@@ -1,0 +1,368 @@
+247106 execve("./simple_chain", ["./simple_chain", "-config=config-master-node1.json"], 0x7ffd81fd7750 /* 46 vars */) = 0
+247106 rt_sigaction(SIGILL, {sa_handler=0x131ec50, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x779973245330}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGILL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_1, {sa_handler=0x779973299530, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigprocmask(SIG_UNBLOCK, [RTMIN RT_1], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7799731ff990, parent_tid=0x7799731ff990, exit_signal=0, stack=0x7799729ff000, stack_size=0x7ff2c0, tls=0x7799731ff6c0} => {parent_tid=[247107]}, 88) = 247107
+247106 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247107 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7799729fe990, parent_tid=0x7799729fe990, exit_signal=0, stack=0x7799721fe000, stack_size=0x7ff2c0, tls=0x7799729fe6c0} => {parent_tid=[247108]}, 88) = 247108
+247106 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247108 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, NULL, [], 8) = 0
+247106 sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247106 sigaltstack({ss_sp=0xc000008000, ss_flags=0, ss_size=32768}, NULL) = 0
+247106 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247106 rt_sigaction(SIGHUP, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGHUP, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGINT, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGQUIT, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGILL, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x779973245330}, 8) = 0
+247106 rt_sigaction(SIGILL, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGTRAP, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGTRAP, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGABRT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGABRT, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGBUS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGBUS, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGFPE, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGFPE, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGUSR1, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGUSR1, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGSEGV, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGSEGV, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGUSR2, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGUSR2, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGPIPE, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGPIPE, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGALRM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGALRM, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGTERM, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGSTKFLT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGSTKFLT, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGCHLD, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGCHLD, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGURG, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGURG, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGXCPU, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGXCPU, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGXFSZ, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGXFSZ, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGVTALRM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGVTALRM, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGPROF, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGPROF, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGWINCH, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGWINCH, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGIO, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGIO, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGPWR, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGPWR, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGSYS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGSYS, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRTMIN, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_1, NULL, {sa_handler=0x779973299530, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, 8) = 0
+247106 rt_sigaction(SIGRT_1, NULL, {sa_handler=0x779973299530, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, 8) = 0
+247106 rt_sigaction(SIGRT_2, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_3, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_3, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_4, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_4, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_5, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_5, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_6, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_6, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_7, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_7, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_8, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_8, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_9, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_9, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_10, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_10, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_11, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_11, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_12, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_12, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_13, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_13, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_14, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_14, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_15, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_15, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_16, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_16, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_17, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_17, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_18, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_18, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_19, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_19, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_20, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_20, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_21, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_21, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_22, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_22, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_23, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_23, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_24, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_24, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_25, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_25, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_26, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_26, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_27, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_27, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_28, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_28, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_29, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_29, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_30, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_30, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_31, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_31, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigaction(SIGRT_32, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+247106 rt_sigaction(SIGRT_32, {sa_handler=0x5c0200, sa_mask=~[RTMIN RT_1], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x779973245330}, NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1], [], 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x77997159f990, parent_tid=0x77997159f990, exit_signal=0, stack=0x779970d9f000, stack_size=0x7ff2c0, tls=0x77997159f6c0} => {parent_tid=[247109]}, 88) = 247109
+247106 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1],  <unfinished ...>
+247109 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247106 <... rt_sigprocmask resumed>[], 8) = 0
+247109 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x779970d9e990, parent_tid=0x779970d9e990, exit_signal=0, stack=0x77997059e000, stack_size=0x7ff2c0, tls=0x779970d9e6c0} => {parent_tid=[247110]}, 88) = 247110
+247106 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247109 sigaltstack(NULL,  <unfinished ...>
+247106 <... rt_sigprocmask resumed>NULL, 8) = 0
+247109 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247109 sigaltstack({ss_sp=0xc000180000, ss_flags=0, ss_size=32768},  <unfinished ...>
+247106 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1],  <unfinished ...>
+247109 <... sigaltstack resumed>NULL)   = 0
+247106 <... rt_sigprocmask resumed>[], 8) = 0
+247110 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247109 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247110 <... rt_sigprocmask resumed>NULL, 8) = 0
+247109 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x779925fff990, parent_tid=0x779925fff990, exit_signal=0, stack=0x7799257ff000, stack_size=0x7ff2c0, tls=0x779925fff6c0} => {parent_tid=[247111]}, 88) = 247111
+247110 sigaltstack(NULL,  <unfinished ...>
+247106 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247110 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247106 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247110 sigaltstack({ss_sp=0xc000188000, ss_flags=0, ss_size=32768},  <unfinished ...>
+247106 <... rt_sigprocmask resumed>NULL, 8) = 0
+247110 <... sigaltstack resumed>NULL)   = 0
+247110 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247111 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247110 <... rt_sigprocmask resumed>NULL, 8) = 0
+247111 <... rt_sigprocmask resumed>NULL, 8) = 0
+247110 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1],  <unfinished ...>
+247111 sigaltstack(NULL,  <unfinished ...>
+247110 <... rt_sigprocmask resumed>[], 8) = 0
+247111 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247111 sigaltstack({ss_sp=0xc000194000, ss_flags=0, ss_size=32768}, NULL) = 0
+247111 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247110 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247110 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7799257fe990, parent_tid=0x7799257fe990, exit_signal=0, stack=0x779924ffe000, stack_size=0x7ff2c0, tls=0x7799257fe6c0} <unfinished ...>
+247106 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1], [], 8) = 0
+247110 <... clone3 resumed> => {parent_tid=[247112]}, 88) = 247112
+247110 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_BLOCK, ~[],  <unfinished ...>
+247110 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247106 <... rt_sigprocmask resumed>~[KILL STOP RTMIN RT_1], 8) = 0
+247110 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x779924ffd990, parent_tid=0x779924ffd990, exit_signal=0, stack=0x7799247fd000, stack_size=0x7ff2c0, tls=0x779924ffd6c0} <unfinished ...>
+247112 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247106 <... clone3 resumed> => {parent_tid=[247113]}, 88) = 247113
+247112 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247106 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1], [], 8) = 0
+247113 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247112 sigaltstack(NULL,  <unfinished ...>
+247106 rt_sigprocmask(SIG_BLOCK, ~[],  <unfinished ...>
+247112 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247106 <... rt_sigprocmask resumed>~[KILL STOP RTMIN RT_1], 8) = 0
+247112 sigaltstack({ss_sp=0xc000206000, ss_flags=0, ss_size=32768},  <unfinished ...>
+247106 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x779917fff990, parent_tid=0x779917fff990, exit_signal=0, stack=0x7799177ff000, stack_size=0x7ff2c0, tls=0x779917fff6c0} <unfinished ...>
+247112 <... sigaltstack resumed>NULL)   = 0
+247112 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247113 sigaltstack(NULL,  <unfinished ...>
+247112 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 <... clone3 resumed> => {parent_tid=[247114]}, 88) = 247114
+247113 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247106 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247113 sigaltstack({ss_sp=0xc00019c000, ss_flags=0, ss_size=32768},  <unfinished ...>
+247106 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247113 <... sigaltstack resumed>NULL)   = 0
+247106 <... rt_sigprocmask resumed>NULL, 8) = 0
+247114 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247113 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247114 sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247114 sigaltstack({ss_sp=0xc000214000, ss_flags=0, ss_size=32768}, NULL) = 0
+247114 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247109 tgkill(247106, 247106, SIGURG)   = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247106 rt_sigreturn({mask=[]})          = 1
+247111 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1], [], 8) = 0
+247111 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247111 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7799177fe990, parent_tid=0x7799177fe990, exit_signal=0, stack=0x779916ffe000, stack_size=0x7ff2c0, tls=0x7799177fe6c0} => {parent_tid=[247115]}, 88) = 247115
+247111 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247111 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247115 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0
+247115 sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247115 sigaltstack({ss_sp=0xc00051e000, ss_flags=0, ss_size=32768}, NULL) = 0
+247115 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+247111 tgkill(247106, 247106, SIGURG)   = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247106 rt_sigreturn({mask=[]})          = 202
+247111 tgkill(247106, 247115, SIGURG <unfinished ...>
+247115 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247111 <... tgkill resumed>)            = 0
+247112 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1],  <unfinished ...>
+247115 rt_sigreturn({mask=[]})          = 824636027216
+247112 <... rt_sigprocmask resumed>[], 8) = 0
+247112 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1], 8) = 0
+247112 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x779916ffd990, parent_tid=0x779916ffd990, exit_signal=0, stack=0x7799167fd000, stack_size=0x7ff2c0, tls=0x779916ffd6c0} <unfinished ...>
+247111 tgkill(247106, 247115, SIGURG)   = 0
+247115 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247112 <... clone3 resumed> => {parent_tid=[247116]}, 88) = 247116
+247115 rt_sigreturn({mask=[]} <unfinished ...>
+247112 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247115 <... rt_sigreturn resumed>)      = 202
+247112 <... rt_sigprocmask resumed>NULL, 8) = 0
+247111 tgkill(247106, 247106, SIGURG <unfinished ...>
+247112 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247111 <... tgkill resumed>)            = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247116 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247112 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 rt_sigreturn({mask=[]} <unfinished ...>
+247116 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 <... rt_sigreturn resumed>)      = 202
+247111 tgkill(247106, 247106, SIGURG)   = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247106 rt_sigreturn({mask=[]})          = -1 EAGAIN (Resource temporarily unavailable)
+247116 sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247116 sigaltstack({ss_sp=0xc000606000, ss_flags=0, ss_size=32768}, NULL) = 0
+247111 tgkill(247106, 247106, SIGURG <unfinished ...>
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247116 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247111 <... tgkill resumed>)            = 0
+247106 rt_sigreturn({mask=[]} <unfinished ...>
+247116 <... rt_sigprocmask resumed>NULL, 8) = 0
+247106 <... rt_sigreturn resumed>)      = 90545380
+247111 tgkill(247106, 247106, SIGURG <unfinished ...>
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247111 <... tgkill resumed>)            = 0
+247106 rt_sigreturn({mask=[]})          = 0
+247111 tgkill(247106, 247106, SIGURG)   = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247106 rt_sigreturn({mask=[]})          = 202
+247106 tgkill(247106, 247110, SIGURG)   = 0
+247110 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247110 rt_sigreturn({mask=[]})          = 0
+247106 tgkill(247106, 247112, SIGURG)   = 0
+247112 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247112 rt_sigreturn({mask=[]})          = 824634088128
+247111 tgkill(247106, 247115, SIGURG)   = 0
+247115 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247115 rt_sigreturn({mask=[]})          = 0
+247111 tgkill(247106, 247115, SIGURG <unfinished ...>
+247115 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247111 <... tgkill resumed>)            = 0
+247113 rt_sigprocmask(SIG_SETMASK, ~[RTMIN RT_1],  <unfinished ...>
+247115 rt_sigreturn({mask=[]} <unfinished ...>
+247113 <... rt_sigprocmask resumed>[], 8) = 0
+247115 <... rt_sigreturn resumed>)      = 824637396800
+247113 rt_sigprocmask(SIG_BLOCK, ~[],  <unfinished ...>
+247112 tgkill(247106, 247116, SIGURG <unfinished ...>
+247113 <... rt_sigprocmask resumed>~[KILL STOP RTMIN RT_1], 8) = 0
+247116 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247112 <... tgkill resumed>)            = 0
+247113 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7799167fc990, parent_tid=0x7799167fc990, exit_signal=0, stack=0x779915ffc000, stack_size=0x7ff2c0, tls=0x7799167fc6c0} <unfinished ...>
+247116 rt_sigreturn({mask=[]})          = 131500898120872
+247113 <... clone3 resumed> => {parent_tid=[247117]}, 88) = 247117
+247113 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247110 tgkill(247106, 247111, SIGURG <unfinished ...>
+247113 <... rt_sigprocmask resumed>NULL, 8) = 0
+247113 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247111 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247110 <... tgkill resumed>)            = 0
+247113 <... rt_sigprocmask resumed>NULL, 8) = 0
+247111 rt_sigreturn({mask=[]})          = 247106
+247111 tgkill(247106, 247110, SIGURG <unfinished ...>
+247117 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1],  <unfinished ...>
+247111 <... tgkill resumed>)            = 0
+247117 <... rt_sigprocmask resumed>NULL, 8) = 0
+247110 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247111 tgkill(247106, 247116, SIGURG)   = 0
+247110 rt_sigreturn({mask=[]} <unfinished ...>
+247116 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247117 sigaltstack(NULL,  <unfinished ...>
+247110 <... rt_sigreturn resumed>)      = 202
+247117 <... sigaltstack resumed>{ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+247116 rt_sigreturn({mask=[]} <unfinished ...>
+247111 tgkill(247106, 247106, SIGURG <unfinished ...>
+247117 sigaltstack({ss_sp=0xc0007e2000, ss_flags=0, ss_size=32768},  <unfinished ...>
+247116 <... rt_sigreturn resumed>)      = 202
+247111 <... tgkill resumed>)            = 0
+247117 <... sigaltstack resumed>NULL)   = 0
+247106 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247117 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+247106 rt_sigreturn({mask=[]})          = 202
+247117 <... rt_sigprocmask resumed>NULL, 8) = 0
+247111 tgkill(247106, 247116, SIGURG)   = 0
+247116 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247116 rt_sigreturn({mask=[]} <unfinished ...>
+247111 tgkill(247106, 247113, SIGURG <unfinished ...>
+247116 <... rt_sigreturn resumed>)      = -1 EAGAIN (Resource temporarily unavailable)
+247111 <... tgkill resumed>)            = 0
+247113 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247113 rt_sigreturn({mask=[]})          = 202
+247116 --- SIGPROF {si_signo=SIGPROF, si_code=SI_KERNEL} ---
+247116 rt_sigreturn({mask=[]})          = 1
+247116 --- SIGPROF {si_signo=SIGPROF, si_code=SI_TIMER, si_timerid=0x2, si_overrun=0, si_int=0, si_ptr=NULL} ---
+247116 rt_sigreturn({mask=[]})          = 131498947153824
+247109 tgkill(247106, 247116, SIGURG)   = 0
+247116 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247116 rt_sigreturn({mask=[]})          = 0
+247115 --- SIGPROF {si_signo=SIGPROF, si_code=SI_KERNEL} ---
+247115 rt_sigreturn({mask=[]})          = 35
+247109 tgkill(247106, 247113, SIGURG)   = 0
+247113 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247113 rt_sigreturn({mask=[]})          = 1
+247109 tgkill(247106, 247116, SIGURG)   = 0
+247116 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247116 rt_sigreturn({mask=[]})          = 34818
+247109 tgkill(247106, 247117, SIGURG)   = 0
+247117 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=247106, si_uid=1001} ---
+247117 rt_sigreturn({mask=[]})          = 0
+247116 --- SIGPROF {si_signo=SIGPROF, si_code=SI_KERNEL} ---
+247116 rt_sigreturn({mask=[]})          = 316384500999850
+247117 --- SIGPROF {si_signo=SIGPROF, si_code=SI_TIMER, si_timerid=0x7, si_overrun=0, si_int=0, si_ptr=NULL} ---
+247117 rt_sigreturn({mask=[]})          = 38
+247115 exit_group(1)                    = ?
+247117 +++ exited with 1 +++
+247115 +++ exited with 1 +++
+247116 +++ exited with 1 +++
+247114 +++ exited with 1 +++
+247113 +++ exited with 1 +++
+247108 +++ exited with 1 +++
+247107 +++ exited with 1 +++
+247111 +++ exited with 1 +++
+247110 +++ exited with 1 +++
+247112 +++ exited with 1 +++
+247109 +++ exited with 1 +++
+247106 +++ exited with 1 +++

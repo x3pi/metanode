@@ -1,0 +1,65 @@
+syntax = "proto3";
+package rpc_request;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/pkg/proto";
+
+// RpcRequest đại diện cho một JSON-RPC request gửi qua TCP
+message RpcRequest {
+    string jsonrpc = 1;       // "2.0"
+    string method = 2;        // e.g. "net_version", "eth_call", "eth_sendRawTransaction"
+    repeated bytes params = 3; // Params dạng bytes (mỗi param được JSON encode)
+    string id = 4;            // Request ID
+}
+
+// RpcResponse đại diện cho một JSON-RPC response trả về qua TCP
+message RpcResponse {
+    string jsonrpc = 1;       // "2.0"
+    bytes result = 2;         // Result dạng bytes (JSON encoded)
+    RpcError error = 3;       // Error nếu có
+    string id = 4;            // Request ID tương ứng
+}
+
+// RpcError đại diện cho lỗi trong JSON-RPC
+message RpcError {
+    int32 code = 1;
+    string message = 2;
+    string data = 3;
+}
+
+// TcpSendTxRequest - request gửi raw transaction qua TCP dạng binary (không JSON)
+// Client gửi raw eth tx bytes trực tiếp, không cần hex encode → nhanh hơn
+message TcpSendTxRequest {
+    bytes raw_tx = 1;  // raw ethereum tx bytes (đã decode từ hex)
+}
+
+// TcpEthCallRequest - request eth_call qua TCP dạng binary
+message TcpEthCallRequest {
+    bytes to = 1;      // contract address (20 bytes)
+    bytes data = 2;    // ABI-encoded function call data (raw bytes, không hex)
+}
+
+// TcpAddressParam - param chung chứa 1 address (20 bytes)
+message TcpAddressParam {
+    bytes address = 1;
+}
+
+// TcpHashParam - param chung chứa 1 hash (32 bytes)
+message TcpHashParam {
+    bytes hash = 1;
+}
+
+// TcpGetNonceResponse - response nonce qua TCP (không cần hex parse)
+message TcpGetNonceResponse {
+    uint64 nonce = 1;
+}
+
+// TcpSubscribeRequest - subscribe events qua TCP
+message TcpSubscribeRequest {
+    repeated bytes addresses = 1;  // contract addresses (mỗi address 20 bytes)
+    repeated bytes topics = 2;     // topic hashes (mỗi topic 32 bytes)
+}
+
+// TcpUnsubscribeRequest - unsubscribe qua TCP
+message TcpUnsubscribeRequest {
+    string subscription_id = 1;
+}

@@ -1,0 +1,438 @@
+// package storage
+
+// import (
+// 	"fmt"
+// 	"os"
+// 	"runtime"
+// 	"runtime/debug"
+// 	"sync"
+// 	"time"
+
+// 	"github.com/linxGnu/grocksdb" // Thay đổi thư viện ở đây
+// 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+// 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+// 	// Thay đổi thư viện ở đây
+// )
+
+// type RocksDBManager struct {
+// 	instances    map[string]*RocksDB
+// 	mu           sync.RWMutex
+// 	maxOpenFiles int
+// 	activeFiles  int
+// 	idleTimeout  time.Duration
+// }
+
+// type RocksDB struct {
+// 	db         *grocksdb.DB
+// 	closed     bool
+// 	path       string
+// 	closeChan  chan bool
+// 	lastActive time.Time
+// 	mu         sync.Mutex
+// }
+
+// func NewRocksDBManager(maxOpenFiles int, idleTimeout time.Duration) *RocksDBManager {
+// 	mgr := &RocksDBManager{
+// 		instances:    make(map[string]*RocksDB),
+// 		maxOpenFiles: maxOpenFiles,
+// 		idleTimeout:  idleTimeout,
+// 	}
+// 	go mgr.periodicCleanup(mgr.idleTimeout) // Thêm goroutine dọn dẹp
+// 	return mgr
+// }
+
+// func (mgr *RocksDBManager) periodicCleanup(duration time.Duration) {
+// 	for {
+// 		mgr.cleanupInstances(duration)
+// 		time.Sleep(duration) // Chạy dọn dẹp định kỳ
+// 	}
+// }
+
+// func (mgr *RocksDBManager) cleanupInstances(duration time.Duration) {
+// 	mgr.mu.Lock()
+// 	defer mgr.mu.Unlock()
+// 	for path, db := range mgr.instances {
+// 		if time.Since(db.lastActive) >= duration { // Kiểm tra thời gian nhàn rỗi
+// 			logger.Info("RocksDB cleaned up path: ", path)
+// 			if err := db.Close(); err != nil {
+// 				logger.Error("Failed to close RocksDB at path %s during cleanup: %v", path, err)
+// 				continue // Tiếp tục vòng lặp để xử lý các instance khác
+// 			}
+// 			// Giải phóng bộ nhớ sau khi đóng database
+// 			runtime.GC()
+// 			debug.FreeOSMemory()
+// 			delete(mgr.instances, path)
+// 			mgr.activeFiles--
+// 		}
+// 	}
+// 	logger.Info("RocksDB instances cleaned up.")
+// }
+
+// type RocksDBSnapShot struct {
+// 	snapShot *grocksdb.Snapshot
+// 	db       *grocksdb.DB
+// }
+
+// func (mgr *RocksDBManager) GetOrCreate(path string, isReadOnly bool) (*RocksDB, error) {
+// 	if path == "" {
+// 		return nil, fmt.Errorf("invalid path: path is empty")
+// 	}
+
+// 	// Đọc trước mà không cần khóa ghi
+// 	mgr.mu.RLock()
+// 	if db, exists := mgr.instances[path]; exists {
+// 		mgr.mu.RUnlock()
+// 		return db, nil
+// 	}
+// 	mgr.mu.RUnlock()
+
+// 	mgr.mu.Lock()
+// 	defer mgr.mu.Unlock()
+
+// 	// Kiểm tra lại sau khi lấy khóa ghi (tránh đua dữ liệu)
+// 	if db, exists := mgr.instances[path]; exists {
+// 		return db, nil
+// 	}
+
+// 	// Tạo mới nếu không tồn tại
+// 	return mgr.createInstance(path, isReadOnly)
+// }
+
+// func (mgr *RocksDBManager) createInstance(path string, isReadOnly bool) (*RocksDB, error) {
+// 	// Tạo thư mục nếu chưa tồn tại
+// 	err := os.MkdirAll(path, os.ModePerm)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	// Cấu hình RocksDB
+// 	options := grocksdb.NewDefaultOptions()
+// 	options.SetCreateIfMissing(!isReadOnly)
+
+// 	// Mở RocksDB
+// 	db, err := grocksdb.OpenDb(options, path)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	rdb := &RocksDB{
+// 		db:         db,
+// 		closed:     false,
+// 		path:       path,
+// 		closeChan:  make(chan bool),
+// 		lastActive: time.Now(),
+// 	}
+
+// 	if !isReadOnly {
+// 		go rdb.manageIdle(mgr.idleTimeout)
+// 	}
+
+// 	mgr.instances[path] = rdb
+// 	mgr.activeFiles++
+// 	return rdb, nil
+// }
+
+// func (mgr *RocksDBManager) Delete(path string) error {
+// 	mgr.mu.Lock()
+// 	defer mgr.mu.Unlock()
+
+// 	if db, ok := mgr.instances[path]; ok {
+// 		if err := db.Close(); err != nil {
+// 			return fmt.Errorf("failed to close RocksDB at path %s: %w", path, err)
+// 		}
+// 		delete(mgr.instances, path)
+// 		mgr.activeFiles--
+// 		// Giải phóng bộ nhớ sau khi đóng database
+// 		runtime.GC()
+// 		debug.FreeOSMemory()
+// 		return nil
+// 	}
+
+// 	return fmt.Errorf("RocksDB instance not found at path: %s", path)
+// }
+
+// func (mgr *RocksDBManager) closeIdleDatabases() {
+// 	for path, db := range mgr.instances {
+// 		if time.Since(db.lastActive) >= mgr.idleTimeout {
+// 			logger.Info("Closing idle database: %s", path)
+// 			if err := db.Close(); err != nil {
+// 				logger.Error("Failed to close idle database %s: %v", path, err)
+// 				continue // Tiếp tục vòng lặp để xử lý các instance khác
+// 			}
+// 			// Giải phóng bộ nhớ sau khi đóng database
+// 			runtime.GC()
+// 			debug.FreeOSMemory()
+// 			delete(mgr.instances, path)
+// 			mgr.activeFiles--
+// 			if mgr.activeFiles < mgr.maxOpenFiles {
+// 				break
+// 			}
+// 		}
+// 	}
+// }
+
+// func (mgr *RocksDBManager) CloseAll() {
+// 	mgr.mu.Lock()
+// 	defer mgr.mu.Unlock()
+
+// 	for path, db := range mgr.instances {
+// 		if err := db.Close(); err != nil {
+// 			logger.Error("Failed to close RocksDB at path %s: %v", path, err)
+// 		}
+// 		delete(mgr.instances, path)
+// 	}
+// 	mgr.activeFiles = 0
+// }
+
+// func (rdb *RocksDB) manageIdle(idleTimeout time.Duration) {
+// 	for {
+// 		select {
+// 		case <-time.After(idleTimeout):
+// 			rdb.mu.Lock()
+// 			idleDuration := time.Since(rdb.lastActive)
+// 			rdb.mu.Unlock()
+
+// 			if idleDuration >= idleTimeout {
+// 				logger.Info("Closing idle RocksDB connection at path: %s", rdb.path)
+// 				if err := rdb.Close(); err != nil {
+// 					logger.Error("Failed to close idle RocksDB: %v", err)
+// 					return
+// 				}
+// 				// Giải phóng bộ nhớ sau khi đóng database
+// 				runtime.GC()
+// 				debug.FreeOSMemory()
+// 				return
+// 			}
+// 		case <-rdb.closeChan:
+// 			return
+// 		}
+// 	}
+// }
+
+// func (rdb *RocksDB) ensureOpen() error {
+// 	rdb.mu.Lock()
+// 	defer rdb.mu.Unlock()
+
+// 	if rdb.closed {
+// 		var err error
+// 		rdb.db, err = grocksdb.OpenDb(grocksdb.NewDefaultOptions(), rdb.path)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		rdb.closed = false
+// 	}
+// 	return nil
+// }
+
+// func (rdb *RocksDB) updateLastActive() {
+// 	rdb.mu.Lock()
+// 	defer rdb.mu.Unlock()
+// 	rdb.lastActive = time.Now()
+// }
+// func (rdb *RocksDB) Get(key []byte) ([]byte, error) {
+// 	rdb.updateLastActive()
+
+// 	if err := rdb.ensureOpen(); err != nil {
+// 		return nil, err
+// 	}
+
+// 	readOptions := grocksdb.NewDefaultReadOptions()
+// 	defer readOptions.Destroy()
+
+// 	result, err := rdb.db.Get(readOptions, key)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return result.Data(), nil
+// }
+
+// func (rdb *RocksDB) Put(key, value []byte) error {
+// 	rdb.updateLastActive()
+
+// 	rdb.mu.Lock() // Sử dụng khóa ghi
+// 	defer rdb.mu.Unlock()
+
+// 	if err := rdb.ensureOpen(); err != nil {
+// 		return err
+// 	}
+
+// 	writeOptions := grocksdb.NewDefaultWriteOptions()
+// 	defer writeOptions.Destroy()
+
+// 	return rdb.db.Put(writeOptions, key, value)
+// }
+
+// func (rdb *RocksDB) Close() error {
+// 	rdb.mu.Lock()
+// 	defer rdb.mu.Unlock()
+
+// 	if !rdb.closed {
+// 		rdb.closeChan <- true
+// 		rdb.db.Close() // Không cần xử lý lỗi vì Close() không trả về lỗi
+// 		rdb.closed = true
+// 		// Giải phóng bộ nhớ sau khi đóng database
+// 		runtime.GC()
+// 		debug.FreeOSMemory()
+// 	}
+// 	return nil
+// }
+
+// func (rdb *RocksDB) Compact() error {
+// 	rdb.db.CompactRange(grocksdb.Range{}) // Không cần xử lý giá trị trả về
+// 	return nil
+// }
+
+// func (rdb *RocksDB) Has(key []byte) bool {
+// 	// Khởi tạo ReadOptions (có thể để nil nếu không cần tùy chỉnh)
+// 	readOptions := grocksdb.NewDefaultReadOptions()
+// 	defer readOptions.Destroy()
+
+// 	// Lấy giá trị của key
+// 	data, err := rdb.db.Get(readOptions, key)
+// 	if err != nil {
+// 		logger.Error(err)
+// 		// Nếu có lỗi khác ngoài lỗi không tìm thấy, thì key không tồn tại
+// 		return false
+// 	}
+
+// 	// Nếu không có lỗi, key tồn tại
+// 	data.Free() // Giải phóng bộ nhớ của data sau khi sử dụng
+// 	return true
+// }
+
+// func (rdb *RocksDB) Delete(key []byte) error {
+// 	// Tạo WriteOptions mới
+// 	writeOptions := grocksdb.NewDefaultWriteOptions()
+// 	defer writeOptions.Destroy()
+
+// 	// Xóa key từ cơ sở dữ liệu
+// 	return rdb.db.Delete(writeOptions, key)
+// }
+
+// func (rdb *RocksDB) BatchPut(kvs [][2][]byte) error {
+// 	rdb.updateLastActive()
+
+// 	if err := rdb.ensureOpen(); err != nil {
+// 		return err
+// 	}
+// 	batch := grocksdb.NewWriteBatch()
+// 	for i := range kvs {
+// 		batch.Put(kvs[i][0], kvs[i][1])
+// 	}
+// 	return rdb.db.Write(grocksdb.NewDefaultWriteOptions(), batch)
+// }
+
+// func (rdb *RocksDB) Open() error {
+// 	var err error
+// 	if rdb.closed {
+// 		// Tạo một đối tượng Options mới
+// 		options := grocksdb.NewDefaultOptions()
+// 		defer options.Destroy() // Hủy đối tượng options khi không cần nữa
+
+// 		// Mở cơ sở dữ liệu
+// 		rdb.db, err = grocksdb.OpenDb(options, rdb.path)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		rdb.closed = false
+// 	}
+// 	return nil
+// }
+
+// type RocksDBIterator struct {
+// 	iterator *grocksdb.Iterator
+// }
+
+// func (it *RocksDBIterator) Next() bool {
+// 	it.iterator.Next()
+// 	return it.iterator.Valid()
+// }
+
+// func (it *RocksDBIterator) Valid() bool {
+// 	return it.iterator.Valid()
+// }
+
+// func (it *RocksDBIterator) Key() []byte {
+// 	return it.iterator.Key().Data()
+// }
+
+// func (it *RocksDBIterator) Value() []byte {
+// 	return it.iterator.Value().Data()
+// }
+
+// func (it *RocksDBIterator) Error() error {
+// 	return it.iterator.Err() // Sử dụng Err() thay vì GetError()
+// }
+
+// func (it *RocksDBIterator) Close() error {
+// 	it.iterator.Close()
+// 	return nil
+// }
+
+// // Implement the Release method to satisfy the IIterator interface
+// func (it *RocksDBIterator) Release() {
+// 	it.iterator.Close()
+// }
+
+// func (rdb *RocksDB) GetIterator() IIterator {
+// 	// Tạo một ReadOptions mới
+// 	readOptions := grocksdb.NewDefaultReadOptions()
+// 	// Tạo iterator từ grocksdb với ReadOptions
+// 	iterator := rdb.db.NewIterator(readOptions)
+// 	// Bao bọc iterator của grocksdb trong RocksDBIterator
+// 	return &RocksDBIterator{iterator: iterator}
+// }
+
+// func (rdb *RocksDB) GetSnapShot() SnapShot {
+// 	snapShot := rdb.db.NewSnapshot()
+// 	return NewRocksDBSnapShot(snapShot)
+// }
+
+// func (rdb *RocksDB) Stats() *pb.LevelDBStats {
+// 	// Tạo ra một đối tượng ReadOptions mặc định để lấy các thuộc tính
+
+// 	// Giả sử bạn có thể phân tích chuỗi statsString ở trên (có thể sử dụng regex hoặc cách xử lý khác)
+// 	// Tuy nhiên, bạn phải thực hiện phân tích chuỗi statsString để chuyển đổi sang các chỉ số cụ thể bạn cần.
+
+// 	// Ví dụ, bạn có thể phân tích chuỗi này và chuyển thành kiểu dữ liệu tương ứng.
+
+// 	// Tạo đối tượng thống kê LevelDBStats
+// 	pbStat := &pb.LevelDBStats{
+// 		// Ví dụ chuyển đổi thông tin từ chuỗi
+// 		// Bạn cần phân tích chuỗi statsString và phân bổ các giá trị vào các trường tương ứng.
+// 		// Dưới đây là một ví dụ đơn giản để chuyển một vài chỉ số.
+
+// 		// Ví dụ: sử dụng regex hoặc phân tích chuỗi để tách thông tin thống kê:
+// 		// Cần có cách phân tích thông tin từ statsString để cập nhật các trường ở đây.
+// 		Path: rdb.path,
+// 	}
+
+// 	return pbStat
+// }
+
+// func NewRocksDBSnapShot(snapShot *grocksdb.Snapshot) *RocksDBSnapShot {
+// 	return &RocksDBSnapShot{
+// 		snapShot: snapShot,
+// 	}
+// }
+
+// func (snapShot *RocksDBSnapShot) GetIterator() IIterator {
+// 	// Sử dụng Snapshot trong quá trình tạo Iterator
+// 	readOptions := grocksdb.NewDefaultReadOptions()
+// 	readOptions.SetSnapshot(snapShot.snapShot) // Đặt Snapshot vào ReadOptions
+
+// 	// Tạo iterator từ DB, sử dụng ReadOptions đã thiết lập snapshot
+// 	iterator := snapShot.db.NewIterator(readOptions)
+
+// 	// Trả về iterator (có thể cần chuyển đổi sang kiểu IIterator nếu cần)
+// 	return &RocksDBIterator{
+// 		iterator: iterator,
+// 	}
+// }
+
+// func (snapShot *RocksDBSnapShot) Release() {
+// 	if snapShot != nil {
+// 		snapShot.Release()
+// 		snapShot.snapShot = nil
+// 	}
+// }

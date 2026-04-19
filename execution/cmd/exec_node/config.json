@@ -1,0 +1,54 @@
+{
+  "debug": true,
+  "private_key": "27c8f505bcae593cc0e3ac8ae9ed1b1d4493eabd11736aabda176d4d3255fa69",
+  "address": "9065e2caaa4bf6533ded0b2a763e4ee81cd31bd2",
+  "backup_path": "./other",
+  "log_path": "./logs",
+  "service_type": "EXEC-NODE",
+  "connection_address": "0.0.0.0:4202",
+  "genesis_file_path": "genesis.json",
+  "db_type": 2,
+  "Databases": {
+    "RootPath": "./data",
+    "NodeType": "STORAGE_CLIENT",
+    "Version": "0.0.1.0",
+    "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
+    "AccountState": {
+      "ListenAddress": "0.0.0.0:6001"
+    },
+    "Trie": {
+      "ListenAddress": "0.0.0.0:6002"
+    },
+    "SmartContractCode": {
+      "ListenAddress": "0.0.0.0:6003"
+    },
+    "SmartContractStorage": {
+      "ListenAddress": "0.0.0.0:6004"
+    },
+    "Blocks": {
+      "ListenAddress": "0.0.0.0:6005"
+    },
+    "Receipts": {
+      "ListenAddress": "0.0.0.0:6006"
+    },
+    "BackupDeviceKey": {
+      "ListenAddress": "0.0.0.0:6007"
+    },
+    "TransactionState": {
+      "ListenAddress": "0.0.0.0:6008"
+    },
+    "Mapping": {
+      "ListenAddress": "0.0.0.0:6009"
+    },
+    "Backup": {
+      "Path": "./backup_db/",
+      "ListenAddress": null
+    }
+  },
+  "nodes": {
+    "master_address": "0.0.0.0:4201",
+    "list_sub_address": [
+      "0.0.0.0:4201"
+    ]
+  }
+}

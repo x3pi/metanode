@@ -1,0 +1,19 @@
+[package]
+name = "mtn-nomt-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mtn_nomt"
+crate-type = ["staticlib"]
+
+[dependencies]
+nomt = { git = "https://github.com/thrumdev/nomt.git", features = ["blake3-hasher"] }
+nomt-core = { git = "https://github.com/thrumdev/nomt.git", features = ["std", "blake3-hasher"] }
+anyhow = "1.0"
+blake3 = "1.5"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,164 @@
+/* ContractInteractionPage.css */
+.contract-page {
+    max-width: 800px;
+    margin: 20px auto;
+    padding: 20px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f9f9f9;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  }
+  
+  .contract-page h2,
+  .contract-page h3 {
+    color: #333;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+    margin-bottom: 20px;
+  }
+  
+  .section-box {
+    background-color: #fff;
+    padding: 20px;
+    margin-bottom: 25px;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+  
+  /* Wallet Section */
+  .wallet-section .wallet-info {
+    display: flex;
+    align-items: center;
+    gap: 15px; /* Khoảng cách giữa các phần tử */
+  }
+  .wallet-section .address {
+    font-weight: bold;
+    font-family: 'Courier New', Courier, monospace;
+    background-color: #e8f0fe; /* Nền xanh nhạt giống Google */
+    padding: 5px 8px;
+    border-radius: 4px;
+    color: #1a73e8; /* Màu xanh Google */
+  }
+  
+  /* Result Section */
+  .result-section .result-data {
+    font-weight: bold;
+    color: #2c3e50;
+    background-color: #ecf0f1;
+    padding: 5px 10px;
+    border-radius: 4px;
+    display: inline-block; /* Cho phép padding và background */
+    margin-left: 5px;
+    word-break: break-all; /* Ngắt dòng nếu quá dài */
+  }
+  .result-section .result-multiline {
+     display: block; /* Hiển thị dạng block để pre hoạt động tốt */
+     white-space: pre-wrap; /* Giữ khoảng trắng và tự động xuống dòng */
+     max-height: 150px; /* Giới hạn chiều cao và cho phép scroll */
+     overflow-y: auto;
+     background-color: #f8f9fa;
+     border: 1px solid #dee2e6;
+     margin-top: 5px;
+  }
+  
+  .result-section .tx-hash {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9em;
+    color: #6c757d;
+  }
+  
+  
+  /* Controls Section */
+  .controls-section .control-group {
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap; /* Cho phép xuống dòng trên màn hình nhỏ */
+    gap: 10px; /* Khoảng cách giữa các input/button */
+  }
+  
+  .controls-section label {
+    min-width: 120px; /* Đảm bảo label thẳng hàng */
+    font-weight: 500;
+    color: #555;
+  }
+  
+  .controls-section input[type="text"],
+  .controls-section input[type="number"] {
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1rem;
+    flex-grow: 1; /* Input chiếm không gian còn lại */
+    min-width: 150px; /* Chiều rộng tối thiểu */
+  }
+  .controls-section input:disabled {
+    background-color: #eee;
+  }
+  
+  
+  /* Buttons */
+  .btn {
+    padding: 10px 18px;
+    font-size: 1rem;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+    background-color: #007bff; /* Màu xanh dương chính */
+    color: white;
+    font-weight: 500;
+  }
+  .btn:hover:not(:disabled) {
+    background-color: #0056b3;
+    transform: translateY(-1px);
+  }
+  .btn:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+  }
+  
+  .btn-connect { background-color: #28a745; } /* Xanh lá */
+  .btn-connect:hover:not(:disabled) { background-color: #218838; }
+  
+  .btn-disconnect { background-color: #dc3545; } /* Đỏ */
+  .btn-disconnect:hover:not(:disabled) { background-color: #c82333; }
+  
+  .btn-danger { background-color: #ffc107; color: #333;} /* Vàng cảnh báo */
+  .btn-danger:hover:not(:disabled) { background-color: #e0a800; }
+  
+  .btn-refresh { background-color: #6c757d; } /* Xám */
+  .btn-refresh:hover:not(:disabled) { background-color: #5a6268; }
+  
+  
+  /* Messages */
+  .loading-message {
+    color: #0056b3;
+    font-weight: bold;
+    margin-top: 15px;
+    text-align: center;
+    background-color: #e7f3ff;
+    padding: 10px;
+    border-radius: 4px;
+  }
+  
+  .error-message {
+    color: #c82333; /* Màu đỏ đậm hơn */
+    font-weight: bold;
+    margin-top: 15px;
+    text-align: center;
+    background-color: #f8d7da; /* Nền đỏ nhạt */
+    padding: 10px;
+    border: 1px solid #f5c6cb;
+    border-radius: 4px;
+  }
+  .warning-message {
+    color: #856404; /* Màu chữ vàng đậm */
+    background-color: #fff3cd; /* Nền vàng nhạt */
+    border: 1px solid #ffeeba;
+    padding: 10px;
+    border-radius: 4px;
+    margin-top: 15px;
+    text-align: center;
+    font-weight: 500;
+  }

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "/proto";
+
+
+message TransactionExe {
+    bytes digest = 1;
+    uint32 worker_id = 2;
+}
+
+message ExecutableBlock {
+    // FLATTENED: List of all deduplicated and sorted transactions for this block
+    repeated TransactionExe transactions = 1;
+    // CRITICAL FORK-SAFETY: global_exec_index ensures deterministic execution order across all nodes
+    // This is the global execution index (Checkpoint Sequence Number) that increases continuously
+    // across epochs without resetting. All nodes must execute blocks with the same global_exec_index
+    // in the same order to prevent forks.
+    uint64 global_exec_index = 2;
+    // CRITICAL FORK-SAFETY: commit_index is the epoch-local commit index
+    // Used together with global_exec_index to ensure deterministic ordering
+    uint32 commit_index = 3;
+    // EPOCH TRACKING: epoch number for this commit, used to populate BlockHeader.Epoch
+    uint64 epoch = 4;
+    // CRITICAL FORK-SAFETY: Consensus timestamp (median stake-weighted) for deterministic block hashes
+    // This timestamp is calculated by Rust Linearizer::calculate_commit_timestamp()
+    // Go Master MUST use this timestamp for BlockHeader instead of time.Now()
+    // Unit: milliseconds since Unix epoch
+    uint64 commit_timestamp_ms = 5;
+    // CRITICAL FORK-SAFETY: Leader authority index in committee (0-based)
+    // Go Master MUST lookup validator address from committee using this index for BlockHeader.LeaderAddress
+    // This ensures all nodes create blocks with same leader = same block hash
+    uint32 leader_author_index = 6;
+    // CRITICAL FORK-SAFETY: Leader validator address (20 bytes Ethereum address)
+    // Sent directly from Rust to ensure deterministic leader assignment
+    // Go MUST use this address directly instead of lookup when present
+    bytes leader_address = 7;
+    // CRITICAL FORK-SAFETY: Explicit block number assigned by Rust consensus layer
+    // Go MUST use this block number to ensure all nodes agree on block heights,
+    // avoiding inflation from edge cases like repeated empty epoch boundary processing.
+    uint64 block_number = 8;
+}

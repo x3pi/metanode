@@ -1,0 +1,87 @@
+site_name: Meta Node Documentation (Simple)
+site_description: Technical architecture and guidelines for the mtn-simple-2025 node.
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+
+nav:
+  - Trang chủ: index.md
+  - Introduction:
+    - Context: introduction/context.md
+  - Architecture:
+    - Blockchain Flow: architecture/blockchain-flow.md
+    - Storage: architecture/nomt-storage-architecture.md
+    - QUIC Stream: architecture/quic--stream--architecture.md
+    - Socket Protocol: architecture/socket-protocol.md
+    - Gateway Native: architecture/gateway-native-execution.md
+    - Message Received: architecture/message-received-handling.md
+    - Flat Trie Storage: architecture/flat-trie-storage.md
+    - Xapian DB Flow: architecture/xapian-db-commit-flow.md
+  - Core Concepts:
+    - Block Signing: core-concepts/block-signing.md
+    - Flat vs MPT: core-concepts/flat-vs-mpt-comparison.md
+    - Transaction Flow: core-concepts/transaction-flow.md
+    - Fork Safety: core-concepts/transaction-flow-fork-safety-analysis.md
+  - Performance & Scaling:
+    - High Throughput: performance-scaling/high-throughput-optimization.md
+    - TPS Analysis: performance-scaling/tps-analysis.md
+    - Scaling to 100k: performance-scaling/scaling-to-hundreds-of-thousands.md
+  - Operations & Diagnostics:
+    - Ops Explorer: operations/explorer.md
+    - Adding Node: operations/adding-new-node.md
+    - Mining: operations/mining.md
+    - Debug Guide: diagnostics-guides/realtime-debug-guide.md
+    - Debug RPC: diagnostics-guides/debug-rpc.md
+    - Epoch Integration: diagnostics-guides/epoch-transition-validator-integration.md
+  - Tooling:
+    - Tools Overview: tooling/tools.md
+    - Account Tx: tooling/account-transaction-setting.md
+    - TPS Blast: tooling/tps-blast-test-guide-vn.md
+  - Miscellaneous:
+    - Rust Init Data: miscellaneous/rust-initialization-data.md
+
+# Ẩn các cảnh báo đứt link code hoặc thẻ tiếng Việt (để log sạch sẽ hơn)
+validation:
+  links:
+    not_found: info
+    absolute_links: ignore
+    unrecognized_links: ignore
+  anchors: ignore
