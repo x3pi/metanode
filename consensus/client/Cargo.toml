@@ -1,0 +1,61 @@
+[package]
+name = "metanode-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["MetaNode Team"]
+license = "Apache-2.0"
+
+[[bin]]
+name = "metanode-client"
+path = "src/main.rs"
+
+[dependencies]
+# Meta Consensus dependencies - using local copies
+consensus-core = { path = "../metanode/meta-consensus/core" }
+consensus-config = { path = "../metanode/meta-consensus/config" }
+consensus-types = { path = "../metanode/meta-consensus/types" }
+
+# Async runtime
+tokio = "=1.47.1"
+
+# Serialization
+serde = { version = "1.0.144", features = ["derive", "rc"] }
+serde_json = { version = "1.0.95", features = ["preserve_order"] }
+bcs = "0.1.4"
+
+# Error handling
+anyhow = "1.0.71"
+thiserror = "1.0.40"
+
+# Logging
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.15", default-features = false, features = ["std", "env-filter", "fmt"] }
+
+# Network
+mysten-network = { path = "../crates/mysten-network" }
+mysten-metrics = { path = "../crates/mysten-metrics" }
+mysten-common = { path = "../crates/mysten-common" }
+
+# Storage
+typed-store = { path = "../crates/typed-store" }
+
+# Protocol
+meta-protocol-config = { path = "../crates/meta-protocol-config" }
+
+# Crypto
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
+shared-crypto = { path = "../crates/shared-crypto" }
+
+# Utilities
+parking_lot = { version = "0.12.3", features = ["arc_lock"] }
+itertools = "0.13.0"
+prometheus = "0.13.3"
+rand = "0.8.5"
+toml = { version = "0.7.4", features = ["preserve_order"] }
+base64 = "0.21.2"
+hex = "0.4.3"
+reqwest = { version = "0.12", features = ["json"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive", "wrap_help"] }
+
