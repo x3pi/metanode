@@ -1,0 +1,243 @@
+// Copyright (c) MetaNode Team
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::node::tx_submitter::TransactionSubmitter;
+use crate::node::ConsensusNode;
+use anyhow::Result;
+use consensus_core::SystemTransaction;
+use std::io::{Read, Write};
+use std::path::Path;
+use tokio::sync::Mutex;
+use tracing::{error, info, trace, warn}; // Added TransactionSubmitter trait
+
+pub async fn queue_transaction(
+    pending_queue: &Mutex<Vec<Vec<u8>>>,
+    storage_path: &Path,
+    tx_data: Vec<u8>,
+) -> Result<()> {
+    queue_transactions(pending_queue, storage_path, vec![tx_data]).await
+}
+
+pub async fn queue_transactions(
+    pending_queue: &Mutex<Vec<Vec<u8>>>,
+    storage_path: &Path,
+    tx_data_list: Vec<Vec<u8>>,
+) -> Result<()> {
+    if tx_data_list.is_empty() {
+        return Ok(());
+    }
+
+    let mut queue = pending_queue.lock().await;
+    let added_len = tx_data_list.len();
+    queue.extend(tx_data_list);
+    info!(
+        "📦 [TX FLOW] Queued {} transactions: total_size={}",
+        added_len,
+        queue.len()
+    );
+
+    if let Err(e) = persist_transaction_queue(&queue, storage_path).await {
+        warn!("⚠️ [TX PERSISTENCE] Failed to persist queue: {}", e);
+    }
+    Ok(())
+}
+
+pub async fn persist_transaction_queue(queue: &[Vec<u8>], storage_path: &Path) -> Result<()> {
+    let queue_path = storage_path.join("transaction_queue.bin");
+    let mut file = std::fs::File::create(&queue_path)?;
+
+    let count = queue.len() as u32;
+    file.write_all(&count.to_le_bytes())?;
+
+    for tx_data in queue {
+        let len = tx_data.len() as u32;
+        file.write_all(&len.to_le_bytes())?;
+        file.write_all(tx_data)?;
+    }
+    file.flush()?;
+    trace!(
+        "💾 Persisted {} txs to {}",
+        queue.len(),
+        queue_path.display()
+    );
+    Ok(())
+}
+
+pub async fn load_transaction_queue_static(storage_path: &Path) -> Result<Vec<Vec<u8>>> {
+    let queue_path = storage_path.join("transaction_queue.bin");
+    if !queue_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut file = std::fs::File::open(&queue_path)?;
+    let mut queue = Vec::new();
+    let mut count_buf = [0u8; 4];
+    file.read_exact(&mut count_buf)?;
+    let count = u32::from_le_bytes(count_buf);
+
+    for _ in 0..count {
+        let mut len_buf = [0u8; 4];
+        file.read_exact(&mut len_buf)?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        let mut tx_data = vec![0u8; len];
+        file.read_exact(&mut tx_data)?;
+        queue.push(tx_data);
+    }
+    Ok(queue)
+}
+
+pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usize> {
+    let mut queue = node.pending_transactions_queue.lock().await;
+    let original_count = queue.len();
+    if original_count == 0 {
+        return Ok(0);
+    }
+
+    info!(
+        "📤 [TX FLOW] Submitting {} queued transactions",
+        original_count
+    );
+
+    // Load committed transaction hashes to avoid resubmitting already committed transactions
+    let committed_hashes = {
+        let hashes_guard = node.committed_transaction_hashes.lock().await;
+        hashes_guard.clone()
+    };
+    info!(
+        "📋 [TX FLOW] Loaded {} committed transaction hashes from current epoch",
+        committed_hashes.len()
+    );
+
+    // P0-1 FIX: Compute hash ONCE per TX, carry (tx_data, hash) through filter + dedup.
+    // Previously hashed every TX twice (once for committed filter, once for dedup),
+    // wasting ~400ms CPU at 200K queued TXs during epoch transition.
+    let mut skipped_duplicates = 0;
+
+    let mut txs_with_hash: Vec<(Vec<u8>, Vec<u8>)> = queue
+        .iter()
+        .filter_map(|tx| {
+            let hash = crate::types::tx_hash::calculate_transaction_hash_single(tx);
+            if committed_hashes.contains(&hash) {
+                skipped_duplicates += 1;
+                trace!(
+                    "⏭️ [TX FLOW] Skipping already committed transaction: {}",
+                    hex::encode(hash)
+                );
+                None
+            } else {
+                Some((tx.clone(), hash))
+            }
+        })
+        .collect();
+
+    // Dedup among remaining transactions (using already-computed hashes)
+    txs_with_hash.sort_by(|(_, a), (_, b)| a.cmp(b));
+    txs_with_hash.dedup_by(|a, b| a.1 == b.1);
+
+    let transactions: Vec<Vec<u8>> = txs_with_hash.into_iter().map(|(tx, _)| tx).collect();
+    queue.clear();
+    drop(queue); // Release lock
+
+    info!(
+        "🔄 [TX FLOW] Filtered {} duplicates, submitting {} unique transactions",
+        skipped_duplicates,
+        transactions.len()
+    );
+
+    let mut successful_count = 0;
+    let mut requeued_count = 0;
+    // DEADLOCK FIX: Total timeout prevents blocking epoch transitions for hours.
+    // Previously, exponential backoff (200 * 2^19 = 29 hours at max retry) would
+    // block transition_to_epoch_from_system_tx forever when consensus has no quorum
+    // (e.g., epoch mismatch after snapshot restore), keeping transition_in_progress=true
+    // and preventing the epoch monitor from ever advancing to the next epoch.
+    let total_start = std::time::Instant::now();
+    let total_timeout = std::time::Duration::from_secs(30);
+    let max_retries = 5u64;
+    let max_delay_ms: u64 = 5000; // Cap per-retry delay at 5s
+
+    for tx_data in transactions {
+        // Check total timeout before each transaction
+        if total_start.elapsed() > total_timeout {
+            warn!(
+                "⏱️ [TX FLOW] Total timeout ({:?}) reached. Re-queuing remaining transactions.",
+                total_timeout
+            );
+            let mut q = node.pending_transactions_queue.lock().await;
+            q.push(tx_data);
+            requeued_count += 1;
+            continue;
+        }
+
+        if SystemTransaction::from_bytes(&tx_data).is_ok()
+            || !crate::types::tx_hash::verify_transaction_protobuf(&tx_data)
+        {
+            continue;
+        }
+
+        if node.transaction_client_proxy.is_none() {
+            let mut q = node.pending_transactions_queue.lock().await;
+            q.push(tx_data);
+            requeued_count += 1;
+            continue;
+        }
+
+        let mut retry = 0;
+        let mut submitted = false;
+
+        while retry < max_retries {
+            // Also check total timeout inside retry loop
+            if total_start.elapsed() > total_timeout {
+                break;
+            }
+
+            let proxy = match node.transaction_client_proxy.as_ref() {
+                Some(p) => p,
+                None => {
+                    let mut q = node.pending_transactions_queue.lock().await;
+                    q.push(tx_data.clone());
+                    requeued_count += 1;
+                    break;
+                }
+            };
+            match proxy.submit(vec![tx_data.clone()]).await {
+                Ok(_) => {
+                    successful_count += 1;
+                    submitted = true;
+                    break;
+                }
+                Err(e) => {
+                    retry += 1;
+                    // Cap delay to prevent exponential explosion
+                    let delay = std::cmp::min(200 * (1u64 << (retry - 1)), max_delay_ms);
+                    warn!(
+                        "⚠️ Failed to submit (attempt {}/{}): {}. Retry in {}ms",
+                        retry, max_retries, e, delay
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            }
+        }
+
+        if !submitted {
+            error!("❌ Failed to submit tx after retries. Re-queuing.");
+            let mut q = node.pending_transactions_queue.lock().await;
+            q.push(tx_data);
+            requeued_count += 1;
+        }
+    }
+
+    if successful_count > 0 {
+        let queue_path = node.storage_path.join("transaction_queue.bin");
+        if queue_path.exists() {
+            let _ = std::fs::remove_file(&queue_path);
+        }
+    } else if requeued_count > 0 {
+        // Re-persist if failed
+        let q = node.pending_transactions_queue.lock().await;
+        let _ = persist_transaction_queue(&q, &node.storage_path).await;
+    }
+
+    Ok(successful_count)
+}
