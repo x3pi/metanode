@@ -1,0 +1,357 @@
+syntax = "proto3";
+
+package state;
+
+option go_package = "/proto";
+
+import "google/protobuf/timestamp.proto";
+
+message BlockRequest { // <--- Tên message là "BlockRequest"
+    uint64 blockNumber = 1;
+}
+
+// StringStringPair định nghĩa một cặp key-value dạng chuỗi để thay thế cho map,
+// nhằm đảm bảo việc tuần tự hóa tất định (canonical encoding).
+message StringStringPair {
+  string key = 1;
+  string value = 2;
+}
+message ValidatorList {
+    repeated Validator validators = 1;
+}
+
+// ValidatorInfoList - danh sách ValidatorInfo cho epoch transition
+message ValidatorInfoList {
+    repeated ValidatorInfo validators = 1;
+    // Epoch metadata để thống nhất với Rust
+    uint64 epoch_timestamp_ms = 2;        // Epoch start timestamp in milliseconds
+    uint64 last_global_exec_index = 3;    // Last global execution index from previous epoch
+}
+
+// Response cho GetLastBlockNumberRequest
+message LastBlockNumberResponse {
+    uint64 last_block_number = 1;  // Last block number from Go Master DB
+    uint64 last_global_exec_index = 2;  // Last processed GlobalExecIndex (includes empty commits)
+    bool is_ready = 3;             // True if Master is fully synced/ready
+}
+
+// Sui-style epoch transition messages
+message GetCurrentEpochRequest {
+    // Empty request - get current epoch from Go state
+}
+
+message GetCurrentEpochResponse {
+    uint64 epoch = 1;  // Current epoch from Go state
+}
+
+message GetEpochStartTimestampRequest {
+    uint64 epoch = 1;  // Epoch to query timestamp for
+}
+
+message GetEpochStartTimestampResponse {
+    uint64 timestamp_ms = 1;  // Epoch start timestamp in milliseconds
+}
+
+message AdvanceEpochRequest {
+    uint64 new_epoch = 1;  // New epoch number to advance to
+    uint64 epoch_start_timestamp_ms = 2;  // Epoch start timestamp in milliseconds
+    uint64 boundary_block = 3;  // global_exec_index of last block of ending epoch (epoch boundary)
+    uint64 boundary_gei = 4;  // NEW: Authoritative global_exec_index at epoch boundary
+}
+
+message AdvanceEpochResponse {
+    uint64 new_epoch = 1;  // Confirmed new epoch number
+    uint64 epoch_start_timestamp_ms = 2;  // Confirmed epoch start timestamp
+}
+
+// NEW: Unified epoch boundary data request - returns all data needed for epoch transition
+// This ensures consistency: epoch_timestamp_ms and validators come from the same source
+message GetEpochBoundaryDataRequest {
+    uint64 epoch = 1;  // Epoch to get boundary data for
+}
+
+// NEW: Unified epoch boundary data response
+// Contains all data needed for epoch transition from a single authoritative source
+message EpochBoundaryData {
+    uint64 epoch = 1;                      // Epoch number
+    uint64 epoch_start_timestamp_ms = 2;   // Epoch start timestamp in milliseconds
+    uint64 boundary_block = 3;             // Boundary block number (last block of previous epoch)
+    repeated ValidatorInfo validators = 4; // New active validators
+    uint64 epoch_duration_seconds = 5;     // Epoch duration
+    uint64 boundary_gei = 6;               // NEW: Authoritative global_exec_index at epoch boundary
+}
+
+// NEW: Clean Transition Handoff APIs
+// These APIs ensure no gaps or overlaps between sync and consensus modes
+
+// SetConsensusStartBlock - Called by Rust before starting consensus
+// Tells Go: "Consensus will produce blocks starting from block_number"
+// Go will wait for sync to complete up to block_number - 1 before allowing consensus blocks
+message SetConsensusStartBlockRequest {
+    uint64 block_number = 1;  // First block that consensus will produce
+}
+
+message SetConsensusStartBlockResponse {
+    bool success = 1;
+    uint64 last_sync_block = 2;  // Last block that was synced (should be block_number - 1)
+    string message = 3;
+}
+
+// SetSyncStartBlock - Called by Rust when consensus ends
+// Tells Go: "Consensus ended at last_consensus_block, sync should start from last_consensus_block + 1"
+message SetSyncStartBlockRequest {
+    uint64 last_consensus_block = 1;  // Last block produced by consensus
+}
+
+message SetSyncStartBlockResponse {
+    bool success = 1;
+    uint64 sync_start_block = 2;  // Block number where sync will start (last_consensus_block + 1)
+    string message = 3;
+}
+
+// WaitForSyncToBlock - Called by Rust to wait for Go sync to reach a specific block
+// Used during SyncOnly -> Validator transition to ensure sync is complete before consensus starts
+message WaitForSyncToBlockRequest {
+    uint64 target_block = 1;       // Target block number to wait for
+    uint64 timeout_seconds = 2;    // Maximum time to wait (0 = use default)
+}
+
+
+message WaitForSyncToBlockResponse {
+    bool reached = 1;              // True if target block was reached
+    uint64 current_block = 2;      // Current block number
+    string message = 3;
+}
+
+// NotifyEpochChange - Pushed from Go to Rust (SyncOnly) when epoch changes
+// This allows event-driven transitions instead of polling
+message NotifyEpochChangeRequest {
+    uint64 new_epoch = 1;
+    uint64 epoch_timestamp_ms = 2;
+    uint64 boundary_block = 3;
+}
+
+message NotifyEpochChangeResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Committee change notification - pushed from Go to Rust when validators register/deregister
+message CommitteeChangedNotification {
+    uint64 block_number = 1;           // Block number where change occurred
+    string change_type = 2;            // "REGISTER" or "DEREGISTER"
+    string validator_address = 3;      // Address of the validator that changed
+    uint64 new_validator_count = 4;    // Total validator count after change
+}
+
+// NEW: ForceCommit - Pushed from Rust Consensus to Go
+// Instructs Go Master to immediately flush transactions in the pool and generate a block
+message ForceCommitRequest {
+    string reason = 1;         // (Optional) Diagnostic reason for the forced commit
+}
+
+message ForceCommitResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// ============================================================================
+// BLOCK SYNC APIs (SyncOnly Block Synchronization)
+// These APIs enable SyncOnly nodes to fetch and sync blocks from the Go Master
+// ============================================================================
+
+// BlockData - Contains all data needed to sync a block
+message BlockData {
+    uint64 block_number = 1;         // Block number (global_exec_index)
+    bytes block_hash = 2;            // Block hash (32 bytes)
+    uint64 epoch = 3;                // Epoch this block belongs to
+    uint64 timestamp_ms = 4;         // Block timestamp (consensus timestamp)
+    bytes parent_hash = 5;           // Parent block hash
+    bytes state_root = 6;            // State root after executing this block
+    bytes transactions_root = 7;     // Transactions merkle root
+    bytes receipts_root = 8;         // Receipts merkle root
+    uint64 gas_used = 9;             // Total gas used
+    uint64 gas_limit = 10;           // Block gas limit
+    bytes extra_data = 11;           // Extra data (validator signature, etc.)
+    bytes raw_block_bytes = 12;      // Full serialized block (Go's block.Marshal() output) for sync storage
+    bytes backup_data = 13;          // Full BackUpDb (gob-encoded) for state transfer during sync
+}
+
+// GetBlocksRangeRequest - Request blocks by range for sync
+message GetBlocksRangeRequest {
+    uint64 from_block = 1;           // Start block number (inclusive)
+    uint64 to_block = 2;             // End block number (inclusive)
+}
+
+// GetBlocksRangeResponse - Response with blocks data
+message GetBlocksRangeResponse {
+    repeated BlockData blocks = 1;   // List of blocks
+    uint64 count = 2;                // Number of blocks returned
+    string error = 3;                // Error message if any
+}
+
+// SyncBlocksRequest - Send blocks to Go for syncing (from peer)
+message SyncBlocksRequest {
+    repeated BlockData blocks = 1;   // Blocks to sync
+    bool execute_mode = 2;           // When true, Go executes blocks through NOMT (not just store)
+}
+
+// SyncBlocksResponse - Response after syncing blocks
+message SyncBlocksResponse {
+    uint64 synced_count = 1;         // Number of blocks successfully synced
+    uint64 last_synced_block = 2;    // Last block number that was synced
+    string error = 3;                // Error message if any
+    uint64 last_executed_gei = 4;    // GEI after execution (only set when execute_mode=true)
+}
+
+// Validator định nghĩa cấu trúc dữ liệu on-chain cho một validator.
+message Validator {
+  // Địa chỉ Ethereum của validator.
+  string address = 1;
+
+  // Tên hiển thị của validator.
+  string name = 2;
+
+  // Mô tả chi tiết về validator.
+  string description = 3;
+
+  // Trang web của validator.
+  string website = 4;
+
+  // Trạng thái bị "jail" (tạm khóa).
+  bool is_jailed = 5;
+
+  // Thời điểm hết hạn "jail".
+  google.protobuf.Timestamp jailed_until = 6;
+
+  // Bộ đếm các khối đã bỏ lỡ liên tiếp.
+  int64 missed_blocks_counter = 7;
+
+  // Tỷ lệ hoa hồng (ví dụ: 1000 tương đương 10%). Tối đa 10000.
+  uint64 commission_rate = 8;
+
+  // Lượng stake tối thiểu validator phải tự ủy quyền (dưới dạng chuỗi).
+  string min_self_delegation = 9;
+
+  // Danh sách chứa các delegator và lượng stake của họ.
+  // Được sắp xếp theo key (địa chỉ delegator) trước khi marshal để đảm bảo tính tất định.
+  repeated StringStringPair delegators = 10;
+
+  // ---- Các trường cho logic phần thưởng ----
+
+  // Tổng phần thưởng tích lũy trên mỗi đơn vị stake (nhân với 10^18).
+  string accumulated_rewards_per_share = 11;
+
+  // Chỉ số phần thưởng của từng delegator tại lần cuối họ tương tác.
+  // Được sắp xếp theo key (địa chỉ delegator) trước khi marshal để đảm bảo tính tất định.
+  repeated StringStringPair delegator_reward_indexes = 12;
+
+  // URL tới ảnh đại diện của validator.
+  string image = 13;
+  string primary_address = 14;
+  string total_staked_amount = 15;
+  string worker_address = 16;
+  string p2p_address = 17;
+  string pubkey_bls = 18;
+  string pubkey_secp = 19;
+  // Các trường mới để tương thích với committee.json (Rust)
+  string hostname = 20;        // Tương đương với name (dùng cho committee.json)
+  string authority_key = 21;   // Tương đương với pubkey_bls (dùng cho committee.json)
+  string protocol_key = 22;   // Tương đương với pubkey_secp (dùng cho committee.json)
+  string network_key = 23;    // Network key (dùng cho committee.json)
+}
+
+// ValidatorInfo - các trường cần thiết cho committee.json + metadata + phí/phần thưởng (epoch transition)
+// Field names match ValidatorState interface in Go for consistency
+message ValidatorInfo {
+  // RENAMED: address = Ethereum wallet address (matches ValidatorState.Address())
+  string address = 1;        // Ethereum wallet address (e.g., "0x1234...abcd")
+  string stake = 2;          // Stake amount (string) - khớp với "stake" trong committee.json (sau khi normalize)
+  string authority_key = 3;   // BLS public key (base64) - khớp với "authority_key" trong committee.json
+  string protocol_key = 4;   // Ed25519 protocol key (base64) - khớp với "protocol_key" trong committee.json
+  string network_key = 5;    // Ed25519 network key (base64) - khớp với "network_key" trong committee.json
+  
+  // Metadata
+  string name = 6;                // Tên validator
+  string description = 7;         // Mô tả validator
+  string website = 8;            // Website của validator
+  string image = 9;              // URL ảnh đại diện
+  
+  // Các trường liên quan đến tính phí và trả phần thưởng
+  uint64 commission_rate = 10;   // Tỷ lệ hoa hồng (ví dụ: 1000 = 10%, tối đa 10000)
+  string min_self_delegation = 11; // Lượng stake tối thiểu validator phải tự ủy quyền
+  string accumulated_rewards_per_share = 12; // Tổng phần thưởng tích lũy trên mỗi đơn vị stake
+  
+  // NEW: P2P address (matches ValidatorState.P2PAddress())
+  // Used for committee.json network communication
+  string p2p_address = 13;   // P2P address (Multiaddr format, e.g., "/ip4/127.0.0.1/tcp/9000")
+}
+
+// Thêm một loại request/response mới để làm ví dụ
+message StatusRequest {
+    // Không cần tham số gì, chỉ cần hỏi status
+}
+message ServerStatus {
+    string status_message = 1;
+    uint64 uptime_seconds = 2;
+}
+// Request để lấy danh sách active validators cho epoch transition
+// Chỉ lấy validators không bị jailed và có stake > 0
+message GetActiveValidatorsRequest {
+    // Không cần tham số, lấy từ state hiện tại
+}
+
+// Request để lấy validators tại một block cụ thể
+// Dùng cho khởi động (block 0) và epoch transition (last_global_exec_index)
+message GetValidatorsAtBlockRequest {
+    uint64 block_number = 1;  // Block number (0 cho genesis, last_global_exec_index cho epoch transition)
+}
+
+// Request để lấy last block number từ Go Master
+// Dùng để khởi tạo next_expected_index trong Rust executor_client
+message GetLastBlockNumberRequest {
+    // Không cần tham số, lấy từ DB
+}
+message Request {
+    // oneof đảm bảo chỉ một trong các trường sau có thể được set tại một thời điểm
+    oneof payload {
+        BlockRequest block_request = 1;
+        StatusRequest status_request = 2;
+        GetActiveValidatorsRequest get_active_validators_request = 3;
+        GetValidatorsAtBlockRequest get_validators_at_block_request = 4;
+        GetLastBlockNumberRequest get_last_block_number_request = 5;  // New: Get last block number
+        GetCurrentEpochRequest get_current_epoch_request = 6;  // Sui-style: Get current epoch
+        GetEpochStartTimestampRequest get_epoch_start_timestamp_request = 7;  // Sui-style: Get epoch timestamp
+        AdvanceEpochRequest advance_epoch_request = 8;  // Sui-style: Advance epoch
+        GetEpochBoundaryDataRequest get_epoch_boundary_data_request = 9;  // NEW: Get unified epoch boundary data
+        SetConsensusStartBlockRequest set_consensus_start_block_request = 10;  // NEW: Transition handoff
+        SetSyncStartBlockRequest set_sync_start_block_request = 11;  // NEW: Transition handoff
+        WaitForSyncToBlockRequest wait_for_sync_to_block_request = 12;  // NEW: Transition handoff
+        NotifyEpochChangeRequest notify_epoch_change_request = 20; // NEW: Event-driven notification (Go -> Rust)
+        GetBlocksRangeRequest get_blocks_range_request = 21;  // NEW: Block sync - get blocks
+        SyncBlocksRequest sync_blocks_request = 22;  // NEW: Block sync - send blocks to sync
+        // Thêm các loại request khác ở đây trong tương lai
+        ForceCommitRequest force_commit_request = 30; // NEW: Event-driven forced commit
+    }
+}
+message Response {
+    oneof payload {
+        ValidatorList validator_list = 1;
+        ValidatorInfoList validator_info_list = 2; // Cho epoch transition
+        ServerStatus server_status = 3;
+        string error = 4; // Error message nếu có lỗi
+        LastBlockNumberResponse last_block_number_response = 5;  // New: Last block number response
+        GetCurrentEpochResponse get_current_epoch_response = 6;  // Sui-style: Current epoch response
+        GetEpochStartTimestampResponse get_epoch_start_timestamp_response = 7;  // Sui-style: Epoch timestamp response
+        AdvanceEpochResponse advance_epoch_response = 8;  // Sui-style: Advance epoch response
+        EpochBoundaryData epoch_boundary_data = 9;  // NEW: Unified epoch boundary data response
+        SetConsensusStartBlockResponse set_consensus_start_block_response = 10;  // NEW: Transition handoff
+        SetSyncStartBlockResponse set_sync_start_block_response = 11;  // NEW: Transition handoff
+        WaitForSyncToBlockResponse wait_for_sync_to_block_response = 12;  // NEW: Transition handoff
+        NotifyEpochChangeResponse notify_epoch_change_response = 20; // NEW: Event-driven notification (Go -> Rust)
+        GetBlocksRangeResponse get_blocks_range_response = 21;  // NEW: Block sync - get blocks response
+        SyncBlocksResponse sync_blocks_response = 22;  // NEW: Block sync - sync blocks response
+        // Thêm các loại response khác ở đây
+        ForceCommitResponse force_commit_response = 30; // NEW: Event-driven forced commit response
+    }
+}

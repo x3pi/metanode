@@ -1,0 +1,229 @@
+/* src/FullDbInteractionPage.css */
+.full-db-page {
+    max-width: 950px; /* Rộng hơn */
+    margin: 20px auto;
+    padding: 15px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f4f7f9; /* Nền sáng hơn */
+    border-radius: 8px;
+  }
+  
+  .section-box {
+    background-color: #fff;
+    padding: 20px 25px;
+    margin-bottom: 20px;
+    border-radius: 6px;
+    border: 1px solid #e0e4e8;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+  
+  h3 {
+    color: #2c3e50;
+    margin-top: 0;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #e0e4e8;
+  }
+  
+  /* --- Top Section --- */
+  .top-section {
+    display: flex;
+    justify-content: space-between;
+    gap: 30px;
+    flex-wrap: wrap;
+  }
+  .wallet-display, .db-management {
+    flex: 1;
+    min-width: 300px;
+  }
+  .wallet-display .address {
+    font-weight: bold;
+    font-family: monospace;
+    background-color: #e8f0fe;
+    padding: 3px 6px;
+    border-radius: 4px;
+    color: #1a73e8;
+  }
+  .current-db {
+    font-weight: bold;
+    color: #16a085; /* Màu xanh lá */
+  }
+  
+  /* --- Controls & Groups --- */
+  .control-group {
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .control-group label {
+    font-weight: 500;
+    color: #555;
+    margin-right: 5px;
+    min-width: 80px; /* Điều chỉnh nếu cần */
+  }
+  .control-group input[type="text"],
+  .control-group input[type="number"],
+  .control-group select {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95rem;
+    flex-grow: 1;
+  }
+  .control-group input:disabled, .control-group select:disabled {
+    background-color: #f0f0f0;
+  }
+  .filter-group input[type="number"] {
+     width: 120px;
+     flex-grow: 0; /* Không cho input số tự động giãn */
+  }
+  .filter-group span {
+      margin: 0 5px;
+  }
+  
+  /* --- Buttons --- */
+  .btn {
+    padding: 8px 15px;
+    font-size: 0.95rem;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+    background-color: #3498db; /* Xanh dương */
+    color: white;
+    font-weight: 500;
+    white-space: nowrap; /* Ngăn nút bị xuống dòng */
+  }
+  .btn:hover:not(:disabled) {
+    background-color: #2980b9;
+    transform: translateY(-1px);
+  }
+  .btn:disabled {
+    background-color: #bdc3c7; /* Xám nhạt */
+    cursor: not-allowed;
+  }
+  .btn-sm {
+    padding: 5px 10px;
+    font-size: 0.85rem;
+  }
+  .btn-secondary { background-color: #f39c12; } /* Cam */
+  .btn-secondary:hover:not(:disabled) { background-color: #e67e22; }
+  .btn-disconnect { background-color: #e74c3c; } /* Đỏ */
+  .btn-disconnect:hover:not(:disabled) { background-color: #c0392b; }
+  .btn-delete { background-color: #e74c3c; } /* Đỏ cho nút xóa */
+  .btn-delete:hover:not(:disabled) { background-color: #c0392b; }
+  .btn-search { background-color: #2ecc71; } /* Xanh lá cây */
+  .btn-search:hover:not(:disabled) { background-color: #27ae60; }
+  
+  /* --- Results Section --- */
+  .results-section h3 {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+  }
+  .tx-info {
+      font-size: 0.85em;
+      color: #7f8c8d;
+      word-break: break-all;
+      margin-top: 5px;
+      margin-bottom: 15px;
+  }
+  .tx-info a {
+      color: #3498db;
+      text-decoration: none;
+  }
+  .tx-info a:hover {
+      text-decoration: underline;
+  }
+  
+  .product-list {
+    margin-top: 20px;
+    border-top: 1px solid #eee;
+  }
+  .product-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start; /* Canh trên */
+    padding: 15px 0;
+    border-bottom: 1px solid #eee;
+    gap: 15px;
+  }
+  .product-item:last-child {
+    border-bottom: none;
+  }
+  .product-info {
+    flex-grow: 1;
+    font-size: 0.95rem;
+    line-height: 1.4;
+  }
+  .product-info strong {
+      color: #555;
+  }
+  .product-data {
+      display: inline-block; /* Hoặc block tùy layout */
+      margin-left: 5px;
+      font-family: monospace;
+      background-color: #f8f9fa;
+      padding: 2px 5px;
+      border-radius: 3px;
+      word-break: break-all;
+  }
+  
+  /* --- Pagination --- */
+  .pagination {
+    margin-top: 25px;
+    text-align: center;
+  }
+  .pagination button {
+    margin: 0 10px;
+  }
+  .pagination span {
+    margin: 0 10px;
+    font-weight: 500;
+    color: #555;
+  }
+  
+  /* --- Messages --- */
+  .loading-message, .error-message, .status-message, .warning-message {
+    padding: 12px 15px;
+    margin: 15px 0;
+    border-radius: 4px;
+    font-weight: 500;
+    text-align: center;
+  }
+  .loading-message { color: #2980b9; background-color: #eaf5ff; border: 1px solid #b3d7f8; }
+  .error-message { color: #c0392b; background-color: #fbeae5; border: 1px solid #f1c6c0; }
+  .status-message { color: #27ae60; background-color: #eafaf1; border: 1px solid #b8e9c9; }
+  .warning-message { color: #e67e22; background-color: #fef5e7; border: 1px solid #fbe5c1; }
+
+  .add-product-section {
+    /* Similar styling to search-section or db-management */
+    background-color: #fff;
+    padding: 20px 25px;
+    margin-bottom: 20px;
+    border-radius: 6px;
+    border: 1px solid #e0e4e8;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+  
+  .add-product-section form .control-group {
+      margin-bottom: 18px; /* More space between rows */
+  }
+  
+  .add-product-section form label {
+      min-width: 90px; /* Adjust label width */
+      text-align: right;
+      margin-right: 8px;
+  }
+  
+   .add-product-section form input[type="text"],
+   .add-product-section form textarea {
+       flex-grow: 1; /* Allow inputs to take available space */
+   }
+  
+   /* Style the add button specifically if needed */
+   .add-product-section .btn-success {
+       margin-top: 10px;
+   }

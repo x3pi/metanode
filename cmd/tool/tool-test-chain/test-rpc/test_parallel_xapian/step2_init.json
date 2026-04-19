@@ -1,0 +1,9 @@
+[
+  {
+    "contract": "0x7f0e4B281B52e30Fd32C2862A77ec89b91F49D6e",
+    "abi_path": "../abi/dual-tx-xapian.json",
+    "action": "send",
+    "method": "initDb",
+    "args": []
+  }
+]

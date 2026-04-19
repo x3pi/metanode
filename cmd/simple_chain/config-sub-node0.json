@@ -1,0 +1,83 @@
+{
+    "debug": true,
+    "mode": "Multi",
+    "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
+    "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
+    "log_path": "../../../mtn-consensus/metanode/logs/node_0/go-sub",
+    "backup_path": "./sample/node0/back_up_write",
+    "explorer_db_path": "./sample/node0/data-write/other/explorer",
+    "explorer_read_only_db_path": "./sample/node0/data-write/other/explorer-read-only",
+    "is_explorer": true,
+    "connection_address": "0.0.0.0:4200",
+    "rust_receive_socket_path": "/tmp/rust-go-node0.sock",
+    "rust_tx_socket_path": "/tmp/metanode-tx-0.sock",
+    "meta_node_rpc_address": "127.0.0.1:10100",
+    "version": "0.0.1.0",
+    "node_type": "child_node",
+    "service_type": "SUB-WRITE",
+    "rpc_port": ":8646",
+    "db_type": 2,
+    "genesis_file_path": "genesis.json",
+    "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
+    "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+    "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
+    "cross_chain": {
+        "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+    },
+    "snapshot_enabled": true,
+    "Databases": {
+        "RootPath": "./sample/node0/data-write/data",
+        "DBEngine": "sharded",
+        "NodeType": "STORAGE_LOCAL",
+        "Version": "0.0.1.0",
+        "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
+        "SnapshotPath": "./snapshot_data_node0",
+        "MaxPartSizeMB": 100,
+        "ArchiveBaseName": "snapshot_archive",
+        "AccountState": {
+            "Path": "/account_state/"
+        },
+        "Trie": {
+            "Path": "/trie_database/"
+        },
+        "SmartContractCode": {
+            "Path": "/smart_contract_code/"
+        },
+        "SmartContractStorage": {
+            "Path": "/smart_contract_storage/"
+        },
+        "Blocks": {
+            "Path": "/blocks/"
+        },
+        "Receipts": {
+            "Path": "/receipts/"
+        },
+        "BackupDeviceKey": {
+            "Path": "/backup_device_key_storage/"
+        },
+        "TransactionState": {
+            "Path": "/transaction_state/"
+        },
+        "Mapping": {
+            "Path": "/mapping/"
+        },
+        "Backup": {
+            "Path": "/backup_db/"
+        },
+        "Stake": {
+            "Path": "/stake_db/"
+        },
+        "XapianPath": "/xapian"
+    },
+    "nodes": {
+        "master_address": "127.0.0.1:4201"
+    },
+    "snapshot_server_port": 8700,
+    "snapshot_blocks_delay": 20,
+    "snapshot_method": "hybrid",
+    "snapshot_source_dir": "./sample/node0/data-write",
+    "state_backend": "nomt",
+    "nomt_commit_concurrency": 32,
+    "nomt_page_cache_mb": 1024,
+    "nomt_leaf_cache_mb": 1024
+}

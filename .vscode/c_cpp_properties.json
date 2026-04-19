@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/pkg/mvm/linker/include",
+                "${workspaceFolder}/pkg/mvm/linker/include/my_extension",
+                "${workspaceFolder}/pkg/mvm/linker/include/abi",
+                "${workspaceFolder}/pkg/mvm/linker/include/xapian",
+                "${workspaceFolder}/pkg/mvm/c_mvm/build/include",
+                "${workspaceFolder}/pkg/mvm/c_mvm/build/include/3rdparty"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compileCommands": "${workspaceFolder}/pkg/mvm/linker/build/compile_commands.json"
+        }
+    ],
+    "version": 4
+}

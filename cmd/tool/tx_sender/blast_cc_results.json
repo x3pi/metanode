@@ -1,0 +1,13 @@
+{
+  "amount": "1000000000000000000",
+  "destinationId": 2,
+  "recipient": "0xb9aF411413cc44685B6674d944a5679694014E6B",
+  "roundTPS": [
+    2721.3388657307382,
+    2677.9579273798354,
+    2707.695751370295
+  ],
+  "rounds": 3,
+  "txCount": 10000,
+  "type": "lockAndBridge"
+}
