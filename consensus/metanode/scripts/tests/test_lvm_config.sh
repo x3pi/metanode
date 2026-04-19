@@ -18,8 +18,8 @@ cd ../..
 
 # Test 2: Simulate what node.rs does
 echo "Test 2: Simulating node.rs logic"
-BIN_PATH="/home/abc/chain-n/mtn-consensus/metanode/bin/lvm-snap-rsync"
-BIN_DIR="/home/abc/chain-n/mtn-consensus/metanode/bin"
+BIN_PATH="/home/abc/chain-n/metanode/consensus/metanode/bin/lvm-snap-rsync"
+BIN_DIR="/home/abc/chain-n/metanode/consensus/metanode/bin"
 
 echo "Binary path: $BIN_PATH"
 echo "Binary directory: $BIN_DIR"

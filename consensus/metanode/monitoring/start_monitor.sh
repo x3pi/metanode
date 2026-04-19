@@ -41,9 +41,9 @@ find_metanode_dir() {
     local relative_paths=(
         "."
         "../metanode"
-        "../../mtn-consensus/metanode"
-        "../../../chain-n/mtn-consensus/metanode"
-        "$HOME/chain-n/mtn-consensus/metanode"
+        "../../consensus/metanode"
+        "../../../chain-n/metanode/consensus/metanode"
+        "$HOME/chain-n/metanode/consensus/metanode"
     )
 
     for path in "${relative_paths[@]}"; do

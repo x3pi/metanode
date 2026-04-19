@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/abc/nhat/mtn-simple-2025"
+ROOT="/home/abc/chain-n/metanode/execution"
 INPUT="/tmp/demo_2g.bin"
 OUTPUT="/tmp/demo_out_2g.bin"
 CHUNK_SIZE=$((200 * 1024))

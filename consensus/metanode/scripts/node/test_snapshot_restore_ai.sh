@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SIMPLE_CHAIN_DIR="$(cd "$SCRIPT_DIR/../../../../mtn-simple-2025/cmd/simple_chain" && pwd)"
+SIMPLE_CHAIN_DIR="$(cd "$SCRIPT_DIR/../../../../execution/cmd/simple_chain" && pwd)"
 METANODE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOG_DIR="$METANODE_ROOT/logs"
 

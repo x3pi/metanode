@@ -1,6 +1,6 @@
 import re
 
-with open('/home/abc/chain-n/mtn-consensus/metanode/src/network/tx_socket_server.rs', 'r') as f:
+with open('/home/abc/chain-n/metanode/consensus/metanode/src/network/tx_socket_server.rs', 'r') as f:
     content = f.read()
 
 # Replace listener start up to the loop
@@ -66,5 +66,5 @@ content = content.replace('_storage_path: Option<std::path::PathBuf>,', '')
 stream_read_rx = re.compile(r'// Use the new codec module.*?let mut parse_error = false;', re.DOTALL)
 content = stream_read_rx.sub('''let mut parse_error = false;''', content)
 
-with open('/home/abc/chain-n/mtn-consensus/metanode/src/network/tx_socket_server.rs', 'w') as f:
+with open('/home/abc/chain-n/metanode/consensus/metanode/src/network/tx_socket_server.rs', 'w') as f:
     f.write(content)

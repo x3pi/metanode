@@ -14,7 +14,7 @@ TX_HASH_SHORT="${TX_HASH:0:16}"  # First 8 bytes (16 hex chars)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 METANODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-GO_PROJECT_ROOT="$(cd "$METANODE_ROOT/../.." && pwd)/mtn-simple-2025"
+GO_PROJECT_ROOT="$(cd "$METANODE_ROOT/../.." && pwd)/execution"
 
 echo "🔍 Tracing transaction: $TX_HASH"
 echo "   Short hash (first 8 bytes): $TX_HASH_SHORT"

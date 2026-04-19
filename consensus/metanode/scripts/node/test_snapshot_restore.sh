@@ -31,8 +31,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SIMPLE_CHAIN_DIR="/home/abc/chain-n/mtn-simple-2025/cmd/simple_chain"
-METANODE_ROOT="/home/abc/chain-n/mtn-consensus/metanode"
+SIMPLE_CHAIN_DIR="/home/abc/chain-n/metanode/execution/cmd/simple_chain"
+METANODE_ROOT="/home/abc/chain-n/metanode/consensus/metanode"
 LOG_DIR="$METANODE_ROOT/logs"
 
 SRC_NODE=${1:-0}

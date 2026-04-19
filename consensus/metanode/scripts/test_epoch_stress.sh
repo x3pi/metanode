@@ -14,7 +14,7 @@ sleep 10
 
 # Step 2: Run load test
 echo "🔥 Step 2: Blasting 200,000 transactions..."
-cd ../../mtn-simple-2025/cmd/tool/tps_blast
+cd ../../execution/cmd/tool/tps_blast
 ./run_multinode_load.sh 10 20000  # 10 accounts * 20000 = 200K TXs
 sleep 10
 
@@ -34,12 +34,12 @@ echo "💀 Step 4: Crashing Node 0 to test recovery..."
 kill -9 $(pgrep -f "metanode.*node-0") || true
 sleep 5
 echo "⚡ Restarting Node 0..."
-cd ../../../../mtn-consensus/metanode/scripts
+cd ../../../../consensus/metanode/scripts
 ./node/node.sh 0 start
 sleep 10
 
 echo "🔥 Blasting 100,000 more transactions after recovery..."
-cd ../../mtn-simple-2025/cmd/tool/tps_blast
+cd ../../execution/cmd/tool/tps_blast
 ./run_multinode_load.sh 10 10000
 sleep 10
 

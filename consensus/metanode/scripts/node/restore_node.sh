@@ -37,7 +37,7 @@ NC='\033[0m'
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 METANODE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-GO_PROJECT_ROOT="$(cd "$METANODE_ROOT/../.." && pwd)/mtn-simple-2025"
+GO_PROJECT_ROOT="$(cd "$METANODE_ROOT/../.." && pwd)/execution"
 GO_SIMPLE_ROOT="$GO_PROJECT_ROOT/cmd/simple_chain"
 LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"

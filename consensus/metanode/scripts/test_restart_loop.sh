@@ -8,7 +8,7 @@ echo "=========================================================="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ORCHESTRATOR="$SCRIPT_DIR/mtn-orchestrator.sh"
-TX_SENDER_DIR="$BASE_DIR/mtn-simple-2025/cmd/tool/tx_sender"
+TX_SENDER_DIR="$BASE_DIR/execution/cmd/tool/tx_sender"
 
 if [ ! -f "$ORCHESTRATOR" ]; then
     echo "❌ Không tìm thấy mtn-orchestrator.sh"

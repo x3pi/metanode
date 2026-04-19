@@ -3,7 +3,7 @@
     "mode": "Multi",
     "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
     "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
-    "log_path": "../../../mtn-consensus/metanode/logs/node_0/go-sub",
+    "log_path": "../../../consensus/metanode/logs/node_0/go-sub",
     "backup_path": "./sample/node0/back_up_write",
     "explorer_db_path": "./sample/node0/data-write/other/explorer",
     "explorer_read_only_db_path": "./sample/node0/data-write/other/explorer-read-only",

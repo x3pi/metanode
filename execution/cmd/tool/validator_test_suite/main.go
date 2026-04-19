@@ -187,7 +187,7 @@ type HashWatcher struct {
 func main() {
 	masterRPC := flag.String("master-rpc", "http://localhost:8747", "Master node RPC URL")
 	node4RPC := flag.String("node4-rpc", "http://localhost:10748", "Node 4 RPC URL")
-	scriptsDir := flag.String("scripts-dir", "", "Path to mtn-consensus/metanode/scripts/node/ (auto-detect if empty)")
+	scriptsDir := flag.String("scripts-dir", "", "Path to consensus/metanode/scripts/node/ (auto-detect if empty)")
 	privateKey := flag.String("private-key", defaultNode4Config.PrivateKey, "Node 4 private key (hex)")
 	checkInterval := flag.Duration("check-interval", 5*time.Second, "Hash check interval")
 	stakeAmount := flag.String("stake", "1000000000000000000000", "Stake amount in wei (default: 1000 ETH)")
@@ -201,9 +201,9 @@ func main() {
 	// Auto-detect scripts dir
 	if *scriptsDir == "" {
 		candidates := []string{
-			"../../../mtn-consensus/metanode/scripts/node",
-			"../../../../mtn-consensus/metanode/scripts/node",
-			"/home/abc/chain-n/mtn-consensus/metanode/scripts/node",
+			"../../../consensus/metanode/scripts/node",
+			"../../../../consensus/metanode/scripts/node",
+			"/home/abc/chain-n/consensus/metanode/scripts/node",
 		}
 		for _, c := range candidates {
 			abs, _ := filepath.Abs(c)

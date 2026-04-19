@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/abc/chain-n/mtn-consensus/metanode/scripts
+cd /home/abc/chain-n/metanode/consensus/metanode/scripts
 
 echo "Starting fresh restart..."
 ./fresh_restart.sh > /dev/null 2>&1

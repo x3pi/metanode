@@ -266,7 +266,7 @@ class NodeMonitor:
         # Try to read from genesis.json for base timestamp
         genesis_timestamp = 0
         try:
-            genesis_file = Path(self.metanode_path).parent / "mtn-simple-2025" / "cmd" / "simple_chain" / "genesis.json"
+            genesis_file = Path(self.metanode_path).parent / "execution" / "cmd" / "simple_chain" / "genesis.json"
             if genesis_file.exists():
                 with open(genesis_file, 'r') as f:
                     genesis = json.load(f)

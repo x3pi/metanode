@@ -59,7 +59,7 @@ fi
 
 echo "-------------------------------------"
 echo "🧹 Wiping all local test snapshots from previous test runs..."
-rm -rf /home/abc/chain-n/mtn-simple-2025/cmd/simple_chain/snapshot_data_node*
+rm -rf /home/abc/chain-n/metanode/execution/cmd/simple_chain/snapshot_data_node*
 echo "✅ Snapshots cleared."
 echo "-------------------------------------"
 exit 0

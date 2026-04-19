@@ -12,23 +12,23 @@
 #   ./update_ips.sh 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1  # localhost
 #
 # Files ảnh hưởng:
-#   Rust:  mtn-consensus/metanode/config/node_{0..4}.toml
+#   Rust:  consensus/metanode/config/node_{0..4}.toml
 #          - network_address (IP:port P2P consensus)
 #          - peer_rpc_addresses (danh sách IP peer discovery)
-#   Go:    mtn-simple-2025/cmd/simple_chain/config-master-node{0..4}.json
+#   Go:    execution/cmd/simple_chain/config-master-node{0..4}.json
 #          - meta_node_rpc_address (Rust RPC endpoint)
-#          mtn-simple-2025/cmd/simple_chain/config-sub-node{0..4}.json
+#          execution/cmd/simple_chain/config-sub-node{0..4}.json
 #          - meta_node_rpc_address (Rust RPC endpoint)
 #          - nodes.master_address (Go Master endpoint cho sub node)
-#   Tools: mtn-simple-2025/cmd/tool/tps_blast/run_multinode_load.sh
+#   Tools: execution/cmd/tool/tps_blast/run_multinode_load.sh
 #          - NODES, RPCS arrays, block_hash_checker nodes
-#          mtn-simple-2025/cmd/tool/tps_blast/run_node0_only_load.sh
+#          execution/cmd/tool/tps_blast/run_node0_only_load.sh
 #          - NODES array, -rpc parameter
-#          mtn-simple-2025/cmd/tool/tx_sender/config.json
+#          execution/cmd/tool/tx_sender/config.json
 #          - parent_connection_address
-#          mtn-simple-2025/cmd/tool/tps_blast/config.json
+#          execution/cmd/tool/tps_blast/config.json
 #          - parent_connection_address
-#          mtn-simple-2025/cmd/tool/tps_benchmark_multi_node/config.json
+#          execution/cmd/tool/tps_benchmark_multi_node/config.json
 #          - parent_connection_address
 # ============================================================================
 
@@ -46,7 +46,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 METANODE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUST_CONFIG_DIR="$METANODE_DIR/config"
-GO_DIR="$(cd "$METANODE_DIR/../../mtn-simple-2025" && pwd)"
+GO_DIR="$(cd "$METANODE_DIR/../../execution" && pwd)"
 GO_CONFIG_DIR="$GO_DIR/cmd/simple_chain"
 
 # ─── Port Mapping ────────────────────────────────────────────────────────────

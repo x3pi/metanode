@@ -6,7 +6,7 @@ while true; do
     echo "Current block: $DEC_BLOCK"
     if [ "$DEC_BLOCK" -ge 150 ]; then
       echo "Reached block 150! Restoring node 2..."
-      cd /home/abc/chain-n/mtn-consensus/metanode
+      cd /home/abc/chain-n/metanode/consensus/metanode
       ./scripts/node/restore_node.sh 2
       break
     fi

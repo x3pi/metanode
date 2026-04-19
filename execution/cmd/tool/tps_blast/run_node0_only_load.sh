@@ -4,7 +4,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_PROJECT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-MTN_CONSENSUS_ROOT="$(cd "$GO_PROJECT/../mtn-consensus" && pwd)"
+MTN_CONSENSUS_ROOT="$(cd "$GO_PROJECT/../consensus" && pwd)"
 
 CLIENTS=${1:-10}
 TX_PER_CLIENT=${2:-20000}

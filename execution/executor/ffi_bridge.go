@@ -1,8 +1,8 @@
 package executor
 
 /*
-#cgo CFLAGS: -I../../mtn-consensus/metanode/src/ffi
-#cgo LDFLAGS: -L${SRCDIR}/../../mtn-consensus/metanode/target/release -lmetanode -Wl,--allow-multiple-definition
+#cgo CFLAGS: -I../../consensus/metanode/src/ffi
+#cgo LDFLAGS: -L${SRCDIR}/../../consensus/metanode/target/release -lmetanode -Wl,--allow-multiple-definition
 #cgo linux,amd64 LDFLAGS: -lpthread -ldl -lm -lutil -lrt
 #include <stdlib.h>
 #include <stdint.h>

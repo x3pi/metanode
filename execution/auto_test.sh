@@ -6,7 +6,7 @@
 # Tự động lấy thư mục gốc của project (thư mục chứa file auto_test.sh)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Suy ra thư mục script mtn-consensus nằm cùng cấp
-METANODE_SCRIPT_DIR="$(cd "$PROJECT_ROOT/../mtn-consensus/metanode/scripts/node" && pwd)"
+METANODE_SCRIPT_DIR="$(cd "$PROJECT_ROOT/../consensus/metanode/scripts/node" && pwd)"
 
 # Cấu hình bước bắt đầu chạy (mặc định là 1)
 START_STEP=1

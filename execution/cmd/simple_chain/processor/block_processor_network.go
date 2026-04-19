@@ -64,8 +64,8 @@ func (bp *BlockProcessor) runUnixSocket() {
 	rustConfigPath := bp.config.RustConfigPath
 	if rustConfigPath == "" {
 		// Fallback for easy local testing if not in config
-		logger.Warn("RustConfigPath not specified in config! Using default: ../mtn-consensus/metanode/config/node-0.toml")
-		rustConfigPath = "../mtn-consensus/metanode/config/node-0.toml"
+		logger.Warn("RustConfigPath not specified in config! Using default: ../consensus/metanode/config/node-0.toml")
+		rustConfigPath = "../consensus/metanode/config/node-0.toml"
 	}
 
 	// 4. Initialize FFI Bridge

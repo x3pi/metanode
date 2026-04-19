@@ -10,7 +10,7 @@ import (
 func main() {
 	count := 0
 	for i := 0; i < 16; i++ {
-		dbPath := fmt.Sprintf("/home/abc/chain-n/mtn-simple-2025/sample/node0/back_up/backup_db/db%d", i)
+		dbPath := fmt.Sprintf("/home/abc/chain-n/metanode/execution/sample/node0/back_up/backup_db/db%d", i)
 		db, err := leveldb.OpenFile(dbPath, nil)
 		if err != nil {
 			log.Fatalf("Failed to open DB %d: %v", i, err)

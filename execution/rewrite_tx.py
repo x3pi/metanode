@@ -1,6 +1,6 @@
 import re
 
-orig_path = "/home/abc/chain-n/mtn-consensus/metanode/src/network/tx_socket_server.rs"
+orig_path = "/home/abc/chain-n/metanode/consensus/metanode/src/network/tx_socket_server.rs"
 with open(orig_path, 'r') as f:
     content = f.read()
 

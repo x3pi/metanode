@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/abc/chain-n/mtn-simple-2025/cmd/tool/tps_blast
+cd /home/abc/chain-n/metanode/execution/cmd/tool/tps_blast
 
 echo "Starting 30 runs of blast test..." > tps_summary.txt
 

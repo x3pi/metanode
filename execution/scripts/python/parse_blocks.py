@@ -4,7 +4,7 @@ from datetime import datetime
 for i in range(5):
     lines = []
     for ep in [0, 1]:
-        filepath = f"/home/abc/chain-n/mtn-consensus/metanode/logs/node_{i}/go-master/epoch_{ep}/Commit.log"
+        filepath = f"/home/abc/chain-n/metanode/consensus/metanode/logs/node_{i}/go-master/epoch_{ep}/Commit.log"
         if os.path.exists(filepath):
             with open(filepath, 'r') as f:
                 for line in f:

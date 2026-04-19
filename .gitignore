@@ -1,0 +1,420 @@
+
+#
+# =============================================================================
+**/*~
+._*
+**/*.7z
+# **/.atom/
+**/.aws/
+**/aws-credentials
+# AWS credentials
+**/*.backup
+# Backup and archive files
+# Backup files
+**/*.bak
+benchmark_results/
+# Benchmark results
+**/benchmarks/
+/bin/
+# Binary executables
+/blast_accounts.json
+/blast_results.json
+/block_hash_checker
+**/_book/
+**/book/
+**/build/
+/build
+/build_app
+# Build artifacts
+# Build artifacts and dependencies
+# ===== Build binaries (root level) =====
+# ===== Build binaries (specific paths) =====
+# ===== Build directories =====
+**/*.bz2
+**/.cache/
+cache_debug.log
+Cargo.lock
+# Cargo.lock (only ignore in workspace root, keep in individual crates if needed)
+channel_debug.log
+/check_account
+/check_*.go
+**/ci-cache/
+# CI cache and artifacts
+# CI/CD and deployment
+cmd/benchmark_storage_client/benchmark_client
+cmd/build/
+cmd/client/add_account/add_account
+cmd/client/add_account_tx_0/add_account_tx_0
+cmd/client/call_tool_test/call_tool_test
+cmd/client/call_tool_test/output.json
+cmd/client/call_tool_test_parallel/transaction_results.json
+cmd/demo/
+cmd/demoSocket
+cmd/exec_node/other
+cmd/observer/tool/deployContract/deploy_crosschain
+cmd/observer/tool/deployContract/deployCrossChain
+cmd/observer/tool/gen_key_eth/gen_key
+cmd/observer/tool/gen_spam_keys/generated_keys*.json
+cmd/observer/tool/tps_blast_cc/blast_cc_results.json
+cmd/observer/tool/tps_blast_cc/tps_blast
+cmd/rpc-client/dist/
+cmd/rpc-client/privatekey_db_encrypted
+cmd/simple_chain/app.go.part
+cmd/simple_chain/App.log
+cmd/simple_chain/blast_cc_results.json
+cmd/simple_chain/blast_results.json
+cmd/simple_chain/cmd/migrate_data/BatchPut_0
+cmd/simple_chain/debugTraceBlock.json
+cmd/simple_chain/genesis.json
+cmd/simple_chain/genesis.json.backup_safe
+cmd/simple_chain/heap_*.prof
+cmd/simple_chain/leveldb/
+cmd/simple_chain/manual_debug*.log
+cmd/simple_chain/mem_dump.txt
+cmd/simple_chain/meta-node
+cmd/simple_chain/metanode
+cmd/simple_chain/panic_debug.log
+cmd/simple_chain/run.stdout
+cmd/simple_chain/sample/
+cmd/simple_chain/simple
+cmd/simple_chain/simple_chain
+cmd/simple_chain/snapshot_data/
+cmd/simple_chain/snapshot_data_node*/
+cmd/simple_chain/startup_cpu.prof
+cmd/simple_chain/test_build
+cmd/simple_chain/tmp_simple_chain
+cmd/simple_chain/xapian/
+cmd/simple_chain/xapian_database/
+cmd/simple_chain/xapian_node1
+cmd/simple_chain/xapian_node2
+cmd/storage/db_data
+cmd/storage/running_instances
+cmd/storage/storage_server
+cmd/test/*
+cmd/testdb/*
+cmd/tests/nomt_empty/
+cmd/tool/add_validator_node4/add_validator_node4
+cmd/tool/batch_account_setup/accounts.json
+cmd/tool/block_hash_checker/hash_mismatch_alert.log
+cmd/tool/block_hash_checker/mismatches_*.csv
+cmd/tool/pipeline_monitor/pipeline_monitor
+cmd/tool/register_validator/register_validator
+cmd/tool/test_tps/gen_spam_keys/generated_keys*.json
+cmd/tool/test_tps/tps_blast_cc/blast_cc_results.json
+cmd/tool/tps_benchmark_multi_node/tx_payloads.json
+cmd/tool/tps_benchmark/tps_benchmark
+cmd/tool/tps_blast/accounts_*.json
+cmd/tool/tps_blast/bin/
+cmd/tool/tps_blast/blast_accounts.json
+cmd/tool/tps_blast/blast_results.json
+cmd/tool/tps_blast/check/check_loop
+cmd/tool/tps_blast/test_blast
+cmd/tool/tps_blast/tmp_blast
+cmd/tool/tps_blast/tps_blast
+cmd/tool/tps_blast/tps_blast.out
+cmd/tool/tps_blast/verify_all
+cmd/tool/tps_blast/verify/verify
+cmd/tool/trie_bench/trie_bench
+cmd/tool/tx_sender/logs/
+cmd/tool/tx_sender/out.txt
+cmd/tool/tx_sender/tx_sender
+cmd/tool/validator_test_suite/validator_test_suite
+# Compiled binaries and libraries
+# Compiled binaries (should not be in Git)
+# Compiled metanode binary in scripts (copied for deployment)
+/config.json
+# Configuration and secrets (SECURITY CRITICAL)
+**/consensus_db/
+**/coverage/
+**/credentials.txt
+# Cryptographic keys (NEVER COMMIT - Contains private keys!)
+# ===== CSV / benchmark result artifacts =====
+**/CURRENT
+.cursor/
+# ===== Data/runtime directories =====
+**/*.db.lock
+**/*.db.tmp
+**/*.debug
+# Debug and profiling files
+# **/debug.log
+# ===== Debug/scratch scripts =====
+/demo
+# ===== Demo / hybrid =====
+demo/receiver/incoming_chunks
+demo/receiver/restored_data
+demo/sender/db_data
+demo/sender/db_data_to_send
+**/*-deployment.yaml
+**/desktop.ini
+# Development and testing
+# Development utility scripts (not part of source)
+**/dev.toml
+**/dist/
+**/*.dll
+# Docker
+**/docker-compose.override.yml
+**/.dockerignore.tmp
+**/docs/build/
+**/docs/.doctrees/
+# Documentation and build artifacts
+# Documentation builds
+.DS_Store
+.DS_Store?
+**/*.dSYM/
+# Dùng / prefix để chỉ match ở root, tránh match thư mục source code
+**/*.dylib
+# Each section focuses on a specific type of files/artifacts.
+# **/.eclipse/
+**/*.egg-info/
+ehthumbs.db
+**/.env
+**/env/
+**/ENV/
+**/env.bak/
+# Environment files (may contain secrets)
+**/.env.*.local
+**/.env.local
+**/.env.production
+**/.env.staging
+# Error/debug output files
+**/*.exe
+/exec_node
+# External binaries (built from source)
+# ===== Extra generated outputs =====
+/fast_setup
+# Files in the "Configuration and secrets" section are CRITICAL to exclude.
+# Flame graphs
+**/flamegraph.svg
+# ===== Frontend build output =====
+/full_system.log
+**/.fuse_hidden*
+**/*.gcda
+**/*.gcno
+**/*.gcov
+# GCP service accounts and secrets
+/gen_bls
+# Generic secrets files
+# ===== Genesis (large generated file, use genesis-main.json for source) =====
+# Go binaries
+# Go binary (built separately, should not be in Rust repo)
+**/*.gz
+hybrid-storage-demo/
+**/.idea/
+.idea/
+# IDE and editor files
+# ===== IDE & editor =====
+**/IDENTITY
+**/id_rsa
+**/id_rsa.pub
+**/*.iso
+**/k8s/
+**/*.key
+**/*_key.json
+**/known_hosts
+# Kubernetes
+**/*.lcov
+**/.local
+# **/local-config.toml
+# **/*.local.db
+# Local development overrides
+# **/.local.env
+# Local environment overrides (uncomment as needed)
+**/local.toml
+**/LOCK
+**/*.log
+**/*.log.*
+*.log
+**/LOG*
+# ===== Log files =====
+# Log files
+**/logs/
+# Logs and databases
+# **/lost+found/
+**/main
+**/MANIFEST-*
+# ===== Manual debug logs =====
+/meta-node
+metanode/bin/
+# Meta Node Blockchain (Go) - .gitignore
+metanode/check.err
+metanode/config/committee.json
+metanode/config/committee_*.json
+metanode/config-copy
+metanode/config/epoch_timestamp.txt
+metanode/config/node_*_network_key.json
+metanode/config/node_*_protocol_key.json
+metanode/config/node_*.toml
+metanode/config/storage/
+metanode/*.err
+metanode/go-node
+metanode/monitoring/venv/
+metanode/rust_run_log.out
+!metanode/scripts/logs/
+metanode/scripts/metanode
+/mining_server
+/mismatches_*.csv
+# ===== MkDocs =====
+# Monitoring virtual environment
+/mtn-simple
+**/mysticeti-*
+# Mysticeti Blockchain Node - .gitignore
+**/.nfs*
+# Node configuration files (may contain sensitive data)
+node_logs/
+# ===== Node logs directory =====
+**/node_modules/
+# ===== Node modules =====
+# Node modules (JavaScript/TypeScript)
+/nohup.out
+nohup.out
+# ===== Observer tool binaries & generated data =====
+# One-off Go test scripts created during debugging sessions
+**/OPTIONS-*
+**/*.orig
+# ===== OS generated =====
+# OS generated files
+/parse_genesis.go
+# Password files
+**/passwords.txt
+**/*.pdb
+**/perf.data
+**/perf.data.old
+# Performance profiling
+*.pid
+!pkg/bls/blst/build
+pkg/mvm/3rdparty/*
+pkg/mvm/c_mvm/3rdparty/leveldb
+pkg/mvm/c_mvm/build/
+pkg/mvm_cpp17/
+pkg/mvm/linker/build/
+pkg/mvm/linker/include/config.h
+pkg/mvm/linker/include/xapian/schema_leveldb/
+pkg/mvm/linker/src/xapian/schema_leveldb/
+pkg/nomt_ffi/rust_lib/target/
+pkg/proto/qmdb.pb.go
+pkg/proto/qmdb.proto
+pkg/rust_adder
+pkg/storage/coverage.out
+**/*.pprof
+**/private_key.pem
+/processor.test
+**/*.prof
+*.prof
+# ===== Profiling & heap dumps =====
+**/*.profraw
+# Project specific
+*.py
+**/*.pyc
+**/__pycache__/
+__pycache__/
+**/*.pyd
+**/*.pyo
+**/.Python
+# ===== Python & MkDocs =====
+# Python virtual environments and cache
+**/*.rar
+/register_validator
+**/*.rej
+**/*.resolved
+# ===== Resolved doc scratch files =====
+restored_data/
+# ===== Root-level compiled binaries =====
+# Root-level runtime output and logs
+**/*.rs.bk
+run.stderr
+run.stdout
+# ===== Runtime output =====
+# Rust build artifacts
+# Rust documentation
+/rust_node.log
+# ===== Rust scratch projects =====
+# Rust test and benchmark artifacts
+sample/
+# ===== Scratch / debug test scripts =====
+# Scratch test scripts
+**/*.secret
+**/secret_key.pem
+**/*-secrets.*
+**/secrets/
+**/*-secrets.json
+**/secrets.json
+# Security and secrets (additional)
+# SECURITY NOTE: Never commit private keys, secrets, or sensitive configuration!
+**/service-account*.json
+**/*-service.yaml
+**/simple_chain
+/simple_chain
+simple_chain
+/simple_chain_bin
+site/
+# ===== Snapshot data directories =====
+**/*.so
+socket-rust/target/
+.Spotlight-V100
+# SSH keys
+**/*.sst
+/startup.log
+*.stderr
+*.stdout
+# Storage databases (IMPORTANT: Contains blockchain state)
+# **/.sublime/
+sui
+**/*.swn
+**/*.swo
+**/*.swp
+# System and tools
+# System files
+/system_run.log
+**/*.tar
+**/target/
+/target/
+**/target/doc/
+**/*.tar.gz
+**/*.temp
+# Temporary database files
+# ===== Temporary files =====
+# Temporary files
+temp_script.sh
+**/.terraform/
+# Terraform
+**/*.test
+*_test_chain*
+# Test coverage reports
+/test_*.go
+test_nomt/
+/test_project/
+/test_*.sh
+test_simple_chain*
+# ===== Test TPS (Moved Paths) =====
+**/*.tfstate
+**/*.tfstate.backup
+# ===== Third-party / generated =====
+# This .gitignore is organized by sections for better maintainability.
+**/Thumbs.db
+Thumbs.db
+**/*.tmp
+/tmp_master
+**/.tmux/
+# tmux session files
+# To test: git status --ignored
+/tps_benchmark
+/tps_blast
+/tps_blast.pid
+# **/trace.log
+# **/.Trash/
+.Trashes
+/tx_sender
+# Uncomment for specific IDEs you use:
+# Uncomment for specific OS files:
+# Uncomment the following lines if you want to ignore additional local files:
+/validator_test_suite
+**/venv/
+.venv/
+venv/
+**/venv.bak/
+/verification_test.json
+**/.vs/
+**/.vscode/
+.vscode/
+**/*.xz
+**/*.zip

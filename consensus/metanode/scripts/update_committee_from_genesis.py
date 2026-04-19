@@ -9,7 +9,7 @@ import time
 
 def update_committee_from_genesis():
     committee_file = '../config/committee.json'
-    genesis_file = '../../../mtn-simple-2025/cmd/simple_chain/genesis.json'
+    genesis_file = '../../../execution/cmd/simple_chain/genesis.json'
 
     # Load files
     try:

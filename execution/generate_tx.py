@@ -1,6 +1,6 @@
 import os
 
-with open("/home/abc/chain-n/mtn-consensus/metanode/src/network/tx_socket_server.rs", "r") as f:
+with open("/home/abc/chain-n/metanode/consensus/metanode/src/network/tx_socket_server.rs", "r") as f:
     lines = f.readlines()
 
 out = []
@@ -140,6 +140,6 @@ impl TxSocketServer {
 }
 """
 
-with open("/home/abc/chain-n/mtn-consensus/metanode/src/network/tx_socket_server.rs", "w") as f:
+with open("/home/abc/chain-n/metanode/consensus/metanode/src/network/tx_socket_server.rs", "w") as f:
     f.write(full_file)
 

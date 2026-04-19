@@ -1,6 +1,6 @@
 import re
 
-path = "/home/abc/chain-n/mtn-simple-2025/cmd/simple_chain/processor/tx_batch_forwarder_core.go"
+path = "/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go"
 with open(path, "r") as f:
     content = f.read()
 

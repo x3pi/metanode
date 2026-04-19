@@ -28,7 +28,7 @@ providers:
 EOF
 
 mkdir -p /var/lib/grafana/dashboards
-cp /home/abc/chain-n/mtn-simple-2025/deploy/grafana/metanode-dashboard.json /var/lib/grafana/dashboards/
+cp /home/abc/chain-n/metanode/execution/deploy/grafana/metanode-dashboard.json /var/lib/grafana/dashboards/
 chown -R grafana:grafana /var/lib/grafana/dashboards
 
 echo "Restarting Grafana..."

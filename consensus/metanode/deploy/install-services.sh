@@ -10,7 +10,7 @@ GOMEMLIMIT=${2:-"4GiB"}
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Find Rust consensus dir and Go simple chain dir based on standard layout
 RUST_WORKDIR="$(dirname "$DEPLOY_DIR")" 
-GO_WORKDIR="$(cd "$RUST_WORKDIR/../../mtn-simple-2025" && pwd)"
+GO_WORKDIR="$(cd "$RUST_WORKDIR/../../execution" && pwd)"
 
 # Get the actual user calling sudo
 ACTUAL_USER="${SUDO_USER:-$(whoami)}"

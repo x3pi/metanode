@@ -16,11 +16,11 @@ set -euo pipefail
 
 # ─── Đường dẫn gốc ───────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Script nằm ở: mtn-consensus/metanode/scripts/
-# BASE_DIR = thư mục cha chứa cả mtn-consensus và mtn-simple-2025
+# Script nằm ở: consensus/metanode/scripts/
+# BASE_DIR = monorepo root (metanode/)
 BASE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-GO_DIR="$BASE_DIR/mtn-simple-2025/cmd/simple_chain"
-RUST_DIR="$BASE_DIR/mtn-consensus/metanode"
+GO_DIR="$BASE_DIR/execution/cmd/simple_chain"
+RUST_DIR="$BASE_DIR/consensus/metanode"
 RUST_BIN="$RUST_DIR/target/release/metanode"
 GO_BIN="$GO_DIR/simple_chain"
 LOG_BASE="$RUST_DIR/logs"
@@ -335,11 +335,11 @@ cmd_start() {
     # Build processes
     if $build_nomt; then
         log_info "🛠  Đang build NOMT FFI (Rust)..."
-        (cd "$BASE_DIR/mtn-simple-2025/pkg/nomt_ffi/rust_lib" && cargo +nightly build --release) || exit 1
+        (cd "$BASE_DIR/execution/pkg/nomt_ffi/rust_lib" && cargo +nightly build --release) || exit 1
     fi
     if $build_evm; then
         log_info "🛠  Đang build EVM (C++ MVM)..."
-        (cd "$BASE_DIR/mtn-simple-2025/pkg/mvm" && chmod +x build.sh && ./build.sh) || exit 1
+        (cd "$BASE_DIR/execution/pkg/mvm" && chmod +x build.sh && ./build.sh) || exit 1
     fi
     if $build_go; then
         log_info "🛠  Đang build Go (simple_chain)..."

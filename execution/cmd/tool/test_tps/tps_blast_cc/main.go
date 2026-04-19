@@ -217,7 +217,7 @@ func checkNonceDivergence(rpcPool []*rpc.RPCClient, sampleAddr string, triggerIn
 		fmt.Printf("╠══════════════════════════════════════════════════════════════╣\n")
 		fmt.Printf("║  ⚠️  PHÁT HIỆN LỆCH NONCE GIỮA CÁC NODE! Majority nonce=%d\n", majorityNonce)
 		fmt.Printf("║     → Nguyên nhân: sub-node bị replication lag hoặc chết.\n")
-		fmt.Printf("║     → Kiểm tra logs: /mtn-consensus/metanode/logs/node_*/\n")
+		fmt.Printf("║     → Kiểm tra logs: /consensus/metanode/logs/node_*/\n")
 	} else {
 		fmt.Printf("║  ✅ Tất cả node đồng thuận nonce=%d. Có thể do race condition.\n", majorityNonce)
 	}
