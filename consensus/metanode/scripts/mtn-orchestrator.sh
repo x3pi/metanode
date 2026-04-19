@@ -341,14 +341,14 @@ cmd_start() {
         log_info "🛠  Đang build EVM (C++ MVM)..."
         (cd "$BASE_DIR/execution/pkg/mvm" && chmod +x build.sh && ./build.sh) || exit 1
     fi
+    if $build_rust; then
+        log_info "🛠  Đang build Rust (metanode)..."
+        (cd "$RUST_DIR" && cargo +nightly build --release) || exit 1
+    fi
     if $build_go; then
         log_info "🛠  Đang build Go (simple_chain)..."
         # Dùng trình biên dịch tận dụng số luồng tối đa, bỏ cờ '-a' để dùng Build Cache (~2s thay vì 3 phút)
         (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && CGO_ENABLED=1 go build -p $(nproc) -o simple_chain .) || exit 1
-    fi
-    if $build_rust; then
-        log_info "🛠  Đang build Rust (metanode)..."
-        (cd "$RUST_DIR" && cargo +nightly build --release --bin metanode) || exit 1
     fi
 
     # Kiểm tra binary tồn tại (chỉ cần Go, Rust nhúng via FFI)
