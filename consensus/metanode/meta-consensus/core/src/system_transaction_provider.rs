@@ -94,19 +94,40 @@ impl DefaultSystemTransactionProvider {
             time_based_enabled
         );
 
-        // FIX 5: Do NOT reset the epoch start timestamp to now() even if it is old.
-        // It must remain consistent across the network and accurately reflect the boundary block timestamp.
-        let effective_epoch_start = epoch_start_timestamp_ms;
-
-        if time_based_enabled && elapsed_seconds >= epoch_duration_seconds {
-            info!(
+        // FIX 6 (replaces FIX 5): When epoch start timestamp is stale (elapsed > duration),
+        // reset to now() to prevent an immediate EndOfEpoch trigger.
+        //
+        // CONTEXT: After snapshot restore (cold-start), the Go boundary timestamp may be
+        // extremely old (e.g., genesis at 1772784000000ms = 45 days ago). FIX 5 kept the
+        // original timestamp to "ensure consistent epoch boundary blocks", but this caused
+        // a FATAL BUG:
+        //   1. Provider initialized with stale timestamp → elapsed=3864219s > duration=900s
+        //   2. First block proposal immediately injects EndOfEpoch system transaction
+        //   3. Network commits it → epoch transition fires on a still-syncing node
+        //   4. core_thread shuts down → GEI GAP GUARD deadlocks → node stuck forever
+        //
+        // FIX: Reset to now(). This is safe because:
+        //   - On normal nodes, update_epoch() is called during epoch transitions, which
+        //     resets the timestamp anyway. The constructor value only matters at startup.
+        //   - On cold-start nodes, the priority is STABILITY (don't trigger premature
+        //     epoch transition). After catching up, the node will participate in the
+        //     network's epoch transitions normally.
+        //   - Network consistency is maintained because EndOfEpoch is only injected by
+        //     the LEADER, and a syncing node won't be leader until it catches up.
+        let effective_epoch_start = if time_based_enabled && elapsed_seconds >= epoch_duration_seconds {
+            warn!(
                 "⚠️  SystemTransactionProvider: Epoch start timestamp is {}s old (>= duration {}s). \
-                 Keeping original timestamp {}ms to ensure consistent epoch boundary blocks.",
+                 Resetting to now() ({}ms) to prevent immediate EndOfEpoch trigger. \
+                 Original timestamp: {}ms. This is normal during snapshot restore / cold-start.",
                 elapsed_seconds,
                 epoch_duration_seconds,
+                now_ms,
                 epoch_start_timestamp_ms
             );
-        }
+            now_ms
+        } else {
+            epoch_start_timestamp_ms
+        };
 
         Self {
             current_epoch: Arc::new(RwLock::new(current_epoch)),
