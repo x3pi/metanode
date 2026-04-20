@@ -45,9 +45,24 @@ echo "   -> Đã dừng bơm giao dịch."
 
 # 1. Tìm bản Snapshot mới nhất
 echo "⏳ [1/6] Tìm Snapshot mới nhất từ Node 0..."
-LATEST_SNAPSHOT=$(ls -1 $GO_DIR/snapshot_data_node0 | sort -V | tail -1)
+MAX_WAIT=60
+ELAPSED=0
+LATEST_SNAPSHOT=""
+
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    LATEST_SNAPSHOT=$(ls -1 "$GO_DIR/snapshot_data_node0" 2>/dev/null | sort -V | tail -n 1 || true)
+    if [ -n "$LATEST_SNAPSHOT" ] && [ "$LATEST_SNAPSHOT" != "null" ]; then
+        echo "   -> Đã tìm thấy snapshot mục tiêu, chờ 2s để đảm bảo ghi hoàn tất..."
+        sleep 2
+        break
+    fi
+    echo "   -> Chưa thấy snapshot (Go có thể đang tính toán/flush)... đợi thêm ($ELAPSED/$MAX_WAIT s)"
+    sleep 3
+    ELAPSED=$((ELAPSED + 3))
+done
+
 if [ -z "$LATEST_SNAPSHOT" ]; then
-    echo "❌ Không tìm thấy Snapshot nào trên Node 0!"
+    echo "❌ Không tìm thấy Snapshot nào trên Node 0 sau quá trình kiểm tra!"
     exit 1
 fi
 echo "✅ Dùng Snapshot: $LATEST_SNAPSHOT"

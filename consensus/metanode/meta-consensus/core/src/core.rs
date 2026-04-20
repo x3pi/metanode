@@ -106,6 +106,15 @@ pub(crate) struct Core {
     /// Set to `true` by the authority node after detecting ≥ quorum_threshold unique peers.
     /// Prevents fork at startup where isolated subgroups form independent consensus.
     pub(crate) quorum_ready: Arc<AtomicBool>,
+    /// ═══════════════════════════════════════════════════════════════════
+    /// COLD-START CATCH-UP: Commit index at Core creation time.
+    /// After snapshot restore, align_commit_index_with_go sets a synthetic
+    /// commit index. Until the node produces NEW commits beyond this value,
+    /// it is still catching up and must NOT be blocked by the lag-based
+    /// proposal skip — otherwise a deadlock occurs:
+    ///   no proposals → no commits → lag never decreases → proposals blocked.
+    /// ═══════════════════════════════════════════════════════════════════
+    pub(crate) initial_commit_index: u32,
 }
 
 impl Core {
@@ -173,6 +182,8 @@ impl Core {
             AncestorStateManager::new(context.clone(), dag_state.clone());
         ancestor_state_manager.set_propagation_scores(propagation_scores);
 
+        let initial_commit_index = dag_state.read().last_commit_index();
+
         Self {
             context,
             last_signaled_round,
@@ -194,6 +205,7 @@ impl Core {
             adaptive_delay_state,
             system_transaction_provider,
             quorum_ready,
+            initial_commit_index,
         }
         .recover()
         .expect("Core::recover() failed")
