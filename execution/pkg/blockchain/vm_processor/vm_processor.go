@@ -295,7 +295,7 @@ func (vmP *VmProcessor) readOnlyCall(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
+		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
