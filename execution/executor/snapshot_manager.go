@@ -299,229 +299,21 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 
 // CreateSnapshot tạo snapshot bằng hardlink copy
 func (sm *SnapshotManager) CreateSnapshot(epoch, blockNumber, boundaryBlock uint64) error {
-	startTime := time.Now()
-
-	// Tên snapshot: snap_epoch_<epoch>_block_<block>
-	snapshotName := fmt.Sprintf("snap_epoch_%d_block_%d", epoch, blockNumber)
-	snapshotPath := filepath.Join(sm.snapshotBaseDir, snapshotName)
-
-	// Kiểm tra xem snapshot đã tồn tại chưa
-	if _, err := os.Stat(snapshotPath); err == nil {
-		logger.Warn("📸 [SNAPSHOT] Snapshot already exists: %s", snapshotPath)
-		return nil
-	}
-
-	// Tạo thư mục snapshot
-	if err := os.MkdirAll(snapshotPath, 0755); err != nil {
-		return fmt.Errorf("failed to create snapshot directory %s: %w", snapshotPath, err)
-	}
-
-	sm.mu.Lock()
-	checkpointCb := sm.checkpointCallback
-	nomtCb := sm.nomtSnapshotCallback
-	sm.mu.Unlock()
-
-	if checkpointCb != nil {
-		logger.Info("📸 [SNAPSHOT] Creating PebbleDB CHECKPOINT snapshot: %s", snapshotPath)
-		checkpointStart := time.Now()
-		if err := checkpointCb(snapshotPath); err != nil {
-			return fmt.Errorf("PebbleDB checkpoint failed: %w", err)
-		}
-		logger.Info("📸 [SNAPSHOT] ✅ PebbleDB Checkpoint completed (took %v)", time.Since(checkpointStart))
-	} else {
-		// Fallback: hardlink copy (for LevelDB or when checkpoint not available)
-		logger.Info("📸 [SNAPSHOT] Creating hardlink snapshot: %s → %s", sm.dataDir, snapshotPath)
-		for _, dir := range sm.levelDBDirs {
-			srcDir := filepath.Join(sm.dataDir, dir)
-			dstDir := filepath.Join(snapshotPath, dir)
-
-			if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-				logger.Warn("📸 [SNAPSHOT] Source directory not found, skipping: %s", srcDir)
-				continue
-			}
-
-			if err := hardlinkCopyDir(srcDir, dstDir); err != nil {
-				logger.Error("📸 [SNAPSHOT] Failed to hardlink copy %s: %v", dir, err)
-				return fmt.Errorf("failed to hardlink copy %s: %w", dir, err)
-			}
-
-			logger.Info("📸 [SNAPSHOT] ✅ Hardlinked: %s", dir)
-		}
-	}
-
-	// Snapshot NOMT databases if configured
-	if nomtCb != nil {
-		logger.Info("📸 [SNAPSHOT] Creating NOMT Database Snapshot")
-		nomtStart := time.Now()
-		if err := nomtCb(snapshotPath, sm.reflinkSupported); err != nil {
-			return fmt.Errorf("NOMT snapshot failed: %w", err)
-		}
-		logger.Info("📸 [SNAPSHOT] ✅ NOMT Snapshot completed (took %v)", time.Since(nomtStart))
-	} else {
-		logger.Warn("📸 [SNAPSHOT] ⏭️ Skipping NOMT snapshot (callback not set)")
-	}
-	// COPY PebbleDB và SubNode dirs (ONLY when checkpoint is NOT active)
-	// When checkpointCallback is set, all PebbleDB databases are already
-	// atomically checkpointed via CheckpointAll (including back_up/backup_db).
-	// The pebbleDBDirs list (back_up/backup_db, back_up_write, data-write)
-	// would duplicate that work with unsafe parallelCopyDir that can corrupt
-	// data if PebbleDB compaction runs during the copy.
-	if checkpointCb == nil {
-		for _, dir := range sm.pebbleDBDirs {
-			srcDir := filepath.Join(sm.dataDir, dir)
-			// Fix dst path to keep just the base directory name instead of "../back_up/backup_db"
-			dstDirName := filepath.Base(dir)
-			if strings.Contains(dir, "backup_db") {
-				// For back_up/backup_db, we want the whole back_up folder structure
-				dstDirName = "back_up"
-				srcDir = filepath.Join(sm.dataDir, "../../back_up")
-			}
-			dstDir := filepath.Join(snapshotPath, dstDirName)
-
-			if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-				logger.Warn("📸 [SNAPSHOT] PebbleDB source not found, skipping: %s", srcDir)
-				continue
-			}
-
-			// CRITICAL: PebbleDB SSTs are MUTABLE — compaction deletes/replaces them.
-			// Hardlinking shares the inode with the live DB, causing corruption when
-			// snapshots are rotated (inode refcount → 0 → live file becomes 0 bytes).
-			// Use parallel byte-copy instead for complete isolation.
-			if err := parallelCopyDir(srcDir, dstDir, 8); err != nil {
-				logger.Error("📸 [SNAPSHOT] Failed to copy %s: %v", dir, err)
-				return fmt.Errorf("failed to copy %s: %w", dir, err)
-			}
-			// Validate: remove any 0-byte SST files (caught mid-compaction during copy)
-			cleaned := cleanZeroByteSSTs(dstDir)
-			if cleaned > 0 {
-				logger.Warn("📸 [SNAPSHOT] Removed %d zero-byte SST files from %s (PebbleDB was mid-compaction)", cleaned, dir)
-			}
-			logger.Info("📸 [SNAPSHOT] ✅ Copied: %s", dir)
-		}
-	} else {
-		logger.Info("📸 [SNAPSHOT] ⏭️ Skipping pebbleDBDirs copy (already handled by PebbleDB checkpoint)")
-	}
-
-	// Explicitly copy epoch_data_backup.json
-	epochBackupSrc := filepath.Join(sm.dataDir, "../../back_up/epoch_data_backup.json")
-	epochBackupDst := filepath.Join(snapshotPath, "back_up", "epoch_data_backup.json")
-	if _, err := os.Stat(epochBackupSrc); err == nil {
-		if err := os.MkdirAll(filepath.Dir(epochBackupDst), 0755); err == nil {
-			if copyErr := regularCopyFile(epochBackupSrc, epochBackupDst, 0644); copyErr != nil {
-				logger.Warn("📸 [SNAPSHOT] Failed to copy epoch backup file: %v", copyErr)
-			} else {
-				logger.Info("📸 [SNAPSHOT] ✅ Copied: epoch_data_backup.json")
-			}
-		}
-	}
-
-	// Ghi metadata
-	metadata := SnapshotMetadata{
-		Epoch:         epoch,
-		BlockNumber:   blockNumber,
-		BoundaryBlock: boundaryBlock,
-		Timestamp:     time.Now().UnixMilli(),
-		CreatedAt:     time.Now().Format(time.RFC3339),
-		DataDir:       sm.dataDir,
-		SnapshotName:  snapshotName,
-		Method:        "hardlink",
-	}
-
-	metadataPath := filepath.Join(snapshotPath, "metadata.json")
-	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	if err := os.WriteFile(metadataPath, metadataJSON, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
-	}
-
-	elapsed := time.Since(startTime)
-	logger.Info("📸 [SNAPSHOT] ✅ Snapshot created successfully: %s (took %v)", snapshotName, elapsed)
-
-	return nil
+	return sm.createAtomicSnapshot(epoch, blockNumber, boundaryBlock, "hardlink")
 }
 
 // CreateRsyncSnapshot tạo snapshot bằng rsync — an toàn cho Xapian
-// rsync -a copy toàn bộ thư mục nguồn (bao gồm Xapian) → snapshot directory
-// Không cần sudo, chỉ copy đúng thư mục cần thiết
 func (sm *SnapshotManager) CreateRsyncSnapshot(epoch, blockNumber, boundaryBlock uint64) error {
-	startTime := time.Now()
-
-	if sm.snapshotSourceDir == "" {
-		return fmt.Errorf("snapshot_source_dir is not configured")
-	}
-
-	// Kiểm tra thư mục nguồn tồn tại
-	if _, err := os.Stat(sm.snapshotSourceDir); os.IsNotExist(err) {
-		return fmt.Errorf("snapshot source directory does not exist: %s", sm.snapshotSourceDir)
-	}
-
-	// Tên snapshot: snap_epoch_<epoch>_block_<block>
-	snapshotName := fmt.Sprintf("snap_epoch_%d_block_%d", epoch, blockNumber)
-	snapshotPath := filepath.Join(sm.snapshotBaseDir, snapshotName)
-
-	// Kiểm tra xem snapshot đã tồn tại chưa
-	if _, err := os.Stat(snapshotPath); err == nil {
-		logger.Warn("📸 [SNAPSHOT] Snapshot already exists: %s", snapshotPath)
-		return nil
-	}
-
-	// Tạo thư mục snapshot
-	if err := os.MkdirAll(snapshotPath, 0755); err != nil {
-		return fmt.Errorf("failed to create snapshot directory %s: %w", snapshotPath, err)
-	}
-
-	logger.Info("📸 [SNAPSHOT] Creating rsync snapshot: %s → %s", sm.snapshotSourceDir, snapshotPath)
-
-	// Dùng rsync -a để copy toàn bộ nội dung thư mục nguồn
-	// -a = archive mode (recursive, preserve permissions, timestamps, symlinks)
-	// --delete = xóa files ở đích không có ở nguồn
-	// Trailing "/" trên source = copy nội dung, không copy thư mục cha
-	srcPath := strings.TrimRight(sm.snapshotSourceDir, "/") + "/"
-
-	cmd := exec.Command("rsync", "-a", "--delete", srcPath, snapshotPath+"/")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Cleanup nếu rsync thất bại
-		os.RemoveAll(snapshotPath)
-		return fmt.Errorf("rsync failed: %v, output: %s", err, string(output))
-	}
-
-	logger.Info("📸 [SNAPSHOT] ✅ rsync completed successfully")
-
-	// Ghi metadata
-	metadata := SnapshotMetadata{
-		Epoch:         epoch,
-		BlockNumber:   blockNumber,
-		BoundaryBlock: boundaryBlock,
-		Timestamp:     time.Now().UnixMilli(),
-		CreatedAt:     time.Now().Format(time.RFC3339),
-		DataDir:       sm.snapshotSourceDir,
-		SnapshotName:  snapshotName,
-		Method:        "rsync",
-	}
-
-	metadataPath := filepath.Join(snapshotPath, "metadata.json")
-	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	if err := os.WriteFile(metadataPath, metadataJSON, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
-	}
-
-	elapsed := time.Since(startTime)
-	logger.Info("📸 [SNAPSHOT] ✅ Rsync snapshot created: %s (took %v)", snapshotName, elapsed)
-
-	return nil
+	return sm.createAtomicSnapshot(epoch, blockNumber, boundaryBlock, "rsync")
 }
 
 // CreateHybridSnapshot tạo snapshot bằng cách kết hợp hardlink + rsync
-// - LevelDB dirs: dùng hardlink (tức thì, 0 disk space cho immutable files)
-// - Xapian dirs: dùng rsync (an toàn cho mutable files)
-// Kết quả: nhanh gần như hardlink nhưng safe cho Xapian
 func (sm *SnapshotManager) CreateHybridSnapshot(epoch, blockNumber, boundaryBlock uint64) error {
+	return sm.createAtomicSnapshot(epoch, blockNumber, boundaryBlock, "hybrid")
+}
+
+// createAtomicSnapshot xử lý thống nhất tất cả các loại snapshot với đảm bảo atomic và an toàn deadlock
+func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBlock uint64, method string) error {
 	startTime := time.Now()
 
 	// Tên snapshot: snap_epoch_<epoch>_block_<block>
@@ -539,21 +331,26 @@ func (sm *SnapshotManager) CreateHybridSnapshot(epoch, blockNumber, boundaryBloc
 		return fmt.Errorf("failed to create snapshot directory %s: %w", snapshotPath, err)
 	}
 
-	logger.Info("📸 [SNAPSHOT] Creating HYBRID snapshot")
+	logger.Info("📸 [SNAPSHOT] Creating ATOMIC snapshot")
+	logger.Info("📸 [SNAPSHOT]    Method: %s", method)
 	logger.Info("📸 [SNAPSHOT]    Source data dir: %s", sm.dataDir)
 	logger.Info("📸 [SNAPSHOT]    Target snapshot: %s", snapshotPath)
-	// Phase 1: Database dirs — use PebbleDB Checkpoint when available
+
+	// Lấy callbacks
 	sm.mu.Lock()
 	checkpointCb := sm.checkpointCallback
+	nomtCb := sm.nomtSnapshotCallback
 	pauseCb := sm.pauseCallback
 	resumeCb := sm.resumeCallback
-	stateRootCb := sm.stateRootCallback
 	rustPauseCb := sm.rustPauseCallback
 	rustResumeCb := sm.rustResumeCallback
+	stateRootCb := sm.stateRootCallback
 	sm.mu.Unlock()
 
-	// CRITICAL: Acquire global execution lock before starting PebbleDB & NOMT snapshots
-	// This ensures both DBs are captured at exactly the same GEI
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PHASE 0: FREEZE TOÀN BỘ EXECUTION
+	// ═══════════════════════════════════════════════════════════════════════════
+	pausedGo := false
 	if rustPauseCb != nil {
 		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Rust consensus writing for atomic snapshot...")
 		rustPauseCb()
@@ -561,256 +358,254 @@ func (sm *SnapshotManager) CreateHybridSnapshot(epoch, blockNumber, boundaryBloc
 	if pauseCb != nil {
 		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Go Master execution for atomic database snapshot...")
 		pauseCb()
+		pausedGo = true
 	}
 
+	// CRITICAL: Đảm bảo resume luôn được gọi kể cả khi panic/error xảy ra
+	defer func() {
+		if resumeCb != nil && pausedGo {
+			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Go Master execution after DB snapshots")
+			resumeCb()
+		}
+		if rustResumeCb != nil {
+			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Rust consensus writing after DB snapshots")
+			rustResumeCb()
+		}
+	}()
+
 	// ═══════════════════════════════════════════════════════════════════════════
-	// CAPTURE ATOMIC STATE METADATA
+	// PHASE 0.5: CAPTURE ATOMIC STATE METADATA
 	// ═══════════════════════════════════════════════════════════════════════════
 	// While the execution is frozen, capture the exact block number, GEI, and state root
-	// that will be snapshotted. This prevents inflation metadata mismatches and ensures
-	// restorations will accurately align with the preserved state data.
+	// that will be snapshotted. This prevents inflation metadata mismatches.
 	actualBlockNumber := storage.GetLastBlockNumber()
 	actualGEI := storage.GetLastGlobalExecIndex()
 	actualStateRoot := ""
 	if stateRootCb != nil {
 		actualStateRoot = stateRootCb()
 	}
-	// Fallbacks if node was uninitialized or execution never properly captured
 	if actualBlockNumber == 0 {
 		actualBlockNumber = blockNumber
 	}
-	
-	// Khởi tạo các giá trị cho metadata (nếu có bridge sang Rust)
-	// (sẽ gọi Rust via FFI sau khi unpause)
+
 	rustDAGEpoch := uint64(0)
 	rustCommitIndex := uint64(0)
-	
-	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s", 
+
+	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s",
 		actualBlockNumber, actualGEI, actualStateRoot)
 
-	hardlinkStart := time.Now()
-	if checkpointCb != nil {
-		logger.Info("📸 [SNAPSHOT] Phase 1: PebbleDB CHECKPOINT for all database dirs")
-		if err := checkpointCb(snapshotPath); err != nil {
+	// Nếu method là rsync, chạy độc lập lệnh rsync -a
+	if method == "rsync" {
+		if sm.snapshotSourceDir == "" {
 			os.RemoveAll(snapshotPath)
-			return fmt.Errorf("PebbleDB checkpoint failed: %w", err)
+			return fmt.Errorf("snapshot_source_dir is not configured")
 		}
-		logger.Info("📸 [SNAPSHOT] ✅ Phase 1: PebbleDB Checkpoint completed (took %v)", time.Since(hardlinkStart))
+
+		if _, err := os.Stat(sm.snapshotSourceDir); os.IsNotExist(err) {
+			os.RemoveAll(snapshotPath)
+			return fmt.Errorf("snapshot source directory does not exist: %s", sm.snapshotSourceDir)
+		}
+
+		logger.Info("📸 [SNAPSHOT] Running rsync copy: %s → %s", sm.snapshotSourceDir, snapshotPath)
+		srcPath := strings.TrimRight(sm.snapshotSourceDir, "/") + "/"
+
+		cmd := exec.Command("rsync", "-a", "--delete", srcPath, snapshotPath+"/")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			os.RemoveAll(snapshotPath)
+			return fmt.Errorf("rsync failed: %v, output: %s", err, string(output))
+		}
+		logger.Info("📸 [SNAPSHOT] ✅ rsync completed successfully")
 	} else {
-		// Fallback: Hardlink copy LevelDB dirs
-		hardlinkedCount := 0
-		for _, dir := range sm.levelDBDirs {
-			srcDir := filepath.Join(sm.dataDir, dir)
-			dstDir := filepath.Join(snapshotPath, dir)
-
-			if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-				logger.Warn("📸 [SNAPSHOT] Source directory not found, skipping: %s", srcDir)
-				continue
-			}
-
-			if err := hardlinkCopyDir(srcDir, dstDir); err != nil {
+		// Logic dùng chung cho "hybrid" và "hardlink"
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 1: Database dirs — use PebbleDB Checkpoint
+		// ═══════════════════════════════════════════════════════════════════════════
+		hardlinkStart := time.Now()
+		if checkpointCb != nil {
+			logger.Info("📸 [SNAPSHOT] Phase 1: PebbleDB CHECKPOINT for all database dirs")
+			if err := checkpointCb(snapshotPath); err != nil {
 				os.RemoveAll(snapshotPath)
-				return fmt.Errorf("failed to hardlink copy %s: %w", dir, err)
+				return fmt.Errorf("PebbleDB checkpoint failed: %w", err)
 			}
-			hardlinkedCount++
-		}
-		logger.Info("📸 [SNAPSHOT] ✅ Phase 1: Hardlinked %d LevelDB dirs (took %v)", hardlinkedCount, time.Since(hardlinkStart))
-	}
-	hardlinkElapsed := time.Since(hardlinkStart)
+			logger.Info("📸 [SNAPSHOT] ✅ Phase 1: PebbleDB Checkpoint completed (took %v)", time.Since(hardlinkStart))
+		} else {
+			// Fallback: Hardlink copy LevelDB dirs
+			hardlinkedCount := 0
+			for _, dir := range sm.levelDBDirs {
+				srcDir := filepath.Join(sm.dataDir, dir)
+				dstDir := filepath.Join(snapshotPath, dir)
 
-	// Phase 1.5: Copy/Reflink NOMT Databases
-	sm.mu.Lock()
-	nomtCb := sm.nomtSnapshotCallback
-	sm.mu.Unlock()
-	if nomtCb != nil {
-		logger.Info("📸 [SNAPSHOT] Phase 1.5: NOMT Database Snapshot")
-		nomtStart := time.Now()
-		if err := nomtCb(snapshotPath, sm.reflinkSupported); err != nil {
-			os.RemoveAll(snapshotPath)
-			return fmt.Errorf("NOMT snapshot failed: %w", err)
-		}
-		logger.Info("📸 [SNAPSHOT] ✅ Phase 1.5: NOMT Snapshot completed (took %v)", time.Since(nomtStart))
-	} else {
-		logger.Warn("📸 [SNAPSHOT] ⏭️ Phase 1.5: Skipping NOMT snapshot (callback not set)")
-	}
-
-	// CRITICAL: Release global execution lock after both databases are snapped
-	if resumeCb != nil {
-		logger.Info("📸 [SNAPSHOT] ▶️  Resuming Go Master execution after DB snapshots")
-		resumeCb()
-	}
-	if rustResumeCb != nil {
-		logger.Info("📸 [SNAPSHOT] ▶️  Resuming Rust consensus writing after DB snapshots")
-		rustResumeCb()
-	}
-
-	// Phase 2: Copy Xapian dirs — auto-chọn method tốt nhất
-	// btrfs/xfs → reflink (tức thì, CoW)
-	// ext4/other → parallel Go copy (8 workers)
-	// Lưu ý: Xapian dirs có thể nằm ở dataDir HOẶC snapshotSourceDir
-	copyStart := time.Now()
-	copiedCount := 0
-	copyMethod := "parallel-copy"
-	if sm.reflinkSupported {
-		copyMethod = "reflink"
-	}
-	for _, dir := range sm.xapianDirs {
-		dstDir := filepath.Join(snapshotPath, dir)
-
-		// Tìm thư mục nguồn: ưu tiên dataDir, fallback sang snapshotSourceDir
-		srcDir := filepath.Join(sm.dataDir, dir)
-		if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-			// Không tìm thấy trong dataDir, thử snapshotSourceDir
-			if sm.snapshotSourceDir != "" {
-				srcDir = filepath.Join(sm.snapshotSourceDir, dir)
 				if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-					logger.Warn("📸 [SNAPSHOT] Xapian directory not found in either location, skipping: %s", dir)
+					logger.Warn("📸 [SNAPSHOT] Source directory not found, skipping: %s", srcDir)
 					continue
 				}
-			} else {
-				logger.Warn("📸 [SNAPSHOT] Xapian directory not found, skipping: %s", srcDir)
-				continue
-			}
-		}
 
-		var copyErr error
-		if sm.reflinkSupported {
-			// Reflink: tức thì trên btrfs/xfs (Copy-on-Write)
-			copyErr = reflinkCopyDir(srcDir, dstDir)
-		} else {
-			// Parallel Go copy: nhanh hơn rsync
-			copyErr = parallelCopyDir(srcDir, dstDir, 8)
-		}
-		if copyErr != nil {
-			os.RemoveAll(snapshotPath)
-			return fmt.Errorf("%s failed for %s: %w", copyMethod, dir, copyErr)
-		}
-		copiedCount++
-		logger.Info("📸 [SNAPSHOT]    ✅ %s: %s → %s", copyMethod, srcDir, dstDir)
-	}
-	copyElapsed := time.Since(copyStart)
-	logger.Info("📸 [SNAPSHOT] ✅ Phase 2: %s %d Xapian dirs (took %v)", copyMethod, copiedCount, copyElapsed)
-
-	// Phase 2.5: COPY PebbleDB và SubNode dirs (ONLY when checkpoint is NOT active)
-	// When checkpointCallback is set, all PebbleDB databases are already
-	// atomically checkpointed via CheckpointAll (including back_up/backup_db).
-	if checkpointCb == nil {
-		pebbleStart := time.Now()
-		pebbleCount := 0
-		for _, dir := range sm.pebbleDBDirs {
-			srcDir := filepath.Join(sm.dataDir, dir)
-			// Fix dst path to keep just the base directory name instead of "../back_up/backup_db"
-			dstDirName := filepath.Base(dir)
-			if strings.Contains(dir, "backup_db") {
-				// For back_up/backup_db, we want the whole back_up folder structure
-				dstDirName = "back_up"
-				srcDir = filepath.Join(sm.dataDir, "../../back_up")
-			}
-			dstDir := filepath.Join(snapshotPath, dstDirName)
-
-			if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-				logger.Warn("📸 [SNAPSHOT] PebbleDB source not found, skipping: %s", srcDir)
-				continue
-			}
-
-			// CRITICAL: PebbleDB SSTs are MUTABLE — compaction deletes/replaces them.
-			// Hardlinking shares the inode with the live DB, causing corruption when
-			// snapshots are rotated (inode refcount → 0 → live file becomes 0 bytes).
-			// Use parallel byte-copy instead for complete isolation.
-			if err := parallelCopyDir(srcDir, dstDir, 8); err != nil {
-				logger.Error("📸 [SNAPSHOT] Failed to copy %s: %v", dir, err)
-				return fmt.Errorf("failed to copy %s: %w", dir, err)
-			}
-			// Validate: remove any 0-byte SST files (caught mid-compaction during copy)
-			cleaned := cleanZeroByteSSTs(dstDir)
-			if cleaned > 0 {
-				logger.Warn("📸 [SNAPSHOT] Removed %d zero-byte SST files from %s (PebbleDB was mid-compaction)", cleaned, dir)
-			}
-			pebbleCount++
-			logger.Info("📸 [SNAPSHOT] ✅ Copied PebbleDB/SubNode dir: %s", dir)
-		}
-		pebbleElapsed := time.Since(pebbleStart)
-		logger.Info("📸 [SNAPSHOT] ✅ Phase 2.5: Copied %d PebbleDB/SubNode dirs (took %v)", pebbleCount, pebbleElapsed)
-	} else {
-		logger.Info("📸 [SNAPSHOT] ⏭️ Phase 2.5: Skipping pebbleDBDirs copy (already handled by PebbleDB checkpoint)")
-	}
-
-	// Phase 3: Nếu có snapshotSourceDir, rsync các file/dir khác ngoài LevelDB và Xapian
-	// (ví dụ: các file cấu hình, state files)
-	if sm.snapshotSourceDir != "" {
-		extraStart := time.Now()
-		extraCount := 0
-		// Đọc danh sách entries trong source dir
-		entries, err := os.ReadDir(sm.snapshotSourceDir)
-		if err == nil {
-			// Tạo set các dir đã được xử lý
-			processedDirs := make(map[string]bool)
-			for _, d := range sm.levelDBDirs {
-				processedDirs[d] = true
-			}
-			for _, d := range sm.xapianDirs {
-				processedDirs[d] = true
-			}
-
-			for _, entry := range entries {
-				name := entry.Name()
-				if processedDirs[name] {
-					continue // Đã xử lý ở phase 1 hoặc 2
+				if err := hardlinkCopyDir(srcDir, dstDir); err != nil {
+					os.RemoveAll(snapshotPath)
+					return fmt.Errorf("failed to hardlink copy %s: %w", dir, err)
 				}
-				srcPath := filepath.Join(sm.snapshotSourceDir, name)
-				dstPath := filepath.Join(snapshotPath, name)
+				hardlinkedCount++
+			}
+			logger.Info("📸 [SNAPSHOT] ✅ Phase 1: Hardlinked %d LevelDB dirs (took %v)", hardlinkedCount, time.Since(hardlinkStart))
+		}
 
-				if entry.IsDir() {
-					// Copy directory bằng parallel Go copy
-					if err := parallelCopyDir(srcPath, dstPath, 8); err != nil {
-						logger.Warn("📸 [SNAPSHOT] Failed to copy extra dir %s: %v", name, err)
-						continue
-					}
-				} else {
-					// Copy file
-					info, err := entry.Info()
-					if err == nil {
-						if copyErr := regularCopyFile(srcPath, dstPath, info.Mode()); copyErr != nil {
-							logger.Warn("📸 [SNAPSHOT] Failed to copy extra file %s: %v", name, copyErr)
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 1.5: Copy/Reflink NOMT Databases
+		// ═══════════════════════════════════════════════════════════════════════════
+		if nomtCb != nil {
+			logger.Info("📸 [SNAPSHOT] Phase 1.5: NOMT Database Snapshot")
+			nomtStart := time.Now()
+			if err := nomtCb(snapshotPath, sm.reflinkSupported); err != nil {
+				os.RemoveAll(snapshotPath)
+				return fmt.Errorf("NOMT snapshot failed: %w", err)
+			}
+			logger.Info("📸 [SNAPSHOT] ✅ Phase 1.5: NOMT Snapshot completed (took %v)", time.Since(nomtStart))
+		} else {
+			logger.Warn("📸 [SNAPSHOT] ⏭️ Phase 1.5: Skipping NOMT snapshot (callback not set)")
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 2: Copy Xapian dirs (Chỉ dành cho Hybrid)
+		// ═══════════════════════════════════════════════════════════════════════════
+		if method == "hybrid" {
+			copyStart := time.Now()
+			copiedCount := 0
+			copyDirMethod := "parallel-copy"
+			if sm.reflinkSupported {
+				copyDirMethod = "reflink"
+			}
+			for _, dir := range sm.xapianDirs {
+				dstDir := filepath.Join(snapshotPath, dir)
+
+				srcDir := filepath.Join(sm.dataDir, dir)
+				if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+					if sm.snapshotSourceDir != "" {
+						srcDir = filepath.Join(sm.snapshotSourceDir, dir)
+						if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 							continue
 						}
+					} else {
+						continue
 					}
 				}
-				extraCount++
+
+				var copyErr error
+				if sm.reflinkSupported {
+					copyErr = reflinkCopyDir(srcDir, dstDir)
+				} else {
+					copyErr = parallelCopyDir(srcDir, dstDir, 8)
+				}
+				if copyErr != nil {
+					os.RemoveAll(snapshotPath)
+					return fmt.Errorf("%s failed for %s: %w", copyDirMethod, dir, copyErr)
+				}
+				copiedCount++
+			}
+			logger.Info("📸 [SNAPSHOT] ✅ Phase 2: %s %d Xapian dirs (took %v)", copyDirMethod, copiedCount, time.Since(copyStart))
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 2.5: Copy PebbleDB và SubNode dirs (Nếu Checkpoint KHÔNG active)
+		// ═══════════════════════════════════════════════════════════════════════════
+		if checkpointCb == nil {
+			pebbleStart := time.Now()
+			pebbleCount := 0
+			for _, dir := range sm.pebbleDBDirs {
+				srcDir := filepath.Join(sm.dataDir, dir)
+				dstDirName := filepath.Base(dir)
+				if strings.Contains(dir, "backup_db") {
+					dstDirName = "back_up"
+					srcDir = filepath.Join(sm.dataDir, "../../back_up")
+				}
+				dstDir := filepath.Join(snapshotPath, dstDirName)
+
+				if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+					continue
+				}
+
+				if err := parallelCopyDir(srcDir, dstDir, 8); err != nil {
+					os.RemoveAll(snapshotPath)
+					return fmt.Errorf("failed to copy %s: %w", dir, err)
+				}
+				cleaned := cleanZeroByteSSTs(dstDir)
+				if cleaned > 0 {
+					logger.Warn("📸 [SNAPSHOT] Removed %d zero-byte SST files from %s", cleaned, dir)
+				}
+				pebbleCount++
+			}
+			logger.Info("📸 [SNAPSHOT] ✅ Phase 2.5: Copied %d PebbleDB/SubNode dirs (took %v)", pebbleCount, time.Since(pebbleStart))
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 3: Copy Extra Files (Chỉ dành cho Hybrid)
+		// ═══════════════════════════════════════════════════════════════════════════
+		if method == "hybrid" && sm.snapshotSourceDir != "" {
+			extraStart := time.Now()
+			extraCount := 0
+			entries, err := os.ReadDir(sm.snapshotSourceDir)
+			if err == nil {
+				processedDirs := make(map[string]bool)
+				for _, d := range sm.levelDBDirs {
+					processedDirs[d] = true
+				}
+				for _, d := range sm.xapianDirs {
+					processedDirs[d] = true
+				}
+
+				for _, entry := range entries {
+					name := entry.Name()
+					if processedDirs[name] {
+						continue
+					}
+					srcPath := filepath.Join(sm.snapshotSourceDir, name)
+					dstPath := filepath.Join(snapshotPath, name)
+
+					if entry.IsDir() {
+						if err := parallelCopyDir(srcPath, dstPath, 8); err != nil {
+							continue
+						}
+					} else {
+						info, err := entry.Info()
+						if err == nil {
+							_ = regularCopyFile(srcPath, dstPath, info.Mode())
+						}
+					}
+					extraCount++
+				}
+			}
+			if extraCount > 0 {
+				logger.Info("📸 [SNAPSHOT] ✅ Phase 3: Copied %d extra items (took %v)", extraCount, time.Since(extraStart))
 			}
 		}
-		extraElapsed := time.Since(extraStart)
-		if extraCount > 0 {
-			logger.Info("📸 [SNAPSHOT] ✅ Phase 3: Copied %d extra items (took %v)", extraCount, extraElapsed)
+
+		// Copy epoch backup json explicitly
+		epochBackupSrc := filepath.Join(sm.dataDir, "../../back_up/epoch_data_backup.json")
+		epochBackupDst := filepath.Join(snapshotPath, "back_up", "epoch_data_backup.json")
+		if _, err := os.Stat(epochBackupSrc); err == nil {
+			if err := os.MkdirAll(filepath.Dir(epochBackupDst), 0755); err == nil {
+				_ = regularCopyFile(epochBackupSrc, epochBackupDst, 0644)
+			}
 		}
 	}
 
-	// Explicitly copy epoch_data_backup.json
-	epochBackupSrc := filepath.Join(sm.dataDir, "../../back_up/epoch_data_backup.json")
-	epochBackupDst := filepath.Join(snapshotPath, "back_up", "epoch_data_backup.json")
-	if _, err := os.Stat(epochBackupSrc); err == nil {
-		if err := os.MkdirAll(filepath.Dir(epochBackupDst), 0755); err == nil {
-			if copyErr := regularCopyFile(epochBackupSrc, epochBackupDst, 0644); copyErr != nil {
-				logger.Warn("📸 [SNAPSHOT] Failed to copy epoch backup file: %v", copyErr)
-			} else {
-				logger.Info("📸 [SNAPSHOT] ✅ Copied: epoch_data_backup.json")
-			}
-		}
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PHASE 4: Writing Metadata
+	// ═══════════════════════════════════════════════════════════════════════════
+	metadataDir := sm.dataDir
+	if method == "rsync" {
+		metadataDir = sm.snapshotSourceDir
 	}
 
-	// Khởi tạo các giá trị cho metadata từ Rust
-	// (TODO: Populate over FFI if available)
-
-	// Ghi metadata
 	metadata := SnapshotMetadata{
 		Epoch:           epoch,
 		BlockNumber:     actualBlockNumber,
 		BoundaryBlock:   boundaryBlock,
 		Timestamp:       time.Now().UnixMilli(),
 		CreatedAt:       time.Now().Format(time.RFC3339),
-		DataDir:         sm.dataDir,
+		DataDir:         metadataDir,
 		SnapshotName:    snapshotName,
-		Method:          "hybrid",
+		Method:          method,
 		GlobalExecIndex: actualGEI,
 		StateRoot:       actualStateRoot,
 		RustDAGEpoch:    rustDAGEpoch,
@@ -820,16 +615,15 @@ func (sm *SnapshotManager) CreateHybridSnapshot(epoch, blockNumber, boundaryBloc
 	metadataPath := filepath.Join(snapshotPath, "metadata.json")
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
+		os.RemoveAll(snapshotPath)
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 	if err := os.WriteFile(metadataPath, metadataJSON, 0644); err != nil {
+		os.RemoveAll(snapshotPath)
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 
-	elapsed := time.Since(startTime)
-	logger.Info("📸 [SNAPSHOT] ✅ HYBRID snapshot created: %s (total: %v, hardlink: %v, %s: %v)",
-		snapshotName, elapsed, hardlinkElapsed, copyMethod, copyElapsed)
-
+	logger.Info("📸 [SNAPSHOT] ✅ %s snapshot created: %s (took %v)", strings.ToUpper(method), snapshotName, time.Since(startTime))
 	return nil
 }
 

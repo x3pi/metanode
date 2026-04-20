@@ -20,9 +20,12 @@ const maxValueSize = 64 * 1024
 
 // Handle wraps the opaque NOMT database pointer.
 type Handle struct {
-	ptr *C.NomtHandle
-	mu  sync.RWMutex // protects ptr lifecycle (open/close)
-	path string      // stores the path for snapshotting
+	ptr               *C.NomtHandle
+	mu                sync.RWMutex // protects ptr lifecycle (open/close)
+	path              string       // stores the path for snapshotting
+	commitConcurrency int
+	pageCacheMB       int
+	leafCacheMB       int
 }
 
 // Session wraps the opaque NOMT write session pointer.
@@ -51,7 +54,13 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB int) (*Handle
 		return nil, fmt.Errorf("nomt_ffi: failed to open database at %s", path)
 	}
 
-	return &Handle{ptr: ptr, path: path}, nil
+	return &Handle{
+		ptr:               ptr,
+		path:              path,
+		commitConcurrency: commitConcurrency,
+		pageCacheMB:       pageCacheMB,
+		leafCacheMB:       leafCacheMB,
+	}, nil
 }
 
 // Close frees all resources associated with the database.
@@ -67,6 +76,33 @@ func (h *Handle) Close() {
 // GetPath returns the filesystem path of the database.
 func (h *Handle) GetPath() string {
 	return h.path
+}
+
+// CloseForSnapshot acquires the lock and fully closes the underlying NOMT/RocksDB 
+// database instance. This guarantees that all background compaction and flush 
+// threads are stopped, making it 100% safe to `cp -a` the database directory.
+func (h *Handle) CloseForSnapshot() {
+	h.mu.Lock()
+	if h.ptr != nil {
+		C.nomt_close(h.ptr)
+		h.ptr = nil
+	}
+}
+
+// ReopenAfterSnapshot reopens the database using the previously saved path and config,
+// and releases the lock acquired by `CloseForSnapshot()`.
+func (h *Handle) ReopenAfterSnapshot() error {
+	cPath := C.CString(h.path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	ptr := C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+	if ptr == nil {
+		h.mu.Unlock() // avoid deadlock on failure
+		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s", h.path)
+	}
+	h.ptr = ptr
+	h.mu.Unlock()
+	return nil
 }
 
 // AcquireExclusive acquires the exclusive lock on the database.

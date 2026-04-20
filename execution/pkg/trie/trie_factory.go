@@ -278,11 +278,13 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s: %s -> %s", namespace, srcPath, destPath)
 		start := time.Now()
 
-		// 1. Acquire Exclusive Lock
-		// This blocks all Read() and CommitPayload() operations on this handle.
-		handle.AcquireExclusive()
+		// 1. Acquire Exclusive Lock & Stop RocksDB
+		// This blocks all Read() and CommitPayload() operations on this handle IN THE GO ROUTINES
+		// AND ALSO totally shuts down the internal RocksDB C++ instance so that NO background
+		// compaction or flush threads are running while we execute `cp -a`.
+		handle.CloseForSnapshot()
 
-		// 2. Perform the copy while locked
+		// 2. Perform the copy while locked and stopped
 		var copyErr error
 		if useReflink {
 			copyErr = copyDirReflink(srcPath, destPath)
@@ -290,11 +292,14 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 			copyErr = copyDirFallback(srcPath, destPath)
 		}
 
-		// 3. Release Exclusive Lock
-		handle.ReleaseExclusive()
+		// 3. Reopen RocksDB & Release Exclusive Lock
+		reopenErr := handle.ReopenAfterSnapshot()
 
 		if copyErr != nil {
 			return fmt.Errorf("failed to copy NOMT database %s: %w", namespace, copyErr)
+		}
+		if reopenErr != nil {
+			logger.Fatal("❌ [SNAPSHOT] CRITICAL ERROR: Failed to reopen database %s after snapshot: %v", namespace, reopenErr)
 		}
 
 		// 4. Cleanup lock file from snapshot
