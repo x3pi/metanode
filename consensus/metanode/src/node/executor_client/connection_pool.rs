@@ -70,6 +70,9 @@ impl ConnectionPool {
     pub async fn get_connection(
         &self,
     ) -> Result<(tokio::sync::MutexGuard<'_, Option<SocketStream>>, usize)> {
+        if self.pool_size == 0 {
+            return Err(anyhow::anyhow!("Connection pool is disabled (FFI NO-OP mode)"));
+        }
         let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % self.pool_size;
         let mut guard = self.connections[idx].lock().await;
 

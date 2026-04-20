@@ -7,6 +7,7 @@ import (
 )
 
 type SocketServer interface {
+	StartWorkerPool()
 	Listen(string) error
 	Stop()
 	StartWorkerPool()

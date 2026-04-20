@@ -65,6 +65,10 @@ The script supports overriding the starting step and the deployment topology mod
   - If `--mode multi`: Runs `deploy_cluster.sh --env deploy-3machines.env --all`.
 - **Note:** Includes a brief 5-second sleep to ensure HTTP/RPC servers settle before pushing queries.
 
+### Bước 2.5: Bật RPC Proxy
+- **Location:** `cmd/rpc/cmd/rpc-client`
+- **Action:** Starts a JSON-RPC Proxy server inside a `tmux` session named `rpc-proxy`. It automatically clears old logs in its `logs/` directory before starting to provide clean traces for each run. It blocks and verifies via `curl` until the proxy is responsive at port 8545.
+
 ### Bước 3: Test TCP RPC
 - **Location:** `cmd/tool/tool-test-chain/test-tcp/caller-tcp`
 - **Action:** Runs `main-no-none.go` to test legacy raw TCP transaction injection.

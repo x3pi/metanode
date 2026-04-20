@@ -89,6 +89,7 @@ func VerifyTransaction(
 			isCrossChainBatchSubmit = ccHandler.IsBatchSubmitTx(tx.CallData().Input())
 		}
 	}
+	logger.Info("isCrossChainBatchSubmit: %v", isCrossChainBatchSubmit)
 	as, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
 	if err != nil {
 		// For nonce-0 account setting TXs (BLS registration), a fresh account state

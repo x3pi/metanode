@@ -381,53 +381,21 @@ impl ExecutorClient {
         let mut request_buf = Vec::new();
         request.encode(&mut request_buf)?;
 
-        let (mut conn_guard, _slot) = self
-            .request_pool
-            .get_connection()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get pool connection: {}", e))?;
+        // FFI INTEGRATION: Send request directly via CGo callback instead of socket
+        let response_buf = self.execute_rpc_request(&request_buf).await?;
 
-        if let Some(ref mut stream) = *conn_guard {
-            let len = request_buf.len() as u32;
-            let len_bytes = len.to_be_bytes();
-            stream.write_all(&len_bytes).await?;
-            stream.write_all(&request_buf).await?;
-            stream.flush().await?;
+        let response = Response::decode(&response_buf[..])
+            .map_err(|e| anyhow::anyhow!("Failed to decode response from Go: {}", e))?;
 
-            use tokio::io::AsyncReadExt;
-            use tokio::time::{timeout, Duration};
-            let read_timeout = Duration::from_secs(5);
-
-            let mut len_buf = [0u8; 4];
-            timeout(read_timeout, stream.read_exact(&mut len_buf))
-                .await
-                .map_err(|e| anyhow::anyhow!("Timeout reading response length: {}", e))??;
-            let response_len = u32::from_be_bytes(len_buf) as usize;
-
-            if response_len == 0 || response_len > 10_000_000 {
-                return Err(anyhow::anyhow!("Invalid response length: {}", response_len));
+        match response.payload {
+            Some(proto::response::Payload::ForceCommitResponse(res)) => {
+                info!("✅ [EXECUTOR-REQ] ForceCommit successful: {}", res.message);
+                Ok(res.success)
             }
-
-            let mut response_buf = vec![0u8; response_len];
-            timeout(read_timeout, stream.read_exact(&mut response_buf))
-                .await
-                .map_err(|e| anyhow::anyhow!("Timeout reading response data: {}", e))??;
-
-            let response = Response::decode(&response_buf[..])
-                .map_err(|e| anyhow::anyhow!("Failed to decode response from Go: {}", e))?;
-
-            match response.payload {
-                Some(proto::response::Payload::ForceCommitResponse(res)) => {
-                    info!("✅ [EXECUTOR-REQ] ForceCommit successful: {}", res.message);
-                    Ok(res.success)
-                }
-                Some(proto::response::Payload::Error(error_msg)) => {
-                    Err(anyhow::anyhow!("Go returned error: {}", error_msg))
-                }
-                _ => Err(anyhow::anyhow!("Unexpected response type for ForceCommit")),
+            Some(proto::response::Payload::Error(error_msg)) => {
+                Err(anyhow::anyhow!("Go returned error: {}", error_msg))
             }
-        } else {
-            Err(anyhow::anyhow!("Request connection is not available"))
+            _ => Err(anyhow::anyhow!("Unexpected response type for ForceCommit")),
         }
     }
 }

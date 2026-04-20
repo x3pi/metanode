@@ -132,7 +132,7 @@ func (s *SocketServer) StartWorkerPool() {
 	}
 
 	// Log worker pool stats periodically
-	go s.logStats(&activeWorkers, &processedRequests, workerCount)
+	// go s.logStats(&activeWorkers, &processedRequests, workerCount)
 }
 
 // HandleConnection processes commands from a single connection.
