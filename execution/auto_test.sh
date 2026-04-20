@@ -71,6 +71,24 @@ if [ $START_STEP -le 2 ]; then
 fi
 
 # ----------------------------------------------------
+# BƯỚC 2.5: Bật RPC Proxy
+# ----------------------------------------------------
+if [ $START_STEP -le 2 ]; then
+    echo ""
+    echo "📌 BƯỚC 2.5: Kiểm tra và bật RPC Proxy..."
+    if ! curl -s http://127.0.0.1:8545 > /dev/null; then
+        echo "  -> RPC Proxy chưa bật, đang tiến hành khởi động qua tmux session 'rpc-proxy'..."
+        cd "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client"
+        # Nếu session đã tồn tại thì tắt đi trước khi tạo mới
+        tmux kill-session -t rpc-proxy 2>/dev/null || true
+        tmux new-session -d -s rpc-proxy 'go run main.go'
+        sleep 5
+    else
+        echo "  ✅ RPC Proxy đã hoạt động ở port 8545."
+    fi
+fi
+
+# ----------------------------------------------------
 # BƯỚC 3: Test TCP Caller
 # ----------------------------------------------------
 if [ $START_STEP -le 3 ]; then

@@ -1,0 +1,44 @@
+syntax = "proto3";
+package rpc_request;
+
+option go_package = "/proto";
+
+// RpcLogEntry - Log entry dùng chung cho cả Event và Receipt
+// Tất cả fields dùng string để khớp với chain JSON output (hex format)
+message RpcLogEntry {
+    string Address = 1;               // Contract address
+    repeated string Topics = 2;       // Topics (event signature + indexed params)
+    string Data = 3;                  // Non-indexed event data (hex)
+    string BlockNumber = 4;           // Block number (hex)
+    string TransactionHash = 5;       // Transaction hash
+    string BlockHash = 6;             // Block hash
+    string TransactionIndex = 7;      // Transaction index (hex)
+    string LogIndex = 8;              // Log index (hex)
+    bool Removed = 9;                 // Removed flag (reorg)
+}
+
+// RpcEvent - Subscription event notification = subscription_id + log entry
+message RpcEvent {
+    string SubscriptionId = 1;        // Subscription ID (0xabc...)
+    RpcLogEntry Log = 2;              // Log entry data
+}
+
+// RpcReceipt - Transaction receipt gửi qua TCP (pure protobuf)
+message RpcReceipt {
+    string TransactionHash = 1;
+    string From = 2;
+    string To = 3;
+    string ContractAddress = 4;       // Nếu deploy contract
+    string Status = 5;                // "0x1" = success, "0x0" = fail
+    string GasUsed = 6;              // Hex string
+    string CumulativeGasUsed = 7;
+    string EffectiveGasPrice = 8;
+    string BlockHash = 9;
+    string BlockNumber = 10;          // Hex string
+    string TransactionIndex = 11;
+    string Type = 12;                 // Transaction type
+    repeated RpcLogEntry Logs = 13;   // Dùng chung RpcLogEntry
+    string LogsBloom = 14;
+    bytes ReturnData = 15;            // Return data từ EVM execution
+    string Exception = 16;            // Exception type nếu có lỗi
+}

@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package state;
+
+option go_package = "/proto";
+
+import "google/protobuf/timestamp.proto";
+
+message BlockRequest { // <--- Tên message là "BlockRequest"
+    uint64 blockNumber = 1;
+}
+
+// StringStringPair định nghĩa một cặp key-value dạng chuỗi để thay thế cho map,
+// nhằm đảm bảo việc tuần tự hóa tất định (canonical encoding).
+message StringStringPair {
+  string key = 1;
+  string value = 2;
+}
+message ValidatorList {
+    repeated Validator validators = 1;
+}
+// Validator định nghĩa cấu trúc dữ liệu on-chain cho một validator.
+message Validator {
+  // Địa chỉ Ethereum của validator.
+  string address = 1;
+
+  // Tên hiển thị của validator.
+  string name = 2;
+
+  // Mô tả chi tiết về validator.
+  string description = 3;
+
+  // Trang web của validator.
+  string website = 4;
+
+  // Trạng thái bị "jail" (tạm khóa).
+  bool is_jailed = 5;
+
+  // Thời điểm hết hạn "jail".
+  google.protobuf.Timestamp jailed_until = 6;
+
+  // Bộ đếm các khối đã bỏ lỡ liên tiếp.
+  int64 missed_blocks_counter = 7;
+
+  // Tỷ lệ hoa hồng (ví dụ: 1000 tương đương 10%). Tối đa 10000.
+  uint64 commission_rate = 8;
+
+  // Lượng stake tối thiểu validator phải tự ủy quyền (dưới dạng chuỗi).
+  string min_self_delegation = 9;
+
+  // Danh sách chứa các delegator và lượng stake của họ.
+  // Được sắp xếp theo key (địa chỉ delegator) trước khi marshal để đảm bảo tính tất định.
+  repeated StringStringPair delegators = 10;
+
+  // ---- Các trường cho logic phần thưởng ----
+
+  // Tổng phần thưởng tích lũy trên mỗi đơn vị stake (nhân với 10^18).
+  string accumulated_rewards_per_share = 11;
+
+  // Chỉ số phần thưởng của từng delegator tại lần cuối họ tương tác.
+  // Được sắp xếp theo key (địa chỉ delegator) trước khi marshal để đảm bảo tính tất định.
+  repeated StringStringPair delegator_reward_indexes = 12;
+
+  // URL tới ảnh đại diện của validator.
+  string image = 13;
+  string primary_address = 14;
+  string total_staked_amount = 15;
+  string worker_address = 16;
+  string p2p_address = 17;
+  string pubkey_bls = 18;
+  string pubkey_secp = 19;
+}
+
+
+// Thêm một loại request/response mới để làm ví dụ
+message StatusRequest {
+    // Không cần tham số gì, chỉ cần hỏi status
+}
+message ServerStatus {
+    string status_message = 1;
+    uint64 uptime_seconds = 2;
+}
+message Request {
+    // oneof đảm bảo chỉ một trong các trường sau có thể được set tại một thời điểm
+    oneof payload {
+        BlockRequest block_request = 1;
+        StatusRequest status_request = 2;
+        // Thêm các loại request khác ở đây trong tương lai
+    }
+}
+message Response {
+    oneof payload {
+        ValidatorList validator_list = 1;
+        ServerStatus server_status = 2;
+        // Thêm các loại response khác ở đây
+    }
+}
