@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,25 +23,27 @@ import (
 // Pool ví con cho embassy dùng gửi TX song song mà không đợi receipt.
 // Mỗi ví giữ nonce riêng. Khi receipt về → đánh dấu ví sẵn sàng lại.
 
-type walletEntry struct {
+type WalletEntry struct {
 	address common.Address
 	ready   atomic.Bool // true = không có TX đang pending
+	ExpectedNonce uint64
 }
 
 // WalletPool quản lý N ví con để gửi TX song song
 type WalletPool struct {
-	wallets []*walletEntry
+	Wallets []*WalletEntry
+	nextIdx uint32
 }
 
 // NewWalletPool tạo pool với danh sách address, tất cả ví khởi tạo ready=true
 func NewWalletPool(addresses []common.Address) *WalletPool {
-	wallets := make([]*walletEntry, len(addresses))
+	wallets := make([]*WalletEntry, len(addresses))
 	for i, addr := range addresses {
-		e := &walletEntry{address: addr}
+		e := &WalletEntry{address: addr}
 		e.ready.Store(true)
 		wallets[i] = e
 	}
-	return &WalletPool{wallets: wallets}
+	return &WalletPool{Wallets: wallets}
 }
 
 // DeriveEmbassyWalletAddresses tạo n địa chỉ ví giả deterministic từ embassyAddr + index.
@@ -68,11 +69,18 @@ func DeriveEmbassyWalletAddresses(embassyAddr common.Address, n int) []common.Ad
 	return addrs
 }
 
-// Acquire tìm ví rảnh (ready=true).
-// Nếu tất cả ví đều busy (đang chờ receipt), block cho đến khi có ví rảnh.
-func (p *WalletPool) Acquire() *walletEntry {
+// Acquire tìm ví rảnh (ready=true) theo cơ chế Round-Robin để phân tải đều.
+// Tránh việc 1 ví đứng đầu mảng bị lặp lại liên tục khi xảy ra rủi ro lỗi nonce.
+func (p *WalletPool) Acquire() *WalletEntry {
+	total := uint32(len(p.Wallets))
+	if total == 0 {
+		return nil
+	}
 	for {
-		for _, w := range p.wallets {
+		for i := uint32(0); i < total; i++ {
+			// Tăng nextIdx an toàn cho goroutine
+			idx := atomic.AddUint32(&p.nextIdx, 1) % total
+			w := p.Wallets[idx]
 			if w.ready.CompareAndSwap(true, false) {
 				return w
 			}
@@ -83,7 +91,7 @@ func (p *WalletPool) Acquire() *walletEntry {
 
 // MarkReady đánh dấu ví sẵn sàng sau khi receipt về
 func (p *WalletPool) MarkReady(address common.Address) {
-	for _, w := range p.wallets {
+	for _, w := range p.Wallets {
 		if w.address == address {
 			w.ready.Store(true)
 			return
@@ -92,7 +100,7 @@ func (p *WalletPool) MarkReady(address common.Address) {
 }
 
 // Address trả về địa chỉ của wallet entry (exported để external packages dùng được)
-func (w *walletEntry) Address() common.Address {
+func (w *WalletEntry) Address() common.Address {
 	return w.address
 }
 
@@ -146,6 +154,20 @@ func (client *Client) ChainGetChainId() (uint64, error) {
 	return chainId, nil
 }
 
+// ChainGetNonce lấy nonce trực tiếp từ chain (dùng lệnh GetNonce)
+func (client *Client) ChainGetNonce(address common.Address) (uint64, error) {
+	resp, err := client.sendChainRequest(command.GetNonce, address.Bytes(), 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	var nonce uint64
+	if len(resp) >= 8 {
+		nonce = binary.BigEndian.Uint64(resp)
+	}
+	return nonce, nil
+}
+
+
 // ChainGetBlockNumber lấy block number trực tiếp từ chain (raw uint64)
 func (client *Client) ChainGetBlockNumber() (uint64, error) {
 	resp, err := client.sendChainRequest(command.GetBlockNumber, nil, 60*time.Second)
@@ -156,7 +178,6 @@ func (client *Client) ChainGetBlockNumber() (uint64, error) {
 		return 0, fmt.Errorf("invalid block number response: %d bytes", len(resp))
 	}
 	bn := binary.BigEndian.Uint64(resp)
-	logger.Info("✅ ChainGetBlockNumber: %d", bn)
 	return bn, nil
 }
 
@@ -268,15 +289,10 @@ func (client *Client) SendTransactionFromWallet(
 	}
 
 	// Lấy nonce từ chain (dùng ID matching, không dùng shared nonce channel)
-	nonceResp, err := client.sendChainRequest(command.GetNonce, fromAddress.Bytes(), 10*time.Second)
+	nonce, err := client.ChainGetNonce(fromAddress)
 	if err != nil {
 		return common.Hash{}, 0, fmt.Errorf("get nonce failed: %w", err)
 	}
-	var nonce uint64
-	if len(nonceResp) >= 8 {
-		nonce = binary.BigEndian.Uint64(nonceResp)
-	}
-
 	bRelatedAddresses := make([][]byte, len(relatedAddress))
 	for i, v := range relatedAddress {
 		bRelatedAddresses[i] = v.Bytes()
@@ -301,19 +317,19 @@ func (client *Client) SendTransactionFromWallet(
 
 	bTransaction, err := tx.Marshal()
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("marshal tx failed: %w", err)
+		return tx.Hash(), nonce, fmt.Errorf("marshal tx failed: %w", err)
 	}
 
 	// Gửi qua sendChainRequest kèm header ID → nhận TransactionSuccess / TransactionError
 	resp, err := client.sendChainRequest(command.SendTransaction, bTransaction, 120*time.Second)
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("send tx failed: %w", err)
+		return tx.Hash(), nonce, fmt.Errorf("send tx failed: %w", err)
 	}
 	txErr := &pb.TransactionHashWithError{}
 	if parseErr := proto.Unmarshal(resp, txErr); parseErr == nil {
-		return common.Hash{}, 0, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, txErr.Description)
+		return tx.Hash(), nonce, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, txErr.Description)
 	}
-	logger.Info("✅ SendTransactionFromWallet: %v", tx)
+	// logger.Info("✅ SendTransactionFromWallet: %v", tx)
 	return tx.Hash(), nonce, nil
 }
 
@@ -326,83 +342,81 @@ func (client *Client) SendTransactionFromWallet(
 //   - Goroutine poll gọi ChainGetTransactionReceipt cho đến khi nhận được (infinite retry).
 //   - Khi receipt về → pool.MarkReady(walletAddr), xóa khỏi map,
 //     và parse BlockNumber từ RpcReceipt → gửi vào localBlockCh.
-func (client *Client) StartWalletPoolReceiptWatcher(pool *WalletPool, txHashToWallet *sync.Map, localBlockCh chan<- uint64) {
-	const (
-		scanInterval   = 400 * time.Millisecond // tần suất scan map tìm TX mới
-		pollInterval   = 50 * time.Millisecond  // tần suất poll receipt cho mỗi TX
-		maxPollWorkers = 8                      // giới hạn goroutines poll receipt đồng thời
-	)
+// func (client *Client) StartWalletPoolReceiptWatcher(pool *WalletPool, txHashToWallet *sync.Map, localBlockCh chan<- uint64) {
+// 	const (
+// 		scanInterval   = 400 * time.Millisecond // tần suất scan map tìm TX mới
+// 		pollInterval   = 50 * time.Millisecond  // tần suất poll receipt cho mỗi TX
+// 		maxPollWorkers = 8                      // giới hạn goroutines poll receipt đồng thời
+// 	)
 
-	// semaphore: giới hạn tối đa maxPollWorkers goroutines poll cùng lúc
-	sem := make(chan struct{}, maxPollWorkers)
-	// tracking: các txHash đang được poll để không spawn duplicate goroutine
-	var tracking sync.Map
-	go func() {
-		ticker := time.NewTicker(scanInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			txHashToWallet.Range(func(key, val any) bool {
-				txHash := key.(common.Hash)
-				walletAddr := val.(common.Address)
-				// chỉ spawn 1 goroutine poll cho mỗi txHash
-				if _, already := tracking.LoadOrStore(txHash, struct{}{}); already {
-					return true
-				}
-				sem <- struct{}{}
-				go func(txHash common.Hash, walletAddr common.Address) {
-					defer func() { <-sem }() // trả lại slot khi xong
-					startTime := time.Now()
-					for {
-						// Nếu quá 30 giây mà vẫn chưa có receipt thì xoá khỏi hàng đợi
-						if time.Since(startTime) > 30*time.Second {
-							logger.Error("❌ [WalletPool] Timeout receipt for txHash=%s after 30s! Marking tx as SUCCESS", txHash.Hex())
-							pool.MarkReady(walletAddr)
-							txHashToWallet.Delete(txHash)
-							tracking.Delete(txHash)
-							return
-						}
+// 	// semaphore: giới hạn tối đa maxPollWorkers goroutines poll cùng lúc
+// 	sem := make(chan struct{}, maxPollWorkers)
+// 	// tracking: các txHash đang được poll để không spawn duplicate goroutine
+// 	var tracking sync.Map
+// 	go func() {
+// 		ticker := time.NewTicker(scanInterval)
+// 		defer ticker.Stop()
+// 		for range ticker.C {
+// 			txHashToWallet.Range(func(key, val any) bool {
+// 				txHash := key.(common.Hash)
+// 				walletAddr := val.(common.Address)
+// 				// chỉ spawn 1 goroutine poll cho mỗi txHash
+// 				if _, already := tracking.LoadOrStore(txHash, struct{}{}); already {
+// 					return true
+// 				}
+// 				sem <- struct{}{}
+// 				go func(txHash common.Hash, walletAddr common.Address) {
+// 					defer func() { <-sem }() // trả lại slot khi xong
+// 					startTime := time.Now()
+// 					for {
+// 						// Nếu quá 30 giây mà vẫn chưa có receipt thì xoá khỏi hàng đợi
+// 						if time.Since(startTime) > 30*time.Second {
+// 							logger.Error("❌ [WalletPool] Timeout receipt for txHash=%s after 30s! Marking tx as SUCCESS", txHash.Hex())
+// 							pool.MarkReady(walletAddr)
+// 							txHashToWallet.Delete(txHash)
+// 							tracking.Delete(txHash)
+// 							return
+// 						}
 
-						resp, err := client.ChainGetTransactionReceipt(txHash)
-						if err != nil {
-							logger.Error("❌ [WalletPool] ChainGetTransactionReceipt failed for txHash=%s: %v", txHash.Hex(), err)
-						} else if resp != nil && resp.Receipt != nil {
-							// Thực sự đã có Receipt (đã mint block) thì mới báo Ready
-							pool.MarkReady(walletAddr)
-							txHashToWallet.Delete(txHash)
-							tracking.Delete(txHash)
-							// Parse receipt response → lấy BlockNumber trực tiếp
-							if localBlockCh != nil {
-								blockNumHex := resp.Receipt.GetBlockNumber()
-								if blockNumHex != "" {
-									var bn uint64
-									if _, scanErr := fmt.Sscanf(blockNumHex, "0x%x", &bn); scanErr == nil && bn > 0 {
-										select {
-										case localBlockCh <- bn:
-										default:
-										}
-									}
-								}
-							}
+// 						resp, err := client.ChainGetTransactionReceipt(txHash)
+// 						if err != nil {
+// 							logger.Error("❌ [WalletPool] ChainGetTransactionReceipt failed for txHash=%s: %v", txHash.Hex(), err)
+// 						} else if resp != nil && resp.Receipt != nil {
+// 							// Thực sự đã có Receipt (đã mint block) thì mới báo Ready
+// 							pool.MarkReady(walletAddr)
+// 							txHashToWallet.Delete(txHash)
+// 							tracking.Delete(txHash)
+// 							// Parse receipt response → lấy BlockNumber trực tiếp
+// 							if localBlockCh != nil {
+// 								blockNumHex := resp.Receipt.GetBlockNumber()
+// 								if blockNumHex != "" {
+// 									var bn uint64
+// 									if _, scanErr := fmt.Sscanf(blockNumHex, "0x%x", &bn); scanErr == nil && bn > 0 {
+// 										select {
+// 										case localBlockCh <- bn:
+// 										default:
+// 										}
+// 									}
+// 								}
+// 							}
 
-							statusStr := "SUCCESS"
-							if resp.Receipt.Status != pb.RECEIPT_STATUS_RETURNED && resp.Receipt.Status != pb.RECEIPT_STATUS_HALTED {
-								statusStr = fmt.Sprintf("REVERTED (status=%v)", resp.Receipt.Status)
-								logger.Info("Error receipt: %v", resp.GetReceipt())
-							}
-							logger.Info("✅ [WalletPool] Receipt confirmed txHash=%s → wallet %s ready | Status: %s",
-								txHash.Hex(), walletAddr.Hex(), statusStr)
-							return
-						}
-						// Nếu request lỗi, hoặc response trả về chưa có Receipt -> tiếp tục poll
-						// logger.Info("⏳ [WalletPool] Polling receipt txHash=%s", txHash.Hex())
-						time.Sleep(pollInterval)
-					}
-				}(txHash, walletAddr)
-				return true
-			})
-		}
-	}()
-}
+// 							if resp.Receipt.Status != pb.RECEIPT_STATUS_RETURNED || resp.Receipt.Status != pb.RECEIPT_STATUS_HALTED {
+// 								logger.Info("Error receipt: %v", resp.GetReceipt())
+// 							}
+// 							logger.Info("✅ [WalletPool] Receipt confirmed txHash=%s → wallet %s ready | Status: %v",
+// 								txHash.Hex(), walletAddr.Hex(), resp.Receipt.Status)
+// 							return
+// 						}
+// 						// Nếu request lỗi, hoặc response trả về chưa có Receipt -> tiếp tục poll
+// 						// logger.Info("⏳ [WalletPool] Polling receipt txHash=%s", txHash.Hex())
+// 						time.Sleep(pollInterval)
+// 					}
+// 				}(txHash, walletAddr)
+// 				return true
+// 			})
+// 		}
+// 	}()
+// }
 
 // parseBlockNumberFromReceiptResponse parse GetTransactionReceiptResponse proto,
 // lấy RpcReceipt.BlockNumber (hex string "0x123") → uint64.

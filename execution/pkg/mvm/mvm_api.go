@@ -21,14 +21,17 @@ typedef struct {
 import "C"
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -43,7 +46,25 @@ import (
 var (
 	apiInstances          sync.Map
 	protectedApiInstances sync.Map
+	mvmIdCounter          uint64
 )
+
+// GenerateUniqueMvmId tạo một mvmId độc nhất, sẽ tạo lại nếu bị trùng với cache hiện tại.
+func GenerateUniqueMvmId() common.Address {
+	for {
+		count := atomic.AddUint64(&mvmIdCounter, 1)
+		// Băm kết hợp thời gian và counter để đảm bảo tỉ lệ trùng lặp gần như bằng 0
+		hash := sha256.Sum256([]byte(fmt.Sprintf("mvm-temp-%d-%d-%d", time.Now().UnixNano(), rand.Int63(), count)))
+
+		// Lấy 20 bytes cuối làm Address
+		mvmId := common.Address(hash[12:])
+
+		// Kiểm tra xem mvmId này đã tồn tại trong mvm cache chưa, nếu chưa thì lấy cái này
+		if GetMVMApi(mvmId) == nil {
+			return mvmId
+		}
+	}
+}
 
 type AccountStateDB interface {
 	AccountState(address common.Address) (types.AccountState, error)

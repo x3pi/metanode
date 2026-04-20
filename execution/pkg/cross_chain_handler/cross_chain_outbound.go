@@ -12,7 +12,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -29,7 +28,6 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	method *abi.Method,
 	inputData []byte,
 	mvmId common.Address,
-	enableTrace bool,
 	blockTime uint64,
 ) ([]types.EventLog, types.ExecuteSCResult, error) {
 	if tx.Amount().Sign() <= 0 {
@@ -63,7 +61,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 
 	// Kiểm tra destinationId có trong registeredChainIds
 	// Nếu không có trong cache → tự động thử get lại từ chain 1 lần
-	if !h.isDestinationRegisteredWithRefresh(destinationId, chainState, tx) {
+	if !h.isDestinationRegistered(destinationId) {
 		return nil, nil, fmt.Errorf("lockAndBridge: destinationId %s is not registered", destinationId.String())
 	}
 
@@ -82,10 +80,9 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	// BURN: processNativeMintBurn(operationType=1)
 	var exRs types.ExecuteSCResult
 	if ctx != nil {
-		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
-		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, blockTime)
 
-		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("lockAndBridge: burn failed: %v", err)
 		}
@@ -108,7 +105,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	payload, err := abi.Arguments{{Type: mustType("address")}}.Pack(recipient)
 	if err != nil {
 		return nil, exRs, fmt.Errorf("lockAndBridge: pack payload error: %v", err)
-    }
+	}
 	target := common.Address{}
 
 	eventData, err := eventDef.Inputs.NonIndexed().Pack(
@@ -135,7 +132,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 		},
 	)
 
-	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND lockAndBridge: txHash=%s → EMITTING MessageSent\n" +
+	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND lockAndBridge: txHash=%s → EMITTING MessageSent\n"+
 		"        sender=%s recipient=%s amount=%s srcId=%s destId=%s",
 		tx.Hash().Hex(),
 		sender.Hex(), recipient.Hex(), amount.String(),
@@ -153,7 +150,6 @@ func (h *CrossChainHandler) handleSendMessage(
 	method *abi.Method,
 	inputData []byte,
 	mvmId common.Address,
-	enableTrace bool,
 	blockTime uint64,
 ) ([]types.EventLog, types.ExecuteSCResult, error) {
 	// Unpack: sendMessage(address target, bytes payload, uint256 destinationId)
@@ -188,7 +184,7 @@ func (h *CrossChainHandler) handleSendMessage(
 
 	// Kiểm tra destinationId có trong registeredChainIds
 	// Nếu không có trong cache → tự động thử get lại từ chain 1 lần
-	if !h.isDestinationRegisteredWithRefresh(destinationId, chainState, tx) {
+	if !h.isDestinationRegistered(destinationId) {
 		return nil, nil, fmt.Errorf("sendMessage: destinationId %s is not registered", destinationId.String())
 	}
 
@@ -208,10 +204,9 @@ func (h *CrossChainHandler) handleSendMessage(
 	// BURN: Nếu có msg.value > 0 → burn coin từ sender
 	var exRs types.ExecuteSCResult
 	if amount.Sign() > 0 && ctx != nil {
-		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
-		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, blockTime)
 
-		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("sendMessage: burn msg.value failed: %v", err)
 		}
@@ -254,7 +249,7 @@ func (h *CrossChainHandler) handleSendMessage(
 		},
 	)
 
-	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND sendMessage: txHash=%s → EMITTING MessageSent\n" +
+	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND sendMessage: txHash=%s → EMITTING MessageSent\n"+
 		"        sender=%s target=%s amount=%s srcId=%s destId=%s payloadLen=%d",
 		tx.Hash().Hex(),
 		sender.Hex(), target.Hex(), amount.String(),

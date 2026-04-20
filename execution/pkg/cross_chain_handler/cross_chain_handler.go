@@ -99,6 +99,11 @@ func (h *CrossChainHandler) GetABI() abi.ABI {
 	return h.abi
 }
 
+// GetConfigABI trả về parsed Config Registry ABI.
+func (h *CrossChainHandler) GetConfigABI() abi.ABI {
+	return h.configABI
+}
+
 // EmbassyCount trả về tổng số embassy active đang cached.
 // Trả về 0 nếu config chưa load.
 func (h *CrossChainHandler) EmbassyCount() int {
@@ -209,54 +214,12 @@ func (h *CrossChainHandler) isDestinationRegistered(destinationId *big.Int) bool
 	return false
 }
 
-// isDestinationRegisteredWithRefresh kiểm tra destinationId trong cache;
-// nếu không tìm thấy → thử RefreshConfig 1 lần rồi kiểm tra lại.
-// Dùng khi chain có thể đã update registeredChainIds mà node chưa reload.
-func (h *CrossChainHandler) isDestinationRegisteredWithRefresh(
-	destinationId *big.Int,
-	chainState *blockchain.ChainState,
-	originalTx types.Transaction,
-) bool {
-	if h.isDestinationRegistered(destinationId) {
-		return true
-	}
-	// Không tìm thấy trong cache → thử refresh và kiểm tra lại
-	logger.Info("[CrossChain] destinationId=%s not in cache, refreshing config...", destinationId.String())
-	if err := h.RefreshConfig(chainState, originalTx); err != nil {
-		logger.Warn("[CrossChain] RefreshConfig failed: %v", err)
-		return false
-	}
-	result := h.isDestinationRegistered(destinationId)
-	if result {
-		logger.Info("[CrossChain] destinationId=%s found after config refresh ✅", destinationId.String())
-	} else {
-		logger.Warn("[CrossChain] destinationId=%s still not found after config refresh ❌", destinationId.String())
-	}
-	return result
-}
-
-// GetActiveEmbassyInfosWithRefresh trả về active embassy list;
-// nếu rỗng (chưa có embassy nào) → thử RefreshConfig 1 lần.
-func (h *CrossChainHandler) GetActiveEmbassyInfosWithRefresh(
-	chainState *blockchain.ChainState,
-	originalTx types.Transaction,
-) []EmbassyInfo {
-	infos := h.GetActiveEmbassyInfos()
-	if len(infos) > 0 {
-		return infos
-	}
-	logger.Info("[CrossChain] No active embassies in cache, refreshing config...")
-	if err := h.RefreshConfig(chainState, originalTx); err != nil {
-		logger.Warn("[CrossChain] RefreshConfig for embassies failed: %v", err)
-		return infos
-	}
-	infos = h.GetActiveEmbassyInfos()
-	if len(infos) > 0 {
-		logger.Info("[CrossChain] Found %d active embassies after config refresh ✅", len(infos))
-	} else {
-		logger.Warn("[CrossChain] Still no active embassies after config refresh ❌")
-	}
-	return infos
+// InvalidateConfigCache xoá cờ loaded để lần gọi kế tiếp sẽ tự fetch lại từ contract
+func (h *CrossChainHandler) InvalidateConfigCache() {
+	h.configMu.Lock()
+	h.configLoaded.Store(false)
+	h.configMu.Unlock()
+	logger.Info("[CrossChain] Cache invalidated due to configuration event")
 }
 
 // RefreshConfig force reload config (useful khi registeredChainIds thay đổi)
@@ -307,11 +270,11 @@ func (h *CrossChainHandler) HandleTransaction(
 
 	switch method.Name {
 	case "lockAndBridge":
-		eventLogs, exRs, logicErr = h.handleLockAndBridge(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleLockAndBridge(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	case "sendMessage":
-		eventLogs, exRs, logicErr = h.handleSendMessage(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleSendMessage(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	case "batchSubmit":
-		eventLogs, exRs, logicErr = h.handleBatchSubmit(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleBatchSubmit(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	default:
 		logicErr = fmt.Errorf("cross-chain: unsupported method '%s'", method.Name)
 	}

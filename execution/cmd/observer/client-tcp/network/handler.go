@@ -51,7 +51,6 @@ func NewHandler(
 func (h *Handler) HandleRequest(request network.Request) (err error) {
 
 	cmd := request.Message().Command()
-	// logger.Debug("handler.gohandling command: " + cmd)
 	switch cmd {
 	case command.InitConnection:
 		return h.handleInitConnection(request)
@@ -211,12 +210,10 @@ func (h *Handler) handleReceipt(request network.Request) (err error) {
 	if h.receiptChan != nil {
 		h.receiptChan <- receipt
 	} else {
-		logger.Debug(fmt.Sprintf("Receive receipt: %v", receipt))
-		logger.Debug(fmt.Sprintf("Receive To address: %v", request.Message().ToAddress()))
 		if receipt.Status() == pb.RECEIPT_STATUS_TRANSACTION_ERROR {
 			transactionErr := &transaction.TransactionError{}
 			transactionErr.Unmarshal(receipt.Return())
-			logger.Debug("Receive Transaction error 1: ", transactionErr)
+			logger.Info("Receive Transaction error 1: ", transactionErr)
 		}
 	}
 	return nil

@@ -21,7 +21,34 @@ type KeyInfo struct {
 func main() {
 	count := flag.Int("count", 1, "Number of key pairs to generate")
 	output := flag.String("output", "", "Output JSON file path (default: print to console)")
+	recoverKey := flag.String("recover", "", "Recover public key and address from private key (hex format)")
 	flag.Parse()
+
+	if *recoverKey != "" {
+		fmt.Println("═══════════════════════════════════════════════════")
+		fmt.Println("  🔑 RECOVER KEY — Private Key, Public Key, Address")
+		fmt.Println("═══════════════════════════════════════════════════")
+
+		privateKeyBytes, err := hex.DecodeString(*recoverKey)
+		if err != nil {
+			fmt.Printf("  ❌ Error decoding private key: %v\n", err)
+			os.Exit(1)
+		}
+
+		privateKey, err := crypto.ToECDSA(privateKeyBytes)
+		if err != nil {
+			fmt.Printf("  ❌ Error converting to ECDSA: %v\n", err)
+			os.Exit(1)
+		}
+
+		pubKeyBytes := crypto.CompressPubkey(&privateKey.PublicKey)
+		address := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+		fmt.Printf("  🔐 Private Key: %s\n", *recoverKey)
+		fmt.Printf("  🔓 Public Key:  %s\n", hex.EncodeToString(pubKeyBytes))
+		fmt.Printf("  📍 Address:     %s\n\n", address.Hex())
+		return
+	}
 
 	if *count <= 0 {
 		fmt.Println("❌ Count must be greater than 0")

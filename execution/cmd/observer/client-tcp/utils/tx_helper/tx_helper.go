@@ -40,6 +40,7 @@ func SendReadTransaction(
 	input []byte,
 	opts *tx_models.TxOptions,
 ) (types.Receipt, error) {
+	logger.Info("____ zo ")
 	if cli == nil || cfg == nil {
 		return nil, fmt.Errorf("client and config are required")
 	}
@@ -214,7 +215,7 @@ func SendTransactionFromWallet(
 		maxTimeUse,
 	)
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("failed to send %s transaction (fire-and-forget): %w", action, err)
+		return txHash, nonce, fmt.Errorf("failed to send %s transaction (fire-and-forget): %w", action, err)
 	}
 	return txHash, nonce, nil
 }

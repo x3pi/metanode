@@ -290,26 +290,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		}
 	}
 	if verifiedEmbassyAddr == "" {
-		// Không tìm thấy trong cache → thử refresh từ on-chain 1 lần rồi lookup lại
-		logger.Info("[VIRTUAL CC batchSubmit] BLS pubkey not in cached embassy list, refreshing from on-chain... sender=%s", sender.Hex())
-		freshEmbassies := ccHandler.GetActiveEmbassyInfosWithRefresh(v.chainState, updatedTx)
-		// Cập nhật lại count nếu embassy list đã thay đổi
-		if newTotal := ccHandler.EmbassyCount(); acc.GetTotalEmbassies() != newTotal {
-			acc.SetTotalEmbassies(newTotal)
-		}
-		for _, emb := range freshEmbassies {
-			if len(emb.BlsPublicKey) == 0 {
-				continue
-			}
-			if bytes.Equal(emb.BlsPublicKey, blsPubKeyBytes) {
-				verifiedEmbassyAddr = emb.EthAddress.Hex()
-				matchedPubKey = mt_common.PubkeyFromBytes(emb.BlsPublicKey)
-				break
-			}
-		}
-	}
-	if verifiedEmbassyAddr == "" {
-		logger.Warn("[VIRTUAL CC batchSubmit] ❌ BLS pubkey from calldata not found in embassy list (after on-chain refresh): sender=%s", sender.Hex())
+		logger.Warn("[VIRTUAL CC batchSubmit] ❌ BLS pubkey from calldata not found in active embassy list: sender=%s", sender.Hex())
 		return nil, fmt.Errorf("batchSubmit: BLS pubkey does not match any active embassy"), nil
 	}
 	// Verify BLS signature với pubkey đã match (1 lần duy nhất thay vì loop tất cả)
@@ -355,8 +336,8 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 
 	// ── Đủ quorum lần đầu → EXECUTE ─────────────────────────────────────
 	// ReadOnly=false (mặc định) → master gọi GetCrossChainHandler().HandleTransaction
-	logger.Info("[VIRTUAL CC batchSubmit] 🚀 EXECUTE (quorum %d/%d) embassy=%s key=%x",
-		voteCount, total, verifiedEmbassyAddr, key[:8])
+	logger.Info("[VIRTUAL CC batchSubmit] 🚀 EXECUTE (quorum %d/%d) embassy=%s key=%x txHash=%s",
+		voteCount, total, verifiedEmbassyAddr, key[:8], updatedTx.Hash().Hex())
 	updatedTx.SetReadOnly(false)
 
 	// ── Fake EVM dry-run để lấy relatedAddresses ─────────────────────────
@@ -375,7 +356,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	targets := ccHandler.ExtractInboundTargets(inputData)
 	if len(targets) > 0 {
 		blockTime := uint64(time.Now().Unix())
-		for i, item := range targets {
+		for _, item := range targets {
 			if item.Target == (common.Address{}) {
 				// ── lockAndBridge path: không chạy EVM dry-run ──────────────────
 				// Target rỗng → đây là mint native coin, chỉ cần thêm Recipient
@@ -394,31 +375,37 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			// ── sendMessage path: EVM dry-run với mvmId riêng cho từng target ──
 			// Mỗi target có mvmId = hash(txHash + target + index) để C++ state cache
 			// và relatedAddresses hoàn toàn độc lập nhau.
-			itemHash := sha256.Sum256([]byte(fmt.Sprintf("batchsubmit-virtual-%x-%s-%d",
-				updatedTx.Hash(), item.Target.Hex(), i)))
-			itemMvmId := common.BytesToAddress(itemHash[12:])
-			vmP := vm_processor.NewVmProcessor(v.chainState, itemMvmId, false, blockTime)
+			uniqueMvmId := mvm.GenerateUniqueMvmId()
+			vmP := vm_processor.NewVmProcessor(v.chainState, uniqueMvmId, false, blockTime)
 
 			// Validate: target phải là contract hợp lệ
 			toAccountState, err := v.chainState.GetAccountStateDB().AccountState(item.Target)
 			if err != nil || !vmP.IsValidSmartContractCall(toAccountState, updatedTx) {
 				logger.Warn("[VIRTUAL CC batchSubmit] target=%s is not a valid contract, skip dry-run", item.Target.Hex())
 				updatedTx.AddRelatedAddress(item.Target) // vẫn thêm địa chỉ để đảm bảo sequential
-				mvm.ClearMVMApi(itemMvmId)
+				mvm.ClearMVMApi(uniqueMvmId)
 				continue
+			}
+			mvmApi := mvm.GetOrCreateMVMApi(uniqueMvmId, v.chainState.GetSmartContractDB(), v.chainState.GetAccountStateDB(), true)
+			if item.SourceNationId != nil {
+				mvmApi.SetCrossChainContext(item.Sender, item.SourceNationId.Uint64())
 			}
 			// Fake call với đúng payload của packet để EVM simulate đúng code path,
 			// touch đúng storage slots → relatedAddresses sẽ khớp với lúc execute thật.
 			fakeCallTx := proxy_tx.New(updatedTx, updatedTx.FromAddress(), item.Target,
 				updatedTx.Amount(), uint64(mt_common.MAX_GASS_FEE), 0, item.Payload)
 			_, _, _ = vmP.ExecuteTransactionWithMvmIdSub(ctx, fakeCallTx, true)
-			mvmApi := mvm.GetMVMApi(itemMvmId)
+
+			if item.SourceNationId != nil {
+				mvmApi.ClearCrossChainContext()
+			}
+
 			if mvmApi != nil {
 				for _, addr := range mvmApi.GetCurrentRelatedAddresses() {
 					updatedTx.AddRelatedAddress(addr)
 				}
 			}
-			mvm.ClearMVMApi(itemMvmId)
+			mvm.ClearMVMApi(uniqueMvmId)
 			logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
 				item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 		}

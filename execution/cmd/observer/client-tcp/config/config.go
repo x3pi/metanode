@@ -19,10 +19,11 @@ import (
 type RemoteChain struct {
 	Name                    string `json:"name"`
 	NationId                uint64 `json:"nation_id"`
-	ConnectionAddress       string `json:"connection_address"`       // TCP address của remote chain (mới)
-	LocalContract           string `json:"local_contract"`
-	ParentAddress           string `json:"parent_address"`
-	ParentConnectionAddress string `json:"parent_connection_address"` // backward compat
+	ConnectionAddress       string   `json:"connection_address"`       // TCP address của remote chain (mới)
+	ChainNodes              []string `json:"chain_nodes"`              // Mảng IPs cho deterministic failover
+	LocalContract           string   `json:"local_contract"`
+	ParentAddress           string   `json:"parent_address"`
+	ParentConnectionAddress string   `json:"parent_connection_address"` // backward compat
 	RemoteContract          string `json:"remote_contract"`
 	Privatekey              string `json:"private_key"`
 	EthPrivateKey           string `json:"eth_private_key"`
@@ -31,8 +32,9 @@ type RemoteChain struct {
 type ClientConfig struct {
 	PrivateKey_ string `json:"private_key"`
 
-	ConnectionAddress_       string `json:"connection_address"`
-	PublicConnectionAddress_ string `json:"public_connection_address"`
+	ConnectionAddress_       string   `json:"connection_address"`
+	PublicConnectionAddress_ string   `json:"public_connection_address"`
+	ChainNodes               []string `json:"chain_nodes"`
 
 	Version_          string       `json:"version"`
 	TransactionFeeHex string       `json:"transaction_fee"`

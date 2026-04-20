@@ -22,12 +22,12 @@ const (
 	rpcGlobalBurst = 50000  // burst size
 
 	// Per-IP rate limit (must be < global to provide meaningful protection)
-	rpcPerIPRate  = 10000 // requests per second per IP
-	rpcPerIPBurst = 2000  // burst per IP
+	rpcPerIPRate  = 100000 // requests per second per IP
+	rpcPerIPBurst = 20000  // burst per IP
 
 	// Per-IP limiter cache
 	maxIPEntries   = 10000
-	ipCleanupEvery = 5 * time.Minute
+	ipCleanupEvery = 1 * time.Minute
 )
 
 // ipEntry holds a rate limiter and the last time it was used.

@@ -1415,7 +1415,7 @@ func spamLockAndBridge(
 	fmt.Println("═════════════════════════════════════════")
 
 	// Đọc keys file từ env PATH_KEY_SPAM
-	keysPath := getEnv("PATH_KEY_SPAM", "generated_keys.json")
+	keysPath := getEnv("PATH_KEY_SPAM", "../../../tool/test_tps/gen_spam_keys/generated_keys.json")
 	// Nếu PATH_KEY_SPAM là thư mục, nối thêm generated_keys.json
 	if strings.HasSuffix(keysPath, "/") {
 		keysPath = keysPath + "generated_keys.json"
@@ -1786,7 +1786,7 @@ func spamCrossChainTPS(
 	// Recipient sẽ là chính các ví trong danh sách.
 
 	// ── Load keys ────────────────────────────────────
-	keysPath := getEnv("PATH_KEY_SPAM", "generated_keys.json")
+	keysPath := getEnv("PATH_KEY_SPAM", "../../../tool/test_tps/gen_spam_keys/generated_keys.json")
 	if strings.HasSuffix(keysPath, "/") {
 		keysPath = keysPath + "generated_keys.json"
 	}

@@ -493,50 +493,10 @@ if $DO_START; then
 
     sleep 3
 
-    # ─── Wait for UDS sockets ───────────────────────────────────────
-    log_step "Phase 5b: Waiting for Go Master sockets"
-
-    for server in $SERVERS; do
-        nodes=$(get_nodes_for_server "$server")
-        for id in $nodes; do
-            SOCKET="/tmp/rust-go-node${id}-master.sock"
-            log_info "Waiting for socket $SOCKET on $server..."
-            for attempt in $(seq 1 60); do
-                if ssh_cmd "$server" "test -S $SOCKET" 2>/dev/null; then
-                    log_ok "Go Master $id ready (${attempt}s)"
-                    break
-                fi
-                if [ "$attempt" -eq 60 ]; then
-                    log_warn "Timeout waiting for Go Master $id socket"
-                fi
-                sleep 1
-            done
-        done
-    done
-
-
-
-    sleep 5
-
-    # ─── Start Rust Metanodes ───────────────────────────────────────
-    log_step "Phase 5d: Starting Rust Metanodes"
-
-    RUST_CONFIGS=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
-
-    for server in $SERVERS; do
-        nodes=$(get_nodes_for_server "$server")
-        for id in $nodes; do
-            log_info "Starting Rust Node $id on $server..."
-
-            RUST_BIN="${REMOTE_METANODE}/target/release/metanode"
-            RUST_LOG_FILE="${REMOTE_METANODE}/logs/node_${id}/rust.log"
-            RUST_CFG="${RUST_CONFIGS[$id]}"
-            ssh_cmd "$server" "tmux new-session -d -s metanode-${id} -c ${REMOTE_METANODE} '${RUST_BIN} start --config ${RUST_CFG} >> ${RUST_LOG_FILE} 2>&1'"
-            log_ok "Rust Node $id started"
-            sleep 1
-        done
-    done
-
+    # ─── Rust Consensus (nhúng trong Go Master via FFI) ─────────
+    log_step "Phase 5b: Rust Consensus (FFI)"
+    log_info "Rust Consensus Engine đã được nhúng trong Go Master via FFI"
+    log_info "Không cần chờ UDS socket (/tmp/*.sock) hoặc khởi động process Rust riêng biệt"
     sleep 5
 fi
 

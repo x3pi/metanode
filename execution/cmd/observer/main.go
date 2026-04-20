@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	client_tcp "github.com/meta-node-blockchain/meta-node/cmd/observer/client-tcp"
 	tcp_config "github.com/meta-node-blockchain/meta-node/cmd/observer/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/cmd/observer/listener"
 	"github.com/meta-node-blockchain/meta-node/cmd/observer/processor"
@@ -153,29 +152,18 @@ func main() {
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
-	// New design: 1 client duy nhất từ config chính (private_key + parent_address)
-	// Dùng connection_manager để kết nối từng remote chain và scan GetLogs.
-	// Không còn tạo client riêng cho từng remote_chain.
+	// Khởi tạo scanner hoàn toàn từ ChainNodes
+	// Không còn tạo client riêng lẻ (parent_connection_address có thể bỏ trống)
 	// ─────────────────────────────────────────────────────────────────────────
-	logger.Info("Creating single embassy client from main config (address=%s, chain=%s)",
-		cfg.ParentAddress, cfg.ParentConnectionAddress)
-
-	localClient, err := client_tcp.NewClient(cfg)
-	if err != nil {
-		logger.Error("Failed to create embassy client: %v", err)
-		os.Exit(1)
-	}
+	logger.Info("Creating embassy scanner from main config")
 
 	// Tạo 1 scanner dùng connection_manager để quét logs từ các remote chains
 	scanner := listener.NewCrossChainScanner(
-		localClient,
 		cfg,
 		app.processor,
 	)
 	scanner.Start()
 
-	logger.Info("Starting Supervisor with config: %s", *configPath)
-	fmt.Println("Server is running")
 	defer app.Stop()
 	if err := app.Run(); err != nil {
 		logger.Error("Application error: %v", err)

@@ -103,10 +103,6 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	}
 
 	// Phase 1: AccountStateDB (Parallel)
-	logger.Warn("🔍 [FORK-DEBUG] Block #%d: DirtyContentHash=%s", (*lastBlockHeader).BlockNumber()+1, chainState.GetAccountStateDB().DirtyContentHash().Hex())
-	for _, detail := range chainState.GetAccountStateDB().DirtyAccountDetails() {
-		logger.Warn("🔍 [FORK-DEBUG] Block #%d: %s", (*lastBlockHeader).BlockNumber()+1, detail)
-	}
 	go func() {
 		defer irWg.Done()
 		s := time.Now()
@@ -585,7 +581,9 @@ func processSingleGroup(
 			// ReadOnly=false (mặc định) → gọi HandleTransaction để execute đầy đủ.
 			if tx.GetReadOnly() {
 				logger.Info("[CC SIG_ACK] TX %s readOnly=true → nonce-only", tx.Hash().Hex())
-				vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+
+				uniqueMvmId := mvm.GenerateUniqueMvmId()
+				vmP := vm_processor.NewVmProcessor(chainState, uniqueMvmId, enableTrace, blockTime)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,

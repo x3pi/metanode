@@ -5,6 +5,3 @@ tool/test-fakecontract/.env
 tool/tictactoe-cli/.env
 tool/tictactoe-cli/tcc_address.txt
 tool/tictactoe-cli/.env
-config-client-tcp-1.json
-config-client-tcp-2.json
-config-client-tcp-3.json

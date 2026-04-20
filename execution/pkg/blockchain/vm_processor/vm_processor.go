@@ -72,9 +72,24 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if span != nil {
 			span.AddEvent("HandlingReadOnlyTransaction", nil)
 		}
-		combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", tx.Hash(), rand.Int63(), time.Now().UnixNano())))
-		ethAddressBytes := combinedHash[12:]
-		mvmIdReadOnly := common.BytesToAddress(ethAddressBytes)
+		mvmIdReadOnly := mvm.GenerateUniqueMvmId()if tx.GetReadOnly() {
+		if span != nil {
+			span.AddEvent("HandlingReadOnlyTransaction", nil)
+		}
+		mvmIdReadOnly := mvm.GenerateUniqueMvmId()
+		if span != nil {
+			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
+		}
+		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
+		result := vmP.readOnlyCall(execCtx, tx, mvmROnly)
+		if span != nil {
+			span.SetAttribute("readOnlyResultStatus", result.ReceiptStatus().String())
+			span.SetAttribute("readOnlyResultGasUsed", result.GasUsed())
+			span.SetAttribute("readOnlyResultReturnHex", hex.EncodeToString(result.Return()))
+		}
+		return result, nil
+	}
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
@@ -451,9 +466,14 @@ func (vmP *VmProcessor) executeSmartContract(
 func (vmP *VmProcessor) ProcessNativeMintBurn(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
 	operationType uint64, // 0: mint, 1: burn
 ) (types.ExecuteSCResult, error) {
+	// 1. Khởi tạo MVMApi nội bộ cho quá trình chuyển tiền nghiêm ngặt
+	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), true)
+	
+	// 2. CHẶT CHẼ: Ràng buộc Related Addresses theo yêu cầu an toàn
+	mvmE.SetRelatedAddresses(tx.RelatedAddresses())
+
 	var span *trace.Span = nil        // Khởi tạo nil
 	var execCtx context.Context = ctx // Mặc định dùng context vào
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()

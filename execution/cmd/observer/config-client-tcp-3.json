@@ -1,0 +1,36 @@
+{
+  "connection_address": "0.0.0.0:4902",
+  "version": "0.0.1.0",
+  "chain_nodes": [
+    "192.168.1.234:4201",
+    "192.168.1.234:6201",
+    "192.168.1.234:6211",
+    "192.168.1.234:6221",
+    "192.168.1.234:6241"
+  ],
+  "chain_id": 991,
+  "nation_id": 1,
+  "parent_connection_type": "client",
+  "cross_chain_abi_path": "pkg/abi/cross_chain_abi.json",
+  "config_abi_path": "pkg/abi/config_abi.json",
+  "log_path": "./logs/log-3",
+  "private_key": "51e77f618443bad33d19effcf43b6a50738e36e752386033996c47fac14c9db4",
+  "parent_address": "0xf8BC1eFd77902977aA8D209E084A45497cB45c75",
+  "eth_private_key": "c87176edd1f9de8e51bef55b1e2e6c451664e4e815300069704ed10af26dad30",
+  "contract_config": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+  "contract_cross_chain": "0x00000000000000000000000000000000B429C0B2",
+  "remote_chains": [
+    {
+      "name": "Chain B",
+      "nation_id": 2,
+      "connection_address": "192.168.1.233:6201",
+      "chain_nodes": [
+        "192.168.1.233:4201",
+        "192.168.1.233:6201",
+        "192.168.1.233:6211",
+        "192.168.1.233:6221",
+        "192.168.1.233:6241"
+      ]
+    }
+  ]
+}

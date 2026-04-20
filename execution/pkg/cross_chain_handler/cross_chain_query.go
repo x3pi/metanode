@@ -34,9 +34,9 @@ func (h *CrossChainHandler) HandleOffChainQuery(tx types.Transaction, chainState
 	var logicErr error
 	switch method.Name {
 	case "lockAndBridge":
-		_, _, logicErr = h.handleLockAndBridge(nil, chainState, tx, method, inputData[4:], common.Address{}, false, blockTime)
+		_, _, logicErr = h.handleLockAndBridge(nil, chainState, tx, method, inputData[4:], common.Address{}, blockTime)
 	case "sendMessage":
-		_, _, logicErr = h.handleSendMessage(nil, chainState, tx, method, inputData[4:], common.Address{}, false, blockTime)
+		_, _, logicErr = h.handleSendMessage(nil, chainState, tx, method, inputData[4:], common.Address{}, blockTime)
 	default:
 		logicErr = fmt.Errorf("method '%s' không được hỗ trợ", method.Name)
 		logger.Error(logicErr.Error())

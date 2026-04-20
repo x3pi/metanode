@@ -15,7 +15,7 @@ pragma solidity ^0.8.20;
 contract CrossChainGateway {
     enum MessageType {
         ASSET_TRANSFER, // Bridge native coin
-        CONTRACT_CALL   // Remote contract execution
+        CONTRACT_CALL // Remote contract execution
     }
 
     enum MessageStatus {
@@ -28,6 +28,7 @@ contract CrossChainGateway {
     // ══════════════════════════════════════════════════════════════════════════
 
     struct CrossChainPacket {
+        bytes32 messageId;
         uint256 sourceNationId;
         uint256 destNationId;
         uint256 timestamp;
@@ -88,7 +89,7 @@ contract CrossChainGateway {
     event MessageSent(
         uint256 indexed sourceNationId,
         uint256 indexed destNationId,
-        bytes32 indexed msgId,  // txHash gốc của user — dùng để filter và track OutboundResult
+        bytes32 indexed msgId, // txHash gốc của user — dùng để filter và track OutboundResult
         bool isEVM,
         address sender,
         address target,
@@ -100,7 +101,7 @@ contract CrossChainGateway {
     event MessageReceived(
         uint256 indexed sourceNationId,
         uint256 indexed destNationId,
-        bytes32 indexed msgId,  // txHash gốc — scanner chain A đọc Topics[3] để set ConfirmationParam.MessageId
+        bytes32 indexed msgId, // txHash gốc — scanner chain A đọc Topics[3] để set ConfirmationParam.MessageId
         MessageType msgType,
         MessageStatus status,
         bytes returnData,
@@ -114,7 +115,7 @@ contract CrossChainGateway {
     );
 
     event OutboundResult(
-        bytes32 indexed msgId,  // txHash gốc — client subscribe event này filter theo msgId để biết tx A đã hoàn tất
+        bytes32 indexed msgId, // txHash gốc — client subscribe event này filter theo msgId để biết tx A đã hoàn tất
         address indexed sender,
         MessageType msgType,
         bool isSuccess,
@@ -158,7 +159,10 @@ contract CrossChainGateway {
     /// @param destinationId Nation ID của chain đích (phải registered)
     /// @dev sourceId được Go handler set từ cached chainId,
     ///      destinationId được validate against registeredChainIds
-    function lockAndBridge(address recipient, uint256 destinationId) external payable {
+    function lockAndBridge(
+        address recipient,
+        uint256 destinationId
+    ) external payable {
         require(recipient != address(0), "Recipient address cannot be zero");
         require(msg.value > 0, "Amount must be greater than zero");
         require(destinationId > 0, "Invalid destinationId");
@@ -169,19 +173,21 @@ contract CrossChainGateway {
 
         // 2. Không lưu vào lockedBalances / outboundMessages vì Go layer không làm trò đó
         // (Tiết kiệm gas lưu trữ cực lớn, chỉ Rely vào Event sinh ra)
-        
+
         bytes memory payload = abi.encode(recipient);
         uint256 sourceId = block.chainid; // Lấy chuẩn chainId thật của node
 
         // 3. Bắn Event MessageSent: Truyền tham số hệt như Go handler packer
         // isEVM=true: Solidity không biết txHash — Go handler sẽ overwrite toàn bộ event này (isEVM=false)
         // msgId = keccak256(context) — unique đủ dùng cho EVM direct call edge case
-        bytes32 msgId = keccak256(abi.encodePacked(msg.sender, block.number, destinationId, msg.value));
+        bytes32 msgId = keccak256(
+            abi.encodePacked(msg.sender, block.number, destinationId, msg.value)
+        );
         emit MessageSent(
             sourceId,
             destinationId,
             msgId,
-            true,               // isEVM = true vì đang chạy trong lõi Solidity của EVM
+            true, // isEVM = true vì đang chạy trong lõi Solidity của EVM
             msg.sender,
             address(0),
             msg.value,
@@ -199,24 +205,31 @@ contract CrossChainGateway {
         bytes calldata payload,
         uint256 destinationId
     ) external payable {
-        require(target != address(0), "Target cannot be zero (use lockAndBridge for asset transfer)");
+        require(
+            target != address(0),
+            "Target cannot be zero (use lockAndBridge for asset transfer)"
+        );
         require(destinationId > 0, "Invalid destinationId");
 
         // 1. BURN: Nếu người gửi kẹp msg.value > 0, ta burn y hệt Go (processNativeMintBurn)
         if (msg.value > 0) {
-            payable(0x000000000000000000000000000000000000dEaD).transfer(msg.value);
+            payable(0x000000000000000000000000000000000000dEaD).transfer(
+                msg.value
+            );
         }
 
         uint256 sourceId = block.chainid;
 
         // 2. Bắn Event MessageSent chuẩn xác
         // msgId = keccak256(context) — Go handler (isEVM=false) sẽ overwrite bằng txHash thật
-        bytes32 msgId = keccak256(abi.encodePacked(msg.sender, target, payload, block.number));
+        bytes32 msgId = keccak256(
+            abi.encodePacked(msg.sender, target, payload, block.number)
+        );
         emit MessageSent(
             sourceId,
             destinationId,
             msgId,
-            true,               // isEVM = true
+            true, // isEVM = true
             msg.sender,
             target,
             msg.value,
@@ -232,7 +245,10 @@ contract CrossChainGateway {
     /// @notice Loại event mà embassy gửi lên
     /// @dev INBOUND = MessageSent phát trên remote chain → cần thực thi trên chain này
     ///      CONFIRMATION = MessageReceived phát trên remote chain → cần xác nhận outbound
-    enum EventKind { INBOUND, CONFIRMATION }
+    enum EventKind {
+        INBOUND,
+        CONFIRMATION
+    }
 
     /// @notice Unified event struct — gộp cả inbound lẫn confirmation
     /// @dev Khi eventKind = INBOUND:   dùng packet
@@ -257,9 +273,7 @@ contract CrossChainGateway {
     function batchSubmit(
         EmbassyEvent[] calldata events,
         bytes calldata embassyPubKey
-    ) external onlyOwner {
-    }
-
+    ) external onlyOwner {}
 
     receive() external payable {
         totalLocked += msg.value;

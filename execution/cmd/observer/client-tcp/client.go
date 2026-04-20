@@ -158,7 +158,7 @@ func NewClient(
 		clientContext.ConnectionsManager.AddParentConnection(parentConn)
 		clientContext.SocketServer.OnConnect(parentConn)
 		go clientContext.SocketServer.HandleConnection(parentConn)
-		go clientContext.SocketServer.Listen("0.0.0.0:8080")
+		clientContext.SocketServer.StartWorkerPool() // Khởi động Worker Pool để duyệt message trong requestChan
 		client.startKeepAliveLoop()
 		client.clientContext.SocketServer.AddOnDisconnectedCallBack(
 			client.handleParentDisconnectWithResubscribe,
@@ -169,6 +169,87 @@ func NewClient(
 	client.transactionController = controllers.NewTransactionController(
 		clientContext,
 	)
+	return &client, nil
+}
+
+// NewClientNonBlocking tạo Client mà KHÔNG block nếu kết nối thất bại.
+// Thử kết nối 1 lần: thành công → client sẵn sàng; thất bại → chạy reconnect background.
+// IsParentConnected() sẽ trả false cho đến khi kết nối thành công.
+func NewClientNonBlocking(
+	config *c_config.ClientConfig,
+) (*Client, error) {
+	clientContext := &client_context.ClientContext{
+		Config: config,
+	}
+	client := Client{
+		clientContext:        clientContext,
+		accountStateChan:     make(chan types.AccountState, 2000),
+		receiptChan:          make(chan types.Receipt, 1),
+		receiptRequests:      make(chan receiptRequest),
+		deviceKeyChan:        make(chan types.LastDeviceKey, 1),
+		transactionErrorChan: make(chan *mt_transaction.TransactionHashWithError, 1),
+	}
+
+	go client.runReceiptRouter()
+
+	clientContext.KeyPair = bls.NewKeyPair(config.PrivateKey())
+	clientContext.MessageSender = p_network.NewMessageSender(config.Version())
+	clientContext.ConnectionsManager = p_network.NewConnectionsManager()
+	clientContext.Handler = c_network.NewHandler(
+		client.accountStateChan,
+		client.receiptChan,
+		client.deviceKeyChan,
+		client.transactionErrorChan,
+	)
+	clientContext.Handler.SetPendingRpcRequests(&client.pendingRpcRequests)
+	clientContext.Handler.SetPendingChainRequests(&client.pendingChainRequests)
+	clientContext.SocketServer, _ = p_network.NewSocketServer(
+		nil,
+		clientContext.KeyPair,
+		clientContext.ConnectionsManager,
+		clientContext.Handler,
+		config.NodeType(),
+		config.Version(),
+	)
+	client.transactionController = controllers.NewTransactionController(clientContext)
+
+	// Thử kết nối 1 lần duy nhất — không block
+	parentConn := p_network.NewConnection(
+		common.HexToAddress(config.ParentAddress),
+		config.ParentConnectionType,
+		nil,
+	)
+	parentConn.SetRealConnAddr(config.ParentConnectionAddress)
+
+	if err := parentConn.Connect(); err != nil {
+		logger.Warn("⚠️ [NonBlocking] Cannot connect to %s: %v → retry in background",
+			config.ParentConnectionAddress, err)
+		go func() {
+			for {
+				time.Sleep(3 * time.Second)
+				if reconnErr := client.ReconnectToParent(); reconnErr == nil {
+					logger.Info("✅ [NonBlocking] Connected to %s (background)", config.ParentConnectionAddress)
+					go clientContext.SocketServer.HandleConnection(parentConn)
+					clientContext.SocketServer.StartWorkerPool()
+					client.startKeepAliveLoop()
+					client.clientContext.SocketServer.AddOnDisconnectedCallBack(
+						client.handleParentDisconnectWithResubscribe,
+					)
+					break
+				}
+			}
+		}()
+	} else {
+		clientContext.ConnectionsManager.AddParentConnection(parentConn)
+		clientContext.SocketServer.OnConnect(parentConn)
+		go clientContext.SocketServer.HandleConnection(parentConn)
+		clientContext.SocketServer.StartWorkerPool()
+		client.startKeepAliveLoop()
+		client.clientContext.SocketServer.AddOnDisconnectedCallBack(
+			client.handleParentDisconnectWithResubscribe,
+		)
+	}
+
 	return &client, nil
 }
 
@@ -759,11 +840,9 @@ func (client *Client) ReadTransaction(
 	maxGasPrice uint64,
 	maxTimeUse uint64,
 ) (types.Receipt, error) {
-
 	if client.clientContext == nil || client.clientContext.ConnectionsManager == nil {
 		return nil, fmt.Errorf("client not ready: clientContext or ConnectionsManager is nil")
 	}
-
 	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 	if parentConn == nil || !parentConn.IsConnect() {
 		logger.Error("Parent connection is not connected, reconnecting...")
@@ -772,21 +851,16 @@ func (client *Client) ReadTransaction(
 		}
 	}
 	// Gửi yêu cầu lấy account state
-	client.clientContext.MessageSender.SendBytes(parentConn, command.GetAccountState, fromAddress.Bytes())
 	lastDeviceKey := common.HexToHash("0000000000000000000000000000000000000000000000000000000000000000")
 	newDeviceKey := common.HexToHash("0000000000000000000000000000000000000000000000000000000000000000")
-	as := <-client.accountStateChan
-	pendingBalance := as.PendingBalance()
-	logger.Info("[Client] PendingBalance : %s", pendingBalance.String())
 	bRelatedAddresses := make([][]byte, len(relatedAddress))
 	for i, v := range relatedAddress {
 		bRelatedAddresses[i] = v.Bytes()
 	}
-	logger.Info("[Client] bRelatedAddresses length : %d", len(bRelatedAddresses))
 	tx, err := client.transactionController.ReadTransaction(
 		fromAddress,
 		toAddress,
-		pendingBalance,
+		big.NewInt(0),
 		amount,
 		maxGas,
 		maxGasPrice,
@@ -805,7 +879,6 @@ func (client *Client) ReadTransaction(
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("[Client] Receipt found with Tx Hash : %s", receipt.TransactionHash().Hex())
 	return receipt, nil
 }
 
@@ -984,7 +1057,6 @@ func (client *Client) SendTransactionWithDeviceKey(
 		fromAddress.Bytes(),
 	)
 	logger.Info("TcpRemoteAddr: %v", parentConn.TcpRemoteAddr())
-
 	logger.Info("TcpLocalAddr: %v", parentConn.TcpLocalAddr())
 	// Lắng nghe tài khoản trong kênh accountStateChan bằng for range
 	for as := range client.accountStateChan {
@@ -1061,7 +1133,7 @@ func (client *Client) SendTransactionWithDeviceKey(
 
 		select {
 		case receipt := <-responseCh:
-			logger.Info("Receipt Data: %v", receipt)
+			// logger.Info("Receipt Data: %v", receipt)
 			return receipt, nil
 		case txErr := <-client.transactionErrorChan:
 			client.receiptRequests <- receiptRequest{
@@ -1576,4 +1648,12 @@ func (client *Client) SendTransactionWithFullInfo(
 
 func (s *Client) GetMtnAddress() common.Address {
 	return s.clientContext.KeyPair.Address()
+}
+
+// GetNodeAddr trả về địa chỉ IP:port của node mà client đang kết nối (dùng cho debug log).
+func (s *Client) GetNodeAddr() string {
+	if s.clientContext != nil && s.clientContext.Config != nil {
+		return s.clientContext.Config.ParentConnectionAddress
+	}
+	return "unknown"
 }

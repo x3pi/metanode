@@ -49,7 +49,7 @@ type inboundPacketData struct {
 	Value          *big.Int
 	Payload        []byte
 	BlockNumber    *big.Int
-	MsgId          [32]byte // txHash gốc của user trên chain nguồn (từ MessageSent Topics[3])
+	MessageId      [32]byte // txHash gốc của user trên chain nguồn (từ MessageSent Topics[3])
 }
 
 type confirmationData struct {
@@ -153,10 +153,11 @@ func (h *CrossChainHandler) IsBatchSubmitTx(inputData []byte) bool {
 
 // dùng trong virtual
 type InboundCallTarget struct {
-	Target    common.Address
-	Sender    common.Address
-	Payload   []byte
-	Recipient common.Address // rỗng nếu Target != address{} (sendMessage path)
+	Target         common.Address
+	Sender         common.Address
+	SourceNationId *big.Int
+	Payload        []byte
+	Recipient      common.Address // rỗng nếu Target != address{} (sendMessage path)
 }
 
 //   - sendMessage path (Target != address{}): lấy Target + Payload để virtual processor
@@ -180,48 +181,66 @@ func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCal
 		return nil
 	}
 
-	// addrType dùng để ABI-decode recipient từ payload của lockAndBridge
-	addrType, addrTypeErr := abi.NewType("address", "", nil)
-
 	var targets []InboundCallTarget
 	for i := 0; i < eventsLen; i++ {
 		ev := abihelper.ReflectIndex(eventsVal, i)
 		eventKind, err := abihelper.ReflectUint8(ev, "EventKind")
-		if err != nil || eventKind != 0 { // chỉ quan tâm INBOUND (eventKind=0)
-			continue
-		}
-		pkt, err := reflectInboundPacket(ev)
 		if err != nil {
 			continue
 		}
 
-		if pkt.Target != (common.Address{}) {
-			// ── sendMessage path: dùng EVM dry-run với đúng payload ────────────
-			targets = append(targets, InboundCallTarget{
-				Target:  pkt.Target,
-				Sender:  pkt.Sender,
-				Payload: pkt.Payload,
-			})
-		} else {
-			// ── lockAndBridge path: target rỗng, parse payload lấy recipient ──
-			// Solidity: bytes memory payload = abi.encode(recipient);
-			// → payload = ABI-encoded address (32 bytes zero-padded)
-			var recipient common.Address
-			if addrTypeErr == nil && len(pkt.Payload) >= 32 {
-				parsedVals, parseErr := abi.Arguments{{Type: addrType}}.Unpack(pkt.Payload)
-				if parseErr == nil && len(parsedVals) > 0 {
-					if addr, ok := parsedVals[0].(common.Address); ok {
-						recipient = addr
+		if eventKind == 0 { // INBOUND
+			pkt, err := reflectInboundPacket(ev)
+			if err != nil {
+				continue
+			}
+
+			if pkt.Target != (common.Address{}) {
+				// ── sendMessage path: dùng EVM dry-run với đúng payload ────────────
+				targets = append(targets, InboundCallTarget{
+					Target:         pkt.Target,
+					Sender:         pkt.Sender,
+					SourceNationId: pkt.SourceNationId,
+					Payload:        pkt.Payload,
+				})
+			} else {
+				// ── lockAndBridge path: target rỗng, parse payload lấy recipient ──
+				// Đảm bảo logic parse hoàn toàn khớp với executeMintForInbound:
+				var recipient common.Address
+				if len(pkt.Payload) >= 20 {
+					if len(pkt.Payload) >= 32 {
+						recipient = common.BytesToAddress(pkt.Payload[12:32])
+					} else {
+						recipient = common.BytesToAddress(pkt.Payload)
 					}
 				}
+
+				// Luôn add vào targets để virtual processor thêm Sender + Recipient vào relatedAddresses
+				targets = append(targets, InboundCallTarget{
+					Target:         common.Address{}, // zero = lockAndBridge, không chạy EVM dry-run
+					Sender:         pkt.Sender,
+					SourceNationId: pkt.SourceNationId,
+					Payload:        pkt.Payload,
+					Recipient:      recipient,
+				})
 			}
-			// Luôn add vào targets để virtual processor thêm Sender + Recipient vào relatedAddresses
-			targets = append(targets, InboundCallTarget{
-				Target:    common.Address{}, // zero = lockAndBridge, không chạy EVM dry-run
-				Sender:    pkt.Sender,
-				Payload:   pkt.Payload,
-				Recipient: recipient,
-			})
+		} else if eventKind == 1 { // CONFIRMATION
+			conf, err := reflectConfirmation(ev)
+			if err != nil {
+				continue
+			}
+			if !conf.IsSuccess {
+				// ── CONFIRMATION fail path: MINT hoàn tiền cho người gửi ──
+				// Đảm bảo virtual processor thu thập conf.Sender vào relatedAddresses
+				// để grouptxns có thể gom nhóm các giao dịch chạm vào cùng user,
+				// tránh lỗi state divergence.
+				targets = append(targets, InboundCallTarget{
+					Target:    common.Address{}, // không chạy EVM dry-run
+					Sender:    conf.Sender,
+					Payload:   nil,
+					Recipient: conf.Sender,
+				})
+			}
 		}
 	}
 	return targets
@@ -262,7 +281,6 @@ func (h *CrossChainHandler) handleBatchSubmit(
 	method *abi.Method,
 	inputData []byte,
 	mvmId common.Address,
-	enableTrace bool,
 	blockTime uint64,
 ) ([]types.EventLog, types.ExecuteSCResult, error) {
 
@@ -301,16 +319,14 @@ func (h *CrossChainHandler) handleBatchSubmit(
 				logger.Error("[BatchSubmit] event[%d]: read packet failed: %v", i, err)
 				continue
 			}
-			// Extract msgId (txHash gốc) từ Confirmation.MessageId được scanner carry theo
-			pkt.MsgId = extractMsgIdFromInboundEvent(ev)
 			// 🔍 [FORK-DEBUG] Log chi tiết INBOUND event để so sánh node
-			logger.Info("🔍 [FORK-DEBUG][%d] INBOUND: src=%s→dest=%s sender=%s value=%s blk=%s msgId=%x",
+			logger.Info("🔍 [FORK-DEBUG][%d] INBOUND: src=%s→dest=%s sender=%s value=%s blk=%s messageId=%x",
 				i, pkt.SourceNationId, pkt.DestNationId,
-				pkt.Sender.Hex()[:10], pkt.Value, pkt.BlockNumber, pkt.MsgId[:8])
+				pkt.Sender.Hex()[:10], pkt.Value, pkt.BlockNumber, pkt.MessageId[:8])
 			// Luôn collect logs kể cả khi exErr != nil:
 			// executeMintForInbound emit MessageReceived(status=FAILED) ngị cả khi mint lỗi,
 			// event đó vẫn cần được propagate để observer biết item nào thất bại.
-			logs, exErr := h.executeMintForInbound(ctx, chainState, tx, pkt, mvmId, enableTrace, blockTime)
+			logs, exErr := h.executeMintForInbound(ctx, chainState, tx, pkt, blockTime)
 			if exErr != nil {
 				logger.Error("[BatchSubmit] executeMintForInbound hard-failed event[%d] (no event emitted): %v", i, exErr)
 			} else {
@@ -326,7 +342,7 @@ func (h *CrossChainHandler) handleBatchSubmit(
 			logger.Info("🔍 [FORK-DEBUG][%d] CONFIRMATION: msgId=%x isSuccess=%v srcBlk=%s sender=%s val=%s",
 				i, conf.MessageId[:8], conf.IsSuccess, conf.SourceBlockNumber,
 				conf.Sender.Hex()[:10], conf.Value)
-			logs, exErr := h.executeConfirmation(ctx, chainState, tx, conf, mvmId, enableTrace, blockTime)
+			logs, exErr := h.executeConfirmation(ctx, chainState, tx, conf, blockTime)
 			if exErr != nil {
 				logger.Error("[BatchSubmit] executeConfirmation failed event[%d]: %v", i, exErr)
 			} else {
@@ -364,6 +380,10 @@ func reflectInboundPacket(ev reflect.Value) (*inboundPacketData, error) {
 		return nil, err
 	}
 
+	messageId, err := abihelper.ReflectBytes32(pktField, "MessageId")
+	if err != nil {
+		return nil, fmt.Errorf("packet.MessageId: %v", err)
+	}
 	sourceNationId, err := abihelper.ReflectBigInt(pktField, "SourceNationId")
 	if err != nil {
 		return nil, fmt.Errorf("packet.SourceNationId: %v", err)
@@ -402,7 +422,7 @@ func reflectInboundPacket(ev reflect.Value) (*inboundPacketData, error) {
 		Value:          value,
 		Payload:        payload,
 		BlockNumber:    blockNumber,
-		// MsgId được carry từ scanner qua Confirmation.MessageId của EmbassyEvent INBOUND
+		MessageId:      messageId,
 	}, nil
 }
 
