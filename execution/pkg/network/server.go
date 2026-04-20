@@ -82,7 +82,7 @@ func NewSocketServer(
 	return s, nil
 }
 
-func (s *SocketServer) startWorkerPool() {
+func (s *SocketServer) StartWorkerPool() {
 	workerCount := s.config.HandlerWorkerPoolSize
 
 	s.wg.Add(workerCount)
@@ -132,7 +132,7 @@ func (s *SocketServer) startWorkerPool() {
 	}
 
 	// Log worker pool stats periodically
-	go s.logStats(&activeWorkers, &processedRequests, workerCount)
+	// go s.logStats(&activeWorkers, &processedRequests, workerCount)
 }
 
 // HandleConnection processes commands from a single connection.
@@ -261,7 +261,7 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 }
 
 func (s *SocketServer) Listen(listenAddress string) error {
-	s.startWorkerPool()
+	s.StartWorkerPool()
 
 	var err error
 	s.listener, err = net.Listen("tcp", listenAddress)

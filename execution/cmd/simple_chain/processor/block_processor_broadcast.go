@@ -20,6 +20,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 )
 
@@ -53,10 +54,44 @@ func PrepareChainEventData(bl types.Block) *mt_filters.ChainEvent {
 	return &mt_filters.ChainEvent{Header: header}
 }
 
+func (bp *BlockProcessor) checkForConfigUpdates(allEventLogs []types.EventLog) {
+	// Config registry address
+	configHex := bp.chainState.GetConfig().CrossChain.ConfigContract
+	if configHex == "" {
+		return
+	}
+	configAddr := common.HexToAddress(configHex)
+
+	ccHandler, err := cross_chain_handler.GetCrossChainHandler()
+	if err != nil || ccHandler == nil {
+		return
+	}
+	configABI := ccHandler.GetConfigABI()
+
+	// Lấy Topic ID trực tiếp từ ABI
+	embassyAddedTopic := configABI.Events["EmbassyAdded"].ID.Hex()
+	embassyRemovedTopic := configABI.Events["EmbassyRemoved"].ID.Hex()
+	chainRegisteredTopic := configABI.Events["ChainRegistered"].ID.Hex()
+	chainUnregisteredTopic := configABI.Events["ChainUnregistered"].ID.Hex()
+
+	for _, eventLog := range allEventLogs {
+		if common.Address(eventLog.Address()) == configAddr {
+			if len(eventLog.Topics()) > 0 {
+				topic0 := common.BytesToHash([]byte(eventLog.Topics()[0])).Hex()
+				if topic0 == embassyAddedTopic || topic0 == embassyRemovedTopic ||
+					topic0 == chainRegisteredTopic || topic0 == chainUnregisteredTopic {
+					logger.Info("🔄 [CrossChain] Broadcast detected ConfigRegistry event: %s", topic0)
+					ccHandler.InvalidateConfigCache()
+					return // Just trigger invalidate once per block is enough
+				}
+			}
+		}
+	}
+}
+
 // broadcastEventsOnly broadcasts only events, not receipts
 // Used by master node (no client connections)
 func (bp *BlockProcessor) broadcastEventsOnly(lastBlock types.Block, allEventLogs []types.EventLog) {
-
 	if bp.eventSystem != nil {
 		chainEventData := PrepareChainEventData(lastBlock)
 		syncData := PrepareSyncData(lastBlock)
@@ -67,6 +102,7 @@ func (bp *BlockProcessor) broadcastEventsOnly(lastBlock types.Block, allEventLog
 	// Receipts will be broadcast by child node when receiving block from master
 	if len(allEventLogs) > 0 {
 		mapEventLogs := smart_contract_db.GroupEventLogsByAddress(allEventLogs)
+		go bp.checkForConfigUpdates(allEventLogs)
 		go bp.BroadCastEventLogs(mapEventLogs)
 	} else {
 		logger.Debug("broadcastEventsOnly: no event logs to broadcast",
@@ -78,6 +114,7 @@ func (bp *BlockProcessor) broadcastEventsOnly(lastBlock types.Block, allEventLog
 
 // broadcastEventsAndReceipts broadcasts both events and receipts
 func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allReceipts []types.Receipt, allEventLogs []types.EventLog) {
+
 	// Add context with timeout to prevent goroutine leak
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -148,6 +185,7 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 	}
 	if len(allEventLogs) > 0 {
 		mapEventLogs := smart_contract_db.GroupEventLogsByAddress(allEventLogs)
+		go bp.checkForConfigUpdates(allEventLogs)
 		go bp.BroadCastEventLogs(mapEventLogs)
 	} else {
 		logger.Debug("broadcastEventsAndReceipts: no event logs to broadcast",

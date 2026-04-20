@@ -2,10 +2,8 @@ package vm_processor
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -72,24 +70,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if span != nil {
 			span.AddEvent("HandlingReadOnlyTransaction", nil)
 		}
-		mvmIdReadOnly := mvm.GenerateUniqueMvmId()if tx.GetReadOnly() {
-		if span != nil {
-			span.AddEvent("HandlingReadOnlyTransaction", nil)
-		}
 		mvmIdReadOnly := mvm.GenerateUniqueMvmId()
-		if span != nil {
-			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
-		}
-		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
-		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
-		result := vmP.readOnlyCall(execCtx, tx, mvmROnly)
-		if span != nil {
-			span.SetAttribute("readOnlyResultStatus", result.ReceiptStatus().String())
-			span.SetAttribute("readOnlyResultGasUsed", result.GasUsed())
-			span.SetAttribute("readOnlyResultReturnHex", hex.EncodeToString(result.Return()))
-		}
-		return result, nil
-	}
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
@@ -470,7 +451,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 ) (types.ExecuteSCResult, error) {
 	// 1. Khởi tạo MVMApi nội bộ cho quá trình chuyển tiền nghiêm ngặt
 	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), true)
-	
+
 	// 2. CHẶT CHẼ: Ràng buộc Related Addresses theo yêu cầu an toàn
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses())
 
