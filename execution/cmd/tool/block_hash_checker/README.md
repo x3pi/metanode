@@ -32,6 +32,14 @@ go run main.go --nodes "node0=http://localhost:8757,node1=http://localhost:10747
 Cú pháp cho mạng 5 Nodes:
 
 ```bash
+
+# single machine
+go run main.go --watch --interval 5s --check-last 10 --nodes "m0=http://127.0.0.1:8757,m1=http://127.0.0.1:10747,m2=http://127.0.0.1:10749,m3=http://127.0.0.1:10750,m4=http://127.0.0.1:10748"
+
+# on multiple machine
+go run main.go --watch --interval 5s --check-last 10 --nodes "m0=http://192.168.1.234:8757,m1=http://192.168.1.234:10747,m2=http://192.168.1.233:10749,m3=http://192.168.1.231:10750,m4=http://192.168.1.231:10748"
+
+
 # single machine
 go run main.go --watch --interval 5s --check-last 10 --nodes "m0=http://localhost:8757,s0=http://localhost:8646,m1=http://localhost:10747,s1=http://localhost:10646,m2=http://localhost:10749,s2=http://localhost:10650,m3=http://localhost:10750,s3=http://localhost:10651,m4=http://localhost:10748,s4=http://localhost:10649"
 

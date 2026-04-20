@@ -110,7 +110,11 @@ if [ $START_STEP -le 6 ]; then
     echo ""
     echo "📌 BƯỚC 6: Load Test TPS (20,000 txs)..."
     cd "$PROJECT_ROOT/cmd/tool/test_tps/tps_blast_cc"
-    go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=500
+    if [ "$DEPLOY_MODE" == "single" ]; then
+        go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=500
+    else
+        go run main.go --count 20000 --parallel_native=true --rounds 1 --load_balance=true --batch=500
+    fi
     if [ $? -ne 0 ]; then echo "❌ Lỗi ở Load Test TPS (Bước 6)"; exit 1; fi
 fi
 

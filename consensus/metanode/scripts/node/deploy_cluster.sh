@@ -190,7 +190,6 @@ if $DO_STOP; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t go-sub-\$id 2>/dev/null || true
                     tmux kill-session -t metanode-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
@@ -202,7 +201,6 @@ if $DO_STOP; then
                 sleep 3
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t go-sub-\$id 2>/dev/null || true
                     tmux kill-session -t metanode-\$id 2>/dev/null || true
                 done
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
@@ -281,7 +279,6 @@ if $DO_PUSH || $DO_START; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t go-sub-\$id 2>/dev/null || true
                     tmux kill-session -t metanode-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
@@ -293,7 +290,6 @@ if $DO_PUSH || $DO_START; then
                 sleep 3
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t go-sub-\$id 2>/dev/null || true
                     tmux kill-session -t metanode-\$id 2>/dev/null || true
                 done
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
@@ -312,7 +308,6 @@ if $DO_PUSH; then
     log_step "Phase 3: Creating remote directories + pushing files"
 
     GO_MASTER_CONFIGS=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-    GO_SUB_CONFIGS=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
     RUST_CONFIGS=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
     for server in $SERVERS; do
@@ -361,9 +356,8 @@ if $DO_PUSH; then
                 mkdir -p '${REMOTE_METANODE}/logs/node_${id}'
             "
 
-            # Go configs (master + sub)
+            # Go configs (master)
             rsync_cmd "${LOCAL_GO_SIMPLE}/${GO_MASTER_CONFIGS[$id]}" "$server" "${REMOTE_GO_SIMPLE}/${GO_MASTER_CONFIGS[$id]}"
-            rsync_cmd "${LOCAL_GO_SIMPLE}/${GO_SUB_CONFIGS[$id]}" "$server" "${REMOTE_GO_SIMPLE}/${GO_SUB_CONFIGS[$id]}"
 
             # Rust config + keys
             rsync_cmd "${LOCAL_METANODE}/${RUST_CONFIGS[$id]}" "$server" "${REMOTE_METANODE}/${RUST_CONFIGS[$id]}"
@@ -520,27 +514,7 @@ if $DO_START; then
         done
     done
 
-    # ─── Start Go Subs ──────────────────────────────────────────────
-    log_step "Phase 5c: Starting Go Subs"
 
-    GO_SUB_CONFIGS=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
-
-    for server in $SERVERS; do
-        nodes=$(get_nodes_for_server "$server")
-        for id in $nodes; do
-            log_info "Starting Go Sub $id on $server..."
-            XAPIAN="sample/node${id}/data-write/data/xapian_node"
-
-            ssh_cmd "$server" "
-                cd '${REMOTE_GO_SIMPLE}'
-                LOG_DIR='${REMOTE_METANODE}/logs'
-                tmux new-session -d -s 'go-sub-${id}' -c '${REMOTE_GO_SIMPLE}' \
-                    \"ulimit -n 100000; export GOTOOLCHAIN=${GO_TOOLCHAIN} && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='${XAPIAN}' && export MVM_LOG_DIR=\\\"\${LOG_DIR}/node_${id}\\\" && ./simple_chain -config=${GO_SUB_CONFIGS[$id]} >> \\\"\${LOG_DIR}/node_${id}/go-sub-stdout.log\\\" 2>&1\"
-            "
-            log_ok "Go Sub $id started"
-            sleep 1
-        done
-    done
 
     sleep 5
 
@@ -582,7 +556,7 @@ for server in $SERVERS; do
     nodes=$(get_nodes_for_server "$server")
     echo -e "${CYAN}  📍 $server — Nodes: [$nodes]${NC}"
     for id in $nodes; do
-        echo -e "     tmux: metanode-$id | go-master-$id | go-sub-$id"
+        echo -e "     tmux: metanode-$id | go-master-$id"
     done
 done
 

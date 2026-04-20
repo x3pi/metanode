@@ -2,12 +2,14 @@
     "version": "0.0.1.0",
     "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
     "parent_address": "0xac1137f94f0a4cf8fdc0f4fb6f69a8be98032041",
-    "parent_connection_address": "127.0.0.1:4200",
-    "rpc_1":"127.0.0.1:8646",
+    "parent_connection_address": "127.0.0.1:4201",
+    "rpc_0":"127.0.0.1:8757",
+    "connection_node_1": "127.0.0.1:6201",
+    "rpc_1":"127.0.0.1:10747",
     "connection_node_2": "192.168.1.233:6211",
-    "rpc_2":"192.168.1.233:10650",
+    "rpc_2":"192.168.1.233:10749",
     "connection_node_3": "192.168.1.231:6221",
-    "rpc_3":"192.168.1.231:10651",
+    "rpc_3":"192.168.1.231:10750",
     "parent_connection_type": "client",
     "chain_id": 991
 }

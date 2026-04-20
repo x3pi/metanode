@@ -15,11 +15,8 @@
 #   Rust:  consensus/metanode/config/node_{0..4}.toml
 #          - network_address (IP:port P2P consensus)
 #          - peer_rpc_addresses (danh sách IP peer discovery)
-#   Go:    execution/cmd/simple_chain/config-master-node{0..4}.json
+#          execution/cmd/simple_chain/config-master-node{0..4}.json
 #          - meta_node_rpc_address (Rust RPC endpoint)
-#          execution/cmd/simple_chain/config-sub-node{0..4}.json
-#          - meta_node_rpc_address (Rust RPC endpoint)
-#          - nodes.master_address (Go Master endpoint cho sub node)
 #   Tools: execution/cmd/tool/tps_blast/run_multinode_load.sh
 #          - NODES, RPCS arrays, block_hash_checker nodes
 #          execution/cmd/tool/tps_blast/run_node0_only_load.sh
@@ -61,8 +58,6 @@ RUST_RPC_PORTS=(10100 10101 10102 10103 10104)
 
 # Go Master connection ports per node
 GO_MASTER_CONN_PORTS=(4201 6201 6211 6221 6241)
-# Go Sub connection ports per node
-GO_SUB_CONN_PORTS=(4201 6201 6211 6221 6241)
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
 usage() {
@@ -85,7 +80,6 @@ usage() {
     echo -e "Files ảnh hưởng:"
     echo -e "  ${GREEN}Rust:${NC}  config/node_{0..4}.toml (network_address, peer_rpc_addresses)"
     echo -e "  ${GREEN}Go:${NC}    config-master-node{0..4}.json (meta_node_rpc_address)"
-    echo -e "  ${GREEN}Go:${NC}    config-sub-node{0..4}.json (meta_node_rpc_address, master_address)"
     exit 0
 }
 
@@ -229,30 +223,7 @@ for N in $(seq 0 $((NODE_COUNT - 1))); do
         "meta_node_rpc_address IP → ${NODE_IP}"
 done
 
-# ─── Update Go Sub JSON Configs ──────────────────────────────────────────────
-echo -e "\n${BOLD}═══ Go Sub JSON (config-sub-node{0..4}.json) ═══${NC}"
 
-for N in $(seq 0 $((NODE_COUNT - 1))); do
-    SUB_JSON="$GO_CONFIG_DIR/config-sub-node${N}.json"
-    if [ ! -f "$SUB_JSON" ]; then
-        echo -e "  ${YELLOW}⚠️  Bỏ qua config-sub-node${N}.json (không tồn tại)${NC}"
-        continue
-    fi
-
-    echo -e "\n  ${BOLD}📄 config-sub-node${N}.json${NC}"
-    NODE_IP="${IPS[$N]}"
-
-    # meta_node_rpc_address: thay IP, giữ port
-    safe_sed "$SUB_JSON" \
-        "s|\"meta_node_rpc_address\": \"[0-9.]*:|\"meta_node_rpc_address\": \"${NODE_IP}:|" \
-        "meta_node_rpc_address IP → ${NODE_IP}"
-
-    # nodes.master_address: thay IP, giữ port
-    # Kết nối Sub → Master trên cùng máy → dùng IP của node đó
-    safe_sed "$SUB_JSON" \
-        "s|\"master_address\": \"[0-9.]*:|\"master_address\": \"${NODE_IP}:|" \
-        "master_address IP → ${NODE_IP}"
-done
 
 # ─── Update TPS Blast Scripts ────────────────────────────────────────────────
 echo -e "\n${BOLD}═══ TPS Blast Scripts (run_multinode_load.sh, run_node0_only_load.sh) ═══${NC}"
@@ -327,13 +298,13 @@ fi
 # ─── Update Tool Config JSONs ────────────────────────────────────────────────
 echo -e "\n${BOLD}═══ Tool Configs (tx_sender, tps_blast, tps_benchmark_multi_node) ═══${NC}"
 
-# tx_sender/config.json — connects to node0 Sub port
+# tx_sender/config.json — connects to node0 Master port
 TX_SENDER_CFG="$GO_DIR/cmd/tool/tx_sender/config.json"
 if [ -f "$TX_SENDER_CFG" ]; then
     echo -e "\n  ${BOLD}📄 tx_sender/config.json${NC}"
     safe_sed "$TX_SENDER_CFG" \
-        "s|\"parent_connection_address\": \"[^\"]*\"|\"parent_connection_address\": \"${IPS[0]}:${GO_SUB_CONN_PORTS[0]}\"|" \
-        "parent_connection_address → ${IPS[0]}:${GO_SUB_CONN_PORTS[0]}"
+        "s|\"parent_connection_address\": \"[^\"]*\"|\"parent_connection_address\": \"${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}\"|" \
+        "parent_connection_address → ${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}"
 fi
 
 # tps_blast/config.json — connects to node0 Master port
@@ -345,13 +316,13 @@ if [ -f "$TPS_BLAST_CFG" ]; then
         "parent_connection_address → ${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}"
 fi
 
-# tps_benchmark_multi_node/config.json — connects to node0 Sub port
+# tps_benchmark_multi_node/config.json — connects to node0 Master port
 TPS_BENCH_CFG="$GO_DIR/cmd/tool/tps_benchmark_multi_node/config.json"
 if [ -f "$TPS_BENCH_CFG" ]; then
     echo -e "\n  ${BOLD}📄 tps_benchmark_multi_node/config.json${NC}"
     safe_sed "$TPS_BENCH_CFG" \
-        "s|\"parent_connection_address\": \"[^\"]*\"|\"parent_connection_address\": \"${IPS[0]}:${GO_SUB_CONN_PORTS[0]}\"|" \
-        "parent_connection_address → ${IPS[0]}:${GO_SUB_CONN_PORTS[0]}"
+        "s|\"parent_connection_address\": \"[^\"]*\"|\"parent_connection_address\": \"${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}\"|" \
+        "parent_connection_address → ${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}"
 fi
 
 # ─── Update Genesis JSON ─────────────────────────────────────────────────────
@@ -482,12 +453,6 @@ if ! $DRY_RUN; then
                 echo -e "    Master $N: ${GREEN}${ADDR}${NC}"
             fi
         fi
-        SUB_JSON="$GO_CONFIG_DIR/config-sub-node${N}.json"
-        if [ -f "$SUB_JSON" ]; then
-            ADDR=$(grep 'meta_node_rpc_address' "$SUB_JSON" | sed 's/.*: "//;s/".*//' | head -1 || true)
-            if [ -n "$ADDR" ]; then
-                echo -e "    Sub $N:    ${GREEN}${ADDR}${NC}"
-            fi
-        fi
+
     done
 fi
