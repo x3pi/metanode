@@ -114,12 +114,12 @@ impl InitializedNode {
                     None => Arc::new(crate::node::tx_submitter::NoOpTransactionSubmitter),
                 };
 
-            let socket_path = node_config
+            let _socket_path = node_config
                 .rust_tx_socket_path
                 .clone()
                 .unwrap_or_else(|| format!("/tmp/metanode-tx-{}.sock", node_config.node_id));
             let node_for_uds = node.clone();
-            let (is_transitioning_for_uds, pending_tx_queue, storage_path) = {
+            let (is_transitioning_for_uds, _pending_tx_queue, _storage_path) = {
                 let node_guard = node.lock().await;
                 (
                     node_guard.is_transitioning.clone(),

@@ -13,10 +13,10 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag, SystemTransaction};
 use prost::Message;
-use tokio::io::AsyncWriteExt;
+
 use tracing::{error, info, trace, warn};
 
-use super::persistence::{persist_last_sent_index, write_uvarint};
+use super::persistence::persist_last_sent_index;
 use super::proto::{ExecutableBlock, TransactionExe};
 use super::ExecutorClient;
 use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};

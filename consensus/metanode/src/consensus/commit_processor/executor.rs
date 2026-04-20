@@ -290,9 +290,22 @@ pub async fn dispatch_commit(
             && go_current_gei > 0
             && subdag.extract_end_of_epoch_transaction().is_none()
         {
+            // SNAPSHOT-FIX: Re-read Go GEI right before blocking.
+            // After snapshot restore, Go may have already advanced past this commit
+            // (via sync-first catch-up). If so, skip immediately instead of blocking
+            // the core_thread for 60s (which causes it to shutdown → permanent consensus death).
+            let fresh_go_gei = client.get_last_global_exec_index().await.unwrap_or(0);
+            if fresh_go_gei >= global_exec_index {
+                info!(
+                    "⏭️ [GEI GAP GUARD] Fresh check: Go GEI={} already >= commit GEI={}. Skipping (snapshot catch-up).",
+                    fresh_go_gei, global_exec_index
+                );
+                return Ok(1);
+            }
+
             info!(
                     "⏳ [GEI GAP GUARD] Commit GEI={} is {} ahead of Go GEI={}. Waiting for gap to close...",
-                    global_exec_index, global_exec_index - go_current_gei, go_current_gei
+                    global_exec_index, global_exec_index - fresh_go_gei, fresh_go_gei
                 );
 
             for attempt in 0..MAX_GAP_WAIT_ATTEMPTS {

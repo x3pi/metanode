@@ -87,8 +87,8 @@ impl TxSocketServer {
         client: Arc<dyn TransactionSubmitter>,
         node: Option<Arc<Mutex<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
-        peer_rpc_addresses: Vec<String>,
-        peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
+        _peer_rpc_addresses: Vec<String>,
+        _peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
     ) {
         use prost::bytes::Buf;
@@ -251,7 +251,7 @@ impl TxSocketServer {
             // Submission phase
             const MAX_BUNDLE_SIZE: usize = 60000;
             let total_tx_count = transactions_to_submit.len();
-            let mut total_submitted = 0usize;
+            // let mut total_submitted = 0usize;
 
             let chunks_list: Vec<Vec<Vec<u8>>> = if total_tx_count <= MAX_BUNDLE_SIZE {
                 vec![transactions_to_submit.clone()]
@@ -260,8 +260,8 @@ impl TxSocketServer {
             };
 
             let mut all_succeeded = true;
-            for (chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
-                let chunk_len = chunk_vec.len();
+            for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
+                // let chunk_len = chunk_vec.len();
                 
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
@@ -269,9 +269,9 @@ impl TxSocketServer {
 
                 match current_client.submit_no_wait(chunk_vec).await {
                     Ok(included_in_block_rx) => {
-                        total_submitted += chunk_len;
+                        // total_submitted += chunk_len;
                         tokio::spawn(async move {
-                            if let Ok((block_ref, _indices, status_receiver)) = included_in_block_rx.await {
+                            if let Ok((_block_ref, _indices, status_receiver)) = included_in_block_rx.await {
                                 tokio::spawn(async move {
                                     if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
                                         warn!("♻️ [FFI TX STATUS] Block {:?} Garbage Collected.", gc_block);

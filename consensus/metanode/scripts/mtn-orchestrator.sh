@@ -221,11 +221,7 @@ stop_session() {
     local session="$1"
     local label="$2"
 
-    if ! session_exists "$session"; then
-        return 0
-    fi
-
-    # Tìm PID thực của binary (simple_chain hoặc metanode), không phải bash wrapper
+    # Tìm PID thực của binary (simple_chain hoặc metanode)
     local real_pids=""
     if [[ "$session" == go-master-* ]]; then
         local node_id=${session#go-master-}
@@ -233,6 +229,15 @@ stop_session() {
     elif [[ "$session" == metanode-* ]]; then
         local node_id=${session#metanode-}
         real_pids=$(pgrep -f "metanode start.*node_${node_id}.toml" 2>/dev/null || true)
+    fi
+
+    # Lấy thêm các child processes nếu có
+    if [ -n "$real_pids" ]; then
+        local child_pids=""
+        for pid in $real_pids; do
+            child_pids="$child_pids $(pgrep -P "$pid" 2>/dev/null || true)"
+        done
+        real_pids="$real_pids $child_pids"
     fi
 
     # Fallback: nếu không tìm được binary PID, dùng tmux pane PID + children
@@ -390,7 +395,9 @@ cmd_start() {
             rm -rf "$GO_DIR/sample/node${i}/data"
             rm -rf "$GO_DIR/sample/node${i}/back_up"
             rm -rf "$GO_DIR/snapshot_data_node${i}"
+            rm -rf "$GO_DIR"/snapshot_*node${i}* 2>/dev/null || true
         done
+        rm -rf "$GO_DIR"/snapshot_data* 2>/dev/null || true
         log_step "Xóa logs..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
             if [ "$i" = "$exclude_node" ]; then continue; fi

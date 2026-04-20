@@ -32,7 +32,7 @@ use anyhow::Result;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 
 use crate::node::rpc_circuit_breaker::RpcCircuitBreaker;
 
@@ -50,9 +50,9 @@ use std::collections::BTreeMap;
 /// Client to send committed blocks to Go executor via Unix Domain Socket or TCP Socket
 /// Supports both local (Unix) and network (TCP) deployment
 pub struct ExecutorClient {
-    socket_address: SocketAddress, // Changed from socket_path: String
+    _socket_address: SocketAddress, // Changed from socket_path: String
     pub(crate) connection: Arc<Mutex<Option<SocketStream>>>, // Changed from UnixStream
-    pub(crate) request_socket_address: SocketAddress, // Changed from request_socket_path: String
+    _request_socket_address: SocketAddress, // Changed from request_socket_path: String
     pub(crate) request_connection: Arc<Mutex<Option<SocketStream>>>, // Changed from UnixStream
     enabled: bool,
     can_commit: bool, // Only node 0 can actually commit transactions to Go state
@@ -181,9 +181,9 @@ impl ExecutorClient {
         }
 
         Self {
-            socket_address,
+            _socket_address: socket_address,
             connection,
-            request_socket_address,
+            _request_socket_address: request_socket_address,
             request_connection,
             enabled,
             can_commit,

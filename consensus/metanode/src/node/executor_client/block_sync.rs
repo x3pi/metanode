@@ -1,10 +1,8 @@
 use anyhow::Result;
 use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::proto;
-use super::socket_stream::SocketStream;
 use super::ExecutorClient;
 
 impl ExecutorClient {
