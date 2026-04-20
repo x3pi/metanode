@@ -1096,8 +1096,8 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("Starting pprof server on localhost:6060")
-		logger.Error(http.ListenAndServe("localhost:6060", nil))
+		logger.Info("Starting pprof server on localhost:6069")
+		logger.Error(http.ListenAndServe("localhost:6069", nil))
 	}()
 
 	// Tạo custom transport với connection pooling và resilient settings
@@ -1164,7 +1164,7 @@ func main() {
 	clientTcp, err := client_tcp.NewClient(tcpCfg)
 
 	if err != nil {
-		log.Fatalf("FATAL: Failed to create TCP Client: %v", err)
+		logger.Warn("Warning: Failed to create TCP Client (port 4200 may be offline): %v", err)
 	}
 	proxy := &RpcReverseProxy{
 		ReverseProxy:         defaultProxy,
