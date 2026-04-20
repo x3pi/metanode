@@ -9,6 +9,7 @@ import (
 type SocketServer interface {
 	Listen(string) error
 	Stop()
+	StartWorkerPool()
 
 	OnConnect(Connection)
 	OnDisconnect(Connection)

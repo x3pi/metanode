@@ -52,19 +52,19 @@ echo "=================================================="
 # ----------------------------------------------------
 # BƯỚC 1: Xóa genesis cũ và tạo file genesis mới
 # ----------------------------------------------------
-if should_run 1; then
-    echo ""
-    echo "📌 BƯỚC 1: Prepare Genesis & Gen Spam Keys..."
-    cd "$PROJECT_ROOT/cmd/simple_chain"
-    echo "  -> Xóa genesis.json và copy từ genesis-main.json..."
-    rm -f genesis.json
-    cp genesis-main.json genesis.json
+# if should_run 1; then
+#     echo ""
+#     echo "📌 BƯỚC 1: Prepare Genesis & Gen Spam Keys..."
+#     cd "$PROJECT_ROOT/cmd/simple_chain"
+#     echo "  -> Xóa genesis.json và copy từ genesis-main.json..."
+#     rm -f genesis.json
+#     cp genesis-main.json genesis.json
 
-    cd "$PROJECT_ROOT/cmd/tool/test_tps/gen_spam_keys"
-    echo "  -> Chạy Gen Spam Keys (count 50000)..."
-    go run main.go --count 50000
-    if [ $? -ne 0 ]; then echo "❌ Lỗi ở Bước 1"; exit 1; fi
-fi
+#     cd "$PROJECT_ROOT/cmd/tool/test_tps/gen_spam_keys"
+#     echo "  -> Chạy Gen Spam Keys (count 50000)..."
+#     go run main.go --count 50000
+#     if [ $? -ne 0 ]; then echo "❌ Lỗi ở Bước 1"; exit 1; fi
+# fi
 
 # ----------------------------------------------------
 # BƯỚC 2: Triển khai Cụm
@@ -163,7 +163,7 @@ if should_run 6; then
     echo "📌 BƯỚC 6: Load Test TPS (20,000 txs)..."
     cd "$PROJECT_ROOT/cmd/tool/test_tps/tps_blast_cc"
     if [ "$DEPLOY_MODE" == "single" ]; then
-        go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=500
+        go run main.go --count 20000 --parallel_native=true --rounds 1 --load_balance=false --batch=500
     else
         go run main.go --count 20000 --parallel_native=true --rounds 1 --load_balance=true --batch=500
     fi

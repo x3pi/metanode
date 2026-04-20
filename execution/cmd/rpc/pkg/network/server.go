@@ -76,7 +76,7 @@ func NewSocketServer(
 	return s, nil
 }
 
-func (s *SocketServer) startWorkerPool() {
+func (s *SocketServer) StartWorkerPool() {
 	workerCount := s.config.HandlerWorkerPoolSize
 	logger.Info("Starting Worker Pool with %d workers...", workerCount)
 	logger.Info("Worker Pool Config - RequestChanSize: %d, NumCPU: %d",
@@ -265,7 +265,7 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 }
 
 func (s *SocketServer) Listen(listenAddress string) error {
-	s.startWorkerPool()
+	s.StartWorkerPool()
 
 	var err error
 	s.listener, err = net.Listen("tcp", listenAddress)
