@@ -21,40 +21,41 @@
 
 ## Kiến trúc Cluster
 
-Mỗi cluster gồm **5 nodes** (0–4), mỗi node có 3 process:
+Mỗi cluster gồm **5 nodes** (0–4), mỗi node vận hành theo **kiến trúc quy trình đơn (Unified Process)** thông qua FFI:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    Node N                            │
 │                                                      │
-│  ┌──────────────┐   IPC    ┌──────────────────────┐ │
-│  │   Rust        │ ◄──────► │   Go Master          │ │
-│  │  Consensus    │  (UDS)   │  (State + Execution) │ │
-│  └──────────────┘          └────────┬─────────────┘ │
-│                                      │ broadcast     │
-│                              ┌───────▼─────────────┐ │
-│                              │   Go Sub             │ │
-│                              │  (State Replica)     │ │
+│  ┌────────────────────────────────────────────────┐  │
+│  │               Go Master Process                │  │
+│  │                                                │  │
+│  │   ┌───────────────┐  FFI   ┌───────────────┐   │  │
+│  │   │  Rust Consensus│◄──────►│  Go Executor  │   │  │
+│  │   │   (Embedded)   │       │ (State Layer) │   │  │
+│  │   └───────────────┘        └───────┬───────┘   │  │
+│  └────────────────────────────────────│───────────┘  │
+│                                       │ broadcast    │
+│                              ┌────────▼────────────┐ │
+│                              │       Go Sub        │ │
+│                              │   (State Replica)   │ │
 │                              └─────────────────────┘ │
 └─────────────────────────────────────────────────────┘
 ```
 
 ### Vai trò
 
-| Process | Vai trò | Binary | Session tmux |
-|:--------|:--------|:-------|:-------------|
-| **Rust Consensus** | Đồng thuận DAG, sản xuất commits | `metanode` | `metanode-N` |
-| **Go Master** | Thực thi transactions, quản lý state | `simple_chain` | `go-master-N` |
-| **Go Sub** | Bản sao state từ Master, phục vụ queries | `simple_chain` | `go-sub-N` |
+| Process | Vai trò | Binary |
+|:--------|:--------|:-------|
+| **Go Master (Core)** | Nhúng Rust FFI (Đồng thuận DAG) & Go Executor (State) | `simple_chain`|
+| **Go Sub** | Bản sao state từ Master, phục vụ queries | `simple_chain`|
 
 ### Thứ tự khởi động / tắt
 
 ```
-Khởi động: Go Master → Go Sub → Rust Consensus
-Tắt:       Rust Consensus → Go Sub → Go Master
+Khởi động: Tổng hợp trong tiến trình Go Master duy nhất → Go Sub
+Tắt:       Go Master (Tự handle ngắt FFI an toàn) → Go Sub
 ```
-
-> **Quan trọng**: Go Master phải sẵn sàng TRƯỚC vì Rust sẽ query Go ngay khi khởi động.
 
 ---
 
@@ -107,25 +108,20 @@ Using existing block (not init genesis)
 ./mtn-orchestrator.sh stop
 ```
 
-### Quy trình tắt an toàn (3 phases)
+### Quy trình tắt an toàn (2 phases)
 
 ```
-Phase 1: SIGTERM → Rust Consensus (tất cả 5 nodes)
-         ↓
-         Chờ 10s (drain pipeline — Go xử lý hết blocks còn trong queue)
-         ↓
-Phase 2: SIGTERM → Go Sub (tất cả 5 nodes)
+Phase 1: SIGTERM → Go Sub (tất cả 5 nodes)
          ↓
          Chờ 5s (flush state xuống disk)
          ↓  
-Phase 3: SIGTERM → Go Master (tất cả 5 nodes)
+Phase 2: SIGTERM → Go Master (tất cả 5 nodes)
          Go Master thực hiện:
-           1. StopWait(12s) — chờ pending operations hoàn thành
-           2. SaveLastBlockSync() — ghi block cuối xuống disk (atomic)
-           3. FlushAll() — flush toàn bộ PebbleDB memtable → SST files
-           4. CloseAll() — đóng tất cả database handles
-         ↓
-         Dọn sạch UDS sockets
+           1. Rust FFI ngắt consensus, ngưng nhận TX.
+           2. StopWait(12s) — chờ pending operations hoàn thành
+           3. SaveLastBlockSync() — ghi block cuối xuống disk (atomic)
+           4. FlushAll() — flush toàn bộ PebbleDB memtable → SST files
+           5. CloseAll() — đóng tất cả database handles
 ```
 
 ### Timeout & SIGKILL
@@ -317,26 +313,24 @@ go run . -loop
 Output mẫu:
 
 ```
-╔═══════════════════════════════════════════════════════╗
-║  Node  │ Rust Consensus │ Go Master │ Go Sub │ Sockets ║
-╠═══════════════════════════════════════════════════════╣
-║    0   │ ✅ 496078     │ ✅ 495358 │ ✅ 495741 │ 3/3 ✅ ║
-║    1   │ ✅ 496201     │ ✅ 495441 │ ✅ 495794 │ 3/3 ✅ ║
-╚═══════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════╗
+║  Node  │ Go Master (FFI) │ Go Sub  │ FFI Status    ║
+╠════════════════════════════════════════════════════╣
+║    0   │ ✅ 495358      │ ✅ 495741│   Embedded ✅ ║
+║    1   │ ✅ 495441      │ ✅ 495794│   Embedded ✅ ║
+╚════════════════════════════════════════════════════╝
 ```
 
 ### Xem log theo node
 
 ```bash
 ./mtn-orchestrator.sh logs 0           # Tất cả log node 0
-./mtn-orchestrator.sh logs 0 master    # Chỉ Go Master
-./mtn-orchestrator.sh logs 0 sub       # Chỉ Go Sub
-./mtn-orchestrator.sh logs 0 rust      # Chỉ Rust
+./mtn-orchestrator.sh logs 0 master    # Log Go Master (bao gồm Rust FFI)
+./mtn-orchestrator.sh logs 0 sub       # Log Go Sub
 
 # Hoặc dùng script riêng
 cd metanode/scripts/logs
-./go-master.sh 0 -f     # Follow Go Master node 0
-./rust.sh 0 -f           # Follow Rust node 0
+./go-master.sh 0 -f     # Follow Go Master node 0 (bao gồm Rust core logs)
 ```
 
 ### Kiểm tra block production
@@ -345,8 +339,8 @@ cd metanode/scripts/logs
 # Block hiện tại (Go Master)
 grep "block=#" mtn-consensus/metanode/logs/node_0/go-master-stdout.log | tail -3
 
-# GEI hiện tại (Rust → Go)
-grep "INIT.*Returning.*block=" mtn-consensus/metanode/logs/node_0/go-master/epoch_*/App.log | tail -1
+# GEI hiện tại từ Rust Consensus
+grep "\[GLOBAL_EXEC_INDEX\]" mtn-consensus/metanode/logs/node_0/go-master-stdout.log | tail -1
 
 # Backup file
 cat mtn-simple-2025/cmd/simple_chain/sample/node0/back_up/last_block_backup.json

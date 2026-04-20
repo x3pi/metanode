@@ -12,7 +12,7 @@
 
 ## Architecture Overview
 
-The Go Execution Engine runs as **two process types per validator**:
+The Go Execution Engine runs as a **unified process** where the Rust Consensus layer is embedded via CGo FFI per validator:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -25,8 +25,9 @@ The Go Execution Engine runs as **two process types per validator**:
 │  └───────┬────────┘  └──────────────┘  └─────────────────┘  │
 │          │                                                   │
 │  ┌───────▼────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ SocketExecutor │  │  Transaction │  │  RPC Server     │  │
-│  │ (IPC from Rust)│  │  Pool        │  │  (JSON-RPC/WS)  │  │
+│  │   FFI Bridge   │  │  Transaction │  │  RPC Server     │  │
+│  │ (embedded Rust │  │  Pool        │  │  (JSON-RPC/WS)  │  │
+│  │   Consensus)   │  │              │  │                 │  │
 │  └────────────────┘  └──────────────┘  └─────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 
@@ -93,13 +94,13 @@ mtn-simple-2025/
 │   ├── keygen/                           # BLS key generation tool
 │   └── tool/                             # CLI utilities
 │
-├── executor/                             # ⭐ Go↔Rust bridge layer
-│   ├── unix_socket.go                    # Main IPC socket server (dispatches RPCs)
-│   ├── unix_socket_handler.go            # RPC handlers (basic requests)
+├── executor/                             # ⭐ Go↔Rust bridge layer (FFI)
+│   ├── unix_socket.go                    # FFI bridge executor wrapper 
+│   ├── unix_socket_handler.go            # RPC handlers (basic requests) routed to Rust
 │   ├── unix_socket_handler_epoch.go      # Epoch-related RPC handlers (AdvanceEpoch, etc.)
 │   ├── unix_socket_protocol.go           # Protobuf framing protocol
-│   ├── socket_abstraction.go             # UDS/TCP auto-detection
-│   ├── listener.go                       # Commit listener (receives blocks from Rust)
+│   ├── socket_abstraction.go             # Legacy network abstraction
+│   ├── listener.go                       # Commit listener (receives blocks from Rust callbacks)
 │   ├── snapshot_manager.go               # LVM snapshot management
 │   ├── snapshot_server.go                # Snapshot serving for new nodes
 │   ├── snapshot_init.go                  # Snapshot-based state initialization
@@ -243,10 +244,10 @@ Each node needs a JSON config file (see `cmd/simple_chain/config-master-node0.js
 
 ---
 
-## IPC Protocol (Go ↔ Rust)
+## IPC Protocol (Go ↔ Rust via FFI)
 
 ### Socket Executor (`executor/unix_socket.go`)
-Handles incoming RPCs from Rust Consensus:
+Handles incoming FFI calls and dispatches them:
 - **`GetLastBlockNumber`** — Returns current chain height
 - **`GetEpochBoundaryData`** — Returns epoch boundary info (timestamp, committee)
 - **`AdvanceEpoch`** — Advances Go's epoch state
@@ -254,14 +255,12 @@ Handles incoming RPCs from Rust Consensus:
 - **`SetConsensusStartBlock`** / **`SetSyncStartBlock`** — Mode transition barriers
 
 ### Listener (`executor/listener.go`)
-Receives committed blocks from Rust:
+Receives committed blocks from Rust via FFI callbacks:
 - **Blocking send** — Never drops blocks (critical safety invariant)
 - Blocks are queued for `BlockProcessor` to execute
 
 ### Socket Abstraction (`executor/socket_abstraction.go`)
-Auto-detects transport:
-- `tcp://host:port` → TCP socket
-- `/path/to/file.sock` → Unix Domain Socket
+Legacy auto-detection module replaced by FFI interface.
 
 ---
 

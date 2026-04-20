@@ -11,28 +11,29 @@
 
 ## Architecture Overview
 
-The MetaNode system is a **two-process architecture**:
+The MetaNode system is a **unified single-process architecture** (embedded via CGo FFI):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Rust Process (this repo)                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Consensus   │  │  Linearizer  │  │   CommitProcessor    │  │
-│  │  (DAG-BFT)   │──│ (Sub-DAG →   │──│ (Send ordered blocks │  │
-│  │              │  │  linear seq) │  │  to Go via UDS/TCP)  │  │
-│  └──────────────┘  └──────────────┘  └──────────┬───────────┘  │
-│                                                  │              │
-│  ┌──────────────┐  ┌──────────────┐              │              │
-│  │ TxSocketServer│  │ EpochMonitor │              │              │
-│  │ (receive txs │  │ (manage epoch│              │              │
-│  │  from Go Sub)│  │  transitions)│              │              │
-│  └──────────────┘  └──────────────┘              │              │
-└──────────────────────────────────────────────────┼──────────────┘
-                                                   │ UDS / TCP
-┌──────────────────────────────────────────────────┼──────────────┐
-│                   Go Process (mtn-simple-2025)   │              │
+│              Go Master Node Process (mtn-simple-2025)           │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                Embedded Rust Library (FFI)                │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │  │
+│  │  │   Consensus  │  │  Linearizer  │  │ CommitProcessor │  │  │
+│  │  │  (DAG-BFT)   │──│ (Sub-DAG →   │──│ (FFI Callbacks) │  │  │
+│  │  │              │  │  linear seq) │  │                 │  │  │
+│  │  └──────────────┘  └──────────────┘  └────────┬────────┘  │  │
+│  │                                               │           │  │
+│  │  ┌──────────────┐  ┌──────────────┐           │           │  │
+│  │  │ Tx Receiver  │  │ EpochMonitor │           │           │  │
+│  │  │ (FFI Calls)  │  │ (manage epoch│           │           │  │
+│  │  │              │  │  transitions)│           │           │  │
+│  │  └──────────────┘  └──────────────┘           │           │  │
+│  └───────────────────────────────────────────────┼───────────┘  │
+│                                                  │ CGo FFI      │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────▼──────────┐  │
-│  │  Transaction  │  │    State     │  │   SocketExecutor     │  │
+│  │  Transaction │  │    State     │  │   Executor Bridge    │  │
 │  │    Pool      │  │  (MPT Tries) │  │ (receive ordered     │  │
 │  │              │  │              │  │  blocks from Rust)   │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
@@ -70,13 +71,13 @@ mtn-consensus/
 │   │   │   ├── committee.rs         # Committee construction from Go validator data
 │   │   │   ├── committee_source.rs  # Peer discovery for committee data
 │   │   │   ├── transition/          # Epoch transition state machine
-│   │   │   ├── executor_client/     # IPC client to Go (UDS/TCP, Protobuf)
+│   │   │   ├── executor_client/     # FFI client to Go bridge
 │   │   │   ├── dual_stream.rs       # Manages concurrent Consensus + Sync data streams
 │   │   │   ├── epoch_checkpoint.rs  # Crash-recovery checkpointing for transitions
 │   │   │   ├── sync.rs              # SyncOnly mode logic
 │   │   │   └── catchup.rs           # CatchupManager for peer block fetching
 │   │   ├── network/
-│   │   │   └── tx_socket_server.rs  # Receives transaction batches from Go Sub-node
+│   │   │   └── tx_receiver.rs       # Receives transaction batches from Go via FFI
 │   │   └── types/                   # Shared type definitions
 │   │
 │   ├── meta-consensus/              # Core consensus library
@@ -135,14 +136,14 @@ A MetaNode operates in one of two modes:
    - Old `ConsensusAuthority` is stopped; new one is started.
 4. Crash recovery via `EpochCheckpoint` (atomic write-then-rename).
 
-### Communication Protocol (Rust ↔ Go)
-- **Transport**: Unix Domain Sockets (local) or TCP (distributed).
-- **Encoding**: Protobuf (`proto/validator_rpc.proto`).
-- **Key RPCs**:
+### Communication Protocol (Rust ↔ Go via FFI)
+- **Transport**: CGo FFI Native Calls (no network overhead) and Callbacks.
+- **Encoding**: Binary buffers passed across the C boundary.
+- **Key FFI Calls**:
   - `GetEpochBoundaryData` — Fetch epoch boundary info from Go.
   - `AdvanceEpoch` — Notify Go of epoch change.
   - `GetValidatorsAtBlock` — Fetch committee for a given block height.
-  - `SendCommittedSubDag` — Send ordered transactions to Go for execution.
+  - `SendCommittedSubDag` — Send ordered transactions to Go for execution via callback.
   - `SyncBlocks` — Bulk block sync for SyncOnly mode.
 
 ### Block Coordinator (Dual-Stream)
@@ -157,10 +158,11 @@ The `BlockCoordinator` in `block_coordinator.rs` deduplicates and sequences them
 ## Build & Run
 
 ### Build
+The Rust consensus engine is compiled as a static library and linked into the Go Execution Engine during the overall application build process:
 ```bash
-cd metanode
-cargo build --release
-# Binary: target/release/metanode
+# Handled by the orchestrator script
+cd metanode/consensus/metanode
+cargo +nightly build --release
 ```
 
 ### Run a single node
@@ -242,9 +244,9 @@ EpochMonitor detects Go epoch > current
 
 ### Transaction Flow
 ```
-Go Sub-node pool → UDS batch → Rust TxSocketServer
+Go Sub-node pool → Master Node → FFI call → Rust Tx Receiver
   → pending_transactions_queue → DAG Block proposal
   → Consensus rounds → Leader elected → Linearizer
-  → CommittedSubDag → CommitProcessor → ExecutorClient
-  → UDS/TCP → Go Master (execute & commit state)
+  → CommittedSubDag → CommitProcessor → FFI Callback
+  → Go Master (execute & commit state)
 ```
