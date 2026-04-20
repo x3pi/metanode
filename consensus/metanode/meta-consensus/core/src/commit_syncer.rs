@@ -174,10 +174,32 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // ADAPTIVE SYNC: Use shorter interval when in sync mode for faster response
         let base_interval = Duration::from_secs(2);
         let fast_interval = Duration::from_secs(1);
-        let mut current_interval_duration = base_interval;
-        let mut interval = tokio::time::interval(base_interval);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // COLD-START FAST POLL: After snapshot restore the DAG is empty
+        // (highest_accepted_round == 0). The first tick fires immediately
+        // but quorum_commit_index is still 0 (no peer blocks yet). The
+        // normal 2s interval means we waste 1.5–2s before detecting that
+        // quorum has become available. Use a 200ms poll until the first
+        // fetch is scheduled, then switch back to normal cadence.
+        // ═══════════════════════════════════════════════════════════════════
+        let cold_start_detected = self.inner.dag_state.read().highest_accepted_round() == 0;
+        let cold_start_interval = Duration::from_millis(200);
+        let initial_interval = if cold_start_detected {
+            info!(
+                "⚡ [COMMIT-SYNCER] Cold-start detected (highest_accepted_round=0). \
+                 Using fast 200ms poll until first fetch is scheduled."
+            );
+            cold_start_interval
+        } else {
+            base_interval
+        };
+
+        let mut current_interval_duration = initial_interval;
+        let mut interval = tokio::time::interval(initial_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_interval_check = tokio::time::Instant::now();
+        let mut cold_start_fast_poll_active = cold_start_detected;
 
         loop {
             tokio::select! {
@@ -210,6 +232,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         last_interval_check = now;
                     }
                     self.try_schedule_once();
+
+                    // COLD-START FAST POLL: Once a fetch has been scheduled,
+                    // switch back to normal interval to avoid busy-polling.
+                    if cold_start_fast_poll_active && self.highest_scheduled_index.is_some() {
+                        cold_start_fast_poll_active = false;
+                        current_interval_duration = base_interval;
+                        interval = tokio::time::interval(base_interval);
+                        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                        info!(
+                            "✅ [COMMIT-SYNCER] Cold-start fast poll complete. \
+                             First fetch scheduled at index {:?}. Switching to normal {}s interval.",
+                            self.highest_scheduled_index,
+                            base_interval.as_secs()
+                        );
+                    }
                 }
                 // Handles results from fetch tasks.
                 Some(result) = self.inflight_fetches.join_next(), if !self.inflight_fetches.is_empty() => {

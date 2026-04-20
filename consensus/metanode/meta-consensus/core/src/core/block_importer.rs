@@ -51,6 +51,26 @@ impl Core {
             // This needs to be called after try_commit() and try_propose(), which may
             // have advanced the threshold clock round.
             self.try_signal_new_round();
+        } else if !missing_block_refs.is_empty() {
+            // ═══════════════════════════════════════════════════════════════════
+            // COLD-START UNSUSPEND: All blocks were suspended (no accepted).
+            // If GC was advanced externally (e.g., cold_start_advance_gc_round
+            // from CommitSyncer), suspended blocks whose missing ancestors are
+            // now below the new GC round can be freed. Without this, they stay
+            // stuck until the next successful add_certified_commits — which may
+            // never come if the threshold clock can't advance (DEADLOCK).
+            // ═══════════════════════════════════════════════════════════════════
+            self.block_manager
+                .try_unsuspend_blocks_for_latest_gc_round();
+
+            // Re-check: unsuspending may have freed blocks that are now accepted
+            // in the DAG, advancing the threshold clock.
+            let new_clock_round = self.dag_state.read().threshold_clock_round();
+            if new_clock_round > self.last_signaled_round {
+                self.try_commit(vec![])?;
+                self.try_propose(false)?;
+                self.try_signal_new_round();
+            }
         };
 
         if !missing_block_refs.is_empty() {

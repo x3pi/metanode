@@ -434,15 +434,31 @@ impl Core {
         // Once quorum_ready latches to true, it stays true permanently.
         // ═══════════════════════════════════════════════════════════════════
         if clock_round > 1 && !self.quorum_ready.load(Ordering::Relaxed) {
+            // ═══════════════════════════════════════════════════════════════
+            // COLD-START BYPASS: After snapshot restore, CommitSyncer GC
+            // advance jumps the threshold clock from round 1 to 10000+.
+            // The quorum gate would block proposals for up to 30s.
+            // During cold-start (no local progress since Core creation),
+            // bypass the gate — the node MUST propose to join consensus.
+            // ═══════════════════════════════════════════════════════════════
+            let local_ci = self.dag_state.read().last_commit_index();
+            let no_progress = local_ci <= self.initial_commit_index;
+            if !no_progress {
+                debug!(
+                    "🔒 [QUORUM GATE] Round {} proposals blocked: waiting for peer quorum \
+                     (round 1 allowed freely to bootstrap peer detection)",
+                    clock_round
+                );
+                core_skipped_proposals
+                    .with_label_values(&["quorum_gate_waiting"])
+                    .inc();
+                return false;
+            }
             debug!(
-                "🔒 [QUORUM GATE] Round {} proposals blocked: waiting for peer quorum \
-                 (round 1 allowed freely to bootstrap peer detection)",
-                clock_round
+                "🔓 [QUORUM GATE] Cold-start bypass: round {} allowed despite quorum not ready \
+                 (local_commit={} <= initial_commit={})",
+                clock_round, local_ci, self.initial_commit_index
             );
-            core_skipped_proposals
-                .with_label_values(&["quorum_gate_waiting"])
-                .inc();
-            return false;
         }
 
         // CRITICAL: Check if node is lagging and prioritize sync over consensus

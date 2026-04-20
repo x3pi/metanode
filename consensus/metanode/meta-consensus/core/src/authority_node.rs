@@ -342,8 +342,9 @@ where
         let proposed_block_handler =
             spawn_logged_monitored_task!(proposed_block_handler.run(), "proposed_block_handler");
 
+        let highest_accepted_round_at_start = dag_state.read().highest_accepted_round();
         let sync_last_known_own_block = boot_counter == 0
-            && dag_state.read().highest_accepted_round() == 0
+            && highest_accepted_round_at_start == 0
             && !context
                 .parameters
                 .sync_last_known_own_block_timeout
@@ -533,8 +534,23 @@ where
                  total_stake={}, own_stake={}, committee_size={}",
                 quorum_threshold_val, total_stake, own_stake, committee_size_val
             );
+            // COLD-START: If boot_counter > 0 and DAG is empty, Phase 1 sync
+            // already verified peers are reachable. Use shorter timeout (5s)
+            // instead of 30s to avoid blocking proposals at high rounds.
+            // NOTE: highest_accepted_round was captured before dag_state was
+            // moved into Subscriber::new, reuse it here.
+            let is_cold_start_boot = boot_counter > 0
+                && highest_accepted_round_at_start == 0;
+            let gate_timeout_secs = if is_cold_start_boot { 5u64 } else { 30u64 };
+            if is_cold_start_boot {
+                info!(
+                    "⚡ [QUORUM GATE] Cold-start detected (boot_counter={}, empty DAG). \
+                     Reduced timeout to {}s (was 30s).",
+                    boot_counter, gate_timeout_secs
+                );
+            }
             tokio::spawn(async move {
-                let timeout = tokio::time::Duration::from_secs(30);
+                let timeout = tokio::time::Duration::from_secs(gate_timeout_secs);
                 let start = tokio::time::Instant::now();
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
 
@@ -544,7 +560,8 @@ where
                     // Safety timeout
                     if start.elapsed() >= timeout {
                         tracing::warn!(
-                            "⚠️ [QUORUM GATE] Timeout after 30s. Enabling proposals as fallback."
+                            "⚠️ [QUORUM GATE] Timeout after {}s. Enabling proposals as fallback.",
+                            gate_timeout_secs
                         );
                         quorum_ready_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
