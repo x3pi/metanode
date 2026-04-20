@@ -15,36 +15,24 @@
 The Go Execution Engine runs as a **unified process** where the Rust Consensus layer is embedded via CGo FFI per validator:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                       Go Master Node                         │
-│  ┌────────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ BlockProcessor │  │  AccountState │  │  SmartContract  │  │
-│  │ (orchestrates  │  │  DB (MPT)    │  │  DB + C++ MVM   │  │
-│  │  entire block  │  │              │  │                 │  │
-│  │  lifecycle)    │  │              │  │                 │  │
-│  └───────┬────────┘  └──────────────┘  └─────────────────┘  │
-│          │                                                   │
-│  ┌───────▼────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │   FFI Bridge   │  │  Transaction │  │  RPC Server     │  │
-│  │ (embedded Rust │  │  Pool        │  │  (JSON-RPC/WS)  │  │
-│  │   Consensus)   │  │              │  │                 │  │
-│  └────────────────┘  └──────────────┘  └─────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│                       Go Sub Node                            │
-│  ┌────────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ BlockProcessor │  │  Sync from   │  │  Client-facing  │  │
-│  │ (receives from │  │  Master      │  │  RPC / WS       │  │
-│  │  Master via    │  │  (backup     │  │  (serve users)  │  │
-│  │  AccountBatch) │  │  blocks)     │  │                 │  │
-│  └────────────────┘  └──────────────┘  └─────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│             MetaNode Unified Process                   │
+│  ┌────────────────┐  ┌──────────────┐  ┌─────────────┐ │
+│  │ BlockProcessor │  │ AccountState │  │ SmartContract│ │
+│  │ (FFI Bridge &  │  │   DB (MPT)   │  │ DB + MVM     │ │
+│  │  State Mngr)   │  │              │  │              │ │
+│  └───────┬────────┘  └──────────────┘  └──────┬──────┘ │
+│          │                                    │        │
+│  ┌───────▼────────┐  ┌──────────────┐  ┌──────▼──────┐ │
+│  │ VirtualTx      │  │ Transaction  │  │ Client RPC  │ │
+│  │ executor       │  │    Pool      │  │ (port 4201) │ │
+│  └────────────────┘  └──────────────┘  └─────────────┘ │
+└────────────────────────────────────────────────────────┘
 ```
 
-### Master vs Sub Node
-- **Master Node**: Receives ordered transactions from Rust Consensus, executes them, produces state roots, and broadcasts finalized blocks to Sub-nodes.
-- **Sub Node**: Receives finalized blocks (with state) from the Master via `AccountBatch` replication. Serves client RPC requests. Does NOT execute transactions locally (applies pre-computed state).
+### Node Modes
+- **Validator Node**: Tham gia đầy đủ vào đóng gói blocks. Nhận giao dịch (client-facing), chạy giả (`VirtualTx`) để xác minh, tích hợp vào pool, nạp vào CGo FFI. Khi đồng thuận xong sẽ apply vào DB chính (`AccountStateDB`).
+- **SyncOnly Node**: Tương tự Validator nhưng không có quyền tham gia tạo khối hay bầu cử trên mạng rỗng. Đồng bộ chuỗi block qua P2P layer (anemo network) và apply DB thay vì trực tiếp chạy TX nội bộ.
 
 ---
 
@@ -180,10 +168,8 @@ The system includes a C++ Virtual Machine (`pkg/mvm/`) connected via CGo:
 - **Thread safety**: `db_mutex` protects Xapian database access
 - **Memory**: Uses `C.free` with deferred cleanup for high-load scenarios
 
-### Master-Sub Synchronization
-- **AccountBatch**: Serialized state diffs sent from Master to Sub-nodes
-- Sub-nodes apply pre-computed state without re-executing transactions
-- Sub-nodes handle client connections (RPC/WebSocket)
+### Master-Sub Synchronization (Obsolete)
+Hệ thống KHÔNG CÒN sử dụng `AccountBatch` và Go Sub. Tất cả xử lý (bao gồm `ProcessSingleTransactionVirtual`) đều diễn ra trên `Go Master` (nay là process duy nhất). Nodes chạy dưới chế độ `SyncOnly` sẽ sync payload thông qua cơ chế block replication P2P của lớp gRPC/Rust.
 
 ---
 
@@ -222,7 +208,7 @@ cd cmd/simple_chain
 ./simple_chain --config config.json
 ```
 
-### Full Cluster (5 Master + 5 Sub)
+### Full Cluster (Validator + SyncOnly mix)
 ```bash
 bash run.sh
 ```
@@ -232,12 +218,11 @@ Each node needs a JSON config file (see `cmd/simple_chain/config-master-node0.js
 ```json
 {
   "chain_id": 991,
-  "port": 8545,
+  "connection_address": "0.0.0.0:4201",
   "data_dir": "data_node0",
-  "is_master": true,
-  "peer_rpc_port": 9001,
-  "master_socket": "/tmp/meta_master_0.sock",
-  "sub_socket": "/tmp/meta_sub_0.sock",
+  "is_explorer": true,
+  "service_type": "MASTER",
+  "peer_rpc_port": 19200,
   ...
 }
 ```

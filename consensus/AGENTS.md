@@ -15,7 +15,7 @@ The MetaNode system is a **unified single-process architecture** (embedded via C
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              Go Master Node Process (mtn-simple-2025)           │
+│              MetaNode Unified Process (mtn-simple-2025)         │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                Embedded Rust Library (FFI)                │  │
