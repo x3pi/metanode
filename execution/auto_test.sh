@@ -8,35 +8,51 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Suy ra thư mục script mtn-consensus nằm cùng cấp
 METANODE_SCRIPT_DIR="$(cd "$PROJECT_ROOT/../consensus/metanode/scripts/node" && pwd)"
 
-# Cấu hình bước bắt đầu chạy (mặc định là 1)
-START_STEP=1
+# Cấu hình danh sách các bước cụ thể để chạy (mặc định = chạy tất cả)
+STEPS_TO_RUN=""
 # Cấu hình chế độ deploy (mặc định là single)
 DEPLOY_MODE="single"
 
-# Nhận tham số truyền vào từ command line (VD: ./auto_test.sh --step 3 --mode multi)
+# Nhận tham số truyền vào từ command line (VD: ./auto_test.sh --steps "2,4,5" --mode multi)
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --step) START_STEP="$2"; shift ;;
+        --step|--steps) STEPS_TO_RUN="$2"; shift ;;
         --mode) DEPLOY_MODE="$2"; shift ;;
     esac
     shift
 done
 
+STEPS_TO_RUN_NORMALIZED=$(echo "$STEPS_TO_RUN" | tr ',' ' ')
+
+# Hàm kiểm tra xem có chạy step hiện tại không
+should_run() {
+    local step=$1
+    if [ -n "$STEPS_TO_RUN" ]; then
+        for s in $STEPS_TO_RUN_NORMALIZED; do
+            if [ "$s" == "$step" ]; then return 0; fi
+        done
+        return 1
+    else
+        # Nếu không truyền --steps, mặc định chạy tất cả
+        return 0
+    fi
+}
+
 echo "=================================================="
-if [ $START_STEP -gt 1 ]; then
-    echo "🚀 BẮT ĐẦU AUTO TEST PIPELINE (RESUME TỪ BƯỚC $START_STEP)"
+if [ -n "$STEPS_TO_RUN" ]; then
+    echo "🚀 BẮT ĐẦU AUTO TEST PIPELINE (CHỈ CHẠY CÁC BƯỚC: $STEPS_TO_RUN)"
 else
-    echo "🚀 BẮT ĐẦU AUTO TEST PIPELINE TỪ ĐẦU..."
+    echo "🚀 BẮT ĐẦU AUTO TEST PIPELINE TỪ ĐẦU (ALL STEPS)..."
 fi
-echo "💡 Parameter hiện tại: MODE=$DEPLOY_MODE | START_STEP=$START_STEP"
-echo "💡 Usage: ./auto_test.sh [--step <số>] [--mode single|multi]"
+echo "💡 Parameter hiện tại: MODE=$DEPLOY_MODE | STEPS_TO_RUN=${STEPS_TO_RUN:-ALL}"
+echo "💡 Usage: ./auto_test.sh [--step|--steps \"2,4,5\"] [--mode single|multi]"
 echo "=================================================="
 
 
 # ----------------------------------------------------
 # BƯỚC 1: Xóa genesis cũ và tạo file genesis mới
 # ----------------------------------------------------
-if [ $START_STEP -le 1 ]; then
+if should_run 1; then
     echo ""
     echo "📌 BƯỚC 1: Prepare Genesis & Gen Spam Keys..."
     cd "$PROJECT_ROOT/cmd/simple_chain"
@@ -53,7 +69,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 2: Triển khai Cụm
 # ----------------------------------------------------
-if [ $START_STEP -le 2 ]; then
+if should_run 2; then
     echo ""
     echo "📌 BƯỚC 2: Triển khai cụm Cluster (deploy_cluster.sh)..."
     if [ "$DEPLOY_MODE" == "single" ]; then
@@ -73,7 +89,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 2.5: Bật RPC Proxy
 # ----------------------------------------------------
-if [ $START_STEP -le 2 ]; then
+if should_run 2; then
     echo ""
     echo "📌 BƯỚC 2.5: Kiểm tra và bật RPC Proxy..."
     if ! curl -s http://127.0.0.1:8545 > /dev/null; then
@@ -82,7 +98,25 @@ if [ $START_STEP -le 2 ]; then
         # Nếu session đã tồn tại thì tắt đi trước khi tạo mới
         tmux kill-session -t rpc-proxy 2>/dev/null || true
         tmux new-session -d -s rpc-proxy 'go run main.go'
-        sleep 5
+        sleep 3
+        
+        # Kiểm tra lại xem đã lên chưa
+        if ! curl -s http://127.0.0.1:8545 -m 2 > /dev/null; then
+            echo "  ❌ Khởi động RPC Proxy thất bại! Đang kiểm tra log mới nhất..."
+            # Tìm file log mới nhất
+            LATEST_LOG=$(find "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client/logs" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
+            if [ -n "$LATEST_LOG" ]; then
+                echo "  📄 File log: $LATEST_LOG"
+                echo "--------------------------------------------------"
+                tail -n 30 "$LATEST_LOG"
+                echo "--------------------------------------------------"
+            else
+                echo "  ⚠️ Không tìm thấy file log nào."
+            fi
+            exit 1
+        else
+            echo "  ✅ RPC Proxy đã khởi động thành công ở port 8545."
+        fi
     else
         echo "  ✅ RPC Proxy đã hoạt động ở port 8545."
     fi
@@ -91,7 +125,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 3: Test TCP Caller
 # ----------------------------------------------------
-if [ $START_STEP -le 3 ]; then
+if should_run 3; then
     echo ""
     echo "📌 BƯỚC 3: Test TCP RPC (main-no-none.go)..."
     cd "$PROJECT_ROOT/cmd/tool/tool-test-chain/test-tcp/caller-tcp"
@@ -102,7 +136,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 4: Test HTTP RPC - Xapian V0
 # ----------------------------------------------------
-if [ $START_STEP -le 4 ]; then
+if should_run 4; then
     echo ""
     echo "📌 BƯỚC 4: Test Xapian V0..."
     cd "$PROJECT_ROOT/cmd/tool/tool-test-chain/test-rpc"
@@ -113,7 +147,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 5: Test HTTP RPC - Xapian V2
 # ----------------------------------------------------
-if [ $START_STEP -le 5 ]; then
+if should_run 5; then
     echo ""
     echo "📌 BƯỚC 5: Test Xapian V2..."
     cd "$PROJECT_ROOT/cmd/tool/tool-test-chain/test-rpc"
@@ -124,7 +158,7 @@ fi
 # ----------------------------------------------------
 # BƯỚC 6: Load Test TPS
 # ----------------------------------------------------
-if [ $START_STEP -le 6 ]; then
+if should_run 6; then
     echo ""
     echo "📌 BƯỚC 6: Load Test TPS (20,000 txs)..."
     cd "$PROJECT_ROOT/cmd/tool/test_tps/tps_blast_cc"

@@ -32,24 +32,24 @@ The script supports overriding the starting step and the deployment topology mod
 
 | Argument | Value Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--step` | `Integer (1-6)` | `1` | The pipeline step at which to start or resume. Useful if a previous run failed at an intermediate step and you don't want to restart the cluster from scratch. |
+| `--step` or `--steps` | `String` or `Integer` | `ALL` | Specifies exactly which steps to execute. You can provide a single step (e.g., `--step 3`) or a list of steps separated by commas or spaces (e.g., `--steps "2,4,5"`). If omitted, the script executes all steps sequentially. |
 | `--mode` | `single` \| `multi`| `single`| The topology used in Step 2. `single` uses `mtn-orchestrator.sh` for a 1-machine cluster. `multi` uses `deploy_cluster.sh` with `deploy-3machines.env` for a multi-machine testing layout. |
 
 ### Examples
 
-**1. Run a fresh multi-machine test from the beginning:**
+**1. Run a fresh multi-machine test from the beginning (all steps):**
 ```bash
-./auto_test.sh --step 1 --mode multi
+./auto_test.sh --mode multi
 ```
 
-**2. The cluster is already deployed. Resume load testing (starts at Step 6):**
+**2. The cluster is already deployed. Run only the TPS load testing phase (Step 6):**
 ```bash
 ./auto_test.sh --step 6 --mode multi
 ```
 
-**3. Run specific Xapian tests and then TPS load tests (skipping cluster deploy):**
+**3. Run specific steps only (e.g. Cluster Deploy, Xapian V0, and Xapian V2):**
 ```bash
-./auto_test.sh --step 4 --mode multi
+./auto_test.sh --steps "2,4,5" --mode multi
 ```
 
 ## Pipeline Steps Explained

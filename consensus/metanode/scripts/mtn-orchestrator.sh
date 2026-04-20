@@ -195,13 +195,13 @@ start_go_master() {
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
     cmd+="export GOMEMLIMIT=4GiB && "
-    cmd+="export XAPIAN_BASE_PATH='${xapian_path}' && "
-    cmd+="export MVM_LOG_DIR='${log_dir}' && "
+    cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
+    cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="exec ./simple_chain -config=${config} ${pprof_flag} "
     cmd+=">> \"${log_file}\" 2>&1"
 
-    cd "$GO_DIR" && nohup bash -c "$cmd" &
-    log_step "Go Master node${node_id} → process started via nohup"
+    cd "$GO_DIR" && tmux new-session -d -s "$session" "bash -c '$cmd'"
+    log_step "Go Master node${node_id} → process started via tmux"
 }
 
 
