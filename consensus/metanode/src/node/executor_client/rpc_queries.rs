@@ -12,7 +12,7 @@
 use anyhow::Result;
 use prost::Message;
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use super::persistence::persist_last_block_number;
 use super::proto::{self, GetValidatorsAtBlockRequest, Request, Response, ValidatorInfo};
@@ -334,7 +334,7 @@ impl ExecutorClient {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ-GEI] Received {} bytes from Go FFI, hex={}",
             response_buf.len(),
             hex_preview
@@ -346,7 +346,7 @@ impl ExecutorClient {
         match response.payload {
             Some(proto::response::Payload::LastBlockNumberResponse(res)) => {
                 let last_gei = res.last_global_exec_index;
-                info!(
+                trace!(
                     "✅ [EXECUTOR-REQ] Go last_global_exec_index={} (block={})",
                     last_gei, res.last_block_number
                 );

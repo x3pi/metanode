@@ -179,10 +179,24 @@ func (bp *BlockProcessor) commitWorker() {
 
 		// ══════════════════════════════════════════════════════════════════
 		// BACKUP: Serialize and persist BackupDb is DEFERRED to a background goroutine.
-		// This moves ~2-5s of serialization entirely out of Rust's critical path.
+		// This uses a coalescing queue to skip intermediate backups when catching up.
 		// ══════════════════════════════════════════════════════════════════
 		if bp.serviceType == p_common.ServiceTypeMaster && bp.storageManager.GetStorageBackupDb() != nil {
-			bp.persistBackupDbAsync(job)
+			select {
+			case bp.backupDbChannel <- job:
+				// enqueued successfully
+			default:
+				// queue full, drop oldest and try again
+				select {
+				case <-bp.backupDbChannel:
+				default:
+				}
+				// push newest
+				select {
+				case bp.backupDbChannel <- job:
+				default:
+				}
+			}
 		}
 
 		// ══════════════════════════════════════════════════════════════════
@@ -437,6 +451,33 @@ func (bp *BlockProcessor) persistWorker() {
 		if elapsed > 10*time.Millisecond {
 			logger.Info("[PERF] PersistWorker: async persist completed in %v", elapsed)
 		}
+	}
+}
+
+// backupDbWorker processes BackupDb serialization in the background, coalescing requests.
+func (bp *BlockProcessor) backupDbWorker() {
+	logger.Info("✅ BackupDb Worker initiated (coalescing backup blobs)")
+	for job := range bp.backupDbChannel {
+		// we popped a job. We will process it.
+		// But first, drain the channel to get the absolute latest if more arrived while we were idle.
+		latestJob := job
+		drained := 0
+	DRAIN_LOOP:
+		for {
+			select {
+			case nextJob := <-bp.backupDbChannel:
+				latestJob = nextJob
+				drained++
+			default:
+				break DRAIN_LOOP
+			}
+		}
+
+		if drained > 0 {
+			logger.Debug("🚀 [BACKUP] Coalesced %d BackupDb jobs, jumping to block #%d", drained, latestJob.Block.Header().BlockNumber())
+		}
+		
+		bp.persistBackupDbAsync(latestJob)
 	}
 }
 

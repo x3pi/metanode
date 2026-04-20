@@ -81,6 +81,8 @@ pub struct ExecutorClient {
     pub(crate) next_block_number: Arc<tokio::sync::Mutex<u64>>,
     /// CRITICAL FORK-SAFETY: Tracks the last epoch we processed to identify epoch boundaries
     pub(crate) last_processed_epoch: Arc<tokio::sync::Mutex<u64>>,
+    /// Semaphore to limit concurrent FFI RPC calls, preventing thread starvation and Go-side contention
+    pub(crate) rpc_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// Production safety constants
@@ -199,6 +201,7 @@ impl ExecutorClient {
             go_lag_handle: None, // Set via set_go_lag_handle() after construction
             next_block_number: Arc::new(tokio::sync::Mutex::new(0)),
             last_processed_epoch: Arc::new(tokio::sync::Mutex::new(0)),
+            rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
 
@@ -453,6 +456,36 @@ impl ExecutorClient {
 
     /// Execute an RPC request synchronously via CGo FFI
     pub(crate) async fn execute_rpc_request(&self, request_buf: &[u8]) -> Result<Vec<u8>> {
+        let _permit = self.rpc_semaphore.acquire().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+        const MAX_RETRIES: u32 = 3;
+        const BACKOFF_MS: [u64; 3] = [100, 500, 1000];
+
+        let req_buf_clone = request_buf.to_vec();
+
+        for attempt in 0..=MAX_RETRIES {
+            let req = req_buf_clone.clone();
+            
+            // Execute the blocking CGo FFI call in a spawn_blocking block to prevent
+            // blocking the async executor.
+            let result = tokio::task::spawn_blocking(move || {
+                Self::execute_rpc_request_inner(&req)
+            }).await.map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?;
+
+            match result {
+                Ok(buf) if !buf.is_empty() => return Ok(buf),
+                Ok(_) => { /* empty response, considered equivalent to error/EOF */ },
+                Err(e) => {
+                    tracing::warn!("RPC attempt {}/{} failed: {}", attempt+1, MAX_RETRIES + 1, e);
+                }
+            }
+            if attempt < MAX_RETRIES {
+                tokio::time::sleep(tokio::time::Duration::from_millis(BACKOFF_MS[attempt as usize])).await;
+            }
+        }
+        Err(anyhow::anyhow!("RPC request failed after {} retries", MAX_RETRIES))
+    }
+
+    fn execute_rpc_request_inner(request_buf: &[u8]) -> Result<Vec<u8>> {
         if let Some(c_fn) = crate::ffi::GO_CALLBACKS
             .get()
             .and_then(|c| c.process_rpc_request)

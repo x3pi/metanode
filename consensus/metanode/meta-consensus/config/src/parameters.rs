@@ -187,7 +187,7 @@ impl Parameters {
     }
 
     pub(crate) fn default_commit_sync_parallel_fetches() -> usize {
-        8
+        12
     }
 
     pub(crate) fn default_commit_sync_batch_size() -> u32 {
@@ -195,14 +195,14 @@ impl Parameters {
             // Exercise commit sync.
             5
         } else {
-            100
+            200
         }
     }
 
     pub(crate) fn default_commit_sync_batches_ahead() -> usize {
         // This is set to be a multiple of default commit_sync_parallel_fetches to allow fetching ahead,
         // while keeping the total number of inflight fetches and unprocessed fetched commits limited.
-        32
+        48
     }
 
     pub(crate) fn default_adaptive_delay_enabled() -> bool {

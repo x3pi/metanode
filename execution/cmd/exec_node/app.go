@@ -13,7 +13,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-		"github.com/meta-node-blockchain/meta-node/pkg/config"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
@@ -471,7 +472,7 @@ func (app *App) Run() error {
 
 	// Start socket server in a goroutine
 	go app.socketServer.Listen(app.config.ConnectionAddress)
-	go app.ConnectTo(app.config.Nodes.MasterAddress, common.MASTER_CONNECTION_TYPE)
+	go app.ConnectTo(app.config.Nodes.MasterAddress, p_common.MASTER_CONNECTION_TYPE)
 
 	log.Println("App is running")
 	storage.UpdateState(3)

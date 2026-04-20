@@ -901,7 +901,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	logger.Debug("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
 
 	// Limit batch size to prevent DoS
-	maxBatch := uint64(500)
+	maxBatch := uint64(5000)
 	if toBlock-fromBlock+1 > maxBatch {
 		toBlock = fromBlock + maxBatch - 1
 		logger.Info("📦 [BLOCK SYNC] Limited batch size to %d blocks (from=%d, to=%d)", maxBatch, fromBlock, toBlock)
@@ -1096,7 +1096,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
 
-	for _, blockData := range blocks {
+	for i, blockData := range blocks {
+		isLastBlock := i == len(blocks)-1
+
 		rawBytes := blockData.GetRawBlockBytes()
 		backupBytes := blockData.GetBackupData()
 
@@ -1172,25 +1174,32 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// CommitBlockState(WithRebuildTries) reloads the trie from the state that was
 		// just written to LevelDB by applyBackupDbBatches. After this call, NOMT's
 		// persistent root matches the block's stateRoot.
+		// OPTIMIZATION: Only rebuild trie and verify root on the LAST block of the batch!
 		// ═══════════════════════════════════════════════════════════════════════════
-		if _, err := rh.chainState.CommitBlockState(blk,
-			blockchain.WithRebuildTries(),
-			blockchain.WithPersistToDB(),
-		); err != nil {
+		var commitOpts []blockchain.CommitOption
+		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
+		
+		if isLastBlock {
+			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+		}
+
+		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
-		} else {
+		} else if isLastBlock {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ CommitBlockState for block #%d (stateRoot=%s)",
 				blockNum, header.AccountStatesRoot().Hex()[:18]+"...")
 		}
 
-		// Verify stateRoot matches peer's stateRoot:
-		localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-		expectedRoot := header.AccountStatesRoot()
-		if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
-			logger.Error("🚨 [STATE VERIFY] Block #%d stateRoot MISMATCH! local=%s expected=%s. HALTING sync.",
-				blockNum, localRoot.Hex(), expectedRoot.Hex())
-			return &pb.SyncBlocksResponse{Error: "stateRoot mismatch"}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
+		if isLastBlock {
+			// Verify stateRoot matches peer's stateRoot only for the last block:
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
+				logger.Error("🚨 [STATE VERIFY] Block #%d stateRoot MISMATCH! local=%s expected=%s. HALTING sync.",
+					blockNum, localRoot.Hex(), expectedRoot.Hex())
+				return &pb.SyncBlocksResponse{Error: "stateRoot mismatch"}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
+			}
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1220,11 +1229,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// Without this, loadedAccounts and lruCache retain stale pre-sync data,
 		// causing RPC queries and transaction validation to use old values
 		// on newly executed blocks — making them appear diverged.
+		// OPTIMIZATION: Only do this once at the end of the batch.
 		// ═══════════════════════════════════════════════════════════════════════════
-		rh.chainState.InvalidateAllState()
-		// Clear MVM caches so smart contract reads see the new state
-		mvm.ClearAllMVMApi()
-		mvm.CallClearAllStateInstances()
+		if isLastBlock {
+			rh.chainState.InvalidateAllState()
+			// Clear MVM caches so smart contract reads see the new state
+			mvm.ClearAllMVMApi()
+			mvm.CallClearAllStateInstances()
+		}
 
 		executedCount++
 		lastExecutedBlock = blockNum

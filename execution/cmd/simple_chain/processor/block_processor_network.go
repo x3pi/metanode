@@ -58,7 +58,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
-	blockQueue := make(chan *pb.ExecutableBlock, 1000)
+	blockQueue := make(chan *pb.ExecutableBlock, 5000)
 
 	// 3. Find Rust configuration path
 	rustConfigPath := bp.config.RustConfigPath

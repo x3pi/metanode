@@ -38,6 +38,7 @@ static inline void register_callbacks_to_rust() {
 import "C"
 import (
 	"fmt"
+	"time"
 	"unsafe"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -109,8 +110,34 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 		return C.bool(false)
 	}
 
-	// Dispatch to the request handler directly
-	wrappedResponse := defaultRequestHandler.ProcessProtobufRequest(&request)
+	// Safely execute request with timeout and panic recovery
+	var wrappedResponse *pb.Response
+	done := make(chan *pb.Response, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_process_rpc_request: %v", r)
+				done <- &pb.Response{
+					Payload: &pb.Response_Error{
+						Error: fmt.Sprintf("Panic in Go RPC handler: %v", r),
+					},
+				}
+			}
+		}()
+		done <- defaultRequestHandler.ProcessProtobufRequest(&request)
+	}()
+
+	select {
+	case res := <-done:
+		wrappedResponse = res
+	case <-time.After(5 * time.Second):
+		logger.Error("[FFI Bridge] ⚠️ RPC request timeout after 5s")
+		wrappedResponse = &pb.Response{
+			Payload: &pb.Response_Error{
+				Error: "RPC request timeout in Go handler",
+			},
+		}
+	}
 
 	// Always send response (even on error)
 	if wrappedResponse == nil {

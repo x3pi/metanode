@@ -94,7 +94,10 @@ const (
 	MissingBlockFetchMinInterval = 5 * time.Second
 
 	// MaxSkippedCommitsRetention is how many skipped commits to keep in memory.
-	MaxSkippedCommitsRetention uint64 = 100
+	// TPS OPTIMIZATION: 100 -> 5000 to accommodate high concurrency in CommitSyncer.
+	// Since turbo mode fetches up to 16 parallel ranges of 200 commits, out-of-order
+	// block delivery can hold up to 3200 commits waiting for their predecessors.
+	MaxSkippedCommitsRetention uint64 = 5000
 
 	// MonitoringTimeout is the timeout for monitoring operations.
 	MonitoringTimeout = 30 * time.Second

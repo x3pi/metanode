@@ -388,7 +388,7 @@ impl CommitProcessor {
                             epoch_base_index,
                             cumulative_fragment_offset
                         );
-                        info!(
+                        trace!(
                             "epoch_base_index for epoch {} is set to {}",
                             current_epoch, epoch_base_index
                         );

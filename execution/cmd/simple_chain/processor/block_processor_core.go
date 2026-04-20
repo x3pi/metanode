@@ -151,7 +151,10 @@ type BlockProcessor struct {
 	// Pipeline commit: async persistence of trie nodes to LevelDB
 	persistChannel chan PersistJob
 
-
+	// Backup DB Coalescing
+	backupDbChannel chan CommitJob
+	// GEI Coalescing
+	geiUpdateChan chan uint64
     
 	forceCommitChan chan struct{}
 
@@ -159,6 +162,7 @@ type BlockProcessor struct {
 	processedBlockCount  uint64
 	lastRateCheckTime    time.Time
 	lastRateCheckCount   uint64
+	lastLazyRefreshTime  time.Time
 
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
@@ -295,9 +299,12 @@ func NewBlockProcessor(
 		processingLockChan: make(chan struct{}, 1),
 		// Pipeline commit: async persistence channel
 		persistChannel: make(chan PersistJob, 100),
+		backupDbChannel: make(chan CommitJob, 1),
+		geiUpdateChan: make(chan uint64, 1),
 
 		forceCommitChan:  make(chan struct{}, 1),
 		lastRateCheckTime: time.Now(),
+		lastLazyRefreshTime: time.Now(),
 	}
 
 	// Phase 7: Initialize decoupled components
@@ -360,6 +367,8 @@ func NewBlockProcessor(
 	if serviceType == p_common.ServiceTypeMaster {
 		go bp.commitWorker()
 		go bp.persistWorker()   // Pipeline commit: async LevelDB persistence
+		go bp.backupDbWorker()  // Coalesced BackupDb builder
+		go bp.geiWorker()       // Coalesced GEI updates
 	}
 	go bp.inputTPSWorker()
 	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI

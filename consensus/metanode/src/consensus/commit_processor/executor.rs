@@ -250,11 +250,21 @@ pub async fn dispatch_commit(
     // EndOfEpoch commits always pass through for epoch transition safety.
     // ═══════════════════════════════════════════════════════════════════
     if let Some(ref client) = executor_client {
-        let go_current_gei = client.get_last_global_exec_index().await.unwrap_or(0);
+        // SYNC OPTIMIZATION: Use local cached GEI instead of Go RPC for every commit.
+        // send_committed_subdag has local REPLAY PROTECTION (next_expected_index check)
+        // that catches duplicates without needing Go state per-commit.
+        // Only verify with Go RPC every 200 commits for safety.
+        let go_current_gei = if commit_index % 200 == 0 {
+            client.get_last_global_exec_index().await.unwrap_or(0)
+        } else if let Some(ref shared_gei) = shared_last_global_exec_index {
+            *shared_gei.lock().await
+        } else {
+            0
+        };
         if go_current_gei >= global_exec_index && global_exec_index > 0 {
             let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();
             if !has_end_of_epoch {
-                info!(
+                trace!(
                     "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit GEI={}.",
                     commit_index, go_current_gei, global_exec_index
                 );
@@ -361,11 +371,11 @@ pub async fn dispatch_commit(
                     if let Some(shared_index) = shared_last_global_exec_index.clone() {
                         let mut index_guard = shared_index.lock().await;
                         *index_guard = last_gei;
-                        info!("📊 [GLOBAL_EXEC_INDEX] Updated shared last_global_exec_index to {} after successful send (geis_consumed={})", last_gei, geis_consumed);
+                        trace!("📊 [GLOBAL_EXEC_INDEX] Updated shared last_global_exec_index to {} after successful send (geis_consumed={})", last_gei, geis_consumed);
                     }
 
-                    // Track lag every 100 commits
-                    if commit_index % 100 == 0 {
+                    // Track lag every 500 commits (reduced from 100 to minimize Go RPC during sync)
+                    if commit_index % 500 == 0 {
                         if let Ok(go_gei) = client.get_last_global_exec_index().await {
                             let lag = global_exec_index.saturating_sub(go_gei);
                             if lag > 500 {
