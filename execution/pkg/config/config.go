@@ -92,7 +92,6 @@ type PruningConfig struct {
 // SimpleChainConfig là struct chính, đại diện cho toàn bộ file config JSON.
 type SimpleChainConfig struct {
 	Debug                   bool   `json:"debug"`
-	Mode                    string `json:"mode"`
 	ExplorereDbPath         string `json:"explorer_db_path"`
 	ExplorereReadOnlyDbPath string `json:"explorer_read_only_db_path"`
 
@@ -120,7 +119,6 @@ type SimpleChainConfig struct {
 	ConnectionAddress                  string             `json:"connection_address"`
 	DNSServerAddress                   string             `json:"dns_server_address"`
 	Version                            string             `json:"version"`
-	NodeType                           string             `json:"node_type"`
 	ListTypeService                    string             `json:"list_type_service"`
 	ServiceType                        common.ServiceType `json:"service_type"`
 	RpcPort                            string             `json:"rpc_port"`

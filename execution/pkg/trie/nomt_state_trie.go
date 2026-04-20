@@ -806,7 +806,7 @@ func (n *NomtStateTrie) GetCommitBatch() [][2][]byte {
 // commit takes 4+ minutes, completely stalling sub-node sync. Instead, we simply strip the
 // 'nomt:' prefix and keep the data in the PebbleDB batch for fast downstream writes.
 // This reduces block apply time from minutes to milliseconds.
-func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte, isMaster bool) error {
+func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error {
 	if globalStateBackend != BackendNOMT {
 		return nil
 	}

@@ -183,7 +183,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // quorum has become available. Use a 200ms poll until the first
         // fetch is scheduled, then switch back to normal cadence.
         // ═══════════════════════════════════════════════════════════════════
-        let cold_start_detected = self.inner.dag_state.read().highest_accepted_round() == 0;
+        let cold_start_detected = self.inner.dag_state.read().highest_accepted_round() <= 1
+            && self.synced_commit_index == 0;
         let cold_start_interval = Duration::from_millis(200);
         let initial_interval = if cold_start_detected {
             info!(
@@ -305,7 +306,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // validate vote blocks from the current epoch.
         // ═══════════════════════════════════════════════════════════════════════
         let highest_accepted_round = self.inner.dag_state.read().highest_accepted_round();
-        if highest_accepted_round == 0 && quorum_commit_index > 0 {
+        // RACE FIX: Use `<= 1` instead of `== 0`. If Core proposes a round-1
+        // block before CommitSyncer's first tick (e.g., sync_last_known_own_block
+        // completes fast), highest_accepted_round becomes 1 and the `== 0` check
+        // was skipped — leaving the node stuck forever with synced_commit_index=0.
+        // Also require local_commit_index==0 to avoid re-triggering in normal operation.
+        if highest_accepted_round <= 1 && local_commit_index == 0 && quorum_commit_index > 0 {
             // SNAPSHOT RESTORE: Fast-forward to the current quorum. Historical
             // commits can never be verified (DAG was wiped — vote blocks reference
             // digests that don't exist). The node will only process NEW commits
@@ -546,7 +552,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // we instantly know the network's HEAD round! We advance gc_round to this
         // round, causing all historical blocks to be GC'd instead of fetched.
         // ═══════════════════════════════════════════════════════════════════════
-        if self.inner.dag_state.read().highest_accepted_round() == 0 {
+        // RACE FIX: Use `<= 1` instead of `== 0`. After the node proposes its
+        // own round-1 block, highest_accepted_round becomes 1. The `== 0` check
+        // missed this case, preventing GC advance → all peer blocks stayed
+        // suspended → DEADLOCK. cold_start_advance_gc_round is idempotent
+        // (returns early if new_gc_round <= current_gc_round).
+        if self.inner.dag_state.read().highest_accepted_round() <= 1 
+            && self.inner.dag_state.read().last_commit_index() == 0 
+        {
             let highest_commit_round = certified_commits
                 .commits()
                 .iter()
@@ -1306,7 +1319,7 @@ mod tests {
             block_verifier,
             transaction_certifier,
             network_client,
-            dag_state,
+            dag_state.clone(),
             None,
         );
 
@@ -1316,6 +1329,11 @@ mod tests {
         assert!(commit_syncer.highest_scheduled_index().is_none());
         assert_eq!(commit_syncer.highest_fetched_commit_index(), 0);
         assert_eq!(commit_syncer.synced_commit_index(), 0);
+
+        // Force highest_accepted_round > 1 to bypass cold-start fast-forward logic,
+        // which would otherwise skip scheduling fetches from index 1 to 10.
+        let test_block = TestBlock::new(2, 0).build();
+        dag_state.write().accept_block(VerifiedBlock::new_for_test(test_block));
 
         // Observe round 15 blocks voting for commit 10 from authorities 0 to 2 in CommitVoteMonitor
         for i in 0..3 {

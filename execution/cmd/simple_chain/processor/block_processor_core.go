@@ -440,7 +440,7 @@ func NewBlockProcessor(
 	// This goroutine periodically syncs bp.lastBlock from DB.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if bp.serviceType == p_common.ServiceTypeMaster {
-		// No autonomous state polling - Rust entirely governs Go Master state
+		go bp.syncLastBlockFromDB()
 	}
 
 	return bp
@@ -448,6 +448,8 @@ func NewBlockProcessor(
 
 // GetLastBlock returns the last processed block
 func (bp *BlockProcessor) GetLastBlock() types.Block {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
 	value := bp.lastBlock.Load()
 	if value == nil {
 		return nil
@@ -457,6 +459,8 @@ func (bp *BlockProcessor) GetLastBlock() types.Block {
 
 // SetLastBlock sets the last processed block
 func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
 	if lastBlock != nil {
 		bp.lastBlock.Store(lastBlock)
 	}

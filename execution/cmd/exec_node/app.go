@@ -13,8 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	"github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
+		"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
@@ -213,7 +212,6 @@ func (app *App) startStorageServer(ctx context.Context, dbDetail config.DBDetail
 		keyPair,
 		connectionsManager,
 		mainHandler,
-		string(app.config.Databases.NodeType),
 		app.config.Databases.Version,
 	)
 	if err != nil {
@@ -456,7 +454,6 @@ func (app *App) initRoutes() {
 		app.keyPair,
 		app.connectionsManager,
 		handler,
-		"node",
 		app.config.Version,
 	)
 }

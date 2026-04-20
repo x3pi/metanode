@@ -278,10 +278,56 @@ impl RustSyncNode {
                     }
                 }
                 Ok(_) => {
-                    debug!("[RUST-SYNC] No new blocks available from peers");
+                    info!("🚀 [DEBUG-SYNC] Reached Ok(_) branch in fetch_blocks_from_peer. Checking peer GET...");
+
+                    // FORK-SAFETY EMPTY-COMMIT CATCHUP:
+                    // If peers are at same DB block (no txs) but higher GEI, sync empty
+                    // commits to advance GEI via FFI directly.
+                    if let Ok((_peer_epoch, peer_block, best_peer, peer_gei)) =
+                        crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc_addresses).await
+                    {
+                        if peer_block == go_block && peer_gei > go_last_gei {
+                            info!("🚀 [RUST-SYNC] Peer {} matches block {} but has higher GEI {} (our GEI {}). Fetching empty commits...", 
+                                best_peer, peer_block, peer_gei, go_last_gei);
+                            
+                            let from_gei = go_last_gei + 1;
+                            let to_gei = std::cmp::min(peer_gei, from_gei + 2000);
+                            
+                            match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], from_gei, to_gei).await {
+                                Ok(exec_blocks) if !exec_blocks.is_empty() => {
+                                    info!("✅ [RUST-SYNC] Fetched {} empty executable blocks. Pushing to Go FFI...", exec_blocks.len());
+                                    let mut sent = 0;
+                                    if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                                        for (gei, data) in exec_blocks {
+                                            if c_fn(data.as_ptr(), data.len()) {
+                                                sent += 1;
+                                            } else {
+                                                tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
+                                                break;
+                                            }
+                                        }
+                                        info!("✅ [RUST-SYNC] Successfully pushed {} empty commits to Go.", sent);
+                                        // NOTE: Return Ok(0) instead of Ok(sent) to avoid triggering turbo mode.
+                                        // Empty commit GEI catch-up is NOT real block sync progress.
+                                        // Without this, the sync loop stays in turbo (50ms) and burns CPU
+                                        // perpetually chasing peer GEI that keeps advancing from consensus.
+                                        return Ok(0);
+                                    } else {
+                                        tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
+                                    }
+                                }
+                                Ok(_) => {
+                                    tracing::debug!("[RUST-SYNC] No executable blocks fetched from peer.");
+                                }
+                                Err(e) => {
+                                    tracing::warn!("⚠️ [RUST-SYNC] Failed to fetch executable blocks: {}", e);
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    debug!("[RUST-SYNC] Fetch from peers failed: {}", e);
+                    info!("🚀 [DEBUG-SYNC] Fetch from peers failed Err branch: {}", e);
                 }
             }
         } else {
