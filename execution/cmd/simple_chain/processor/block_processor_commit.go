@@ -454,30 +454,15 @@ func (bp *BlockProcessor) persistWorker() {
 	}
 }
 
-// backupDbWorker processes BackupDb serialization in the background, coalescing requests.
+// backupDbWorker processes BackupDb serialization in the background, concurrently.
 func (bp *BlockProcessor) backupDbWorker() {
-	logger.Info("✅ BackupDb Worker initiated (coalescing backup blobs)")
+	logger.Info("✅ BackupDb Worker initiated (concurrent serialization)")
 	for job := range bp.backupDbChannel {
-		// we popped a job. We will process it.
-		// But first, drain the channel to get the absolute latest if more arrived while we were idle.
-		latestJob := job
-		drained := 0
-	DRAIN_LOOP:
-		for {
-			select {
-			case nextJob := <-bp.backupDbChannel:
-				latestJob = nextJob
-				drained++
-			default:
-				break DRAIN_LOOP
-			}
-		}
-
-		if drained > 0 {
-			logger.Debug("🚀 [BACKUP] Coalesced %d BackupDb jobs, jumping to block #%d", drained, latestJob.Block.Header().BlockNumber())
-		}
-		
-		bp.persistBackupDbAsync(latestJob)
+		// IMPORTANT: Do NOT drop intermediary blocks (coalescing), as BackupDb contains
+		// critical block-level state deltas needed by peers to sync.
+		// Spawn a goroutine to serialize and write concurrently, leveraging all CPU cores
+		// and preventing backpressure on the consensus thread.
+		go bp.persistBackupDbAsync(job)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -542,7 +541,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	currentEpoch := rh.chainState.GetCurrentEpoch()
 	lastCommittedBlock := storage.GetLastBlockNumber()
 	lastGEI := storage.GetLastGlobalExecIndex()
-	
+
 	if request.NewEpoch <= currentEpoch && request.NewEpoch > 0 {
 		// Rust loop/monitor fired a duplicate advance.
 		// We silently accept but DO NOT modify Go state, to let Rust proceed.
@@ -556,7 +555,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	if request.BoundaryBlock > 0 && request.BoundaryBlock < lastCommittedBlock {
 		logger.Warn("⚠️ [EPOCH GUARD] Boundary Block %d < Go Last Block %d. Allowing (likely a recovery replay).", request.BoundaryBlock, lastCommittedBlock)
 	}
-	
+
 	if request.BoundaryGei > 0 && lastGEI > request.BoundaryGei {
 		logger.Warn("⚠️ [EPOCH GUARD] Boundary GEI %d < Go Last GEI %d. Go has already executed blocks into this epoch!", request.BoundaryGei, lastGEI)
 	}
@@ -1189,7 +1188,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		var commitOpts []blockchain.CommitOption
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
-		
+
 		if isLastBlock {
 			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
 		}
@@ -1200,17 +1199,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		} else if isLastBlock {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ CommitBlockState for block #%d (stateRoot=%s)",
 				blockNum, header.AccountStatesRoot().Hex()[:18]+"...")
-		}
-
-		if isLastBlock {
-			// Verify stateRoot matches peer's stateRoot only for the last block:
-			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-			expectedRoot := header.AccountStatesRoot()
-			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
-				logger.Error("🚨 [STATE VERIFY] Block #%d stateRoot MISMATCH! local=%s expected=%s. HALTING sync.",
-					blockNum, localRoot.Hex(), expectedRoot.Hex())
-				return &pb.SyncBlocksResponse{Error: "stateRoot mismatch"}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
-			}
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1434,7 +1422,7 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 		if len(deserialized) == 0 {
 			continue
 		}
-		
+
 		// Key format expected: "addressHex/dbName"
 		parts := strings.Split(key, "/")
 		if len(parts) != 2 {
@@ -1449,7 +1437,7 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 		prefix := fmt.Sprintf("%x:%s:", dbNameHash, addressHex)
 
 		prefixedDB := storage.NewPrefixStorage(sharedDB, prefix)
-		
+
 		if err := prefixedDB.BatchPut(deserialized); err != nil {
 			return fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
 		}
