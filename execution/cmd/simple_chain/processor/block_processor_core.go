@@ -32,10 +32,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
-
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
-	"path/filepath"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
 
 // State represents the processor state
@@ -418,14 +415,6 @@ func NewBlockProcessor(
 				logger.Info("💾 [SNAPSHOT] Creating PebbleDB checkpoints...")
 				if err := storageMgr.CheckpointAll(destPath); err != nil {
 					return err
-				}
-				
-				// CRITICAL FIX: Checkpoint dynamically created MVM Smart Contract storage tries.
-				// These are created directly by TrieDatabaseManager and not registered in storageMgr.
-				trieDestPath := filepath.Join(destPath, "trie_database")
-				if err := trie_database.GetTrieDatabaseManager().CheckpointAll(trieDestPath); err != nil {
-					logger.Error("💾 [SNAPSHOT] Failed to checkpoint TrieDatabaseManager: %v", err)
-					return fmt.Errorf("failed to checkpoint TrieDatabaseManager: %w", err)
 				}
 				
 				return nil

@@ -30,7 +30,7 @@ const (
 type TrieDatabase struct {
 	trieR          p_trie.StateTrie
 	originRootHash common.Hash
-	db             *storage.ShardelDB
+	db             storage.Storage
 	dirtyData      sync.Map
 	mu             sync.Mutex
 	address        common.Address
@@ -44,7 +44,7 @@ type TrieDatabase struct {
 
 func NewTrieDatabase(
 	hash common.Hash,
-	db *storage.ShardelDB,
+	db storage.Storage,
 	mvmId common.Address,
 	address common.Address,
 	dbName string,
