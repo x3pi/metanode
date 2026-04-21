@@ -233,7 +233,7 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 			// Normal dispatch: non-blocking send to worker pool
 			select {
 			case s.requestChan <- request:
-				logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
+				// logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
 				// Success
 			default:
 				logger.Warn(

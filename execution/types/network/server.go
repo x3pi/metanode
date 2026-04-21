@@ -10,7 +10,6 @@ type SocketServer interface {
 	StartWorkerPool()
 	Listen(string) error
 	Stop()
-	StartWorkerPool()
 
 	OnConnect(Connection)
 	OnDisconnect(Connection)
