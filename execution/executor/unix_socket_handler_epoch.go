@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -1101,13 +1103,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// ═══════════════════════════════════════════════════════════════════════════
 	currentGEI := storage.GetLastGlobalExecIndex()
 
-	trieDBCache := make(map[string]*storage.ShardelDB)
-	defer func() {
-		for _, db := range trieDBCache {
-			db.Close()
-		}
-	}()
-
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
 
@@ -1165,7 +1160,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			if deserErr != nil {
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
-				if applyErr := rh.applyBackupDbBatches(&backupDb, trieDBCache); applyErr != nil {
+				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
 			}
@@ -1328,7 +1323,7 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.
 // This mirrors applyBlockBatch from BlockProcessor but is adapted for the executor package.
 // It writes Account, Block, Code, SmartContract, Receipt, Transaction, StakeState, and TrieDB batches.
-func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb, trieDBCache map[string]*storage.ShardelDB) error {
+func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error {
 	// Map batch data fields to their corresponding storages
 	type batchEntry struct {
 		name    string
@@ -1383,7 +1378,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb, trieD
 
 	// Apply TrieDB batches
 	if len(backupDb.TrieDatabaseBatchPut) > 0 {
-		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber, trieDBCache); err != nil {
+		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber); err != nil {
 			return fmt.Errorf("error writing TrieDB batches for block %d: %w", backupDb.BockNumber, err)
 		}
 	}
@@ -1422,7 +1417,12 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb, trieD
 
 // applyTrieDbBatches applies TrieDB batch data from a BackUpDb to the local TrieDB LevelDB storages.
 // Each key in the map corresponds to a sub-database path under the Trie root.
-func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64, trieDBCache map[string]*storage.ShardelDB) error {
+func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64) error {
+	sharedDB := rh.storageManager.GetStorageDatabaseTrie()
+	if sharedDB == nil {
+		return fmt.Errorf("shared database trie is nil")
+	}
+
 	for key, value := range trieDbBatches {
 		if len(value) == 0 {
 			continue
@@ -1435,22 +1435,22 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 			continue
 		}
 		
-		database, exists := trieDBCache[key]
-		if !exists {
-			// Open TrieDB at the configured path
-			databasePath := config.ConfigApp.Databases.RootPath + config.ConfigApp.Databases.Trie.Path + "/" + key
-			var err error
-			database, err = storage.NewShardelDB(databasePath, 1, 2, config.ConfigApp.DBType, databasePath)
-			if err != nil {
-				return fmt.Errorf("error creating TrieDB '%s' for block %d: %w", key, blockNum, err)
-			}
-			if err := database.Open(); err != nil {
-				return fmt.Errorf("error opening TrieDB '%s' for block %d: %w", key, blockNum, err)
-			}
-			trieDBCache[key] = database
+		// Key format expected: "addressHex/dbName"
+		parts := strings.Split(key, "/")
+		if len(parts) != 2 {
+			logger.Warn("⚠️ Ignored invalid TrieDB batch key format: %s", key)
+			continue
 		}
+
+		addressHex := parts[0]
+		dbName := parts[1]
+
+		dbNameHash := crypto.Keccak256([]byte(dbName))
+		prefix := fmt.Sprintf("%x:%s:", dbNameHash, addressHex)
+
+		prefixedDB := storage.NewPrefixStorage(sharedDB, prefix)
 		
-		if err := database.BatchPut(deserialized); err != nil {
+		if err := prefixedDB.BatchPut(deserialized); err != nil {
 			return fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
 		}
 	}

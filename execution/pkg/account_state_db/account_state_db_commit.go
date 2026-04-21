@@ -190,16 +190,18 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	}
 
 	// Build AccountBatch for network replication.
+	var accountBatchData []byte
 	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
 		if len(networkBatch) > 0 {
 			data, serErr := storage.SerializeBatch(networkBatch)
 			if serErr != nil {
 				logger.Error("Commit: Failed to serialize commit batch for network transfer", "error", serErr)
 			} else {
-				db.SetAccountBatch(data)
+				accountBatchData = data
 				logger.Debug("Commit: Serialized account batch for network transfer", "size_bytes", len(data), "entries", len(networkBatch))
 			}
 		}
+		db.SetAccountBatch(accountBatchData)
 	}
 
 	// 5. Create a *new* trie instance reflecting the committed state.
@@ -355,9 +357,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	}
 
 	// Store accountBatch for network transfer (same as original Commit)
-	if accountBatchData != nil {
-		db.SetAccountBatch(accountBatchData)
-	}
+	// ALWAYS call SetAccountBatch (even if nil) to clear any leftover batch 
+	// from the previous block, ensuring we don't leak stale data to Sub nodes.
+	db.SetAccountBatch(accountBatchData)
 
 	// ═══════════════════════════════════════════════════════════════
 	// Phase 4: RELEASE muTrie IMMEDIATELY
