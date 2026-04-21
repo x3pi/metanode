@@ -342,6 +342,7 @@ sample/
 # SECURITY NOTE: Never commit private keys, secrets, or sensitive configuration!
 **/service-account*.json
 **/*-service.yaml
+!/execution/cmd/simple_chain/processor/block_processor_db_sync.go
 **/simple_chain
 /simple_chain
 simple_chain
