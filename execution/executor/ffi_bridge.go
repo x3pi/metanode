@@ -110,6 +110,31 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 		return C.bool(false)
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Dynamic RPC timeout based on request type.
+	// SyncBlocksRequest (EXECUTE mode) processes each block through NOMT trie
+	// rebuild, MVM FullDbLogs replay, PebbleDB batch writes — easily 3-5s/block.
+	// The old hardcoded 5s timeout killed these requests every time → sync stall.
+	// ═══════════════════════════════════════════════════════════════════════════
+	rpcTimeout := 10 * time.Second // default for general queries
+	switch req := request.GetPayload().(type) {
+	case *pb.Request_SyncBlocksRequest:
+		// EXECUTE mode
+		blockCount := len(req.SyncBlocksRequest.GetBlocks())
+		rpcTimeout = time.Duration(blockCount*3+30) * time.Second
+		if rpcTimeout < 60*time.Second {
+			rpcTimeout = 60 * time.Second // minimum 60s
+		}
+		if rpcTimeout > 600*time.Second {
+			rpcTimeout = 600 * time.Second // maximum 10 minutes
+		}
+	case *pb.Request_WaitForSyncToBlockRequest:
+		rpcTimeout = 60 * time.Second // polling-based, up to 30s internally + margin
+	default:
+		// Simple queries (GetLastBlockNumber, GetCurrentEpoch, etc.)
+		rpcTimeout = 10 * time.Second
+	}
+
 	// Safely execute request with timeout and panic recovery
 	var wrappedResponse *pb.Response
 	done := make(chan *pb.Response, 1)
@@ -130,8 +155,8 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	select {
 	case res := <-done:
 		wrappedResponse = res
-	case <-time.After(5 * time.Second):
-		logger.Error("[FFI Bridge] ⚠️ RPC request timeout after 5s")
+	case <-time.After(rpcTimeout):
+		logger.Error("[FFI Bridge] ⚠️ RPC request timeout after %v", rpcTimeout)
 		wrappedResponse = &pb.Response{
 			Payload: &pb.Response_Error{
 				Error: "RPC request timeout in Go handler",

@@ -212,23 +212,23 @@ impl RustSyncNode {
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
-        // SYNC STRATEGY: PRE-COMMITTED BLOCK IMPORT (PRODUCTION)
+        // SYNC STRATEGY: PRE-COMMITTED BLOCK IMPORT WITH PARALLEL PREFETCH
         // ═══════════════════════════════════════════════════════════════════════════
+        // Pipeline architecture:
+        //   Round N: [Execute prefetched blocks via FFI] ║ [Prefetch next batch from peers]
+        //   Round N+1: [Execute prefetched blocks via FFI] ║ [Prefetch next batch from peers]
+        //
+        // This eliminates the sequential wait: instead of fetch→execute→fetch→execute,
+        // we overlap network I/O with Go FFI processing for ~2x throughput.
+        //
         // Fetch pre-committed BlockData from peer's /get_blocks endpoint.
         // Import directly via sync_blocks → Go HandleSyncBlocksRequest.
         // NO RE-EXECUTION on sync node — blocks arrive with correct hash, stateRoot,
         // blockNumber already embedded. Fork impossible.
-        //
-        // Flow: Peer Go (backup storage) → Peer Rust RPC → Network → Local Rust
-        //       → sync_blocks (UDS) → Go HandleSyncBlocksRequest → direct DB import
-        //
-        // Validator stores backup data after execution. Sync node imports same data.
-        // Both nodes end up with identical blocks — no re-execution, no numbering mismatch.
         // ═══════════════════════════════════════════════════════════════════════════
         let peer_rpc_addresses = self.config.peer_rpc_addresses.clone();
         if !peer_rpc_addresses.is_empty() {
             // Use Go's last block number as the sync cursor
-            // HandleSyncBlocksRequest works with block numbers from block headers
             let go_block = match self.executor_client.get_last_block_number().await {
                 Ok((b, _, _)) => b,
                 Err(e) => {
@@ -237,97 +237,173 @@ impl RustSyncNode {
                 }
             };
 
-            let from_block = go_block + 1;
             let batch_size = self.config.turbo_batch_size as u64;
-            let to_block = from_block + batch_size - 1;
 
-            debug!(
-                "🔄 [RUST-SYNC] Fetching pre-committed blocks {} to {} from peers",
-                from_block, to_block
-            );
+            // ═══════════════════════════════════════════════════════════════════
+            // PHASE A: Check if we have prefetched blocks ready from previous round
+            // ═══════════════════════════════════════════════════════════════════
+            let blocks_to_process = {
+                let mut prefetch_guard = self.prefetch_buffer.lock().await;
+                if let Some(prefetched) = prefetch_guard.take() {
+                    // Validate prefetched blocks are still relevant (not stale)
+                    let first_prefetched_block = prefetched.first().map(|b| b.block_number).unwrap_or(0);
+                    if first_prefetched_block == go_block + 1 {
+                        info!(
+                            "⚡ [RUST-SYNC] Using {} PREFETCHED blocks ({}..{}), zero network wait!",
+                            prefetched.len(),
+                            first_prefetched_block,
+                            prefetched.last().map(|b| b.block_number).unwrap_or(0)
+                        );
+                        Some(prefetched)
+                    } else {
+                        info!(
+                            "🔄 [RUST-SYNC] Prefetch buffer stale (expected block {}, got {}). Discarding.",
+                            go_block + 1, first_prefetched_block
+                        );
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
 
-            // Fetch pre-committed BlockData from peer's /get_blocks endpoint
-            match crate::network::peer_rpc::fetch_blocks_from_peer(
-                &peer_rpc_addresses,
-                from_block,
-                to_block,
-            )
-            .await
-            {
-                Ok(blocks) if !blocks.is_empty() => {
-                    let count = blocks.len();
-                    info!(
-                        "✅ [RUST-SYNC] Got {} pre-committed blocks from peers, importing via sync_blocks",
-                        count
+            // ═══════════════════════════════════════════════════════════════════
+            // PHASE B: If no prefetch available, do synchronous fetch (cold start)
+            // ═══════════════════════════════════════════════════════════════════
+            let blocks_to_process = match blocks_to_process {
+                Some(blocks) => blocks,
+                None => {
+                    let from_block = go_block + 1;
+                    let to_block = from_block + batch_size - 1;
+                    debug!(
+                        "🔄 [RUST-SYNC] Cold fetch: blocks {} to {} from peers",
+                        from_block, to_block
                     );
-
-                    // Import blocks directly into Go — NO re-execution
-                    match self.executor_client.sync_and_execute_blocks(blocks).await {
-                        Ok((synced, last_block, _gei)) => {
-                            info!(
-                                "✅ [RUST-SYNC] Imported {} blocks (last: {})",
-                                synced, last_block
-                            );
-                            self.check_and_process_pending_epoch_transitions(go_last_gei)
-                                .await;
-                            return Ok(synced as usize);
-                        }
+                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                        &peer_rpc_addresses,
+                        from_block,
+                        to_block,
+                    )
+                    .await
+                    {
+                        Ok(blocks) => blocks,
                         Err(e) => {
-                            warn!("⚠️ [RUST-SYNC] sync_and_execute_blocks failed: {}", e);
+                            info!("🚀 [DEBUG-SYNC] Fetch from peers failed: {}", e);
+                            Vec::new()
                         }
                     }
                 }
-                Ok(_) => {
-                    info!("🚀 [DEBUG-SYNC] Reached Ok(_) branch in fetch_blocks_from_peer. Checking peer GET...");
+            };
 
-                    // FORK-SAFETY EMPTY-COMMIT CATCHUP:
-                    // If peers are at same DB block (no txs) but higher GEI, sync empty
-                    // commits to advance GEI via FFI directly.
-                    if let Ok((_peer_epoch, peer_block, best_peer, peer_gei)) =
-                        crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc_addresses).await
+            if !blocks_to_process.is_empty() {
+                let count = blocks_to_process.len();
+                let last_fetched_block = blocks_to_process.last().map(|b| b.block_number).unwrap_or(0);
+                info!(
+                    "✅ [RUST-SYNC] Got {} pre-committed blocks, importing via sync_blocks",
+                    count
+                );
+
+                // ═══════════════════════════════════════════════════════
+                // PHASE C: PARALLEL — Start prefetching NEXT batch while
+                //          Go FFI processes current batch
+                // ═══════════════════════════════════════════════════════
+                let prefetch_from = last_fetched_block + 1;
+                let prefetch_to = prefetch_from + batch_size - 1;
+                let prefetch_peers = peer_rpc_addresses.clone();
+                let prefetch_buffer_clone = self.prefetch_buffer.clone();
+
+                let prefetch_handle = tokio::spawn(async move {
+                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                        &prefetch_peers,
+                        prefetch_from,
+                        prefetch_to,
+                    )
+                    .await
                     {
-                        if peer_block == go_block && peer_gei > go_last_gei {
-                            info!("🚀 [RUST-SYNC] Peer {} matches block {} but has higher GEI {} (our GEI {}). Fetching empty commits...", 
-                                best_peer, peer_block, peer_gei, go_last_gei);
-                            
-                            let from_gei = go_last_gei + 1;
-                            let to_gei = std::cmp::min(peer_gei, from_gei + 2000);
-                            
-                            match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], from_gei, to_gei).await {
-                                Ok(exec_blocks) if !exec_blocks.is_empty() => {
-                                    info!("✅ [RUST-SYNC] Fetched {} empty executable blocks. Pushing to Go FFI...", exec_blocks.len());
-                                    let mut sent = 0;
-                                    if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
-                                        for (gei, data) in exec_blocks {
-                                            if c_fn(data.as_ptr(), data.len()) {
-                                                sent += 1;
-                                            } else {
-                                                tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
-                                                break;
-                                            }
+                        Ok(blocks) if !blocks.is_empty() => {
+                            let prefetched_count = blocks.len();
+                            let mut buf = prefetch_buffer_clone.lock().await;
+                            *buf = Some(blocks);
+                            info!(
+                                "⚡ [PREFETCH] Prefetched {} blocks ({}..{}) ready for next round",
+                                prefetched_count, prefetch_from, prefetch_from + prefetched_count as u64 - 1
+                            );
+                        }
+                        Ok(_) => {
+                            debug!("[PREFETCH] No more blocks available from peers");
+                        }
+                        Err(e) => {
+                            debug!("[PREFETCH] Prefetch failed (non-fatal): {}", e);
+                        }
+                    }
+                });
+
+                // Execute current batch via FFI (this is the CPU-bound part)
+                let execute_result = self.executor_client.sync_and_execute_blocks(blocks_to_process).await;
+
+                // Wait for prefetch to complete (it's usually faster than FFI execution)
+                let _ = prefetch_handle.await;
+
+                match execute_result {
+                    Ok((synced, last_block, _gei)) => {
+                        info!(
+                            "✅ [RUST-SYNC] Imported {} blocks (last: {})",
+                            synced, last_block
+                        );
+                        self.check_and_process_pending_epoch_transitions(go_last_gei)
+                            .await;
+                        return Ok(synced as usize);
+                    }
+                    Err(e) => {
+                        // Clear prefetch buffer on execution error (state may be inconsistent)
+                        let mut buf = self.prefetch_buffer.lock().await;
+                        *buf = None;
+                        warn!("⚠️ [RUST-SYNC] sync_and_execute_blocks failed: {}", e);
+                    }
+                }
+            } else {
+                info!("🚀 [DEBUG-SYNC] No blocks from peers. Checking for empty commit catchup...");
+
+                // FORK-SAFETY EMPTY-COMMIT CATCHUP:
+                // If peers are at same DB block (no txs) but higher GEI, sync empty
+                // commits to advance GEI via FFI directly.
+                if let Ok((_peer_epoch, peer_block, best_peer, peer_gei)) =
+                    crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc_addresses).await
+                {
+                    if peer_block == go_block && peer_gei > go_last_gei {
+                        info!("🚀 [RUST-SYNC] Peer {} matches block {} but has higher GEI {} (our GEI {}). Fetching empty commits...", 
+                            best_peer, peer_block, peer_gei, go_last_gei);
+                        
+                        let from_gei = go_last_gei + 1;
+                        let to_gei = std::cmp::min(peer_gei, from_gei + 2000);
+                        
+                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], from_gei, to_gei).await {
+                            Ok(exec_blocks) if !exec_blocks.is_empty() => {
+                                info!("✅ [RUST-SYNC] Fetched {} empty executable blocks. Pushing to Go FFI...", exec_blocks.len());
+                                let mut sent = 0;
+                                if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                                    for (gei, data) in exec_blocks {
+                                        if c_fn(data.as_ptr(), data.len()) {
+                                            sent += 1;
+                                        } else {
+                                            tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
+                                            break;
                                         }
-                                        info!("✅ [RUST-SYNC] Successfully pushed {} empty commits to Go.", sent);
-                                        // NOTE: Return Ok(0) instead of Ok(sent) to avoid triggering turbo mode.
-                                        // Empty commit GEI catch-up is NOT real block sync progress.
-                                        // Without this, the sync loop stays in turbo (50ms) and burns CPU
-                                        // perpetually chasing peer GEI that keeps advancing from consensus.
-                                        return Ok(0);
-                                    } else {
-                                        tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
                                     }
+                                    info!("✅ [RUST-SYNC] Successfully pushed {} empty commits to Go.", sent);
+                                    return Ok(0);
+                                } else {
+                                    tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
                                 }
-                                Ok(_) => {
-                                    tracing::debug!("[RUST-SYNC] No executable blocks fetched from peer.");
-                                }
-                                Err(e) => {
-                                    tracing::warn!("⚠️ [RUST-SYNC] Failed to fetch executable blocks: {}", e);
-                                }
+                            }
+                            Ok(_) => {
+                                tracing::debug!("[RUST-SYNC] No executable blocks fetched from peer.");
+                            }
+                            Err(e) => {
+                                tracing::warn!("⚠️ [RUST-SYNC] Failed to fetch executable blocks: {}", e);
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    info!("🚀 [DEBUG-SYNC] Fetch from peers failed Err branch: {}", e);
                 }
             }
         } else {

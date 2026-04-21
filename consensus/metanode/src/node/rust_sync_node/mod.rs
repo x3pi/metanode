@@ -27,6 +27,7 @@ mod fetch_tests;
 mod sync_loop_tests;
 
 use crate::node::executor_client::ExecutorClient;
+use crate::node::executor_client::proto;
 use crate::node::peer_health::PeerHealthTracker;
 use crate::node::sync_metrics::SyncMetrics;
 use block_queue::BlockQueue;
@@ -116,6 +117,9 @@ pub struct RustSyncNode {
     pub(crate) peer_health: Arc<Mutex<PeerHealthTracker>>,
     /// Optional store to persist fetched blocks and commits, bypassing Validator sync
     pub(crate) store: Option<Arc<dyn consensus_core::storage::Store>>,
+    /// Prefetch buffer: holds blocks fetched from peers during the previous sync round.
+    /// The next sync_once() can use these immediately instead of waiting for network I/O.
+    pub(crate) prefetch_buffer: Arc<Mutex<Option<Vec<proto::BlockData>>>>,
 }
 
 impl RustSyncNode {
@@ -152,6 +156,7 @@ impl RustSyncNode {
             metrics: SyncMetrics::new_for_test(),
             peer_health: Arc::new(Mutex::new(PeerHealthTracker::new())),
             store: None,
+            prefetch_buffer: Arc::new(Mutex::new(None)),
         }
     }
 

@@ -1096,6 +1096,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
+	// ═══════════════════════════════════════════════════════════════════════════
+	currentGEI := storage.GetLastGlobalExecIndex()
+
+	trieDBCache := make(map[string]*storage.ShardelDB)
+	defer func() {
+		for _, db := range trieDBCache {
+			db.Close()
+		}
+	}()
+
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
 
@@ -1120,9 +1132,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		blockGEI := header.GlobalExecIndex()
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// DEDUPLICATION: Skip blocks already executed (GEI-based, not block-number based)
+		// DEDUPLICATION: Skip blocks already executed (GEI-based)
 		// ═══════════════════════════════════════════════════════════════════════════
-		currentGEI := storage.GetLastGlobalExecIndex()
 		if blockGEI > 0 && blockGEI <= currentGEI {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
@@ -1140,6 +1151,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			continue
 		}
 
+		// Update cached GEI so next blocks in the loop don't dedup on stale value
+		if blockGEI > currentGEI {
+			currentGEI = blockGEI
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
@@ -1149,8 +1165,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			if deserErr != nil {
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
-				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
-					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply BackUpDb for block #%d: %v", blockNum, applyErr)
+				if applyErr := rh.applyBackupDbBatches(&backupDb, trieDBCache); applyErr != nil {
+					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
 			}
 		}
@@ -1312,7 +1328,7 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.
 // This mirrors applyBlockBatch from BlockProcessor but is adapted for the executor package.
 // It writes Account, Block, Code, SmartContract, Receipt, Transaction, StakeState, and TrieDB batches.
-func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error {
+func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb, trieDBCache map[string]*storage.ShardelDB) error {
 	// Map batch data fields to their corresponding storages
 	type batchEntry struct {
 		name    string
@@ -1367,7 +1383,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 
 	// Apply TrieDB batches
 	if len(backupDb.TrieDatabaseBatchPut) > 0 {
-		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber); err != nil {
+		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber, trieDBCache); err != nil {
 			return fmt.Errorf("error writing TrieDB batches for block %d: %w", backupDb.BockNumber, err)
 		}
 	}
@@ -1406,7 +1422,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 
 // applyTrieDbBatches applies TrieDB batch data from a BackUpDb to the local TrieDB LevelDB storages.
 // Each key in the map corresponds to a sub-database path under the Trie root.
-func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64) error {
+func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64, trieDBCache map[string]*storage.ShardelDB) error {
 	for key, value := range trieDbBatches {
 		if len(value) == 0 {
 			continue
@@ -1418,20 +1434,25 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 		if len(deserialized) == 0 {
 			continue
 		}
-		// Open TrieDB at the configured path (matching getTrieDBFromPool pattern)
-		databasePath := config.ConfigApp.Databases.RootPath + config.ConfigApp.Databases.Trie.Path + "/" + key
-		database, err := storage.NewShardelDB(databasePath, 1, 2, config.ConfigApp.DBType, databasePath)
-		if err != nil {
-			return fmt.Errorf("error creating TrieDB '%s' for block %d: %w", key, blockNum, err)
+		
+		database, exists := trieDBCache[key]
+		if !exists {
+			// Open TrieDB at the configured path
+			databasePath := config.ConfigApp.Databases.RootPath + config.ConfigApp.Databases.Trie.Path + "/" + key
+			var err error
+			database, err = storage.NewShardelDB(databasePath, 1, 2, config.ConfigApp.DBType, databasePath)
+			if err != nil {
+				return fmt.Errorf("error creating TrieDB '%s' for block %d: %w", key, blockNum, err)
+			}
+			if err := database.Open(); err != nil {
+				return fmt.Errorf("error opening TrieDB '%s' for block %d: %w", key, blockNum, err)
+			}
+			trieDBCache[key] = database
 		}
-		if err := database.Open(); err != nil {
-			return fmt.Errorf("error opening TrieDB '%s' for block %d: %w", key, blockNum, err)
-		}
+		
 		if err := database.BatchPut(deserialized); err != nil {
-			database.Close()
 			return fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
 		}
-		database.Close()
 	}
 	return nil
 }

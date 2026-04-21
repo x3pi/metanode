@@ -279,17 +279,6 @@ impl ExecutorClient {
                     last_block_number, last_gei, is_ready
                 );
 
-                // Persist for crash recovery
-                if let Some(ref storage_path) = self.storage_path {
-                    if let Err(e) = persist_last_block_number(storage_path, last_block_number).await
-                    {
-                        warn!(
-                            "⚠️ [PERSIST] Failed to persist last block number {}: {}",
-                            last_block_number, e
-                        );
-                    }
-                }
-
                 Ok((last_block_number, last_gei, is_ready))
             }
             Some(proto::response::Payload::Error(error_msg)) => {
