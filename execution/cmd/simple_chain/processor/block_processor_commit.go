@@ -129,7 +129,7 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		header := job.Block.Header()
-		logger.Info("[batch_id=%s] 📋 [MASTER] Block #%d committed (tx_count=%d, save=%v): %s",
+		logger.Debug("[batch_id=%s] 📋 [MASTER] Block #%d committed (tx_count=%d, save=%v): %s",
 			batchID, header.BlockNumber(), txCount, saveDuration, header.String())
 
 		// Auto-update epoch from incoming blocks (critical for late-joining nodes)
@@ -235,7 +235,7 @@ func (bp *BlockProcessor) commitWorker() {
 			}(job.MappingWg, job.Block, job.ProcessResults.Receipts, allEventLogs)
 		}
 
-		logger.Info("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
+		logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
 	}
 }
 
@@ -365,7 +365,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	// Log per-task timing for diagnostics (only for blocks that take noticeable time)
 	overallDuration := time.Since(overallStart)
 	if overallDuration > 50*time.Millisecond {
-		logger.Info("[PERF] commitToMemoryParallel: %v (bottleneck: %s=%v)",
+		logger.Debug("[PERF] commitToMemoryParallel: %v (bottleneck: %s=%v)",
 			overallDuration, maxTask, maxDuration)
 	}
 
@@ -449,7 +449,7 @@ func (bp *BlockProcessor) persistWorker() {
 
 		elapsed := time.Since(start)
 		if elapsed > 10*time.Millisecond {
-			logger.Info("[PERF] PersistWorker: async persist completed in %v", elapsed)
+			logger.Debug("[PERF] PersistWorker: async persist completed in %v", elapsed)
 		}
 	}
 }

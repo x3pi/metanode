@@ -212,7 +212,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		incomingTxCount := len(epochData.Transactions)
 		incomingGEI := epochData.GetGlobalExecIndex()
 		if incomingTxCount > 0 {
-			fmt.Printf("📥 [DIAG-RECV] Block from Rust: GEI=%d, txs=%d, epoch=%d, nextExpected=%d, currentBlock=%d",
+			logger.Debug("📥 [DIAG-RECV] Block from Rust: GEI=%d, txs=%d, epoch=%d, nextExpected=%d, currentBlock=%d",
 				incomingGEI, incomingTxCount, epochData.GetEpoch(), nextExpectedGlobalExecIndex, currentBlockNumber)
 		}
 

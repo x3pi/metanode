@@ -28,7 +28,7 @@ func (bp *BlockProcessor) processSingleEpochData(
 	fileLogger *loggerfile.FileLogger,
 ) {
 PROCESS_SINGLE_EPOCH_DATA_START:
-	fmt.Printf("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d\n", epochData.GetGlobalExecIndex())
+	logger.Debug("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d", epochData.GetGlobalExecIndex())
 	globalExecIndex := epochData.GetGlobalExecIndex()
 	commitIndex := epochData.GetCommitIndex()
 
@@ -589,7 +589,6 @@ PROCESS_BLOCK:
 		// Unmarshal as single Transaction first
 		singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
 		if err == nil {
-			logger.Info("✅ [TX FLOW] UnmarshalTransaction SUCCESS for tx[%d]", txIdx)
 			allTransactions = append(allTransactions, singleTx)
 			totalTxsFromRust++
 			continue
@@ -602,7 +601,6 @@ PROCESS_BLOCK:
 			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes)", txIdx, err, len(ms.Digest))
 			continue
 		}
-		logger.Info("✅ [TX FLOW] UnmarshalTransactions SUCCESS for tx[%d]: returned %d txs", txIdx, len(transactions))
 		allTransactions = append(allTransactions, transactions...)
 		totalTxsFromRust += len(transactions)
 	}
@@ -836,7 +834,7 @@ PROCESS_BLOCK:
 	createBlockDuration := time.Since(createBlockStart)
 
 	blockHash := newBlock.Header().Hash().Hex()
-	logger.Info("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
+	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
 	// Update GlobalExecIndex tracking (persistent)

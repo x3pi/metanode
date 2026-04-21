@@ -22,6 +22,35 @@ import (
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
+type dirtyAccountEntry struct {
+	addr  common.Address
+	state types.AccountState
+}
+
+type marshalResult struct {
+	address common.Address
+	bytes   []byte
+	err     error
+}
+
+var (
+	keysToProcessPool = sync.Pool{
+		New: func() interface{} { return make([]dirtyAccountEntry, 0, 5000) },
+	}
+	marshalResultsPool = sync.Pool{
+		New: func() interface{} { return make([]marshalResult, 0, 5000) },
+	}
+	batchKeysPool = sync.Pool{
+		New: func() interface{} { return make([][]byte, 0, 5000) },
+	}
+	batchValuesPool = sync.Pool{
+		New: func() interface{} { return make([][]byte, 0, 5000) },
+	}
+	batchOldValuesPool = sync.Pool{
+		New: func() interface{} { return make([][]byte, 0, 5000) },
+	}
+)
+
 // Commit persists all dirty account states to the trie and the underlying database.
 // It calculates the new root hash and updates the state database instance.
 func (db *AccountStateDB) Commit() (common.Hash, error) {
@@ -125,7 +154,7 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 			logger.Error("Commit: NOMT CommitPayload failed: %v", err)
 			return common.Hash{}, fmt.Errorf("NOMT CommitPayload failed during Commit: %w", err)
 		}
-		logger.Info("✅ [NOMT] CommitPayload flushed synchronously during Commit (genesis-safe)")
+		logger.Debug("✅ [NOMT] CommitPayload flushed synchronously during Commit (genesis-safe)")
 	}
 
 	// 3. Handle old keys (optional)
@@ -284,7 +313,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	}
 
 	if trieCommitDuration > 10*time.Millisecond {
-		logger.Info("[PERF-COMMIT] trie.Commit(true) took: %v", trieCommitDuration)
+		logger.Debug("[PERF-COMMIT] trie.Commit(true) took: %v", trieCommitDuration)
 	}
 
 	// Sanity check
@@ -341,12 +370,12 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
 		if len(batch) > 0 {
 			// DEBUG MASTER COMMIT BATCH
-			logger.Info("[DEBUG MASTER DB] CommitPipeline: serializing %d entries for network transfer", len(batch))
+			logger.Debug("[DEBUG MASTER DB] CommitPipeline: serializing %d entries for network transfer", len(batch))
 			startSerialize := time.Now()
 			data, serErr := storage.SerializeBatch(batch)
 			serializeDuration := time.Since(startSerialize)
 			if serializeDuration > 10*time.Millisecond {
-				logger.Info("[PERF-COMMIT] SerializeBatch took: %v for %d entries", serializeDuration, len(batch))
+				logger.Debug("[PERF-COMMIT] SerializeBatch took: %v for %d entries", serializeDuration, len(batch))
 			}
 			if serErr != nil {
 				logger.Error("CommitPipeline: Failed to serialize commit batch", "error", serErr)
@@ -399,6 +428,8 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 //  1. BatchPut nodeSet to LevelDB (disk I/O)
 //  2. Create new trie from committed hash
 //  3. Swap trie reference and update originRootHash
+//  4. Close persistReady to unblock the next block's IntermediateRoot
+//  5. (NOMT) Run CommitPayload to flush changes to disk asynchronously.
 //
 // This method is designed to be called from a background goroutine.
 // It briefly re-acquires muTrie for the trie swap (step 2-3).
@@ -411,17 +442,6 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	if result == nil {
 		return nil // Nothing to persist (e.g., no state changes)
 	}
-
-	// FORK-SAFETY & DEADLOCK PREVENTION:
-	// Signal that trie swap is complete or failed. Ensure this always runs
-	// so the next block's IntermediateRoot(true) is unblocked.
-	defer func() {
-		if result.PersistChannel != nil {
-			close(result.PersistChannel)
-		} else {
-			close(db.persistReady)
-		}
-	}()
 
 	// ═══════════════════════════════════════════════════════════════
 	// Step 1: Persist to LevelDB (slow, disk I/O — this is the part
@@ -440,14 +460,6 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	// from Pipeline Commit, preventing us from creating a cold trie and losing PreWarm cache.
 	// ═══════════════════════════════════════════════════════════════
 
-	// Commit NOMT payload to disk if applicable
-	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		if err := nomtTrie.CommitPayload(); err != nil {
-			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
-			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
-		}
-	}
-
 	db.muTrie.Lock()
 	if result.Trie != nil {
 		db.trie = result.Trie
@@ -465,6 +477,38 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	db.muTrie.Unlock()
 
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
+
+	// ═══════════════════════════════════════════════════════════════
+	// Step 3: IMMEDIATE PERSIST GATE UNBLOCK
+	// Signal that trie swap is complete. Ensure this always runs BEFORE
+	// CommitPayload so the next block's IntermediateRoot(true) is unblocked
+	// and EVM execution can overlap with disk I/O!
+	// ═══════════════════════════════════════════════════════════════
+	if result.PersistChannel != nil {
+		close(result.PersistChannel)
+	} else {
+		close(db.persistReady)
+	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// Step 4: BACKGROUND NOMT DISK FLUSH (CommitPayload)
+	// With the gate opened, the next block proceeds at full speed.
+	// We use nomtCommitGuard to serialize this background flush with the next
+	// block's BatchUpdateWithCachedOldValues.
+	// ═══════════════════════════════════════════════════════════════
+	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
+		// Acquire guard to prevent concurrent modification during flush
+		<-db.nomtCommitGuard
+		defer func() {
+			db.nomtCommitGuard <- struct{}{} // Release guard
+		}()
+
+		if err := nomtTrie.CommitPayload(); err != nil {
+			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
+			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -546,10 +590,44 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		updateErr     error
 		processedKeys int  = 0
 		hasChanges    bool = false
-		keysToProcess []common.Address
 	)
 
-	cloned := make(map[common.Address]types.AccountState)
+	keysToProcess := keysToProcessPool.Get().([]dirtyAccountEntry)[:0]
+	marshalResults := marshalResultsPool.Get().([]marshalResult)[:0]
+	batchKeys := batchKeysPool.Get().([][]byte)[:0]
+	batchValues := batchValuesPool.Get().([][]byte)[:0]
+	var batchOldValues [][]byte
+	if db.isFlatTrie {
+		batchOldValues = batchOldValuesPool.Get().([][]byte)[:0]
+	}
+
+	defer func() {
+		// Release slices back to pools (limit capacity to prevent memory leaks if spiked)
+		if cap(keysToProcess) < 20000 {
+			keysToProcessPool.Put(keysToProcess)
+		}
+		if cap(marshalResults) < 20000 {
+			marshalResultsPool.Put(marshalResults)
+		}
+		if cap(batchKeys) < 20000 {
+			for i := range batchKeys {
+				batchKeys[i] = nil // Avoid pinning memory
+			}
+			batchKeysPool.Put(batchKeys)
+		}
+		if cap(batchValues) < 20000 {
+			for i := range batchValues {
+				batchValues[i] = nil
+			}
+			batchValuesPool.Put(batchValues)
+		}
+		if db.isFlatTrie && batchOldValues != nil && cap(batchOldValues) < 20000 {
+			for i := range batchOldValues {
+				batchOldValues[i] = nil
+			}
+			batchOldValuesPool.Put(batchOldValues)
+		}
+	}()
 
 	// Bước 1: Thu thập keys (vì sync.Map.Range không cho biết trước số lượng)
 	db.dirtyAccounts.Range(func(key, value interface{}) bool {
@@ -567,8 +645,10 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			return true // Skip this account, it wasn't modified
 		}
 
-		cloned[address] = state
-		keysToProcess = append(keysToProcess, address)
+		keysToProcess = append(keysToProcess, dirtyAccountEntry{
+			addr:  address,
+			state: state,
+		})
 		return true
 	})
 
@@ -577,8 +657,8 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// with the same keys but in different orders causes structural differences
 	// (different branches, splits) which completely changes the final AccountStatesRoot
 	// and causes forks between nodes. Sorting guarantees deterministic trie updates.
-	slices.SortFunc(keysToProcess, func(a, b common.Address) int {
-		return bytes.Compare(a[:], b[:])
+	slices.SortFunc(keysToProcess, func(a, b dirtyAccountEntry) int {
+		return bytes.Compare(a.addr[:], b.addr[:])
 	})
 
 	totalDirty := len(keysToProcess)
@@ -593,12 +673,14 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// Marshaling AccountState to []byte is CPU bound. Do this concurrently
 	// before acquiring the exclusive muTrie.Lock().
 	// ═══════════════════════════════════════════════════════════════
-	type marshalResult struct {
-		address common.Address
-		bytes   []byte
-		err     error
+	// ═══════════════════════════════════════════════════════════════
+
+	// Ensure marshalResults has the correct length before parallel mapping
+	if cap(marshalResults) < totalDirty {
+		marshalResults = make([]marshalResult, totalDirty) // fallback allocation if pool was too small
+	} else {
+		marshalResults = marshalResults[:totalDirty] // extend to full length
 	}
-	marshalResults := make([]marshalResult, totalDirty)
 
 	if totalDirty > 0 {
 		startMarshal := time.Now()
@@ -629,9 +711,10 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			go func(startIdx, endIdx int) {
 				defer wg.Done()
 				for j := startIdx; j < endIdx; j++ {
-					addr := keysToProcess[j]
-					as, ok := cloned[addr]
-					if !ok || as == nil {
+					entry := keysToProcess[j]
+					addr := entry.addr
+					as := entry.state
+					if as == nil {
 						marshalResults[j] = marshalResult{
 							address: addr,
 							err:     fmt.Errorf("missing or nil account state for %s", addr.Hex()),
@@ -651,7 +734,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		wg.Wait()
 		marshalDuration := time.Since(startMarshal)
 		if marshalDuration > 10*time.Millisecond {
-			logger.Info("[PERF] IntermediateRoot ParallelMarshal: %v (%d keys)", marshalDuration, totalDirty)
+			logger.Debug("[PERF] IntermediateRoot ParallelMarshal: %v (%d keys)", marshalDuration, totalDirty)
 		}
 	}
 
@@ -664,12 +747,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// The LRU cache contains pre-commit serialized bytes — exactly what
 	// FlatStateTrie needs for bucket hash computation (old contribution).
 	// ═══════════════════════════════════════════════════════════════
-	batchKeys := make([][]byte, 0, totalDirty)
-	batchValues := make([][]byte, 0, totalDirty)
-	var batchOldValues [][]byte
-	if db.isFlatTrie {
-		batchOldValues = make([][]byte, 0, totalDirty)
-	}
+	// batchKeys and batchValues slices are pre-allocated via sync.Pool above.
 	for _, res := range marshalResults {
 		if res.err != nil {
 			logger.Error("Marshal error for %s: %v", res.address.Hex(), res.err)
@@ -753,10 +831,25 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 				}
 			} else if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+				// ═══════════════════════════════════════════════════════════════
+				// BACKGROUND FLUSH GUARD
+				// Wait for any running CommitPayload to finish before applying new state.
+				// This protects NOMT's internal structures during concurrent I/O flush.
+				// ═══════════════════════════════════════════════════════════════
+				guardStart := time.Now()
+				<-db.nomtCommitGuard
+				guardWait := time.Since(guardStart)
+				if guardWait > 5*time.Millisecond {
+					logger.Debug("[PERF] IntermediateRoot guarded wait for CommitPayload: %v", guardWait)
+				}
+
 				if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 					logger.Error("BatchUpdateWithCachedOldValues (NOMT) failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 				}
+				
+				// Release guard immediately after update
+				db.nomtCommitGuard <- struct{}{}
 			} else {
 				// Fallback: generic BatchUpdate
 				if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
@@ -764,7 +857,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 					updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 				}
 			}
-			logger.Info("[PERF] IntermediateRoot BatchUpdate (thread-safe, lock-free, cached-old): %v (%d keys)", time.Since(startBatch), len(batchKeys))
+			logger.Debug("[PERF] IntermediateRoot BatchUpdate (thread-safe, lock-free, cached-old): %v (%d keys)", time.Since(startBatch), len(batchKeys))
 		}
 
 		if updateErr != nil {
@@ -772,15 +865,15 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			return common.Hash{}, updateErr
 		}
 
-		// DEFERRED PERSIST GATE: Wait for the previous block's async persist
+		// DEFERRED PERSIST GATE: Wait for the previous block's trie swap
 		// to complete before we lock the trie and modify its structural state.
-		// We still benefit from massive TPS gains because the CPU-bound marshaling
-		// and lock-free BatchUpdate happened OUTSIDE this wait!
+		// Since PersistAsync now closes persistReady BEFORE CommitPayload, this wait
+		// is nearly instantaneous.
 		persistWaitStart := time.Now()
 		<-db.persistReady
 		persistWaitDuration := time.Since(persistWaitStart)
 		if persistWaitDuration > 5*time.Millisecond {
-			logger.Info("[PERF] IntermediateRoot DEFERRED persistReady wait: %v", persistWaitDuration)
+			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait: %v", persistWaitDuration)
 		}
 
 		// Only lock for Hash() + clear maps (minimal critical section ~10ms)
@@ -794,7 +887,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		<-db.persistReady
 		persistWaitDuration := time.Since(persistWaitStart)
 		if persistWaitDuration > 5*time.Millisecond {
-			logger.Info("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", persistWaitDuration)
+			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", persistWaitDuration)
 		}
 
 		db.muTrie.Lock()
@@ -804,7 +897,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			db.trie.PreWarm(batchKeys)
 			preWarmDuration := time.Since(startPreWarm)
 			if preWarmDuration > 10*time.Millisecond {
-				logger.Info("[PERF] IntermediateRoot PreWarm: %v (%d keys)", preWarmDuration, len(batchKeys))
+				logger.Debug("[PERF] IntermediateRoot PreWarm: %v (%d keys)", preWarmDuration, len(batchKeys))
 			}
 		}
 
@@ -814,7 +907,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 				logger.Error("BatchUpdate failed: %v", err)
 				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
-			logger.Info("[PERF] IntermediateRoot BatchUpdate: %v (%d keys)", time.Since(startBatch), len(batchKeys))
+			logger.Debug("[PERF] IntermediateRoot BatchUpdate: %v (%d keys)", time.Since(startBatch), len(batchKeys))
 		}
 
 		if updateErr != nil {
@@ -859,7 +952,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			return true
 		})
 		db.blocksSinceLoadedClear = 0
-		logger.Info("[TPS-OPT] Cleared loadedAccounts cache (bounded eviction every 10 blocks)")
+		logger.Debug("[TPS-OPT] Cleared loadedAccounts cache (bounded eviction every 10 blocks)")
 	}
 
 	var newHash common.Hash
@@ -870,7 +963,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		newHash = db.trie.Hash()
 		hashDuration := time.Since(startHash)
 		if hashDuration > 10*time.Millisecond {
-			logger.Info("[PERF] IntermediateRoot Hash: %v (%d dirty)", hashDuration, totalDirty)
+			logger.Debug("[PERF] IntermediateRoot Hash: %v (%d dirty)", hashDuration, totalDirty)
 		}
 		logger.Debug("IntermediateRoot(true): computed new hash after applying %d dirty accounts: %s -> %s",
 			totalDirty, db.originRootHash.Hex(), newHash.Hex())

@@ -83,7 +83,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		return C.bool(false)
 	}
 
-	logger.Info("[FFI Bridge] Received block from Rust: block_height=%d", subDag.GetBlockNumber())
+	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d", subDag.GetBlockNumber())
 
 	// Dispatch to the listener's channel exactly like unix socket did
 	if defaultListenerBlockQueue != nil {

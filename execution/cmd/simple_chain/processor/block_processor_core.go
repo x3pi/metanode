@@ -299,7 +299,7 @@ func NewBlockProcessor(
 		backupDbChannel: make(chan CommitJob, 1),
 		geiUpdateChan: make(chan uint64, 1),
 
-		forceCommitChan:  make(chan struct{}, 1),
+		forceCommitChan:  make(chan struct{}, 8),
 		lastRateCheckTime: time.Now(),
 		lastLazyRefreshTime: time.Now(),
 	}
