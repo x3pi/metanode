@@ -38,6 +38,7 @@ static inline void register_callbacks_to_rust() {
 import "C"
 import (
 	"fmt"
+	"time"
 	"unsafe"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -82,7 +83,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		return C.bool(false)
 	}
 
-	// logger.Info("[FFI Bridge] Received block from Rust: block_height=%d", subDag.GetBlockNumber())
+	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d", subDag.GetBlockNumber())
 
 	// Dispatch to the listener's channel exactly like unix socket did
 	if defaultListenerBlockQueue != nil {
@@ -109,8 +110,59 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 		return C.bool(false)
 	}
 
-	// Dispatch to the request handler directly
-	wrappedResponse := defaultRequestHandler.ProcessProtobufRequest(&request)
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Dynamic RPC timeout based on request type.
+	// SyncBlocksRequest (EXECUTE mode) processes each block through NOMT trie
+	// rebuild, MVM FullDbLogs replay, PebbleDB batch writes — easily 3-5s/block.
+	// The old hardcoded 5s timeout killed these requests every time → sync stall.
+	// ═══════════════════════════════════════════════════════════════════════════
+	rpcTimeout := 10 * time.Second // default for general queries
+	switch req := request.GetPayload().(type) {
+	case *pb.Request_SyncBlocksRequest:
+		// EXECUTE mode
+		blockCount := len(req.SyncBlocksRequest.GetBlocks())
+		rpcTimeout = time.Duration(blockCount*3+30) * time.Second
+		if rpcTimeout < 60*time.Second {
+			rpcTimeout = 60 * time.Second // minimum 60s
+		}
+		if rpcTimeout > 600*time.Second {
+			rpcTimeout = 600 * time.Second // maximum 10 minutes
+		}
+	case *pb.Request_WaitForSyncToBlockRequest:
+		rpcTimeout = 60 * time.Second // polling-based, up to 30s internally + margin
+	default:
+		// Simple queries (GetLastBlockNumber, GetCurrentEpoch, etc.)
+		rpcTimeout = 10 * time.Second
+	}
+
+	// Safely execute request with timeout and panic recovery
+	var wrappedResponse *pb.Response
+	done := make(chan *pb.Response, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_process_rpc_request: %v", r)
+				done <- &pb.Response{
+					Payload: &pb.Response_Error{
+						Error: fmt.Sprintf("Panic in Go RPC handler: %v", r),
+					},
+				}
+			}
+		}()
+		done <- defaultRequestHandler.ProcessProtobufRequest(&request)
+	}()
+
+	select {
+	case res := <-done:
+		wrappedResponse = res
+	case <-time.After(rpcTimeout):
+		logger.Error("[FFI Bridge] ⚠️ RPC request timeout after %v", rpcTimeout)
+		wrappedResponse = &pb.Response{
+			Payload: &pb.Response_Error{
+				Error: "RPC request timeout in Go handler",
+			},
+		}
+	}
 
 	// Always send response (even on error)
 	if wrappedResponse == nil {
@@ -132,7 +184,7 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	// Allocate memory in C to return the response
 	cResLen := C.size_t(len(resData))
 	cResData := (*C.uint8_t)(C.malloc(cResLen))
-	
+
 	// Copy to C memory
 	// There is a neat trick: unsafe.Slice
 	cSlice := unsafe.Slice((*byte)(unsafe.Pointer(cResData)), len(resData))

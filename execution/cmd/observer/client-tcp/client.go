@@ -130,7 +130,6 @@ func NewClient(
 		clientContext.KeyPair,
 		clientContext.ConnectionsManager,
 		clientContext.Handler,
-		config.NodeType(),
 		config.Version(),
 	)
 
@@ -783,8 +782,8 @@ func (client *Client) SendTransaction(
 		return nil, fmt.Errorf("get nonce failed: %w", err)
 	}
 	var nonce uint64
-	if len(nonceResp) >= 8 {
-		nonce = binary.BigEndian.Uint64(nonceResp)
+	if len(nonceResp.Body()) >= 8 {
+		nonce = binary.BigEndian.Uint64(nonceResp.Body())
 	}
 	logger.Info("Nonce : %d", nonce)
 
@@ -1354,7 +1353,6 @@ func NewStorageClient(
 		clientContext.KeyPair,
 		clientContext.ConnectionsManager,
 		clientContext.Handler,
-		config.NodeType(),
 		config.Version(),
 	)
 	err := parentConn.Connect()

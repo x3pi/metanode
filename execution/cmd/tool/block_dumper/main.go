@@ -9,14 +9,14 @@ import (
 )
 
 func main() {
-	dumpBlock("Node 0", "/tmp/node0_blocks")
-	dumpBlock("Node 1", "/tmp/node1_blocks")
+	dumpBlock("Node 0", "/home/abc/chain-n/metanode/sample/node0/data/data/master_n_0_0/blocks")
+	dumpBlock("Node 1", "/home/abc/chain-n/metanode/sample/node1/data/data/master_n_1_0/blocks")
 }
 
 func dumpBlock(nodeName, dbPath string) {
-	fmt.Printf("--- Dumping block from %s (%s) ---\n", nodeName, dbPath)
+	fmt.Printf("--- Dumping blocks 200-201 from %s (%s) ---\n", nodeName, dbPath)
 	
-	db, err := storage.NewShardelDB(dbPath, 16, 1, storage.TypeLevelDB, "")
+	db, err := storage.NewShardelDB(dbPath, 16, 1, storage.TypePebbleDB, "")
 	if err != nil {
 		log.Fatalf("Failed to create ShardedDB for %s: %v", dbPath, err)
 	}
@@ -36,8 +36,8 @@ func dumpBlock(nodeName, dbPath string) {
 		}
 		
 		h := b.Header()
-		fmt.Printf("Block Number: %d\n", h.BlockNumber())
-		if h.BlockNumber() == 5 {
+		if h.BlockNumber() == 200 || h.BlockNumber() == 201 {
+			fmt.Printf("Block Number: %d\n", h.BlockNumber())
 			fmt.Printf("Hash: %s\n", h.Hash().Hex())
 			fmt.Printf("AccountStatesRoot: %s\n", h.AccountStatesRoot().Hex())
 			fmt.Printf("StakeStatesRoot: %s\n", h.StakeStatesRoot().Hex())

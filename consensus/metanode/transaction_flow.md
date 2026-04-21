@@ -7,7 +7,7 @@ Quy trình này trải dài qua cả hai thành phần: **Go Execution Engine** 
 ---
 
 ## 1. Tiếp nhận Giao Dịch (Transaction Injection)
-**Mô tả:** Client (hoặc Backend/Dapp) kết nối và gửi giao dịch mới tới Sub-Node của Go. Giao dịch được tiếp nhận qua TCP/Websocket socket và được đẩy vào một hàng đợi đợi xử lý.
+**Mô tả:** Client (hoặc Backend/Dapp) kết nối và gửi giao dịch mới tới tiến trình Go nguyên khối (Monolithic Go). Giao dịch được tiếp nhận qua TCP/Websocket socket và đẩy vào một hàng đợi (pool) nội bộ.
 
 **Các file chịu trách nhiệm chính:**
 - `cmd/simple_chain/processor/connection_processor.go`: Quản lý các kết nối network từ Client. Giải mã gói tin byte (Packet) và định tuyến lệnh tới Transaction Processor.
@@ -21,18 +21,18 @@ Quy trình này trải dài qua cả hai thành phần: **Go Execution Engine** 
 - `pkg/blockchain/tx_processor/validation.go` (hoặc `validation_transaction.go`): Nơi thực thi logic `VerifyTransaction`, xác minh Public Key, thuật toán chữ ký điện tử và điều kiện chi tiêu tối thiểu của account.
 
 ## 3. Chuyển giao dịch sang Tầng Đồng Thuận (Forward to Rust Consensus)
-**Mô tả:** Ở mô hình kiến trúc này, Go không tự định đoạt thứ tự (ordering). Các giao dịch hợp lệ nằm trong Pool của Go sẽ được một tiến trình nền gom lại thành từng mẻ (batch) và đẩy sang tiến trình Rust để thực hiện đồng thuận định danh toàn hệ thống.
+**Mô tả:** Ở mô hình kiến trúc này, tiến trình Go không tự quyết định thứ tự (ordering). Các giao dịch hợp lệ nằm trong Pool của Go sẽ được gom lại thành từng mẻ (batch) và đẩy thẳng vào lõi Rust thông qua các lời gọi FFI (CGo) trong cùng không gian tiến trình. Khác biệt với máy ảo đời đầu, IPC qua Unix Domain Sockets (UDS) đã bị loại bỏ để tối đa hóa hiệu suất.
 
 **Các file chịu trách nhiệm chính:**
-- `cmd/simple_chain/processor/block_processor_txs.go` (Go): Có hạ tầng `TxsProcessor2` chạy một vòng lặp liên tục (`Run()`), chuyên lấy hàng loạt giao dịch từ Transaction Pool (bằng `ProcessTransactionsInPoolSub`), đóng gói và gửi thẳng qua Unix Domain Socket (UDS) sang tiến trình Rust.
-- `metanode/src/network/tx_socket_server.rs` (Rust): Server Socket tại tầng Rust, tiếp nhận các batch giao dịch từ Go thông qua hàm `handle_connection`. Sau đó Rust sẽ gỡ batch, đưa các giao dịch này trực tiếp vào hàng đợi chờ chốt (`pending_transactions_queue`).
+- `cmd/simple_chain/processor/block_processor_txs.go` (Go): Có hạ tầng `TxsProcessor2` chạy một vòng lặp liên tục (`Run()`), chuyên lấy hàng loạt giao dịch từ Transaction Pool, đóng gói và gọi native CGo function trực tiếp vào thư viện Rust.
+- `metanode/src/network/tx_receiver.rs` (Rust): Hàm FFI phía Rust tiếp nhận con trỏ byte batch giao dịch từ Go. Sau đó Rust sẽ decode mẻ giao dịch, đưa trực tiếp vào hàng đợi chờ chốt (`pending_transactions_queue`).
 
 ## 4. Giai đoạn Đồng Thuận (mtn-consensus Consensus)
 **Mô tả:** Động cơ Rust Consensus sẽ lấy các giao dịch trong khay chờ, vận hành thuật toán mtn-consensus (DAG-based BFT) để thỏa hiệp thứ tự với các Validator khác trên mạng lưới thành chuỗi block tuyến tính.
 
 **Các file chịu trách nhiệm chính:**
 - Thư mục `metanode/src/node/consensus/`: Chứa mã nguồn thuật toán mtn-consensus để gom batch và chốt đồng thuận.
-- `metanode/src/node/transition/...`: Sau khi Validator Node đã chốt được Block nào đi trước, giao dịch nào đi trước, Rust sẽ gọi ngược gRPC/Socket về tiến trình Go Master node yêu cầu **Thực thi** lô giao dịch này (vì Rust không giữ State Trie).
+- `metanode/src/node/transition/...`: Sau khi Validator Node đã chốt block, Rust sẽ thực hiện một Callback FFI ngược về Listener của quá trình Go nguyên khối, kích hoạt sự kiện yêu cầu **Thực thi** lô giao dịch này (vì lõi đồng thuận tĩnh không giữ State Trie).
 
 ## 5. Thực thi Giao dịch và State (Execution Phase)
 **Mô tả:** Tiến trình Go nhận lệnh từ Rust mang theo danh sách Giao dịch đã có tem thời gian đồng thuận cứng (Block Timestamp). Go tiến hành phân tích sự phụ thuộc (dependency tree) để nhóm các giao dịch song song, sau đó chạy thực thi State/Smart contract.
@@ -54,13 +54,13 @@ Quy trình này trải dài qua cả hai thành phần: **Go Execution Engine** 
 **Các file chịu trách nhiệm chính:**
 - `cmd/simple_chain/processor/block_processor_commit.go`: Cấu trúc vòng lặp `commitWorker()` tiếp nhận Block đã tạo.
   - Phase 1: Lưu metadata Block cứng vào DB (`block_database.go`).
-  - Phase 2: Serialized các bytes tạo ra cục BackupDb (để truyền cho các sub-node). 
+  - Phase 2: Xử lý các tác vụ dọn dẹp và chuẩn bị phát sóng (broadcast) cho P2P network (SyncOnly nodes). 
 - `pkg/account_state_db/account_state_db.go`: Thực hiện lệnh `Commit()`. Nó sẽ chép map tạm `dirtyAccounts` xuống Trie cấu trúc lưu trữ MPT (Merkle-Patricia Trie) thật và xả batch xuống LevelDB (Cập nhật số dư cuối cùng).
 - `pkg/transaction_state_db/transaction_state_db.go`: Đóng gói `ReceiptBatch` và `TxBatch` xuống DB cục bộ với logic bảo vệ lock trie đa cấp.
 
 ## 8. Phân phối và Trả lại biên lai (Broadcast & Receipt Callback)
-**Mô tả:** Báo hiệu hoàn tất cho toàn mạng ngang hàng (Peers) và trả lệnh Callback thông báo có mã block cho Socket của Client đã kết nối yêu cầu ở bước 1.
+**Mô tả:** Báo hiệu hoàn tất cho các node thụ động trên mạng (SyncOnly Nodes) bằng cơ chế P2P, đồng thời trả lời trực tiếp lệnh Callback cho Socket của Client đã kết nối ở bước 1.
 
 **Các file chịu trách nhiệm chính:**
-- `cmd/simple_chain/processor/block_processor_commit.go`: Master Node kích hoạt `broadcastBlockToNetwork()`, nhồi cục BackupData ở bước 7 (chứa toàn bộ transaction và Receipts) gửi rải rác tới các mảng kết nối của Child/Sub Nodes cấp dưới.
-- `cmd/simple_chain/processor/block_processor_broadcast.go`: Nơi các Child Sub-nodes đứng chờ đợi nhận dữ liệu block từ Master. Khi Sub-Node nhận được, nó sẽ unpack Receipts ra và chủ động gọi bộ `connectionsManager` (Network WebSocket) tra đúng connection ID map với user để stream sự kiện "Thực thi thành công / Thất bại" tới Client. (Giai đoạn hoàn thành việc trừ tiền, nhận Smart Contract output).
+- `cmd/simple_chain/processor/block_processor_commit.go`: Node kích hoạt `broadcastBlockToNetwork()`, đưa block mới lan truyền tới layer mạng P2P (thường xử lý qua anemo).
+- `cmd/simple_chain/processor/connection_processor.go` / Event Bus: Khi quy trình execute cục bộ hoàn thành, đối tượng receipt liền được trích xuất. Hệ thống chủ động tra `connectionsManager` (Network WebSocket) tìm đúng connection ID của user và trả thẳng về "Thực thi thành công / Thất bại". (Bỏ qua hoàn toàn quy trình đồng bộ Master-Sub phức tạp).

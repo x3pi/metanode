@@ -778,10 +778,104 @@ impl InitializedNode {
                 info!(
                     "✅ [STARTUP] Catch-up complete. Starting ConsensusAuthority for Validator..."
                 );
-                let (new_epoch, new_exec_index) = {
+                let (new_epoch, new_exec_index, executor_client_opt, peer_rpc_addresses) = {
                     let node_guard = self.node.lock().await;
-                    (node_guard.current_epoch, node_guard.last_global_exec_index)
+                    (
+                        node_guard.current_epoch,
+                        node_guard.last_global_exec_index,
+                        node_guard.executor_client.clone(),
+                        self.node_config.peer_rpc_addresses.clone(),
+                    )
                 };
+
+                // ═══════════════════════════════════════════════════════════════
+                // Phase 2.5: STATE VERIFICATION GATE
+                // ═══════════════════════════════════════════════════════════════
+                if new_exec_index > 0 && !peer_rpc_addresses.is_empty() {
+                    info!(
+                        "🔍 [STATE VERIFY] Starting State Verification Gate for block {}...",
+                        new_exec_index
+                    );
+                    let mut state_verified = false;
+                    let mut retry_count = 0;
+
+                    while !state_verified && retry_count < 3 {
+                        // 1. Get LOCAL state root
+                        let mut local_state_root = vec![];
+                        if let Some(ref client) = executor_client_opt {
+                            if let Ok(blocks) = client.get_blocks_range(new_exec_index, new_exec_index).await {
+                                if let Some(local_block) = blocks.first() {
+                                    local_state_root = local_block.state_root.clone();
+                                }
+                            }
+                        }
+
+                        if local_state_root.is_empty() {
+                            warn!("⚠️ [STATE VERIFY] Could not fetch local state root for block {}. Retrying...", new_exec_index);
+                            retry_count += 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            continue;
+                        }
+
+                        let local_root_hex = hex::encode(&local_state_root);
+                        let local_root_preview = if local_root_hex.len() > 16 {
+                            format!("{}...", &local_root_hex[..16])
+                        } else {
+                            local_root_hex.clone()
+                        };
+                        info!("🔍 [STATE VERIFY] Local StateRoot at block {}: {}", new_exec_index, local_root_preview);
+
+                        // 2. Get NETWORK state root
+                        let mut match_count = 0;
+                        let mut peer_roots = std::collections::HashMap::new();
+
+                        for peer in &peer_rpc_addresses {
+                            if let Ok(blocks) = crate::network::peer_rpc::fetch_blocks_from_peer(&[peer.clone()], new_exec_index, new_exec_index).await {
+                                if let Some(peer_block) = blocks.first() {
+                                    if peer_block.state_root.is_empty() { continue; }
+                                    let peer_root_hex = hex::encode(&peer_block.state_root);
+                                    *peer_roots.entry(peer_root_hex.clone()).or_insert(0) += 1;
+
+                                    if peer_block.state_root == local_state_root {
+                                        match_count += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Compare: require at least 1 peer match (or 2f+1 for larger networks)
+                        let f = peer_rpc_addresses.len() / 3;
+                        let required_matches = std::cmp::max(1, f * 2 + 1);
+
+                        if match_count >= required_matches {
+                            info!("✅ [STATE VERIFY] PASS! Local stateRoot matches {} peers (required: {}).", match_count, required_matches);
+                            state_verified = true;
+                        } else if peer_roots.is_empty() {
+                            warn!("⚠️ [STATE VERIFY] Could not fetch stateRoot from any peers.");
+                            retry_count += 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        } else {
+                            warn!("🚨 [STATE VERIFY] FAIL! Local stateRoot {} matched only {} peers (required: {}).", local_root_preview, match_count, required_matches);
+                            for (root, count) in peer_roots {
+                                let root_preview = if root.len() > 16 { format!("{}...", &root[..16]) } else { root };
+                                warn!("   Network Root: {} ({} peers)", root_preview, count);
+                            }
+                            retry_count += 1;
+                            if retry_count < 3 {
+                                warn!("🔄 [STATE VERIFY] Retrying... {}/3", retry_count);
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
+                        }
+                    }
+
+                    if !state_verified {
+                        error!("❌ [STATE VERIFY] FATAL ERROR: Node has diverged from network state. Halting before joining consensus!");
+                        return Err(anyhow::anyhow!("State verification failed at block {}", new_exec_index));
+                    }
+                } else if peer_rpc_addresses.is_empty() {
+                    info!("⏭️ [STATE VERIFY] SKIPPING: No peers configured.");
+                }
+
                 let mut node_guard = self.node.lock().await;
 
                 if let Err(e) = crate::node::transition::mode_transition::transition_mode_only(

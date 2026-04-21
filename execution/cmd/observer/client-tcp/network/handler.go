@@ -147,8 +147,8 @@ func (h *Handler) handleTransactionError(request network.Request) (err error) {
 	// Để SendTransactionFromWallet nhận error qua ID, không lẫn với channel cũ
 	if id != "" && h.pendingChainRequests != nil {
 		if val, ok := h.pendingChainRequests.LoadAndDelete(id); ok {
-			ch := val.(chan []byte)
-			ch <- msg.Body()
+			ch := val.(chan network.Message)
+			ch <- msg
 			return nil
 		}
 	}
@@ -303,12 +303,9 @@ func (h *Handler) handleRpcEvent(request network.Request) error {
 	return nil
 }
 
-// handleChainResponse xử lý response từ chain trực tiếp (ChainId, TransactionReceipt, BlockNumber)
-// Dispatch bằng header ID — gửi raw body bytes vào channel
 func (h *Handler) handleChainResponse(request network.Request) error {
 	msg := request.Message()
 	id := msg.ID()
-	body := msg.Body()
 
 	if h.pendingChainRequests == nil {
 		logger.Warn("handleChainResponse: pendingChainRequests not set, dropping")
@@ -317,8 +314,8 @@ func (h *Handler) handleChainResponse(request network.Request) error {
 
 	val, ok := h.pendingChainRequests.LoadAndDelete(id)
 	if ok {
-		ch := val.(chan []byte)
-		ch <- body
+		ch := val.(chan network.Message)
+		ch <- msg
 	} else {
 		logger.Warn("handleChainResponse: no pending request for id=%s cmd=%s", id, msg.Command())
 	}

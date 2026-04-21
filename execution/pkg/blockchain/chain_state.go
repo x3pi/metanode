@@ -375,6 +375,20 @@ func (cs *ChainState) SetAccountStateDB(asDB *account_state_db.AccountStateDB) {
 	cs.accountStateDB = asDB
 }
 
+// InvalidateAllState clears all in-memory caches across all state databases.
+// This ensures that subsequent reads will fetch fresh data from the underlying PebbleDB/NOMT storage.
+func (cs *ChainState) InvalidateAllState() {
+	if cs.accountStateDB != nil {
+		cs.accountStateDB.InvalidateAllCaches()
+	}
+	if cs.stakeStateDB != nil {
+		cs.stakeStateDB.InvalidateAllCaches()
+	}
+	if cs.smartContractDB != nil {
+		cs.smartContractDB.InvalidateAllCaches()
+	}
+}
+
 // GetBlockDatabase trả về BlockDatabase.
 func (cs *ChainState) GetBlockDatabase() *block.BlockDatabase {
 	return cs.blockDatabase

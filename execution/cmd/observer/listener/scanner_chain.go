@@ -175,11 +175,10 @@ func (s *CrossChainScanner) scanAndSubmit(
 
 				var txHash common.Hash
 				var err error
-				maxRetries := 3
 
 				forceIndex := -1
 				var batchId [32]byte
-				for attempt := 1; attempt <= maxRetries; attempt++ {
+				for attempt := 1; ; attempt++ {
 					var tIndex int
 					txHash, tIndex, err = s.submitBatch(rc, chunk, forceIndex)
 					if err == nil {
@@ -205,8 +204,8 @@ func (s *CrossChainScanner) scanAndSubmit(
 						})
 						break
 					}
-					logger.Warn("⚠️  [Scanner][%s] submitBatch attempt %d/%d failed txHash=%s, at block %d (chunk %d-%d/%d): %v",
-						rc.Name, attempt, maxRetries, txHash.Hex(), blockNum, i, end, len(events), err)
+					logger.Warn("⚠️  [Scanner][%s] submitBatch attempt %d failed txHash=%s, at block %d (chunk %d-%d/%d): %v",
+						rc.Name, attempt, txHash.Hex(), blockNum, i, end, len(events), err)
 
 					// Nếu thất bại, tính target index cũ và tịnh tiến lên +1
 					if forceIndex < 0 {
@@ -216,16 +215,9 @@ func (s *CrossChainScanner) scanAndSubmit(
 						forceIndex = int(new(big.Int).Mod(batchIdBig, mod).Int64())
 					}
 					forceIndex++
-					if attempt < maxRetries {
-						time.Sleep(2 * time.Second)
-					}
-				}
-				if err != nil {
-					logger.Error("❌ [Scanner][%s] submitBatch ALL %d retries failed at block %d: %v", rc.Name, maxRetries, blockNum, err)
-					return false, fmt.Errorf("submitBatch failed after %d retries: %w", maxRetries, err)
+					time.Sleep(2 * time.Second)
 				}
 			}
-
 			// Đã submit thành công tất cả các chunk cho block này
 			s.enqueueProgressUpdate(rc.NationId, blockNum)
 		}

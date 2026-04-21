@@ -117,7 +117,7 @@ func VerifyTransaction(
 	// On Master nodes, PublicKeyBls is always populated for registered accounts,
 	// so this bypass never fires on Master (which is correct).
 	// ════════════════════════════════════════════════════════════════
-	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
+	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0) && !isCrossChainBatchSubmit
 
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHashHex := tx.Hash().Hex()

@@ -147,7 +147,7 @@ func TestSimpleChainConfig_JSONParsing(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, cfg.Debug)
-	assert.Equal(t, "single_node", cfg.Mode)
+	
 	assert.Equal(t, big.NewInt(1000), cfg.ChainId)
 	assert.Equal(t, ":8747", cfg.RpcPort)
 	assert.Equal(t, "genesis.json", cfg.GenesisFilePath)

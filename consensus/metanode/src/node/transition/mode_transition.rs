@@ -163,16 +163,13 @@ pub async fn transition_mode_only(
             );
             node.cold_start_snapshot_gei
         } else {
-            warn!(
-                "⚠️ [MODE TRANSITION] Cold-start: node.cold_start_snapshot_gei is 0! Falling back to querying Go. \
-                 This may cause fork if Go's GEI has been advanced by peer sync."
+            tracing::error!(
+                "🚨 [MODE TRANSITION] FATAL: Cold-start requested but node.cold_start_snapshot_gei is 0! \
+                 The snapshot initial state was lost. Cannot transition to Validator mode safely without fork risk."
             );
-            // Fallback: query Go (not ideal but better than using synced_global_exec_index)
-            let client = committee_source.create_executor_client(&config.executor_send_socket_path);
-            match client.get_last_global_exec_index().await {
-                Ok(go_gei) => go_gei,
-                Err(_) => synced_global_exec_index,
-            }
+            return Err(anyhow::anyhow!(
+                "Cold-start without snapshot GEI"
+            ));
         }
     } else {
         0u64 // Not used when not cold-start

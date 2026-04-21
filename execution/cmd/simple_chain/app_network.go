@@ -70,7 +70,7 @@ func (app *App) initHostNode() error {
 	hostNode, err := node.NewHostNode(
 		ctx,
 		app.config.Databases.RootPath,
-		app.config.NodeType,
+		string(app.config.ServiceType),
 		app.connectionsManager,
 		app.messageSender,
 	)

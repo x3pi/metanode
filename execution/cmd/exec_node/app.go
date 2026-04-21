@@ -13,7 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	"github.com/meta-node-blockchain/meta-node/pkg/common"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -73,23 +73,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("failed to load config: %v", err)
 	}
 	app.storageManager = storage.NewStorageManager()
-
-	// Backup database
-	backupDB, err := storage.NewShardelDB(
-		config.JoinPathIfNotURL(app.config.BackupPath, app.config.Databases.Backup.Path),
-		16, 2,
-		app.config.DBType,
-		config.JoinPathIfNotURL(app.config.BackupPath, app.config.Databases.Backup.Path),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create backup DB: %v", err)
-	}
-	if err := backupDB.Open(); err != nil {
-		return nil, fmt.Errorf("failed to open backup DB: %v", err)
-	}
-	if err := app.storageManager.AddStorageBackupDb(backupDB); err != nil {
-		return nil, err
-	}
 
 	// Initialize network components
 	if err := app.initNetwork(); err != nil {
@@ -213,7 +196,6 @@ func (app *App) startStorageServer(ctx context.Context, dbDetail config.DBDetail
 		keyPair,
 		connectionsManager,
 		mainHandler,
-		string(app.config.Databases.NodeType),
 		app.config.Databases.Version,
 	)
 	if err != nil {
@@ -266,6 +248,20 @@ func createRemoteDBClient(serverAddress string) (storage.Storage, error) {
 func (app *App) initStorageDatabases() error {
 	logger.Info("Start initStorageDatabases")
 
+	databaseConfig := app.config.Databases
+
+	// Use unified SharedDB if running locally (not remote or client)
+	if databaseConfig.NodeType != config.STORAGE_REMOTE && databaseConfig.NodeType != config.STORAGE_CLIENT {
+		if err := app.storageManager.InitSharedDatabase(databaseConfig.RootPath, app.config.DBType); err != nil {
+			return fmt.Errorf("failed to initialize unified shared database: %w", err)
+		}
+		logger.Info("Initialized unified SharedDB at %s/chaindata", databaseConfig.RootPath)
+		return nil
+	}
+
+	// Legacy fallback for Remote/Client configs
+	logger.Warn("Using legacy fragmented DB architecture for Remote/Client mode")
+	
 	// Helper function for creating and adding storage
 	createAndAdd := func(storageName string, dbDetail config.DBDetail, dbType storage.DBType, addFunc func(storage.Storage) error) error {
 		fullBackupPath := app.config.BackupPath + dbDetail.Path
@@ -275,8 +271,6 @@ func (app *App) initStorageDatabases() error {
 		}
 		return addFunc(db)
 	}
-
-	databaseConfig := app.config.Databases
 
 	// Account state database
 	if err := createAndAdd("account", databaseConfig.AccountState, app.config.DBType, app.storageManager.AddStorageAccount); err != nil {
@@ -299,7 +293,7 @@ func (app *App) initStorageDatabases() error {
 	}
 
 	// Smart contract database
-	if err := createAndAdd("smart contract", app.config.Databases.SmartContractStorage, app.config.DBType, app.storageManager.AddStorageSmartContract); err != nil {
+	if err := createAndAdd("smart contract", databaseConfig.SmartContractStorage, app.config.DBType, app.storageManager.AddStorageSmartContract); err != nil {
 		return err
 	}
 
@@ -323,7 +317,25 @@ func (app *App) initStorageDatabases() error {
 		return err
 	}
 
-	logger.Info("End initStorageDatabases")
+	// Backup database (Legacy setup)
+	backupPath := config.JoinPathIfNotURL(app.config.BackupPath, databaseConfig.Backup.Path)
+	backupDB, err := storage.NewShardelDB(
+		backupPath,
+		16, 2,
+		app.config.DBType,
+		backupPath,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create backup DB: %v", err)
+	}
+	if err := backupDB.Open(); err != nil {
+		return fmt.Errorf("failed to open backup DB: %v", err)
+	}
+	if err := app.storageManager.AddStorageBackupDb(backupDB); err != nil {
+		return err
+	}
+
+	logger.Info("End initStorageDatabases via legacy fallback")
 	return nil
 }
 
@@ -456,7 +468,6 @@ func (app *App) initRoutes() {
 		app.keyPair,
 		app.connectionsManager,
 		handler,
-		"node",
 		app.config.Version,
 	)
 }
@@ -474,7 +485,7 @@ func (app *App) Run() error {
 
 	// Start socket server in a goroutine
 	go app.socketServer.Listen(app.config.ConnectionAddress)
-	go app.ConnectTo(app.config.Nodes.MasterAddress, common.MASTER_CONNECTION_TYPE)
+	go app.ConnectTo(app.config.Nodes.MasterAddress, p_common.MASTER_CONNECTION_TYPE)
 
 	log.Println("App is running")
 	storage.UpdateState(3)

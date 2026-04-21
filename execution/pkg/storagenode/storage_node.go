@@ -87,7 +87,6 @@ func NewStorageNode(cfg *Config) (*StorageNode, error) {
 		keyPair,
 		connectionsManager,
 		mainHandler,
-		cfg.NodeType,
 		cfg.Version,
 	)
 	if err != nil {

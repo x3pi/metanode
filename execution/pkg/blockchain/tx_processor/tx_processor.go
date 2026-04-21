@@ -77,7 +77,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	startExec := time.Now()
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime)
 	execDuration := time.Since(startExec)
-	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
+	logger.Debug("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -132,14 +132,14 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	// --- PERF SUMMARY for blocks with TXs ---
 	blockNum := (*lastBlockHeader).BlockNumber() + 1
 	if len(allTransactions) > 0 {
-		logger.Info("[PERF] Block #%d Phase Breakdown (txCount=%d):", blockNum, len(allTransactions))
-		logger.Info("  [PERF]   TX Execution (Parallel): %v", execDuration)
-		logger.Info("  [PERF]   IntermediateRoot (TrieDB): %v", trieDBIRDuration)
-		logger.Info("  [PERF]   IntermediateRoot (AccountDB): %v (Parallel)", accountIRDuration)
-		logger.Info("  [PERF]   IntermediateRoot (StakeDB): %v (Parallel)", stakeIRDuration)
-		logger.Info("  [PERF]   TOTAL IR (Wall Clock): %v", trieDBIRDuration+utils.MaxDuration(accountIRDuration, stakeIRDuration))
+		logger.Debug("[PERF] Block #%d Phase Breakdown (txCount=%d):", blockNum, len(allTransactions))
+		logger.Debug("  [PERF]   TX Execution (Parallel): %v", execDuration)
+		logger.Debug("  [PERF]   IntermediateRoot (TrieDB): %v", trieDBIRDuration)
+		logger.Debug("  [PERF]   IntermediateRoot (AccountDB): %v (Parallel)", accountIRDuration)
+		logger.Debug("  [PERF]   IntermediateRoot (StakeDB): %v (Parallel)", stakeIRDuration)
+		logger.Debug("  [PERF]   TOTAL IR (Wall Clock): %v", trieDBIRDuration+utils.MaxDuration(accountIRDuration, stakeIRDuration))
 	} else {
-		logger.Info("[PERF] IntermediateRoot (StakeState): %v, block: %v", stakeIRDuration, blockNum)
+		logger.Debug("[PERF] IntermediateRoot (StakeState): %v, block: %v", stakeIRDuration, blockNum)
 	}
 	// logger.Info("🔍 [FORK-DEBUG] Block #%d: POST-IR stakeRoot=%s", blockNum, stakeRoot.Hex())
 
@@ -209,10 +209,6 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 
 	go func() {
 		defer rootWg.Done()
-		logger.Warn("🔍 [FORK-DEBUG-SUB] Block #%d: DirtyContentHash=%s", (*lastBlockHeader).BlockNumber()+1, chainState.GetAccountStateDB().DirtyContentHash().Hex())
-		for _, detail := range chainState.GetAccountStateDB().DirtyAccountDetails() {
-			logger.Warn("🔍 [FORK-DEBUG-SUB] Block #%d: %s", (*lastBlockHeader).BlockNumber()+1, detail)
-		}
 		root, accountErr = chainState.GetAccountStateDB().IntermediateRoot(true)
 	}()
 
@@ -316,7 +312,7 @@ func processGroupsConcurrently(
 	chainState.GetAccountStateDB().PreloadAccounts(addrSlice)
 
 	preloadDuration := time.Since(startPreload)
-	logger.Info("⚡ [PERF] Pre-fetched %d unique addresses (from %d groups) via BATCH in %v",
+	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses (from %d groups) via BATCH in %v",
 		len(addrSlice), len(groupedGroups), preloadDuration)
 
 	// CRITICAL FORK-SAFETY: Use indexed slice instead of channel to collect results.
@@ -379,19 +375,33 @@ func processGroupsConcurrently(
 	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
 	startEVM := time.Now()
 
+	chunkSize := len(groupedGroups) / (numWorkers * 4)
+	if chunkSize < 1 {
+		chunkSize = 1
+	} else if chunkSize > 64 {
+		chunkSize = 64
+	}
+
 	for w := 0; w < numWorkers; w++ {
 		go func() {
 			defer wg.Done()
 			for {
-				idx := int(nextIdx.Add(1) - 1)
-				if idx >= len(groupedGroups) {
+				endIdxVal := int(nextIdx.Add(int64(chunkSize)))
+				startIdx := endIdxVal - chunkSize
+				if startIdx >= len(groupedGroups) {
 					return
 				}
-				meta := groupMetas[idx]
-				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime)
-				results[idx] = result // Write to indexed position — deterministic order
-				if enableTrace && meta.span != nil {
-					meta.span.End()
+				endIdx := endIdxVal
+				if endIdx > len(groupedGroups) {
+					endIdx = len(groupedGroups)
+				}
+				for idx := startIdx; idx < endIdx; idx++ {
+					meta := groupMetas[idx]
+					result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime)
+					results[idx] = result // Write to indexed position — deterministic order
+					if enableTrace && meta.span != nil {
+						meta.span.End()
+					}
 				}
 			}
 		}()
@@ -452,7 +462,7 @@ func processGroupsConcurrently(
 	if groupCount > 0 {
 		avgPerGroup = evmDuration / time.Duration(groupCount)
 	}
-	logger.Info("🧮 [PERF-EVM] groups=%d | workers=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
+	logger.Debug("🧮 [PERF-EVM] groups=%d | workers=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
 		groupCount, numWorkers, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
 	// ─────────────────────────────────────────────────────────────
 

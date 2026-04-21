@@ -32,10 +32,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
-
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
-	"path/filepath"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
 
 // State represents the processor state
@@ -151,7 +148,10 @@ type BlockProcessor struct {
 	// Pipeline commit: async persistence of trie nodes to LevelDB
 	persistChannel chan PersistJob
 
-
+	// Backup DB Coalescing
+	backupDbChannel chan CommitJob
+	// GEI Coalescing
+	geiUpdateChan chan uint64
     
 	forceCommitChan chan struct{}
 
@@ -159,6 +159,7 @@ type BlockProcessor struct {
 	processedBlockCount  uint64
 	lastRateCheckTime    time.Time
 	lastRateCheckCount   uint64
+	lastLazyRefreshTime  time.Time
 
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
@@ -295,9 +296,12 @@ func NewBlockProcessor(
 		processingLockChan: make(chan struct{}, 1),
 		// Pipeline commit: async persistence channel
 		persistChannel: make(chan PersistJob, 100),
+		backupDbChannel: make(chan CommitJob, 1),
+		geiUpdateChan: make(chan uint64, 1),
 
-		forceCommitChan:  make(chan struct{}, 1),
+		forceCommitChan:  make(chan struct{}, 8),
 		lastRateCheckTime: time.Now(),
+		lastLazyRefreshTime: time.Now(),
 	}
 
 	// Phase 7: Initialize decoupled components
@@ -360,6 +364,8 @@ func NewBlockProcessor(
 	if serviceType == p_common.ServiceTypeMaster {
 		go bp.commitWorker()
 		go bp.persistWorker()   // Pipeline commit: async LevelDB persistence
+		go bp.backupDbWorker()  // Coalesced BackupDb builder
+		go bp.geiWorker()       // Coalesced GEI updates
 	}
 	go bp.inputTPSWorker()
 	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
@@ -411,14 +417,6 @@ func NewBlockProcessor(
 					return err
 				}
 				
-				// CRITICAL FIX: Checkpoint dynamically created MVM Smart Contract storage tries.
-				// These are created directly by TrieDatabaseManager and not registered in storageMgr.
-				trieDestPath := filepath.Join(destPath, "trie_database")
-				if err := trie_database.GetTrieDatabaseManager().CheckpointAll(trieDestPath); err != nil {
-					logger.Error("💾 [SNAPSHOT] Failed to checkpoint TrieDatabaseManager: %v", err)
-					return fmt.Errorf("failed to checkpoint TrieDatabaseManager: %w", err)
-				}
-				
 				return nil
 			})
 		}
@@ -440,7 +438,7 @@ func NewBlockProcessor(
 	// This goroutine periodically syncs bp.lastBlock from DB.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if bp.serviceType == p_common.ServiceTypeMaster {
-		// No autonomous state polling - Rust entirely governs Go Master state
+		go bp.syncLastBlockFromDB()
 	}
 
 	return bp
@@ -448,6 +446,8 @@ func NewBlockProcessor(
 
 // GetLastBlock returns the last processed block
 func (bp *BlockProcessor) GetLastBlock() types.Block {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
 	value := bp.lastBlock.Load()
 	if value == nil {
 		return nil
@@ -455,8 +455,31 @@ func (bp *BlockProcessor) GetLastBlock() types.Block {
 	return value.(types.Block)
 }
 
+// GetLastBlockMutex exposes the last block mutex for synchronization
+func (bp *BlockProcessor) GetLastBlockMutex() *sync.Mutex {
+	return &bp.lastBlockMutex
+}
+
+// UpdateLastBlockAndHeader atomically updates both last block and chain state header
+func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
+	
+	if blk != nil {
+		bp.lastBlock.Store(blk)
+		// Update nextBlockNumber
+		bp.nextBlockNumber.Store(blk.Header().BlockNumber() + 1)
+		
+		// Update header atomically
+		headerCopy := blk.Header()
+		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+	}
+}
+
 // SetLastBlock sets the last processed block
 func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
 	if lastBlock != nil {
 		bp.lastBlock.Store(lastBlock)
 	}

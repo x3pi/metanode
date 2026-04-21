@@ -2,15 +2,13 @@ package trie_database
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
+	"fmt"
 	"slices"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
@@ -20,6 +18,7 @@ type TrieDatabaseManager struct {
 	trieDatabases    map[common.Hash]*TrieDatabase
 	accountStateDB   *account_state_db.AccountStateDB
 	collectedBatches map[string][]byte
+	sharedDB         storage.Storage
 }
 
 var (
@@ -33,6 +32,7 @@ func CreateTrieDatabaseManager(db storage.Storage, accountStateDB *account_state
 			trieDatabases:    make(map[common.Hash]*TrieDatabase),
 			accountStateDB:   accountStateDB,
 			collectedBatches: make(map[string][]byte),
+			sharedDB:         db,
 		}
 	})
 	return instance
@@ -168,9 +168,10 @@ func (manager *TrieDatabaseManager) CloseAllTrieDatabases() error {
 		err := trieDB.db.Close()
 		if err != nil {
 			logger.Error("Failed to close TrieDatabase", "id", id, "error", err)
+			// Return here or continue? Previous code returns on first error.
 			return err
 		}
-		logger.Info("Closed TrieDatabase", "id", id)
+		logger.Info("Closed TrieDatabase (NO-OP on PrefixStorage)", "id", id)
 	}
 	return nil
 }
@@ -181,48 +182,32 @@ func (manager *TrieDatabaseManager) DeleteTrieDatabase(id common.Hash) error {
 		return nil // Không có gì để xóa nếu không tồn tại
 	}
 
-	// Đóng database trước khi xóa
-	err := trieDB.db.Close()
-	if err != nil {
-		logger.Error("Failed to close TrieDatabase", "id", id, "error", err)
-		return err
-	}
-
-	dbNameHash := crypto.Keccak256Hash([]byte(trieDB.dbName)).Hex()
-	databasePath := filepath.Join(config.ConfigApp.Databases.Trie.Path, trieDB.address.String(), dbNameHash)
-
-	err = os.RemoveAll(databasePath)
-	if err != nil {
-		logger.Error("Failed to delete TrieDatabase folder", "id", id, "path", databasePath, "error", err)
-		return err
+	// Xóa tất cả các keys thuộc prefix này (tương đương xóa folder cũ)
+	results, err := trieDB.db.PrefixScan([]byte{})
+	if err == nil && len(results) > 0 {
+		var keysToDelete [][]byte
+		for _, kv := range results {
+			keysToDelete = append(keysToDelete, kv[0]) // kv[0] is the key
+		}
+		// Batch delete all keys
+		_ = trieDB.db.BatchDelete(keysToDelete)
 	}
 
 	delete(manager.trieDatabases, id)
-	logger.Info("Deleted TrieDatabase and folder", "id", id, "path", databasePath)
+	logger.Info("Deleted TrieDatabase logic keys", "id", id, "address", trieDB.address.Hex(), "dbName", trieDB.dbName)
 	return nil
 }
 
-// GetTrieDatabase lấy một TrieDatabase theo ID của nó.
+// GetOrCrateTrieDatabase lấy một TrieDatabase theo ID của nó.
 func (manager *TrieDatabaseManager) GetOrCrateTrieDatabase(id common.Hash, hash common.Hash, mvmId common.Address, address common.Address, dbName string) (*TrieDatabase, bool) {
 	trieDB, exists := manager.trieDatabases[id]
 	if !exists {
 		dbNameHash := crypto.Keccak256Hash([]byte(dbName)).Hex()
+		
+		// Map the single TrieDatabase to a PrefixStorage slice on the sharedDB
+		prefixStr := fmt.Sprintf("%s:%s:", address.Hex(), dbNameHash)
+		database := storage.NewPrefixStorage(manager.sharedDB, prefixStr)
 
-		subPath := filepath.Join(address.String(), dbNameHash)
-
-		databasePath := filepath.Join(config.ConfigApp.Databases.RootPath+config.ConfigApp.Databases.Trie.Path, subPath)
-
-		database, err := storage.NewShardelDB(
-			databasePath,
-			1, 2,
-			config.ConfigApp.DBType,
-			databasePath,
-		)
-		database.Open()
-		if err != nil {
-			logger.Error(err)
-			return nil, false
-		}
 		trieDB = NewTrieDatabase(hash, database, mvmId, address, dbName, manager.accountStateDB)
 		if trieDB == nil {
 			return nil, false
@@ -246,34 +231,4 @@ func (manager *TrieDatabaseManager) ListAllIDs() []common.Hash {
 	return ids
 }
 
-// CheckpointAll creates atomic PebbleDB checkpoints for all active TrieDatabases in the manager.
-func (manager *TrieDatabaseManager) CheckpointAll(destBaseDir string) error {
-	trieIDs := manager.ListAllIDs()
 
-	for _, id := range trieIDs {
-		trieDB, exists := manager.trieDatabases[id]
-		if !exists {
-			continue
-		}
-		if trieDB.GetStatus() == Deleted || trieDB.GetStatus() == Reverted {
-			continue // Skip deleted or reverted databases
-		}
-
-		// Calculate destination subdirectory corresponding to the contract
-		destDir := filepath.Join(destBaseDir, trieDB.GetSubPath())
-
-		// Ensure the parent directory (usually destBaseDir/address) exists before calling Checkpoint
-		parentDir := filepath.Dir(destDir)
-		if err := os.MkdirAll(parentDir, 0755); err != nil {
-			logger.Error("Failed to create parent directory for TrieDatabase checkpoint", "id", id, "parent", parentDir, "error", err)
-			return err
-		}
-
-		if err := trieDB.db.Checkpoint(destDir); err != nil {
-			logger.Error("Failed to checkpoint TrieDatabase", "id", id, "dest", destDir, "error", err)
-			return err
-		}
-		logger.Info("✅ [SNAPSHOT] Checkpointed TrieDatabase", "id", id, "dest", destDir)
-	}
-	return nil
-}

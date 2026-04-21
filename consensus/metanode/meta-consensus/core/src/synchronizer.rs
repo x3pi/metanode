@@ -446,9 +446,17 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                         // fetching blocks from peers in a different epoch). This prevents a
                         // spam loop of ~5 futile requests/second per peer.
                         let failures = self.consecutive_sync_failures.load(Ordering::Relaxed);
+                        
+                        // Detect if we are in sync mode (lagging)
+                        let local_commit = self.dag_state.read().last_commit_index();
+                        let quorum_commit = self.commit_vote_monitor.quorum_commit_index();
+                        let lag = quorum_commit.saturating_sub(local_commit);
+                        let is_sync_mode = lag > 50 || (quorum_commit > 0 && (lag as f64 / quorum_commit as f64) > 0.05);
+
                         let next_interval = if failures > 0 {
                             let backoff = PERIODIC_FETCH_INTERVAL * 2u32.saturating_pow(failures.min(6));
-                            backoff.min(MAX_BACKOFF_INTERVAL)
+                            let max_backoff = if is_sync_mode { Duration::from_secs(2) } else { MAX_BACKOFF_INTERVAL };
+                            backoff.min(max_backoff)
                         } else {
                             PERIODIC_FETCH_INTERVAL
                         };

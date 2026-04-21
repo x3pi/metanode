@@ -668,6 +668,7 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 
 	// Handle replication batch for Sub nodes
 	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+		var stakeBatchData []byte
 		if nodeSet != nil && len(nodeSet.Nodes) > 0 {
 			// MPT path: use nodeSet for replication
 			batch := make([][2][]byte, 0, len(nodeSet.Nodes))
@@ -678,7 +679,7 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 			if err != nil {
 				logger.Error("Commit (StakeStateDB): Failed to serialize MPT batch: %v", err)
 			} else {
-				db.SetStakeBatch(data)
+				stakeBatchData = data
 				logger.Debug("Commit (StakeStateDB): Serialized MPT stake batch for replication, size=%d", len(data))
 			}
 		} else {
@@ -689,11 +690,12 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 				if err != nil {
 					logger.Error("Commit (StakeStateDB): Failed to serialize flat block batch: %v", err)
 				} else {
-					db.SetStakeBatch(data)
+					stakeBatchData = data
 					logger.Debug("Commit (StakeStateDB): Serialized flat stake batch for replication, size=%d", len(data))
 				}
 			}
 		}
+		db.SetStakeBatch(stakeBatchData)
 	}
 
 	// Persist MPT nodes / FlatTrie to local DB
@@ -812,9 +814,9 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	}
 
 	// Store stakeBatch for network transfer
-	if stakeBatchData != nil {
-		db.SetStakeBatch(stakeBatchData)
-	}
+	// ALWAYS call SetStakeBatch (even if nil) to clear any leftover batch 
+	// from the previous block, ensuring we don't leak stale data to Sub nodes.
+	db.SetStakeBatch(stakeBatchData)
 
 	logger.Debug("CommitPipeline (StakeStateDB): sync phase complete, hash=%s, batch_size=%d",
 		committedHash.Hex(), len(batch))

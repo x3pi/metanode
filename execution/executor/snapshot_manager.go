@@ -118,6 +118,8 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"trie_database",
 			"backup_device_key_storage",
 			"rust_consensus", // NEW: Rust DAG data
+			"chaindata",
+			"executor_state",
 		},
 		xapianDirs: []string{
 			"xapian_node",

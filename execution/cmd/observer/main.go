@@ -51,7 +51,6 @@ func NewSupervisorApp(cfg *tcp_config.ClientConfig) (*SupervisorApp, error) {
 		app.keyPair,
 		app.connectionsManager,
 		handler,
-		"SUPERVISOR",
 		"1.0.0",
 	)
 	if err != nil {

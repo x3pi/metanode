@@ -132,7 +132,7 @@ mtn-simple-2025/
 ├── config/                               # Configuration templates
 ├── build.sh                              # Main build script (handles C++ MVM)
 ├── build_app.sh                          # Full application build
-├── run.sh                                # Start the cluster (Master + Sub nodes)
+├── run.sh                                # Start the cluster
 ├── kill_nodes.sh                         # Stop all running nodes
 └── go.mod / go.sum                       # Go module definition
 ```
@@ -146,12 +146,12 @@ The heart of the system is the `BlockProcessor` in `cmd/simple_chain/processor/`
 
 1. **Transaction Injection** → `connection_processor.go` receives TXs from clients
 2. **Validation & Pooling** → `transaction_processor_pool.go` validates and pools TXs
-3. **Forward to Rust** → `block_processor_txs.go` (`TxsProcessor2`) batches TXs via UDS to Rust
-4. **Receive Ordered Block** → `executor/listener.go` receives committed sub-DAG from Rust
+3. **Forward to Rust** → `block_processor_txs.go` (`TxsProcessor2`) batches TXs via FFI native calls to Rust
+4. **Receive Ordered Block** → `executor/listener.go` receives committed sub-DAG via FFI callback from Rust
 5. **Execute TXs** → `transaction_processor_pool.go` + `pkg/blockchain/tx_processor/` runs TXs in parallel groups
 6. **Generate Block** → `block_processor_processing.go` creates block with state roots
 7. **Commit to DB** → `block_processor_commit.go` persists block + state asynchronously
-8. **Broadcast** → `block_processor_broadcast.go` sends to Sub-nodes
+8. **Broadcast/Network Sync** → `block_processor_broadcast.go` distributes blocks via P2P layer for SyncOnly nodes
 
 ### State Databases
 | Database | Purpose | Backend |
@@ -168,8 +168,9 @@ The system includes a C++ Virtual Machine (`pkg/mvm/`) connected via CGo:
 - **Thread safety**: `db_mutex` protects Xapian database access
 - **Memory**: Uses `C.free` with deferred cleanup for high-load scenarios
 
-### Master-Sub Synchronization (Obsolete)
-Hệ thống KHÔNG CÒN sử dụng `AccountBatch` và Go Sub. Tất cả xử lý (bao gồm `ProcessSingleTransactionVirtual`) đều diễn ra trên `Go Master` (nay là process duy nhất). Nodes chạy dưới chế độ `SyncOnly` sẽ sync payload thông qua cơ chế block replication P2P của lớp gRPC/Rust.
+### Removed Concepts
+- **Go Sub nodes & Master nodes**: Replaced by a single unified executable process.
+- **Master-Sub IPC**, **AccountBatch**, **UDS (Unix Domain Socket)**: Entirely removed in favor of direct CGo FFI calls.
 
 ---
 
@@ -266,8 +267,7 @@ Legacy auto-detection module replaced by FFI interface.
 
 1. **No `time.Now()` for block timestamps** — Timestamps come from Rust consensus. Zero timestamp → `panic()` (fail-fast safety).
 2. **Canonical validator sorting** — Sort by `AuthorityKey` bytes (BLS public key). Must match Rust exactly.
-3. **AccountBatch determinism** — Master and Sub nodes must produce identical state roots.
-4. **Blocking send on Listener** — The commit listener channel MUST NOT drop blocks.
+3. **Blocking send on Listener** — The commit listener channel MUST NOT drop blocks.
 5. **Deferred `C.free`** — All CGo memory allocations use `defer C.free()` to prevent leaks.
 
 ---
@@ -290,7 +290,7 @@ Transactions within a block are grouped using Union-Find (`pkg/grouptxns/`):
 ---
 
 ## Environment & Logging
-- Logs go to `master.log` / `sub.log` and node-specific log files
+- Logs go to node-specific log files
 - Key log markers:
   - `🔍 [BLOCK-HASH-DEBUG]` — Block hash ingredients
   - `🔄 [EPOCH BOUNDARY DETECTED]` — Epoch transition

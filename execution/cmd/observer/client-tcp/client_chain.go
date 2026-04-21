@@ -16,6 +16,7 @@ import (
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	mt_transaction "github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -24,8 +25,8 @@ import (
 // Mỗi ví giữ nonce riêng. Khi receipt về → đánh dấu ví sẵn sàng lại.
 
 type WalletEntry struct {
-	address common.Address
-	ready   atomic.Bool // true = không có TX đang pending
+	address       common.Address
+	ready         atomic.Bool // true = không có TX đang pending
 	ExpectedNonce uint64
 }
 
@@ -108,14 +109,14 @@ func (w *WalletEntry) Address() common.Address {
 // Gửi thẳng lên chain, dùng header ID matching, không qua RPC proxy
 
 // sendChainRequest gửi command trực tiếp lên chain và đợi response theo header ID
-func (client *Client) sendChainRequest(cmd string, body []byte, timeout time.Duration) ([]byte, error) {
+func (client *Client) sendChainRequest(cmd string, body []byte, timeout time.Duration) (network.Message, error) {
 	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 	if parentConn == nil || !parentConn.IsConnect() {
 		return nil, fmt.Errorf("parent connection not available")
 	}
 
 	id := uuid.New().String()
-	respCh := make(chan []byte, 1)
+	respCh := make(chan network.Message, 1)
 
 	client.pendingChainRequests.Store(id, respCh)
 
@@ -142,10 +143,11 @@ func (client *Client) sendChainRequest(cmd string, body []byte, timeout time.Dur
 
 // ChainGetChainId lấy chain ID trực tiếp từ chain (raw uint64)
 func (client *Client) ChainGetChainId() (uint64, error) {
-	resp, err := client.sendChainRequest(command.GetChainId, nil, 60*time.Second)
+	respMsg, err := client.sendChainRequest(command.GetChainId, nil, 60*time.Second)
 	if err != nil {
 		return 0, err
 	}
+	resp := respMsg.Body()
 	if len(resp) < 8 {
 		return 0, fmt.Errorf("invalid chain id response: %d bytes", len(resp))
 	}
@@ -156,10 +158,11 @@ func (client *Client) ChainGetChainId() (uint64, error) {
 
 // ChainGetNonce lấy nonce trực tiếp từ chain (dùng lệnh GetNonce)
 func (client *Client) ChainGetNonce(address common.Address) (uint64, error) {
-	resp, err := client.sendChainRequest(command.GetNonce, address.Bytes(), 10*time.Second)
+	respMsg, err := client.sendChainRequest(command.GetNonce, address.Bytes(), 10*time.Second)
 	if err != nil {
 		return 0, err
 	}
+	resp := respMsg.Body()
 	var nonce uint64
 	if len(resp) >= 8 {
 		nonce = binary.BigEndian.Uint64(resp)
@@ -167,13 +170,13 @@ func (client *Client) ChainGetNonce(address common.Address) (uint64, error) {
 	return nonce, nil
 }
 
-
 // ChainGetBlockNumber lấy block number trực tiếp từ chain (raw uint64)
 func (client *Client) ChainGetBlockNumber() (uint64, error) {
-	resp, err := client.sendChainRequest(command.GetBlockNumber, nil, 60*time.Second)
+	respMsg, err := client.sendChainRequest(command.GetBlockNumber, nil, 60*time.Second)
 	if err != nil {
 		return 0, err
 	}
+	resp := respMsg.Body()
 	if len(resp) < 8 {
 		return 0, fmt.Errorf("invalid block number response: %d bytes", len(resp))
 	}
@@ -191,13 +194,13 @@ func (client *Client) ChainGetTransactionReceipt(txHash common.Hash) (*pb.GetTra
 		return nil, fmt.Errorf("failed to marshal GetTransactionReceiptRequest: %w", err)
 	}
 
-	respBytes, err := client.sendChainRequest(command.GetTransactionReceipt, requestBytes, 60*time.Second)
+	respMsg, err := client.sendChainRequest(command.GetTransactionReceipt, requestBytes, 60*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
 	resp := &pb.GetTransactionReceiptResponse{}
-	if err := proto.Unmarshal(respBytes, resp); err != nil {
+	if err := proto.Unmarshal(respMsg.Body(), resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal GetTransactionReceiptResponse: %w", err)
 	}
 	if resp.Error != "" {
@@ -248,12 +251,12 @@ func (client *Client) ChainGetLogs(
 		return nil, fmt.Errorf("failed to marshal GetLogsRequest: %w", err)
 	}
 
-	resp, err := client.sendChainRequest(command.GetLogs, requestBytes, 60*time.Second)
+	respMsg, err := client.sendChainRequest(command.GetLogs, requestBytes, 60*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	response := &pb.GetLogsResponse{}
-	if err := proto.Unmarshal(resp, response); err != nil {
+	if err := proto.Unmarshal(respMsg.Body(), response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal GetLogsResponse: %w", err)
 	}
 	if response.Error != "" {
@@ -321,102 +324,26 @@ func (client *Client) SendTransactionFromWallet(
 	}
 
 	// Gửi qua sendChainRequest kèm header ID → nhận TransactionSuccess / TransactionError
-	resp, err := client.sendChainRequest(command.SendTransaction, bTransaction, 120*time.Second)
+	respMsg, err := client.sendChainRequest(command.SendTransaction, bTransaction, 120*time.Second)
 	if err != nil {
 		return tx.Hash(), nonce, fmt.Errorf("send tx failed: %w", err)
 	}
-	txErr := &pb.TransactionHashWithError{}
-	if parseErr := proto.Unmarshal(resp, txErr); parseErr == nil {
-		return tx.Hash(), nonce, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, txErr.Description)
+
+	if respMsg.Command() == command.TransactionError {
+		txErr := &pb.TransactionHashWithError{}
+		if parseErr := proto.Unmarshal(respMsg.Body(), txErr); parseErr == nil {
+			desc := txErr.Description
+			logger.Error("❌ SendTransactionFromWallet: tx rejected code=%d desc=%q txHash=%s nonce=%d from=%s to=%s",
+				txErr.Code, desc, tx.Hash().Hex(), nonce, fromAddress.Hex(), toAddress.Hex())
+			return tx.Hash(), nonce, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, desc)
+		} else {
+			logger.Warn("❌ SendTransactionFromWallet: received TransactionError but failed to parse: %v", parseErr)
+			return tx.Hash(), nonce, fmt.Errorf("tx rejected but failed to parse error details")
+		}
 	}
-	// logger.Info("✅ SendTransactionFromWallet: %v", tx)
+	logger.Info("✅ SendTransactionFromWallet: txHash=%s nonce=%d from=%s", tx.Hash().Hex(), nonce, fromAddress.Hex())
 	return tx.Hash(), nonce, nil
 }
-
-// StartWalletPoolReceiptWatcher theo dõi các TX do WalletPool gửi bằng cách poll
-// GetTransactionReceipt — vì các ví trong pool là derived addresses (không phải embassy),
-// receipt không trở về qua receiptChan mà phải chủ động hỏi chain.
-//
-// Cách hoạt động:
-//   - Mỗi giây scan txHashToWallet map, spawn goroutine poll cho từng txHash chưa tracked.
-//   - Goroutine poll gọi ChainGetTransactionReceipt cho đến khi nhận được (infinite retry).
-//   - Khi receipt về → pool.MarkReady(walletAddr), xóa khỏi map,
-//     và parse BlockNumber từ RpcReceipt → gửi vào localBlockCh.
-// func (client *Client) StartWalletPoolReceiptWatcher(pool *WalletPool, txHashToWallet *sync.Map, localBlockCh chan<- uint64) {
-// 	const (
-// 		scanInterval   = 400 * time.Millisecond // tần suất scan map tìm TX mới
-// 		pollInterval   = 50 * time.Millisecond  // tần suất poll receipt cho mỗi TX
-// 		maxPollWorkers = 8                      // giới hạn goroutines poll receipt đồng thời
-// 	)
-
-// 	// semaphore: giới hạn tối đa maxPollWorkers goroutines poll cùng lúc
-// 	sem := make(chan struct{}, maxPollWorkers)
-// 	// tracking: các txHash đang được poll để không spawn duplicate goroutine
-// 	var tracking sync.Map
-// 	go func() {
-// 		ticker := time.NewTicker(scanInterval)
-// 		defer ticker.Stop()
-// 		for range ticker.C {
-// 			txHashToWallet.Range(func(key, val any) bool {
-// 				txHash := key.(common.Hash)
-// 				walletAddr := val.(common.Address)
-// 				// chỉ spawn 1 goroutine poll cho mỗi txHash
-// 				if _, already := tracking.LoadOrStore(txHash, struct{}{}); already {
-// 					return true
-// 				}
-// 				sem <- struct{}{}
-// 				go func(txHash common.Hash, walletAddr common.Address) {
-// 					defer func() { <-sem }() // trả lại slot khi xong
-// 					startTime := time.Now()
-// 					for {
-// 						// Nếu quá 30 giây mà vẫn chưa có receipt thì xoá khỏi hàng đợi
-// 						if time.Since(startTime) > 30*time.Second {
-// 							logger.Error("❌ [WalletPool] Timeout receipt for txHash=%s after 30s! Marking tx as SUCCESS", txHash.Hex())
-// 							pool.MarkReady(walletAddr)
-// 							txHashToWallet.Delete(txHash)
-// 							tracking.Delete(txHash)
-// 							return
-// 						}
-
-// 						resp, err := client.ChainGetTransactionReceipt(txHash)
-// 						if err != nil {
-// 							logger.Error("❌ [WalletPool] ChainGetTransactionReceipt failed for txHash=%s: %v", txHash.Hex(), err)
-// 						} else if resp != nil && resp.Receipt != nil {
-// 							// Thực sự đã có Receipt (đã mint block) thì mới báo Ready
-// 							pool.MarkReady(walletAddr)
-// 							txHashToWallet.Delete(txHash)
-// 							tracking.Delete(txHash)
-// 							// Parse receipt response → lấy BlockNumber trực tiếp
-// 							if localBlockCh != nil {
-// 								blockNumHex := resp.Receipt.GetBlockNumber()
-// 								if blockNumHex != "" {
-// 									var bn uint64
-// 									if _, scanErr := fmt.Sscanf(blockNumHex, "0x%x", &bn); scanErr == nil && bn > 0 {
-// 										select {
-// 										case localBlockCh <- bn:
-// 										default:
-// 										}
-// 									}
-// 								}
-// 							}
-
-// 							if resp.Receipt.Status != pb.RECEIPT_STATUS_RETURNED || resp.Receipt.Status != pb.RECEIPT_STATUS_HALTED {
-// 								logger.Info("Error receipt: %v", resp.GetReceipt())
-// 							}
-// 							logger.Info("✅ [WalletPool] Receipt confirmed txHash=%s → wallet %s ready | Status: %v",
-// 								txHash.Hex(), walletAddr.Hex(), resp.Receipt.Status)
-// 							return
-// 						}
-// 						// Nếu request lỗi, hoặc response trả về chưa có Receipt -> tiếp tục poll
-// 						// logger.Info("⏳ [WalletPool] Polling receipt txHash=%s", txHash.Hex())
-// 						time.Sleep(pollInterval)
-// 					}
-// 				}(txHash, walletAddr)
-// 				return true
-// 			})
-// 		}
-// 	}()
-// }
 
 // parseBlockNumberFromReceiptResponse parse GetTransactionReceiptResponse proto,
 // lấy RpcReceipt.BlockNumber (hex string "0x123") → uint64.

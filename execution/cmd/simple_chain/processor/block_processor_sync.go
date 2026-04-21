@@ -28,7 +28,7 @@ func (bp *BlockProcessor) processSingleEpochData(
 	fileLogger *loggerfile.FileLogger,
 ) {
 PROCESS_SINGLE_EPOCH_DATA_START:
-	fmt.Printf("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d\n", epochData.GetGlobalExecIndex())
+	logger.Debug("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d", epochData.GetGlobalExecIndex())
 	globalExecIndex := epochData.GetGlobalExecIndex()
 	commitIndex := epochData.GetCommitIndex()
 
@@ -93,7 +93,8 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// This lightweight check syncs bp.lastBlock from DB whenever
 		// storage advances, keeping RPC responses accurate.
 		// ═══════════════════════════════════════════════════════════════
-		{
+		if time.Since(bp.lastLazyRefreshTime) > 100*time.Millisecond {
+			bp.lastLazyRefreshTime = time.Now()
 			storageLastBlockNum := storage.GetLastBlockNumber()
 			bpLastBlock := bp.GetLastBlock()
 			bpLastBlockNum := uint64(0)
@@ -162,102 +163,106 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// After SyncBlocks, storage may be ahead of bp.lastBlock. This check detects
 	// staleness and refreshes from DB, preventing fork from stale parent hash.
 	// This replaces the old syncCompletionCallback mechanism with a simpler approach.
-	storageLastBlockNum := storage.GetLastBlockNumber()
-	bpLastBlock := bp.GetLastBlock()
-	bpLastBlockNum := uint64(0)
-	if bpLastBlock != nil {
-		bpLastBlockNum = bpLastBlock.Header().BlockNumber()
-	}
-	if storageLastBlockNum > bpLastBlockNum {
-		// bp.lastBlock is stale (likely post-sync), refresh from storage
-		// Use centralized CommitBlockState with WithRebuildTries to ensure ALL state
-		// components (header, tries, mappings, counter) are updated atomically.
-		// This fixes the SyncOnly→Validator fork where stale tries caused different
-		// execution results.
-		blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(storageLastBlockNum)
-		if ok {
-			freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
-			if err == nil && freshBlock != nil {
-				// ═══════════════════════════════════════════════════════════════
-				// STATE-AWARENESS GUARD (LEGACY — defense-in-depth):
-				// Since Phase 1 (sync_and_execute_blocks), synced blocks are
-				// always executed via NOMT, so trie roots should always match.
-				// This guard is kept as a safety net for unforeseen edge cases.
-				//
-				// Original purpose: After snapshot restore, P2P sync stored
-				// blocks in LevelDB but NOMT state stayed at snapshot point.
-				// Advancing bp.lastBlock caused new blocks to use stale trie.
-				// ═══════════════════════════════════════════════════════════════
-				currentTrieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
-				targetStateRoot := freshBlock.Header().AccountStatesRoot()
+	if time.Since(bp.lastLazyRefreshTime) > 100*time.Millisecond {
+		bp.lastLazyRefreshTime = time.Now()
+		
+		storageLastBlockNum := storage.GetLastBlockNumber()
+		bpLastBlock := bp.GetLastBlock()
+		bpLastBlockNum := uint64(0)
+		if bpLastBlock != nil {
+			bpLastBlockNum = bpLastBlock.Header().BlockNumber()
+		}
+		if storageLastBlockNum > bpLastBlockNum {
+			// bp.lastBlock is stale (likely post-sync), refresh from storage
+			// Use centralized CommitBlockState with WithRebuildTries to ensure ALL state
+			// components (header, tries, mappings, counter) are updated atomically.
+			// This fixes the SyncOnly→Validator fork where stale tries caused different
+			// execution results.
+			blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(storageLastBlockNum)
+			if ok {
+				freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
+				if err == nil && freshBlock != nil {
+					// ═══════════════════════════════════════════════════════════════
+					// STATE-AWARENESS GUARD (LEGACY — defense-in-depth):
+					// Since Phase 1 (sync_and_execute_blocks), synced blocks are
+					// always executed via NOMT, so trie roots should always match.
+					// This guard is kept as a safety net for unforeseen edge cases.
+					//
+					// Original purpose: After snapshot restore, P2P sync stored
+					// blocks in LevelDB but NOMT state stayed at snapshot point.
+					// Advancing bp.lastBlock caused new blocks to use stale trie.
+					// ═══════════════════════════════════════════════════════════════
+					currentTrieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
+					targetStateRoot := freshBlock.Header().AccountStatesRoot()
 
-				if currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
-					logger.Warn("🛡️ [LAZY REFRESH] State mismatch! trie_root=%s ≠ target block #%d stateRoot=%s. "+
-						"NOT advancing (P2P-synced blocks not executed by NOMT — snapshot restore?). "+
-						"Staying at block #%d until Rust sends commits for sequential execution.",
-						currentTrieRoot.Hex()[:18]+"...", storageLastBlockNum, targetStateRoot.Hex()[:18]+"...", bpLastBlockNum)
-				} else {
-					bp.SetLastBlock(freshBlock)
-					newNextBlock := storageLastBlockNum + 1
-					bp.nextBlockNumber.Store(newNextBlock)
-
-					// Centralized state update: header + mappings + counter + tries
-					if _, err := bp.chainState.CommitBlockState(freshBlock,
-						blockchain.WithRebuildTries(),
-					); err != nil {
-						logger.Error("🔄 [LAZY REFRESH] Failed to rebuild state from fresh block #%d: %v",
-							storageLastBlockNum, err)
+					if currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
+						logger.Warn("🛡️ [LAZY REFRESH] State mismatch! trie_root=%s ≠ target block #%d stateRoot=%s. "+
+							"NOT advancing (P2P-synced blocks not executed by NOMT — snapshot restore?). "+
+							"Staying at block #%d until Rust sends commits for sequential execution.",
+							currentTrieRoot.Hex()[:18]+"...", storageLastBlockNum, targetStateRoot.Hex()[:18]+"...", bpLastBlockNum)
 					} else {
-						logger.Debug("🔄 [LAZY REFRESH] ✅ Updated stale state: %d → %d (header + tries + mappings refreshed)",
-							bpLastBlockNum, storageLastBlockNum)
+						bp.SetLastBlock(freshBlock)
+						newNextBlock := storageLastBlockNum + 1
+						bp.nextBlockNumber.Store(newNextBlock)
 
-						// CRITICAL (Feb 2026): Clear ALL cached state after sync→validator transition.
-						// Two cache layers must be cleared:
-						// 1. Go-side MVMApi instances (prevent stale accountStateDb references)
-						// 2. C++ State::instances (prevent EVM from using stale nonce/balance
-						//    from its internal concurrent_hash_map instead of calling GlobalStateGet)
-						mvm.ClearAllMVMApi()
-						mvm.CallClearAllStateInstances()
-						logger.Debug("🔄 [LAZY REFRESH] 🗑️ Cleared Go MVMApi cache + C++ State instances (EVM will re-read fresh state)")
+						// Centralized state update: header + mappings + counter + tries
+						if _, err := bp.chainState.CommitBlockState(freshBlock,
+							blockchain.WithRebuildTries(),
+						); err != nil {
+							logger.Error("🔄 [LAZY REFRESH] Failed to rebuild state from fresh block #%d: %v",
+								storageLastBlockNum, err)
+						} else {
+							logger.Debug("🔄 [LAZY REFRESH] ✅ Updated stale state: %d → %d (header + tries + mappings refreshed)",
+								bpLastBlockNum, storageLastBlockNum)
+
+							// CRITICAL (Feb 2026): Clear ALL cached state after sync→validator transition.
+							// Two cache layers must be cleared:
+							// 1. Go-side MVMApi instances (prevent stale accountStateDb references)
+							// 2. C++ State::instances (prevent EVM from using stale nonce/balance
+							//    from its internal concurrent_hash_map instead of calling GlobalStateGet)
+							mvm.ClearAllMVMApi()
+							mvm.CallClearAllStateInstances()
+							logger.Debug("🔄 [LAZY REFRESH] 🗑️ Cleared Go MVMApi cache + C++ State instances (EVM will re-read fresh state)")
+						}
 					}
 				}
 			}
 		}
-	}
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// PHASE 3: HASH-MISMATCH-GUARD — Final defense against wrong parentHash fork.
-	//
-	// ROOT CAUSE: LAZY REFRESH uses strict inequality (storageLastBlockNum > bpLastBlockNum).
-	// When both equal (e.g., both = 235), LAZY REFRESH does NOT fire. But Go P2P sync
-	// (HandleSyncBlocksRequest) may have OVERWRITTEN LevelDB block #235 with the network's
-	// authoritative version AFTER Rust already created its own block #235 in memory.
-	// Result: bp.lastBlock.Hash() ≠ LevelDB hash → next block gets wrong parentHash → FORK.
-	//
-	// FIX: After LAZY REFRESH, when block numbers are equal (the "missed" case), compare
-	// actual hashes. If they differ, force-refresh bp.lastBlock from LevelDB — the P2P-synced
-	// (network-authoritative) version is always correct.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if storageLastBlockNum == bpLastBlockNum && storageLastBlockNum > 0 && bpLastBlock != nil {
-		storageHash, hashOk := blockchain.GetBlockChainInstance().GetBlockHashByNumber(storageLastBlockNum)
-		if hashOk && storageHash != (common.Hash{}) {
-			bpHash := bpLastBlock.Header().Hash()
-			if bpHash != storageHash {
-				freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(storageHash)
-				if err == nil && freshBlock != nil {
-					bp.SetLastBlock(freshBlock)
-					bp.nextBlockNumber.Store(storageLastBlockNum + 1)
-					if _, err := bp.chainState.CommitBlockState(freshBlock,
-						blockchain.WithRebuildTries(),
-					); err != nil {
-						logger.Error("🛡️ [HASH-MISMATCH-GUARD] Failed to rebuild state for block #%d: %v",
-							storageLastBlockNum, err)
-					} else {
-						mvm.ClearAllMVMApi()
-						mvm.CallClearAllStateInstances()
-						logger.Warn("🛡️ [HASH-MISMATCH-GUARD] Block #%d hash mismatch detected! "+
-							"bp.lastBlock=%s, storage=%s. Refreshed to P2P-synced authoritative version.",
-							storageLastBlockNum, bpHash.Hex()[:18]+"...", storageHash.Hex()[:18]+"...")
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PHASE 3: HASH-MISMATCH-GUARD — Final defense against wrong parentHash fork.
+		//
+		// ROOT CAUSE: LAZY REFRESH uses strict inequality (storageLastBlockNum > bpLastBlockNum).
+		// When both equal (e.g., both = 235), LAZY REFRESH does NOT fire. But Go P2P sync
+		// (HandleSyncBlocksRequest) may have OVERWRITTEN LevelDB block #235 with the network's
+		// authoritative version AFTER Rust already created its own block #235 in memory.
+		// Result: bp.lastBlock.Hash() ≠ LevelDB hash → next block gets wrong parentHash → FORK.
+		//
+		// FIX: After LAZY REFRESH, when block numbers are equal (the "missed" case), compare
+		// actual hashes. If they differ, force-refresh bp.lastBlock from LevelDB — the P2P-synced
+		// (network-authoritative) version is always correct.
+		// ═══════════════════════════════════════════════════════════════════════════
+		if storageLastBlockNum == bpLastBlockNum && storageLastBlockNum > 0 && bpLastBlock != nil {
+			storageHash, hashOk := blockchain.GetBlockChainInstance().GetBlockHashByNumber(storageLastBlockNum)
+			if hashOk && storageHash != (common.Hash{}) {
+				bpHash := bpLastBlock.Header().Hash()
+				if bpHash != storageHash {
+					freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(storageHash)
+					if err == nil && freshBlock != nil {
+						bp.SetLastBlock(freshBlock)
+						bp.nextBlockNumber.Store(storageLastBlockNum + 1)
+						if _, err := bp.chainState.CommitBlockState(freshBlock,
+							blockchain.WithRebuildTries(),
+						); err != nil {
+							logger.Error("🛡️ [HASH-MISMATCH-GUARD] Failed to rebuild state for block #%d: %v",
+								storageLastBlockNum, err)
+						} else {
+							mvm.ClearAllMVMApi()
+							mvm.CallClearAllStateInstances()
+							logger.Warn("🛡️ [HASH-MISMATCH-GUARD] Block #%d hash mismatch detected! "+
+								"bp.lastBlock=%s, storage=%s. Refreshed to P2P-synced authoritative version.",
+								storageLastBlockNum, bpHash.Hex()[:18]+"...", storageHash.Hex()[:18]+"...")
+						}
 					}
 				}
 			}
@@ -584,7 +589,6 @@ PROCESS_BLOCK:
 		// Unmarshal as single Transaction first
 		singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
 		if err == nil {
-			logger.Info("✅ [TX FLOW] UnmarshalTransaction SUCCESS for tx[%d]", txIdx)
 			allTransactions = append(allTransactions, singleTx)
 			totalTxsFromRust++
 			continue
@@ -597,7 +601,6 @@ PROCESS_BLOCK:
 			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes)", txIdx, err, len(ms.Digest))
 			continue
 		}
-		logger.Info("✅ [TX FLOW] UnmarshalTransactions SUCCESS for tx[%d]: returned %d txs", txIdx, len(transactions))
 		allTransactions = append(allTransactions, transactions...)
 		totalTxsFromRust += len(transactions)
 	}
@@ -831,7 +834,7 @@ PROCESS_BLOCK:
 	createBlockDuration := time.Since(createBlockStart)
 
 	blockHash := newBlock.Header().Hash().Hex()
-	logger.Info("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
+	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
 	// Update GlobalExecIndex tracking (persistent)

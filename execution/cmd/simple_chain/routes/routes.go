@@ -21,7 +21,6 @@ func InitRoutes(
 	subscribeProcessor *processor.SubscribeProcessor,
 	serviceType common.ServiceType,
 	messageSender network.MessageSender,
-	mode string,
 ) {
 	// --- KHỞI TẠO RATE LIMITERS ---
 	// Giới hạn 1,000,000 req/s, burst 100,000 (cho 100ms)

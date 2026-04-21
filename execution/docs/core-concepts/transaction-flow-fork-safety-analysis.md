@@ -7,37 +7,37 @@ Hệ thống có 3 luồng chính:
 2. **Rust → Go Master**: Gửi committed blocks từ Rust đến Go master executor
 3. **Epoch Transition**: Chuyển đổi epoch mượt mà không bị fork
 
-## 1. Luồng Go Sub → Rust
+## 1. Luồng Go Pool → Rust FFI
 
-### 1.1. Go Sub Node gửi transactions
+### 1.1. Go Pool Forward transactions
 
-**File**: `pkg/txsender/channel_sender.go`
+**File**: `cmd/simple_chain/processor/block_processor_txs.go` (TxsProcessor2)
 
 **Luồng**:
 ```
-Go Sub Node → ChannelBasedSender → Unix Domain Socket → Rust Consensus
+Go Pool (TxQueue) → batchTxWorkers → FFI Call → Rust TransactionReceiver
 ```
 
 **Chi tiết**:
-1. **ChannelBasedSender**: Sử dụng buffered channel (1000 batches) và multiple workers (10 workers)
-2. **Persistent connections**: Mỗi worker có persistent connection riêng
-3. **Retry mechanism**: Có retry channel cho các batches bị reject do epoch transition
-4. **UDS/TCP**: Ưu tiên UDS (localhost), fallback về TCP
+1. **batchTxWorkers**: Sử dụng goroutines thu thập các giao dịch hợp lệ định kỳ.
+2. **FFI Call**: Truyền block dữ liệu qua bộ nhớ (CGo), loại bỏ hoàn toàn Protobuf framing overhead qua TCP/UDS.
+3. **Retry mechanism**: Có retry queue/channel cho các batches bị reject do epoch transition.
+4. **No UDS/TCP**: Truyền dữ liệu trực tiếp trong cùng một tiến trình hệ thống, đảm bảo an toàn bộ nhớ tĩnh trong quy trình nguyên khối.
 
-**Fork-Safety**: ✅ Transactions được gửi tuần tự qua channel, không có race condition
+**Fork-Safety**: ✅ Transactions được gửi qua FFI, không có race condition
 
 ### 1.2. Rust nhận transactions
 
-**File**: `metanode/src/node.rs` (transaction submission)
+**File**: `metanode/src/network/tx_receiver.rs`
 
 **Luồng**:
 ```
-Unix Domain Socket → TransactionReceiver → Consensus Core
+FFI Call → TransactionReceiver → pending_transactions_queue → Consensus Core
 ```
 
 **Fork-Safety**: ✅ Consensus core đảm bảo transactions được xử lý theo thứ tự
 
-## 2. Luồng Rust → Go Master
+## 2. Luồng Rust → Go Unified Executor
 
 ### 2.1. Rust tạo committed blocks
 
@@ -62,11 +62,11 @@ Consensus Core → CommittedSubDag → CommitProcessor → ExecutorClient
 
 ### 2.2. Executor Client gửi blocks
 
-**File**: `metanode/src/executor_client.rs`
+**File**: `metanode/src/node/executor_client/mod.rs` (hoặc `commit_processor.rs`)
 
 **Luồng**:
 ```
-send_committed_subdag() → convert_to_protobuf() → buffer.insert() → flush_buffer() → send_block_data() → Unix Domain Socket
+send_committed_subdag() → convert_to_protobuf() → buffer.insert() → flush_buffer() → call_golang_callback() → FFI Queue
 ```
 
 **Chi tiết**:
@@ -91,13 +91,13 @@ send_committed_subdag() → convert_to_protobuf() → buffer.insert() → flush_
 - Duplicate detection đảm bảo không gửi cùng commit 2 lần
 - Sequential buffering đảm bảo Go nhận blocks đúng thứ tự
 
-### 2.3. Go Master nhận blocks
+### 2.3. Go Unified Node nhận blocks
 
-**File**: `cmd/simple_chain/processor/block_processor.go`
+**File**: `executor/listener.go` và `cmd/simple_chain/processor/block_processor_core.go`
 
 **Luồng**:
 ```
-Unix Domain Socket → Listener → dataChan → Block Processor → Process Block
+FFI Callback → Listener → dataChan → Block Processor → Process Block
 ```
 
 **Chi tiết**:
@@ -320,4 +320,4 @@ Hệ thống đã được thiết kế với các cơ chế fork-safety mạnh 
 4. **Duplicate Prevention**: Có cơ chế detect và handle duplicates
 5. **Out-of-Order Handling**: Có buffer mechanism để handle out-of-order blocks
 
-**Tất cả các cơ chế này đảm bảo hệ thống không bị fork và giao dịch được xử lý mượt mà từ Go sub → Rust → Go master.**
+**Tất cả các cơ chế này đảm bảo hệ thống không bị fork và giao dịch được xử lý mượt mà trong cấu trúc Monolithic (Go Unified Node ↔ Rust FFI).**

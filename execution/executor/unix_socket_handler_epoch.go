@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -540,7 +542,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	currentEpoch := rh.chainState.GetCurrentEpoch()
 	lastCommittedBlock := storage.GetLastBlockNumber()
 	lastGEI := storage.GetLastGlobalExecIndex()
-	
+
 	if request.NewEpoch <= currentEpoch && request.NewEpoch > 0 {
 		// Rust loop/monitor fired a duplicate advance.
 		// We silently accept but DO NOT modify Go state, to let Rust proceed.
@@ -554,7 +556,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	if request.BoundaryBlock > 0 && request.BoundaryBlock < lastCommittedBlock {
 		logger.Warn("⚠️ [EPOCH GUARD] Boundary Block %d < Go Last Block %d. Allowing (likely a recovery replay).", request.BoundaryBlock, lastCommittedBlock)
 	}
-	
+
 	if request.BoundaryGei > 0 && lastGEI > request.BoundaryGei {
 		logger.Warn("⚠️ [EPOCH GUARD] Boundary GEI %d < Go Last GEI %d. Go has already executed blocks into this epoch!", request.BoundaryGei, lastGEI)
 	}
@@ -901,7 +903,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	logger.Debug("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
 
 	// Limit batch size to prevent DoS
-	maxBatch := uint64(500)
+	maxBatch := uint64(5000)
 	if toBlock-fromBlock+1 > maxBatch {
 		toBlock = fromBlock + maxBatch - 1
 		logger.Info("📦 [BLOCK SYNC] Limited batch size to %d blocks (from=%d, to=%d)", maxBatch, fromBlock, toBlock)
@@ -1076,560 +1078,6 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 // HandleSyncBlocksRequest processes a SyncBlocksRequest and syncs blocks to local storage
 // This is used by nodes to receive blocks fetched from peers via Rust orchestration
 func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest) (*pb.SyncBlocksResponse, error) {
-	// ═══════════════════════════════════════════════════════════════════════════
-	// EXECUTE MODE (Phase 1 — Snapshot Restore Redesign):
-	// When execute_mode=true, blocks are EXECUTED through NOMT (not just stored).
-	// This eliminates GEI inflation — the root cause of post-restore forks.
-	// Safe to update in-memory state directly because during epoch catch-up,
-	// the consensus goroutine is paused (no concurrent writer).
-	// ═══════════════════════════════════════════════════════════════════════════
-	if request.GetExecuteMode() {
-		return rh.handleSyncBlocksExecuteMode(request)
-	}
-
-	blocks := request.GetBlocks()
-	blockCount := len(blocks)
-
-	logger.Info("📥 [BLOCK SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
-
-	if blockCount == 0 {
-		return &pb.SyncBlocksResponse{
-			SyncedCount:     0,
-			LastSyncedBlock: 0,
-			Error:           "No blocks to sync",
-		}, nil
-	}
-
-	blockDatabase := block.NewBlockDatabase(rh.storageManager.GetStorageBlock())
-	bc := blockchain.GetBlockChainInstance()
-
-	var syncedCount uint64 = 0
-	var lastSyncedBlock uint64 = 0
-
-	for _, blockData := range blocks {
-		rawBytes := blockData.GetRawBlockBytes()
-		backupBytes := blockData.GetBackupData()
-
-		if len(rawBytes) == 0 {
-			logger.Warn("📥 [BLOCK SYNC] Block (wire_num=%d) has no raw_block_bytes, skipping", blockData.GetBlockNumber())
-			continue
-		}
-
-		// Unmarshal the raw block bytes back to a Block object
-		blk := &block.Block{}
-		if err := blk.Unmarshal(rawBytes); err != nil {
-			logger.Error("📥 [BLOCK SYNC] Failed to unmarshal block (wire_num=%d): %v", blockData.GetBlockNumber(), err)
-			continue
-		}
-
-		header := blk.Header()
-		blockHash := header.Hash()
-		// FORK-SAFETY: Always use the block header's BlockNumber, NOT blockData.GetBlockNumber()
-		// The wire field might be GEI (from GetBlocksRangeRequest) or BlockNumber depending on caller.
-		// The block header is the single source of truth for sequential block numbering.
-		blockNum := header.BlockNumber()
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// DEDUPLICATION: Check if this block already exists in storage
-		// During Validator→SyncOnly transitions, there's a race window where the Go
-		// executor may have already created some blocks via consensus. P2P sync then
-		// sends the same blocks from peer validators. If hashes match, skip.
-		// If hashes differ, the peer's version is authoritative (we replace ours).
-		// ═══════════════════════════════════════════════════════════════════════════
-		existingHash, existsInStorage := bc.GetBlockHashByNumber(blockNum)
-		if existsInStorage && existingHash != (common.Hash{}) {
-			if existingHash == blockHash {
-				// Block already exists with identical hash — skip block state writes
-				// BUT: Still persist backup data if available! Sub nodes need
-				// block_data_topic-N to process blocks. Without this, Sub gets
-				// stuck waiting for backup data that was never written.
-				if len(backupBytes) > 0 {
-					backupStorage := rh.storageManager.GetStorageBackupDb()
-					if backupStorage != nil {
-						backupKey := []byte(fmt.Sprintf("block_data_topic-%d", blockNum))
-						// Only write if not already present (avoid redundant I/O)
-						if _, err := backupStorage.Get(backupKey); err != nil {
-							if putErr := backupStorage.Put(backupKey, backupBytes); putErr != nil {
-								logger.Error("❌ [BLOCK SYNC] Failed to persist backup for skipped block #%d: %v", blockNum, putErr)
-							} else {
-								logger.Info("📥 [BLOCK SYNC] Block #%d skipped (dup) but backup data persisted for Sub", blockNum)
-							}
-							// Also persist legacy key
-							legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
-							backupStorage.Put(legacyKey, backupBytes)
-						}
-					}
-				}
-				syncedCount++
-				if blockNum > lastSyncedBlock {
-					lastSyncedBlock = blockNum
-				}
-				continue
-			}
-			// CRITICAL FIX: Prevent "State Reversion via Empty Blocks" race condition.
-			// If our local block has more transactions than the peer's block, it means
-			// we executed the block locally but the peer sent an empty deduplicated block.
-			// Overwriting our block with an empty header will corrupt our state.
-			if existingBlock, fetchErr := blockDatabase.GetBlockByHash(existingHash); fetchErr == nil && existingBlock != nil {
-				if len(existingBlock.Transactions()) > len(blk.Transactions()) {
-					logger.Warn("⚠️ [BLOCK SYNC] Refusing to overwrite local block #%d: local has %d txs, peer has %d txs (preventing state revert!)",
-						blockNum, len(existingBlock.Transactions()), len(blk.Transactions()))
-					syncedCount++
-					if blockNum > lastSyncedBlock {
-						lastSyncedBlock = blockNum
-					}
-					// Still add backupBytes if they exist so Sub nodes don't get stuck waiting
-					if len(backupBytes) > 0 {
-						backupStorage := rh.storageManager.GetStorageBackupDb()
-						if backupStorage != nil {
-							backupKey := []byte(fmt.Sprintf("block_data_topic-%d", blockNum))
-							if _, err := backupStorage.Get(backupKey); err != nil {
-								if putErr := backupStorage.Put(backupKey, backupBytes); putErr == nil {
-									legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
-									backupStorage.Put(legacyKey, backupBytes)
-								}
-							}
-						}
-					}
-					continue
-				}
-			}
-
-			// CRITICAL: Hashes differ! This indicates a transition race condition.
-			// The peer's block is authoritative — overwrite local stale copy.
-			logger.Error("🚨 [BLOCK SYNC] HASH MISMATCH at block #%d! local=%s, peer=%s — replacing with peer's authoritative block",
-				blockNum, existingHash.Hex()[:18]+"...", blockHash.Hex()[:18]+"...")
-		}
-
-		// === FULL STATE EXECUTION: Apply BackUpDb state batches ===
-		// If backup_data is present, deserialize and apply ALL state batches
-		// (Account, Code, SmartContract, Receipt, Transaction, StakeState, TrieDB)
-		// This ensures the local node has complete state data, preventing fork.
-		// NOTE: AccountBatch in BackUpDb contains MPT trie nodes (see account_state_db.go
-		// Commit() lines 696-703), so NO separate trie rebuild is needed.
-		if len(backupBytes) > 0 {
-			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
-			if deserErr != nil {
-				logger.Error("📥 [BLOCK SYNC] Failed to deserialize BackUpDb for block %d: %v", blockNum, deserErr)
-				// Fall back to header-only mode
-			} else {
-				// Apply all state batches from BackUpDb to local LevelDB
-				applyErr := rh.applyBackupDbBatches(&backupDb)
-				if applyErr != nil {
-					logger.Error("📥 [BLOCK SYNC] Failed to apply BackUpDb for block %d: %v", blockNum, applyErr)
-				} else {
-					logger.Debug("📥 [BLOCK SYNC] ✅ Applied full BackUpDb state for block #%d", blockNum)
-				}
-			}
-		} else {
-			// No backup data available — store raw block only (header-only sync)
-			// This happens for blocks committed before BackUpDb persistence was enabled
-			if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-				logger.Error("📥 [BLOCK SYNC] Failed to save block %d: %v", blockNum, err)
-				continue
-			}
-		}
-
-		// SINGLE WRITER PRINCIPLE (Feb 2026):
-		// Only the consensus goroutine modifies in-memory state (accountStateDB, header pointer, counter).
-		// Sync handler writes ONLY to LevelDB — no SetcurrentBlockHeader, no UpdateLastBlockNumber.
-		// The consensus goroutine's LAZY REFRESH mechanism will detect the new blocks in LevelDB
-		// and update in-memory state before processing the next consensus block.
-
-		// 1. Save block data to block LevelDB (under hash key ONLY, NOT lastBlockHashKey)
-		//    lastBlockHashKey is reserved for consensus goroutine's SaveLastBlock.
-		//    Sync handler only stores by hash for GetBlockByHash lookups.
-		if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-			logger.Error("📥 [BLOCK SYNC] Failed to save block %d to DB: %v", blockNum, err)
-			continue
-		}
-
-		// 2. Set blockNum → hash mapping (thread-safe sync.Map, flushed to LevelDB via bc.Commit)
-		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("📥 [BLOCK SYNC] Failed to set block→hash mapping for block %d: %v", blockNum, err)
-		}
-
-		// 3. Set tx hash → block number mappings (thread-safe sync.Map)
-		for _, txHash := range blk.Transactions() {
-			bc.SetTxHashMapBlockNumber(txHash, blockNum)
-		}
-
-		// 4. Auto-detect epoch from block header (needed for epoch tracking)
-		rh.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp())
-
-		syncedCount++
-		if blockNum > lastSyncedBlock {
-			lastSyncedBlock = blockNum
-		}
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// CRITICAL FIX: Persist backup data to backup PebbleDB for Sub node recovery.
-		// Without this, blocks committed via Rust P2P sync are invisible to Sub nodes.
-		// The Sub's 3-tier recovery calls GetBlockStorage() → backup_db with key
-		// "block_data_topic-N". If the key doesn't exist, Sub stays stuck forever.
-		// ═══════════════════════════════════════════════════════════════════════════
-		if len(backupBytes) > 0 {
-			backupStorage := rh.storageManager.GetStorageBackupDb()
-			if backupStorage != nil {
-				backupKey := []byte(fmt.Sprintf("block_data_topic-%d", blockNum))
-				if putErr := backupStorage.Put(backupKey, backupBytes); putErr != nil {
-					logger.Error("❌ [BLOCK SYNC] Failed to persist backup data for block #%d: %v", blockNum, putErr)
-				} else {
-					logger.Debug("📥 [BLOCK SYNC] ✅ Persisted backup for block #%d (key=%s, size=%d bytes)",
-						blockNum, string(backupKey), len(backupBytes))
-				}
-
-				// Also persist with legacy key format for backward compatibility
-				legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
-				backupStorage.Put(legacyKey, backupBytes)
-			}
-		} else {
-			// has_backup=false: try to read backup from PebbleDB (broadcastWorker may have written it)
-			backupStorage := rh.storageManager.GetStorageBackupDb()
-			if backupStorage != nil {
-				backupKey := []byte(fmt.Sprintf("block_data_topic-%d", blockNum))
-				if fallbackData, fbErr := backupStorage.Get(backupKey); fbErr == nil && len(fallbackData) > 0 {
-					backupBytes = fallbackData
-					logger.Info("📥 [BLOCK SYNC] Block #%d has_backup=false, found fallback in PebbleDB (%d bytes)", blockNum, len(backupBytes))
-				} else {
-					// ═══════════════════════════════════════════════════════════
-					// CRITICAL FIX (Mar 2026): Generate minimal BackUpDb from raw block.
-					// When peer doesn't include backup data (block evicted from peer's
-					// BackupDb), Sub node gets stuck forever waiting for this block.
-					// Fix: create a minimal BackUpDb with just BockBatch (block header +
-					// data) so Sub can store the block and advance its counter.
-					// State diffs will be empty — Sub won't have full state for this
-					// block, but chain continuity is maintained and Sub won't stall.
-					// ═══════════════════════════════════════════════════════════
-					rawBlockBytes, marshalErr := blk.Marshal()
-					if marshalErr == nil {
-						blockBatch := [][2][]byte{
-							{header.Hash().Bytes(), rawBlockBytes},
-						}
-						bockBatchSerialized, serErr := storage.SerializeBatch(blockBatch)
-						if serErr == nil {
-							minimalBackup := storage.BackUpDb{
-								BockNumber: blockNum,
-								BockBatch:  bockBatchSerialized,
-							}
-							generatedBytes, genErr := storage.SerializeBackupDb(minimalBackup)
-							if genErr == nil {
-								backupBytes = generatedBytes
-								// Persist to BackupDb so HandleBlockRequest can also find it
-								backupStorage.Put(backupKey, backupBytes)
-								legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
-								backupStorage.Put(legacyKey, backupBytes)
-								logger.Info("📥 [BLOCK SYNC] Block #%d has_backup=false — generated minimal BackUpDb from raw block (%d bytes)", blockNum, len(backupBytes))
-							} else {
-								logger.Error("❌ [BLOCK SYNC] Block #%d failed to serialize minimal BackUpDb: %v", blockNum, genErr)
-							}
-						} else {
-							logger.Error("❌ [BLOCK SYNC] Block #%d failed to serialize block batch: %v", blockNum, serErr)
-						}
-					} else {
-						logger.Error("❌ [BLOCK SYNC] Block #%d failed to marshal block for minimal BackUpDb: %v", blockNum, marshalErr)
-					}
-				}
-			}
-		}
-
-		// Log block header (matching normal block processing format for monitoring)
-		logger.Info("📋 [MASTER] Block #%d committed (sync): hash=%s, parent=%s, epoch=%d, timestamp=%d, tx_count=%d, has_backup=%v",
-			header.BlockNumber(),
-			header.Hash().Hex()[:18]+"...",
-			header.LastBlockHash().Hex()[:18]+"...",
-			header.Epoch(),
-			header.TimeStamp(),
-			len(blk.Transactions()),
-			len(backupBytes) > 0)
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// FORK FIX: Do NOT broadcast to Sub during sync!
-		// Sub should ONLY receive blocks through Master's consensus
-		// commitWorker → broadcastWorker pipeline. Synced blocks are stored
-		// in PebbleDB (block_data_topic-N) for Sub's 3-tier recovery.
-		// Broadcasting here caused Sub to advance ahead of Master → FORK.
-		// ═══════════════════════════════════════════════════════════════════════════
-
-		// Log detailed header and transactions (matches normal block processing logic)
-		// This provides visual confirmation to the user that full execution occurred
-		logger.Info("Lastblock header: %v", header)
-		txHashes := make([]string, 0, len(blk.Transactions()))
-		for _, txHash := range blk.Transactions() {
-			txHashes = append(txHashes, txHash.Hex())
-		}
-		logger.Info("Transactions in block: %v", txHashes)
-
-		if syncedCount%100 == 0 || syncedCount == uint64(blockCount) {
-			logger.Info("📥 [BLOCK SYNC] Progress: synced %d/%d blocks (current: #%d, hash: %x...)",
-				syncedCount, blockCount, blockNum, blockHash.Bytes()[:4])
-		}
-	}
-
-	// Update storage counter ONCE at end of batch
-	// ═══════════════════════════════════════════════════════════════════════════
-	// COUNTER UPDATE POLICY (Mar 2026):
-	//
-	// NON-MASTER nodes: Always update counter forward-only (Sub nodes rely on sync).
-	//
-	// MASTER nodes — TWO MODES:
-	//   1. CATCH-UP MODE (gap > 5 blocks): Safe to update counter.
-	//      Node is in SyncOnly mode after snapshot restore — no consensus
-	//      goroutine running, LAZY REFRESH won't trigger, BackupDb data
-	//      ensures full state integrity.
-	//   2. TRANSITION MODE (gap ≤ 5 blocks): Skip counter update.
-	//      Small gap indicates Validator↔SyncOnly transition race.
-	//      LAZY REFRESH could trigger and rebuild state from synced blocks
-	//      that may lack full state data → state corruption risk.
-	//
-	// INVARIANT: Counter ONLY moves forward (lastSyncedBlock > currentCounter).
-	// ═══════════════════════════════════════════════════════════════════════════
-	if lastSyncedBlock > 0 {
-		isMaster := rh.chainState != nil && rh.chainState.GetConfig() != nil &&
-			rh.chainState.GetConfig().ServiceType == "MASTER"
-		// SYNCONLY DETECTION: A Master with NetworkSyncEnabled=true is running
-		// in SyncOnly mode — no consensus goroutine, no block creation.
-		// Must always update counter to make synced blocks visible to RPC.
-		isSyncOnly := isMaster && rh.chainState.GetConfig().Nodes.NetworkSyncEnabled
-		currentCounter := storage.GetLastBlockNumber()
-		if lastSyncedBlock > currentCounter {
-			gap := lastSyncedBlock - currentCounter
-
-			// ═══════════════════════════════════════════════════════════
-			// SEQUENTIAL COUNTER UPDATE (Mar 2026 - Gap Fix):
-			// Peer databases may return blocks with gaps (some not yet
-			// flushed). If we update counter to lastSyncedBlock directly,
-			// gaps are NEVER backfilled (Rust asks for counter+1, skipping
-			// missing blocks). Instead, find the highest CONSECUTIVE block
-			// from currentCounter and only advance that far.
-			// ═══════════════════════════════════════════════════════════
-			highestConsecutive := currentCounter
-			scanLimit := lastSyncedBlock
-			if scanLimit > currentCounter+200 {
-				scanLimit = currentCounter + 200 // Cap scan range to avoid huge loops
-			}
-			for checkNum := currentCounter + 1; checkNum <= scanLimit; checkNum++ {
-				hash, exists := bc.GetBlockHashByNumber(checkNum)
-				if !exists || hash == (common.Hash{}) {
-					logger.Warn("⚠️ [BLOCK SYNC] Gap at block #%d (exists=%v, hash=%s), highest_consecutive=#%d, lastSynced=#%d, counter=#%d",
-						checkNum, exists, hash.Hex()[:10], highestConsecutive, lastSyncedBlock, currentCounter)
-					break // Gap found — stop here
-				}
-				highestConsecutive = checkNum
-			}
-			if highestConsecutive > currentCounter {
-				logger.Info("📥 [BLOCK SYNC] Sequential scan: counter #%d → #%d (scanned up to #%d, lastSynced=#%d)",
-					currentCounter, highestConsecutive, scanLimit, lastSyncedBlock)
-			} else {
-				logger.Warn("⚠️ [BLOCK SYNC] Sequential scan: NO progress from counter #%d (block #%d not found, lastSynced=#%d)",
-					currentCounter, currentCounter+1, lastSyncedBlock)
-			}
-
-			// SyncOnly nodes: advance counter directly to lastSyncedBlock
-			// No consensus goroutine running → no race risk → safe to jump ahead
-			if isSyncOnly && lastSyncedBlock > currentCounter {
-				storage.UpdateLastBlockNumber(lastSyncedBlock)
-				logger.Info("📥 [BLOCK SYNC] SyncOnly FAST: counter #%d → #%d (direct advance, no sequential scan)",
-					currentCounter, lastSyncedBlock)
-			} else if highestConsecutive > currentCounter {
-				storage.UpdateLastBlockNumber(highestConsecutive)
-				if isMaster {
-					logger.Info("📥 [BLOCK SYNC] Master CATCH-UP / SEQUENTIAL: counter #%d → #%d (consecutive, batch max=%d, gap=%d)",
-						currentCounter, highestConsecutive, lastSyncedBlock, gap)
-				} else {
-					logger.Info("📥 [BLOCK SYNC] Updated storage counter: #%d → #%d", currentCounter, highestConsecutive)
-				}
-			}
-
-			// ═══════════════════════════════════════════════════════════════
-			// CRITICAL FORK-PREVENTION (Mar 2026): ALWAYS update block header
-			// pointer to the latest synced block, regardless of gap size.
-			//
-			// Without this, createBlockFromResults() uses bp.GetLastBlock()
-			// which may point to a LOCAL block created during epoch transition
-			// that was later overwritten by sync. The new consensus block then
-			// gets the wrong parentHash → cascading fork.
-			//
-			// This is safe even during transitions because:
-			// 1. We only set the pointer to match what's already in LevelDB
-			// 2. It doesn't trigger LAZY REFRESH (that's counter-dependent)
-			// 3. If consensus is already running, it will use the correct parent
-			// ═══════════════════════════════════════════════════════════════
-			updateTarget := lastSyncedBlock
-			if highestConsecutive > 0 && highestConsecutive >= currentCounter {
-				updateTarget = highestConsecutive
-			}
-			syncedHash, hashFound := bc.GetBlockHashByNumber(updateTarget)
-			if hashFound {
-				lastBlk, blkErr := blockDatabase.GetBlockByHash(syncedHash)
-				if blkErr == nil && lastBlk != nil {
-					// Check if header pointer needs updating
-					currentHeader := rh.chainState.GetcurrentBlockHeader()
-					needsUpdate := currentHeader == nil ||
-						(*currentHeader).BlockNumber() < lastBlk.Header().BlockNumber() ||
-						((*currentHeader).BlockNumber() == lastBlk.Header().BlockNumber() &&
-							(*currentHeader).Hash() != lastBlk.Header().Hash())
-
-					if needsUpdate {
-						// ═══════════════════════════════════════════════════════════
-						// STATE-AWARENESS GUARD (Apr 2026): Don't advance the header
-						// pointer past the NOMT-executed state. After snapshot restore,
-						// P2P sync stores blocks in LevelDB but NOMT state stays at
-						// the snapshot point. Setting chainState.currentBlockHeader to
-						// a block beyond NOMT breaks downstream code and persists a
-						// stale lastBlockHashKey to LevelDB (loaded on next restart).
-						// ═══════════════════════════════════════════════════════════
-						currentTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-						targetStateRoot := lastBlk.Header().AccountStatesRoot()
-						if currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
-							logger.Warn("🛡️ [BLOCK SYNC] State mismatch! trie_root=%s ≠ synced block #%d stateRoot=%s. "+
-								"NOT updating header pointer (snapshot restore — NOMT not caught up).",
-								currentTrieRoot.Hex()[:18]+"...", updateTarget, targetStateRoot.Hex()[:18]+"...")
-						} else {
-							// Update in-memory block header pointer
-							headerCopy := lastBlk.Header()
-							rh.chainState.SetcurrentBlockHeader(&headerCopy)
-							
-							// CRITICAL FIX: Ensure bp.lastBlock is also updated to prevent GEI divergence 
-							// in case consensus mode transitions or downstream systems rely on it.
-							if rh.updateLastBlockCallback != nil {
-								rh.updateLastBlockCallback(lastBlk)
-							}
-
-							// Persist to LevelDB (lastBlockHashKey)
-							if saveErr := blockDatabase.SaveLastBlock(lastBlk); saveErr != nil {
-								logger.Error("📥 [BLOCK SYNC] Failed to SaveLastBlock for #%d: %v", updateTarget, saveErr)
-							} else {
-								logger.Info("📥 [BLOCK SYNC] ✅ Updated block header pointer to #%d (hash=%s, reason=%s)",
-									updateTarget, syncedHash.Hex()[:18]+"...",
-									func() string {
-										if currentHeader == nil {
-											return "nil_header"
-										}
-										if (*currentHeader).Hash() != lastBlk.Header().Hash() {
-											return "hash_mismatch"
-										}
-										return "block_advance"
-									}())
-							}
-						}
-					}
-
-					// ═══════════════════════════════════════════════════════════════════════════════
-					// CRITICAL GEI SYNC (2026-03-24): Update LastGlobalExecIndex
-					// from synced block's header to prevent post-restore FORK.
-					//
-					// After peer sync: blockNumber=120 but GEI stays at 336
-					// (snapshot). COLD-START GUARD uses snapshot GEI=336 during
-					// cold_start, but after cold_start clears, Layer 1 checks
-					// LIVE Go GEI. If GEI=336 (stale), commits for GEI 337-654
-					// (blocks 51-120 on the network) pass through as "new" and
-					// Go creates duplicate blocks 121+ with stale state → FORK.
-					//
-					// Fix: advance GEI to match synced block's GEI so that
-					// post-cold-start Layer 1 correctly skips already-synced
-					// commits.
-					// ═══════════════════════════════════════════════════════════
-					syncedBlockGEI := lastBlk.Header().GlobalExecIndex()
-					currentGEI := storage.GetLastGlobalExecIndex()
-					if syncedBlockGEI > currentGEI {
-						storage.UpdateLastGlobalExecIndex(syncedBlockGEI)
-						logger.Info("📥 [BLOCK SYNC] ✅ Updated GEI: %d → %d (from synced block #%d header)",
-							currentGEI, syncedBlockGEI, updateTarget)
-					}
-				}
-			}
-		}
-	}
-
-	// Commit the mapping changes to persistent storage
-	if err := bc.Commit(); err != nil {
-		logger.Error("📥 [BLOCK SYNC] Failed to commit block number mappings: %v", err)
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════════
-	// CHAIN INTEGRITY CHECK + REPAIR: Detect and fix parentHash mismatches after sync
-	// If the block AFTER the synced range has a different parentHash than the
-	// last synced block's hash, we have a phantom fork that needs repair.
-	// FIX (Mar 2026): Now actively repairs the header pointer instead of only logging.
-	// ═══════════════════════════════════════════════════════════════════════════════
-	if lastSyncedBlock > 0 && syncedCount > 0 {
-		// Get the last synced block's hash
-		lastSyncedHash, lastFound := bc.GetBlockHashByNumber(lastSyncedBlock)
-
-		// Get the next block (if it exists)
-		nextBlockNum := lastSyncedBlock + 1
-		nextBlockHash, nextFound := bc.GetBlockHashByNumber(nextBlockNum)
-
-		if lastFound && nextFound && nextBlockHash != (common.Hash{}) {
-			// Next block exists - check if its parentHash matches
-			nextBlock, err := blockDatabase.GetBlockByHash(nextBlockHash)
-			if err == nil && nextBlock != nil {
-				nextParentHash := nextBlock.Header().LastBlockHash()
-				if nextParentHash != lastSyncedHash {
-					logger.Error("🚨 [CHAIN REPAIR] CRITICAL: ParentHash mismatch detected after sync!")
-					logger.Error("🚨 [CHAIN REPAIR] Block #%d hash=%s", lastSyncedBlock, lastSyncedHash.Hex()[:18]+"...")
-					logger.Error("🚨 [CHAIN REPAIR] Block #%d parentHash=%s (expected %s)",
-						nextBlockNum, nextParentHash.Hex()[:18]+"...", lastSyncedHash.Hex()[:18]+"...")
-
-					// ═══════════════════════════════════════════════════════
-					// ACTIVE REPAIR: Force-update header pointer to the last
-					// synced block. This ensures createBlockFromResults()
-					// uses the correct parentHash for subsequent blocks.
-					// ═══════════════════════════════════════════════════════
-					repairBlk, repairErr := blockDatabase.GetBlockByHash(lastSyncedHash)
-					if repairErr == nil && repairBlk != nil {
-						headerCopy := repairBlk.Header()
-						rh.chainState.SetcurrentBlockHeader(&headerCopy)
-						if saveErr := blockDatabase.SaveLastBlock(repairBlk); saveErr != nil {
-							logger.Error("🚨 [CHAIN REPAIR] Failed to repair header pointer: %v", saveErr)
-						} else {
-							logger.Info("🚨 [CHAIN REPAIR] ✅ Repaired header pointer to block #%d (hash=%s)",
-								lastSyncedBlock, lastSyncedHash.Hex()[:18]+"...")
-						}
-					} else {
-						logger.Error("🚨 [CHAIN REPAIR] Failed to load block #%d for repair: %v", lastSyncedBlock, repairErr)
-					}
-				} else {
-					logger.Debug("✅ [CHAIN INTEGRITY] Block #%d parentHash matches synced block #%d hash",
-						nextBlockNum, lastSyncedBlock)
-				}
-			}
-		}
-	}
-
-	// Log final chain state after sync
-	if lastSyncedBlock > 0 {
-		currentHeader := rh.chainState.GetcurrentBlockHeader()
-		if currentHeader != nil {
-			logger.Info("📥 [BLOCK SYNC] Chain state after sync: block=#%d, epoch=%d, account_root=%s, stake_root=%s",
-				(*currentHeader).BlockNumber(), rh.chainState.GetCurrentEpoch(),
-				(*currentHeader).AccountStatesRoot().Hex()[:18]+"...",
-				(*currentHeader).StakeStatesRoot().Hex()[:18]+"...")
-		}
-	}
-
-	logger.Info("📥 [BLOCK SYNC] ✅ Completed: synced %d/%d blocks, last_synced_block=%d",
-		syncedCount, blockCount, lastSyncedBlock)
-
-	return &pb.SyncBlocksResponse{
-		SyncedCount:     syncedCount,
-		LastSyncedBlock: lastSyncedBlock,
-		Error:           "",
-	}, nil
-}
-
-// handleSyncBlocksExecuteMode processes sync'd blocks by EXECUTING them through NOMT.
-// This is the Phase 1 fix for the Snapshot Restore Redesign.
-//
-// KEY DIFFERENCE from store-only mode:
-// - Store-only: writes blocks to LevelDB → GEI inflates → Rust skips commits → FORK
-// - Execute mode: applies state + rebuilds NOMT tries → GEI = NOMT-executed state → no fork
-//
-// SAFETY: During epoch catch-up, the consensus goroutine is paused (Rust stops
-// ConsensusAuthority before syncing). The BlockProcessor loop is idle (blocked on
-// empty dataChan). So there is no concurrent writer → direct state update is safe.
-func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequest) (*pb.SyncBlocksResponse, error) {
 	blocks := request.GetBlocks()
 	blockCount := len(blocks)
 
@@ -1649,8 +1097,23 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
+	// ═══════════════════════════════════════════════════════════════════════════
+	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
+	// ═══════════════════════════════════════════════════════════════════════════
+	currentGEI := storage.GetLastGlobalExecIndex()
 
-	for _, blockData := range blocks {
+	// R7: Crash-guard for Cache Invalidation
+	// Guarantee cache is invalidated on exit, even if batch is interrupted or fails
+	defer func() {
+		rh.chainState.InvalidateAllState()
+		mvm.ClearAllMVMApi()
+		mvm.CallClearAllStateInstances()
+		logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+	}()
+
+	for i, blockData := range blocks {
+		isLastBlock := i == len(blocks)-1
+
 		rawBytes := blockData.GetRawBlockBytes()
 		backupBytes := blockData.GetBackupData()
 
@@ -1672,9 +1135,8 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 		blockGEI := header.GlobalExecIndex()
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// DEDUPLICATION: Skip blocks already executed (GEI-based, not block-number based)
+		// DEDUPLICATION: Skip blocks already executed (GEI-based)
 		// ═══════════════════════════════════════════════════════════════════════════
-		currentGEI := storage.GetLastGlobalExecIndex()
 		if blockGEI > 0 && blockGEI <= currentGEI {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
@@ -1692,6 +1154,11 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 			continue
 		}
 
+		// Update cached GEI so next blocks in the loop don't dedup on stale value
+		if blockGEI > currentGEI {
+			currentGEI = blockGEI
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
@@ -1702,7 +1169,7 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
-					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply BackUpDb for block #%d: %v", blockNum, applyErr)
+					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
 			}
 		}
@@ -1726,16 +1193,33 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 		// CommitBlockState(WithRebuildTries) reloads the trie from the state that was
 		// just written to LevelDB by applyBackupDbBatches. After this call, NOMT's
 		// persistent root matches the block's stateRoot.
+		// OPTIMIZATION: Only rebuild trie and verify root on the LAST block of the batch!
 		// ═══════════════════════════════════════════════════════════════════════════
-		if _, err := rh.chainState.CommitBlockState(blk,
-			blockchain.WithRebuildTries(),
-			blockchain.WithPersistToDB(),
-		); err != nil {
+		var commitOpts []blockchain.CommitOption
+		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
+
+		if isLastBlock {
+			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
+			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+		}
+
+		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
-		} else {
-			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ CommitBlockState for block #%d (stateRoot=%s)",
-				blockNum, header.AccountStatesRoot().Hex()[:18]+"...")
+		} else if isLastBlock {
+			// R2: Add stateRoot verify after batch sync
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+			
+			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
+				logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
+					blockNum, localRoot.Hex(), expectedRoot.Hex())
+				return &pb.SyncBlocksResponse{
+					Error: fmt.Sprintf("stateRoot mismatch at block %d: local=%s expected=%s",
+						blockNum, localRoot.Hex()[:18], expectedRoot.Hex()[:18]),
+				}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
+			}
+			logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1760,19 +1244,13 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 			storage.UpdateLastGlobalExecIndex(blockGEI)
 		}
 
-		// Clear MVM caches so smart contract reads see the new state
-		mvm.ClearAllMVMApi()
-		mvm.CallClearAllStateInstances()
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// FORK-SAFETY (Apr 2026): Clear Go-side AccountStateDB and StakeStateDB read caches.
+		// FORK-SAFETY (Apr 2026): Clear Go-side read caches.
 		// applyBackupDbBatches writes directly to NOMT/PebbleDB, bypassing AccountStateDB.
 		// Without this, loadedAccounts and lruCache retain stale pre-sync data,
 		// causing RPC queries and transaction validation to use old values
 		// on newly executed blocks — making them appear diverged.
+		// OPTIMIZATION: Deferred cache clearing is configured at the top of this function.
 		// ═══════════════════════════════════════════════════════════════════════════
-		rh.chainState.GetAccountStateDB().InvalidateAllCaches()
-		rh.chainState.GetStakeStateDB().InvalidateAllCaches()
 
 		executedCount++
 		lastExecutedBlock = blockNum
@@ -1783,15 +1261,17 @@ func (rh *RequestHandler) handleSyncBlocksExecuteMode(request *pb.SyncBlocksRequ
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 6: Persist backup data for Sub nodes
 		// Backup persisted to PebbleDB so Sub can read via 3-tier recovery.
-		// Master MUST also broadcast these to sub nodes during execute mode, otherwise
-		// Sub nodes get stuck since Master is not running the normal commitWorker loop.
+		// FORK-SAFETY (R6/Apr 2026): Master node MUST NOT broadcast blocks to Sub nodes
+		// while it is actively catching up (syncing). It should only broadcast blocks
+		// constructed during active Validator mode consensus.
+		// Sub nodes will pull the missing blocks via DataSync (3-tier recovery).
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
 
-			if rh.broadcastCallback != nil {
-				rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
-			}
+			// if rh.broadcastCallback != nil {
+			// 	rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
+			// }
 		}
 
 		logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
@@ -1888,8 +1368,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 	// becomes completely unaware of the state updates, leading to stale
 	// 'nomt_read' queries later (fixing persistent nonce mismatches on restart!!).
 	// ═══════════════════════════════════════════════════════════════════════════
-	isMaster := config.ConfigApp != nil && string(config.ConfigApp.ServiceType) == "MASTER"
-	if err := trie.ApplyNomtReplicationBatches(aggregatedBatches, isMaster); err != nil {
+	if err := trie.ApplyNomtReplicationBatches(aggregatedBatches); err != nil {
 		return fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
 	}
 
@@ -1944,6 +1423,11 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 // applyTrieDbBatches applies TrieDB batch data from a BackUpDb to the local TrieDB LevelDB storages.
 // Each key in the map corresponds to a sub-database path under the Trie root.
 func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64) error {
+	sharedDB := rh.storageManager.GetStorageDatabaseTrie()
+	if sharedDB == nil {
+		return fmt.Errorf("shared database trie is nil")
+	}
+
 	for key, value := range trieDbBatches {
 		if len(value) == 0 {
 			continue
@@ -1955,20 +1439,25 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 		if len(deserialized) == 0 {
 			continue
 		}
-		// Open TrieDB at the configured path (matching getTrieDBFromPool pattern)
-		databasePath := config.ConfigApp.Databases.RootPath + config.ConfigApp.Databases.Trie.Path + "/" + key
-		database, err := storage.NewShardelDB(databasePath, 1, 2, config.ConfigApp.DBType, databasePath)
-		if err != nil {
-			return fmt.Errorf("error creating TrieDB '%s' for block %d: %w", key, blockNum, err)
+
+		// Key format expected: "addressHex/dbName"
+		parts := strings.Split(key, "/")
+		if len(parts) != 2 {
+			logger.Warn("⚠️ Ignored invalid TrieDB batch key format: %s", key)
+			continue
 		}
-		if err := database.Open(); err != nil {
-			return fmt.Errorf("error opening TrieDB '%s' for block %d: %w", key, blockNum, err)
-		}
-		if err := database.BatchPut(deserialized); err != nil {
-			database.Close()
+
+		addressHex := parts[0]
+		dbName := parts[1]
+
+		dbNameHash := crypto.Keccak256([]byte(dbName))
+		prefix := fmt.Sprintf("%x:%s:", dbNameHash, addressHex)
+
+		prefixedDB := storage.NewPrefixStorage(sharedDB, prefix)
+
+		if err := prefixedDB.BatchPut(deserialized); err != nil {
 			return fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
 		}
-		database.Close()
 	}
 	return nil
 }

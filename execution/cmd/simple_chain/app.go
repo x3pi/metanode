@@ -14,8 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	"github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
+		"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/explorer"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -293,7 +292,6 @@ func (app *App) initRoutes() {
 		app.subscribeProcessor,
 		app.config.ServiceType,
 		app.messageSender,
-		app.config.Mode,
 	)
 
 	// Node-level TCP routes (replacing libp2p stream protocols)
@@ -315,7 +313,6 @@ func (app *App) initRoutes() {
 		app.keyPair,
 		app.connectionsManager,
 		handler,
-		app.config.NodeType,
 		app.config.Version,
 	)
 }
@@ -392,12 +389,7 @@ func (app *App) Run() error {
 	// Start appropriate services based on node type
 	// We now always run as the primary unified execution engine (Master)
 	app.blockProcessor.StartBackgroundWorkers()
-
-	if app.config.Mode == common.MODE_SINGLE {
-		go app.blockProcessor.GenerateBlock()
-	} else {
-		go app.blockProcessor.TxsProcessor2()
-	}
+	go app.blockProcessor.TxsProcessor2()
 
 	// ── CRASH SAFETY: Periodic disk flush every 5 seconds ──────────────
 	// Keeps NoSync for maximum write throughput but limits crash data loss
@@ -434,8 +426,8 @@ func (app *App) Run() error {
 		peerCount = len(app.node.Peers)
 	}
 	lastBlock := storage.GetLastBlockNumber()
-	logger.Info("✅ [READY] %s/%s fully operational: block=%d, peers=%d, service=%s",
-		app.config.ServiceType, app.config.NodeType,
+	logger.Info("✅ [READY] %s fully operational: block=%d, peers=%d, service=%s",
+		app.config.ServiceType,
 		lastBlock, peerCount, app.config.ServiceType)
 
 	return nil
