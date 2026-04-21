@@ -44,7 +44,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// Inject ForceCommit callback for Event-Driven Block Generation
 	reqHandler.SetForceCommitCallback(func() {
-		logger.Info("⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.")
+		// logger.Info("⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.")
 		bp.ForceCommit()
 	})
 

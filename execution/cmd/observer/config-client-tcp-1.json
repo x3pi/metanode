@@ -7,11 +7,11 @@
     "127.0.0.1:4201",
     "127.0.0.1:6201",
     "127.0.0.1:6211",
-    "127.0.0.1:6221"
+    "127.0.0.1:6221""127.0.0.1:6221"
   ],
   "parent_connection_type": "client",
   "cross_chain_abi_path": "pkg/abi/cross_chain_abi.json",
-  "config_abi_path":"pkg/abi/config_abi.json",
+  "config_abi_path": "pkg/abi/config_abi.json",
   "log_path": "./logs/log-1",
   "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
   "parent_address": "0xe1E6A108BdA5C8832155D9D3e83D3DD4d6DFCc7E",

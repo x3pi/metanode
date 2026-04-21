@@ -154,7 +154,7 @@ func (h *CrossChainHandler) executeMintForInbound(
 				eventDef.ID.Bytes(),
 				common.BigToHash(pkt.SourceNationId).Bytes(), // indexed: sourceNationId
 				common.BigToHash(h.cachedChainId).Bytes(),    // indexed: destNationId
-				pkt.MessageId[:], // indexed: msgId = txHash gốc user gửi trên chain nguồn
+				pkt.MessageId[:],                             // indexed: msgId = txHash gốc user gửi trên chain nguồn
 			},
 		)
 		allLogs = append(allLogs, eventLog)
@@ -191,8 +191,13 @@ func (h *CrossChainHandler) executeConfirmation(
 		return nil, fmt.Errorf("executeConfirmation: nil confirmation data")
 	}
 
-	logger.Info("[BatchSubmit] ✅ CONFIRMATION: messageId=%x, isSuccess=%v, sourceBlock=%s",
-		conf.MessageId, conf.IsSuccess, conf.SourceBlockNumber)
+	if conf.IsSuccess {
+		logger.Info("[BatchSubmit] ✅ CONFIRMATION: messageId=%x, isSuccess=%v, sourceBlock=%s",
+			conf.MessageId, conf.IsSuccess, conf.SourceBlockNumber)
+	} else {
+		logger.Error("[BatchSubmit] ❌ CONFIRMATION FAILED on remote chain: messageId=%x, sender=%s",
+			conf.MessageId, conf.Sender.Hex())
+	}
 
 	// Emit OutboundResult event để client theo dõi kết quả
 	eventDef, ok := h.abi.Events["OutboundResult"]
@@ -260,8 +265,8 @@ func (h *CrossChainHandler) executeConfirmation(
 		eventData,
 		[][]byte{
 			eventDef.ID.Bytes(),
-			conf.MessageId[:],        // indexed[1]: msgId = txHash gốc của user
-			conf.Sender.Bytes(),      // indexed[2]: sender (người gửi trên chain nguồn)
+			conf.MessageId[:],   // indexed[1]: msgId = txHash gốc của user
+			conf.Sender.Bytes(), // indexed[2]: sender (người gửi trên chain nguồn)
 		},
 	)
 	logger.Info("[MSGID-TRACE] ⬇️  [4/4] CONFIRMATION chain=%s EMITTING OutboundResult: msgId=%s (=%x) isSuccess=%v sender=%s amount=%s",

@@ -20,9 +20,9 @@ go run main_single.go --count 1000 --parallel_native=true --rounds 5 --load_bala
 go run main.go --count 20000 --parallel_native=true --rounds 5 --load_balance=true  --batch=500 
 go run main.go --count 30000 --parallel_native=true --rounds 20 --load_balance=true  --batch=500 
 go run main.go --count 50000 --parallel_native=true --rounds 5 --load_balance=true --batch=10000 --sleep=0
-
 go run main.go --count 1000 --parallel_native=true --rounds 1 --load_balance=false  --batch=5 --verify
 go run main.go --count 20000 --parallel_native=true --rounds 5 --load_balance=false  --batch=500
+
 ```
 
 ``` bash
@@ -49,7 +49,6 @@ curl -s <http://192.168.1.233:10650> -X POST -H "Content-Type: application/json"
 
 curl -s <http://192.168.1.234:10747> -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["0x4474E7E565E684bE0f054322431F5273817e696A","latest"],"id":1}'
-
 
 ╔═══════════════════════════════════════════════════╗
 ║  📊 BENCHMARK SUMMARY

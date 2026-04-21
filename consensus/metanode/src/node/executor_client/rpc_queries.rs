@@ -11,7 +11,6 @@
 
 use anyhow::Result;
 use prost::Message;
-use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 use super::persistence::persist_last_block_number;

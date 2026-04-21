@@ -71,7 +71,6 @@ bool handle_cross_chain_precompile(
     if (selector == SEL_LOCK_AND_BRIDGE && input.size() >= 68) {
       destId = from_big_endian(input.data() + 36,
                                32); // Prama thứ 2 (bỏ 4 byte đầu + 32 byte đầu)
-      std::cout << "DestId: " << destId << std::endl;
       payload.assign(input.data() + 4, input.data() + 36);
     } else if (selector == SEL_SEND_MESSAGE && input.size() >= 100) {
       targetAddr = from_big_endian(input.data() + 4, 32);

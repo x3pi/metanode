@@ -353,61 +353,84 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	//   2. currentRelatedAddresses (sync.Map trên MVMApi) accumulate tất cả địa chỉ
 	//      từ mọi lần Execute — dùng chung sẽ không biết địa chỉ nào thuộc target nào.
 	ctx := context.Background()
-	targets := ccHandler.ExtractInboundTargets(inputData)
+	targets := ccHandler.ExtractCrossChainTargets(inputData)
 	if len(targets) > 0 {
 		blockTime := uint64(time.Now().Unix())
 		for _, item := range targets {
-			if item.Target == (common.Address{}) {
-				// ── lockAndBridge path: không chạy EVM dry-run ──────────────────
-				// Target rỗng → đây là mint native coin, chỉ cần thêm Recipient
-				// vào relatedAddresses để chain xử lý sequential đúng cách.
-				if item.Recipient != (common.Address{}) {
-					updatedTx.AddRelatedAddress(item.Recipient)
-				} else {
-					// Không parse được recipient → log warn và skip (không reject cả batchSubmit).
-					// Virtual processor chỉ collect relatedAddresses; nếu thiếu recipient
-					// thì chain vẫn xử lý được, chỉ có thể không sequential-safe cho address đó.
-					logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ lockAndBridge: could not parse recipient from payload (sender=%s), skip",
-						item.Sender.Hex())
+			if item.EventKind == 0 { // INBOUND
+				if item.Target == (common.Address{}) {
+					// ── lockAndBridge path: không chạy EVM dry-run ──────────────────
+					// Target rỗng → đây là mint native coin, chỉ cần thêm Recipient
+					// vào relatedAddresses để chain xử lý sequential đúng cách.
+					if item.Recipient != (common.Address{}) {
+						updatedTx.AddRelatedAddress(item.Recipient)
+					} else {
+						// Không parse được recipient → log warn và skip (không reject cả batchSubmit).
+						// Virtual processor chỉ collect relatedAddresses; nếu thiếu recipient
+						// thì chain vẫn xử lý được, chỉ có thể không sequential-safe cho address đó.
+						logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ lockAndBridge: could not parse recipient from payload (sender=%s), skip",
+							item.Sender.Hex())
+					}
+					continue
 				}
-				continue
-			}
-			// ── sendMessage path: EVM dry-run với mvmId riêng cho từng target ──
-			// Mỗi target có mvmId = hash(txHash + target + index) để C++ state cache
-			// và relatedAddresses hoàn toàn độc lập nhau.
-			uniqueMvmId := mvm.GenerateUniqueMvmId()
-			vmP := vm_processor.NewVmProcessor(v.chainState, uniqueMvmId, false, blockTime)
+				logger.Info("_______________________call contract")
+				// ── sendMessage path: EVM dry-run với mvmId riêng cho từng target ──
+				// Mỗi target có mvmId = hash(txHash + target + index) để C++ state cache
+				// và relatedAddresses hoàn toàn độc lập nhau.
+				uniqueMvmId := mvm.GenerateUniqueMvmId()
+				vmP := vm_processor.NewVmProcessor(v.chainState, uniqueMvmId, false, blockTime)
 
-			// Validate: target phải là contract hợp lệ
-			toAccountState, err := v.chainState.GetAccountStateDB().AccountState(item.Target)
-			if err != nil || !vmP.IsValidSmartContractCall(toAccountState, updatedTx) {
-				logger.Warn("[VIRTUAL CC batchSubmit] target=%s is not a valid contract, skip dry-run", item.Target.Hex())
-				updatedTx.AddRelatedAddress(item.Target) // vẫn thêm địa chỉ để đảm bảo sequential
+				// Validate: target phải là contract hợp lệ
+				toAccountState, err := v.chainState.GetAccountStateDB().AccountState(item.Target)
+				if err != nil || !vmP.IsValidSmartContractCall(toAccountState, updatedTx) {
+					logger.Warn("[VIRTUAL CC batchSubmit] target=%s is not a valid contract, skip dry-run", item.Target.Hex())
+					updatedTx.AddRelatedAddress(item.Target) // vẫn thêm địa chỉ để đảm bảo sequential
+					mvm.ClearMVMApi(uniqueMvmId)
+					continue
+				}
+				mvmApi := mvm.GetOrCreateMVMApi(uniqueMvmId, v.chainState.GetSmartContractDB(), v.chainState.GetAccountStateDB(), true)
+				if item.SourceNationId != nil {
+					mvmApi.SetCrossChainContext(item.Sender, item.SourceNationId.Uint64())
+				}
+				// Fake call với đúng payload của packet để EVM simulate đúng code path,
+				// touch đúng storage slots → relatedAddresses sẽ khớp với lúc execute thật.
+				fakeCallTx := proxy_tx.New(updatedTx, updatedTx.FromAddress(), item.Target,
+					updatedTx.Amount(), uint64(mt_common.MAX_GASS_FEE), 0, item.Payload)
+
+				// Ép thêm target vào related address đề phòng EVM thất bại/revert sớm
+				updatedTx.AddRelatedAddress(item.Target)
+
+				exRs, _, errExec := vmP.ExecuteTransactionWithMvmIdSub(ctx, fakeCallTx, true)
+				if errExec != nil || (exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
+					logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ Fake EVM dry-run failed/reverted for target=%s (err: %v)", item.Target.Hex(), errExec)
+				}
+
+				if item.SourceNationId != nil {
+					mvmApi.ClearCrossChainContext()
+				}
+
+				if mvmApi != nil {
+					for _, addr := range mvmApi.GetCurrentRelatedAddresses() {
+						updatedTx.AddRelatedAddress(addr)
+					}
+				}
 				mvm.ClearMVMApi(uniqueMvmId)
-				continue
-			}
-			mvmApi := mvm.GetOrCreateMVMApi(uniqueMvmId, v.chainState.GetSmartContractDB(), v.chainState.GetAccountStateDB(), true)
-			if item.SourceNationId != nil {
-				mvmApi.SetCrossChainContext(item.Sender, item.SourceNationId.Uint64())
-			}
-			// Fake call với đúng payload của packet để EVM simulate đúng code path,
-			// touch đúng storage slots → relatedAddresses sẽ khớp với lúc execute thật.
-			fakeCallTx := proxy_tx.New(updatedTx, updatedTx.FromAddress(), item.Target,
-				updatedTx.Amount(), uint64(mt_common.MAX_GASS_FEE), 0, item.Payload)
-			_, _, _ = vmP.ExecuteTransactionWithMvmIdSub(ctx, fakeCallTx, true)
+				// 🔒 [STATE-LEAK-FIX] Clear the C++ state cache after the dry-run
+				// The dry-run modifies the shared State::instances in C++.
+				// If we don't clear it, the real execution on the Master node will start
+				// with a dirty cache, causing a state root divergence with Sub nodes.
+				// mvm.ClearAllStateInstances()
 
-			if item.SourceNationId != nil {
-				mvmApi.ClearCrossChainContext()
-			}
+				logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
+					item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 
-			if mvmApi != nil {
-				for _, addr := range mvmApi.GetCurrentRelatedAddresses() {
-					updatedTx.AddRelatedAddress(addr)
+			} else if item.EventKind == 1 { // CONFIRMATION
+				// Chỉ add Sender vào related addresses nếu giao dịch thất bại và có số tiền cần hoàn lại
+				if !item.IsSuccess && item.Amount != nil && item.Amount.Sign() > 0 {
+					updatedTx.AddRelatedAddress(item.Sender)
+					logger.Info("[VIRTUAL CC batchSubmit] 🔄 CONFIRMATION failed, added sender=%s to relatedAddresses for refund", item.Sender.Hex())
 				}
 			}
-			mvm.ClearMVMApi(uniqueMvmId)
-			logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
-				item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 		}
 	}
 
