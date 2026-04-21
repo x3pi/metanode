@@ -152,19 +152,22 @@ func (h *CrossChainHandler) IsBatchSubmitTx(inputData []byte) bool {
 }
 
 // dùng trong virtual
-type InboundCallTarget struct {
+type CrossChainCallTarget struct {
+	EventKind      uint8
 	Target         common.Address
 	Sender         common.Address
 	SourceNationId *big.Int
 	Payload        []byte
 	Recipient      common.Address // rỗng nếu Target != address{} (sendMessage path)
+	IsSuccess      bool
+	Amount         *big.Int
 }
 
 //   - sendMessage path (Target != address{}): lấy Target + Payload để virtual processor
 //     chạy fake EVM dry-run thu thập relatedAddresses chính xác.
 //   - lockAndBridge path (Target == address{}): parse payload (abi.encode(recipient)) để
 //     lấy Recipient và add vào relatedAddresses, đảm bảo chain xử lý tuần tự.
-func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCallTarget {
+func (h *CrossChainHandler) ExtractCrossChainTargets(inputData []byte) []CrossChainCallTarget {
 	if len(inputData) <= 4 {
 		return nil
 	}
@@ -181,7 +184,7 @@ func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCal
 		return nil
 	}
 
-	var targets []InboundCallTarget
+	var targets []CrossChainCallTarget
 	for i := 0; i < eventsLen; i++ {
 		ev := abihelper.ReflectIndex(eventsVal, i)
 		eventKind, err := abihelper.ReflectUint8(ev, "EventKind")
@@ -197,11 +200,13 @@ func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCal
 
 			if pkt.Target != (common.Address{}) {
 				// ── sendMessage path: dùng EVM dry-run với đúng payload ────────────
-				targets = append(targets, InboundCallTarget{
+				targets = append(targets, CrossChainCallTarget{
+					EventKind:      eventKind,
 					Target:         pkt.Target,
 					Sender:         pkt.Sender,
 					SourceNationId: pkt.SourceNationId,
 					Payload:        pkt.Payload,
+					Amount:         pkt.Value,
 				})
 			} else {
 				// ── lockAndBridge path: target rỗng, parse payload lấy recipient ──
@@ -216,12 +221,14 @@ func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCal
 				}
 
 				// Luôn add vào targets để virtual processor thêm Sender + Recipient vào relatedAddresses
-				targets = append(targets, InboundCallTarget{
+				targets = append(targets, CrossChainCallTarget{
+					EventKind:      eventKind,
 					Target:         common.Address{}, // zero = lockAndBridge, không chạy EVM dry-run
 					Sender:         pkt.Sender,
 					SourceNationId: pkt.SourceNationId,
 					Payload:        pkt.Payload,
 					Recipient:      recipient,
+					Amount:         pkt.Value,
 				})
 			}
 		} else if eventKind == 1 { // CONFIRMATION
@@ -229,18 +236,16 @@ func (h *CrossChainHandler) ExtractInboundTargets(inputData []byte) []InboundCal
 			if err != nil {
 				continue
 			}
-			if !conf.IsSuccess {
-				// ── CONFIRMATION fail path: MINT hoàn tiền cho người gửi ──
-				// Đảm bảo virtual processor thu thập conf.Sender vào relatedAddresses
-				// để grouptxns có thể gom nhóm các giao dịch chạm vào cùng user,
-				// tránh lỗi state divergence.
-				targets = append(targets, InboundCallTarget{
-					Target:    common.Address{}, // không chạy EVM dry-run
-					Sender:    conf.Sender,
-					Payload:   nil,
-					Recipient: conf.Sender,
-				})
-			}
+			// Bổ sung target với eventKind == 1 để virtual processor xử lý
+			targets = append(targets, CrossChainCallTarget{
+				EventKind: eventKind,
+				Target:    common.Address{}, // không chạy EVM dry-run
+				Sender:    conf.Sender,
+				Payload:   nil,
+				Recipient: conf.Sender,
+				IsSuccess: conf.IsSuccess,
+				Amount:    conf.Value,
+			})
 		}
 	}
 	return targets

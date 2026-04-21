@@ -214,8 +214,6 @@ func (h *CrossChainHandler) isDestinationRegistered(destinationId *big.Int) bool
 	return false
 }
 
-
-
 // InvalidateConfigCache xoá cờ loaded để lần gọi kế tiếp sẽ tự fetch lại từ contract
 func (h *CrossChainHandler) InvalidateConfigCache() {
 	h.configMu.Lock()
@@ -272,11 +270,11 @@ func (h *CrossChainHandler) HandleTransaction(
 
 	switch method.Name {
 	case "lockAndBridge":
-		eventLogs, exRs, logicErr = h.handleLockAndBridge(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleLockAndBridge(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	case "sendMessage":
-		eventLogs, exRs, logicErr = h.handleSendMessage(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleSendMessage(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	case "batchSubmit":
-		eventLogs, exRs, logicErr = h.handleBatchSubmit(ctx, chainState, tx, method, inputData[4:], mvmId, enableTrace, blockTime)
+		eventLogs, exRs, logicErr = h.handleBatchSubmit(ctx, chainState, tx, method, inputData[4:], mvmId, blockTime)
 	default:
 		logicErr = fmt.Errorf("cross-chain: unsupported method '%s'", method.Name)
 	}
