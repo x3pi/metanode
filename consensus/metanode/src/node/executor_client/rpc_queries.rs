@@ -11,7 +11,8 @@
 
 use anyhow::Result;
 use prost::Message;
-use tracing::{info, warn};
+
+use tracing::{info, trace, warn};
 
 use super::persistence::persist_last_block_number;
 use super::proto::{self, GetValidatorsAtBlockRequest, Request, Response, ValidatorInfo};
@@ -278,17 +279,6 @@ impl ExecutorClient {
                     last_block_number, last_gei, is_ready
                 );
 
-                // Persist for crash recovery
-                if let Some(ref storage_path) = self.storage_path {
-                    if let Err(e) = persist_last_block_number(storage_path, last_block_number).await
-                    {
-                        warn!(
-                            "⚠️ [PERSIST] Failed to persist last block number {}: {}",
-                            last_block_number, e
-                        );
-                    }
-                }
-
                 Ok((last_block_number, last_gei, is_ready))
             }
             Some(proto::response::Payload::Error(error_msg)) => {
@@ -333,7 +323,7 @@ impl ExecutorClient {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ-GEI] Received {} bytes from Go FFI, hex={}",
             response_buf.len(),
             hex_preview
@@ -345,7 +335,7 @@ impl ExecutorClient {
         match response.payload {
             Some(proto::response::Payload::LastBlockNumberResponse(res)) => {
                 let last_gei = res.last_global_exec_index;
-                info!(
+                trace!(
                     "✅ [EXECUTOR-REQ] Go last_global_exec_index={} (block={})",
                     last_gei, res.last_block_number
                 );
@@ -380,7 +370,7 @@ impl ExecutorClient {
         let mut request_buf = Vec::new();
         request.encode(&mut request_buf)?;
 
-        // FFI INTEGRATION: Send request directly via CGo callback instead of socket
+        // FFI INTEGRATION: Send request directly via CGo callback
         let response_buf = self.execute_rpc_request(&request_buf).await?;
 
         let response = Response::decode(&response_buf[..])

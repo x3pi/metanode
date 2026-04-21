@@ -114,7 +114,6 @@ func (app *App) startStorageServer(ctx context.Context, dbDetail config.DBDetail
 		keyPair,
 		connectionsManager,
 		mainHandler,
-		string(app.config.Databases.NodeType),
 		app.config.Databases.Version,
 	)
 	if err != nil {

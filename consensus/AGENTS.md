@@ -5,7 +5,7 @@
 **Name**: `mtn-consensus` (MetaNode Consensus)  
 **Language**: Rust (edition 2021)  
 **Purpose**: DAG-based BFT consensus engine for the MetaNode blockchain, forked and extended from Sui's Mysticeti protocol.  
-**Role in System**: This is the **Consensus Layer** — it orders transactions, manages epochs, and drives the Go Execution Layer via IPC (Unix Domain Sockets or TCP).
+**Role in System**: This is the **Consensus Layer** — it orders transactions, manages epochs, and drives the Go Execution Layer natively via CGo FFI (Foreign Function Interface) and Callbacks.
 
 ---
 
@@ -165,7 +165,8 @@ cd metanode/consensus/metanode
 cargo +nightly build --release
 ```
 
-### Run a single node
+### Standalone Execution (For Tooling/Testing)
+The Rust consensus engine can optionally be run as a standalone binary for specific testing or local simulation scenarios, although the main production mode is statically embedded into Go.
 ```bash
 ./target/release/metanode start --config config/node-0.toml
 ```
@@ -244,9 +245,9 @@ EpochMonitor detects Go epoch > current
 
 ### Transaction Flow
 ```
-Go Sub-node pool → Master Node → FFI call → Rust Tx Receiver
+Go Unified Node pool → FFI batching call → Rust Tx Receiver
   → pending_transactions_queue → DAG Block proposal
   → Consensus rounds → Leader elected → Linearizer
   → CommittedSubDag → CommitProcessor → FFI Callback
-  → Go Master (execute & commit state)
+  → Go Unified Node (execute & commit state)
 ```

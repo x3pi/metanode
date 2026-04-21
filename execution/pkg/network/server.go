@@ -28,7 +28,6 @@ type SocketServer struct {
 	listener               net.Listener
 	handler                network.Handler
 	config                 *Config
-	nodeType               string
 	version                string
 	keyPair                *bls.KeyPair
 	ctx                    context.Context
@@ -46,7 +45,6 @@ func NewSocketServer(
 	keyPair *bls.KeyPair,
 	connectionsManager network.ConnectionsManager,
 	handler network.Handler,
-	nodeType string,
 	version string,
 ) (network.SocketServer, error) {
 	if cfg == nil {
@@ -72,7 +70,6 @@ func NewSocketServer(
 		keyPair:            keyPair,
 		connectionsManager: connectionsManager,
 		handler:            handler,
-		nodeType:           nodeType,
 		version:            version,
 		ctx:                ctx,
 		cancelFunc:         cancelFunc,
@@ -352,7 +349,7 @@ func (s *SocketServer) OnConnect(conn network.Connection) {
 	// }
 	initMsg := &pb.InitConnection{
 		Address: addressForInitMsgBytes,
-		Type:    s.nodeType,
+		Type:    "unified",
 		Replace: true,
 	}
 	err := SendMessage(conn, p_common.InitConnection, initMsg, s.version)

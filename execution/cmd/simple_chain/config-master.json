@@ -1,6 +1,5 @@
 {
     "debug": true,
-    "mode": "Multi",
     "chainId": 991,
     "private_key": "27c8f505bcae593cc0e3ac8ae9ed1b1d4493eabd11736aabda176d4d3255fa69",
     "address": "9065e2caaa4bf6533ded0b2a763e4ee81cd31bd2",
@@ -100,7 +99,6 @@
     "connection_address": "0.0.0.0:4201",
     "dns_server_address": "0.0.0.0:7081",
     "version": "0.0.1.0",
-    "node_type": "master",
     "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
     "service_type": "MASTER",
     "rpc_port": ":8757",
@@ -115,7 +113,6 @@
     "Databases": {
         "RootPath": "./sample/node0/data/data",
         "DBEngine": "sharded",
-        "NodeType": "STORAGE_LOCAL",
         "Version": "0.0.1.0",
         "BLSPrivateKey": "0109751113666a88b1d335c312a6fb49a0981c2147489f5ec264e91177b42777",
         "SnapshotPath": "./snapshot_data_node0",

@@ -130,7 +130,6 @@ func NewClient(
 		clientContext.KeyPair,
 		clientContext.ConnectionsManager,
 		clientContext.Handler,
-		config.NodeType(),
 		config.Version(),
 	)
 
@@ -1354,7 +1353,6 @@ func NewStorageClient(
 		clientContext.KeyPair,
 		clientContext.ConnectionsManager,
 		clientContext.Handler,
-		config.NodeType(),
 		config.Version(),
 	)
 	err := parentConn.Connect()

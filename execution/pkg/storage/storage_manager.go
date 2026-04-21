@@ -2,6 +2,8 @@ package storage
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -80,6 +82,7 @@ var validStorageTypes = map[StorageType]bool{
 // StorageManager quản lý nhiều Storage với enum key
 type StorageManager struct {
 	storages               map[StorageType]Storage
+	sharedDB               *ShardelDB // the single underlying database for the node
 	explorerSearch         *explorer.ExplorerSearchService
 	explorerSearchReadOnly *explorer.ExplorerSearchService
 
@@ -93,6 +96,46 @@ func NewStorageManager() *StorageManager {
 	return &StorageManager{
 		storages: make(map[StorageType]Storage),
 	}
+}
+
+// InitSharedDatabase initializes a single database instance and creates PrefixStorage wrappers for all domains
+func (sm *StorageManager) InitSharedDatabase(rootPath string, dbType DBType) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	dbPath := filepath.Join(rootPath, "chaindata")
+	
+	// Create ShardelDB to use the specified DBType with 1 shard
+	db, err := NewShardelDB(dbPath, 1, 4, dbType, "")
+	if err != nil {
+		return fmt.Errorf("failed to create shared DB: %w", err)
+	}
+	
+	if err := db.Open(); err != nil {
+		return fmt.Errorf("failed to open shared DB: %w", err)
+	}
+	
+	sm.sharedDB = db
+
+	prefixMap := map[StorageType]string{
+		STORAGE_ACCOUNT:           "ac:",
+		STORAGE_BLOCK:             "bl:",
+		STORAGE_RECEIPTS:          "rc:",
+		STORAGE_TRANSACTION:       "tx:",
+		STORAGE_SMART_CONTRACT:    "sc:",
+		STORAGE_CODE:              "cd:",
+		STORAGE_DATABASE_TRIE:     "tr:",
+		STORAGE_BACKUP_DEVICE_KEY: "bk:",
+		STORAGE_MAPPING_DB:        "mp:",
+		STORAGE_STAKE:             "st:",
+		STORAGE_BACKUP_DB:         "bu:",
+	}
+
+	for sType, prefix := range prefixMap {
+		sm.storages[sType] = NewPrefixStorage(sm.sharedDB, prefix)
+	}
+
+	return nil
 }
 
 func (sm *StorageManager) IsExplorer() bool {
@@ -254,6 +297,16 @@ func (sm *StorageManager) CloseAll() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	if sm.sharedDB != nil {
+		if err := sm.sharedDB.Close(); err != nil {
+			return fmt.Errorf("failed to close shared DB: %w", err)
+		}
+		sm.sharedDB = nil
+		// Clear storages map
+		sm.storages = make(map[StorageType]Storage)
+		return nil
+	}
+
 	var closeErrs []error
 
 	for dbType, storage := range sm.storages {
@@ -275,6 +328,10 @@ func (sm *StorageManager) CloseAll() error {
 func (sm *StorageManager) FlushAll() error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+
+	if sm.sharedDB != nil {
+		return sm.sharedDB.Flush()
+	}
 
 	var flushErrs []error
 
@@ -314,6 +371,15 @@ var storageTypeToDirName = map[StorageType]string{
 func (sm *StorageManager) CheckpointAll(destBaseDir string) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+
+	if sm.sharedDB != nil {
+		// Create a single unified checkpoint at <destBaseDir>/chaindata
+		destDir := filepath.Join(destBaseDir, "chaindata")
+		if err := sm.sharedDB.Checkpoint(destDir); err != nil {
+			return fmt.Errorf("unified shared DB checkpoint failed: %w", err)
+		}
+		return nil
+	}
 
 	var checkpointErrs []error
 

@@ -85,7 +85,7 @@ impl ExecutorClient {
                     )
                 })
                 .collect();
-            info!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
+            trace!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
                 batch_id, total_tx_before, subdag.blocks.len(), block_details.join(", "));
         }
 
@@ -265,7 +265,7 @@ impl ExecutorClient {
                 block_number,
             )?
         } else {
-            info!("🔍 [DIAG] Using FULL convert_to_protobuf path for global_exec_index={} (total_tx_before={})",
+            trace!("🔍 [DIAG] Using FULL convert_to_protobuf path for global_exec_index={} (total_tx_before={})",
                 global_exec_index, total_tx_before);
             self.convert_to_protobuf(
                 subdag,
@@ -352,7 +352,7 @@ impl ExecutorClient {
                 }
             }
             buffer.insert(global_exec_index, (epoch_data_bytes, epoch, commit_index));
-            info!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
+            trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
 
@@ -399,7 +399,7 @@ impl ExecutorClient {
                 let min_buffered = *buffer.keys().next().unwrap_or(&0);
                 let max_buffered = *buffer.keys().last().unwrap_or(&0);
                 let gap = min_buffered.saturating_sub(*next_expected);
-                info!("📊 [FLUSH BUFFER] Buffer status: size={}, range={}..{}, next_expected={}, gap={}", 
+                trace!("📊 [FLUSH BUFFER] Buffer status: size={}, range={}..{}, next_expected={}, gap={}", 
                     buffer.len(), min_buffered, max_buffered, *next_expected, gap);
             }
         }

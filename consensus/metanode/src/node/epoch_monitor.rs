@@ -496,22 +496,8 @@ pub fn start_unified_epoch_monitor(
                                     info!("✅ [EPOCH MONITOR] Executed {} blocks to Go for epoch {} boundary (last: {})", synced, target_epoch, last);
                                 }
                                 Err(e) => {
-                                    warn!("⚠️ [EPOCH MONITOR] sync_and_execute_blocks failed, falling back to sync_blocks: {}", e);
-                                    // Fallback to store-only mode for backward compatibility
-                                    if let Ok(blocks_retry) =
-                                        crate::network::peer_rpc::fetch_blocks_from_peer(
-                                            &peer_rpc,
-                                            go_block + 1,
-                                            boundary_block,
-                                        )
-                                        .await
-                                    {
-                                        if let Ok((synced, last)) =
-                                            client_arc.sync_blocks(blocks_retry).await
-                                        {
-                                            info!("✅ [EPOCH MONITOR] Fallback: synced {} blocks (store-only) for epoch {} (last: {})", synced, target_epoch, last);
-                                        }
-                                    }
+                                    tracing::error!("🚨 [EPOCH MONITOR] sync_and_execute_blocks failed: {}. Will retry next epoch monitor cycle. NO store-only fallback.", e);
+                                    break; // Stop multi-epoch loop — retry in next monitor cycle
                                 }
                             }
                             let _ = count;

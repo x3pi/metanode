@@ -226,8 +226,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches START (batch_count=%d)", len(aggregatedBatches))
 	nomtStart := time.Now()
 
-	isMaster := config.ConfigApp != nil && string(config.ConfigApp.ServiceType) == "MASTER"
-	if err := p_trie.ApplyNomtReplicationBatches(aggregatedBatches, isMaster); err != nil {
+	if err := p_trie.ApplyNomtReplicationBatches(aggregatedBatches); err != nil {
 		return fmt.Errorf("error replicating NOMT batches: %w", err)
 	}
 	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches DONE in %v", time.Since(nomtStart))
@@ -300,9 +299,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	// Without this, loadedAccounts and lruCache retain stale pre-sync data,
 	// causing RPC queries (eth_getBalance, mtn_getAccountState) to return old values
 	// on Sub nodes — making them appear diverged from Master.
-	bp.chainState.GetAccountStateDB().InvalidateAllCaches()
-	bp.chainState.GetStakeStateDB().InvalidateAllCaches()
-	bp.chainState.GetSmartContractDB().InvalidateAllCaches() // CRITICAL: Clear cached NOMT tries with stale root hashes
+	bp.chainState.InvalidateAllState()
 
 	return nil
 }

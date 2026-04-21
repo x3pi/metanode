@@ -85,7 +85,6 @@ func runServer(ctx context.Context) {
 		keyPair,
 		connectionsManager,
 		handler,
-		"TRANSACTION_SERVER_NODE",
 		protocolVersion,
 	)
 	checkErr(err, "Không thể tạo socket server")

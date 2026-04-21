@@ -50,15 +50,13 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// Inject UpdateLastBlock callback for architectural purity (Rust manages state)
 	reqHandler.SetUpdateLastBlockCallback(func(blk types.Block) {
-		bp.SetLastBlock(blk)
-		headerCopy := blk.Header()
-		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+		bp.UpdateLastBlockAndHeader(blk)
 		logger.Info("🔄 [RUST CONTROL] Rust explicitly advanced Go Master memory to block #%d", blk.Header().BlockNumber())
 	})
 
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
-	blockQueue := make(chan *pb.ExecutableBlock, 1000)
+	blockQueue := make(chan *pb.ExecutableBlock, 5000)
 
 	// 3. Find Rust configuration path
 	rustConfigPath := bp.config.RustConfigPath
@@ -212,7 +210,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		incomingTxCount := len(epochData.Transactions)
 		incomingGEI := epochData.GetGlobalExecIndex()
 		if incomingTxCount > 0 {
-			fmt.Printf("📥 [DIAG-RECV] Block from Rust: GEI=%d, txs=%d, epoch=%d, nextExpected=%d, currentBlock=%d",
+			logger.Debug("📥 [DIAG-RECV] Block from Rust: GEI=%d, txs=%d, epoch=%d, nextExpected=%d, currentBlock=%d",
 				incomingGEI, incomingTxCount, epochData.GetEpoch(), nextExpectedGlobalExecIndex, currentBlockNumber)
 		}
 

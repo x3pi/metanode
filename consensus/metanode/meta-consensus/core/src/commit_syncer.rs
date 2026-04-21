@@ -114,6 +114,7 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
 
     // --- sync mode detection ---
     is_sync_mode: bool, // True when node is in aggressive sync mode due to significant lag
+    is_severe_lag: bool, // True when node has severe lag (>200 commits or >10%)
     last_sync_mode_log_at: tokio::time::Instant,
 
     // --- adaptive delay ---
@@ -156,6 +157,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_logged_quorum_commit_index: 0,
             last_logged_local_commit_index: 0,
             is_sync_mode: false,
+            is_severe_lag: false,
             last_sync_mode_log_at: tokio::time::Instant::now() - Duration::from_secs(300),
             adaptive_delay_state,
         }
@@ -173,7 +175,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
     async fn schedule_loop(mut self, mut rx_shutdown: oneshot::Receiver<()>) {
         // ADAPTIVE SYNC: Use shorter interval when in sync mode for faster response
         let base_interval = Duration::from_secs(2);
-        let fast_interval = Duration::from_secs(1);
+        let fast_interval = Duration::from_millis(500);
+        let turbo_interval = Duration::from_millis(150);
 
         // ═══════════════════════════════════════════════════════════════════
         // COLD-START FAST POLL: After snapshot restore the DAG is empty
@@ -183,7 +186,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // quorum has become available. Use a 200ms poll until the first
         // fetch is scheduled, then switch back to normal cadence.
         // ═══════════════════════════════════════════════════════════════════
-        let cold_start_detected = self.inner.dag_state.read().highest_accepted_round() == 0;
+        let cold_start_detected = self.inner.dag_state.read().highest_accepted_round() <= 1
+            && self.synced_commit_index == 0;
         let cold_start_interval = Duration::from_millis(200);
         let initial_interval = if cold_start_detected {
             info!(
@@ -208,26 +212,34 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     // ADAPTIVE SYNC: Adjust interval based on sync mode
                     // In sync mode, check more frequently (every 1 second instead of 2)
                     let now = tokio::time::Instant::now();
-                    if now.duration_since(last_interval_check) >= Duration::from_secs(5) {
-                        // Check every 5 seconds if we should adjust interval
+                    if now.duration_since(last_interval_check) >= Duration::from_secs(2) {
+                        // Check every 2 seconds if we should adjust interval
                         let quorum_commit_index = self.inner.commit_vote_monitor.quorum_commit_index();
                         let local_commit_index = self.inner.dag_state.read().last_commit_index();
                         let lag = quorum_commit_index.saturating_sub(local_commit_index);
-                        let should_use_fast_interval = lag > 50 || (quorum_commit_index > 0 &&
-                            (lag as f64 / quorum_commit_index as f64) > 0.05);
+                        let lag_pct = if quorum_commit_index > 0 {
+                            (lag as f64 / quorum_commit_index as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        // 3-tier interval: turbo (150ms) / fast (500ms) / normal (2s)
+                        let target_interval = if lag > 200 || lag_pct > 10.0 {
+                            turbo_interval
+                        } else if lag > 50 || lag_pct > 5.0 {
+                            fast_interval
+                        } else {
+                            base_interval
+                        };
 
-                        if should_use_fast_interval && current_interval_duration == base_interval {
-                            // Switch to faster interval (1 second)
-                            current_interval_duration = fast_interval;
-                            interval = tokio::time::interval(fast_interval);
+                        if target_interval != current_interval_duration {
+                            let old_ms = current_interval_duration.as_millis();
+                            current_interval_duration = target_interval;
+                            interval = tokio::time::interval(target_interval);
                             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                            info!("⚡ [SYNC-MODE] Switching to fast sync interval (1s) due to lag={}", lag);
-                        } else if !should_use_fast_interval && current_interval_duration == fast_interval {
-                            // Switch back to normal interval (2 seconds)
-                            current_interval_duration = base_interval;
-                            interval = tokio::time::interval(base_interval);
-                            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                            info!("✅ [SYNC-MODE] Switching back to normal interval (2s) - lag reduced to {}", lag);
+                            info!(
+                                "⚡ [SYNC-MODE] Interval: {}ms → {}ms (lag={}, {:.1}%)",
+                                old_ms, target_interval.as_millis(), lag, lag_pct
+                            );
                         }
                         last_interval_check = now;
                     }
@@ -305,7 +317,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // validate vote blocks from the current epoch.
         // ═══════════════════════════════════════════════════════════════════════
         let highest_accepted_round = self.inner.dag_state.read().highest_accepted_round();
-        if highest_accepted_round == 0 && quorum_commit_index > 0 {
+        // RACE FIX: Use `<= 1` instead of `== 0`. If Core proposes a round-1
+        // block before CommitSyncer's first tick (e.g., sync_last_known_own_block
+        // completes fast), highest_accepted_round becomes 1 and the `== 0` check
+        // was skipped — leaving the node stuck forever with synced_commit_index=0.
+        // Also require local_commit_index==0 to avoid re-triggering in normal operation.
+        if highest_accepted_round <= 1 && local_commit_index == 0 && quorum_commit_index > 0 {
             // SNAPSHOT RESTORE: Fast-forward to the current quorum. Historical
             // commits can never be verified (DAG was wiped — vote blocks reference
             // digests that don't exist). The node will only process NEW commits
@@ -373,6 +390,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let should_be_in_sync_mode =
             lag > MODERATE_LAG_THRESHOLD || lag_percentage > MODERATE_LAG_PERCENTAGE;
         let is_severe_lag = lag > SEVERE_LAG_THRESHOLD || lag_percentage > SEVERE_LAG_PERCENTAGE;
+        self.is_severe_lag = is_severe_lag;
 
         // Log sync mode transition
         if should_be_in_sync_mode != self.is_sync_mode {
@@ -446,14 +464,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
         };
         let effective_batch_size = if self.is_sync_mode {
             // In sync mode: use larger batches for faster catch-up
-            // Moderate lag: 1.5x batch size, Severe lag: 2x batch size
+            // Moderate lag: 2x batch size, Severe lag: 4x batch size
             if lag > 200 || lag_percentage_for_batch > 10.0 {
-                base_batch_size * 2 // Aggressive: 2x batch size
+                base_batch_size * 4 // Turbo: 4x batch size for severe lag
             } else {
-                base_batch_size + base_batch_size / 2 // Moderate: 1.5x batch size
+                base_batch_size * 2 // Fast: 2x batch size for moderate lag
             }
         } else {
             base_batch_size // Normal mode: use configured batch size
+        };
+
+        // Compute effective threshold once (used in loop and partial-batch logic)
+        let effective_threshold = if self.is_severe_lag {
+            unhandled_commits_threshold * 4 // Turbo: allow 4x unhandled commits for severe lag
+        } else if self.is_sync_mode {
+            unhandled_commits_threshold * 2 // Fast: allow 2x unhandled commits
+        } else {
+            unhandled_commits_threshold
         };
 
         // When the node is falling behind, schedule pending fetches which will be executed on later.
@@ -470,12 +497,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 break;
             }
             // Pause scheduling new fetches when handling of commits is lagging.
-            // In sync mode, be more lenient with the threshold to allow more aggressive fetching
-            let effective_threshold = if self.is_sync_mode {
-                unhandled_commits_threshold * 2 // Allow more unhandled commits in sync mode
-            } else {
-                unhandled_commits_threshold
-            };
             if highest_handled_index + effective_threshold < range_end {
                 if !self.is_sync_mode {
                     warn!(
@@ -490,6 +511,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // quorum_commit_index should be non-decreasing, so highest_scheduled_index should not
             // decrease either.
             self.highest_scheduled_index = Some(range_end);
+        }
+
+        // TURBO SYNC: In sync mode, schedule remaining partial batch so no commits are left behind.
+        // Without this, the last partial batch (smaller than effective_batch_size) is always skipped,
+        // leaving up to (effective_batch_size - 1) commits unscheduled until the next tick.
+        if self.is_sync_mode {
+            let scheduled_up_to = self.highest_scheduled_index.unwrap_or(fetch_after_index);
+            if scheduled_up_to < quorum_commit_index
+                && highest_handled_index + effective_threshold >= quorum_commit_index
+            {
+                let range_start = scheduled_up_to + 1;
+                self.pending_fetches
+                    .insert((range_start..=quorum_commit_index).into());
+                self.highest_scheduled_index = Some(quorum_commit_index);
+            }
         }
     }
 
@@ -546,7 +582,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // we instantly know the network's HEAD round! We advance gc_round to this
         // round, causing all historical blocks to be GC'd instead of fetched.
         // ═══════════════════════════════════════════════════════════════════════
-        if self.inner.dag_state.read().highest_accepted_round() == 0 {
+        // RACE FIX: Use `<= 1` instead of `== 0`. After the node proposes its
+        // own round-1 block, highest_accepted_round becomes 1. The `== 0` check
+        // missed this case, preventing GC advance → all peer blocks stayed
+        // suspended → DEADLOCK. cold_start_advance_gc_round is idempotent
+        // (returns early if new_gc_round <= current_gc_round).
+        if self.inner.dag_state.read().highest_accepted_round() <= 1 
+            && self.inner.dag_state.read().last_commit_index() == 0 
+        {
             let highest_commit_round = certified_commits
                 .commits()
                 .iter()
@@ -670,22 +713,37 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // has not finished, reduce parallelism so the earlier fetch can retry on a better host and succeed.
         // ADAPTIVE SYNC: Increase parallelism when in sync mode
         let base_parallel_fetches = self.inner.context.parameters.commit_sync_parallel_fetches;
-        let effective_parallel_fetches = if self.is_sync_mode {
-            // In sync mode: increase parallelism for faster catch-up
-            // Use up to 1.5x the configured parallel fetches, but cap at committee size
-            (base_parallel_fetches + base_parallel_fetches / 2)
+        let effective_parallel_fetches = if self.is_severe_lag {
+            // Turbo: 3x parallel fetches for severe lag
+            (base_parallel_fetches * 3)
+                .min(self.inner.context.committee.size())
+        } else if self.is_sync_mode {
+            // Fast: 2x parallel fetches for moderate lag
+            (base_parallel_fetches * 2)
                 .min(self.inner.context.committee.size())
         } else {
             base_parallel_fetches
         };
 
+        let effective_batches_ahead = if self.is_severe_lag {
+            self.inner.context.parameters.commit_sync_batches_ahead * 3
+        } else if self.is_sync_mode {
+            self.inner.context.parameters.commit_sync_batches_ahead * 2
+        } else {
+            self.inner.context.parameters.commit_sync_batches_ahead
+        };
+
+        // In turbo mode, allow fetching from all peers (not just 2/3)
+        let committee_cap = if self.is_severe_lag {
+            self.inner.context.committee.size()
+        } else {
+            self.inner.context.committee.size() * 2 / 3
+        };
+
         let target_parallel_fetches = effective_parallel_fetches
-            .min(self.inner.context.committee.size() * 2 / 3)
+            .min(committee_cap)
             .min(
-                self.inner
-                    .context
-                    .parameters
-                    .commit_sync_batches_ahead
+                effective_batches_ahead
                     .saturating_sub(self.fetched_ranges.len()),
             )
             .max(1);
@@ -698,7 +756,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 break;
             };
             self.inflight_fetches
-                .spawn(Self::fetch_loop(self.inner.clone(), commit_range));
+                .spawn(Self::fetch_loop(self.inner.clone(), commit_range, self.is_severe_lag, self.is_sync_mode));
         }
 
         let metrics = &self.inner.context.metrics.node_metrics;
@@ -719,9 +777,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
     async fn fetch_loop(
         inner: Arc<Inner<C>>,
         commit_range: CommitRange,
+        is_severe_lag: bool,
+        is_sync_mode: bool,
     ) -> (CommitIndex, CertifiedCommits) {
         // Individual request base timeout.
-        const TIMEOUT: Duration = Duration::from_secs(10);
+        const TIMEOUT: Duration = Duration::from_secs(5);
         // Max per-request timeout will be base timeout times a multiplier.
         // At the extreme, this means there will be 120s timeout to fetch max_blocks_per_fetch blocks.
         const MAX_TIMEOUT_MULTIPLIER: u32 = 12;
@@ -770,6 +830,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         authority,
                         commit_range.clone(),
                         request_timeout,
+                        is_severe_lag,
                     ),
                 )
                 .await
@@ -812,8 +873,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     }
                 }
             }
-            // Avoid busy looping, by waiting for a while before retrying.
-            sleep(TIMEOUT).await;
+            // Avoid busy looping, by waiting briefly before retrying (reduced for faster catch-up).
+            let retry_delay = if is_severe_lag {
+                Duration::from_millis(500)
+            } else if is_sync_mode {
+                Duration::from_millis(1000)
+            } else {
+                Duration::from_secs(2)
+            };
+            sleep(retry_delay).await;
         }
     }
 
@@ -825,6 +893,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         target_authority: AuthorityIndex,
         commit_range: CommitRange,
         timeout: Duration,
+        is_severe_lag: bool,
     ) -> ConsensusResult<CertifiedCommits> {
         let _timer = inner
             .context
@@ -871,7 +940,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 let inner = inner.clone();
                 async move {
                     // 4. Send out pipelined fetch requests to avoid overloading the target authority.
-                    sleep(timeout * i as u32 / num_chunks).await;
+                    // In turbo mode (severe lag), we blast requests to catch up as fast as possible.
+                    if !is_severe_lag {
+                        let delay = timeout * i as u32 / num_chunks / 4; // reduced delay for normal
+                        sleep(delay).await;
+                    }
                     // Retry block fetches up to 3 times with backoff before propagating the error.
                     const MAX_BLOCK_FETCH_RETRIES: u32 = 3;
                     let serialized_blocks = {
@@ -1306,7 +1379,7 @@ mod tests {
             block_verifier,
             transaction_certifier,
             network_client,
-            dag_state,
+            dag_state.clone(),
             None,
         );
 
@@ -1316,6 +1389,11 @@ mod tests {
         assert!(commit_syncer.highest_scheduled_index().is_none());
         assert_eq!(commit_syncer.highest_fetched_commit_index(), 0);
         assert_eq!(commit_syncer.synced_commit_index(), 0);
+
+        // Force highest_accepted_round > 1 to bypass cold-start fast-forward logic,
+        // which would otherwise skip scheduling fetches from index 1 to 10.
+        let test_block = TestBlock::new(2, 0).build();
+        dag_state.write().accept_block(VerifiedBlock::new_for_test(test_block));
 
         // Observe round 15 blocks voting for commit 10 from authorities 0 to 2 in CommitVoteMonitor
         for i in 0..3 {

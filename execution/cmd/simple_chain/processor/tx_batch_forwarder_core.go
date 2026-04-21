@@ -200,8 +200,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			}
 		}
 
-		// TCP Path (Fallback: Sub Nodes forward to Master or Single node)
-		if bf.serviceType == string(p_common.ServiceTypeReadonly) || bf.chainState.GetConfig().Mode == p_common.MODE_SINGLE {
+		// TCP Path (Fallback: Readonly/API nodes forward to Validators)
+		if bf.serviceType == string(p_common.ServiceTypeReadonly) {
 			// Marshal tất cả transactions một lần cho mode SINGLE
 			bTransaction, err := transaction.MarshalTransactions(txs)
 			if err != nil {
