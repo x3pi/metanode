@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -1096,11 +1097,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
-
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
 	// ═══════════════════════════════════════════════════════════════════════════
 	currentGEI := storage.GetLastGlobalExecIndex()
+
+	// R7: Crash-guard for Cache Invalidation
+	// Guarantee cache is invalidated on exit, even if batch is interrupted or fails
+	defer func() {
+		rh.chainState.InvalidateAllState()
+		mvm.ClearAllMVMApi()
+		mvm.CallClearAllStateInstances()
+		logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+	}()
 
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
@@ -1190,6 +1199,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
 		if isLastBlock {
+			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
 			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
 		}
 
@@ -1197,8 +1207,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
 		} else if isLastBlock {
-			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ CommitBlockState for block #%d (stateRoot=%s)",
-				blockNum, header.AccountStatesRoot().Hex()[:18]+"...")
+			// R2: Add stateRoot verify after batch sync
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+			
+			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
+				logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
+					blockNum, localRoot.Hex(), expectedRoot.Hex())
+				return &pb.SyncBlocksResponse{
+					Error: fmt.Sprintf("stateRoot mismatch at block %d: local=%s expected=%s",
+						blockNum, localRoot.Hex()[:18], expectedRoot.Hex()[:18]),
+				}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
+			}
+			logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1228,14 +1249,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// Without this, loadedAccounts and lruCache retain stale pre-sync data,
 		// causing RPC queries and transaction validation to use old values
 		// on newly executed blocks — making them appear diverged.
-		// OPTIMIZATION: Only do this once at the end of the batch.
+		// OPTIMIZATION: Deferred cache clearing is configured at the top of this function.
 		// ═══════════════════════════════════════════════════════════════════════════
-		if isLastBlock {
-			rh.chainState.InvalidateAllState()
-			// Clear MVM caches so smart contract reads see the new state
-			mvm.ClearAllMVMApi()
-			mvm.CallClearAllStateInstances()
-		}
 
 		executedCount++
 		lastExecutedBlock = blockNum
@@ -1246,15 +1261,17 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 6: Persist backup data for Sub nodes
 		// Backup persisted to PebbleDB so Sub can read via 3-tier recovery.
-		// Master MUST also broadcast these to sub nodes during execute mode, otherwise
-		// Sub nodes get stuck since Master is not running the normal commitWorker loop.
+		// FORK-SAFETY (R6/Apr 2026): Master node MUST NOT broadcast blocks to Sub nodes
+		// while it is actively catching up (syncing). It should only broadcast blocks
+		// constructed during active Validator mode consensus.
+		// Sub nodes will pull the missing blocks via DataSync (3-tier recovery).
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
 
-			if rh.broadcastCallback != nil {
-				rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
-			}
+			// if rh.broadcastCallback != nil {
+			// 	rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
+			// }
 		}
 
 		logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",

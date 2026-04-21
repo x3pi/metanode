@@ -455,6 +455,27 @@ func (bp *BlockProcessor) GetLastBlock() types.Block {
 	return value.(types.Block)
 }
 
+// GetLastBlockMutex exposes the last block mutex for synchronization
+func (bp *BlockProcessor) GetLastBlockMutex() *sync.Mutex {
+	return &bp.lastBlockMutex
+}
+
+// UpdateLastBlockAndHeader atomically updates both last block and chain state header
+func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
+	bp.lastBlockMutex.Lock()
+	defer bp.lastBlockMutex.Unlock()
+	
+	if blk != nil {
+		bp.lastBlock.Store(blk)
+		// Update nextBlockNumber
+		bp.nextBlockNumber.Store(blk.Header().BlockNumber() + 1)
+		
+		// Update header atomically
+		headerCopy := blk.Header()
+		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+	}
+}
+
 // SetLastBlock sets the last processed block
 func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
 	bp.lastBlockMutex.Lock()

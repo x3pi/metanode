@@ -50,9 +50,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// Inject UpdateLastBlock callback for architectural purity (Rust manages state)
 	reqHandler.SetUpdateLastBlockCallback(func(blk types.Block) {
-		bp.SetLastBlock(blk)
-		headerCopy := blk.Header()
-		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+		bp.UpdateLastBlockAndHeader(blk)
 		logger.Info("🔄 [RUST CONTROL] Rust explicitly advanced Go Master memory to block #%d", blk.Header().BlockNumber())
 	})
 
