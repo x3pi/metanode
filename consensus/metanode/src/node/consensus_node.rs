@@ -634,14 +634,14 @@ impl ConsensusNode {
         // for epoch>0 because the epoch transition wasn't captured in the snapshot.
         // Using boundary_gei=0 causes wrong GEI calculation → block hash divergence.
         //
-        // CRITICAL FIX (2026-04-15): Also validate when DAG storage is empty (cold_start).
+        // CRITICAL FIX (2026-04-15): Also validate when DAG storage is empty.
         // After snapshot restore, Go may have non-zero but STALE boundary_gei that doesn't
         // match the network. This causes epoch_base_index to be wrong → global_exec_index
         // calculation diverges → FORK.
         //
         // Fix: Validate from peers if:
         //   1. boundary_gei == 0 && epoch > 0 (original fix), OR
-        //   2. DAG storage is empty (cold_start) - indicates snapshot restore
+        //   2. DAG storage is empty - indicates snapshot restore
         // ═══════════════════════════════════════════════════════════════════════════
         let epoch_db_path = config
             .storage_path
@@ -879,8 +879,7 @@ impl ConsensusNode {
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
-        // boundary GEI validation. No longer used for cold_start guard
-        // since Phase 1 ensures Go's GEI is always accurate.
+        // boundary GEI validation.
         // ═══════════════════════════════════════════════════════════════════
         let dag_has_history = {
             let epoch_db = config
@@ -901,9 +900,12 @@ impl ConsensusNode {
             );
         }
 
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
+
         let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
             commit_receiver,
         )
+        .with_delivery_sender(delivery_tx)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
                 current_commit_index.clone(),
@@ -985,6 +987,18 @@ impl ConsensusNode {
         let executor_client_for_init = executor_client_for_proc.clone();
         tokio::spawn(async move {
             executor_client_for_init.initialize_from_go().await;
+        });
+
+        // Tích hợp BlockDeliveryManager vào Phase khởi động (mới thêm vào)
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        let executor_client_for_manager = executor_client_for_proc.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                executor_client_for_manager,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
         });
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -1574,10 +1588,6 @@ impl ConsensusNode {
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
-            cold_start: !consensus.dag_has_history
-                && storage.is_in_committee
-                && storage.current_epoch > 0,
-            cold_start_snapshot_gei: 0, // Will be set during cold-start in startup.rs
         };
 
         // Initialize the global StateTransitionManager

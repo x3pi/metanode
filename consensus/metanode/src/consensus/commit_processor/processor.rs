@@ -42,6 +42,8 @@ pub struct CommitProcessor {
     /// Flag indicating if epoch transition is in progress
     /// When true, we're transitioning to a new epoch
     is_transitioning: Option<Arc<AtomicBool>>,
+    /// Channel to send validated commits to the BlockDeliveryManager
+    delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
     /// Queue for transactions that must be retried in the next epoch
     pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
     /// Optional callback to handle EndOfEpoch system transactions
@@ -55,14 +57,7 @@ pub struct CommitProcessor {
     epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     /// TX recycler for confirming committed TXs
     tx_recycler: Option<Arc<TxRecycler>>,
-    /// Cold-start flag: set when DAG storage was empty at startup (snapshot restore).
-    /// When true, skip stale DAG replay commits and wait for live rounds.
-    cold_start: Arc<AtomicBool>,
-    /// GEI threshold for cold-start skip: skip ALL commits with GEI ≤ this value.
-    /// Set from Go's snapshot GEI (via get_last_global_exec_index) during cold-start.
-    /// CRITICAL: Must use snapshot GEI, NOT synced_global_exec_index (network state),
-    /// otherwise commits needed for state advancement get skipped → nonce gap → FORK.
-    cold_start_skip_gei: u64,
+
 
     /// RS-2: Storage path for persisting cumulative_fragment_offset
     storage_path: Option<std::path::PathBuf>,
@@ -88,6 +83,7 @@ impl CommitProcessor {
             epoch_base_index_override: None,
             executor_client: None,
             is_transitioning: None,
+            delivery_sender: None,
             pending_transactions_queue: None,
             epoch_transition_callback: None,
             epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(
@@ -96,8 +92,7 @@ impl CommitProcessor {
             tx_recycler: None,
             storage_path: None,
             lag_alert_sender: None,
-            cold_start: Arc::new(AtomicBool::new(false)),
-            cold_start_skip_gei: 0,
+
         }
     }
 
@@ -157,6 +152,12 @@ impl CommitProcessor {
     /// Set is_transitioning flag to track epoch transition state
     pub fn with_is_transitioning(mut self, is_transitioning: Arc<AtomicBool>) -> Self {
         self.is_transitioning = Some(is_transitioning);
+        self
+    }
+
+    /// Set BlockDeliveryManager sender
+    pub fn with_delivery_sender(mut self, sender: tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>) -> Self {
+        self.delivery_sender = Some(sender);
         self
     }
 
@@ -228,18 +229,6 @@ impl CommitProcessor {
         self
     }
 
-    /// Set cold-start flag
-    pub fn with_cold_start(mut self, cold_start: Arc<AtomicBool>) -> Self {
-        self.cold_start = cold_start;
-        self
-    }
-
-    /// Set GEI threshold for cold-start skip
-    pub fn with_cold_start_skip_gei(mut self, skip_gei: u64) -> Self {
-        self.cold_start_skip_gei = skip_gei;
-        self
-    }
-
     /// Process commits in order
     pub async fn run(self) -> Result<()> {
         let mut receiver = self.receiver;
@@ -248,6 +237,7 @@ impl CommitProcessor {
         let commit_index_callback = self.commit_index_callback;
         let current_epoch = self.current_epoch;
         let executor_client = self.executor_client;
+        let delivery_sender = self.delivery_sender;
         let pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
 
@@ -397,9 +387,11 @@ impl CommitProcessor {
                             global_exec_index,
                             current_epoch,
                             executor_client.clone(),
+                            delivery_sender.clone(),
                             pending_transactions_queue.clone(),
+                            self.epoch_eth_addresses.clone(),
+                            self.tx_recycler.clone(),
                             self.shared_last_global_exec_index.clone(),
-                            self.epoch_eth_addresses.clone(), // Multi-epoch committee cache
                         )
                         .await?;
 
@@ -498,9 +490,11 @@ impl CommitProcessor {
                                 global_exec_index,
                                 current_epoch,
                                 executor_client.clone(),
+                                delivery_sender.clone(),
                                 pending_transactions_queue.clone(),
+                                self.epoch_eth_addresses.clone(),
+                                self.tx_recycler.clone(),
                                 self.shared_last_global_exec_index.clone(),
-                                self.epoch_eth_addresses.clone(), // Multi-epoch committee cache
                             )
                             .await?;
 

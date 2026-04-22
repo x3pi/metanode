@@ -29,6 +29,7 @@ pub mod catchup;
 pub mod committee;
 pub mod committee_source;
 pub mod dual_stream;
+pub mod block_delivery;
 pub mod epoch_checkpoint;
 pub mod epoch_monitor;
 pub mod epoch_transition_manager;
@@ -182,16 +183,6 @@ pub struct ConsensusNode {
 
     /// TX recycler for tracking and re-submitting stale TXs
     pub(crate) tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-
-    /// Cold-start flag: set to true when DAG was wiped (snapshot restore).
-    /// When true, the node stays in SyncingUp mode and runs blocking Phase 1
-    /// peer sync first. After sync completes, ConsensusAuthority starts and
-    /// DualStreamController handles the overlap period (Phase 4).
-    pub(crate) cold_start: bool,
-    /// CRITICAL: GEI captured at snapshot restore time (before peer sync).
-    /// Used by mode_transition.rs for cold_start_skip_gei calculation.
-    /// Must be the GEI at snapshot time, NOT after peer sync.
-    pub(crate) cold_start_snapshot_gei: u64,
 }
 
 // ConsensusNode constructors are in consensus_node.rs

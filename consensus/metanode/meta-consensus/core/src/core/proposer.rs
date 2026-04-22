@@ -435,10 +435,10 @@ impl Core {
         // ═══════════════════════════════════════════════════════════════════
         if clock_round > 1 && !self.quorum_ready.load(Ordering::Relaxed) {
             // ═══════════════════════════════════════════════════════════════
-            // COLD-START BYPASS: After snapshot restore, CommitSyncer GC
+            // BOOTSTRAP BYPASS: After snapshot restore, CommitSyncer GC
             // advance jumps the threshold clock from round 1 to 10000+.
             // The quorum gate would block proposals for up to 30s.
-            // During cold-start (no local progress since Core creation),
+            // During bootstrap (no local progress since Core creation),
             // bypass the gate — the node MUST propose to join consensus.
             // ═══════════════════════════════════════════════════════════════
             let local_ci = self.dag_state.read().last_commit_index();
@@ -455,7 +455,7 @@ impl Core {
                 return false;
             }
             debug!(
-                "🔓 [QUORUM GATE] Cold-start bypass: round {} allowed despite quorum not ready \
+                "🔓 [QUORUM GATE] Bootstrap bypass: round {} allowed despite quorum not ready \
                  (local_commit={} <= initial_commit={})",
                 clock_round, local_ci, self.initial_commit_index
             );
@@ -514,14 +514,14 @@ impl Core {
         // generate identical genesis hashes and can safely join consensus mid-epoch.
 
         // ═══════════════════════════════════════════════════════════════════
-        // COLD-START EXEMPTION: After snapshot restore, the DAG is wiped
+        // BOOTSTRAP EXEMPTION: After snapshot restore, the DAG is wiped
         // but local_commit_index may be non-zero (set from snapshot GEI).
         // The node is stuck with massive lag vs quorum, which
-        // would block proposals forever. Detect cold-start by THREE conditions:
-        //   (a) clock_round <= 1: very early cold-start (DAG just created)
+        // would block proposals forever. Detect bootstrap by THREE conditions:
+        //   (a) clock_round <= 1: very early bootstrap (DAG just created)
         //   (b) no_local_progress: local_commit_index hasn't advanced
         //       beyond the initial synthetic value set at Core creation.
-        //       After align_commit_index_with_go or cold_start_advance_gc_round,
+        //       After align_commit_index_with_go or bootstrap_advance_gc_round,
         //       commit_index may be high but ALL from synthetic commits.
         //       The node hasn't produced ANY real local consensus commits.
         //   (c) catching_up: node is in CatchingUp phase (lagging behind network)
@@ -554,20 +554,24 @@ impl Core {
                 current_lag > 100 || (quorum_ci > 0 && (current_lag as f64 / quorum_ci as f64) > 0.10)
             })
             .unwrap_or(false);
-        // COLD-START EXEMPTION: Allow proposing during cold-start when node has no
+        // BOOTSTRAP EXEMPTION: Allow proposing during bootstrap when node has no
         // local progress since startup. Original condition `quorum_commit_index > 200`
-        // failed for small networks where quorum < 200. 
+        // failed for small networks where quorum < 200.
         // SAFETY: Require (a) no local progress since Core creation AND (b) any lag
         // exists. Once node commits anything (local_ci > initial_ci), exemption lifts
         // immediately and normal lag-based sync resumes. This preserves the strict
         // sync guarantee: only brand-new nodes get exemption, not lagging ones.
         // EXTENDED: Also allow proposing when in catching up phase (significant lag)
-        let is_cold_start_with_lag =
-            (clock_round <= 1 || no_local_progress || is_catching_up) && quorum_commit_index > 0 && lag > 0;
-        if is_cold_start_with_lag {
-            // Cold-start: allow proposing despite lag
+        // COLD-START FIX: Also allow when quorum_commit_index <= 1 (network hasn't
+        // reported meaningful commits yet) AND no_local_progress - prevents deadlock
+        // where fresh nodes can't propose because they haven't heard from peers.
+        let is_bootstrap_with_lag = (clock_round <= 1 || no_local_progress || is_catching_up)
+            && ((quorum_commit_index > 1 && lag > 0)
+                || (quorum_commit_index <= 1 && no_local_progress));
+        if is_bootstrap_with_lag {
+            // Bootstrap: allow proposing despite lag
             debug!(
-                "🚀 [COLD-START] Allowing proposal at round {} despite lag={} (clock_round={}, local_commit={}, cold-start bootstrap)",
+                "🚀 [BOOTSTRAP] Allowing proposal at round {} despite lag={} (clock_round={}, local_commit={}, bootstrap)",
                 clock_round, lag, clock_round, local_commit_index
             );
             // Fall through to remaining checks (propagation delay, etc.)
@@ -603,11 +607,11 @@ impl Core {
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // COLD-START EXEMPTION (part 2): After snapshot restore, amnesia
+        // BOOTSTRAP EXEMPTION (part 2): After snapshot restore, amnesia
         // recovery syncs the old last_known_proposed_round from peers (e.g.
         // round 4828). But the fresh DAG starts at round 1, so clock_round(1)
         // <= last_known_proposed_round(4828) → proposal blocked forever.
-        // During cold-start, skip propagation delay and proposed round checks.
+        // During bootstrap, skip propagation delay and proposed round checks.
         //
         // Extended detection: also covers the catch-up window AFTER
         // clock_round advances (once peer blocks are received). Without
@@ -615,12 +619,13 @@ impl Core {
         // blocks push clock_round to 10000+ but local_commit_index hasn't
         // advanced → lag check blocks all subsequent proposals → DEADLOCK.
         // ═══════════════════════════════════════════════════════════════════
-        // Use same safe cold-start condition: nodes with NO local progress
+        // Use same safe bootstrap condition: nodes with NO local progress
         // since startup OR in CatchingUp phase get exemption. This allows
         // lagging nodes to catch up by proposing, preventing deadlock.
-        let is_cold_start = is_cold_start_with_lag;
+        let is_genesis = clock_round <= 1 && quorum_commit_index == 0;
+        let is_bootstrap = is_bootstrap_with_lag || is_genesis;
 
-        if !is_cold_start
+        if !is_bootstrap
             && self.propagation_delay
                 > self
                     .context
@@ -641,7 +646,7 @@ impl Core {
         }
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {
-            if !is_cold_start {
+            if !is_bootstrap {
                 debug!(
                     "Skip proposing for round {clock_round}, last known proposed round has not been synced yet."
                 );
@@ -650,14 +655,14 @@ impl Core {
                     .inc();
                 return false;
             }
-            // Cold-start: allow proposing even without synced proposed round
+            // Bootstrap: allow proposing even without synced proposed round
             debug!(
-                "🚀 [COLD-START] Allowing proposal at round {} without last_known_proposed_round (cold-start bootstrap)",
+                "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round (bootstrap)",
                 clock_round
             );
             return true;
         };
-        if !is_cold_start && clock_round <= last_known_proposed_round {
+        if !is_bootstrap && clock_round <= last_known_proposed_round {
             debug!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"
             );

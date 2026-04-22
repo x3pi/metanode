@@ -32,7 +32,7 @@ use std::{
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STATE MACHINE: Explicit state management for synchronization lifecycle
-// Replaces scattered boolean flags (is_sync_mode, is_severe_lag, cold_start_*)
+// Replaces scattered boolean flags (is_sync_mode, is_severe_lag, bootstrap_*)
 // with a single source of truth for node sync state.
 // ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -403,7 +403,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 self.highest_scheduled_index = Some(fast_forward_to);
 
                 // ═══════════════════════════════════════════════════════════════
-                // We do NOT call `cold_start_advance_gc_round` here anymore because
+                // We do NOT call `bootstrap_advance_gc_round` here anymore because
                 // highest_accepted_round is 0 and we don't know the exact target round!
                 // Instead, we will do it in `handle_fetch_result` when the first payload arrives.
                 // ═══════════════════════════════════════════════════════════════
@@ -626,7 +626,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // RACE FIX: Use `<= 1` instead of `== 0`. After the node proposes its
         // own round-1 block, highest_accepted_round becomes 1. The `== 0` check
         // missed this case, preventing GC advance → all peer blocks stayed
-        // suspended → DEADLOCK. cold_start_advance_gc_round is idempotent
+        // suspended → DEADLOCK. bootstrap_advance_gc_round is idempotent
         // (returns early if new_gc_round <= current_gc_round).
         if self.inner.dag_state.read().highest_accepted_round() <= 1 
             && self.inner.dag_state.read().last_commit_index() == 0 

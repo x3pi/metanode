@@ -146,6 +146,7 @@ pub(super) async fn setup_synconly_sync(
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
     // Use boundary_gei for epoch_base
     let actual_epoch_base = boundary_gei;
@@ -185,14 +186,24 @@ pub(super) async fn setup_synconly_sync(
         .with_epoch_info(new_epoch, actual_epoch_base)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
+        .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
 
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
-    if let Some(c) = exec_client_proc {
-        processor = processor.with_executor_client(c);
+    if let Some(c) = exec_client_proc.clone() {
+        processor = processor.with_executor_client(c.clone());
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                c,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
+        });
     }
 
     tokio::spawn(async move {

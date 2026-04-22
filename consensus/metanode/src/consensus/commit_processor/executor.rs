@@ -21,9 +21,11 @@ pub async fn dispatch_commit(
     global_exec_index: u64,
     epoch: u64,
     executor_client: Option<Arc<ExecutorClient>>,
-    pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
+    _pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
     validator_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    _tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
+    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -245,7 +247,7 @@ pub async fn dispatch_commit(
     //
     // Since Phase 1 (sync_and_execute_blocks), Go's GEI is ALWAYS accurate
     // (reflects actually-executed state, never inflated). This single path
-    // handles all deduplication correctly — no cold_start guard needed.
+    // handles all deduplication correctly.
     //
     // EndOfEpoch commits always pass through for epoch transition safety.
     // ═══════════════════════════════════════════════════════════════════
@@ -278,91 +280,29 @@ pub async fn dispatch_commit(
             }
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // GEI GAP GUARD: Block sending when commit is WAY ahead of Go.
-        //
-        // After snapshot restore, the DAG cold-starts and the first
-        // commit may have GEI=2342 while Go is only at GEI=1575. Sending
-        // this immediately would cause Go to skip ~767 GEIs, resulting
-        // in out-of-order processing and stalled execution.
-        //
-        // Instead, wait for SYNC-FIRST GEI sync (or epoch transition)
-        // to fill the gap. The buffered sender's RESTORE-GAP-BRIDGE
-        // logic handles the actual Go-side advancement.
-        //
-        // Max wait: 60s (300 * 200ms). EndOfEpoch commits bypass.
-        // ═══════════════════════════════════════════════════════════════
-        const MAX_ALLOWED_GEI_GAP: u64 = 200;
-        const GAP_WAIT_INTERVAL_MS: u64 = 200;
-        const MAX_GAP_WAIT_ATTEMPTS: u64 = 300; // 60 seconds
+        if let Some(ref sender) = delivery_sender {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    let validated = crate::node::block_delivery::ValidatedCommit {
+                        subdag: subdag.clone(),
+                        global_exec_index,
+                        epoch,
+                        leader_address: leader_address.clone(),
+                        response_tx,
+                    };
 
-        if global_exec_index > go_current_gei + MAX_ALLOWED_GEI_GAP
-            && go_current_gei > 0
-            && subdag.extract_end_of_epoch_transaction().is_none()
-        {
-            // SNAPSHOT-FIX: Re-read Go GEI right before blocking.
-            // After snapshot restore, Go may have already advanced past this commit
-            // (via sync-first catch-up). If so, skip immediately instead of blocking
-            // the core_thread for 60s (which causes it to shutdown → permanent consensus death).
-            let fresh_go_gei = client.get_last_global_exec_index().await.unwrap_or(0);
-            if fresh_go_gei >= global_exec_index {
-                info!(
-                    "⏭️ [GEI GAP GUARD] Fresh check: Go GEI={} already >= commit GEI={}. Skipping (snapshot catch-up).",
-                    fresh_go_gei, global_exec_index
-                );
-                return Ok(1);
-            }
+                    if let Err(e) = sender.send(validated).await {
+                        error!("🚨 [FATAL] Failed to send commit to DeliveryManager: {}", e);
+                        anyhow::bail!("DeliveryManager channel closed.");
+                    }
 
-            info!(
-                    "⏳ [GEI GAP GUARD] Commit GEI={} is {} ahead of Go GEI={}. Waiting for gap to close...",
-                    global_exec_index, global_exec_index - fresh_go_gei, fresh_go_gei
-                );
+                    let geis_consumed = match response_rx.await {
+                        Ok(c) => c,
+                        Err(_) => {
+                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                            anyhow::bail!("DeliveryManager response channel closed.");
+                        }
+                    };
 
-            for attempt in 0..MAX_GAP_WAIT_ATTEMPTS {
-                tokio::time::sleep(tokio::time::Duration::from_millis(GAP_WAIT_INTERVAL_MS)).await;
-                let current_go_gei = client.get_last_global_exec_index().await.unwrap_or(0);
-
-                if global_exec_index <= current_go_gei + MAX_ALLOWED_GEI_GAP {
-                    info!(
-                            "✅ [GEI GAP GUARD] Gap closed! Go GEI={}, commit GEI={}, gap={}. Proceeding after {}ms.",
-                            current_go_gei, global_exec_index,
-                            global_exec_index.saturating_sub(current_go_gei),
-                            (attempt + 1) * GAP_WAIT_INTERVAL_MS
-                        );
-                    break;
-                }
-
-                // Re-check if Go already processed this commit
-                if current_go_gei >= global_exec_index {
-                    info!(
-                            "⏭️ [GEI GAP GUARD] Go caught up past commit: Go GEI={} >= commit GEI={}. Skipping.",
-                            current_go_gei, global_exec_index
-                        );
-                    return Ok(1);
-                }
-
-                if attempt % 25 == 0 {
-                    warn!(
-                            "⏳ [GEI GAP GUARD] Still waiting: commit GEI={}, Go GEI={}, gap={}, elapsed={}s",
-                            global_exec_index, current_go_gei,
-                            global_exec_index.saturating_sub(current_go_gei),
-                            (attempt + 1) * GAP_WAIT_INTERVAL_MS / 1000
-                        );
-                }
-            }
-        }
-    }
-
-    if let Some(ref client) = executor_client {
-        // leader_address already calculated and validated above
-
-        let mut retry_count = 0;
-        let geis_consumed: u64 = loop {
-            match client
-                .send_committed_subdag(subdag, epoch, global_exec_index, leader_address.clone())
-                .await
-            {
-                Ok(geis_consumed) => {
                     trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
                                 batch_id, global_exec_index, commit_index, geis_consumed);
 
@@ -446,7 +386,7 @@ pub async fn dispatch_commit(
                                         warn!("⚠️ [TX TRACKING DEFERRED] Semaphore full (64 tasks in-flight). Dropping deferred tracking for commit #{}.", deferred_commit_index);
                                     }
                                 }
-                                break geis_consumed; // Exit retry loop, commit was sent successfully
+                                return Ok(geis_consumed);
                             }
                         };
                         let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
@@ -517,45 +457,11 @@ pub async fn dispatch_commit(
                         }
                     }
 
-                    break geis_consumed;
+                    return Ok(geis_consumed);
+                } else {
+                    tracing::error!("🚨 [FATAL] delivery_sender is None in dispatch_commit. Cannot process commit.");
+                    anyhow::bail!("delivery_sender missing.");
                 }
-                Err(e) => {
-                    // Case 1: Duplicate index - Critical Fork Safety check
-                    if e.to_string().contains("Duplicate global_exec_index") {
-                        error!("🚨 [FORK-SAFETY] Duplicate global_exec_index={} detected! Skipping commit {} to prevent fork. Error: {}", 
-                                    global_exec_index, commit_index, e);
-                        break 1;
-                    }
-
-                    // Case 2: System Transaction (EndOfEpoch) failed - Retry needed
-                    if has_system_tx {
-                        retry_count += 1;
-                        error!("🚨 [CRITICAL] Failed to send commit {} containing EndOfEpoch transaction (Attempt {}). Retrying in 1s... Error: {}", 
-                                    commit_index, retry_count, e);
-
-                        sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-
-                    // Case 3: Regular transaction failure
-                    warn!("⚠️  [TX FLOW] Failed to send committed subdag: {}", e);
-                    if let Some(ref queue) = pending_transactions_queue {
-                        super::epoch::queue_commit_transactions_for_next_epoch(
-                            subdag,
-                            queue,
-                            commit_index,
-                            global_exec_index,
-                            epoch,
-                        )
-                        .await;
-                    } else {
-                        warn!("⚠️  [TX FLOW] No pending_transactions_queue - transactions may be lost!");
-                    }
-                    break 1;
-                }
-            }
-        };
-        return Ok(geis_consumed);
     } else {
         info!("ℹ️  [TX FLOW] Executor client not enabled, skipping send");
     }
