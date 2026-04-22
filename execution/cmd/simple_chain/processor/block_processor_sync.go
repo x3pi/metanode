@@ -67,7 +67,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 					pendingBlocks[globalExecIndex] = epochData
 					return
 				}
-			} else if gapSize > 200 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
+			} else if gapSize > 20 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
 				// SNAPSHOT-RESTORE GAP BRIDGE (same as full-path, see line ~420)
 				*nextExpectedGlobalExecIndex = globalExecIndex
 				*currentBlockNumber = actualLastBlockDB
@@ -400,7 +400,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 			logger.Info("📋 [EPOCH-GAP-SKIP] Fresh start gap skip: nextExpected=%d → %d (DB=0, gap=%d, first block at GEI=%d)",
 				oldExpected, globalExecIndex, gapSize, globalExecIndex)
 			// Fall through to process the block
-		} else if gapSize > 200 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
+		} else if gapSize > 20 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
 			// ═══════════════════════════════════════════════════════════════
 			// SNAPSHOT-RESTORE GAP BRIDGE (Apr 2026):
 			//

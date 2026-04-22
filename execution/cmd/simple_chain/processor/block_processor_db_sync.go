@@ -25,7 +25,7 @@ import (
 // consensus, but when node is SyncOnly and only receiving empty commits, the fast-path
 // may not trigger frequently enough or may be blocked by stateRoot checks.
 func (bp *BlockProcessor) syncLastBlockFromDB() {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for range ticker.C {

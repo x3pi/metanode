@@ -141,10 +141,10 @@ impl ConsensusNode {
         // SNAPSHOT RESTORE FIX: Go Master needs time to load DB after snapshot restore.
         // Without retry, Rust gets block=0/epoch=0 and initializes consensus at epoch 0,
         // making it permanently stuck and unable to catch up with the cluster.
-        // Retry up to 30 times (2s intervals = 60s max) waiting for Go to report block > 0.
+        // Retry up to 30 times (500ms intervals = 15s max) waiting for Go to report block > 0.
         let latest_block_number = {
             let max_retries = 30;
-            let retry_interval = std::time::Duration::from_secs(2);
+            let retry_interval = std::time::Duration::from_millis(500);
             let mut block_num = 0u64;
 
             for attempt in 1..=max_retries {
@@ -205,7 +205,7 @@ impl ConsensusNode {
             // Go should also report epoch > 0. Retry until epoch matches.
             let epoch = if latest_block_number > 0 {
                 let max_epoch_retries = 30;
-                let retry_interval = std::time::Duration::from_secs(2);
+                let retry_interval = std::time::Duration::from_millis(500);
                 let mut final_epoch = 0u64;
 
                 for attempt in 1..=max_epoch_retries {

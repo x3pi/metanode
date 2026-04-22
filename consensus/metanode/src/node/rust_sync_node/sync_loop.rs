@@ -50,6 +50,9 @@ impl RustSyncNode {
         let mut consecutive_errors: u32 = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 5;
         let mut last_sync_got_blocks = false; // Track if last sync fetched any blocks
+        // STARTUP OPTIMIZATION: Force turbo mode for first 30s after startup
+        // to minimize catch-up delay after snapshot restore
+        let startup_time = Instant::now();
 
         loop {
             // Determine if we're catching up (behind network)
@@ -62,7 +65,7 @@ impl RustSyncNode {
             let rust_epoch = self.current_epoch.load(Ordering::SeqCst);
             let epoch_behind = rust_epoch < go_epoch;
 
-            let new_turbo = catching_up || epoch_behind;
+            let new_turbo = catching_up || epoch_behind || startup_time.elapsed() < Duration::from_secs(30);
             if new_turbo != is_turbo_mode {
                 is_turbo_mode = new_turbo;
                 if is_turbo_mode {
