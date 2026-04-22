@@ -52,19 +52,19 @@ echo "=================================================="
 # ----------------------------------------------------
 # BƯỚC 1: Xóa genesis cũ và tạo file genesis mới
 # ----------------------------------------------------
-# if should_run 1; then
-#     echo ""
-#     echo "📌 BƯỚC 1: Prepare Genesis & Gen Spam Keys..."
-#     cd "$PROJECT_ROOT/cmd/simple_chain"
-#     echo "  -> Xóa genesis.json và copy từ genesis-main.json..."
-#     rm -f genesis.json
-#     cp genesis-main.json genesis.json
+if should_run 1; then
+    echo ""
+    echo "📌 BƯỚC 1: Prepare Genesis & Gen Spam Keys..."
+    cd "$PROJECT_ROOT/cmd/simple_chain"
+    echo "  -> Xóa genesis.json và copy từ genesis-main.json..."
+    rm -f genesis.json
+    cp genesis-main.json genesis.json
 
-#     cd "$PROJECT_ROOT/cmd/tool/test_tps/gen_spam_keys"
-#     echo "  -> Chạy Gen Spam Keys (count 50000)..."
-#     go run main.go --count 50000
-#     if [ $? -ne 0 ]; then echo "❌ Lỗi ở Bước 1"; exit 1; fi
-# fi
+    cd "$PROJECT_ROOT/cmd/tool/test_tps/gen_spam_keys"
+    echo "  -> Chạy Gen Spam Keys (count 50000)..."
+    go run main.go --count 50000
+    if [ $? -ne 0 ]; then echo "❌ Lỗi ở Bước 1"; exit 1; fi
+fi
 
 # ----------------------------------------------------
 # BƯỚC 2: Triển khai Cụm
@@ -74,7 +74,7 @@ if should_run 2; then
     echo "📌 BƯỚC 2: Triển khai cụm Cluster (deploy_cluster.sh)..."
     if [ "$DEPLOY_MODE" == "single" ]; then
         cd "$METANODE_SCRIPT_DIR/.."
-        ./mtn-orchestrator.sh restart --fresh --build-all
+        ./mtn-orchestrator.sh restart --fresh --build-all --exclude-node 4
         if [ $? -ne 0 ]; then echo "❌ Lỗi khi Deploy Cluster Mạng Lớn ở Bước 2"; exit 1; fi
     else
         cd "$METANODE_SCRIPT_DIR"

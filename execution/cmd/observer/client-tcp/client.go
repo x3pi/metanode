@@ -207,7 +207,6 @@ func NewClientNonBlocking(
 		clientContext.KeyPair,
 		clientContext.ConnectionsManager,
 		clientContext.Handler,
-		config.NodeType(),
 		config.Version(),
 	)
 	client.transactionController = controllers.NewTransactionController(clientContext)
