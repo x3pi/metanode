@@ -407,6 +407,7 @@ where
             Some(adaptive_delay_state.clone()),
             system_transaction_provider, // System transaction provider for Sui-style epoch transition
             quorum_ready.clone(),
+            coordination_hub.clone(),
         );
 
         let (core_dispatcher, core_thread_handle) =

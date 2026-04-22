@@ -372,10 +372,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // validate vote blocks from the current epoch.
         // ═══════════════════════════════════════════════════════════════════════
         let highest_accepted_round = self.inner.dag_state.read().highest_accepted_round();
-        // RACE FIX: Use `<= 1` instead of `== 0`. If Core proposes a round-1
-        // block before CommitSyncer's first tick (e.g., sync_last_known_own_block
-        // completes fast), highest_accepted_round becomes 1 and the `== 0` check
-        // was skipped — leaving the node stuck forever with synced_commit_index=0.
         // Also require local_commit_index==0 to avoid re-triggering in normal operation.
         if highest_accepted_round <= 1 && local_commit_index == 0 && quorum_commit_index > 0 {
             // SNAPSHOT RESTORE: Fast-forward to the current quorum. Historical
@@ -397,16 +393,28 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         self.synced_commit_index, fast_forward_to, quorum_commit_index
                     );
                 }
+                
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::FastForwarding);
+                
+                // We advance the DAG baseline immediately so the node doesn't get flooded
+                // with suspended blocks while waiting for fetches. We use quorum_commit_index 
+                // as a proxy for the round, since round >= commit_index in a DAG.
+                self.inner
+                    .dag_state
+                    .write()
+                    .reset_to_network_baseline(fast_forward_to as u32, fast_forward_to.saturating_sub(1), crate::commit::CommitDigest::MIN);
+                
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
+                tracing::info!(
+                    "🚀 [COMMIT_SYNCER] Baseline reset complete in try_schedule. Transitioned {:?} -> {:?}",
+                    crate::coordination_hub::NodeConsensusPhase::FastForwarding,
+                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                );
+
                 self.synced_commit_index = fast_forward_to;
                 // Cancel any pending/scheduled fetches for historical ranges that will fail
                 self.pending_fetches.clear();
                 self.highest_scheduled_index = Some(fast_forward_to);
-
-                // ═══════════════════════════════════════════════════════════════
-                // We do NOT call `bootstrap_advance_gc_round` here anymore because
-                // highest_accepted_round is 0 and we don't know the exact target round!
-                // Instead, we will do it in `handle_fetch_result` when the first payload arrives.
-                // ═══════════════════════════════════════════════════════════════
             }
         }
 
@@ -616,46 +624,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         );
 
         // ═══════════════════════════════════════════════════════════════════════
-        // COLD-START GC ADVANCE: The DAG is empty (highest_accepted_round = 0).
-        // ALL incoming HEAD blocks (round 10k+) need ancestors → they all
-        // suspend → buffer fills → DEADLOCK.
-        // By looking at the leader round of the FIRST commits we fetch from peers,
-        // we instantly know the network's HEAD round! We advance gc_round to this
-        // round, causing all historical blocks to be GC'd instead of fetched.
+        // COLD-START GC ADVANCE: Handled earlier in try_schedule_once
         // ═══════════════════════════════════════════════════════════════════════
-        // RACE FIX: Use `<= 1` instead of `== 0`. After the node proposes its
-        // own round-1 block, highest_accepted_round becomes 1. The `== 0` check
-        // missed this case, preventing GC advance → all peer blocks stayed
-        // suspended → DEADLOCK. bootstrap_advance_gc_round is idempotent
-        // (returns early if new_gc_round <= current_gc_round).
-        if self.inner.dag_state.read().highest_accepted_round() <= 1 
-            && self.inner.dag_state.read().last_commit_index() == 0 
-        {
-            let highest_commit_round = certified_commits
-                .commits()
-                .iter()
-                .map(|c| c.leader().round)
-                .max()
-                .unwrap_or(0);
-            let first_commit_index = certified_commits.commits().first().map(|c| c.index()).unwrap_or(0);
-            let baseline_digest = certified_commits.commits().first().map(|c| c.previous_digest()).unwrap_or(crate::commit::CommitDigest::MIN);
-            if highest_commit_round > 0 {
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::FastForwarding);
-                self.inner
-                    .dag_state
-                    .write()
-                    .reset_to_network_baseline(highest_commit_round, first_commit_index.saturating_sub(1), baseline_digest);
-                
-                // Transition to CatchingUp immediately after baseline reset
-                // The node is now ready to aggressively fetch missing commits
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
-                tracing::info!(
-                    "🚀 [COMMIT_SYNCER] Baseline reset complete. Transitioned {:?} -> {:?}",
-                    crate::coordination_hub::NodeConsensusPhase::FastForwarding,
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                );
-            }
-        }
 
         self.highest_fetched_commit_index = self.highest_fetched_commit_index.max(commit_end);
         metrics

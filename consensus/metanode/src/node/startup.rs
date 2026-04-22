@@ -598,11 +598,27 @@ impl InitializedNode {
                 info!(
                     "✅ [STARTUP] Catch-up complete. Starting ConsensusAuthority for Validator..."
                 );
-                let (new_epoch, new_exec_index, executor_client_opt, peer_rpc_addresses) = {
+                let (new_epoch, new_exec_index, go_last_block, executor_client_opt, peer_rpc_addresses) = {
                     let node_guard = self.node.lock().await;
+                    // CRITICAL: Get Go's actual block number for state verification.
+                    // last_global_exec_index is a DAG commit counter (e.g. 4629),
+                    // NOT a Go block number (e.g. 110). Using GEI as block number
+                    // causes get_blocks_range to request non-existent blocks → FATAL.
+                    let go_block = if let Some(ref client) = node_guard.executor_client {
+                        match client.get_last_block_number().await {
+                            Ok((block, _gei, _ready)) => block,
+                            Err(e) => {
+                                warn!("⚠️ [STATE VERIFY] Could not query Go block number: {}. Falling back to 0.", e);
+                                0
+                            }
+                        }
+                    } else {
+                        0
+                    };
                     (
                         node_guard.current_epoch,
                         node_guard.last_global_exec_index,
+                        go_block,
                         node_guard.executor_client.clone(),
                         self.node_config.peer_rpc_addresses.clone(),
                     )
@@ -610,20 +626,23 @@ impl InitializedNode {
 
                 // ═══════════════════════════════════════════════════════════════
                 // Phase 2.5: STATE VERIFICATION GATE
+                // CRITICAL: Use go_last_block (actual Go block number), NOT
+                // new_exec_index (global_exec_index / DAG commit counter).
+                // These are different counters: block=110, gei=4629.
                 // ═══════════════════════════════════════════════════════════════
-                if new_exec_index > 0 && !peer_rpc_addresses.is_empty() {
+                if go_last_block > 0 && !peer_rpc_addresses.is_empty() {
                     info!(
-                        "🔍 [STATE VERIFY] Starting State Verification Gate for block {}...",
-                        new_exec_index
+                        "🔍 [STATE VERIFY] Starting State Verification Gate for block {} (exec_index={})...",
+                        go_last_block, new_exec_index
                     );
                     let mut state_verified = false;
                     let mut retry_count = 0;
 
                     while !state_verified && retry_count < 3 {
-                        // 1. Get LOCAL state root
+                        // 1. Get LOCAL state root (using actual Go block number, NOT exec_index)
                         let mut local_state_root = vec![];
                         if let Some(ref client) = executor_client_opt {
-                            if let Ok(blocks) = client.get_blocks_range(new_exec_index, new_exec_index).await {
+                            if let Ok(blocks) = client.get_blocks_range(go_last_block, go_last_block).await {
                                 if let Some(local_block) = blocks.first() {
                                     local_state_root = local_block.state_root.clone();
                                 }
@@ -631,7 +650,46 @@ impl InitializedNode {
                         }
 
                         if local_state_root.is_empty() {
-                            warn!("⚠️ [STATE VERIFY] Could not fetch local state root for block {}. Retrying...", new_exec_index);
+                            warn!("⚠️ [STATE VERIFY] Local Go missing block {}. Attempting to fetch from peers and sync...", go_last_block);
+                            // ═══════════════════════════════════════════════════════════════════
+                            // CRITICAL FIX: Go may have last_block_number counter but missing
+                            // actual block data (due to snapshot corruption or incomplete sync).
+                            // Fetch the missing block from peers and sync to Go before retrying.
+                            // ═══════════════════════════════════════════════════════════════════
+                            let mut synced = false;
+                            for peer in &peer_rpc_addresses {
+                                match crate::network::peer_rpc::fetch_blocks_from_peer(&[peer.clone()], go_last_block, go_last_block).await {
+                                    Ok(blocks) if !blocks.is_empty() => {
+                                        if let Some(peer_block) = blocks.first() {
+                                            info!("📥 [STATE VERIFY] Fetched block {} from peer {}, syncing to local Go...", go_last_block, peer);
+                                            // Sync block to local Go
+                                            if let Some(ref client) = executor_client_opt {
+                                                match client.sync_blocks(blocks).await {
+                                                    Ok((count, _last)) => {
+                                                        info!("✅ [STATE VERIFY] Synced {} blocks to Go, retrying verification...", count);
+                                                        synced = true;
+                                                        break;
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("⚠️ [STATE VERIFY] Failed to sync block to Go: {}", e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!("⚠️ [STATE VERIFY] Failed to fetch block {} from peer {}: {}", go_last_block, peer, e);
+                                    }
+                                }
+                            }
+                            
+                            if synced {
+                                // Retry immediately after sync
+                                continue;
+                            }
+                            
+                            warn!("⚠️ [STATE VERIFY] Could not fetch local state root for block {} and peer sync failed. Retrying...", go_last_block);
                             retry_count += 1;
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             continue;
@@ -643,14 +701,14 @@ impl InitializedNode {
                         } else {
                             local_root_hex.clone()
                         };
-                        info!("🔍 [STATE VERIFY] Local StateRoot at block {}: {}", new_exec_index, local_root_preview);
+                        info!("🔍 [STATE VERIFY] Local StateRoot at block {}: {}", go_last_block, local_root_preview);
 
-                        // 2. Get NETWORK state root
+                        // 2. Get NETWORK state root (same block number from peers)
                         let mut match_count = 0;
                         let mut peer_roots = std::collections::HashMap::new();
 
                         for peer in &peer_rpc_addresses {
-                            if let Ok(blocks) = crate::network::peer_rpc::fetch_blocks_from_peer(&[peer.clone()], new_exec_index, new_exec_index).await {
+                            if let Ok(blocks) = crate::network::peer_rpc::fetch_blocks_from_peer(&[peer.clone()], go_last_block, go_last_block).await {
                                 if let Some(peer_block) = blocks.first() {
                                     if peer_block.state_root.is_empty() { continue; }
                                     let peer_root_hex = hex::encode(&peer_block.state_root);
@@ -668,14 +726,14 @@ impl InitializedNode {
                         let required_matches = std::cmp::max(1, f * 2 + 1);
 
                         if match_count >= required_matches {
-                            info!("✅ [STATE VERIFY] PASS! Local stateRoot matches {} peers (required: {}).", match_count, required_matches);
+                            info!("✅ [STATE VERIFY] PASS! Local stateRoot at block {} matches {} peers (required: {}).", go_last_block, match_count, required_matches);
                             state_verified = true;
                         } else if peer_roots.is_empty() {
-                            warn!("⚠️ [STATE VERIFY] Could not fetch stateRoot from any peers.");
+                            warn!("⚠️ [STATE VERIFY] Could not fetch stateRoot from any peers for block {}.", go_last_block);
                             retry_count += 1;
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         } else {
-                            warn!("🚨 [STATE VERIFY] FAIL! Local stateRoot {} matched only {} peers (required: {}).", local_root_preview, match_count, required_matches);
+                            warn!("🚨 [STATE VERIFY] FAIL! Local stateRoot {} at block {} matched only {} peers (required: {}).", local_root_preview, go_last_block, match_count, required_matches);
                             for (root, count) in peer_roots {
                                 let root_preview = if root.len() > 16 { format!("{}...", &root[..16]) } else { root };
                                 warn!("   Network Root: {} ({} peers)", root_preview, count);
@@ -689,8 +747,8 @@ impl InitializedNode {
                     }
 
                     if !state_verified {
-                        error!("❌ [STATE VERIFY] FATAL ERROR: Node has diverged from network state. Halting before joining consensus!");
-                        return Err(anyhow::anyhow!("State verification failed at block {}", new_exec_index));
+                        error!("❌ [STATE VERIFY] FATAL ERROR: Node has diverged from network state at block {} (exec_index={})! Halting before joining consensus!", go_last_block, new_exec_index);
+                        return Err(anyhow::anyhow!("State verification failed at block {} (exec_index={})", go_last_block, new_exec_index));
                     }
                 } else if peer_rpc_addresses.is_empty() {
                     info!("⏭️ [STATE VERIFY] SKIPPING: No peers configured.");

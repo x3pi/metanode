@@ -417,36 +417,25 @@ impl Core {
         let core_skipped_proposals = &self.context.metrics.node_metrics.core_skipped_proposals;
 
         // ═══════════════════════════════════════════════════════════════════
-        // QUORUM GATE: Prevents startup forks by gating round 2+ proposals
-        // until we've heard from enough peers (quorum_threshold).
-        //
-        // Round 1 proposals are ALWAYS allowed — this is critical because:
-        //   1. Round 1 blocks flow freely through the network
-        //   2. Peers update highest_received_rounds when they receive them
-        //   3. The quorum monitor detects enough peers from these updates
-        //   4. It then sets quorum_ready=true, unlocking round 2+ proposals
-        //
-        // Without this, ALL proposals are blocked → no blocks sent →
-        // highest_received_rounds never updates → DEADLOCK.
-        //
-        // Commits require round 3+ blocks, so gating round 2 is sufficient
-        // to prevent isolated subgroups from committing divergent leaders.
-        // Once quorum_ready latches to true, it stays true permanently.
+        // QUORUM GATE: Check if the node is in its initial boot (no prior DAG).
+        // If it is, require quorum readiness before proposing round 2+ blocks.
+        // Restarting nodes (boot_counter > 0) bypass this gate entirely since 
+        // they are already known to the network.
         // ═══════════════════════════════════════════════════════════════════
         if clock_round > 1 && !self.quorum_ready.load(Ordering::Relaxed) {
-            // ═══════════════════════════════════════════════════════════════
-            // BOOTSTRAP BYPASS: After snapshot restore, CommitSyncer GC
-            // advance jumps the threshold clock from round 1 to 10000+.
-            // The quorum gate would block proposals for up to 30s.
-            // During bootstrap (no local progress since Core creation),
-            // bypass the gate — the node MUST propose to join consensus.
-            // ═══════════════════════════════════════════════════════════════
+            // Check if this is the very first boot of the node
             let local_ci = self.dag_state.read().last_commit_index();
             let no_progress = local_ci <= self.initial_commit_index;
-            if !no_progress {
+            
+            // Only enforce quorum gate on initial bootstrap. Restarting nodes
+            // can safely bypass this to immediately join consensus.
+            let highest_accepted_round_at_start = self.dag_state.read().highest_accepted_round();
+            let is_initial_boot = highest_accepted_round_at_start == 0;
+            
+            if is_initial_boot && no_progress {
                 debug!(
                     "🔒 [QUORUM GATE] Round {} proposals blocked: waiting for peer quorum \
-                     (round 1 allowed freely to bootstrap peer detection)",
+                     (initial boot, round 1 allowed freely to bootstrap peer detection)",
                     clock_round
                 );
                 core_skipped_proposals
@@ -454,176 +443,29 @@ impl Core {
                     .inc();
                 return false;
             }
-            debug!(
-                "🔓 [QUORUM GATE] Bootstrap bypass: round {} allowed despite quorum not ready \
-                 (local_commit={} <= initial_commit={})",
-                clock_round, local_ci, self.initial_commit_index
-            );
         }
 
-        // CRITICAL: Check if node is lagging and prioritize sync over consensus
-        // When lag is significant, skip proposing new blocks to focus on syncing commits
-        let local_commit_index = self.dag_state.read().last_commit_index();
-        let quorum_commit_index = self
-            .context
-            .metrics
-            .node_metrics
-            .commit_sync_quorum_index
-            .get() as u32;
-
-        // Thresholds for skipping consensus when lagging:
-        // - MODERATE_LAG: 100 commits or 10% behind quorum -> skip consensus, prioritize sync
-        // - SEVERE_LAG: 200 commits or 15% behind quorum -> aggressively skip consensus
-        const MODERATE_LAG_THRESHOLD: u32 = 100; // Skip consensus if lag > 100 commits
-        const SEVERE_LAG_THRESHOLD: u32 = 200; // Aggressively skip consensus if lag > 200 commits
-        const MODERATE_LAG_PERCENTAGE: f64 = 10.0; // Skip consensus if lag > 10% of quorum
-        const SEVERE_LAG_PERCENTAGE: f64 = 15.0; // Aggressively skip if lag > 15% of quorum
-
-        // HYSTERESIS: To prevent oscillation, use lower threshold when recovering from sync mode
-        // When lag was high and is now decreasing, require lag to drop below 80% of threshold
-        // before resuming consensus. This ensures smooth transition back to consensus.
-        const HYSTERESIS_FACTOR: f64 = 0.8; // Resume consensus when lag < 80% of threshold
-
-        let lag = quorum_commit_index.saturating_sub(local_commit_index);
-        let lag_percentage = if quorum_commit_index > 0 {
-            (lag as f64 / quorum_commit_index as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        // Check if we should skip consensus
-        // Use hysteresis: if we were in sync mode, require lag to drop below 80% of threshold
-        let moderate_lag_threshold_with_hysteresis =
-            (MODERATE_LAG_THRESHOLD as f64 * HYSTERESIS_FACTOR) as u32;
-        let moderate_lag_percentage_with_hysteresis = MODERATE_LAG_PERCENTAGE * HYSTERESIS_FACTOR;
-
-        // Determine if we should skip consensus
-        // If lag is above threshold OR above hysteresis threshold (for smooth recovery)
-        let should_skip_consensus =
-            lag > MODERATE_LAG_THRESHOLD || lag_percentage > MODERATE_LAG_PERCENTAGE;
-        let is_severe_lag = lag > SEVERE_LAG_THRESHOLD || lag_percentage > SEVERE_LAG_PERCENTAGE;
-
-        // Check if we're recovering (lag was high but now decreasing)
-        let is_recovering = lag <= moderate_lag_threshold_with_hysteresis
-            && lag_percentage <= moderate_lag_percentage_with_hysteresis;
-
-        // CRITICAL FORK-PREVENTION: The "Fresh DAG" rule was REMOVED.
-        // Previously, we blocked nodes with a fresh DAG from proposing to prevent forks
-        // caused by mismatched genesis blocks. However, the genesis timestamp is now
-        // unified and strictly matches the network's timestamp. Restored nodes will
-        // generate identical genesis hashes and can safely join consensus mid-epoch.
-
         // ═══════════════════════════════════════════════════════════════════
-        // BOOTSTRAP EXEMPTION: After snapshot restore, the DAG is wiped
-        // but local_commit_index may be non-zero (set from snapshot GEI).
-        // The node is stuck with massive lag vs quorum, which
-        // would block proposals forever. Detect bootstrap by THREE conditions:
-        //   (a) clock_round <= 1: very early bootstrap (DAG just created)
-        //   (b) no_local_progress: local_commit_index hasn't advanced
-        //       beyond the initial synthetic value set at Core creation.
-        //       After align_commit_index_with_go or bootstrap_advance_gc_round,
-        //       commit_index may be high but ALL from synthetic commits.
-        //       The node hasn't produced ANY real local consensus commits.
-        //   (c) catching_up: node is in CatchingUp phase (lagging behind network)
-        //       This covers the case where node made some progress then fell
-        //       behind significantly - it MUST propose to catch up.
-        //
-        // Proposing is ESSENTIAL: the node must create DAG blocks to
-        // participate in consensus. Without this exemption there's a
-        // deadlock: no proposals → no commits → lag never decreases.
-        //
-        // Once local_commit_index advances beyond initial_commit_index
-        // (meaning the node successfully joined consensus and committed),
-        // the exemption is lifted and normal lag management resumes.
+        // UNIFIED PHASE CHECK: Delegate all lag and bootstrap management to
+        // the ConsensusCoordinationHub. Proposer only cares if the node is
+        // actively participating (Healthy) or aggressively syncing (CatchingUp).
         // ═══════════════════════════════════════════════════════════════════
-        let no_local_progress = local_commit_index <= self.initial_commit_index;
-        // Check if we're in catching up phase (significant lag)
-        let is_catching_up = self
-            .adaptive_delay_state
-            .as_ref()
-            .map(|_ads| {
-                let quorum_ci = self
-                    .context
-                    .metrics
-                    .node_metrics
-                    .commit_sync_quorum_index
-                    .get() as u32;
-                let local_ci = local_commit_index;
-                let current_lag = quorum_ci.saturating_sub(local_ci);
-                // CatchingUp if lag > 100 commits or > 10%
-                current_lag > 100 || (quorum_ci > 0 && (current_lag as f64 / quorum_ci as f64) > 0.10)
-            })
-            .unwrap_or(false);
-        // BOOTSTRAP EXEMPTION: Allow proposing during bootstrap when node has no
-        // local progress since startup. Original condition `quorum_commit_index > 200`
-        // failed for small networks where quorum < 200.
-        // SAFETY: Require (a) no local progress since Core creation AND (b) any lag
-        // exists. Once node commits anything (local_ci > initial_ci), exemption lifts
-        // immediately and normal lag-based sync resumes. This preserves the strict
-        // sync guarantee: only brand-new nodes get exemption, not lagging ones.
-        // EXTENDED: Also allow proposing when in catching up phase (significant lag)
-        // COLD-START FIX: Also allow when quorum_commit_index <= 1 (network hasn't
-        // reported meaningful commits yet) AND no_local_progress - prevents deadlock
-        // where fresh nodes can't propose because they haven't heard from peers.
-        let is_bootstrap_with_lag = (clock_round <= 1 || no_local_progress || is_catching_up)
-            && ((quorum_commit_index > 1 && lag > 0)
-                || (quorum_commit_index <= 1 && no_local_progress));
-        if is_bootstrap_with_lag {
-            // Bootstrap: allow proposing despite lag
+        if !self.coordination_hub.is_healthy() && !self.coordination_hub.is_catching_up() {
             debug!(
-                "🚀 [BOOTSTRAP] Allowing proposal at round {} despite lag={} (clock_round={}, local_commit={}, bootstrap)",
-                clock_round, lag, clock_round, local_commit_index
+                "Skip proposing for round {}: node is in phase {:?}",
+                clock_round, self.coordination_hub.get_phase()
             );
-            // Fall through to remaining checks (propagation delay, etc.)
-        } else if should_skip_consensus {
-            if is_severe_lag {
-                // Severe lag: Skip consensus aggressively
-                debug!(
-                    "Skip proposing for round {} due to severe lag: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Prioritizing sync over consensus.",
-                    clock_round, lag, lag_percentage, local_commit_index, quorum_commit_index
-                );
-                core_skipped_proposals
-                    .with_label_values(&["severe_lag_prioritize_sync"])
-                    .inc();
-            } else {
-                // Moderate lag: Skip consensus to prioritize sync
-                debug!(
-                    "Skip proposing for round {} due to moderate lag: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Prioritizing sync over consensus.",
-                    clock_round, lag, lag_percentage, local_commit_index, quorum_commit_index
-                );
-                core_skipped_proposals
-                    .with_label_values(&["moderate_lag_prioritize_sync"])
-                    .inc();
-            }
+            core_skipped_proposals
+                .with_label_values(&["invalid_phase"])
+                .inc();
             return false;
         }
 
-        // If we're recovering from sync mode (lag dropped below hysteresis threshold), log transition
-        if is_recovering && lag > 0 {
-            info!(
-                "✅ [CONSENSUS-RESUME] Resuming consensus after catch-up: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Node has caught up, returning to normal consensus mode.",
-                lag, lag_percentage, local_commit_index, quorum_commit_index
-            );
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // BOOTSTRAP EXEMPTION (part 2): After snapshot restore, amnesia
-        // recovery syncs the old last_known_proposed_round from peers (e.g.
-        // round 4828). But the fresh DAG starts at round 1, so clock_round(1)
-        // <= last_known_proposed_round(4828) → proposal blocked forever.
-        // During bootstrap, skip propagation delay and proposed round checks.
-        //
-        // Extended detection: also covers the catch-up window AFTER
-        // clock_round advances (once peer blocks are received). Without
-        // this, the node's first round-1 proposal succeeds, then peer
-        // blocks push clock_round to 10000+ but local_commit_index hasn't
-        // advanced → lag check blocks all subsequent proposals → DEADLOCK.
-        // ═══════════════════════════════════════════════════════════════════
-        // Use same safe bootstrap condition: nodes with NO local progress
-        // since startup OR in CatchingUp phase get exemption. This allows
-        // lagging nodes to catch up by proposing, preventing deadlock.
-        let is_genesis = clock_round <= 1 && quorum_commit_index == 0;
-        let is_bootstrap = is_bootstrap_with_lag || is_genesis;
+        // Determine if node is in bootstrap phase (restarted but hasn't made local progress yet).
+        // During bootstrap, we MUST bypass overload and equivocation checks, otherwise 
+        // the node's initial round-1 clocks will stall against the old last_known_proposed_round.
+        let local_ci = self.dag_state.read().last_commit_index();
+        let is_bootstrap = local_ci <= self.initial_commit_index;
 
         if !is_bootstrap
             && self.propagation_delay
@@ -662,6 +504,7 @@ impl Core {
             );
             return true;
         };
+        
         if !is_bootstrap && clock_round <= last_known_proposed_round {
             debug!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"

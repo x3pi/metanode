@@ -115,6 +115,8 @@ pub(crate) struct Core {
     ///   no proposals → no commits → lag never decreases → proposals blocked.
     /// ═══════════════════════════════════════════════════════════════════
     pub(crate) initial_commit_index: u32,
+    /// System phase coordination
+    pub(crate) coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
 }
 
 impl Core {
@@ -134,6 +136,7 @@ impl Core {
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
         system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
         quorum_ready: Arc<AtomicBool>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         let last_decided_leader = dag_state.read().last_commit_leader();
         let number_of_leaders = context
@@ -206,6 +209,7 @@ impl Core {
             system_transaction_provider,
             quorum_ready,
             initial_commit_index,
+            coordination_hub,
         }
         .recover()
         .expect("Core::recover() failed")
