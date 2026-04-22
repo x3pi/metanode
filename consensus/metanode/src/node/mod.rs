@@ -24,7 +24,7 @@ use crate::node::executor_client::ExecutorClient;
 use crate::node::tx_submitter::TransactionClientProxy;
 
 // Declare submodules
-pub mod block_coordinator;
+
 pub mod catchup;
 pub mod committee;
 pub mod committee_source;
@@ -176,10 +176,6 @@ pub struct ConsensusNode {
     /// RS-1: RwLock for concurrent read access during commit processing
     pub(crate) epoch_eth_addresses:
         Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
-
-    /// Block Coordinator for dual-stream block production
-    /// Handles both Consensus and Sync streams with deduplication and priority
-    pub(crate) block_coordinator: Option<Arc<block_coordinator::BlockCoordinator>>,
 
     /// Peer RPC addresses for cross-node block fetching during epoch transitions
     pub(crate) peer_rpc_addresses: Vec<String>,

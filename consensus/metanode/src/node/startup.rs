@@ -903,43 +903,16 @@ impl InitializedNode {
                     );
                 }
 
-                let executor_client_opt = node_guard.executor_client.clone();
                 drop(node_guard);
 
                 // ═══════════════════════════════════════════════════════════════
-                // Phase 4: DualStreamController for overlap period
+                // Phase 4: UNIFIED STATE ARCHITECTURE
                 //
-                // ConsensusAuthority just started and will begin delivering
-                // blocks via CommitProcessor. Meanwhile, the network may have
-                // advanced further during our Phase 1 sync. DualStreamController
-                // runs peer sync in background to fill any remaining gap.
-                //
-                // CRITICAL: Skip Phase 4 when cold_start! After snapshot restore,
-                // the commit processor replays ALL old DAG commits in the correct
-                // consensus-determined order. Starting peer sync simultaneously
-                // creates DUAL DELIVERY → Go receives blocks from two sources →
-                // different execution order → stateRoot divergence → FORK!
-                //
-                // The commit processor alone is the authoritative source.
-                // Convergence: When consensus delivers blocks for 10 consecutive
-                // rounds without peer sync contributing, peer sync stops.
+                // DualStreamController has been REMOVED.
+                // Rust consensus (Core and CommitProcessor) is now the ONLY
+                // component authorized to sync and deliver blocks to Go Master.
+                // Go Master strictly executes whatever Rust provides.
                 // ═══════════════════════════════════════════════════════════════
-                if is_cold_start {
-                    info!(
-                        "⏭️ [STARTUP] Phase 4: SKIPPING DualStreamController (cold_start=true). \
-                         Commit processor is the sole block source to prevent fork from dual delivery."
-                    );
-                } else if let Some(executor_client) = executor_client_opt {
-                    let peer_addrs = self.node_config.peer_rpc_addresses.clone();
-                    if !peer_addrs.is_empty() {
-                        info!("🔄 [STARTUP] Phase 4: Spawning DualStreamController for consensus/peer overlap...");
-                        let controller = crate::node::dual_stream::DualStreamController::new(
-                            executor_client,
-                            peer_addrs,
-                        );
-                        let _dual_stream_handle = controller.spawn_block_sync_stream();
-                    }
-                }
             }
         }
 

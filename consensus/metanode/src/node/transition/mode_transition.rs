@@ -270,15 +270,6 @@ pub async fn transition_mode_only(
         None
     };
 
-    // Initialize BlockCoordinator for dual-stream block production
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        synced_global_exec_index + 1,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!("📦 [COORDINATOR] BlockCoordinator initialized for mode transition epoch {} (next_expected={})", 
-        epoch, synced_global_exec_index + 1);
-
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -294,8 +285,8 @@ pub async fn transition_mode_only(
         .with_epoch_info(epoch, epoch_base_gei_from_go)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
-        .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone()); // Connect to BlockCoordinator
+        .with_epoch_transition_callback(epoch_cb);
+
 
     // When cold_start, set the GEI threshold so commit_processor skips ALL
     // replayed commits with GEI ≤ snapshot_gei_for_cold_start (GEI at snapshot time).

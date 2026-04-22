@@ -259,6 +259,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let old_state = self.coordination_hub.get_phase();
                         self.update_state();
                         let new_state = self.coordination_hub.get_phase();
+                        
+                        let local_commit = self.inner.dag_state.read().last_commit_index();
+                        let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
+                        let lag = quorum_commit.saturating_sub(local_commit);
+
+                        info!(
+                            "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",
+                            new_state, local_commit, quorum_commit, lag,
+                            match new_state {
+                                crate::coordination_hub::NodeConsensusPhase::CatchingUp => "SYNC_ONLY (CatchingUp)",
+                                crate::coordination_hub::NodeConsensusPhase::Bootstrapping => "BOOTSTRAPPING",
+                                crate::coordination_hub::NodeConsensusPhase::AwaitingSnapshot => "AWAITING_SNAPSHOT",
+                                crate::coordination_hub::NodeConsensusPhase::FastForwarding => "FAST_FORWARDING",
+                                crate::coordination_hub::NodeConsensusPhase::Healthy => "CONSENSUS (Healthy)",
+                            }
+                        );
+
                         if old_state != new_state {
                             info!(
                                 "🔄 [NODE4-DEBUG] STATE TRANSITION: {:?} → {:?}",

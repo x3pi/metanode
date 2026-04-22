@@ -13,7 +13,7 @@ use tracing::{info, trace, warn};
 
 use crate::consensus::checkpoint::calculate_global_exec_index;
 use crate::consensus::tx_recycler::TxRecycler;
-use crate::node::block_coordinator::BlockCoordinator;
+
 use crate::node::executor_client::ExecutorClient;
 // calculate_transaction_hash_hex removed: was only used for dead logging code
 
@@ -53,8 +53,6 @@ pub struct CommitProcessor {
     /// RS-1: Uses RwLock instead of Mutex — reads (every commit) don't block each other,
     /// only writes (epoch transition) take exclusive lock.
     epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
-    /// Block Coordinator for dual-stream block production (optional)
-    block_coordinator: Option<Arc<BlockCoordinator>>,
     /// TX recycler for confirming committed TXs
     tx_recycler: Option<Arc<TxRecycler>>,
     /// Cold-start flag: set when DAG storage was empty at startup (snapshot restore).
@@ -95,7 +93,6 @@ impl CommitProcessor {
             epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
-            block_coordinator: None,
             tx_recycler: None,
             storage_path: None,
             lag_alert_sender: None,
@@ -206,12 +203,6 @@ impl CommitProcessor {
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>> {
         self.epoch_eth_addresses.clone()
-    }
-
-    /// Set block coordinator for dual-stream block production
-    pub fn with_block_coordinator(mut self, coordinator: Arc<BlockCoordinator>) -> Self {
-        self.block_coordinator = Some(coordinator);
-        self
     }
 
     /// Set TX recycler for confirming committed TXs

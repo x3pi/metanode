@@ -1571,7 +1571,7 @@ impl ConsensusNode {
                 );
                 Arc::new(tokio::sync::RwLock::new(map))
             },
-            block_coordinator: None,
+
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
             cold_start: !consensus.dag_has_history

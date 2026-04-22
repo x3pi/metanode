@@ -56,17 +56,7 @@ pub(super) async fn setup_validator_consensus(
         None
     };
 
-    // Initialize BlockCoordinator for dual-stream block production
-    // Use same initial_next_expected as executor client for consistency
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        initial_next_expected,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!(
-        "📦 [COORDINATOR] BlockCoordinator initialized for epoch {} (next_expected={})",
-        new_epoch, initial_next_expected
-    );
+
 
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
@@ -84,7 +74,6 @@ pub(super) async fn setup_validator_consensus(
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone())
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
@@ -181,17 +170,6 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
-    // Initialize BlockCoordinator - use same initial_next_expected for consistency
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        initial_next_expected,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!(
-        "📦 [COORDINATOR] BlockCoordinator initialized for SyncOnly epoch {} (next_expected={})",
-        new_epoch, initial_next_expected
-    );
-
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -208,7 +186,7 @@ pub(super) async fn setup_synconly_sync(
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone())
+
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
