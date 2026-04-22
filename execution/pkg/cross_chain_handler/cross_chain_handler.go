@@ -261,12 +261,15 @@ func (h *CrossChainHandler) HandleTransaction(
 	// Tự động load config nếu chưa có (dùng globalOffChainProcessor + nil check explorer)
 	if err := h.EnsureConfigLoaded(chainState, tx); err != nil {
 		logger.Error("CrossChain %s: EnsureConfigLoaded error: %v", method.Name, err)
-		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, err.Error())
+		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, err.Error(), true)
 	}
 
 	var eventLogs []types.EventLog
 	var exRs types.ExecuteSCResult
 	var logicErr error
+
+	logger.Info("🔍 [CC-MASTER-DEBUG] HandleTransaction: method=%s txHash=%s from=%s readOnly=%v relatedAddrs=%d mvmId=%s",
+		method.Name, tx.Hash().Hex()[:16], tx.FromAddress().Hex()[:10], tx.GetReadOnly(), len(tx.RelatedAddresses()), mvmId.Hex()[:10])
 
 	switch method.Name {
 	case "lockAndBridge":
@@ -281,13 +284,13 @@ func (h *CrossChainHandler) HandleTransaction(
 
 	if logicErr != nil {
 		logger.Error("CrossChain %s error: %v", method.Name, logicErr)
-		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, logicErr.Error())
+		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, logicErr.Error(), true)
 	}
 	if exRs != nil {
 		logger.Info("cc_exRs: %v", exRs)
 		return receipt_helper.HandleSuccessTxWithExRs(chainState, tx, toAddress, eventLogs, exRs)
 	}
-	return receipt_helper.HandleSuccessTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, nil)
+	return receipt_helper.HandleSuccessTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, nil, true)
 }
 
 // mustType parse ABI type, panic nếu lỗi

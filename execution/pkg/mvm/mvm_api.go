@@ -185,6 +185,7 @@ func CallReplayFullDbLogs(logs map[string][]byte) int {
 // CallClearAllStateInstances clears the C++ EVM's internal global state cache
 // (State::instances). This MUST be called after sync→validator transition
 // (LAZY REFRESH) to prevent the EVM from using stale nonce/balance values.
+// CallClearAllStateInstances clears the C++ EVM's internal global state cache
 func CallClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
@@ -241,7 +242,6 @@ func GetOrCreateMVMApi(
 	// Bước 3: Dùng LoadOrStore (Atomic Check-And-Act)
 	// Tránh trường hợp 2 luồng cùng thấy exists=false và cùng Store đè lên nhau.
 	actualApi, loaded := apiInstances.LoadOrStore(key, newApi)
-
 	if loaded {
 		// Luồng khác đã nhanh tay tạo và Store vào map ngay trước chúng ta mili-giây!
 		// Thay vì đè lên của họ (gây lỗi mất pointer cũ), ta TÁI SỬ DỤNG CHUNG chính cái họ vừa tạo.

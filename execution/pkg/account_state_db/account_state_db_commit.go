@@ -664,6 +664,25 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	totalDirty := len(keysToProcess)
 	logger.Debug("Starting update from dirtyAccounts", "count", totalDirty)
 
+	// ═══════════════════════════════════════════════════════════════
+	// DEBUG: Log chi tiết từng account bị commit vào trie
+	// So sánh log này giữa các node để tìm account nào bị lệch
+	// ═══════════════════════════════════════════════════════════════
+	if totalDirty > 0 {
+		logger.Info("🔍 [TRIE-COMMIT-DEBUG] Committing %d dirty accounts to trie:", totalDirty)
+		for _, entry := range keysToProcess {
+			as := entry.state
+			if as != nil {
+				logger.Info("  📝 [TRIE-COMMIT-DEBUG] addr=%s nonce=%d balance=%s lastHash=%s",
+					entry.addr.Hex(),
+					as.Nonce(),
+					as.Balance().String(),
+					as.LastHash().Hex()[:16],
+				)
+			}
+		}
+	}
+
 	if totalDirty > 0 {
 		hasChanges = true
 	}

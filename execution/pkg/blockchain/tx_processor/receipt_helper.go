@@ -12,12 +12,14 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 func HandleRevertedTransaction(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address,
 	blockTime uint64, enableTrace bool, revertReason string,
+	parallel bool,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	// 1. Mã hóa lý do revert
 	revertData := utils.EncodeRevertReason(revertReason)
@@ -30,8 +32,12 @@ func HandleRevertedTransaction(
 	)
 	// 3. Tăng nonce và cập nhật các thông tin tài khoản khác
 	// Đây là phần code được tái sử dụng
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
-	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
+	finalMvmId := tx.ToAddress()
+	if parallel {
+		finalMvmId = mvm.GenerateUniqueMvmId()
+	}
+	vmP := vm_processor.NewVmProcessor(chainState, finalMvmId, enableTrace, blockTime)
+	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, !parallel)
 	if err != nil {
 		errorReceipt := createErrorReceipt(tx, toAddress, fmt.Errorf("ExecuteNonceOnly failed during revert: %w", err))
 		if exRs != nil {
@@ -54,6 +60,7 @@ func HandleRevertedTransaction(
 func HandleSuccessTransaction(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address,
 	blockTime uint64, enableTrace bool, eventLogs []types.EventLog, returnData []byte,
+	parallel bool,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -61,8 +68,12 @@ func HandleSuccessTransaction(
 		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
-	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
+	finalMvmId := tx.ToAddress()
+	if parallel {
+		finalMvmId = mvm.GenerateUniqueMvmId()
+	}
+	vmP := vm_processor.NewVmProcessor(chainState, finalMvmId, enableTrace, blockTime)
+	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, !parallel)
 
 	if err != nil {
 		rcp := createErrorReceipt(tx, toAddress, err)

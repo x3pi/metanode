@@ -504,7 +504,7 @@ func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpo
 		Epoch: currentEpoch,
 	}
 
-	logger.Info("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
+	// logger.Info("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
 	return response, nil
 }
 
@@ -1210,7 +1210,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// R2: Add stateRoot verify after batch sync
 			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
 			expectedRoot := header.AccountStatesRoot()
-			
+
 			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) {
 				logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
 					blockNum, localRoot.Hex(), expectedRoot.Hex())

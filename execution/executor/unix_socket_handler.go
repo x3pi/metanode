@@ -14,15 +14,15 @@ import (
 )
 
 type RequestHandler struct {
-	storageManager      *storage.StorageManager
-	chainState          *blockchain.ChainState
-	genesisPath         string
-	snapshotManager     *SnapshotManager                                                       // Automatic snapshot management
-	connectionsManager  network.ConnectionsManager
-	messageSender       network.MessageSender
-	forceCommitCallback func()                                                                 // Callback to trigger ForceCommit in BlockProcessor
-	updateLastBlockCallback func(blk types.Block)                                              // Callback to let Rust explicitly update Go memory state
-	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
+	storageManager          *storage.StorageManager
+	chainState              *blockchain.ChainState
+	genesisPath             string
+	snapshotManager         *SnapshotManager // Automatic snapshot management
+	connectionsManager      network.ConnectionsManager
+	messageSender           network.MessageSender
+	forceCommitCallback     func()                                                                  // Callback to trigger ForceCommit in BlockProcessor
+	updateLastBlockCallback func(blk types.Block)                                                   // Callback to let Rust explicitly update Go memory state
+	broadcastCallback       func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -58,7 +58,6 @@ func (rh *RequestHandler) SetUpdateLastBlockCallback(cb func(blk types.Block)) {
 func (rh *RequestHandler) SetBroadcastCallback(cb func(blk *block.Block, backupData []byte, blockNum uint64, txCount int)) {
 	rh.broadcastCallback = cb
 }
-
 
 // NOTE (Sync Architecture Redesign, Apr 2026):
 // broadcastBackupToSub was REMOVED. Sub nodes now exclusively receive blocks
@@ -130,7 +129,7 @@ func (rh *RequestHandler) HandleForceCommitRequest(request *pb.ForceCommitReques
 	if reason == "" {
 		reason = "unspecified"
 	}
-	logger.Info("🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: %s)", reason)
+	// logger.Info("🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: %s)", reason)
 
 	// Since RequestHandler relies on the global BlockChain instance, we can fetch
 	// the BlockProcessor if it's accessible. For this architecture, block processing

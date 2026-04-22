@@ -408,12 +408,11 @@ func (vmP *VmProcessor) updateStateDB(
 		if span != nil { // GUARD
 			span.AddEvent("MarkedTrieDBAsReverted", map[string]interface{}{"mvmId": mvmId.Hex()})
 		}
-		
-		// 🔒 [STATE-LEAK-FIX] Master node's C++ cache (isCache=true) retains state updates 
-		// even if the transaction ultimately throws an exception mid-execution.
-		// By clearing all instances on revert, we force the next read to fetch the correct 
-		// (un-corrupted) state from Go, preventing Master/Sub state divergence.
-		mvm.ClearAllStateInstances()
+
+		// We MUST clear ALL instances because relatedAddresses does NOT include self-accesses.
+		// Example: A calls B. A throws. C++ cache has B's state from A's call.
+		// If we only clear B, C++ still holds stale data for A.
+		mvm.CallClearAllStateInstances()
 
 		amount := transaction.Amount()
 		if amount.Cmp(big.NewInt(0)) > 0 {

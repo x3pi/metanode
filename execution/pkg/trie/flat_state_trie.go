@@ -196,8 +196,8 @@ func NewFlatStateTrieFromRoot(rootHash e_common.Hash, db FlatStateDB, isHash boo
 	// With sharded/async DBs, bucket reads may not reflect latest writes.
 	// Trust the committed rootHash if buckets don't match.
 	if ft.rootHash != rootHash {
-		logger.Warn("[FlatStateTrie] Bucket load mismatch (expected=%s, computed=%s) — using committed hash",
-			rootHash.Hex()[:16], ft.rootHash.Hex()[:16])
+		// logger.Warn("[FlatStateTrie] Bucket load mismatch (expected=%s, computed=%s) — using committed hash",
+		// 	rootHash.Hex()[:16], ft.rootHash.Hex()[:16])
 		ft.rootHash = rootHash
 	}
 
@@ -298,8 +298,8 @@ func (f *FlatStateTrie) Update(key, value []byte) error {
 //
 // OPTIMIZATION: Instead of doing sequential DB reads for old values while holding
 // the lock, this method:
-//   1. Parallelizes hex encoding and old-value DB reads (read-only Phase 1)
-//   2. Acquires the lock ONCE for the entire batch (sequential map updates Phase 2)
+//  1. Parallelizes hex encoding and old-value DB reads (read-only Phase 1)
+//  2. Acquires the lock ONCE for the entire batch (sequential map updates Phase 2)
 //
 // This reduces lock overhead and exploits SSD parallel read bandwidth.
 func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
