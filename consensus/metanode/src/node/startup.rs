@@ -719,8 +719,8 @@ impl InitializedNode {
                                             _ => {}
                                         }
 
-                                        // Caught up when gap is small
-                                        if gap <= 5 {
+                                        // Caught up when gap is strictly 0
+                                        if gap == 0 {
                                             info!(
                                                 "✅ [COLD-START] Phase 1 complete! Go={}, Network block={}, commit={}. \
                                                  Joining consensus...",

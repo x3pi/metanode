@@ -210,12 +210,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         let current_phase = self.coordination_hub.get_phase();
 
-        // Only explicitly CatchingUp/Healthy transitions handled via purely metrics.
-        // Other phases (Bootstrapping, FastForwarding, AwaitingSnapshot) are externally managed.
-        if matches!(current_phase, crate::coordination_hub::NodeConsensusPhase::CatchingUp | crate::coordination_hub::NodeConsensusPhase::Healthy) {
+        // Only explicitly CatchingUp/Healthy/Bootstrapping transitions handled via purely metrics.
+        // Other phases (FastForwarding, AwaitingSnapshot) are externally managed.
+        if matches!(
+            current_phase,
+            crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+                | crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                | crate::coordination_hub::NodeConsensusPhase::Healthy
+        ) {
             if lag > 200 || lag_pct > 10.0 {
                 self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
             } else if lag == 0 {
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
+            } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping && quorum_commit > 0 {
+                // If Bootstrapping and lag <= 200, we are close enough to be considered Healthy
                 self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
             }
         }
