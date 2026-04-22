@@ -164,7 +164,7 @@ func main() {
 			}
 		} else {
 			if !hasAbi {
-				log.Fatalf("❌ Task giao dịch bằng Method+Args BẮT BUỘC phải đọc được ABI hợp lệ!")
+				log.Fatalf("❌ LỖI: Bạn đang dùng Method và Args. Nếu không dùng input_data dưới dạng byte hex thì BẮT BUỘC phải truyền đường dẫn ABI!")
 			}
 			method, ok := contractAbi.Methods[d.Method]
 			if !ok && d.Method != "" {

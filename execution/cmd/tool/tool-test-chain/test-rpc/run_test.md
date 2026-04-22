@@ -2,9 +2,11 @@
 
 ``` bash
 go run main.go -config=config-server.json -data=data.json
+go run main.go -config=config-server.json -data=data-test.json
 
 
 go run main.go -config=config-local.json -data=data-test.json
+
 ```
 
 # Xapiant read write (server)

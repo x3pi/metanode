@@ -107,6 +107,13 @@ interface IFullDBV1 {
     ) external returns (SearchResultsPage memory);
 }
 
+interface IFullDBV1_ReadOnly {
+    function querySearch(
+        string memory dbname,
+        SearchParams memory params
+    ) external view returns (SearchResultsPage memory);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 contract TestFullDBV1 {
     // 0x107 is the address for FULL_DATABASE_ADDRESS_V1.
@@ -412,6 +419,34 @@ contract TestFullDBV1 {
         }
         emit Search_Query(query, page.total, page.results.length);
         return (page.total, page.results.length);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TEST ETH_CALL (READ-ONLY) - KHÔNG TỐN GAS
+    // ════════════════════════════════════════════════════════════════
+
+    // Cách 1: Gọi qua Interface cục bộ có chữ "view"
+    function testCallNormal_Search(string memory query) public view returns (SearchResultsPage memory) {
+        SearchParams memory params = _buildDefaultParams(query);
+        // Ép kiểu địa chỉ sang Interface ReadOnly
+        IFullDBV1_ReadOnly dbReadOnly = IFullDBV1_ReadOnly(address(fullDB));
+        return dbReadOnly.querySearch(DB_NAME, params);
+    }
+
+    // Cách 2: Gọi bằng low-level .staticcall
+    function testCallLowLevel_Search(string memory query) public view returns (SearchResultsPage memory) {
+        SearchParams memory params = _buildDefaultParams(query);
+
+        bytes memory payload = abi.encodeWithSignature(
+            "querySearch(string,(string,(string,string)[],string[],uint64,uint64,int64,bool,(uint256,string,string)[]))",
+            DB_NAME, 
+            params
+        );
+
+        (bool success, bytes memory returnData) = address(fullDB).staticcall(payload);
+        require(success, "Low-level staticcall failed");
+
+        return abi.decode(returnData, (SearchResultsPage));
     }
 
     // ════════════════════════════════════════════════════════════════

@@ -112,15 +112,18 @@ interface IFullDB {
         string memory dbname,
         uint256 docId
     ) external returns (string[] memory);
-    function search(
-        string memory dbname,
-        string memory query
-    ) external returns (string memory);
     function querySearch(
         string memory dbname,
         SearchParams memory params
-    ) external returns (SearchResultsPage memory);
-    function commit(string memory dbname) external returns (bool);
+    ) external view returns (SearchResultsPage memory);
+}
+
+// Interface dành riêng cho việc đọc (gasless)
+interface IFullDB_ReadOnly {
+    function querySearch(
+        string memory dbname,
+        SearchParams memory params
+    ) external view returns (SearchResultsPage memory);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -702,5 +705,37 @@ contract TestFullDB {
                 sortAscending: true,
                 rangeFilters: ranges
             });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // ⑨ VIEW FUNCTIONS FOR ETH_CALL (GASLESS)
+    // ════════════════════════════════════════════════════════════════
+
+    /// Gọi trực tiếp hàm querySearch qua Interface ReadOnly
+    function testCallNormal_Search(
+        string memory query
+    ) public view returns (SearchResultsPage memory) {
+        SearchParams memory params = _buildDefaultParams(query);
+        return IFullDB_ReadOnly(address(fullDB)).querySearch(DB_NAME, params);
+    }
+
+    /// Gọi qua STATICCALL (đảm bảo 100% không tốn gas)
+    function testCallLowLevel_Search(
+        string memory query
+    ) public view returns (SearchResultsPage memory) {
+        SearchParams memory params = _buildDefaultParams(query);
+
+        bytes memory payload = abi.encodeWithSelector(
+            fullDB.querySearch.selector,
+            DB_NAME,
+            params
+        );
+
+        (bool success, bytes memory returnData) = address(fullDB).staticcall(
+            payload
+        );
+        require(success, "STATICCALL failed");
+
+        return abi.decode(returnData, (SearchResultsPage));
     }
 }
