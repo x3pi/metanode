@@ -11,6 +11,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
@@ -122,12 +123,15 @@ func (bp *BlockProcessor) cleanupSubNodeBlockBuffer() {
 }
 
 // applyBlockToState applies block to state in a thread-safe manner
+// NOTE: Uses lastBlock.Load()/Store() directly — NOT GetLastBlock()/SetLastBlock()
+// because those methods acquire lastBlockMutex too, causing deadlock.
 func (bp *BlockProcessor) applyBlockToState(b *block.Block) {
 	bp.lastBlockMutex.Lock()
 	defer bp.lastBlockMutex.Unlock()
 
-	if bp.GetLastBlock() == nil || b.Header().BlockNumber() > bp.GetLastBlock().Header().BlockNumber() {
-		bp.SetLastBlock(b)
+	current := bp.lastBlock.Load()
+	if current == nil || b.Header().BlockNumber() > current.(types.Block).Header().BlockNumber() {
+		bp.lastBlock.Store(b)
 		headerCopy := b.Header()
 		bp.chainState.SetcurrentBlockHeader(&headerCopy)
 	}
