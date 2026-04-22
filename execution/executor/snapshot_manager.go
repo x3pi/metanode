@@ -78,9 +78,10 @@ type SnapshotManager struct {
 	nomtSnapshotCallback func(destPath string, useReflink bool) error
 
 	// Callbacks for pausing/resuming execution
-	pauseCallback      func()
-	resumeCallback     func()
-	rustPauseCallback  func()
+	waitPersistenceCallback func()
+	pauseCallback           func()
+	resumeCallback          func()
+	rustPauseCallback       func()
 	rustResumeCallback func()
 
 	// Callback to get the current exact StateRoot
@@ -206,6 +207,13 @@ func (sm *SnapshotManager) SetRustResumeCallback(cb func()) {
 	sm.rustResumeCallback = cb
 }
 
+// SetWaitPersistenceCallback registers a callback to wait for async commit jobs before snapping
+func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.waitPersistenceCallback = cb
+}
+
 // SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
 func (sm *SnapshotManager) SetSnapshotFrequency(frequency int) {
 	if frequency < 0 {
@@ -274,6 +282,15 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 
 		logger.Info("📸 [SNAPSHOT] ⏰ Trigger! Creating snapshot at block %d (epoch=%d, boundary=%d, method=%s)",
 			blockNumber, epoch, boundaryBlock, sm.snapshotMethod)
+
+		// Đợi toàn bộ các Goroutine Commit ghi vào MVM, PebbleDB và NOMT hoàn tất
+		sm.mu.Lock()
+		waitCb := sm.waitPersistenceCallback
+		sm.mu.Unlock()
+		if waitCb != nil {
+			logger.Info("⏳ [SNAPSHOT] Waiting for BlockProcessor async persistence pipeline to finish...")
+			waitCb()
+		}
 
 		// Trigger storage flush immediately before snapshot
 		sm.mu.Lock()

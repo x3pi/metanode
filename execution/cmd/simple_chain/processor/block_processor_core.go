@@ -399,6 +399,13 @@ func NewBlockProcessor(
 			executor.ResumeRustConsensus()
 		})
 
+		// Fix: Synchronize snapshot triggering with the asynchronous commit pipeline
+		// This guarantees that pebbleDB and fully flush to memory tables and NOMT
+		// has synced the current block before snapshot logic begins closing DB handlers
+		snapshotManager.SetWaitPersistenceCallback(func() {
+			bp.WaitForPersistence()
+		})
+
 		// Wrap the force flush callback to also wait for persistence
 		if storageMgr := bp.chainState.GetStorageManager(); storageMgr != nil {
 			snapshotManager.SetForceFlushCallback(func() error {
