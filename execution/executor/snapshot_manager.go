@@ -41,6 +41,7 @@ type SnapshotManager struct {
 	blocksAfterEpoch  int    // Số blocks chờ sau epoch transition (mặc định 20)
 	snapshotMethod    string // "hardlink", "rsync", hoặc "hybrid"
 	snapshotSourceDir string // Thư mục cần snapshot (cho rsync/hybrid method, vd: data-write)
+	frequencyBlocks   uint64 // Nếu > 0, tạo snapshot định kỳ mỗi N block thay vì chờ hết epoch
 
 	// Filesystem capabilities
 	reflinkSupported bool // true nếu filesystem hỗ trợ cp --reflink (btrfs, xfs)
@@ -205,6 +206,16 @@ func (sm *SnapshotManager) SetRustResumeCallback(cb func()) {
 	sm.rustResumeCallback = cb
 }
 
+// SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
+func (sm *SnapshotManager) SetSnapshotFrequency(frequency int) {
+	if frequency < 0 {
+		frequency = 0
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.frequencyBlocks = uint64(frequency)
+}
+
 // OnEpochAdvanced được gọi khi epoch transition xảy ra
 func (sm *SnapshotManager) OnEpochAdvanced(boundaryBlock uint64, newEpoch uint64) {
 	if !sm.enabled {
@@ -235,12 +246,13 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 		return
 	}
 
-	// Only trigger snapshots when epoch has advanced and enough blocks have passed
-	// NOTE: Removed `blockNumber%50 == 0` test trigger — it was pausing the entire
-	// Go+Rust execution pipeline every 50 blocks in production, causing TPS drops to 0.
+	// Tính năng 1: Tạo snapshot khi nhận được tín hiệu qua Epoch
 	isStandardTrigger := sm.snapshotPending && blockNumber >= (sm.epochBoundaryBlock+uint64(sm.blocksAfterEpoch))
 
-	if !isStandardTrigger {
+	// Tính năng 2: Tạo snapshot tĩnh dựa trên chu kỳ block cố định
+	isPeriodicTrigger := sm.frequencyBlocks > 0 && blockNumber > 0 && blockNumber%sm.frequencyBlocks == 0
+
+	if !isStandardTrigger && !isPeriodicTrigger {
 		sm.mu.Unlock()
 		return
 	}
