@@ -235,12 +235,12 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 		return
 	}
 
-	// Trigger snapshots every 50 blocks for testing purposes,
-	// or if epoch advanced properly.
-	isTestTrigger := blockNumber > 0 && blockNumber%50 == 0
+	// Only trigger snapshots when epoch has advanced and enough blocks have passed
+	// NOTE: Removed `blockNumber%50 == 0` test trigger — it was pausing the entire
+	// Go+Rust execution pipeline every 50 blocks in production, causing TPS drops to 0.
 	isStandardTrigger := sm.snapshotPending && blockNumber >= (sm.epochBoundaryBlock+uint64(sm.blocksAfterEpoch))
 
-	if !isTestTrigger && !isStandardTrigger {
+	if !isStandardTrigger {
 		sm.mu.Unlock()
 		return
 	}

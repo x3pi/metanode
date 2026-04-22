@@ -162,8 +162,24 @@ func (bp *BlockProcessor) commitWorker() {
 		GlobalPipelineStats.SetLastCommitTimeUs(time.Since(start).Microseconds())
 
 		// ══════════════════════════════════════════════════════════════════
+		// BLS BLOCK SIGNING: Sign block hash BEFORE DoneChan signal.
+		// CRITICAL: Must happen before DoneChan because Rust may trigger a
+		// snapshot immediately after receiving the done signal. If signing runs
+		// after DoneChan, the snapshot captures a block without its BLS signature
+		// → Sub-node restore fails signature verification.
+		// BLS sign ~0.5ms — negligible compared to block execution time.
+		// ══════════════════════════════════════════════════════════════════
+		if bp.blockSigner != nil {
+			signingHash := job.Block.Header().HashWithoutSignature()
+			signature := bp.blockSigner.SignBlockHash(signingHash)
+			job.Block.Header().SetAggregateSignature(signature)
+			logger.Debug("🔏 [BLOCK SIGN] Signed block #%d: hash=%s, sig_len=%d",
+				blockNum, signingHash.Hex()[:16]+"...", len(signature))
+		}
+
+		// ══════════════════════════════════════════════════════════════════
 		// TPS OPTIMIZATION: Send DoneChan BEFORE BackupDb serialization.
-		// DoneChan only requires primary block data (SaveLastBlock + GEI)
+		// DoneChan only requires primary block data (SaveLastBlock + GEI + BLS sig)
 		// to be safely on disk. BackupDb is for Sub-node replication only
 		// and can be prepared after unblocking Rust consensus.
 		//
@@ -172,7 +188,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// via the existing network sync mechanism (HandleSyncBlocksRequest).
 		// ══════════════════════════════════════════════════════════════════
 		if job.DoneChan != nil {
-			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted)",
+			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
 			job.DoneChan <- struct{}{}
 		}
@@ -197,19 +213,6 @@ func (bp *BlockProcessor) commitWorker() {
 				default:
 				}
 			}
-		}
-
-		// ══════════════════════════════════════════════════════════════════
-		// BLS BLOCK SIGNING: Sign block hash before broadcast to Sub nodes.
-		// Uses HashWithoutSignature() to exclude signature from hash computation.
-		// BLS sign ~0.5ms — negligible compared to block execution time.
-		// ══════════════════════════════════════════════════════════════════
-		if bp.blockSigner != nil {
-			signingHash := job.Block.Header().HashWithoutSignature()
-			signature := bp.blockSigner.SignBlockHash(signingHash)
-			job.Block.Header().SetAggregateSignature(signature)
-			logger.Debug("🔏 [BLOCK SIGN] Signed block #%d: hash=%s, sig_len=%d",
-				blockNum, signingHash.Hex()[:16]+"...", len(signature))
 		}
 
 		// ══════════════════════════════════════════════════════════════════
@@ -454,16 +457,38 @@ func (bp *BlockProcessor) persistWorker() {
 	}
 }
 
-// backupDbWorker processes BackupDb serialization in the background, concurrently.
+// backupDbWorker processes BackupDb serialization in the background using a fixed worker pool.
+// Previously spawned one goroutine per block (unbounded), which under high load could create
+// hundreds of concurrent serialization goroutines → memory spikes + GC pressure.
+// Now uses a fixed pool of 4 workers to bound concurrency.
 func (bp *BlockProcessor) backupDbWorker() {
-	logger.Info("✅ BackupDb Worker initiated (concurrent serialization)")
+	const numWorkers = 4
+	logger.Info("✅ BackupDb Worker initiated (fixed pool of %d workers)", numWorkers)
+
+	workChan := make(chan CommitJob, 8)
+
+	// Start fixed worker pool
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			for job := range workChan {
+				bp.persistBackupDbAsync(job)
+			}
+		}()
+	}
+
 	for job := range bp.backupDbChannel {
 		// IMPORTANT: Do NOT drop intermediary blocks (coalescing), as BackupDb contains
 		// critical block-level state deltas needed by peers to sync.
-		// Spawn a goroutine to serialize and write concurrently, leveraging all CPU cores
-		// and preventing backpressure on the consensus thread.
-		go bp.persistBackupDbAsync(job)
+		select {
+		case workChan <- job:
+			// Dispatched to worker
+		default:
+			// All workers busy — serialize inline to prevent data loss
+			logger.Warn("⚠️ [BACKUP] All %d workers busy, serializing block #%d inline", numWorkers, job.Block.Header().BlockNumber())
+			bp.persistBackupDbAsync(job)
+		}
 	}
+	close(workChan)
 }
 
 // persistBackupDbAsync performs the heavy serialization of BackUpDb asynchronously.

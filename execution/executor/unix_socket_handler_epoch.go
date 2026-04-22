@@ -100,18 +100,15 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValidatorsAtBlockRequest) (*pb.ValidatorInfoList, error) {
 	blockNumber := request.GetBlockNumber()
 	logger.Info("🔍 [SNAPSHOT] Handling GetValidatorsAtBlockRequest for block %d (Rust checking if Go executor has processed this block)", blockNumber)
-	logger.Debug("🔍 [SNAPSHOT] Handling GetValidatorsAtBlockRequest for block %d", blockNumber)
 
 	// CRITICAL FOR SNAPSHOT: Verify block has been committed to DB
 	// Ensures block is committed before returning validators (snapshot consistency)
 	lastCommittedBlockNumber := storage.GetLastBlockNumber()
-	logger.Info("🔍 [SNAPSHOT] Block commit status: requested_block=%d, last_committed_block=%d", blockNumber, lastCommittedBlockNumber)
 	logger.Debug("🔍 [SNAPSHOT] Block commit status: requested_block=%d, last_committed_block=%d", blockNumber, lastCommittedBlockNumber)
 
 	// If block has not been committed to DB yet, return error (Rust will retry)
 	if blockNumber > lastCommittedBlockNumber {
 		errMsg := fmt.Sprintf("block %d has not been committed to DB yet (last committed: %d). Go executor is still processing this block", blockNumber, lastCommittedBlockNumber)
-		logger.Warn("⚠️  [SNAPSHOT] %s", errMsg)
 		logger.Warn("⚠️  [SNAPSHOT] %s", errMsg)
 		return nil, fmt.Errorf(errMsg)
 	}
@@ -120,7 +117,6 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	// Special handling for block 0 (genesis) — may not exist if Go Master hasn't initialized genesis yet
 	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
 	logger.Debug("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
-	logger.Info("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
 	if !ok {
 		if blockNumber == 0 {
 			// Block 0 doesn't exist yet — Go Master may not have initialized genesis block
@@ -128,27 +124,21 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			logger.Warn("Block 0 not found, getting validators from current state (genesis fallback)")
 			// Fallback: get validators from current state instead of block 0
 			logger.Debug("🔍 [EPOCH] Getting validators from stake state DB...")
-			logger.Info("🔍 [DEBUG] Getting validators from stake state DB...")
 			validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
 			if err != nil {
 				logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
-				logger.Error("🔍 [DEBUG] ERROR getting validators from stake state DB: %v", err)
 				return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
 			}
 
 			logger.Debug("🔍 [EPOCH] Found %d total validators in state (before filtering)", len(validators))
-			logger.Info("🔍 [DEBUG] Found %d total validators in state (before filtering)", len(validators))
 
 			if len(validators) == 0 {
 				logger.Warn("🔍 [EPOCH] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
-				logger.Warn("🔍 [DEBUG] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
 			} else {
 				// Log details of each validator found
 				for i, val := range validators {
 					stake := val.TotalStakedAmount()
 					logger.Debug("🔍 [EPOCH] Validator[%d] from DB: address=%s, name=%s, stake=%s, jailed=%v, p2p=%s",
-						i, val.Address().Hex(), val.Name(), stake.String(), val.IsJailed(), val.P2PAddress())
-					logger.Info("🔍 [DEBUG] Validator[%d] from DB: address=%s, name=%s, stake=%s, jailed=%v, p2p=%s",
 						i, val.Address().Hex(), val.Name(), stake.String(), val.IsJailed(), val.P2PAddress())
 				}
 			}
@@ -215,8 +205,6 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 				}
 				logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s, p2p_address='%s'",
 					len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey, val.P2PAddress)
-				logger.Info("🔍 [DEBUG] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s, p2p_address='%s'",
-					len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey, val.P2PAddress)
 
 				validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 			}
@@ -243,10 +231,8 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			}
 			validatorInfoList.LastGlobalExecIndex = 0 // Genesis block
 
-			logger.Info("🔍 [DEBUG] Returning validators from current state (genesis fallback): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=0",
+			logger.Debug("🔍 [EPOCH] Returning validators from current state (genesis fallback): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=0",
 				len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake, validatorInfoList.EpochTimestampMs)
-			logger.Debug("🔍 [EPOCH] Returning validators from current state: count=%d (skipped: %d jailed, %d had no stake but included with min stake=1)",
-				len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake)
 
 			if len(validatorInfoList.Validators) == 0 {
 				logger.Warn("⚠️  No validators found in state! This may indicate:")
@@ -374,8 +360,6 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		}
 		logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s",
 			len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey)
-		logger.Info("🔍 [DEBUG] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s",
-			len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey)
 
 		validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 	}
@@ -416,10 +400,8 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	validatorInfoList.LastGlobalExecIndex = lastGlobalExecIndex
 
 	// CRITICAL FOR SNAPSHOT: Confirm block commitment to DB
-	logger.Info("✅ [SNAPSHOT] Returning validators at block %d (COMMITTED TO DB): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d (adjusted for genesis), last_global_exec_index=%d, last_committed_block=%d",
+	logger.Info("✅ [SNAPSHOT] Returning validators at block %d (COMMITTED TO DB): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=%d, last_committed_block=%d",
 		blockNumber, len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake, epochTimestampMs, lastGlobalExecIndex, lastCommittedBlockNumber)
-	logger.Info("✅ [SNAPSHOT] Returning validators at block %d (COMMITTED TO DB): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), last_committed_block=%d",
-		blockNumber, len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake, lastCommittedBlockNumber)
 	return validatorInfoList, nil
 }
 
