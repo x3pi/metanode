@@ -774,6 +774,14 @@ func (t *Transaction) RelatedAddresses() []common.Address {
 	if toAddr != accountSettingSelector && toAddr != stakeSelector && toAddr != p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
 		relatedAddresses = append(relatedAddresses, toAddr)
 	}
+
+	fromAddr := t.FromAddress()
+
+	// Debug log: only for cross-chain transactions to avoid log spam during TPS blast
+	if toAddr == p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
+		logger.Info("🔗 [CC-RELATED] txHash=%s from=%s related=%v readOnly=%v",
+			t.Hash().Hex()[:16], fromAddr.Hex()[:10], relatedAddresses, t.GetReadOnly())
+	}
 	return relatedAddresses
 }
 

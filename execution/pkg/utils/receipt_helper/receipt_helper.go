@@ -13,6 +13,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -70,9 +71,16 @@ func CreateErrorReceipt(tx types.Transaction, toAddress common.Address, err erro
 func ExecuteNonceAndFinalize(
 	ctx context.Context, chainState *blockchain.ChainState,
 	tx types.Transaction, enableTrace bool, blockTime uint64,
+	parallel bool,
 ) (types.ExecuteSCResult, error) {
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
-	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
+	finalMvmId := tx.ToAddress()
+	if parallel {
+		finalMvmId = mvm.GenerateUniqueMvmId()
+	}
+	vmP := vm_processor.NewVmProcessor(chainState, finalMvmId, enableTrace, blockTime)
+	// Nếu chạy song song (parallel=true), ta sử dụng mvmId ngẫu nhiên và không lưu cache (isCache=false)
+	// để tránh giẫm chân lên các tiến trình khác và tránh rò rỉ bộ nhớ.
+	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, !parallel)
 	if err != nil {
 		return exRs, err
 	}
@@ -88,6 +96,7 @@ func HandleRevertedTx(
 	ctx context.Context, chainState *blockchain.ChainState,
 	tx types.Transaction, toAddress common.Address,
 	blockTime uint64, enableTrace bool, revertReason string,
+	parallel bool,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	revertData := []byte(revertReason)
 
@@ -98,7 +107,7 @@ func HandleRevertedTx(
 		nil, 0, common.Hash{}, 0,
 	)
 
-	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime)
+	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime, parallel)
 	if err != nil {
 		errorReceipt := CreateErrorReceipt(tx, toAddress, fmt.Errorf("ExecuteNonceOnly failed during revert: %w", err))
 		if exRs != nil {
@@ -120,6 +129,7 @@ func HandleSuccessTx(
 	tx types.Transaction, toAddress common.Address,
 	blockTime uint64, enableTrace bool,
 	eventLogs []types.EventLog, returnData []byte,
+	parallel bool,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -127,7 +137,7 @@ func HandleSuccessTx(
 		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
-	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime)
+	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime, parallel)
 	if err != nil {
 		rcp := CreateErrorReceipt(tx, toAddress, err)
 		if exRs != nil {

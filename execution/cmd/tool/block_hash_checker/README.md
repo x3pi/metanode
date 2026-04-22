@@ -34,7 +34,7 @@ Cú pháp cho mạng 5 Nodes:
 ```bash
 
 # single machine
-go run main.go --watch --interval 5s --check-last 10 --nodes "m0=http://127.0.0.1:8757,m1=http://127.0.0.1:10747,m2=http://127.0.0.1:10749,m3=http://127.0.0.1:10750,m4=http://127.0.0.1:10748"
+go run main.go --watch --interval 5s --check-last 100 --nodes "m0=http://127.0.0.1:8757,m1=http://127.0.0.1:10747,m2=http://127.0.0.1:10749,m3=http://127.0.0.1:10750,m4=http://127.0.0.1:10748"
 
 # on multiple machine
 go run main.go --watch --interval 5s --check-last 10 --nodes "m0=http://192.168.1.234:8757,m1=http://192.168.1.234:10747,m2=http://192.168.1.233:10749,m3=http://192.168.1.231:10750,m4=http://192.168.1.231:10748"

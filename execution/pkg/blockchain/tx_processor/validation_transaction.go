@@ -97,9 +97,9 @@ func (h *ValidatorHandler) HandleTransaction(ctx context.Context, chainState *bl
 	if isCall {
 		if logicErr != nil {
 			logger.Error("Lỗi: %v", logicErr)
-			return HandleRevertedTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, logicErr.Error())
+			return HandleRevertedTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, logicErr.Error(), false)
 		}
-		return HandleSuccessTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, nil)
+		return HandleSuccessTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, nil, false)
 	}
 
 	var returnData []byte
@@ -120,9 +120,9 @@ func (h *ValidatorHandler) HandleTransaction(ctx context.Context, chainState *bl
 	}
 	if errCall != nil {
 		logger.Error("Lỗi: %v", errCall)
-		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, errCall.Error())
+		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, errCall.Error(), false)
 	}
-	return HandleSuccessTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, returnData)
+	return HandleSuccessTransaction(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, returnData, false)
 
 }
 

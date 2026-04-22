@@ -624,6 +624,19 @@ func processSingleGroup(
 				if sigAckExRs != nil {
 					gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, sigAckExRs)
 				}
+				// ──────────────────────────────────────────────────────────────
+				// DEBUG: Log trạng thái ví Embassy sau ReadOnly=true
+				// So sánh giữa các node để phát hiện lệch Account Hash
+				// ──────────────────────────────────────────────────────────────
+				if embassyAs, asErr := chainState.GetAccountStateDB().AccountState(tx.FromAddress()); asErr == nil && embassyAs != nil {
+					logger.Info("🔍 [CC-READONLY-STATE] After nonce-only: embassy=%s nonce=%d balance=%s lastHash=%s txHash=%s",
+						tx.FromAddress().Hex(),
+						embassyAs.Nonce(),
+						embassyAs.Balance().String(),
+						embassyAs.LastHash().Hex()[:16],
+						tx.Hash().Hex()[:16],
+					)
+				}
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}

@@ -74,7 +74,7 @@ if should_run 2; then
     echo "📌 BƯỚC 2: Triển khai cụm Cluster (deploy_cluster.sh)..."
     if [ "$DEPLOY_MODE" == "single" ]; then
         cd "$METANODE_SCRIPT_DIR/.."
-        ./mtn-orchestrator.sh restart --fresh --build-all
+        ./mtn-orchestrator.sh restart --fresh --build-all --exclude-node 4
         if [ $? -ne 0 ]; then echo "❌ Lỗi khi Deploy Cluster Mạng Lớn ở Bước 2"; exit 1; fi
     else
         cd "$METANODE_SCRIPT_DIR"

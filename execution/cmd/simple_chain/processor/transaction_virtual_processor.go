@@ -53,6 +53,8 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		// Dùng cross_chain_handler.IsBatchSubmitTx để check selector qua ABI.
 		ccHandler, handlerErr := cross_chain_handler.GetCrossChainHandler()
 		if handlerErr == nil && ccHandler != nil && ccHandler.IsBatchSubmitTx(inputData) {
+			logger.Info("🔍 [CC-VIRTUAL-DEBUG] batchSubmit detected: txHash=%s from=%s relatedBefore=%d",
+				tx.Hash().Hex()[:16], tx.FromAddress().Hex()[:10], len(tx.RelatedAddresses()))
 			return v.processBatchSubmitVirtual(updatedTx, inputData)
 		}
 
@@ -415,16 +417,18 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 					}
 				}
 				mvm.ClearMVMApi(uniqueMvmId)
-				// 🔒 [STATE-LEAK-FIX] Clear the C++ state cache after the dry-run
+				// 🔒 [STATE-LEAK-FIX] Clear the C++ state cache after the dry-run.
 				// The dry-run modifies the shared State::instances in C++.
 				// If we don't clear it, the real execution on the Master node will start
 				// with a dirty cache, causing a state root divergence with Sub nodes.
-				// mvm.ClearAllStateInstances()
+				mvm.CallClearAllStateInstances()
 
 				logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
 					item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 
 			} else if item.EventKind == 1 { // CONFIRMATION
+				logger.Info("🔍 [CC-VIRTUAL-DEBUG] CONFIRMATION event: sender=%s isSuccess=%v amount=%v",
+					item.Sender.Hex()[:10], item.IsSuccess, item.Amount)
 				// Chỉ add Sender vào related addresses nếu giao dịch thất bại và có số tiền cần hoàn lại
 				if !item.IsSuccess && item.Amount != nil && item.Amount.Sign() > 0 {
 					updatedTx.AddRelatedAddress(item.Sender)
@@ -433,6 +437,10 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			}
 		}
 	}
+
+	// ── Debug summary: log tất cả RelatedAddresses cuối cùng ────────────
+	logger.Info("🔍 [CC-VIRTUAL-DEBUG] FINAL relatedAddresses for txHash=%s: count=%d, addrs=%v",
+		updatedTx.Hash().Hex()[:16], len(updatedTx.RelatedAddresses()), updatedTx.RelatedAddresses())
 
 	return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
 }
