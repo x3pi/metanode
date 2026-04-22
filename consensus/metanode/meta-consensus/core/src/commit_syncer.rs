@@ -505,7 +505,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 break;
             }
             // Pause scheduling new fetches when handling of commits is lagging.
-            // STATE MACHINE: Cold-start and CatchingUp NEVER skip - prevents deadlock
+            // STATE MACHINE: Healthy phase ONLY checks threshold. CatchingUp and other
+            // phases ALWAYS schedule to prevent deadlock: if fetches are blocked due
+            // to lag, the node can never catch up.
             if self.coordination_hub.is_healthy()
                 && effective_handled_index + effective_threshold < range_end
             {

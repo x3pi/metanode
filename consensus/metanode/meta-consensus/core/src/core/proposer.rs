@@ -516,14 +516,17 @@ impl Core {
         // ═══════════════════════════════════════════════════════════════════
         // COLD-START EXEMPTION: After snapshot restore, the DAG is wiped
         // but local_commit_index may be non-zero (set from snapshot GEI).
-        // The node is stuck with massive lag vs quorum, which would block
-        // proposals forever. Detect cold-start by TWO conditions:
+        // The node is stuck with massive lag vs quorum, which
+        // would block proposals forever. Detect cold-start by THREE conditions:
         //   (a) clock_round <= 1: very early cold-start (DAG just created)
         //   (b) no_local_progress: local_commit_index hasn't advanced
         //       beyond the initial synthetic value set at Core creation.
         //       After align_commit_index_with_go or cold_start_advance_gc_round,
         //       commit_index may be high but ALL from synthetic commits.
         //       The node hasn't produced ANY real local consensus commits.
+        //   (c) catching_up: node is in CatchingUp phase (lagging behind network)
+        //       This covers the case where node made some progress then fell
+        //       behind significantly - it MUST propose to catch up.
         //
         // Proposing is ESSENTIAL: the node must create DAG blocks to
         // participate in consensus. Without this exemption there's a
@@ -534,6 +537,23 @@ impl Core {
         // the exemption is lifted and normal lag management resumes.
         // ═══════════════════════════════════════════════════════════════════
         let no_local_progress = local_commit_index <= self.initial_commit_index;
+        // Check if we're in catching up phase (significant lag)
+        let is_catching_up = self
+            .adaptive_delay_state
+            .as_ref()
+            .map(|_ads| {
+                let quorum_ci = self
+                    .context
+                    .metrics
+                    .node_metrics
+                    .commit_sync_quorum_index
+                    .get() as u32;
+                let local_ci = local_commit_index;
+                let current_lag = quorum_ci.saturating_sub(local_ci);
+                // CatchingUp if lag > 100 commits or > 10%
+                current_lag > 100 || (quorum_ci > 0 && (current_lag as f64 / quorum_ci as f64) > 0.10)
+            })
+            .unwrap_or(false);
         // COLD-START EXEMPTION: Allow proposing during cold-start when node has no
         // local progress since startup. Original condition `quorum_commit_index > 200`
         // failed for small networks where quorum < 200. 
@@ -541,8 +561,9 @@ impl Core {
         // exists. Once node commits anything (local_ci > initial_ci), exemption lifts
         // immediately and normal lag-based sync resumes. This preserves the strict
         // sync guarantee: only brand-new nodes get exemption, not lagging ones.
+        // EXTENDED: Also allow proposing when in catching up phase (significant lag)
         let is_cold_start_with_lag =
-            (clock_round <= 1 || no_local_progress) && quorum_commit_index > 0 && lag > 0;
+            (clock_round <= 1 || no_local_progress || is_catching_up) && quorum_commit_index > 0 && lag > 0;
         if is_cold_start_with_lag {
             // Cold-start: allow proposing despite lag
             debug!(
@@ -594,8 +615,9 @@ impl Core {
         // blocks push clock_round to 10000+ but local_commit_index hasn't
         // advanced → lag check blocks all subsequent proposals → DEADLOCK.
         // ═══════════════════════════════════════════════════════════════════
-        // Use same safe cold-start condition: only nodes with NO local progress
-        // since startup get exemption. This prevents lagging nodes from bypassing sync.
+        // Use same safe cold-start condition: nodes with NO local progress
+        // since startup OR in CatchingUp phase get exemption. This allows
+        // lagging nodes to catch up by proposing, preventing deadlock.
         let is_cold_start = is_cold_start_with_lag;
 
         if !is_cold_start
