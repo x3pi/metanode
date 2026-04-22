@@ -227,6 +227,10 @@ hybrid-storage-demo/
 **/LOG*
 # ===== Log files =====
 # Log files
+# Command and strace output logs
+compile_output.txt
+strace_*.txt
+strace_node1.txt
 **/logs/
 # Logs and databases
 # **/lost+found/

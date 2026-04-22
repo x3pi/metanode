@@ -162,6 +162,8 @@ nohup.out
 run.stdout
 run.stderr
 cmd/simple_chain/run.stdout
+compile_output.txt
+strace_*.txt
 
 # ===== CSV / benchmark result artifacts =====
 /mismatches_*.csv
@@ -231,6 +233,7 @@ cmd/tool/test_tps/tps_blast_cc/blast_cc_results.json
 /block_hash_checker
 /blast_accounts.json
 /blast_results.json
+/chaos_tester
 /tps_blast.pid
 *.prof
 test_simple_chain*
