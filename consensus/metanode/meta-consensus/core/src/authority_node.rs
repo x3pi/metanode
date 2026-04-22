@@ -54,7 +54,6 @@ impl ConsensusAuthority {
         network_type: NetworkType,
         epoch_start_timestamp_ms: u64,
         epoch_base_index: u64,
-        last_global_exec_index: u64,
         own_index: AuthorityIndex,
         committee: Committee,
         parameters: Parameters,
@@ -73,13 +72,13 @@ impl ConsensusAuthority {
         system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
         // Legacy store manager from ConsensusNode, to avoid re-opening locked RocksDB files
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         match network_type {
             NetworkType::Tonic => {
                 let authority = AuthorityNode::start(
                     epoch_start_timestamp_ms,
                     epoch_base_index,
-                    last_global_exec_index,
                     own_index,
                     committee,
                     parameters,
@@ -93,6 +92,7 @@ impl ConsensusAuthority {
                     boot_counter,
                     system_transaction_provider,
                     legacy_store_manager,
+                    coordination_hub,
                 )
                 .await;
                 Self::WithTonic(Some(authority))
@@ -207,7 +207,6 @@ where
     pub(crate) async fn start(
         epoch_start_timestamp_ms: u64,
         epoch_base_index: u64,
-        last_global_exec_index: u64,
         own_index: AuthorityIndex,
         committee: Committee,
         parameters: Parameters,
@@ -225,6 +224,7 @@ where
         // Legacy store manager passed from ConsensusNode to avoid RocksDB lock conflicts
         // during epoch transitions. If None, no legacy stores will be available.
         existing_legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         assert!(
             committee.is_valid_index(own_index),
@@ -306,15 +306,12 @@ where
             "consensus db_path must be valid UTF-8 — check Parameters::db_path configuration",
         );
         let store = Arc::new(RocksDBStore::new(store_path));
-        let mut dag_state = DagState::new(context.clone(), store.clone());
+        let dag_state = DagState::new(context.clone(), store.clone());
 
-        // FORK PREVENTION: If DAG is empty (snapshot restore) but Go is already ahead,
-        // we MUST align the initial commit index with Go's expected state
-        if last_global_exec_index > epoch_base_index {
-            let next_commit_index = (last_global_exec_index - epoch_base_index) as u32 + 1;
-            dag_state.align_commit_index_with_go(next_commit_index);
-        }
-
+        // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
+        // during the FastForwarding phase (see commit_syncer.rs). 
+        // We intentionally do NOT align here because we need real network data
+        // (commits from peers) to determine the correct baseline.
         let dag_state = Arc::new(RwLock::new(dag_state));
 
         let block_verifier = Arc::new(SignedBlockVerifier::new(
@@ -333,6 +330,7 @@ where
             context.clone(),
             signals_receivers.block_broadcast_receiver(),
             transaction_certifier.clone(),
+            coordination_hub.clone(),
         );
 
         info!(
@@ -439,6 +437,7 @@ where
             transaction_certifier.clone(),
             network_client.clone(),
             dag_state.clone(),
+            coordination_hub,
             Some(adaptive_delay_state.clone()),
         )
         .start();
@@ -732,6 +731,7 @@ mod tests {
             0,
             None,
             None, // legacy_store_manager
+            crate::coordination_hub::ConsensusCoordinationHub::new(),
         )
         .await;
 

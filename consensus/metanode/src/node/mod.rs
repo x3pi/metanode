@@ -115,6 +115,7 @@ pub struct ConsensusNode {
     /// Legacy epoch store manager - keeps RocksDB stores from previous epochs
     /// open for read-only sync access. Only stores (not full authorities) are kept.
     pub(crate) legacy_store_manager: Arc<consensus_core::LegacyEpochStoreManager>,
+    pub(crate) coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     pub(crate) node_mode: NodeMode,
     pub(crate) execution_lock: Arc<tokio::sync::RwLock<u64>>,
     pub(crate) reconfig_state: Arc<tokio::sync::RwLock<consensus_core::ReconfigState>>,

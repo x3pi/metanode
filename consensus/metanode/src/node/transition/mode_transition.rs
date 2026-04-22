@@ -355,7 +355,6 @@ pub async fn transition_mode_only(
             NetworkType::Tonic,
             epoch_timestamp_to_use,
             epoch_base_gei_from_go,
-            synced_global_exec_index,
             node.own_index,
             committee,
             params,
@@ -369,6 +368,7 @@ pub async fn transition_mode_only(
             boot_counter_for_authority,
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()), // Pass legacy store manager to avoid RocksDB lock conflicts
+            node.coordination_hub.clone(),
         )
         .await,
     );

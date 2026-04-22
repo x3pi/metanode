@@ -672,6 +672,13 @@ impl InitializedNode {
                                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                         continue;
                                     }
+                                    
+                                    // Trigger AwaitingSnapshot phase now that Go is ready
+                                    {
+                                        let sync_ctrl = self.node.lock().await.sync_controller.clone();
+                                        sync_ctrl.trigger_phase_transition(consensus_core::coordination_hub::NodeConsensusPhase::AwaitingSnapshot);
+                                    }
+
                                     b
                                 }
                                 Err(_) => {

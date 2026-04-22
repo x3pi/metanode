@@ -17,6 +17,7 @@ mod commit_observer;
 mod commit_syncer;
 mod commit_vote_monitor;
 mod context;
+pub mod coordination_hub;
 mod core;
 mod core_signals;
 mod core_thread;

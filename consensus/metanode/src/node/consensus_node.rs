@@ -107,15 +107,17 @@ impl ConsensusNode {
         // Phase 1: Storage, epoch discovery, committee, execution index, identity
         let storage = Self::setup_storage(&config).await?;
 
+        let coordination_hub = consensus_core::coordination_hub::ConsensusCoordinationHub::new();
+
         // Phase 2: Consensus params, commit processor, authority start
-        let consensus = Self::setup_consensus(&config, &storage, &registry).await?;
+        let consensus = Self::setup_consensus(&config, &storage, &registry, coordination_hub.clone()).await?;
 
         // Phase 3: Clock/NTP sync
         let clock_sync_manager = Self::setup_networking(&config);
 
         // Phase 4: Assemble node + epoch management (transition manager, monitor, sync)
         let node =
-            Self::setup_epoch_management(config, storage, consensus, clock_sync_manager, &registry)
+            Self::setup_epoch_management(config, storage, consensus, clock_sync_manager, &registry, coordination_hub)
                 .await?;
 
         Ok(node)
@@ -833,6 +835,7 @@ impl ConsensusNode {
         config: &NodeConfig,
         storage: &StorageSetup,
         registry: &Registry,
+        coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     ) -> Result<ConsensusSetup> {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
@@ -1391,7 +1394,6 @@ impl ConsensusNode {
                         NetworkType::Tonic,
                         storage.epoch_timestamp_ms,
                         storage.epoch_base_exec_index,
-                        storage.last_global_exec_index,
                         storage.own_index,
                         storage.committee.clone(),
                         parameters.clone(),
@@ -1406,6 +1408,7 @@ impl ConsensusNode {
                         Some(system_transaction_provider.clone()
                             as Arc<dyn SystemTransactionProvider>),
                         None,
+                        coordination_hub,
                     )
                     .await,
                 ),
@@ -1482,6 +1485,7 @@ impl ConsensusNode {
         consensus: ConsensusSetup,
         clock_sync_manager: Arc<RwLock<ClockSyncManager>>,
         _registry: &Registry,
+        coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     ) -> Result<ConsensusNode> {
         // Initialize no-op epoch change handlers (required by core)
         use consensus_core::epoch_change_provider::{EpochChangeProcessor, EpochChangeProvider};
@@ -1516,6 +1520,7 @@ impl ConsensusNode {
             legacy_store_manager: Arc::new(consensus_core::LegacyEpochStoreManager::new(
                 config.epochs_to_keep,
             )),
+            coordination_hub: coordination_hub.clone(),
             // Phase 2: In-committee nodes start as SyncingUp. They will explicitly catch up
             // via startup.rs and then reliably transition to Validator mode.
             node_mode: if consensus.start_as_validator {
@@ -1550,7 +1555,7 @@ impl ConsensusNode {
             system_transaction_provider: consensus.system_transaction_provider,
             epoch_transition_sender: consensus.epoch_tx_sender,
             sync_task_handle: None,
-            sync_controller: Arc::new(crate::node::sync_controller::SyncController::new()),
+            sync_controller: Arc::new(crate::node::sync_controller::SyncController::new(coordination_hub.clone())),
             epoch_monitor_handle: None,
             notification_server_handle: None,
             executor_client: Some(consensus.executor_client_for_proc),

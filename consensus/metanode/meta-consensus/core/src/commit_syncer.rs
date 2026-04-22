@@ -35,148 +35,9 @@ use std::{
 // Replaces scattered boolean flags (is_sync_mode, is_severe_lag, cold_start_*)
 // with a single source of truth for node sync state.
 // ═══════════════════════════════════════════════════════════════════════════════
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SyncState {
-    /// Node just started, DAG is empty. Fast poll, allow proposals despite lag.
-    ColdStart {
-        /// Whether we've scheduled first fetch
-        first_fetch_scheduled: bool,
-    },
-    /// Significantly behind quorum. Aggressive sync, skip proposing.
-    CatchingUp {
-        /// Whether lag is severe (>200 commits or >10%)
-        is_severe: bool,
-    },
-    /// Nearly caught up. Normal operation with faster poll.
-    Recovering,
-    /// In sync with quorum. Normal operation.
-    Healthy,
-}
-
-impl SyncState {
-    /// Compute next state based on current metrics
-    pub fn transition(
-        &self,
-        local_commit: CommitIndex,
-        quorum_commit: CommitIndex,
-        initial_commit: CommitIndex,
-        highest_scheduled: Option<CommitIndex>,
-    ) -> Self {
-        let lag = quorum_commit.saturating_sub(local_commit);
-        let lag_pct = if quorum_commit > 0 {
-            (lag as f64 / quorum_commit as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        match self {
-            SyncState::ColdStart { first_fetch_scheduled } => {
-                // Transition out of cold-start when we have progress or first fetch scheduled
-                let has_progress = local_commit > initial_commit;
-                let has_scheduled = highest_scheduled.is_some();
-                
-                if has_progress || (has_scheduled && !*first_fetch_scheduled) {
-                    if lag > 50 || lag_pct > 5.0 {
-                        SyncState::CatchingUp {
-                            is_severe: lag > 200 || lag_pct > 10.0,
-                        }
-                    } else if lag > 0 {
-                        SyncState::Recovering
-                    } else {
-                        SyncState::Healthy
-                    }
-                } else {
-                    SyncState::ColdStart {
-                        first_fetch_scheduled: has_scheduled,
-                    }
-                }
-            }
-
-            SyncState::CatchingUp { .. } => {
-                if lag == 0 {
-                    SyncState::Healthy
-                } else if lag <= 10 && lag_pct <= 1.0 {
-                    SyncState::Recovering
-                } else {
-                    SyncState::CatchingUp {
-                        is_severe: lag > 200 || lag_pct > 10.0,
-                    }
-                }
-            }
-
-            SyncState::Recovering => {
-                if lag == 0 {
-                    SyncState::Healthy
-                } else if lag > 50 || lag_pct > 5.0 {
-                    SyncState::CatchingUp {
-                        is_severe: lag > 200 || lag_pct > 10.0,
-                    }
-                } else {
-                    SyncState::Recovering
-                }
-            }
-
-            SyncState::Healthy => {
-                // Check if we need cold-start (e.g., after snapshot restore)
-                let no_local_progress = local_commit <= initial_commit;
-                if no_local_progress && quorum_commit > 0 {
-                    SyncState::ColdStart {
-                        first_fetch_scheduled: false,
-                    }
-                } else if lag > 50 || lag_pct > 5.0 {
-                    SyncState::CatchingUp {
-                        is_severe: lag > 200 || lag_pct > 10.0,
-                    }
-                } else if lag > 0 {
-                    SyncState::Recovering
-                } else {
-                    SyncState::Healthy
-                }
-            }
-        }
-    }
-
-    /// Get polling interval for this state
-    pub fn poll_interval(&self) -> Duration {
-        match self {
-            SyncState::ColdStart { .. } => Duration::from_millis(200),
-            SyncState::CatchingUp { is_severe: true, .. } => Duration::from_millis(150),
-            SyncState::CatchingUp { .. } => Duration::from_millis(500),
-            SyncState::Recovering => Duration::from_secs(1),
-            SyncState::Healthy => Duration::from_secs(2),
-        }
-    }
-
-    /// Get batch size multiplier for this state
-    pub fn batch_multiplier(&self) -> u32 {
-        match self {
-            SyncState::ColdStart { .. } => 1,
-            SyncState::CatchingUp { is_severe: true, .. } => 4,
-            SyncState::CatchingUp { .. } => 2,
-            SyncState::Recovering | SyncState::Healthy => 1,
-        }
-    }
-
-    /// Whether to skip scheduling due to handler lag
-    /// CRITICAL: Cold-start and CatchingUp NEVER skip - prevents deadlock
-    pub fn skip_on_handler_lag(&self) -> bool {
-        match self {
-            SyncState::ColdStart { .. } => false,
-            SyncState::CatchingUp { .. } => false,
-            SyncState::Recovering | SyncState::Healthy => true,
-        }
-    }
-
-    /// Whether node is in aggressive sync mode
-    pub fn is_sync_mode(&self) -> bool {
-        matches!(self, SyncState::CatchingUp { .. } | SyncState::Recovering)
-    }
-
-    /// Whether lag is severe
-    pub fn is_severe_lag(&self) -> bool {
-        matches!(self, SyncState::CatchingUp { is_severe: true, .. })
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE MACHINE: Explicit state management mapped through ConsensusCoordinationHub
+// ═══════════════════════════════════════════════════════════════════════════════
 
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
@@ -260,11 +121,9 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     last_logged_quorum_commit_index: CommitIndex,
     last_logged_local_commit_index: CommitIndex,
 
-    // --- state machine (replaces is_sync_mode, is_severe_lag, cold_start_* flags) ---
-    state: SyncState,
+    // --- state coordination ---
+    coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     last_state_log_at: tokio::time::Instant,
-    // Track initial commit index for cold-start detection
-    initial_commit_index: CommitIndex,
 
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
@@ -281,6 +140,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         transaction_certifier: TransactionCertifier,
         network_client: Arc<C>,
         dag_state: Arc<RwLock<DagState>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
     ) -> Self {
         let inner = Arc::new(Inner {
@@ -294,20 +154,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             dag_state,
         });
         let synced_commit_index = inner.dag_state.read().last_commit_index();
-        let initial_commit_index = synced_commit_index;
-        // Detect cold-start at initialization
-        let is_cold_start =
-            inner.dag_state.read().highest_accepted_round() <= 1 && synced_commit_index == 0;
-        let initial_state = if is_cold_start {
-            SyncState::ColdStart {
-                first_fetch_scheduled: false,
-            }
-        } else {
-            SyncState::Healthy
-        };
         eprintln!(
-            "🔧 [COMMIT-SYNCER-CONSTRUCT] state={:?}, synced_commit_index={}, initial_commit_index={}, is_cold_start={}",
-            initial_state, synced_commit_index, initial_commit_index, is_cold_start
+            "🔧 [COMMIT-SYNCER-CONSTRUCT] synced_commit_index={}",
+            synced_commit_index
         );
         CommitSyncer {
             inner,
@@ -320,9 +169,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_schedule_log_at: tokio::time::Instant::now() - Duration::from_secs(300),
             last_logged_quorum_commit_index: 0,
             last_logged_local_commit_index: 0,
-            state: initial_state,
+            coordination_hub,
             last_state_log_at: tokio::time::Instant::now(),
-            initial_commit_index,
             adaptive_delay_state,
         }
     }
@@ -337,44 +185,59 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
+    // Derived interval 
+    fn poll_interval(&self) -> Duration {
+        match self.coordination_hub.get_phase() {
+            crate::coordination_hub::NodeConsensusPhase::CatchingUp => Duration::from_millis(150),
+            crate::coordination_hub::NodeConsensusPhase::FastForwarding => Duration::from_millis(200),
+            crate::coordination_hub::NodeConsensusPhase::Bootstrapping => Duration::from_millis(200),
+            crate::coordination_hub::NodeConsensusPhase::AwaitingSnapshot => Duration::from_secs(5),
+            crate::coordination_hub::NodeConsensusPhase::Healthy => Duration::from_secs(2),
+        }
+    }
+
     /// STATE MACHINE: Update sync state based on current metrics
     fn update_state(&mut self) {
         let local_commit = self.inner.dag_state.read().last_commit_index();
         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
 
-        let old_state = self.state;
-        self.state = self.state.transition(
-            local_commit,
-            quorum_commit,
-            self.initial_commit_index,
-            self.highest_scheduled_index,
-        );
+        let lag = quorum_commit.saturating_sub(local_commit);
+        let lag_pct = if quorum_commit > 0 {
+            (lag as f64 / quorum_commit as f64) * 100.0
+        } else {
+            0.0
+        };
 
-        if old_state != self.state {
-            info!(
-                "🔄 [STATE-CHANGE] {:?} → {:?} (local={}, quorum={}, initial={})",
-                old_state, self.state, local_commit, quorum_commit, self.initial_commit_index
-            );
+        let current_phase = self.coordination_hub.get_phase();
+
+        // Only explicitly CatchingUp/Healthy transitions handled via purely metrics.
+        // Other phases (Bootstrapping, FastForwarding, AwaitingSnapshot) are externally managed.
+        if matches!(current_phase, crate::coordination_hub::NodeConsensusPhase::CatchingUp | crate::coordination_hub::NodeConsensusPhase::Healthy) {
+            if lag > 200 || lag_pct > 10.0 {
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
+            } else if lag == 0 {
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
+            }
         }
     }
 
     async fn schedule_loop(mut self, mut rx_shutdown: oneshot::Receiver<()>) {
         eprintln!(
-            "🔧 [COMMIT-SYNCER-LOOP] ENTERED! state={:?}, synced={}, interval={}ms",
-            self.state,
+            "🔧 [COMMIT-SYNCER-LOOP] ENTERED! phase={:?}, synced={}, interval={}ms",
+            self.coordination_hub.get_phase(),
             self.synced_commit_index,
-            self.state.poll_interval().as_millis()
+            self.poll_interval().as_millis()
         );
         // STATE MACHINE: Get initial interval from current state
-        let initial_interval = self.state.poll_interval();
+        let initial_interval = self.poll_interval();
         let mut current_interval_duration = initial_interval;
         let mut interval = tokio::time::interval(initial_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_state_check = tokio::time::Instant::now();
 
         info!(
-            "🚀 [COMMIT-SYNCER] Starting with state={:?}, interval={}ms",
-            self.state,
+            "🚀 [COMMIT-SYNCER] Starting with phase={:?}, interval={}ms",
+            self.coordination_hub.get_phase(),
             initial_interval.as_millis()
         );
 
@@ -385,25 +248,24 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     // STATE MACHINE: Check for state transitions every 2 seconds
                     let now = tokio::time::Instant::now();
                     if now.duration_since(last_state_check) >= Duration::from_secs(2) {
-                        let old_state = self.state;
+                        let old_state = self.coordination_hub.get_phase();
                         self.update_state();
-                        let new_state = self.state;
+                        let new_state = self.coordination_hub.get_phase();
                         if old_state != new_state {
                             info!(
                                 "🔄 [NODE4-DEBUG] STATE TRANSITION: {:?} → {:?}",
                                 old_state, new_state
                             );
                         }
-                        let target_interval = self.state.poll_interval();
+                        let target_interval = self.poll_interval();
                         if target_interval != current_interval_duration {
-                            let old_state = self.state;
                             let old_ms = current_interval_duration.as_millis();
                             current_interval_duration = target_interval;
                             interval = tokio::time::interval(target_interval);
                             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                             info!(
                                 "⚡ [STATE-CHANGE] {:?} → {:?}, interval: {}ms → {}ms",
-                                old_state, self.state, old_ms, target_interval.as_millis()
+                                old_state, new_state, old_ms, target_interval.as_millis()
                             );
                         }
                         last_state_check = now;
@@ -452,7 +314,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             adaptive_delay_state.update_quorum_commit(quorum_commit_index);
         }
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
-        let highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
+        let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
         // ═══════════════════════════════════════════════════════════════════════
         // COLD-START DEADLOCK FIX: During cold-start after snapshot restore,
@@ -558,18 +420,34 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if lag > MODERATE_LAG_THRESHOLD
             && now.duration_since(self.last_state_log_at) >= Duration::from_secs(10)
         {
-            if self.state.is_severe_lag() {
+            if self.coordination_hub.is_catching_up() {
                 tracing::error!(
-                    "🚨 [LAG-DETECTION] State={:?}, lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}, synced_commit={}",
-                    self.state, lag, lag_percentage, local_commit_index, quorum_commit_index, self.synced_commit_index
+                    "🚨 [LAG-DETECTION] Phase={:?}, lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}, synced_commit={}",
+                    self.coordination_hub.get_phase(), lag, lag_percentage, local_commit_index, quorum_commit_index, self.synced_commit_index
                 );
             } else {
                 tracing::warn!(
-                    "⚠️ [LAG-DETECTION] State={:?}, lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}, synced_commit={}",
-                    self.state, lag, lag_percentage, local_commit_index, quorum_commit_index, self.synced_commit_index
+                    "⚠️ [LAG-DETECTION] Phase={:?}, lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}, synced_commit={}",
+                    self.coordination_hub.get_phase(), lag, lag_percentage, local_commit_index, quorum_commit_index, self.synced_commit_index
                 );
             }
             self.last_state_log_at = now;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // AUTO-TRANSITION TO HEALTHY: When caught up and still in CatchingUp phase
+        // ═══════════════════════════════════════════════════════════════════════
+        if lag == 0 
+            && self.coordination_hub.is_catching_up()
+            && local_commit_index > 0
+        {
+            self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
+            tracing::info!(
+                "✅ [COMMIT_SYNCER] Fully caught up! Transitioned {:?} -> {:?}, local_commit={}",
+                crate::coordination_hub::NodeConsensusPhase::CatchingUp,
+                crate::coordination_hub::NodeConsensusPhase::Healthy,
+                local_commit_index
+            );
         }
 
         if now.duration_since(self.last_schedule_log_at) >= min_interval
@@ -579,8 +457,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 && now.duration_since(self.last_schedule_log_at) >= Duration::from_secs(10)
         {
             info!(
-                "[NODE4-DEBUG] schedule: state={:?}, synced={}, local={}, quorum={}, lag={}, effective_handled={}, scheduled={:?}",
-                self.state,
+                "[NODE4-DEBUG] schedule: phase={:?}, synced={}, local={}, quorum={}, lag={}, effective_handled={}, scheduled={:?}",
+                self.coordination_hub.get_phase(),
                 self.synced_commit_index,
                 local_commit_index,
                 quorum_commit_index,
@@ -604,13 +482,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // When in sync mode, use larger batches and more aggressive scheduling
         let base_batch_size = self.inner.context.parameters.commit_sync_batch_size;
         // STATE MACHINE: Use state to determine batch size and threshold
-        let effective_batch_size = base_batch_size * self.state.batch_multiplier();
+        let effective_batch_size = if self.coordination_hub.is_catching_up() { base_batch_size * 4 } else { base_batch_size };
 
         // Compute effective threshold based on state severity
-        let effective_threshold = if self.state.is_severe_lag() {
+        let effective_threshold = if self.coordination_hub.is_catching_up() {
             unhandled_commits_threshold * 4 // Turbo: allow 4x unhandled commits for severe lag
-        } else if self.state.is_sync_mode() {
-            unhandled_commits_threshold * 2 // Fast: allow 2x unhandled commits
         } else {
             unhandled_commits_threshold
         };
@@ -630,12 +506,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
             // Pause scheduling new fetches when handling of commits is lagging.
             // STATE MACHINE: Cold-start and CatchingUp NEVER skip - prevents deadlock
-            if self.state.skip_on_handler_lag()
+            if self.coordination_hub.is_healthy()
                 && effective_handled_index + effective_threshold < range_end
             {
                 warn!(
-                    "Skip scheduling new commit fetches: consensus handler is lagging. state={:?}, highest_handled_index={}, local_commit_index={}, effective_threshold={}, range_end={}",
-                    self.state, highest_handled_index, local_commit_index, effective_threshold, range_end
+                    "Skip scheduling new commit fetches: consensus handler is lagging. phase={:?}, highest_handled_index={}, local_commit_index={}, effective_threshold={}, range_end={}",
+                    self.coordination_hub.get_phase(), highest_handled_index, local_commit_index, effective_threshold, range_end
                 );
                 break;
             }
@@ -654,7 +530,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // TURBO SYNC: In sync mode, schedule remaining partial batch so no commits are left behind.
         // Without this, the last partial batch (smaller than effective_batch_size) is always skipped,
         // leaving up to (effective_batch_size - 1) commits unscheduled until the next tick.
-        if self.state.is_sync_mode() {
+        if self.coordination_hub.is_catching_up() {
             let scheduled_up_to = self.highest_scheduled_index.unwrap_or(fetch_after_index);
             if scheduled_up_to < quorum_commit_index
                 && effective_handled_index + effective_threshold >= quorum_commit_index
@@ -734,11 +610,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .map(|c| c.leader().round)
                 .max()
                 .unwrap_or(0);
+            let first_commit_index = certified_commits.commits().first().map(|c| c.index()).unwrap_or(0);
+            let baseline_digest = certified_commits.commits().first().map(|c| c.previous_digest()).unwrap_or(crate::commit::CommitDigest::MIN);
             if highest_commit_round > 0 {
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::FastForwarding);
                 self.inner
                     .dag_state
                     .write()
-                    .cold_start_advance_gc_round(highest_commit_round, commit_end);
+                    .reset_to_network_baseline(highest_commit_round, first_commit_index.saturating_sub(1), baseline_digest);
+                
+                // Transition to CatchingUp immediately after baseline reset
+                // The node is now ready to aggressively fetch missing commits
+                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
+                tracing::info!(
+                    "🚀 [COMMIT_SYNCER] Baseline reset complete. Transitioned {:?} -> {:?}",
+                    crate::coordination_hub::NodeConsensusPhase::FastForwarding,
+                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                );
             }
         }
 
@@ -894,28 +782,22 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // has not finished, reduce parallelism so the earlier fetch can retry on a better host and succeed.
         // STATE MACHINE: Adjust parallelism based on sync state
         let base_parallel_fetches = self.inner.context.parameters.commit_sync_parallel_fetches;
-        let effective_parallel_fetches = if self.state.is_severe_lag() {
-            // Turbo: 3x parallel fetches for severe lag
+        let effective_parallel_fetches = if self.coordination_hub.is_catching_up() {
+            // Turbo: 3x parallel fetches for catching up
             (base_parallel_fetches * 3)
-                .min(self.inner.context.committee.size())
-        } else if self.state.is_sync_mode() {
-            // Fast: 2x parallel fetches for moderate lag
-            (base_parallel_fetches * 2)
                 .min(self.inner.context.committee.size())
         } else {
             base_parallel_fetches
         };
 
-        let effective_batches_ahead = if self.state.is_severe_lag() {
+        let effective_batches_ahead = if self.coordination_hub.is_catching_up() {
             self.inner.context.parameters.commit_sync_batches_ahead * 3
-        } else if self.state.is_sync_mode() {
-            self.inner.context.parameters.commit_sync_batches_ahead * 2
         } else {
             self.inner.context.parameters.commit_sync_batches_ahead
         };
 
         // In turbo mode, allow fetching from all peers (not just 2/3)
-        let committee_cap = if self.state.is_severe_lag() {
+        let committee_cap = if self.coordination_hub.is_catching_up() {
             self.inner.context.committee.size()
         } else {
             self.inner.context.committee.size() * 2 / 3
@@ -940,8 +822,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .spawn(Self::fetch_loop(
                     self.inner.clone(),
                     commit_range,
-                    self.state.is_severe_lag(),
-                    self.state.is_sync_mode(),
+                    self.coordination_hub.is_catching_up(), // is_severe_lag
+                    self.coordination_hub.is_catching_up(), // is_sync_mode
                 ));
         }
 

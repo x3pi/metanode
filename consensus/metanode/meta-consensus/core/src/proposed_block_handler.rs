@@ -17,6 +17,7 @@ pub(crate) struct ProposedBlockHandler {
     context: Arc<Context>,
     rx_block_broadcast: broadcast::Receiver<ExtendedBlock>,
     transaction_certifier: TransactionCertifier,
+    coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
 }
 
 impl ProposedBlockHandler {
@@ -24,11 +25,13 @@ impl ProposedBlockHandler {
         context: Arc<Context>,
         rx_block_broadcast: broadcast::Receiver<ExtendedBlock>,
         transaction_certifier: TransactionCertifier,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         Self {
             context,
             rx_block_broadcast,
             transaction_certifier,
+            coordination_hub,
         }
     }
 
@@ -54,6 +57,10 @@ impl ProposedBlockHandler {
 
     fn handle_proposed_block(&self, extended_block: ExtendedBlock) {
         if !self.context.protocol_config.mysticeti_fastpath() {
+            return;
+        }
+        if !self.coordination_hub.is_healthy() && !matches!(self.coordination_hub.get_phase(), crate::coordination_hub::NodeConsensusPhase::FastForwarding) {
+            tracing::debug!("⏳ [PROPOSED BLOCK HANDLER] Ignoring proposed block because phase is {:?}", self.coordination_hub.get_phase());
             return;
         }
         let _scope = monitored_scope("handle_proposed_block");

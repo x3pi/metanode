@@ -108,7 +108,6 @@ pub(super) async fn setup_validator_consensus(
             NetworkType::Tonic,
             epoch_timestamp,
             actual_epoch_base,
-            node.last_global_exec_index,
             node.own_index,
             committee,
             params,
@@ -122,6 +121,7 @@ pub(super) async fn setup_validator_consensus(
             node.boot_counter,
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()),
+            node.coordination_hub.clone(),
         )
         .await,
     );
