@@ -1,0 +1,26 @@
+syntax = "proto3";
+package proto;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/pkg/proto";
+
+// ArtifactData chứa toàn bộ artifact set cho một contract
+message ArtifactData {
+  string artifact_id = 1;              // keccak256(bytecode_hash + metadata)
+  string bytecode_hash = 2;            // Hash của bytecode on-chain
+  string metadata = 3;                  // Metadata/config.json (JSON string) - chứa compiler settings, sources, etc.
+  string abi = 4;                      // ABI JSON string
+  string source_code = 5;              // Full source code (all .sol files, JSON encoded)
+  string source_map = 6;               // Source map string
+  string storage_layout = 7;           // Storage layout JSON string
+  string contract_address = 8;         // Contract address (optional, for indexing)
+  int64 created_at = 9;               // Unix timestamp
+  bool verified = 10;                  // Whether artifact has been verified (bytecode match)
+  int64 verified_at = 11;              // Unix timestamp when verified
+}
+
+// Index mappings
+// Key format:
+// - "addr:<contract_address>" -> artifact_id
+// - "bytecode:<bytecode_hash>" -> artifact_id  
+// - "artifact:<artifact_id>" -> ArtifactData (full artifact set)
+

@@ -1,0 +1,49 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test Go Code
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache: true
+
+    - name: Set up C++ Compiler & CMake
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++ libstdc++-11-dev libz-dev curl llvm clang
+
+    - name: Run Build Script (mvm linker)
+      run: |
+        chmod +x build.sh
+        bash build.sh linux
+
+    - name: Verify vet
+      run: go vet ./...
+
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: v1.61
+        args: --timeout=5m
+        
+    - name: Test
+      run: go test -v -short ./...
+
+    - name: Run govulncheck
+      uses: golang/govulncheck-action@v1
+      with:
+        go-version-input: 1.23
+        repo-checkout: false

@@ -1,0 +1,52 @@
+syntax = "proto3";
+package proto;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/pkg/proto";
+
+// ContractFreeGasData lưu thông tin contract được miễn phí gas
+message ContractFreeGasData {
+    bytes contract_address = 1;  // 20 bytes (Ethereum address)
+    int64 added_at = 2;          // Unix timestamp khi thêm vào
+    bytes added_by = 3;          // 20 bytes (địa chỉ Ethereum của người thêm)
+}
+
+// ContractFreeGasList dùng cho pagination response
+message ContractFreeGasList {
+    repeated ContractFreeGasData contracts = 1;
+    int32 total = 2;
+    int32 page = 3;
+    int32 page_size = 4;
+    int32 total_pages = 5;
+}
+
+// AuthorizedWalletData lưu thông tin ví được cấp quyền
+message AuthorizedWalletData {
+    bytes wallet_address = 1;    // 20 bytes (Ethereum address)
+    int64 added_at = 2;          // Unix timestamp khi được cấp quyền
+    bytes added_by = 3;          // 20 bytes (địa chỉ admin đã cấp quyền)
+}
+
+// AuthorizedWalletList dùng cho pagination response
+message AuthorizedWalletList {
+    repeated AuthorizedWalletData wallets = 1;
+    int32 total = 2;
+    int32 page = 3;
+    int32 page_size = 4;
+    int32 total_pages = 5;
+}
+
+// AdminData lưu thông tin admin được cấp quyền
+message AdminData {
+    bytes admin_address = 1;    // 20 bytes (Ethereum address)
+    int64 added_at = 2;         // Unix timestamp khi được cấp quyền
+    bytes added_by = 3;         // 20 bytes (root owner đã cấp)
+}
+
+// AdminList dùng cho pagination response
+message AdminList {
+    repeated AdminData admins = 1;
+    int32 total = 2;
+    int32 page = 3;
+    int32 page_size = 4;
+    int32 total_pages = 5;
+}

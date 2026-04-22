@@ -1,0 +1,200 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"math/rand"
+	"sort"
+	"time"
+)
+
+// Event đại diện cho một sự kiện trong Hashgraph
+type Event struct {
+	ID          int       // Mã định danh của sự kiện
+	Creator     int       // ID của nút tạo sự kiện
+	SelfParent  *Event    // Sự kiện trước đó của cùng một nút
+	OtherParent *Event    // Sự kiện nhận được từ nút khác (gossip)
+	Timestamp   time.Time // Thời điểm tạo sự kiện
+	Payload     string    // Nội dung (giao dịch, thông tin, …)
+	Hash        string    // Hash của sự kiện
+	Round       int       // Số vòng khi tạo ra sự kiện
+	Famous      bool      // Cờ cho biết sự kiện có được xem là famous witness hay không
+}
+
+// Node đại diện cho một nút tham gia Hashgraph
+type Node struct {
+	ID     int
+	Events []*Event // Danh sách các sự kiện mà nút tạo ra
+}
+
+var eventCounter int = 0
+
+// computeHash tính hash cho một sự kiện dựa trên các trường dữ liệu liên quan
+func computeHash(e *Event) string {
+	record := fmt.Sprintf("%d:%d:%s:%d", e.ID, e.Creator, e.Timestamp.String(), e.Round)
+	if e.SelfParent != nil {
+		record += e.SelfParent.Hash
+	}
+	if e.OtherParent != nil {
+		record += e.OtherParent.Hash
+	}
+	h := sha256.New()
+	h.Write([]byte(record))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CreateEvent cho phép một node tạo ra sự kiện mới, tham chiếu đến sự kiện của chính nó (selfParent)
+// và một sự kiện từ một node khác (otherParent). Tham số round được truyền vào để đánh dấu vòng.
+func (node *Node) CreateEvent(otherParent *Event, payload string, round int) *Event {
+	eventCounter++
+	var selfParent *Event
+	if len(node.Events) > 0 {
+		selfParent = node.Events[len(node.Events)-1]
+	}
+	e := &Event{
+		ID:          eventCounter,
+		Creator:     node.ID,
+		SelfParent:  selfParent,
+		OtherParent: otherParent,
+		Timestamp:   time.Now(),
+		Payload:     payload,
+		Round:       round,
+	}
+	e.Hash = computeHash(e)
+	node.Events = append(node.Events, e)
+	return e
+}
+
+// sees xác định xem sự kiện a có "thấy" (ancestors theo self/other parent) sự kiện b hay không
+func (a *Event) sees(b *Event) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	// Kiểm tra đệ quy qua selfParent và otherParent
+	if a.SelfParent != nil && a.SelfParent.sees(b) {
+		return true
+	}
+	if a.OtherParent != nil && a.OtherParent.sees(b) {
+		return true
+	}
+	return false
+}
+
+// gossipRound mô phỏng một vòng lan truyền (gossip):
+// Mỗi node tạo ra một sự kiện mới, tham chiếu đến sự kiện cuối của một node ngẫu nhiên (otherParent)
+func gossipRound(nodes []*Node, round int) {
+	for _, node := range nodes {
+		// Chọn ngẫu nhiên một node khác để lấy sự kiện làm otherParent
+		otherIndex := rand.Intn(len(nodes))
+		// Đảm bảo không chọn chính nó (lưu ý: node.ID được giả định là từ 1 trở lên)
+		for nodes[otherIndex].ID == node.ID {
+			otherIndex = rand.Intn(len(nodes))
+		}
+		otherNode := nodes[otherIndex]
+		var otherParent *Event
+		if len(otherNode.Events) > 0 {
+			otherParent = otherNode.Events[len(otherNode.Events)-1]
+		}
+		node.CreateEvent(otherParent, fmt.Sprintf("Payload từ Node %d", node.ID), round)
+	}
+}
+
+// virtualVoting mô phỏng quá trình bỏ phiếu ảo cho các witness của một vòng nhất định.
+// Ở đây, ta giả định rằng witness là sự kiện đầu tiên của mỗi node trong vòng đó.
+// Nếu số node có sự kiện ở vòng sau "thấy" witness này vượt quá nửa số node, ta đánh dấu witness là famous.
+func virtualVoting(nodes []*Node, round int) {
+	// Thu thập các witness: sự kiện đầu tiên của mỗi node có Round == round
+	witnesses := []*Event{}
+	for _, node := range nodes {
+		for _, e := range node.Events {
+			if e.Round == round {
+				witnesses = append(witnesses, e)
+				break // Chỉ lấy sự kiện đầu tiên của mỗi node trong vòng đó
+			}
+		}
+	}
+	// Với mỗi witness, đếm số node có sự kiện ở các vòng > round mà "thấy" witness
+	for _, witness := range witnesses {
+		count := 0
+		for _, node := range nodes {
+			for _, e := range node.Events {
+				if e.Round > round && e.sees(witness) {
+					count++
+					break // Đếm mỗi node một lần
+				}
+			}
+		}
+		if count > len(nodes)/2 {
+			witness.Famous = true
+		} else {
+			witness.Famous = false
+		}
+	}
+}
+
+// consensusOrder gom các sự kiện từ tất cả các node và sắp xếp theo thứ tự đồng thuận
+// (ở đây đơn giản sắp xếp theo Round và Timestamp)
+func consensusOrder(nodes []*Node) []*Event {
+	eventMap := make(map[string]*Event)
+	for _, node := range nodes {
+		for _, e := range node.Events {
+			eventMap[e.Hash] = e
+		}
+	}
+	events := []*Event{}
+	for _, e := range eventMap {
+		events = append(events, e)
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].Round == events[j].Round {
+			return events[i].Timestamp.Before(events[j].Timestamp)
+		}
+		return events[i].Round < events[j].Round
+	})
+	return events
+}
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	// Tạo 3 node tham gia hệ thống Hashgraph
+	nodes := []*Node{
+		{ID: 1, Events: []*Event{}},
+		{ID: 2, Events: []*Event{}},
+		{ID: 3, Events: []*Event{}},
+	}
+
+	// Tạo các sự kiện Genesis cho mỗi node (vòng 0)
+	for _, node := range nodes {
+		node.CreateEvent(nil, "Genesis", 0)
+	}
+	fmt.Println("Khởi tạo sự kiện Genesis cho mỗi node.")
+
+	// Mô phỏng các vòng gossip và bỏ phiếu ảo
+	totalRounds := 3
+	for r := 1; r <= totalRounds; r++ {
+		// Mỗi node tạo sự kiện mới ở vòng r
+		gossipRound(nodes, r)
+		// Sau mỗi vòng, thực hiện bỏ phiếu ảo cho các sự kiện ở vòng trước
+		virtualVoting(nodes, r-1)
+	}
+
+	// Chạy thêm bỏ phiếu ảo cho vòng cuối nếu cần
+	virtualVoting(nodes, totalRounds)
+
+	// Lấy thứ tự đồng thuận dựa trên Round và Timestamp
+	orderedEvents := consensusOrder(nodes)
+	fmt.Println("\nThứ tự đồng thuận của các sự kiện:")
+	for _, e := range orderedEvents {
+		famousStr := ""
+		if e.Famous {
+			famousStr = "(Famous Witness)"
+		}
+		fmt.Printf("Event ID: %d, Creator: %d, Round: %d, Time: %s %s, Payload: %s\n",
+			e.ID, e.Creator, e.Round, e.Timestamp.Format("15:04:05.000"), famousStr, e.Payload)
+	}
+}

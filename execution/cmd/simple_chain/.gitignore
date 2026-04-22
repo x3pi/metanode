@@ -1,0 +1,39 @@
+# ===== Compiled binaries =====
+bins/
+simple_chain
+simple
+metanode
+
+# ===== Runtime data =====
+data/
+prof
+/logs
+sample/
+xapian/
+xapian_database/
+xapian_node*/
+leveldb/
+snapshot_data/
+snapshot_data_node*/
+
+# ===== Profiling =====
+prof
+*.prof
+*.pprof
+heap_*.prof
+startup_cpu.prof
+
+# ===== Logs =====
+*.log
+logs/
+tps_debug
+
+# ===== Runtime output =====
+nohup.out
+run.stdout
+*.stdout
+*.stderr
+mem_dump.txt
+
+# ===== IDE / Editor =====
+*.code-workspace
