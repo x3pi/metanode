@@ -352,12 +352,6 @@ sample/
 # simple_chain (Removed to avoid ignoring the source folder cmd/simple_chain)
 /simple_chain_bin
 site/
-
-# ===== Nested Git Repositories (submodules or separate projects) =====
-/consensus/
-/crates/
-/scripts/
-
 # ===== Snapshot data directories =====
 **/*.so
 socket-rust/target/

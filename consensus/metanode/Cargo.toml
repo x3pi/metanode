@@ -1,0 +1,95 @@
+[package]
+name = "metanode"
+version = "0.9.42"
+edition = "2021"
+authors = ["MetaNode Team"]
+license = "Apache-2.0"
+
+[lib]
+name = "metanode"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
+[workspace]
+members = [
+    "meta-consensus/core",
+    "meta-consensus/types",
+    "meta-consensus/config",
+]
+
+[dependencies]
+# Meta Consensus dependencies - using local copies
+consensus-core = { path = "meta-consensus/core" }
+consensus-config = { path = "meta-consensus/config" }
+consensus-types = { path = "meta-consensus/types" }
+
+# Async runtime
+tokio = "=1.47.1"
+tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Serialization
+serde = { version = "1.0.144", features = ["derive", "rc"] }
+serde_json = { version = "1.0.95", features = ["preserve_order"] }
+bcs = "0.1.4"
+
+# Error handling
+anyhow = "1.0.71"
+thiserror = "1.0.40"
+
+# Logging
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.15", default-features = false, features = ["std", "env-filter", "fmt"] }
+
+# Network
+mysten-network = { path = "../../crates/mysten-network" }
+mysten-metrics = { path = "../../crates/mysten-metrics" }
+mysten-common = { path = "../../crates/mysten-common" }
+
+# Storage
+typed-store = { path = "../../crates/typed-store" }
+
+# Protocol
+meta-protocol-config = { path = "../../crates/meta-protocol-config" }
+
+# Crypto - use git source
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
+shared-crypto = { path = "../../crates/shared-crypto" }
+
+# Utilities
+parking_lot = { version = "0.12.3", features = ["arc_lock"] }
+itertools = "0.13.0"
+prometheus = "0.13.3"
+rand = "0.8.5"
+toml = { version = "0.7.4", features = ["preserve_order"] }
+base64 = "0.21.2"
+hex = "0.4.3"
+hostname = "0.3.1"
+async-trait = "0.1.80"
+prost = "0.14.1"
+sha3 = "0.10.6"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+socket2 = "0.5"  # For TCP socket keepalive support
+
+
+# CLI
+clap = { version = "4.4", features = ["derive", "wrap_help"] }
+once_cell = "1.21.3"
+futures = "0.3.31"
+rayon = "1.11.0"
+
+[build-dependencies]
+prost-build = "0.14.1"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+# Patch dependencies to fix axum-server compilation issue
+[patch.crates-io]
+# Try to use a compatible version of hyper-util
+# This is a workaround for axum-server compilation issue
+
+[[bin]]
+name = "metanode"
+path = "src/main.rs"
+

@@ -1,0 +1,30 @@
+[Unit]
+Description=Metanode Rust Consensus (Node %i)
+After=metanode-go-master@%i.service
+After=metanode-go-sub@%i.service
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{RUST_WORKDIR}}
+ExecStart={{RUST_WORKDIR}}/target/release/metanode --config-path config/node_%i.toml
+
+# Environment
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+# File descriptors
+LimitNOFILE=100000
+
+# Auto-restart
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging
+StandardOutput=append:{{RUST_WORKDIR}}/logs/node_%i/rust.log
+StandardError=append:{{RUST_WORKDIR}}/logs/node_%i/rust.log
+
+[Install]
+WantedBy=multi-user.target
