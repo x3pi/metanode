@@ -12,6 +12,7 @@ typedef struct {
     bool (*execute_block)(uint8_t* payload, size_t len);
     bool (*process_rpc_request)(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
     void (*free_go_buffer)(uint8_t* ptr);
+    char* (*get_state_root)();
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
@@ -25,12 +26,14 @@ bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_d
 extern bool cgo_execute_block(uint8_t* payload, size_t len);
 extern bool cgo_process_rpc_request(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
 extern void cgo_free_go_buffer(uint8_t* ptr);
+extern char* cgo_get_state_root();
 
 static inline void register_callbacks_to_rust() {
     GoCallbacks cbs = {
         .execute_block = cgo_execute_block,
         .process_rpc_request = cgo_process_rpc_request,
         .free_go_buffer = cgo_free_go_buffer,
+        .get_state_root = cgo_get_state_root,
     };
     metanode_register_callbacks(cbs);
 }
@@ -198,11 +201,22 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 }
 
 //export cgo_free_go_buffer
-//export cgo_free_go_buffer
 func cgo_free_go_buffer(ptr *C.uint8_t) {
 	if ptr != nil {
 		C.free(unsafe.Pointer(ptr))
 	}
+}
+
+//export cgo_get_state_root
+func cgo_get_state_root() *C.char {
+	sm := GetGlobalSnapshotManager()
+	if sm != nil && sm.stateRootCallback != nil {
+		root := sm.stateRootCallback()
+		if root != "" {
+			return C.CString(root) // Remember that Rust calls free_go_buffer on this pointer
+		}
+	}
+	return nil
 }
 
 // SubmitTransactionBatch directly submits a transaction batch to the Rust consensus via zero-copy FFI

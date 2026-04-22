@@ -4,7 +4,6 @@ package processor
 
 import (
 	"sync"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
@@ -20,7 +19,7 @@ func GenerateBlockData(lastBlockHeader types.BlockHeader, validatorAddress commo
 	// CRITICAL FORK-SAFETY: Use consensus timestamp from Rust instead of time.Now()
 	// This ensures all nodes produce identical block hashes
 	if timestampSec == 0 {
-		timestampSec = uint64(time.Now().Unix()) // Fallback for backward compatibility
+		panic("FORK-SAFETY PREVENTION: time.Now() fallback is forbidden! Timestamp must be provided by consensus.")
 	}
 
 	previousHash := lastBlockHeader.Hash()
@@ -40,7 +39,7 @@ func GenerateBlockDataReadOnly(validatorAddress common.Address, txs []types.Tran
 	// CRITICAL FORK-SAFETY: Use consensus timestamp from Rust instead of time.Now()
 	// This ensures all nodes produce identical block hashes
 	if timestampSec == 0 {
-		timestampSec = uint64(time.Now().Unix()) // Fallback for backward compatibility
+		panic("FORK-SAFETY PREVENTION: time.Now() fallback is forbidden! Timestamp must be provided by consensus.")
 	}
 	blockHeader := block.NewBlockHeader(common.Hash{}, currentBlockNumber, asRoot, stakeStatesRoot, receiptsRoot, validatorAddress, timestampSec, txsRoot, epoch, globalExecIndex)
 	transactionsHash := make([]common.Hash, len(txs))

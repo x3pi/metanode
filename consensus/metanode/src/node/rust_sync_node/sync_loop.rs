@@ -275,23 +275,24 @@ impl RustSyncNode {
                 None => {
                     let from_block = go_block + 1;
                     let to_block = from_block + batch_size - 1;
-                    debug!(
-                        "🔄 [RUST-SYNC] Cold fetch: blocks {} to {} from peers",
-                        from_block, to_block
-                    );
-                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                        &peer_rpc_addresses,
-                        from_block,
-                        to_block,
-                    )
-                    .await
-                    {
-                        Ok(blocks) => blocks,
-                        Err(e) => {
-                            info!("🚀 [DEBUG-SYNC] Fetch from peers failed: {}", e);
-                            Vec::new()
+                    info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
+                    let fetched_blocks = match crate::network::peer_rpc::fetch_blocks_from_peer(&peer_rpc_addresses, from_block, to_block).await {
+                        Ok(blocks) => {
+                            info!("🚀 [SYNC-LOOP-DEBUG] fetch_blocks_from_peer returned {} blocks", blocks.len());
+                            blocks
                         }
+                        Err(e) => {
+                            warn!("❌ [SYNC-LOOP] Fetch blocks failed: {}", e);
+                            return Ok(0);
+                        }
+                    };
+
+                    if fetched_blocks.is_empty() {
+                        warn!("⚠️ [SYNC-LOOP] No blocks from peers (range {}..{})", from_block, to_block);
+                        return Ok(0);
                     }
+
+                    fetched_blocks
                 }
             };
 

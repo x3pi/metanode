@@ -14,7 +14,7 @@ use prost::Message;
 
 use tracing::{info, trace, warn};
 
-use super::persistence::persist_last_block_number;
+// use super::persistence::persist_last_block_number;
 use super::proto::{self, GetValidatorsAtBlockRequest, Request, Response, ValidatorInfo};
 use super::ExecutorClient;
 

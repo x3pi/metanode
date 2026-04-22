@@ -234,6 +234,8 @@ impl PeerRpcServer {
             *guard
         };
 
+        let state_root = crate::ffi::get_go_state_root();
+
         let info = PeerInfoResponse {
             node_id,
             epoch,
@@ -241,6 +243,7 @@ impl PeerRpcServer {
             last_global_exec_index,
             network_address: network_address.to_string(),
             timestamp_ms,
+            state_root,
         };
 
         let json = serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string());

@@ -534,7 +534,16 @@ impl Core {
         // the exemption is lifted and normal lag management resumes.
         // ═══════════════════════════════════════════════════════════════════
         let no_local_progress = local_commit_index <= self.initial_commit_index;
-        if (clock_round <= 1 || no_local_progress) && quorum_commit_index > 200 {
+        // COLD-START EXEMPTION: Allow proposing during cold-start when node has no
+        // local progress since startup. Original condition `quorum_commit_index > 200`
+        // failed for small networks where quorum < 200. 
+        // SAFETY: Require (a) no local progress since Core creation AND (b) any lag
+        // exists. Once node commits anything (local_ci > initial_ci), exemption lifts
+        // immediately and normal lag-based sync resumes. This preserves the strict
+        // sync guarantee: only brand-new nodes get exemption, not lagging ones.
+        let is_cold_start_with_lag =
+            (clock_round <= 1 || no_local_progress) && quorum_commit_index > 0 && lag > 0;
+        if is_cold_start_with_lag {
             // Cold-start: allow proposing despite lag
             debug!(
                 "🚀 [COLD-START] Allowing proposal at round {} despite lag={} (clock_round={}, local_commit={}, cold-start bootstrap)",
@@ -585,7 +594,9 @@ impl Core {
         // blocks push clock_round to 10000+ but local_commit_index hasn't
         // advanced → lag check blocks all subsequent proposals → DEADLOCK.
         // ═══════════════════════════════════════════════════════════════════
-        let is_cold_start = (clock_round <= 1 || no_local_progress) && quorum_commit_index > 200;
+        // Use same safe cold-start condition: only nodes with NO local progress
+        // since startup get exemption. This prevents lagging nodes from bypassing sync.
+        let is_cold_start = is_cold_start_with_lag;
 
         if !is_cold_start
             && self.propagation_delay
