@@ -349,7 +349,7 @@ func (s *SocketServer) OnConnect(conn network.Connection) {
 	// }
 	initMsg := &pb.InitConnection{
 		Address: addressForInitMsgBytes,
-		Type:    "unified",
+		Type:    conn.Type(),
 		Replace: true,
 	}
 	err := SendMessage(conn, p_common.InitConnection, initMsg, s.version)

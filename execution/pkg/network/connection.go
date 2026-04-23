@@ -56,8 +56,10 @@ type (
 
 	// Payload để khởi tạo
 	initPayload struct {
-		address      common.Address
-		cType        string
+		address common.Address
+		cType   string
+	}
+	cmdSetAddr struct {
 		realConnAddr string
 	}
 )
@@ -276,13 +278,18 @@ func (c *Connection) run() {
 
 			switch v := cmd.(type) {
 			case cmdInit:
+				// Chỉ cập nhật address và cType
 				address = v.payload.address
 				cType = v.payload.cType
-				realConnAddr = v.payload.realConnAddr
-				// Update cache
 				c.metaMu.Lock()
 				c.cachedAddr = address
 				c.cachedType = cType
+				c.metaLastUpdate = time.Now()
+				c.metaMu.Unlock()
+
+			case cmdSetAddr:
+				realConnAddr = v.realConnAddr
+				c.metaMu.Lock()
 				c.cachedAddrStr = realConnAddr
 				c.metaLastUpdate = time.Now()
 				c.metaMu.Unlock()
@@ -713,32 +720,26 @@ func (c *Connection) Init(address common.Address, cType string) {
 	c.metaMu.Lock()
 	c.cachedAddr = address
 	c.cachedType = cType
-	currentRemoteAddr := c.cachedAddrStr
 	c.metaLastUpdate = time.Now()
 	c.metaMu.Unlock()
 
 	// Vẫn gửi vào cmdChan để run() goroutine biết (cho backward compatibility)
 	select {
-	case c.cmdChan <- cmdInit{payload: initPayload{address: address, cType: cType, realConnAddr: currentRemoteAddr}}:
+	case c.cmdChan <- cmdInit{payload: initPayload{address: address, cType: cType}}:
 	default:
 		// cmdChan đầy, không sao vì đã update cache rồi
 	}
 }
 
 func (c *Connection) SetRealConnAddr(realConnAddr string) {
-	address := c.Address()
-	cType := c.Type()
-
 	c.metaMu.Lock()
 	c.cachedAddrStr = realConnAddr
 	c.metaLastUpdate = time.Now()
 	c.metaMu.Unlock()
 
-	// Vẫn gửi vào cmdChan để run() goroutine biết (cho backward compatibility)
 	select {
-	case c.cmdChan <- cmdInit{payload: initPayload{address: address, cType: cType, realConnAddr: realConnAddr}}:
+	case c.cmdChan <- cmdSetAddr{realConnAddr: realConnAddr}:
 	default:
-		// cmdChan đầy, không sao vì đã update cache rồi
 	}
 }
 

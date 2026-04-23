@@ -56,8 +56,10 @@ type (
 
 	// Payload để khởi tạo
 	initPayload struct {
-		address      common.Address
-		cType        string
+		address common.Address
+		cType   string
+	}
+	cmdSetAddr struct {
 		realConnAddr string
 	}
 )
@@ -91,6 +93,7 @@ type (
 	}
 	cmdAccept struct {
 		tcpConn net.Conn
+		resp    chan error // Signal khi đã xử lý xong và sendChan đã được khởi tạo
 	}
 	cmdDisconnect  struct{}
 	cmdSendMessage struct {
@@ -130,19 +133,39 @@ func NewConnection(
 }
 
 // ConnectionFromTcpConnection tạo kết nối từ phía server
+// Đợi cho đến khi cmdAccept được xử lý xong và sendChan đã được khởi tạo
+// để đảm bảo connection thực sự ready trước khi return
 func ConnectionFromTcpConnection(tcpConn net.Conn, config *Config) (network.Connection, error) {
 	if tcpConn == nil {
 		return nil, errors.New("tcpConn không được là nil")
 	}
 	c := newConnectionBase(config)
 	c.runOnce.Do(func() { go c.run() })
-	c.cmdChan <- cmdAccept{tcpConn: tcpConn}
+
+	// Gửi cmdAccept và đợi response để đảm bảo connection đã được khởi tạo hoàn toàn
+	respChan := make(chan error, 1)
+	select {
+	case c.cmdChan <- cmdAccept{tcpConn: tcpConn, resp: respChan}:
+		// Đợi cho đến khi cmdAccept được xử lý xong (bao gồm cả việc khởi tạo sendChan)
+		select {
+		case err := <-respChan:
+			if err != nil {
+				return nil, fmt.Errorf("error accepting connection: %w", err)
+			}
+			// Connection đã ready, có thể return an toàn
+		case <-time.After(5 * time.Second):
+			// Timeout nếu goroutine run() không phản hồi (không nên xảy ra)
+			return nil, errors.New("timeout waiting for connection to be ready")
+		}
+	case <-time.After(100 * time.Millisecond):
+		return nil, errors.New("cmdChan đầy, không thể accept connection")
+	}
+
 	return c, nil
 }
 
 // run là goroutine quản lý state duy nhất, tuần tự hóa mọi truy cập.
 func (c *Connection) run() {
-	logger.Info("Running connection with graceful shutdown logic...")
 
 	var (
 		address         common.Address
@@ -196,40 +219,31 @@ func (c *Connection) run() {
 			return
 		}
 		connect = false
-		logger.Debug("Cleanup: Initiated for %s", realConnAddr)
 
 		// BƯỚC 1: Gửi tín hiệu dừng cho các goroutine con.
 		if quitChan != nil {
-			logger.Debug("Cleanup: Closing quitChan...")
 			close(quitChan)
 		}
 
 		// BƯỚC 2: Đóng kết nối TCP và sendChan.
 		if tcpConn != nil {
-			logger.Debug("Cleanup: Closing TCP connection...")
 			_ = tcpConn.Close()
 		}
 		if sendChan != nil {
-			logger.Debug("Cleanup: Closing sendChan...")
 			close(sendChan)
 		}
 
 		// BƯỚC 3: Chờ cho các goroutine I/O kết thúc hoàn toàn.
-		logger.Debug("Cleanup: Waiting for IO goroutines to finish...")
 		writeWg.Wait()
 		readWg.Wait()
-		logger.Debug("Cleanup: IO goroutines finished.")
 
 		// BƯỚC 4: Đóng các channel downstream (requestChan, errorChan).
 		if requestChan != nil {
-			logger.Debug("Cleanup: Closing requestChan...")
 			close(requestChan)
 		}
 		if errorChan != nil {
-			logger.Debug("Cleanup: Closing errorChan...")
 			close(errorChan)
 		}
-		logger.Info("Connection manager: Cleanup complete for %s", realConnAddr)
 	}
 
 	startIO := func(conn net.Conn) {
@@ -242,8 +256,6 @@ func (c *Connection) run() {
 		c.sendChanMu.Lock()
 		c.sendChan = sendChan
 		c.sendChanMu.Unlock()
-		logger.Info("startIO: sendChan đã được expose cho %s", realConnAddr)
-
 		writeWg.Add(1)
 		readWg.Add(1)
 
@@ -266,19 +278,27 @@ func (c *Connection) run() {
 
 			switch v := cmd.(type) {
 			case cmdInit:
+				// Chỉ cập nhật address và cType
 				address = v.payload.address
 				cType = v.payload.cType
-				realConnAddr = v.payload.realConnAddr
-				// Update cache
 				c.metaMu.Lock()
 				c.cachedAddr = address
 				c.cachedType = cType
+				c.metaLastUpdate = time.Now()
+				c.metaMu.Unlock()
+
+			case cmdSetAddr:
+				realConnAddr = v.realConnAddr
+				c.metaMu.Lock()
 				c.cachedAddrStr = realConnAddr
 				c.metaLastUpdate = time.Now()
 				c.metaMu.Unlock()
 
 			case cmdAccept:
 				if connect {
+					if v.resp != nil {
+						v.resp <- nil // Đã connect rồi, không cần làm gì
+					}
 					continue
 				}
 				tcpConn = v.tcpConn
@@ -293,7 +313,11 @@ func (c *Connection) run() {
 				c.metaLastUpdate = time.Now()
 				c.metaMu.Unlock()
 				startIO(tcpConn)
-				logger.Info("Connection manager: Accepted connection from %s", realConnAddr)
+
+				// Signal rằng cmdAccept đã được xử lý xong và sendChan đã được khởi tạo
+				if v.resp != nil {
+					v.resp <- nil
+				}
 
 			case cmdConnect:
 				if connect {
@@ -317,7 +341,6 @@ func (c *Connection) run() {
 				c.metaLastUpdate = time.Now()
 				c.metaMu.Unlock()
 				startIO(tcpConn)
-				logger.Info("Connection manager: Connected to %s", realConnAddr)
 				v.resp <- nil
 
 			case cmdSendMessage:
@@ -380,7 +403,6 @@ func (c *Connection) run() {
 				}
 			}
 		case <-shutdownTimerCh:
-			logger.Debug("Connection manager: post-disconnect timeout reached, stopping goroutine for %s", realConnAddr)
 			return
 		}
 	}
@@ -462,10 +484,6 @@ func (c *Connection) SendMessage(message network.Message) error {
 		select {
 		case sendChan <- message:
 			// Gửi thành công
-			logger.Debug(
-				"SendMessage: đã gửi message thành công",
-				"command", message.Command(),
-			)
 			return nil
 		case <-time.After(c.config.WriteTimeout):
 			// Timeout khi sendChan đầy hoặc đã bị close
@@ -714,19 +732,14 @@ func (c *Connection) Init(address common.Address, cType string) {
 }
 
 func (c *Connection) SetRealConnAddr(realConnAddr string) {
-	address := c.Address()
-	cType := c.Type()
-
 	c.metaMu.Lock()
 	c.cachedAddrStr = realConnAddr
 	c.metaLastUpdate = time.Now()
 	c.metaMu.Unlock()
 
-	// Vẫn gửi vào cmdChan để run() goroutine biết (cho backward compatibility)
 	select {
-	case c.cmdChan <- cmdInit{payload: initPayload{address: address, cType: cType, realConnAddr: realConnAddr}}:
+	case c.cmdChan <- cmdSetAddr{realConnAddr: realConnAddr}:
 	default:
-		// cmdChan đầy, không sao vì đã update cache rồi
 	}
 }
 
@@ -775,17 +788,6 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 			logger.Error("writeLoop %s: marshal error: %v", remoteAddr, err)
 			continue
 		}
-		cmd := message.Command()
-		if cmd != "Ping" && cmd != "Pong" && cmd != "KeepAlive" && cmd != "GetTransactionReceipt" && cmd != "TransactionReceipt" {
-			logger.Info(
-				"writeLoop %s: sending command %s (%d bytes, remaining queue=%d/%d)",
-				remoteAddr,
-				cmd,
-				len(b),
-				len(sendChan),
-				c.config.SendChanSize,
-			)
-		}
 		_ = tcpConn.SetWriteDeadline(time.Now().Add(c.config.WriteTimeout))
 		length := make([]byte, 8)
 		binary.LittleEndian.PutUint64(length, uint64(len(b)))
@@ -798,13 +800,14 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 			logger.Error("writeLoop %s: write data error: %v", remoteAddr, err)
 			return
 		}
-		if err := writer.Flush(); err != nil {
-			logger.Error("writeLoop %s: flush error: %v", remoteAddr, err)
-			return
+		if len(sendChan) == 0 {
+			if err := writer.Flush(); err != nil {
+				logger.Error("writeLoop %v: flush error: %v", remoteAddr, err)
+				return
+			}
 		}
 		_ = tcpConn.SetWriteDeadline(time.Time{})
 	}
-	logger.Info("writeLoop %s: sendChan closed, goroutine kết thúc", remoteAddr)
 }
 
 func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Request, errorChan chan<- error, wg *sync.WaitGroup, quit <-chan struct{}) {
@@ -812,8 +815,6 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 
 	reader := bufio.NewReader(tcpConn)
 	remoteAddr := tcpConn.RemoteAddr().String()
-
-	logger.Info("readLoop %s: started", remoteAddr)
 
 	// Hàm này xử lý việc gửi các lỗi nghiêm trọng (khiến kết nối phải đóng)
 	// một cách an toàn để không bị panic.
@@ -824,7 +825,6 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 			// Đã gửi lỗi thành công. HandleConnection sẽ xử lý việc dọn dẹp.
 		case <-quit:
 			// Quá trình dọn dẹp đã được bắt đầu từ nơi khác, không cần gửi lỗi nữa.
-			logger.Info("readLoop %s: Bypassing error send, quit signal already received.", remoteAddr)
 		default:
 			// Trường hợp này hiếm gặp, có thể do errorChan đầy.
 			// Dù sao kết nối cũng sẽ bị đóng.
@@ -868,15 +868,14 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 			handleTerminalError(fmt.Errorf("unmarshal error: %w", err), "unmarshaling")
 			return
 		}
-		rcmd := msgProto.GetHeader().GetCommand()
-		if rcmd != "block_data_topic" && rcmd != "Ping" && rcmd != "Pong" && rcmd != "KeepAlive" && rcmd != "GetTransactionReceipt" && rcmd != "TransactionReceipt" {
-			logger.Info(
-				"readLoop %s: received command %s (%d bytes body)",
-				remoteAddr,
-				rcmd,
-				len(msgProto.GetBody()),
-			)
-		}
+
+		// logger.Info(
+		// 	"readLoop %s: received command %s (%d bytes body)",
+		// 	remoteAddr,
+		// 	msgProto.GetHeader().GetCommand(),
+		// 	len(msgProto.GetBody()),
+		// )
+
 		req := requestPool.Get().(network.Request)
 		req.Reset(c, NewMessage(msgProto))
 
