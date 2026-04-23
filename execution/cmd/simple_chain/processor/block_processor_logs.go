@@ -42,8 +42,16 @@ func (bp *BlockProcessor) GetLogs(request network.Request) error {
 		logger.Error("GetLogs: Failed to unmarshal request: %v", err)
 		return bp.sendLogsError(request, id, fmt.Sprintf("failed to unmarshal request: %v", err))
 	}
-
-	// logger.Info("GetLogs: Received request, header ID: %s", id)
+	logger.Info(
+		"[Chain][GetLogs] recv id=%s remote=%s blockHash=%d from=%q to=%q addresses=%d topics=%d",
+		id,
+		request.Connection().RemoteAddrSafe(),
+		len(req.BlockHash),
+		string(req.FromBlock),
+		string(req.ToBlock),
+		len(req.Addresses),
+		len(req.Topics),
+	)
 
 	if len(req.Topics) > maxTopics {
 		logger.Warn("GetLogs: Too many topics: %d", len(req.Topics))
@@ -56,6 +64,7 @@ func (bp *BlockProcessor) GetLogs(request network.Request) error {
 		logger.Error("GetLogs: Failed to get logs: %v", err)
 		return bp.sendLogsError(request, id, err.Error())
 	}
+	logger.Info("[Chain][GetLogs] done id=%s remote=%s matchedLogs=%d", id, request.Connection().RemoteAddrSafe(), len(logs))
 
 	protoLogs := bp.convertLogsToProto(logs)
 	response := &mt_proto.GetLogsResponse{
@@ -137,6 +146,8 @@ func (bp *BlockProcessor) buildFilterCriteria(req *mt_proto.GetLogsRequest) filt
 func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, error) {
 	var eventLogs []*types.Log
 	var beginBlock, endBlock *big.Int
+	var skippedMissingHash, skippedLoadBlockErr uint64
+	var scannedBlocks, scannedTxs, scannedEventLogs uint64
 
 	// Determine block range
 	if crit.BlockHash != nil {
@@ -181,18 +192,29 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 	if blockDiff.Cmp(big.NewInt(limitBlockRange)) > 0 {
 		return nil, fmt.Errorf("block range too large: max %d blocks allowed", limitBlockRange)
 	}
+	logger.Info(
+		"[Chain][GetLogs] resolved range begin=%d end=%d hasBlockHash=%t addrFilters=%d topicFilters=%d",
+		beginBlock.Uint64(),
+		endBlock.Uint64(),
+		crit.BlockHash != nil,
+		len(crit.Addresses),
+		len(crit.Topics),
+	)
 
 	// Iterate through blocks
 	currentBlockNum := new(big.Int).Set(beginBlock)
 	for currentBlockNum.Cmp(endBlock) <= 0 {
+		scannedBlocks++
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(currentBlockNum.Uint64())
 		if !ok {
+			skippedMissingHash++
 			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 			continue
 		}
 
 		blockData, err := bp.chainState.GetBlockDatabase().GetBlockByHash(hash)
 		if err != nil {
+			skippedLoadBlockErr++
 			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 			continue
 		}
@@ -203,12 +225,14 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 		}
 
 		for _, txsHash := range blockData.Transactions() {
+			scannedTxs++
 			receipt, err := rcpDb.GetReceipt(txsHash)
 			if err != nil {
 				return nil, err
 			}
 
 			events := receipt.EventLogs()
+			scannedEventLogs += uint64(len(events))
 
 			for _, eventLog := range events {
 				blockNumberUint64 := currentBlockNum.Uint64()
@@ -245,6 +269,15 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 
 		currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 	}
+	logger.Info(
+		"[Chain][GetLogs] scan summary scannedBlocks=%d scannedTxs=%d scannedEventLogs=%d matched=%d missingHashBlocks=%d blockLoadErrors=%d",
+		scannedBlocks,
+		scannedTxs,
+		scannedEventLogs,
+		len(eventLogs),
+		skippedMissingHash,
+		skippedLoadBlockErr,
+	)
 
 	return eventLogs, nil
 }

@@ -138,7 +138,7 @@ func (s *SocketServer) StartWorkerPool() {
 //  2. initReady gate ensures all other commands WAIT until InitConnection is queued
 //     This guarantees ProcessInitConnection runs before SendTransaction for the same client
 func (s *SocketServer) HandleConnection(conn network.Connection) error {
-	logger.Info("⚠️  [SERVER DEBUG] HandleConnection started for remote: %v", conn.RemoteAddrSafe())
+	// logger.Info("⚠️  [SERVER DEBUG] HandleConnection started for remote: %v", conn.RemoteAddrSafe())
 	requestChan, errorChan := conn.RequestChan()
 	if requestChan == nil || errorChan == nil {
 		return errors.New("request or error channel is nil")

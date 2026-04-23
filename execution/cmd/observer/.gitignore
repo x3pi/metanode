@@ -5,3 +5,4 @@ tool/test-fakecontract/.env
 tool/tictactoe-cli/.env
 tool/tictactoe-cli/tcc_address.txt
 tool/tictactoe-cli/.env
+tool/batch_monitor/report.md

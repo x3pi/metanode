@@ -1,0 +1,21 @@
+{
+ "rpc_urls": [
+		"http://192.168.1.233:8757",
+		"http://192.168.1.233:10747",
+		"http://192.168.1.233:10749",
+		"http://192.168.1.233:10750"
+	],
+	"type": "get_logs",
+	"timeout_seconds": 10,
+	"params": {
+		"from_block": "83",
+		"to_block": "83",
+		"address": "0x00000000000000000000000000000000B429C0B2",
+		"topics": [
+			[
+				"0xb528e3a3d4cbfd0b61a83cc28a004e801777b8ed6274adee62a727632fee66dd",
+				"0xa92be8788ad097ce638b4b327d9930cc1d8545abf05c0a399f37b7a6ce8b94ce"
+			]
+		]
+	}
+}

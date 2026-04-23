@@ -15,7 +15,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-
 // GetNonce lấy nonce cho address.
 // Nếu directClient được set → dùng ChainGetNonce (TCP direct, ID-matching, không tranh channel).
 // Fallback → dùng RpcGetPendingNonce (RPC proxy).
@@ -103,7 +102,6 @@ func (client *Client) ChainGetNonce(address common.Address) (uint64, error) {
 	return nonce, nil
 }
 
-
 // ChainGetTransactionReceipt lấy receipt trực tiếp từ chain theo txHash
 // Trả về raw response bytes — caller tự unmarshal nếu cần
 func (client *Client) ChainGetTransactionReceipt(txHash common.Hash) ([]byte, error) {
@@ -175,6 +173,5 @@ func (client *Client) ChainGetLogs(
 		return nil, fmt.Errorf("server error: %s", response.Error)
 	}
 
-	logger.Info("✅ ChainGetLogs: %d logs found", len(response.Logs))
 	return response, nil
 }

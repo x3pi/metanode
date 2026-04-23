@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -554,7 +556,7 @@ func executeSend(client *ethclient.Client, privateKey *ecdsa.PrivateKey, chainId
 							fmt.Printf("      - Log [%d]: Topic0=%s (Không tìm thấy trong ABI)\n", i, vLog.Topics[0].Hex())
 							continue
 						}
-						
+
 						logStrBuilder := strings.Builder{}
 						fmt.Printf("      - Log [%d] Event: %s\n", i, event.Name)
 						for j, topic := range vLog.Topics {

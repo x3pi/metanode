@@ -1,0 +1,26 @@
+{
+  "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+  "version": "0.0.1.0",
+  "connection_addresses":[
+    "192.168.1.233:4201",
+    "192.168.1.233:6201",
+    "192.168.1.233:6211",
+    "192.168.1.233:6221"
+  ],
+  "chain_id": 991,
+  "nation_id": 1,
+  "parent_connection_type": "client",
+  "parent_address": "0x824fef8A3cE4b93C546209CC254D97E5Fee804e0",
+  "type": "get_logs",
+  "params": {
+    "from_block": "83",
+    "to_block": "83",
+    "address": "0x00000000000000000000000000000000B429C0B2",
+    "topics": [
+      [
+        "0xb528e3a3d4cbfd0b61a83cc28a004e801777b8ed6274adee62a727632fee66dd",
+        "0xa92be8788ad097ce638b4b327d9930cc1d8545abf05c0a399f37b7a6ce8b94ce"
+      ]
+    ]
+  }
+}
