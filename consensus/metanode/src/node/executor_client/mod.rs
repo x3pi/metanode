@@ -524,6 +524,19 @@ impl ExecutorClient {
             Err(anyhow::anyhow!("FFI process_rpc_request not registered"))
         }
     }
+
+    /// Skip an empty commit without sending to Go.
+    ///
+    /// Advances `next_expected_index` to `global_exec_index + 1` so that
+    /// subsequent non-empty commits don't trigger the gap-detection logic
+    /// in `flush_buffer()`. This is the fast-path for empty DAG rounds
+    /// during catch-up — avoids protobuf encode, FFI call, and buffer overhead.
+    pub async fn skip_empty_commit(&self, global_exec_index: u64) {
+        let mut next_expected = self.next_expected_index.lock().await;
+        if global_exec_index >= *next_expected {
+            *next_expected = global_exec_index + 1;
+        }
+    }
 }
 
 // RPC query methods are in rpc_queries.rs

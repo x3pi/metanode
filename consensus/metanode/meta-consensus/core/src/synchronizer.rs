@@ -25,7 +25,6 @@ use parking_lot::{Mutex, RwLock};
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
 use tap::TapFallible;
 use tokio::{
-    runtime::Handle,
     sync::{mpsc::error::TrySendError, oneshot},
     task::{JoinError, JoinSet},
     time::{sleep, sleep_until, timeout, Instant},

@@ -239,9 +239,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         if current_phase != next_phase && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
             self.coordination_hub.set_phase(next_phase);
-        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping && quorum_commit > 0 {
-            // First transition out of bootstrapping
-            self.coordination_hub.set_phase(next_phase);
+        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
+            // ════════════════════════════════════════════════════════════════
+            // BOOTSTRAPPING EXIT LOGIC — two distinct scenarios:
+            //
+            // 1. GENESIS START (highest_handled == 0):
+            //    Go has no state, DAG is empty. Node MUST propose block 1 to
+            //    bootstrap consensus. → Immediately transition to Healthy.
+            //
+            // 2. SNAPSHOT RESTART (highest_handled > 0):
+            //    Go has state at index N, DAG was wiped. Must wait for
+            //    CommitSyncer to fast-forward baseline, then detect quorum
+            //    before allowing proposals. → Only exit when quorum > 0.
+            // ════════════════════════════════════════════════════════════════
+            if highest_handled_index == 0 {
+                // Genesis: no Go state → exit Bootstrapping immediately
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0). \
+                     Transitioning to {:?} to allow block 1 proposal.",
+                    next_phase
+                );
+                self.coordination_hub.set_phase(next_phase);
+            } else if quorum_commit > 0 {
+                // Snapshot restart: Go has state, wait for quorum detection
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
+                    quorum_commit, next_phase
+                );
+                self.coordination_hub.set_phase(next_phase);
+            }
         }
     }
 

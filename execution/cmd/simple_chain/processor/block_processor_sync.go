@@ -355,99 +355,26 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	}
 
 	// Case 2: Future block (out-of-order)
-	// Buffer it for later processing once we receive the gap blocks
-	// CRITICAL FORK-SAFETY: NEVER skip blocks! Always buffer and wait for sequential processing.
+	// ═══════════════════════════════════════════════════════════════════════════
+	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
+	// means Rust intentionally fast-skipped empty commits during catch-up.
+	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
+	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-
-		// SAFE FIX: Try to sync nextExpectedGlobalExecIndex from DB
-		// This handles case where TxsProcessor (Network Sync) updated DB but we didn't track it
-		// IMPORTANT: Only sync if DB is ahead, never jump ahead of DB!
+		
+		oldExpected := *nextExpectedGlobalExecIndex
+		*nextExpectedGlobalExecIndex = globalExecIndex
 		actualLastBlockDB := storage.GetLastBlockNumber()
-		persistedGEI := storage.GetLastGlobalExecIndex()
-		// Sync from persisted GEI (tracks ALL commits), not blockNumber (tracks only non-empty)
-		if persistedGEI > 0 && persistedGEI >= *nextExpectedGlobalExecIndex {
-			oldExpected := *nextExpectedGlobalExecIndex
-			*nextExpectedGlobalExecIndex = persistedGEI + 1
+		if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
 			*currentBlockNumber = actualLastBlockDB
-			logger.Info("🔄 [DB-SYNC] Synced nextExpectedGlobalExecIndex from persisted GEI: old=%d, new=%d (persisted_gei=%d, DB last_block=%d)",
-				oldExpected, *nextExpectedGlobalExecIndex, persistedGEI, actualLastBlockDB)
-
-			// Re-evaluate after sync
-			if globalExecIndex < *nextExpectedGlobalExecIndex {
-				logger.Warn("⚠️ [DB-SYNC] Block %d is now old after sync (expected %d), skipping",
-					globalExecIndex, *nextExpectedGlobalExecIndex)
-				return
-			} else if globalExecIndex == *nextExpectedGlobalExecIndex {
-				logger.Info("✅ [DB-SYNC] After sync, block %d is now sequential! Processing...", globalExecIndex)
-				// Fall through to process the block
-			} else {
-				// Still a gap - buffer and wait (NO JUMPING!)
-				newGap := globalExecIndex - *nextExpectedGlobalExecIndex
-				logger.Warn("⏳ [FORK-SAFETY] After DB sync, still gap=%d, buffering block %d (expected %d). Waiting for missing blocks...",
-					newGap, globalExecIndex, *nextExpectedGlobalExecIndex)
-				pendingBlocks[globalExecIndex] = epochData
-				return
-			}
-		} else if gapSize <= 16 && actualLastBlockDB == 0 {
-			// ═══════════════════════════════════════════════════════════════
-			// EPOCH BOUNDARY GAP SKIP (SyncOnly fresh start):
-			// Go has processed NOTHING (DB block=0) and first blocks from
-			// Rust arrive at GEI > 1 (e.g. GEI=9). The gap represents epoch 0
-			// empty consensus blocks that peers no longer store.
-			// Safe: Go has processed ZERO blocks, so no data is skipped.
-			// Max gap 16 prevents accidentally skipping real missing data.
-			// ═══════════════════════════════════════════════════════════════
-			oldExpected := *nextExpectedGlobalExecIndex
-			*nextExpectedGlobalExecIndex = globalExecIndex
-			logger.Info("📋 [EPOCH-GAP-SKIP] Fresh start gap skip: nextExpected=%d → %d (DB=0, gap=%d, first block at GEI=%d)",
-				oldExpected, globalExecIndex, gapSize, globalExecIndex)
-			// Fall through to process the block
-		} else if gapSize > 20 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
-			// ═══════════════════════════════════════════════════════════════
-			// SNAPSHOT-RESTORE GAP BRIDGE (Apr 2026):
-			//
-			// After snapshot restore, Go starts with persistedGEI from
-			// the snapshot (e.g., 1265). Meanwhile, Rust's cold-start DAG
-			// replays and its GEI GUARD skips all commits with GEI ≤ Go's
-			// reported GEI. The first commit Rust actually SENDS to Go has
-			// a much higher GEI (e.g., 4802) because the network has
-			// advanced significantly since the snapshot.
-			//
-			// At this point:
-			//   - persistedGEI = 1265 (from snapshot)
-			//   - nextExpected = 1266
-			//   - incoming GEI = 4802
-			//   - actualLastBlockDB > 0 (has blocks from snapshot + peer sync)
-			//   - gap = 3536 (>> 200)
-			//
-			// The missing GEIs (1266-4801) will NEVER arrive because Rust's
-			// GEI GUARD already skipped them. Buffering and waiting = deadlock.
-			//
-			// SAFETY: This is safe because:
-			// 1. Rust's GEI GUARD verified Go already has the state for those GEIs
-			// 2. The blocks from peer sync + snapshot cover the execution state
-			// 3. The GEI-REGRESSION guard (line ~637) will catch stale commits
-			// 4. The ANTI-INFLATION guard (line ~670) will adopt synced blocks
-			// 5. We only bridge when gap > 200 (normal ordering gaps are < 50)
-			// ═══════════════════════════════════════════════════════════════
-			oldExpected := *nextExpectedGlobalExecIndex
-			*nextExpectedGlobalExecIndex = globalExecIndex
-			*currentBlockNumber = actualLastBlockDB
-			logger.Warn("🔗 [SNAPSHOT-RESTORE GAP BRIDGE] Large gap detected after snapshot restore! "+
-				"Jumping nextExpected=%d → %d (gap=%d, persistedGEI=%d, DB_block=%d). "+
-				"Rust GEI GUARD already skipped commits %d-%d.",
-				oldExpected, globalExecIndex, gapSize, persistedGEI, actualLastBlockDB,
-				oldExpected, globalExecIndex-1)
-			// Fall through to process the block
-		} else {
-			// FORK-SAFETY CRITICAL: Still a gap - buffer and wait (NO JUMPING!)
-			newGap := globalExecIndex - *nextExpectedGlobalExecIndex
-			logger.Warn("⏳ [FORK-SAFETY] Out-of-order block. Gap=%d, buffering block %d (expected %d). Waiting for missing blocks...",
-				newGap, globalExecIndex, *nextExpectedGlobalExecIndex)
-			pendingBlocks[globalExecIndex] = epochData
-			return
 		}
+
+		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
+			oldExpected, globalExecIndex, gapSize)
+			
+		// Fall through to process the block sequentially
 	}
 
 	// Case 3: Sequential block (globalExecIndex == *nextExpectedGlobalExecIndex)

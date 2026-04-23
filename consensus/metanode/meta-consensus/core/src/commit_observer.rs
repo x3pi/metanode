@@ -173,11 +173,19 @@ impl CommitObserver {
             .read_last_commit()
             .expect("Reading the last commit should not fail");
         let Some(last_commit) = &last_commit else {
-            assert_eq!(
-                replay_after_commit_index, 0,
-                "Commit replay should start at the beginning if there is no commit history"
-            );
-            info!("Nothing to recover for commit observer - starting new epoch");
+            // SNAPSHOT RESTART FIX: On snapshot restore, DAG store is empty (no commits)
+            // but Go has already executed up to replay_after_commit_index (e.g., 1000).
+            // This is a valid state — skip replay and let CommitSyncer fast-forward.
+            // The old assert_eq!(replay_after_commit_index, 0) would PANIC here.
+            if replay_after_commit_index > 0 {
+                info!(
+                    "📊 [SNAPSHOT] Commit observer: empty store but Go at index {}. \
+                     Skipping replay — CommitSyncer will fast-forward.",
+                    replay_after_commit_index
+                );
+            } else {
+                info!("Nothing to recover for commit observer - starting new epoch");
+            }
             return;
         };
 

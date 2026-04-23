@@ -39,11 +39,46 @@ pub async fn dispatch_commit(
     // CC-1: Unified batch_id for end-to-end tracing
     let batch_id = format!("E{}C{}G{}", epoch, commit_index, global_exec_index);
 
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // 🛡️ RUST-DRIVEN LEADER SELECTION (Critical Fork-Safety)
-    // Calculate leader_address for ALL commits (empty or not)
-    // NEVER send None - if we can't determine leader, BLOCK/PANIC
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
+    // FAST PATH: Skip empty commits entirely during catch-up.
+    //
+    // Empty DAG rounds (no transactions, no system TX) make up 90%+ of
+    // commits during catch-up. Each one was going through:
+    //   1. Leader resolution (RwLock + HashMap + retries) → ~ms
+    //   2. Protobuf encode → ~μs
+    //   3. BlockDeliveryManager channel (oneshot await) → ~μs
+    //   4. Buffer + FFI call to Go CGo → ~ms
+    //   5. TX tracking + ForceCommit → ~μs
+    //
+    // With 4000+ empty commits, this adds ~4-8 seconds of unnecessary
+    // latency during catch-up. Go doesn't create blocks for empty commits
+    // anyway (block_number=0), so we can skip the entire pipeline.
+    //
+    // We still update:
+    //   - shared_last_global_exec_index → for GEI tracking
+    //   - executor_client.next_expected_index → to prevent gap detection
+    // ═══════════════════════════════════════════════════════════════════
+    if total_transactions == 0 && !has_system_tx {
+        // Update shared GEI counter
+        if let Some(shared_index) = shared_last_global_exec_index.clone() {
+            let mut index_guard = shared_index.lock().await;
+            if global_exec_index > *index_guard {
+                *index_guard = global_exec_index;
+            }
+        }
+
+        // Advance executor_client's next_expected_index so non-empty commits
+        // don't trigger gap detection when they arrive later
+        if let Some(ref client) = executor_client {
+            client.skip_empty_commit(global_exec_index).await;
+        }
+
+        tracing::trace!(
+            "⏭️ [FAST-SKIP] Empty commit #{} (GEI={}) skipped — no FFI call needed",
+            commit_index, global_exec_index
+        );
+        return Ok(1);
+    }
     let leader_address: Option<Vec<u8>> = if executor_client.is_some() {
         let leader_author_index = subdag.leader.author.value();
 
