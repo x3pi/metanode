@@ -1,8 +1,10 @@
 package listener
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -11,10 +13,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
+// runResweeper quét lại các batch đang ở trạng thái Pending.
+// Nếu một batch đã gửi nhưng chưa thấy log (MessageReceived hoặc OutboundResult)
+// sau 20s, nó sẽ thực hiện quét lại (rescan) trên node mục tiêu.
 func (s *CrossChainScanner) runResweeper() {
-	logger.Info("🧹 [Scanner] Resweeper started")
-
-	// Topic signatures từ ABI
 	var messageReceivedTopic, outboundResultTopic common.Hash
 	if ev, ok := s.cfg.CrossChainAbi.Events["MessageReceived"]; ok {
 		messageReceivedTopic = ev.ID
@@ -22,17 +24,26 @@ func (s *CrossChainScanner) runResweeper() {
 	if ev, ok := s.cfg.CrossChainAbi.Events["OutboundResult"]; ok {
 		outboundResultTopic = ev.ID
 	}
-
 	contractAddr := common.HexToAddress(s.cfg.CrossChainContract_)
 
-	// Giới hạn 8 goroutine quét cùng lúc (giống pattern bên Watcher)
 	sem := make(chan struct{}, 16)
 	var tracking sync.Map
+	var activeWorkers int32
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	logger.Info("🧹 [Resweeper] Started (Interval: 30s, Workers: 16)")
+
 	for range ticker.C {
+		// Đếm số lượng pending batches để in ra log
+		count := 0
+		s.pendingBatches.Range(func(key, value interface{}) bool {
+			count++
+			return true
+		})
+		logger.Info("🧹 [Resweeper] Periodic scan triggered. Pending batches: %d", count)
+
 		s.pendingBatches.Range(func(key, value interface{}) bool {
 			batchId := key.([32]byte)
 			data := value.(*PendingBatchData)
@@ -42,7 +53,7 @@ func (s *CrossChainScanner) runResweeper() {
 				return true
 			}
 
-			// Kiểm tra xem batch này có đang được quét chưa
+			// Kiểm tra xem batch này có đang được quét bởi goroutine cũ không
 			if _, already := tracking.LoadOrStore(batchId, struct{}{}); already {
 				return true
 			}
@@ -50,17 +61,24 @@ func (s *CrossChainScanner) runResweeper() {
 			// Gửi vào goroutine quét
 			select {
 			case sem <- struct{}{}:
+				atomic.AddInt32(&activeWorkers, 1)
 				go func(k, v interface{}) {
 					defer func() {
 						<-sem
 						tracking.Delete(batchId)
+						atomic.AddInt32(&activeWorkers, -1)
 					}()
-					s.processSingleResweep(k, v, messageReceivedTopic, outboundResultTopic, contractAddr)
+
+					// Tạo context timeout để tránh worker bị treo vĩnh viễn
+					ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+					defer cancel()
+
+					s.processSingleResweep(ctx, k, v, messageReceivedTopic, outboundResultTopic, contractAddr)
 				}(key, value)
 			default:
 				// Nếu đã đạt giới hạn worker, giải phóng tracking để lượt sau quét lại
 				tracking.Delete(batchId)
-				// logger.Warn("🧹 [Resweeper] Max workers (8) reached, skipping batch %x", batchId[:4])
+				// logger.Warn("🧹 [Resweeper] Max workers (16) reached, skipping batch %x until next loop", batchId[:4])
 			}
 
 			return true
@@ -69,6 +87,7 @@ func (s *CrossChainScanner) runResweeper() {
 }
 
 func (s *CrossChainScanner) processSingleResweep(
+	ctx context.Context,
 	key, value interface{},
 	messageReceivedTopic, outboundResultTopic common.Hash,
 	contractAddr common.Address,
@@ -79,7 +98,7 @@ func (s *CrossChainScanner) processSingleResweep(
 	// Dùng client đã dùng để submit batch này (hoặc node sống gần nó nhất)
 	localConnClient, _ := s.GetActiveClient(data.TargetIndex)
 	if localConnClient == nil {
-		logger.Warn("🧹 [Resweeper] Cannot get active client to check log (Batch %x)", batchId[:4])
+		logger.Warn("🧹 [Resweeper] Cannot get active client to check log (Batch %x, NodeIndex %d)", batchId[:4], data.TargetIndex)
 		return
 	}
 
@@ -107,7 +126,7 @@ func (s *CrossChainScanner) processSingleResweep(
 		}
 	}
 
-	logger.Info("🧹 [Resweeper] Checking Batch %x (txHash: %s): eventKind=%s (fromBlock=%d), msgId=%s",
+	logger.Info("🧹 [Resweeper] Checking Batch %x (txHash: %s): eventKind=%s (submitBlock=%d), msgId=%s",
 		batchId[:4],
 		data.TxHash.Hex(),
 		func() string {
@@ -127,34 +146,47 @@ func (s *CrossChainScanner) processSingleResweep(
 		fromBlk = 1
 	}
 
+	// Chờ lấy block number mới nhất
 	latestBlk, errBlk := localConnClient.ChainGetBlockNumber()
 	if errBlk != nil {
-		logger.Warn("🧹 [Resweeper] Cannot get latest block (node=%s): %v", localConnClient.GetNodeAddr(), errBlk)
+		logger.Warn("🧹 [Resweeper] Cannot get latest block from node %s: %v", localConnClient.GetNodeAddr(), errBlk)
+		return
+	}
+
+	if latestBlk < fromBlk {
+		logger.Warn("🧹 [Resweeper] Node %s is behind? (latest=%d < searchFrom=%d). Skipping batch %x", 
+			localConnClient.GetNodeAddr(), latestBlk, fromBlk, batchId[:4])
 		return
 	}
 
 	fromBlockStr := hexutil.EncodeUint64(fromBlk)
 	toBlockStr := hexutil.EncodeUint64(latestBlk)
 
+	// Gọi API lấy logs
+	// Note: ChainGetLogs không nhận context nên ta không thể cancel nó giữa chừng,
+	// nhưng context timeout ở ngoài sẽ giúp worker pool không bị đầy nếu nó treo.
 	respRecv, err := localConnClient.ChainGetLogs(
 		nil,
-		fromBlockStr, // From: block lúc submit
+		fromBlockStr, // From: block lúc submit - 50
 		toBlockStr,   // To: block mới nhất
 		[]common.Address{contractAddr},
 		topics,
 	)
 
-	logger.Info("[Resweeper] rescan node %s for batch %x", localConnClient.GetNodeAddr(), batchId[:4])
+	if err != nil {
+		logger.Warn("🧹 [Resweeper] ChainGetLogs error (node=%s, batch=%x): %v", localConnClient.GetNodeAddr(), batchId[:4], err)
+		return
+	}
 
-	if err == nil && respRecv != nil && len(respRecv.Logs) > 0 {
+	if respRecv != nil && len(respRecv.Logs) > 0 {
 		if len(respRecv.Logs) >= 2 {
-			logger.Error("🚨 [Resweeper] CẢNH BÁO: Batch %x đã bị gửi và thực thi TRÙNG LẶP trên chain (tìm thấy %d logs)!", batchId[:4], len(respRecv.Logs))
+			logger.Error("🚨 [Resweeper] DUPLICATE DETECTED: Batch %x found %d times on chain!", batchId[:4], len(respRecv.Logs))
 		}
-		logger.Info("🧹 [Resweeper] Batch %x HOÀN THÀNH - Mạng đã chốt. Xoá pending.", batchId[:4])
+		logger.Info("🧹 [Resweeper] Batch %x HOÀN THÀNH - Log found at node %s. Removing from pending.", batchId[:4], localConnClient.GetNodeAddr())
 		s.pendingBatches.Delete(key)
 	} else {
-		// Không thấy hoặc lỗi => Mạng chưa đạt 2/3 hoặc Node bị chết
-		logger.Warn("🧹 [Resweeper] Batch %x bị kẹt quá 20s (checked via Node %s).",
-			batchId[:4], localConnClient.GetNodeAddr())
+		// Không thấy log => Có thể TX bị rớt hoặc Node chưa sync kịp
+		logger.Warn("🧹 [Resweeper] Batch %x NOT FOUND on node %s (checked blocks %d to %d). Will retry later.",
+			batchId[:4], localConnClient.GetNodeAddr(), fromBlk, latestBlk)
 	}
 }

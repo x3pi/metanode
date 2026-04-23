@@ -104,7 +104,7 @@ interface IFullDBV1 {
     function querySearch(
         string memory dbname,
         SearchParams memory params
-    ) external returns (SearchResultsPage memory);
+    ) external view returns (SearchResultsPage memory);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -378,6 +378,31 @@ contract TestFullDBV1 {
         docId = (d > 0) ? d : docId;
 
         docIds[0] = docId;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Hàm này dùng để CHỨNG MINH LỖI decode dữ liệu bị thiếu 32 byte đầu
+    // Nếu chạy với C++ cũ (chưa sửa data_len), hàm abi.decode sẽ bị REVERT!
+    function runStep4_ReadAndVerifyUpdatedDoc() public {
+        uint256 docId = docIds[0];
+        require(docId > 0, "Run step1 and step3 first");
+
+        // Đọc nguyên cục bytes từ DB ra
+        bytes memory rawBytes = fullDB.getDataDocument(DB_NAME, docId);
+        require(rawBytes.length > 0, "Data is empty!");
+
+        // In ra độ dài thực tế của mảng byte để kiểm chứng
+        emit Read_Terms(docId, rawBytes.length);
+
+        // BƯỚC NÀY SẼ BỊ REVERT NẾU MẢNG BYTE BỊ CẮT XÉN (LỖI CŨ)
+        ProductData memory decodedData = abi.decode(rawBytes, (ProductData));
+
+        // Lưu lại để kiểm chứng trên giao diện
+        lastReadProduct = decodedData;
+        lastReadData = rawBytes;
+        
+        // Emit ra để thấy data đã được decode chính xác
+        emit Read_Data_Ext(docId, rawBytes, decodedData);
     }
 
     // Hàm commit đã được ẩn tự động trong EVM/MVM

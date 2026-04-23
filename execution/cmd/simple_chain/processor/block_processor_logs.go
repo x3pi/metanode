@@ -43,7 +43,7 @@ func (bp *BlockProcessor) GetLogs(request network.Request) error {
 		return bp.sendLogsError(request, id, fmt.Sprintf("failed to unmarshal request: %v", err))
 	}
 
-	logger.Info("GetLogs: Received request, header ID: %s", id)
+	// logger.Info("GetLogs: Received request, header ID: %s", id)
 
 	if len(req.Topics) > maxTopics {
 		logger.Warn("GetLogs: Too many topics: %d", len(req.Topics))

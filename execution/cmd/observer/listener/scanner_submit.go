@@ -49,7 +49,6 @@ func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cros
 		mod := big.NewInt(int64(len(s.localClients)))
 		targetIndex = int(new(big.Int).Mod(batchIdBig, mod).Int64())
 	}
-
 	// Delegate quản lý node sống chết cho GetActiveClient
 	selectedClient, actualIndex := s.GetActiveClient(targetIndex)
 

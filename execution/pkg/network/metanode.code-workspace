@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../../consensus-chain/mtn-2026"
+		},
+		{
+			"path": "../../../../../metaCoSign"
+		}
+	],
+	"settings": {}
+}
