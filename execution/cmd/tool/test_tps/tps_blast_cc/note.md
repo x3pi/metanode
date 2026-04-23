@@ -21,7 +21,7 @@ go run main.go --count 20000 --parallel_native=true --rounds 5 --load_balance=tr
 go run main.go --count 30000 --parallel_native=true --rounds 20 --load_balance=true  --batch=500 
 go run main.go --count 50000 --parallel_native=true --rounds 5 --load_balance=true --batch=10000 --sleep=0
 go run main.go --count 1000 --parallel_native=true --rounds 1 --load_balance=false  --batch=5 --verify
-go run main.go --count 20000 --parallel_native=true --rounds 5 --load_balance=false  --batch=500
+go run main.go --count  6000 --parallel_native=true --rounds 10 --load_balance=false  --batch=500
 
 ```
 
