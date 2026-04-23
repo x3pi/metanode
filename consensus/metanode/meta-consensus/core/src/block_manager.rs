@@ -38,8 +38,7 @@ impl SuspendedBlock {
 /// Maximum number of suspended blocks allowed per authority. When the total suspended blocks
 /// across all authorities exceeds `MAX_SUSPENDED_BLOCKS_PER_AUTHORITY * committee_size`,
 /// new blocks will be skipped to prevent OOM from Byzantine validators sending blocks
-/// without valid causal history.
-const MAX_SUSPENDED_BLOCKS_PER_AUTHORITY: usize = 10000;
+const MAX_SUSPENDED_BLOCKS_PER_AUTHORITY: usize = 5000;
 
 /// Block manager suspends incoming blocks until they are connected to the existing graph,
 /// returning newly connected blocks.
@@ -310,7 +309,7 @@ impl BlockManager {
                 .unwrap_or(0);
             let incoming_round = block.round();
 
-            if incoming_round > oldest_round + 100 {
+            if incoming_round > oldest_round + 50 {
                 // Evict oldest 50% of suspended blocks
                 let evict_count = self.suspended_blocks.len() / 2;
                 let mut evict_refs: Vec<BlockRef> = self

@@ -269,9 +269,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
             tokio::select! {
                 // Periodically, schedule new fetches if the node is falling behind.
                 _ = interval.tick() => {
-                    // STATE MACHINE: Check for state transitions every 2 seconds
+                    // STATE MACHINE: Check for state transitions dynamically
                     let now = tokio::time::Instant::now();
-                    if now.duration_since(last_state_check) >= Duration::from_secs(2) {
+                    let check_interval = if self.coordination_hub.is_healthy() {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::from_millis(500)
+                    };
+                    if now.duration_since(last_state_check) >= check_interval {
                         let old_state = self.coordination_hub.get_phase();
                         self.update_state();
                         let new_state = self.coordination_hub.get_phase();
@@ -737,8 +742,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             .min(
                 effective_batches_ahead
                     .saturating_sub(self.fetched_ranges.len()),
-            )
-            .max(1);
+            );
         // Start new fetches if there are pending batches and available slots.
         loop {
             if self.inflight_fetches.len() >= target_parallel_fetches {
