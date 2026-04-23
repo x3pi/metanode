@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -247,7 +248,7 @@ func (bp *BlockProcessor) commitWorker() {
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // The persist jobs are sent to persistWorker for async LevelDB persistence.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool) {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot) {
 	overallStart := time.Now()
 
 	// ═══════════════════════════════════════════════════════════════
@@ -330,11 +331,11 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			resultsChan <- taskResult{name: "StakePipeline", err: err, duration: time.Since(start)}
 		}()
 
-		// TrieDatabases (MVM smart contract storage)
+		// TrieDatabases (MVM smart contract storage) - Commit from Snapshot to avoid data race
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			err := trie_database.GetTrieDatabaseManager().CommitAllTrieDatabases()
+			err := trie_database.GetTrieDatabaseManager().CommitSnapshots(trieDBSnapshots)
 			resultsChan <- taskResult{name: "TrieDatabases", err: err, duration: time.Since(start)}
 		}()
 

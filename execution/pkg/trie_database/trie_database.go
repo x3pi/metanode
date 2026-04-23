@@ -108,7 +108,9 @@ func (t *TrieDatabase) SetStatus(status TrieDatabaseStatus) {
 }
 
 func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
-	trieDatabae.IntermediateRoot()
+	// REMOVED: trieDatabae.IntermediateRoot()
+	// ProcessTransactions already called IntermediateRoot() sequentially before the parallel commit phase.
+	// Calling it here creates a severe race condition where Commit() steals the dirtyData of Block N+1.
 	trieCopy := trieDatabae.trieR.Copy()
 	
 	root, nodeSet, _, err := trieCopy.Commit(true)

@@ -198,7 +198,30 @@ impl<C: NetworkClient> CommitSyncer<C> {
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
-        let local_commit = self.inner.dag_state.read().last_commit_index();
+        let mut local_commit = self.inner.dag_state.read().last_commit_index();
+
+        // ════════════════════════════════════════════════════════════════════════
+        // SNAPSHOT RESTORE FAST-FORWARD
+        // If Rust DAG is empty (local_commit == 0) BUT Go executor has restored state
+        // up to highest_handled_index > 0, we MUST fast-forward the baseline NOW.
+        // Otherwise, `is_behind` will evaluate to `true`, node stays stuck in
+        // CatchingUp trying to fetch blocks 1..highest_handled_index which are
+        // irrelevant and will cause own-slot conflicts.
+        // ════════════════════════════════════════════════════════════════════════
+        if local_commit == 0 && highest_handled_index > 0 {
+            tracing::info!(
+                "🚀 [COLD-START/RESTORE] Node initialized with empty DAG but Go execution is at {}. Fast-forwarding DAG baseline NOW.",
+                highest_handled_index
+            );
+            
+            // Fast-forward DAG state to match Go Execution Engine's progress
+            // We use highest_handled_index as the base target round for GC dropping
+            self.inner.dag_state.write().reset_to_network_baseline(highest_handled_index as u32, highest_handled_index, crate::commit::CommitDigest::MIN);
+            self.synced_commit_index = highest_handled_index;
+            
+            // Update local_commit for the phase evaluation below!
+            local_commit = highest_handled_index;
+        }
 
         let current_phase = self.coordination_hub.get_phase();
 
@@ -216,16 +239,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         if current_phase != next_phase && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
             self.coordination_hub.set_phase(next_phase);
-            
-            // Initialization point for Cold-Start / Snapshot restore
-            if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy && local_commit == 0 && highest_handled_index > 0 {
-                tracing::info!(
-                    "🚀 [COLD-START] Node caught up to network (Go handled up to {}). Initializing DAG baseline.",
-                    highest_handled_index
-                );
-                self.inner.dag_state.write().reset_to_network_baseline(quorum_commit as u32, highest_handled_index, crate::commit::CommitDigest::MIN);
-                self.synced_commit_index = highest_handled_index;
-            }
         } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping && quorum_commit > 0 {
             // First transition out of bootstrapping
             self.coordination_hub.set_phase(next_phase);

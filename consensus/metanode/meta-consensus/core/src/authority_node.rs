@@ -373,15 +373,8 @@ where
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
-        // Create adaptive delay state
-        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(
-            min_round_delay_ms,
-            adaptive_delay_enabled,
-        ));
-        info!(
-            "Adaptive delay enabled: base_delay={}ms",
-            min_round_delay_ms
-        );
+        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
+        info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
 
         let core = Core::new(
             context.clone(),

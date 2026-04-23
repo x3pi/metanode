@@ -48,6 +48,7 @@ type ProcessResult struct {
 	Error            error
 	EventLogs        map[common.Address][]types.EventLog
 	MvmIdMap         map[common.Hash]common.Address
+	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -153,6 +154,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		EventLogs:        eventLogs,
 		StakeStatesRoot:  stakeRoot,
 		MvmIdMap:         mvmIdMap,
+		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 	}
 	return processResult, nil
 }
@@ -239,6 +241,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		EventLogs:        eventLogs,
 		StakeStatesRoot:  stakeRoot,
 		MvmIdMap:         mvmIdMap,
+		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 	}
 	// Send result to channel
 	// Consider if sending on the channel should happen outside the lock if it blocks
