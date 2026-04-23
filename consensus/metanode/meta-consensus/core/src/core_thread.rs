@@ -19,7 +19,7 @@ use mysten_metrics::{
 use parking_lot::RwLock;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
-use tracing::warn;
+
 
 use crate::{
     block::VerifiedBlock,
@@ -280,7 +280,7 @@ impl ChannelCoreThreadDispatcher {
         self.context.metrics.node_metrics.core_lock_enqueued.inc();
         if let Some(sender) = self.sender.upgrade() {
             if let Err(err) = sender.send(command).await {
-                warn!(
+                tracing::debug!(
                     "Couldn't send command to core thread, probably is shutting down: {}",
                     err
                 );

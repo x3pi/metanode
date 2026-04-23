@@ -34,8 +34,8 @@ pub enum CatchupState {
     },
     /// Go is behind local Rust storage
     BehindRustLocal {
-        target_block: u64,
-        current_block: u64,
+        target_gei: u64,
+        current_gei: u64,
     },
     /// Caught up, ready to participate in consensus
     Ready,
@@ -125,40 +125,34 @@ impl CatchupManager {
         };
 
         let local_go_last_block = match self.executor_client.get_last_block_number().await {
-            Ok((block, _, _)) => block,
+            Ok((block, _, _is_ready)) => block,
             Err(e) => {
                 error!("🚨 [CATCHUP] Failed to get last block from Go: {}", e);
                 return Err(anyhow::anyhow!("Failed to get last block from Go: {}", e));
             }
         };
 
+        let local_go_last_gei = self.executor_client.get_last_global_exec_index().await.unwrap_or(0);
+
         // 2. Get Network State from Peers (TCP-based only)
-        let rust_stored_block = match &self.executor_client.storage_path {
+        let rust_stored_gei = match &self.executor_client.storage_path {
             Some(path) => crate::node::executor_client::block_store::get_max_stored_gei(path)
                 .await
                 .unwrap_or(None)
-                .unwrap_or(local_go_last_block),
-            None => local_go_last_block,
+                .unwrap_or(local_go_last_gei),
+            None => local_go_last_gei,
         };
 
-        if local_go_last_block < rust_stored_block {
-            info!("⚠️ [SYNC STATUS] Go is behind LOCAL Rust DB! (Go: {}, Rust: {}). Fast-forward mandatory.", local_go_last_block, rust_stored_block);
+        if local_go_last_gei < rust_stored_gei {
+            info!("⚠️ [SYNC STATUS] Go is behind LOCAL Rust DB! (Go GEI: {}, Rust GEI: {}). Fast-forward mandatory.", local_go_last_gei, rust_stored_gei);
             let state = CatchupState::BehindRustLocal {
-                target_block: rust_stored_block,
-                current_block: local_go_last_block,
+                target_gei: rust_stored_gei,
+                current_gei: local_go_last_gei,
             };
             *self.state.write().await = state;
 
-            return Ok(SyncStatus {
-                go_epoch: local_go_epoch,
-                go_last_block: local_go_last_block,
-                epoch_match: true,
-                commit_gap: 0,
-                block_gap: rust_stored_block - local_go_last_block,
-                network_block_height: rust_stored_block,
-                network_commit: rust_stored_block,
-                ready: false,
-            });
+            // We do not return early here because we still need to know the WAN network block
+            // to properly calculate the block gap.
         }
 
         let (network_epoch, network_block, _best_peer, network_commit) = if !self
@@ -177,9 +171,9 @@ impl CatchupManager {
                     );
                     (
                         res.0,
-                        std::cmp::max(res.1, rust_stored_block), // Ensure network_block is at least rust_stored_block
+                        std::cmp::max(res.1, local_go_last_block), // network block is at least what Go has
                         res.2,
-                        std::cmp::max(res.3, rust_stored_block), // Ensure network_commit is at least rust_stored_block
+                        std::cmp::max(res.3, rust_stored_gei), // Ensure network_commit is at least rust_stored_gei
                     )
                 }
                 Err(e) => {
@@ -189,9 +183,9 @@ impl CatchupManager {
                     );
                     (
                         local_go_epoch,
-                        std::cmp::max(local_go_last_block, rust_stored_block),
+                        std::cmp::max(local_go_last_block, local_go_last_block),
                         "local".to_string(),
-                        std::cmp::max(local_last_commit, rust_stored_block),
+                        std::cmp::max(local_last_commit, rust_stored_gei),
                     )
                 }
             }
@@ -199,9 +193,9 @@ impl CatchupManager {
             // No peers configured (single node?), assume we are the network
             (
                 local_go_epoch,
-                std::cmp::max(local_go_last_block, rust_stored_block),
+                local_go_last_block,
                 "local".to_string(),
-                std::cmp::max(local_last_commit, rust_stored_block),
+                std::cmp::max(local_last_commit, rust_stored_gei),
             )
         };
 
@@ -475,27 +469,27 @@ impl CatchupManager {
     pub async fn sync_blocks_from_local_rust(
         &self,
         storage_path: &std::path::Path,
-        go_last_block: u64,
-        rust_last_block: u64,
+        go_last_gei: u64,
+        rust_last_gei: u64,
     ) -> Result<u64> {
-        let missing_from = go_last_block + 1;
-        if missing_from > rust_last_block {
+        let missing_from = go_last_gei + 1;
+        if missing_from > rust_last_gei {
             info!(
-                "✅ [LOCAL CATCHUP] No blocks to fetch (go={} >= rust={})",
-                go_last_block, rust_last_block
+                "✅ [LOCAL CATCHUP] No blocks to fetch (go GEI={} >= rust GEI={})",
+                go_last_gei, rust_last_gei
             );
             return Ok(0);
         }
 
         info!(
-            "🔄 [LOCAL CATCHUP] Fetching local Rust blocks {} to {} for Go executor",
-            missing_from, rust_last_block
+            "🔄 [LOCAL CATCHUP] Fetching local Rust blocks GEI {} to {} for Go executor",
+            missing_from, rust_last_gei
         );
 
         let blocks = crate::node::executor_client::block_store::load_executable_blocks_range(
             storage_path,
             missing_from,
-            rust_last_block,
+            rust_last_gei,
         )
         .await?;
 

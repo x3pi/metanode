@@ -356,17 +356,17 @@ impl InitializedNode {
                     {
                         let state = cm.state.read().await.clone();
                         if let crate::node::catchup::CatchupState::BehindRustLocal {
-                            target_block,
-                            current_block,
+                            target_gei,
+                            current_gei,
                         } = state
                         {
-                            warn!("🔄 [STARTUP] Go is behind local Rust storage! Fast-forwarding directly from local DB ({} -> {})...", current_block, target_block);
+                            warn!("🔄 [STARTUP] Go is behind local Rust storage! Fast-forwarding directly from local DB (GEI {} -> {})...", current_gei, target_gei);
                             let storage_path = std::path::Path::new(&self.node_config.storage_path);
                             match cm
                                 .sync_blocks_from_local_rust(
                                     storage_path,
-                                    current_block,
-                                    target_block,
+                                    current_gei,
+                                    target_gei,
                                 )
                                 .await
                             {

@@ -844,8 +844,8 @@ impl ConsensusNode {
         // the DAG baseline and skip re-fetching commits Go has already
         // processed, preventing both deadlocks and re-execution.
         // ═══════════════════════════════════════════════════════════════
-        let go_replay_after = if config.executor_read_enabled && storage.last_global_exec_index > 0 {
-            storage.last_global_exec_index as u32
+        let go_replay_after = if config.executor_read_enabled && storage.last_global_exec_index > storage.epoch_base_exec_index {
+            (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
         } else {
             0
         };

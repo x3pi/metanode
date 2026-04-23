@@ -636,7 +636,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 } else {
                     // Found gap between earliest fetched block and latest synced block,
                     // so not sending additional blocks to Core.
-                    warn!(
+                    tracing::info!(
                         "[NODE4-DEBUG] GAP DETECTED: fetched_range={}→{} but synced={}",
                         fetched_commit_range.start(),
                         fetched_commit_range.end(),

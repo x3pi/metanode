@@ -158,10 +158,9 @@ impl CommitFinalizer {
             }
             for commit in finalized_commits {
                 if let Err(e) = self.commit_sender.send(commit) {
-                    tracing::warn!(
-                        "Failed to send to commit handler, probably due to shutdown: {e:?}"
+                    tracing::debug!(
+                        "Failed to send commit to handler (likely epoch transition active): {e:?}"
                     );
-                    return;
                 }
             }
         }

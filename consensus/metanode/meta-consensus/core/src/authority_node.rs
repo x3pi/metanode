@@ -539,10 +539,10 @@ where
         self.round_prober_handle.stop().await;
         self.proposed_block_handler.abort();
         self.leader_timeout_handle.stop().await;
+        // Stop block subscriptions before stopping Core to prevent sending blocks to closed channel.
+        self.subscriber.stop();
         // Shutdown Core to stop block productions and broadcast.
         self.core_thread_handle.stop().await;
-        // Stop block subscriptions before stopping network server.
-        self.subscriber.stop();
         self.network_manager.stop().await;
 
         self.context

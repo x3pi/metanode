@@ -182,7 +182,13 @@ impl Core {
                 .flat_map(|c| c.blocks())
                 .cloned()
                 .collect::<Vec<_>>();
-            self.block_manager.try_accept_committed_blocks(blocks);
+            self.block_manager.try_accept_committed_blocks(blocks.clone());
+
+            // FIX: Ensure that blocks from certified commits are added to TransactionCertifier.
+            // This prevents CommitFinalizer from panicking with "No vote info found" when it
+            // tries to run direct finalization on these fast-forwarded blocks.
+            self.transaction_certifier
+                .add_voted_blocks(blocks.into_iter().map(|b| (b, vec![])).collect());
 
             // If there is no certified commit to process, run the decision rule.
             let (decided_leaders, local) = if certified_leaders.is_empty() {
