@@ -3,7 +3,6 @@ package listener
 import (
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,7 +26,6 @@ func (s *CrossChainScanner) runResweeper() {
 	contractAddr := common.HexToAddress(s.cfg.CrossChainContract_)
 
 	sem := make(chan struct{}, 16)
-	var tracking sync.Map
 	var activeWorkers int32
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -45,48 +43,28 @@ func (s *CrossChainScanner) runResweeper() {
 		logger.Info("🧹 [Resweeper] Periodic scan triggered. Pending batches: %d", count)
 
 		s.pendingBatches.Range(func(key, value interface{}) bool {
-			batchId := key.([32]byte)
-			data := value.(*PendingBatchData)
+			// Chặn ở đây nếu đã đủ 16 worker — đợi cho đến khi có slot trống
+			sem <- struct{}{}
+			atomic.AddInt32(&activeWorkers, 1)
+			go func(k, v interface{}) {
+				defer func() {
+					<-sem
+					atomic.AddInt32(&activeWorkers, -1)
+				}()
 
-			// Nếu batch chưa quá 20s, bỏ qua
-			if time.Since(data.Timestamp) < 20*time.Second {
-				return true
-			}
+				// Tạo context timeout để tránh worker bị treo vĩnh viễn
+				ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer cancel()
 
-			// Kiểm tra xem batch này có đang được quét bởi goroutine cũ không
-			if _, already := tracking.LoadOrStore(batchId, struct{}{}); already {
-				return true
-			}
-
-			// Gửi vào goroutine quét
-			select {
-			case sem <- struct{}{}:
-				atomic.AddInt32(&activeWorkers, 1)
-				go func(k, v interface{}) {
-					defer func() {
-						<-sem
-						tracking.Delete(batchId)
-						atomic.AddInt32(&activeWorkers, -1)
-					}()
-
-					// Tạo context timeout để tránh worker bị treo vĩnh viễn
-					ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-					defer cancel()
-
-					s.processSingleResweep(ctx, k, v, messageReceivedTopic, outboundResultTopic, contractAddr)
-				}(key, value)
-			default:
-				// Nếu đã đạt giới hạn worker, giải phóng tracking để lượt sau quét lại
-				tracking.Delete(batchId)
-				// logger.Warn("🧹 [Resweeper] Max workers (16) reached, skipping batch %x until next loop", batchId[:4])
-			}
+				s.ProcessSingleResweep(ctx, k, v, messageReceivedTopic, outboundResultTopic, contractAddr)
+			}(key, value)
 
 			return true
 		})
 	}
 }
 
-func (s *CrossChainScanner) processSingleResweep(
+func (s *CrossChainScanner) ProcessSingleResweep(
 	ctx context.Context,
 	key, value interface{},
 	messageReceivedTopic, outboundResultTopic common.Hash,

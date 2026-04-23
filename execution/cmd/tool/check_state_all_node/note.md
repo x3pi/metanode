@@ -1,0 +1,2 @@
+go run getAccountState.go 0xcAf7FD0787f05C6a07B66dA0A1977E4E438e35f3
+go run getLogs.go 83

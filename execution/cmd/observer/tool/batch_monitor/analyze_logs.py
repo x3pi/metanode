@@ -115,10 +115,10 @@ def analyze_logs(log_dir):
             print(f"... and {len(all_pending_details) - 30} more pending batches.")
 
         # Save to file
-        with open("pending_batches.txt", "w") as pf:
-            for node, bid, time in all_pending_details:
-                pf.write(f"{node} | {bid} | {time}\n")
-        print(f"\n{Colors.OKBLUE}💾 All pending Batch IDs saved to 'pending_batches.txt'{Colors.ENDC}")
+        # with open("pending_batches.txt", "w") as pf:
+        #     for node, bid, time in all_pending_details:
+        #         pf.write(f"{node} | {bid} | {time}\n")
+        # print(f"\n{Colors.OKBLUE}💾 All pending Batch IDs saved to 'pending_batches.txt'{Colors.ENDC}")
         
     # GENERATE MARKDOWN REPORT
     md_content = "# Báo cáo Thống kê Batch Logs\n\n"

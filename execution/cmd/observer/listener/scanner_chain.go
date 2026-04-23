@@ -50,6 +50,7 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 			time.Sleep(s.scanInterval)
 			continue
 		}
+		logger.Info("📍 [Scanner][%s] Node %s head=%d lastScanned=%d", rc.Name, client.GetNodeAddr(), latestBlock, lastBlock)
 
 		if latestBlock <= lastBlock {
 			// Đã scan hết, chờ block mới
@@ -120,6 +121,17 @@ func (s *CrossChainScanner) scanAndSubmit(
 	new(big.Int).SetUint64(s.cfg.NationId).FillBytes(localNationTopic[:])
 
 	// Gộp quét MessageSent và MessageReceived thành 1 lệnh RPC duy nhất giúp tăng tốc HTTP/TCP lên gấp đôi
+	logger.Info(
+		"🔍 [Scanner][%s] Querying block=%d node=%s contract=%s topicSent=%s topicRecv=%s localNationId=%d(localTopic=%s)",
+		rc.Name,
+		blockNum,
+		client.GetNodeAddr(),
+		contractAddr.Hex(),
+		messageSentTopic.Hex(),
+		messageReceivedTopic.Hex(),
+		s.cfg.NationId,
+		localNationTopic.Hex(),
+	)
 	resp, err := client.ChainGetLogs(
 		nil,
 		blockStr,
@@ -134,6 +146,8 @@ func (s *CrossChainScanner) scanAndSubmit(
 	}
 
 	var allLogs []*pb.LogEntry
+	var sentTopicCount, recvTopicCount int
+	var sentNationMismatch, recvNationMismatch int
 	if resp != nil && resp.Logs != nil {
 		// Lọc bộ nhớ trong Go (In-memory filter) tiết kiệm tải cho Full Node
 		for _, log := range resp.Logs {
@@ -144,20 +158,43 @@ func (s *CrossChainScanner) scanAndSubmit(
 
 			// 1. Lọc MessageSent (destNationId = localNation)
 			if t0 == messageSentTopic && len(log.Topics) > 2 {
+				sentTopicCount++
 				if common.BytesToHash(log.Topics[2]) == localNationTopic {
 					allLogs = append(allLogs, log)
+				} else {
+					sentNationMismatch++
 				}
 			} else
 			// 2. Lọc MessageReceived (sourceNationId = localNation)
 			if t0 == messageReceivedTopic && len(log.Topics) > 1 {
+				recvTopicCount++
 				if common.BytesToHash(log.Topics[1]) == localNationTopic {
 					allLogs = append(allLogs, log)
+				} else {
+					recvNationMismatch++
 				}
 			}
 		}
 	}
 
-	logger.Info("📦 [Scanner][%s] Block %d: %d logs found", rc.Name, blockNum, len(allLogs))
+	logger.Info("📦 [Scanner][%s] Block %d: %d total raw logs from node %s → %d filtered logs found",
+		rc.Name, blockNum, func() int {
+			if resp != nil && resp.Logs != nil {
+				return len(resp.Logs)
+			}
+			return 0
+		}(), client.GetNodeAddr(), len(allLogs))
+	if len(allLogs) == 0 {
+		logger.Info(
+			"🧪 [Scanner][%s] Block %d debug: sentTopic=%d recvTopic=%d sentNationMismatch=%d recvNationMismatch=%d",
+			rc.Name,
+			blockNum,
+			sentTopicCount,
+			recvTopicCount,
+			sentNationMismatch,
+			recvNationMismatch,
+		)
+	}
 
 	hasEvents := false
 	if len(allLogs) > 0 {

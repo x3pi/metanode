@@ -130,15 +130,15 @@ func NewAccountStateDB(
 	isThreadSafeRead := isFlat || isNomt
 
 	db_instance := &AccountStateDB{
-		trie:           trie,
-		db:             db,
-		originRootHash: trie.Hash(),
-		dirtyAccounts:  sync.Map{}, // Initialize sync.Map
-		lruCache:       cacheCurrent,
-		lruCacheOld:    cacheOld,
-		persistReady:   initReady,
+		trie:            trie,
+		db:              db,
+		originRootHash:  trie.Hash(),
+		dirtyAccounts:   sync.Map{}, // Initialize sync.Map
+		lruCache:        cacheCurrent,
+		lruCacheOld:     cacheOld,
+		persistReady:    initReady,
 		nomtCommitGuard: guard,
-		isFlatTrie:     isThreadSafeRead,
+		isFlatTrie:      isThreadSafeRead,
 	}
 	for i := 0; i < 256; i++ {
 		db_instance.accountLocks[i] = &sync.Mutex{}
@@ -340,16 +340,16 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 
 	if len(bData) == 0 {
 		// New account: return fresh state WITHOUT storing in dirty cache
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty → returning fresh account (nonce=0, no BLS key)", address.Hex())
+		// logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty → returning fresh account (nonce=0, no BLS key)", address.Hex())
 		return state.NewAccountState(address), nil
 	}
 	loadedAs := &state.AccountState{}
 	if err = loadedAs.Unmarshal(bData); err != nil {
 		return nil, fmt.Errorf("error unmarshalling %s from Trie: %w", address.Hex(), err)
 	}
-	if len(loadedAs.PublicKeyBls()) == 0 {
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): found data but PublicKeyBls is EMPTY, nonce=%d", address.Hex(), loadedAs.Nonce())
-	}
+	// if len(loadedAs.PublicKeyBls()) == 0 {
+	// 	logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): found data but PublicKeyBls is EMPTY, nonce=%d", address.Hex(), loadedAs.Nonce())
+	// }
 	if pooledSlice != nil {
 		byteSlicePool.Put(pooledSlice)
 	}
