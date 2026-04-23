@@ -1357,8 +1357,13 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       dbname = std::string(input_without_opcode.begin() + dbname_offset + 32,
                            input_without_opcode.begin() + dbname_offset + 32 +
                                dbname_len);
-      rawData = std::string(input_without_opcode.begin() + data_offset + 64,
-                            input_without_opcode.end());
+      uint32_t data_len = (input_without_opcode[data_offset + 28] << 24) |
+                          (input_without_opcode[data_offset + 29] << 16) |
+                          (input_without_opcode[data_offset + 30] << 8) |
+                          input_without_opcode[data_offset + 31];
+      rawData = std::string(input_without_opcode.begin() + data_offset + 32,
+                            input_without_opcode.begin() + data_offset + 32 +
+                                data_len);
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {

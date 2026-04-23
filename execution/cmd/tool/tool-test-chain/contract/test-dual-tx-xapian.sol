@@ -35,39 +35,94 @@ pragma solidity ^0.8.20;
  */
 
 // Structs cần cho querySearch (không dùng trong test này nhưng để interface đầy đủ)
-struct PrefixEntry { string key; string value; }
-struct RangeFilter { uint slot; string startSerialised; string endSerialised; }
+struct PrefixEntry {
+    string key;
+    string value;
+}
+struct RangeFilter {
+    uint slot;
+    string startSerialised;
+    string endSerialised;
+}
 struct SearchParams {
-    string        queries;
+    string queries;
     PrefixEntry[] prefixMap;
-    string[]      stopWords;
-    uint64        offset;
-    uint64        limit;
-    int64         sortByValueSlot;
-    bool          sortAscending;
+    string[] stopWords;
+    uint64 offset;
+    uint64 limit;
+    int64 sortByValueSlot;
+    bool sortAscending;
     RangeFilter[] rangeFilters;
 }
-struct SearchResult { uint256 docid; uint256 rank; int256 percent; string data; }
-struct SearchResultsPage { uint256 total; SearchResult[] results; }
+struct SearchResult {
+    uint256 docid;
+    uint256 rank;
+    int256 percent;
+    string data;
+}
+struct SearchResultsPage {
+    uint256 total;
+    SearchResult[] results;
+}
 
 interface IFullDB {
     function getOrCreateDb(string memory name) external returns (bool);
-    function newDocument(string memory dbname, string memory data) external returns (uint256);
-    function getDataDocument(string memory dbname, uint256 docId) external returns (string memory);
-    function setDataDocument(string memory dbname, uint256 docId, string memory data) external returns (uint256);
-    function deleteDocument(string memory dbname, uint256 docId) external returns (bool);
-    function addTermDocument(string memory dbname, uint256 docId, string memory term) external returns (uint256);
-    function indexTextForDocument(string memory dbname, uint256 docId, string memory text, uint8 weight, string memory prefix) external returns (uint256);
-    function addValueDocument(string memory dbname, uint256 docId, uint256 slot, string memory data, bool isSerialise) external returns (uint256);
-    function getValueDocument(string memory dbname, uint256 docId, uint256 slot, bool isSerialise) external returns (string memory);
-    function getTermsDocument(string memory dbname, uint256 docId) external returns (string[] memory);
-    function search(string memory dbname, string memory query) external returns (string memory);
-    function querySearch(string memory dbname, SearchParams memory params) external returns (SearchResultsPage memory);
+    function newDocument(
+        string memory dbname,
+        string memory data
+    ) external returns (uint256);
+    function getDataDocument(
+        string memory dbname,
+        uint256 docId
+    ) external returns (string memory);
+    function setDataDocument(
+        string memory dbname,
+        uint256 docId,
+        string memory data
+    ) external returns (uint256);
+    function deleteDocument(
+        string memory dbname,
+        uint256 docId
+    ) external returns (bool);
+    function addTermDocument(
+        string memory dbname,
+        uint256 docId,
+        string memory term
+    ) external returns (uint256);
+    function indexTextForDocument(
+        string memory dbname,
+        uint256 docId,
+        string memory text,
+        uint8 weight,
+        string memory prefix
+    ) external returns (uint256);
+    function addValueDocument(
+        string memory dbname,
+        uint256 docId,
+        uint256 slot,
+        string memory data,
+        bool isSerialise
+    ) external returns (uint256);
+    function getValueDocument(
+        string memory dbname,
+        uint256 docId,
+        uint256 slot,
+        bool isSerialise
+    ) external returns (string memory);
+    function getTermsDocument(
+        string memory dbname,
+        uint256 docId
+    ) external returns (string[] memory);
+    function querySearch(
+        string memory dbname,
+        SearchParams memory params
+    ) external returns (SearchResultsPage memory);
     function commit(string memory dbname) external returns (bool);
 }
 
 contract DualTxXapianTest {
-    IFullDB constant fullDB = IFullDB(0x0000000000000000000000000000000000000106);
+    IFullDB constant fullDB =
+        IFullDB(0x0000000000000000000000000000000000000106);
 
     string constant DB_NAME = "dual_tx_test_v1";
 
@@ -133,12 +188,18 @@ contract DualTxXapianTest {
         uint256 docId1 = realDocIds[1];
 
         // Đọc data thực tế
-        string memory actual0 = docId0 > 0 ? fullDB.getDataDocument(DB_NAME, docId0) : "";
-        string memory actual1 = docId1 > 0 ? fullDB.getDataDocument(DB_NAME, docId1) : "";
+        string memory actual0 = docId0 > 0
+            ? fullDB.getDataDocument(DB_NAME, docId0)
+            : "";
+        string memory actual1 = docId1 > 0
+            ? fullDB.getDataDocument(DB_NAME, docId1)
+            : "";
 
         // So sánh (dùng keccak256 vì Solidity không có string ==)
-        slot0Ok = (keccak256(bytes(actual0)) == keccak256(bytes(expectedData0)));
-        slot1Ok = (keccak256(bytes(actual1)) == keccak256(bytes(expectedData1)));
+        slot0Ok = (keccak256(bytes(actual0)) ==
+            keccak256(bytes(expectedData0)));
+        slot1Ok = (keccak256(bytes(actual1)) ==
+            keccak256(bytes(expectedData1)));
 
         emit DocRead(docId0, actual0, bytes(actual0).length == 0);
         emit DocRead(docId1, actual1, bytes(actual1).length == 0);

@@ -303,7 +303,6 @@ pkg/storage/coverage.out
 # ===== Profiling & heap dumps =====
 **/*.profraw
 # Project specific
-*.py
 **/*.pyc
 **/__pycache__/
 __pycache__/

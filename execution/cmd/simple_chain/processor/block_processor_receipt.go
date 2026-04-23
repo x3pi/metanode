@@ -28,7 +28,7 @@ func (bp *BlockProcessor) GetTransactionReceipt(request network.Request) error {
 		logger.Error("GetTransactionReceipt: Failed to unmarshal request: %v", err)
 		return bp.sendReceiptError(request, id, fmt.Sprintf("failed to unmarshal request: %v", err))
 	}
-	logger.Info("GetTransactionReceipt: Received request, header ID: %v", id)
+	// logger.Info("GetTransactionReceipt: Received request, header ID: %v", id)
 
 	receiptEntry, err := bp.getTransactionReceipt(common.BytesToHash(req.TransactionHash))
 	if err != nil {

@@ -176,23 +176,23 @@ func (s *CrossChainScanner) scanAndSubmit(
 				var txHash common.Hash
 				var err error
 
-				forceIndex := -1
 				var batchId [32]byte
 				for attempt := 1; ; attempt++ {
 					var tIndex int
-					txHash, tIndex, err = s.submitBatch(rc, chunk, forceIndex)
+					txHash, tIndex, err = s.submitBatch(rc, chunk, -1)
 					if err == nil {
 						batchId, _ = s.calculateBatchId(chunk)
 						// Lấy block hiện tại để Resweeper biết quét từ đâu (retry đến khi lấy được)
 						var submitBlk uint64
-						for retry := 0; retry < 5; retry++ {
-							if defCli, _ := s.GetActiveClient(0); defCli != nil {
+						for att := 1; ; att++ {
+							if defCli, _ := s.GetActiveClient(tIndex); defCli != nil {
 								if blk, err := defCli.ChainGetBlockNumber(); err == nil && blk > 0 {
 									submitBlk = blk
 									break
 								}
 							}
-							time.Sleep(500 * time.Millisecond)
+							logger.Warn("⚠️  [Scanner][%s] Attemp %d to get the node's submit block", rc.Name, att)
+							time.Sleep(200 * time.Millisecond)
 						}
 						s.pendingBatches.Store(batchId, &PendingBatchData{
 							TargetIndex: tIndex,
@@ -207,15 +207,7 @@ func (s *CrossChainScanner) scanAndSubmit(
 					logger.Warn("⚠️  [Scanner][%s] submitBatch attempt %d failed txHash=%s, at block %d (chunk %d-%d/%d): %v",
 						rc.Name, attempt, txHash.Hex(), blockNum, i, end, len(events), err)
 
-					// Nếu thất bại, tính target index cũ và tịnh tiến lên +1
-					if forceIndex < 0 {
-						batchId, _ = s.calculateBatchId(chunk)
-						batchIdBig := new(big.Int).SetBytes(batchId[:])
-						mod := big.NewInt(int64(len(s.localClients)))
-						forceIndex = int(new(big.Int).Mod(batchIdBig, mod).Int64())
-					}
-					forceIndex++
-					time.Sleep(2 * time.Second)
+					time.Sleep(1 * time.Second)
 				}
 			}
 			// Đã submit thành công tất cả các chunk cho block này

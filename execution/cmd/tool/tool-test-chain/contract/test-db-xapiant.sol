@@ -118,14 +118,6 @@ interface IFullDB {
     ) external view returns (SearchResultsPage memory);
 }
 
-// Interface dành riêng cho việc đọc (gasless)
-interface IFullDB_ReadOnly {
-    function querySearch(
-        string memory dbname,
-        SearchParams memory params
-    ) external view returns (SearchResultsPage memory);
-}
-
 // ════════════════════════════════════════════════════════════════════════
 contract TestFullDB {
     IFullDB constant fullDB =
@@ -716,7 +708,7 @@ contract TestFullDB {
         string memory query
     ) public view returns (SearchResultsPage memory) {
         SearchParams memory params = _buildDefaultParams(query);
-        return IFullDB_ReadOnly(address(fullDB)).querySearch(DB_NAME, params);
+        return IFullDB(address(fullDB)).querySearch(DB_NAME, params);
     }
 
     /// Gọi qua STATICCALL (đảm bảo 100% không tốn gas)
