@@ -25,7 +25,15 @@ pub(super) async fn setup_validator_consensus(
     committee: consensus_config::Committee,
     config: &NodeConfig,
 ) -> Result<()> {
-    let (commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
+    // can fast-forward baseline and skip re-fetching old commits.
+    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
+        node.last_global_exec_index as u32
+    } else {
+        0
+    };
+    let (commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after, go_replay_after);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
@@ -142,7 +150,14 @@ pub(super) async fn setup_synconly_sync(
 ) -> Result<()> {
     info!("🔄 [EPOCH TRANSITION] SyncOnly mode - setting up CommitProcessor for epoch detection");
 
-    let (_commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: SyncOnly also passes Go state for consistency.
+    let go_replay_after_sync = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
+        node.last_global_exec_index as u32
+    } else {
+        0
+    };
+    let (_commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );

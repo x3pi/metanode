@@ -64,6 +64,12 @@ impl ConsensusCoordinationHub {
     pub fn is_catching_up(&self) -> bool {
         matches!(*self.phase.read(), NodeConsensusPhase::CatchingUp)
     }
+
+    /// Convenience check for whether the node is still bootstrapping (pre-baseline).
+    /// During this phase, Core must NOT propose blocks to avoid equivocation.
+    pub fn is_bootstrapping(&self) -> bool {
+        matches!(*self.phase.read(), NodeConsensusPhase::Bootstrapping)
+    }
 }
 
 impl Default for ConsensusCoordinationHub {

@@ -837,7 +837,24 @@ impl ConsensusNode {
     ) -> Result<ConsensusSetup> {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
-        let (commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+        // ═══════════════════════════════════════════════════════════════
+        // SNAPSHOT RESTART FIX: Pass Go's execution progress into Rust.
+        // On snapshot restart, Go has already executed commits up to
+        // last_global_exec_index. CommitSyncer uses this to fast-forward
+        // the DAG baseline and skip re-fetching commits Go has already
+        // processed, preventing both deadlocks and re-execution.
+        // ═══════════════════════════════════════════════════════════════
+        let go_replay_after = if config.executor_read_enabled && storage.last_global_exec_index > 0 {
+            storage.last_global_exec_index as u32
+        } else {
+            0
+        };
+        info!(
+            "📊 [STARTUP] CommitConsumerArgs: go_replay_after={} (from last_global_exec_index={})",
+            go_replay_after, storage.last_global_exec_index
+        );
+        let (commit_consumer, commit_receiver, mut block_receiver) =
+            CommitConsumerArgs::new(go_replay_after, go_replay_after);
         let current_commit_index = Arc::new(AtomicU32::new(0));
         let is_transitioning = Arc::new(AtomicBool::new(false));
 

@@ -227,7 +227,15 @@ pub async fn transition_mode_only(
     );
 
     // Now setup authority components (same as in full transition)
-    let (commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
+    // can fast-forward and skip re-fetching commits Go already processed.
+    let go_replay_after = if node.executor_commit_enabled && synced_global_exec_index > 0 {
+        synced_global_exec_index as u32
+    } else {
+        0
+    };
+    let (commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after, go_replay_after);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );

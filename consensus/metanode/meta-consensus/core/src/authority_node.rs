@@ -308,10 +308,19 @@ where
         let store = Arc::new(RocksDBStore::new(store_path));
         let dag_state = DagState::new(context.clone(), store.clone());
 
-        // CRITICAL FIX: Align the CommitConsumerMonitor with the restored DAG state.
-        // Otherwise it initializes to 0, which breaks CommitSyncer's lag calculation
-        // and causes the node to get stuck in CatchingUp phase forever.
-        commit_consumer.monitor().set_highest_handled_commit(dag_state.last_commit_index());
+        // CRITICAL FIX: Align the CommitConsumerMonitor with the GREATER of:
+        // 1. DAG state's last_commit_index (persisted Rust consensus progress)
+        // 2. Go's replay_after_commit_index (Go execution progress from snapshot)
+        // On snapshot restart: DAG is empty (0), but Go has processed up to replay_after (e.g. 1000).
+        // Using max() ensures CommitSyncer detects the snapshot state and triggers fast-forward.
+        let go_handled = commit_consumer.replay_after_commit_index;
+        let dag_handled = dag_state.last_commit_index();
+        let effective_handled = go_handled.max(dag_handled);
+        commit_consumer.monitor().set_highest_handled_commit(effective_handled);
+        info!(
+            "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
+            go_handled, dag_handled, effective_handled
+        );
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
         // during the FastForwarding phase (see commit_syncer.rs). 

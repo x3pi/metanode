@@ -417,15 +417,17 @@ impl Core {
         let core_skipped_proposals = &self.context.metrics.node_metrics.core_skipped_proposals;
 
         // ═══════════════════════════════════════════════════════════════════
-        // PHASE CHECK: Only block proposals when actively catching up from
-        // the network (CatchingUp). Bootstrapping (genesis / fresh start)
-        // and Healthy both allow proposals — genesis nodes must propose
-        // round 1 to bootstrap consensus.
+        // PHASE CHECK: Block proposals during both CatchingUp AND Bootstrapping.
+        // - Bootstrapping: snapshot restore in progress, baseline not yet
+        //   established. Proposing here risks equivocation if the node
+        //   previously proposed at a higher round before the snapshot.
+        // - CatchingUp: node is syncing commits from the network.
+        // - Healthy: normal consensus — proposals allowed.
         // ═══════════════════════════════════════════════════════════════════
-        if self.coordination_hub.is_catching_up() {
+        if self.coordination_hub.is_catching_up() || self.coordination_hub.is_bootstrapping() {
             debug!(
-                "Skip proposing for round {}: node is catching up from network",
-                clock_round
+                "Skip proposing for round {}: node phase is {:?}",
+                clock_round, self.coordination_hub.get_phase()
             );
             core_skipped_proposals
                 .with_label_values(&["catching_up"])
