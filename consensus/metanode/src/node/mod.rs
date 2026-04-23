@@ -62,15 +62,14 @@ use epoch_store::load_legacy_epoch_stores;
 #[cfg(test)]
 mod epoch_transition_tests;
 
-/// Node operation modes
+/// Node operation modes — simplified: only two states.
+/// Validator always starts consensus immediately; catch-up is handled internally by CommitSyncer.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NodeMode {
     /// Node only syncs data, does not participate in voting
     SyncOnly,
-    /// Node participates in consensus and voting
+    /// Node participates in consensus and voting (catches up via CommitSyncer if needed)
     Validator,
-    /// Node is catching up with the network (syncing epoch/commits)
-    SyncingUp,
 }
 
 /// Pending epoch transition that is deferred until sync is complete

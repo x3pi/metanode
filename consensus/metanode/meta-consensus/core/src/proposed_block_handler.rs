@@ -59,7 +59,7 @@ impl ProposedBlockHandler {
         if !self.context.protocol_config.mysticeti_fastpath() {
             return;
         }
-        if !self.coordination_hub.is_healthy() && !matches!(self.coordination_hub.get_phase(), crate::coordination_hub::NodeConsensusPhase::FastForwarding) {
+        if !self.coordination_hub.is_healthy() {
             tracing::debug!("⏳ [PROPOSED BLOCK HANDLER] Ignoring proposed block because phase is {:?}", self.coordination_hub.get_phase());
             return;
         }

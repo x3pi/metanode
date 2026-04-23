@@ -125,7 +125,7 @@ impl CoreTextFixture {
             round_tracker,
             None,
             None,
-            Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+            crate::coordination_hub::ConsensusCoordinationHub::new(),
         );
 
         Self {
@@ -274,7 +274,7 @@ async fn test_core_recover_from_store_for_full_round() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // New round should be 5
@@ -418,7 +418,7 @@ async fn test_core_recover_from_store_for_partial_round() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // Clock round should have advanced to 5 during recovery because
@@ -521,7 +521,7 @@ async fn test_core_propose_after_genesis() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // Send some transactions
@@ -773,7 +773,7 @@ async fn test_commit_and_notify_for_block_status() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // Flush the DAG state to storage.
@@ -943,7 +943,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
     // We set the last known round to 4 so we avoid creating new blocks until then - otherwise it will crash as the already created DAG contains blocks for this
     // authority.
@@ -1026,7 +1026,7 @@ async fn test_core_set_min_propose_round() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced
@@ -1386,7 +1386,7 @@ async fn test_smart_ancestor_selection() {
         round_tracker.clone(),
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced
@@ -1682,7 +1682,7 @@ async fn test_excluded_ancestor_limit() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced
@@ -1781,7 +1781,7 @@ async fn test_core_set_propagation_delay_per_authority() {
         round_tracker.clone(),
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // Use a large propagation delay to disable proposing.
@@ -2233,7 +2233,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         round_tracker,
         None,
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+        crate::coordination_hub::ConsensusCoordinationHub::new(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced

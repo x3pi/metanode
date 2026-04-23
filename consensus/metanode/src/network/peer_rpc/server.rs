@@ -13,8 +13,10 @@
 
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use crate::node::executor_client::ExecutorClient;
@@ -197,10 +199,10 @@ impl PeerRpcServer {
         network_address: &str,
         shared_exec_index: &Arc<tokio::sync::Mutex<u64>>,
     ) {
-        // Query epoch and block from Go Master
-        let epoch = match executor.get_current_epoch().await {
-            Ok(e) => e,
-            Err(e) => {
+        // Query epoch and block from Go Master with timeout
+        let epoch = match timeout(Duration::from_secs(5), executor.get_current_epoch()).await {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => {
                 error!("🌐 [PEER RPC] Failed to get epoch: {}", e);
                 let response = format!(
                     "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Failed to get epoch: {}\"}}",
@@ -209,17 +211,27 @@ impl PeerRpcServer {
                 let _ = stream.write_all(response.as_bytes()).await;
                 return;
             }
+            Err(_) => {
+                error!("🌐 [PEER RPC] Timeout getting epoch from Go");
+                let _ = stream.write_all(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Timeout getting epoch\"}").await;
+                return;
+            }
         };
 
-        let last_block = match executor.get_last_block_number().await {
-            Ok((b, _, _)) => b,
-            Err(e) => {
+        let last_block = match timeout(Duration::from_secs(5), executor.get_last_block_number()).await {
+            Ok(Ok((b, _, _))) => b,
+            Ok(Err(e)) => {
                 error!("🌐 [PEER RPC] Failed to get last block: {}", e);
                 let response = format!(
                     "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Failed to get last block: {}\"}}",
                     e.to_string().replace('"', "\\\"")
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
+                return;
+            }
+            Err(_) => {
+                error!("🌐 [PEER RPC] Timeout getting last block from Go");
+                let _ = stream.write_all(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Timeout getting last block\"}").await;
                 return;
             }
         };
@@ -303,9 +315,14 @@ impl PeerRpcServer {
             target_epoch
         );
 
-        // Fetch from local Go Master
-        match executor.get_epoch_boundary_data(target_epoch).await {
-            Ok((epoch, timestamp_ms, boundary_block, validators, _, boundary_gei)) => {
+        // Fetch from local Go Master with timeout
+        let fetch_result = timeout(
+            Duration::from_secs(5),
+            executor.get_epoch_boundary_data(target_epoch)
+        ).await;
+
+        match fetch_result {
+            Ok(Ok((epoch, timestamp_ms, boundary_block, validators, _, boundary_gei))) => {
                 // Convert ValidatorInfo to ValidatorInfoSimple for JSON transport
                 let validators_simple: Vec<ValidatorInfoSimple> = validators
                     .iter()
@@ -346,7 +363,7 @@ impl PeerRpcServer {
                     epoch, timestamp_ms, boundary_block, validators.len()
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("🌐 [PEER RPC] Failed to get epoch boundary data: {}", e);
                 let response = EpochBoundaryDataResponse {
                     epoch: target_epoch,
@@ -365,6 +382,27 @@ impl PeerRpcServer {
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
                     error!("🌐 [PEER RPC] Failed to write error response: {}", e);
+                }
+            }
+            Err(_) => {
+                warn!("🌐 [PEER RPC] Timeout getting epoch boundary data from Go");
+                let response = EpochBoundaryDataResponse {
+                    epoch: target_epoch,
+                    timestamp_ms: 0,
+                    boundary_block: 0,
+                    validators: vec![],
+                    boundary_gei: 0,
+                    error: Some("Timeout fetching epoch boundary data from Go".to_string()),
+                };
+
+                let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                let http_response = format!(
+                    "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{}",
+                    json
+                );
+
+                if let Err(e) = stream.write_all(http_response.as_bytes()).await {
+                    error!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
                 }
             }
         }
@@ -542,8 +580,15 @@ impl PeerRpcServer {
         );
 
         // Fetch blocks from Go Master via executor_client
-        match executor.get_blocks_range(from, actual_to).await {
-            Ok(block_data_list) => {
+        // CRITICAL: Add timeout to prevent peer RPC handler from hanging
+        // if Go Master is busy or not responding.
+        let fetch_result = timeout(
+            Duration::from_secs(5),
+            executor.get_blocks_range(from, actual_to)
+        ).await;
+
+        match fetch_result {
+            Ok(Ok(block_data_list)) => {
                 // Convert proto::BlockData to HashMap<u64, String> for response
                 // Encode FULL protobuf BlockData (not just extra_data) so receiver
                 // can reconstruct complete BlockData objects for sync_blocks()
@@ -575,7 +620,8 @@ impl PeerRpcServer {
                     error!("🌐 [PEER RPC] Failed to write /get_blocks response: {}", e);
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // FFI call failed
                 warn!("🌐 [PEER RPC] Failed to fetch blocks from Go Master: {}", e);
                 let response = GetBlocksResponse {
                     node_id,
@@ -592,6 +638,26 @@ impl PeerRpcServer {
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
                     error!("🌐 [PEER RPC] Failed to write error response: {}", e);
+                }
+            }
+            Err(_) => {
+                // Timeout
+                warn!("🌐 [PEER RPC] Timeout fetching blocks from Go Master");
+                let response = GetBlocksResponse {
+                    node_id,
+                    blocks: std::collections::HashMap::new(),
+                    count: 0,
+                    error: Some("Timeout fetching blocks from Go Master".to_string()),
+                };
+
+                let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                let http_response = format!(
+                    "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{}",
+                    json
+                );
+
+                if let Err(e) = stream.write_all(http_response.as_bytes()).await {
+                    error!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
                 }
             }
         }

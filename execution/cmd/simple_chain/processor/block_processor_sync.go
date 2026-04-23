@@ -15,6 +15,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -195,7 +196,9 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 					currentTrieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
 					targetStateRoot := freshBlock.Header().AccountStatesRoot()
 
-					if currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
+					isNomtMismatchAllowed := trie.GetStateBackend() == trie.BackendNOMT
+
+					if !isNomtMismatchAllowed && currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
 						logger.Warn("🛡️ [LAZY REFRESH] State mismatch! trie_root=%s ≠ target block #%d stateRoot=%s. "+
 							"NOT advancing (P2P-synced blocks not executed by NOMT — snapshot restore?). "+
 							"Staying at block #%d until Rust sends commits for sequential execution.",

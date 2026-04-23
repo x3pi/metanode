@@ -189,43 +189,46 @@ impl<C: NetworkClient> CommitSyncer<C> {
     fn poll_interval(&self) -> Duration {
         match self.coordination_hub.get_phase() {
             crate::coordination_hub::NodeConsensusPhase::CatchingUp => Duration::from_millis(150),
-            crate::coordination_hub::NodeConsensusPhase::FastForwarding => Duration::from_millis(200),
             crate::coordination_hub::NodeConsensusPhase::Bootstrapping => Duration::from_millis(200),
-            crate::coordination_hub::NodeConsensusPhase::AwaitingSnapshot => Duration::from_secs(5),
             crate::coordination_hub::NodeConsensusPhase::Healthy => Duration::from_secs(2),
         }
     }
 
     /// STATE MACHINE: Update sync state based on current metrics
     fn update_state(&mut self) {
-        let local_commit = self.inner.dag_state.read().last_commit_index();
+        let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
-
-        let lag = quorum_commit.saturating_sub(local_commit);
-        let lag_pct = if quorum_commit > 0 {
-            (lag as f64 / quorum_commit as f64) * 100.0
-        } else {
-            0.0
-        };
+        let local_commit = self.inner.dag_state.read().last_commit_index();
 
         let current_phase = self.coordination_hub.get_phase();
 
-        // Only explicitly CatchingUp/Healthy/Bootstrapping transitions handled via purely metrics.
-        // Other phases (FastForwarding, AwaitingSnapshot) are externally managed.
-        if matches!(
-            current_phase,
-            crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-                | crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                | crate::coordination_hub::NodeConsensusPhase::Healthy
-        ) {
-            if lag > 200 || lag_pct > 10.0 {
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
-            } else if lag == 0 {
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
-            } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping && quorum_commit > 0 {
-                // If Bootstrapping and lag <= 200, we are close enough to be considered Healthy
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
+        // Phase is determined by DAG consensus progress, NOT Go execution speed.
+        // local_commit = how far the DAG has committed
+        // quorum_commit = network consensus progress
+        // highest_handled_index = Go execution progress (independent of consensus)
+        let is_behind = local_commit < quorum_commit;
+
+        let next_phase = if is_behind {
+            crate::coordination_hub::NodeConsensusPhase::CatchingUp
+        } else {
+            crate::coordination_hub::NodeConsensusPhase::Healthy
+        };
+
+        if current_phase != next_phase && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
+            self.coordination_hub.set_phase(next_phase);
+            
+            // Initialization point for Cold-Start / Snapshot restore
+            if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy && local_commit == 0 && highest_handled_index > 0 {
+                tracing::info!(
+                    "🚀 [COLD-START] Node caught up to network (Go handled up to {}). Initializing DAG baseline.",
+                    highest_handled_index
+                );
+                self.inner.dag_state.write().reset_to_network_baseline(quorum_commit as u32, highest_handled_index, crate::commit::CommitDigest::MIN);
+                self.synced_commit_index = highest_handled_index;
             }
+        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping && quorum_commit > 0 {
+            // First transition out of bootstrapping
+            self.coordination_hub.set_phase(next_phase);
         }
     }
 
@@ -270,8 +273,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             match new_state {
                                 crate::coordination_hub::NodeConsensusPhase::CatchingUp => "SYNC_ONLY (CatchingUp)",
                                 crate::coordination_hub::NodeConsensusPhase::Bootstrapping => "BOOTSTRAPPING",
-                                crate::coordination_hub::NodeConsensusPhase::AwaitingSnapshot => "AWAITING_SNAPSHOT",
-                                crate::coordination_hub::NodeConsensusPhase::FastForwarding => "FAST_FORWARDING",
                                 crate::coordination_hub::NodeConsensusPhase::Healthy => "CONSENSUS (Healthy)",
                             }
                         );
@@ -341,81 +342,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // COLD-START DEADLOCK FIX: During cold-start after snapshot restore,
-        // highest_handled_index (from Go) may be significantly behind 
-        // local_commit_index (from Rust). This happens because Go processes the
-        // snapshot separately while Rust consensus starts fresh.
-        //
-        // If we use highest_handled_index for the scheduling threshold check,
-        // the node can never fetch new commits because:
-        //   highest_handled_index(10) + threshold(20) < range_end(210)
-        // This creates a deadlock: Go waits for Rust to provide commits, but Rust
-        // can't fetch because Go hasn't processed them yet.
-        //
-        // FIX: Use the MAX of highest_handled_index and local_commit_index for
-        // the threshold calculation. This allows cold-start nodes to fetch ahead
-        // while still protecting the consumer in normal operation.
-        // ═══════════════════════════════════════════════════════════════════════
-        let effective_handled_index = highest_handled_index.max(local_commit_index);
-        // Update synced_commit_index periodically to make sure it is no smaller than
-        // local commit index.
-        self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // COLD-START FAST-FORWARD (Snapshot Restore Support)
-        // When a node starts fresh from a Go snapshot (DAG wiped) and the
-        // network is far ahead, skip historical consensus commits. Go already has
-        // the blockchain state from the snapshot — we only need recent commits so
-        // the DAG can continue. Without this, verify_commits() fails with
-        // "Not enough votes (0)" because the committee from the stale epoch can't
-        // validate vote blocks from the current epoch.
-        // ═══════════════════════════════════════════════════════════════════════
-        let highest_accepted_round = self.inner.dag_state.read().highest_accepted_round();
-        // Also require local_commit_index==0 to avoid re-triggering in normal operation.
-        if highest_accepted_round <= 1 && local_commit_index == 0 && quorum_commit_index > 0 {
-            // SNAPSHOT RESTORE: Fast-forward to the current quorum. Historical
-            // commits can never be verified (DAG was wiped — vote blocks reference
-            // digests that don't exist). The node will only process NEW commits
-            // after it joins consensus via the proposer cold-start exemption.
-            let fast_forward_to = quorum_commit_index;
-            if self.synced_commit_index < fast_forward_to {
-                if self.synced_commit_index == 0 {
-                    warn!(
-                        "🚀 [COLD-START] Fast-forwarding synced_commit_index: 0 → {} (quorum={}). \
-                         Go already has historical state from snapshot — skipping ALL historical consensus.",
-                        fast_forward_to, quorum_commit_index
-                    );
-                } else {
-                    info!(
-                        "🚀 [COLD-START] Continuing fast-forward: {} → {} (quorum={}). \
-                         Still no local commits — DAG not synced yet.",
-                        self.synced_commit_index, fast_forward_to, quorum_commit_index
-                    );
-                }
-                
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::FastForwarding);
-                
-                // We advance the DAG baseline immediately so the node doesn't get flooded
-                // with suspended blocks while waiting for fetches. We use quorum_commit_index 
-                // as a proxy for the round, since round >= commit_index in a DAG.
-                self.inner
-                    .dag_state
-                    .write()
-                    .reset_to_network_baseline(fast_forward_to as u32, fast_forward_to.saturating_sub(1), crate::commit::CommitDigest::MIN);
-                
-                self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
-                tracing::info!(
-                    "🚀 [COMMIT_SYNCER] Baseline reset complete in try_schedule. Transitioned {:?} -> {:?}",
-                    crate::coordination_hub::NodeConsensusPhase::FastForwarding,
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                );
-
-                self.synced_commit_index = fast_forward_to;
-                // Cancel any pending/scheduled fetches for historical ranges that will fail
-                self.pending_fetches.clear();
-                self.highest_scheduled_index = Some(fast_forward_to);
-            }
+        // Track synced commits purely via state logic
+        if self.coordination_hub.is_healthy() {
+            self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
+        } else {
+            self.synced_commit_index = self.synced_commit_index.max(highest_handled_index);
         }
 
         let unhandled_commits_threshold = self.unhandled_commits_threshold();
@@ -467,21 +398,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.last_state_log_at = now;
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // AUTO-TRANSITION TO HEALTHY: When caught up and still in CatchingUp phase
-        // ═══════════════════════════════════════════════════════════════════════
-        if lag == 0 
-            && self.coordination_hub.is_catching_up()
-            && local_commit_index > 0
-        {
-            self.coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
-            tracing::info!(
-                "✅ [COMMIT_SYNCER] Fully caught up! Transitioned {:?} -> {:?}, local_commit={}",
-                crate::coordination_hub::NodeConsensusPhase::CatchingUp,
-                crate::coordination_hub::NodeConsensusPhase::Healthy,
-                local_commit_index
-            );
-        }
 
         if now.duration_since(self.last_schedule_log_at) >= min_interval
             || lag_jump
@@ -490,13 +406,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 && now.duration_since(self.last_schedule_log_at) >= Duration::from_secs(10)
         {
             info!(
-                "[NODE4-DEBUG] schedule: phase={:?}, synced={}, local={}, quorum={}, lag={}, effective_handled={}, scheduled={:?}",
+                "[NODE4-DEBUG] schedule: phase={:?}, synced={}, local={}, quorum={}, lag={}, scheduled={:?}",
                 self.coordination_hub.get_phase(),
                 self.synced_commit_index,
                 local_commit_index,
                 quorum_commit_index,
                 lag,
-                effective_handled_index,
                 self.highest_scheduled_index,
             );
             self.last_schedule_log_at = now;
@@ -541,8 +456,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // STATE MACHINE: Healthy phase ONLY checks threshold. CatchingUp and other
             // phases ALWAYS schedule to prevent deadlock: if fetches are blocked due
             // to lag, the node can never catch up.
+            let fetch_threshold_index = if self.coordination_hub.is_healthy() { highest_handled_index.max(local_commit_index) } else { highest_handled_index };
             if self.coordination_hub.is_healthy()
-                && effective_handled_index + effective_threshold < range_end
+                && fetch_threshold_index + effective_threshold < range_end
             {
                 warn!(
                     "Skip scheduling new commit fetches: consensus handler is lagging. phase={:?}, highest_handled_index={}, local_commit_index={}, effective_threshold={}, range_end={}",
@@ -565,16 +481,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // TURBO SYNC: In sync mode, schedule remaining partial batch so no commits are left behind.
         // Without this, the last partial batch (smaller than effective_batch_size) is always skipped,
         // leaving up to (effective_batch_size - 1) commits unscheduled until the next tick.
-        if self.coordination_hub.is_catching_up() {
-            let scheduled_up_to = self.highest_scheduled_index.unwrap_or(fetch_after_index);
-            if scheduled_up_to < quorum_commit_index
-                && effective_handled_index + effective_threshold >= quorum_commit_index
-            {
-                let range_start = scheduled_up_to + 1;
-                self.pending_fetches
-                    .insert((range_start..=quorum_commit_index).into());
-                self.highest_scheduled_index = Some(quorum_commit_index);
-            }
+        // We ALWAYS run this (regardless of phase) to prevent the node from permanently stalling
+        // if it misses a few broadcasted blocks and falls just short of a full batch.
+        let scheduled_up_to = self.highest_scheduled_index.unwrap_or(fetch_after_index);
+        let fetch_threshold_index = if self.coordination_hub.is_healthy() { highest_handled_index.max(local_commit_index) } else { highest_handled_index };
+        if scheduled_up_to < quorum_commit_index
+            && fetch_threshold_index + effective_threshold >= quorum_commit_index
+        {
+            let range_start = scheduled_up_to + 1;
+            self.pending_fetches
+                .insert((range_start..=quorum_commit_index).into());
+            self.highest_scheduled_index = Some(quorum_commit_index);
         }
     }
 
@@ -637,10 +554,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.pending_fetches
                 .insert((commit_end + 1..=target_end).into());
         }
-        // Make sure synced_commit_index is up to date.
-        self.synced_commit_index = self
-            .synced_commit_index
-            .max(self.inner.dag_state.read().last_commit_index());
+        // Make sure synced_commit_index is up to date, but only if healthy!
+        if self.coordination_hub.is_healthy() {
+            self.synced_commit_index = self
+                .synced_commit_index
+                .max(self.inner.dag_state.read().last_commit_index());
+        }
         info!(
             "[NODE4-DEBUG] fetched result: range={}→{}, synced_commit={}, pending_ranges={}",
             commit_start, commit_end, self.synced_commit_index, self.fetched_ranges.len()

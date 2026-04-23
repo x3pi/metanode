@@ -90,12 +90,39 @@ func NewStateTrie(root e_common.Hash, db trie_db.DB, isHash bool) (StateTrie, er
 			type pathGetter interface {
 				GetBackupPath() string
 			}
-			if pg, ok := db.(pathGetter); ok {
+			type prefixGetter interface {
+				GetPrefix() []byte
+			}
+
+			pg, isPathGetter := db.(pathGetter)
+			if isPathGetter && pg.GetBackupPath() != "" {
 				// Use the base (folder) name of the backup path rather than the full directory path.
 				// This ensures Sub and Master nodes use identical underlying NOMT namespaces 
 				// even if their backup/storage root paths differ.
-				// e.g. "./sample/node0/back_up/account_state" -> "account_state"
 				namespace = filepath.Base(pg.GetBackupPath())
+			} else if prg, ok := db.(prefixGetter); ok {
+				prefixBytes := prg.GetPrefix()
+				prefixStr := string(prefixBytes)
+
+				// Determine namespace based on the global SharedDB prefix.
+				if prefixStr == "ac:" {
+					namespace = "account_state"
+				} else if prefixStr == "sc:" {
+					namespace = "smart_contract_storage"
+				} else if prefixStr == "st:" {
+					namespace = "stake_db"
+				} else if prefixStr == "rc:" {
+					namespace = "receipts"
+				} else if prefixStr == "tx:" {
+					namespace = "transaction_state"
+				} else if prefixStr == "bl:" {
+					namespace = "blocks"
+				} else if len(prefixBytes) == 20 {
+					// 20-byte prefix means it's a Smart Contract's PrefixedStorage wrapper.
+					namespace = "smart_contract_storage"
+				} else {
+					namespace = fmt.Sprintf("%T_%x", db, prefixBytes)
+				}
 			} else {
 				// Fallback: use type name (stable across restarts)
 				namespace = fmt.Sprintf("%T", db)
@@ -111,7 +138,13 @@ func NewStateTrie(root e_common.Hash, db trie_db.DB, isHash bool) (StateTrie, er
 				GetPrefix() []byte
 			}
 			if pg, ok := db.(prefixGetter); ok {
-				keyPrefix = namespace + "_" + hex.EncodeToString(pg.GetPrefix())
+				prefixBytes := pg.GetPrefix()
+				// Only append to keyPrefix if it's a Smart Contract address (20 bytes).
+				// We DO NOT want to append global prefixes like "ac:" or "sc:",
+				// because global domains are already isolated by the `namespace` Handle.
+				if len(prefixBytes) == 20 {
+					keyPrefix = namespace + "_" + hex.EncodeToString(prefixBytes)
+				}
 			}
 		}
 

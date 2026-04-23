@@ -140,9 +140,7 @@ pub fn start_unified_epoch_monitor(
                 // This makes snapshot restore behave like a node restart:
                 // sync up → join consensus immediately.
                 // ═══════════════════════════════════════════════════════════
-                if matches!(_current_mode, crate::node::NodeMode::SyncOnly)
-                    || matches!(_current_mode, crate::node::NodeMode::SyncingUp)
-                {
+                if matches!(_current_mode, crate::node::NodeMode::SyncOnly) {
                     // Check if this node should be a Validator
                     let own_protocol_pubkey = {
                         if let Some(node_arc) = crate::node::get_transition_handler_node().await {
@@ -245,9 +243,7 @@ pub fn start_unified_epoch_monitor(
             // SyncOnly nodes don't run full transitions, but Go must advance epoch
             // to serve blocks at the correct epoch to other nodes and to itself.
             // ═══════════════════════════════════════════════════════════════
-            if matches!(_current_mode, crate::node::NodeMode::SyncOnly)
-                || matches!(_current_mode, crate::node::NodeMode::SyncingUp)
-            {
+            if matches!(_current_mode, crate::node::NodeMode::SyncOnly) {
                 // Skip if Go is already caught up
                 if local_go_epoch >= network_epoch {
                     continue;

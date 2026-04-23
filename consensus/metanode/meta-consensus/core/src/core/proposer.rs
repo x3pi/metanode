@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, iter, sync::atomic::Ordering, time::Duration, vec};
+use std::{collections::BTreeSet, iter, time::Duration, vec};
 
 use itertools::Itertools as _;
 use tokio::time::Instant;
@@ -417,58 +417,23 @@ impl Core {
         let core_skipped_proposals = &self.context.metrics.node_metrics.core_skipped_proposals;
 
         // ═══════════════════════════════════════════════════════════════════
-        // QUORUM GATE: Check if the node is in its initial boot (no prior DAG).
-        // If it is, require quorum readiness before proposing round 2+ blocks.
-        // Restarting nodes (boot_counter > 0) bypass this gate entirely since 
-        // they are already known to the network.
+        // PHASE CHECK: Only block proposals when actively catching up from
+        // the network (CatchingUp). Bootstrapping (genesis / fresh start)
+        // and Healthy both allow proposals — genesis nodes must propose
+        // round 1 to bootstrap consensus.
         // ═══════════════════════════════════════════════════════════════════
-        if clock_round > 1 && !self.quorum_ready.load(Ordering::Relaxed) {
-            // Check if this is the very first boot of the node
-            let local_ci = self.dag_state.read().last_commit_index();
-            let no_progress = local_ci <= self.initial_commit_index;
-            
-            // Only enforce quorum gate on initial bootstrap. Restarting nodes
-            // can safely bypass this to immediately join consensus.
-            let highest_accepted_round_at_start = self.dag_state.read().highest_accepted_round();
-            let is_initial_boot = highest_accepted_round_at_start == 0;
-            
-            if is_initial_boot && no_progress {
-                debug!(
-                    "🔒 [QUORUM GATE] Round {} proposals blocked: waiting for peer quorum \
-                     (initial boot, round 1 allowed freely to bootstrap peer detection)",
-                    clock_round
-                );
-                core_skipped_proposals
-                    .with_label_values(&["quorum_gate_waiting"])
-                    .inc();
-                return false;
-            }
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // UNIFIED PHASE CHECK: Delegate all lag and bootstrap management to
-        // the ConsensusCoordinationHub. Proposer only cares if the node is
-        // actively participating (Healthy) or aggressively syncing (CatchingUp).
-        // ═══════════════════════════════════════════════════════════════════
-        if !self.coordination_hub.is_healthy() && !self.coordination_hub.is_catching_up() {
+        if self.coordination_hub.is_catching_up() {
             debug!(
-                "Skip proposing for round {}: node is in phase {:?}",
-                clock_round, self.coordination_hub.get_phase()
+                "Skip proposing for round {}: node is catching up from network",
+                clock_round
             );
             core_skipped_proposals
-                .with_label_values(&["invalid_phase"])
+                .with_label_values(&["catching_up"])
                 .inc();
             return false;
         }
 
-        // Determine if node is in bootstrap phase (restarted but hasn't made local progress yet).
-        // During bootstrap, we MUST bypass overload and equivocation checks, otherwise 
-        // the node's initial round-1 clocks will stall against the old last_known_proposed_round.
-        let local_ci = self.dag_state.read().last_commit_index();
-        let is_bootstrap = local_ci <= self.initial_commit_index;
-
-        if !is_bootstrap
-            && self.propagation_delay
+        if self.propagation_delay
                 > self
                     .context
                     .parameters
@@ -488,24 +453,15 @@ impl Core {
         }
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {
-            if !is_bootstrap {
-                debug!(
-                    "Skip proposing for round {clock_round}, last known proposed round has not been synced yet."
-                );
-                core_skipped_proposals
-                    .with_label_values(&["no_last_known_proposed_round"])
-                    .inc();
-                return false;
-            }
-            // Bootstrap: allow proposing even without synced proposed round
+            // First boot: allow proposing even without synced proposed round
             debug!(
-                "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round (bootstrap)",
+                "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round",
                 clock_round
             );
             return true;
         };
         
-        if !is_bootstrap && clock_round <= last_known_proposed_round {
+        if clock_round <= last_known_proposed_round {
             debug!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"
             );

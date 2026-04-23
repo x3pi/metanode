@@ -22,7 +22,7 @@ use crate::{
     commit_vote_monitor::CommitVoteMonitor,
     context::{Clock, Context},
     core::{Core, CoreSignals},
-    core_thread::{ChannelCoreThreadDispatcher, CoreThreadDispatcher, CoreThreadHandle},
+    core_thread::{ChannelCoreThreadDispatcher, CoreThreadHandle},
     dag_state::DagState,
     leader_schedule::LeaderSchedule,
     leader_timeout::{LeaderTimeoutTask, LeaderTimeoutTaskHandle},
@@ -308,6 +308,11 @@ where
         let store = Arc::new(RocksDBStore::new(store_path));
         let dag_state = DagState::new(context.clone(), store.clone());
 
+        // CRITICAL FIX: Align the CommitConsumerMonitor with the restored DAG state.
+        // Otherwise it initializes to 0, which breaks CommitSyncer's lag calculation
+        // and causes the node to get stuck in CatchingUp phase forever.
+        commit_consumer.monitor().set_highest_handled_commit(dag_state.last_commit_index());
+
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
         // during the FastForwarding phase (see commit_syncer.rs). 
         // We intentionally do NOT align here because we need real network data
@@ -340,9 +345,8 @@ where
         let proposed_block_handler =
             spawn_logged_monitored_task!(proposed_block_handler.run(), "proposed_block_handler");
 
-        let highest_accepted_round_at_start = dag_state.read().highest_accepted_round();
         let sync_last_known_own_block = boot_counter == 0
-            && highest_accepted_round_at_start == 0
+            && dag_state.read().highest_accepted_round() == 0
             && !context
                 .parameters
                 .sync_last_known_own_block_timeout
@@ -379,19 +383,6 @@ where
             min_round_delay_ms
         );
 
-        // ═══════════════════════════════════════════════════════════════════
-        // QUORUM READINESS GATE: Create flag that blocks proposals until
-        // enough peers are connected. This prevents startup forks where
-        // isolated subgroups form independent consensus.
-        // ═══════════════════════════════════════════════════════════════════
-        let quorum_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let quorum_threshold = context.committee.quorum_threshold();
-        let committee_size = context.committee.size();
-        info!(
-            "🔒 [QUORUM GATE] Initialized: quorum_threshold={}, committee_size={}",
-            quorum_threshold, committee_size
-        );
-
         let core = Core::new(
             context.clone(),
             leader_schedule,
@@ -406,7 +397,6 @@ where
             round_tracker.clone(),
             Some(adaptive_delay_state.clone()),
             system_transaction_provider, // System transaction provider for Sui-style epoch transition
-            quorum_ready.clone(),
             coordination_hub.clone(),
         );
 
@@ -501,107 +491,6 @@ where
 
         network_manager.install_service(network_service).await;
 
-        // ═══════════════════════════════════════════════════════════════════
-        // QUORUM MONITOR: Polls highest_received_rounds to detect real peers.
-        //
-        // No deadlock because round 1 proposals are ALWAYS allowed by the
-        // quorum gate in proposer.rs (clock_round > 1 check). Round 1 blocks
-        // flow freely through the network, updating highest_received_rounds.
-        // Once peers with total stake ≥ quorum_threshold show round > 0,
-        // quorum_ready is set and round 2+ proposals are unlocked.
-        //
-        // NOTE: quorum_threshold is STAKE-weighted (e.g., 2667 for 4×1000),
-        // so we must sum peer stakes, not count peers.
-        //
-        // Timeout after 30s as a safety fallback.
-        // ═══════════════════════════════════════════════════════════════════
-        {
-            let quorum_ready_clone = quorum_ready.clone();
-            let dispatcher_clone = core_dispatcher.clone();
-            let quorum_threshold_val = quorum_threshold;
-            let own_index_val = context.own_index;
-            let committee_size_val = committee_size;
-            // Collect per-authority stakes for stake-weighted comparison
-            let authority_stakes: Vec<u64> = context
-                .committee
-                .authorities()
-                .map(|(_, a)| a.stake)
-                .collect();
-            let own_stake = authority_stakes[own_index_val.value()];
-            let total_stake: u64 = authority_stakes.iter().sum();
-            info!(
-                "🔒 [QUORUM GATE] Initialized: quorum_threshold={} (stake-weighted), \
-                 total_stake={}, own_stake={}, committee_size={}",
-                quorum_threshold_val, total_stake, own_stake, committee_size_val
-            );
-            // COLD-START: If boot_counter > 0 and DAG is empty, Phase 1 sync
-            // already verified peers are reachable. Use shorter timeout (5s)
-            // instead of 30s to avoid blocking proposals at high rounds.
-            // NOTE: highest_accepted_round was captured before dag_state was
-            // moved into Subscriber::new, reuse it here.
-            let is_initial_boot = boot_counter > 0
-                && highest_accepted_round_at_start == 0;
-            let gate_timeout_secs = if is_initial_boot { 5u64 } else { 30u64 };
-            if is_initial_boot {
-                info!(
-                    "⚡ [QUORUM GATE] Initial bootstrap detected (boot_counter={}, empty DAG). \
-                     Reduced timeout to {}s (was 30s).",
-                    boot_counter, gate_timeout_secs
-                );
-            }
-            tokio::spawn(async move {
-                let timeout = tokio::time::Duration::from_secs(gate_timeout_secs);
-                let start = tokio::time::Instant::now();
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
-
-                loop {
-                    interval.tick().await;
-
-                    // Safety timeout
-                    if start.elapsed() >= timeout {
-                        tracing::warn!(
-                            "⚠️ [QUORUM GATE] Timeout after {}s. Enabling proposals as fallback.",
-                            gate_timeout_secs
-                        );
-                        quorum_ready_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break;
-                    }
-
-                    // Sum stakes of peers with received rounds > 0
-                    let received_rounds = dispatcher_clone.highest_received_rounds();
-                    let mut active_stake: u64 = own_stake; // include ourselves
-                    let mut peers_heard: usize = 0;
-                    for (i, round) in received_rounds.iter().enumerate() {
-                        if i != own_index_val.value() && *round > 0 {
-                            active_stake += authority_stakes[i];
-                            peers_heard += 1;
-                        }
-                    }
-
-                    if active_stake >= quorum_threshold_val {
-                        tracing::info!(
-                            "🔓 [QUORUM GATE] Quorum reached: stake {}/{} ({} peers + self). \
-                             Enabling round 2+ proposals.",
-                            active_stake,
-                            total_stake,
-                            peers_heard
-                        );
-                        quorum_ready_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break;
-                    }
-
-                    tracing::debug!(
-                        "🔒 [QUORUM GATE] Waiting: stake {}/{} ({} peers), \
-                         need {} for quorum. Elapsed: {:?}",
-                        active_stake,
-                        total_stake,
-                        peers_heard,
-                        quorum_threshold_val,
-                        start.elapsed()
-                    );
-                }
-            });
-        }
 
         info!(
             "✅ [AUTHORITY NODE] Consensus authority started, took {:?}",

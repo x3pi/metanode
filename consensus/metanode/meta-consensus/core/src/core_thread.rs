@@ -528,7 +528,7 @@ mod test {
             round_tracker,
             None, // adaptive_delay_state - not used in tests
             None, // system_transaction_provider - not used in tests
-            Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+            crate::coordination_hub::ConsensusCoordinationHub::new(),
         );
 
         let (core_dispatcher, handle) =

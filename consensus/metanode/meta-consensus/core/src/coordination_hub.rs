@@ -16,14 +16,6 @@ pub enum NodeConsensusPhase {
     /// Node is verifying identity, connecting to Go executor, and checking database state.
     Bootstrapping,
     
-    /// Node is waiting for the Go executor to finish snapshot restoration.
-    /// Rust consensus must pause processing and disable sync.
-    AwaitingSnapshot,
-
-    /// Node is executing a fast-forward operation to synchronize the DAG baseline
-    /// with the network's current state immediately following a snapshot restore.
-    FastForwarding,
-
     /// Node is significantly lagging behind the network quorum.
     /// Aggressive commit synchronization is active.
     CatchingUp,
@@ -71,11 +63,6 @@ impl ConsensusCoordinationHub {
     /// Convenience check for whether the node is explicitly catching up.
     pub fn is_catching_up(&self) -> bool {
         matches!(*self.phase.read(), NodeConsensusPhase::CatchingUp)
-    }
-
-    /// Convenience check for whether we should pause DAG processing based on snapshot restoration.
-    pub fn is_awaiting_snapshot(&self) -> bool {
-        matches!(*self.phase.read(), NodeConsensusPhase::AwaitingSnapshot | NodeConsensusPhase::FastForwarding)
     }
 }
 

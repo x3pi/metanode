@@ -429,10 +429,11 @@ func NewBlockProcessor(
 		}
 	}
 
-	// PEER DISCOVERY: Start TCP listener for remote Rust nodes to query this Go Master
-	// This enables distributed deployment (nodes on different machines)
+	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer
+	// which now listens on config.PeerRPCPort (e.g. 1920x) for HTTP JSON-RPC.
 	if config.PeerRPCPort > 0 {
-		go bp.runPeerDiscoverySocket(config.PeerRPCPort)
+		// go bp.runPeerDiscoverySocket(config.PeerRPCPort)
+		logger.Info("🌐 [PEER DISCOVERY] Go Master TCP socket listener is intentionally disabled to avoid port conflict with Rust PeerRpcServer")
 	}
 
 

@@ -78,8 +78,6 @@ struct ConsensusSetup {
     transaction_verifier: Arc<NoopTransactionVerifier>,
     /// TX recycler for tracking and re-submitting uncommitted TXs
     tx_recycler: Arc<crate::consensus::tx_recycler::TxRecycler>,
-    /// Whether the node should start as a validator immediately.
-    start_as_validator: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,14 +1389,11 @@ impl ConsensusNode {
         // system_transaction_provider and epoch_duration_seconds are created earlier
         // (before executor_client_for_proc) for backpressure wiring
 
-        // Conditional logic: Start as Validator immediately IF:
-        // 1. Node is designated as Validator in config
-        // 2. AND we have DAG history for this epoch (meaning we didn't amnesia-crash)
-        // OR
-        // 3. We are exactly at the start of the epoch (no blocks produced yet, so no gap)
+        // Simplified validator startup: if node is in committee, always start consensus.
+        // Cold-start / restart catch-up is handled by CommitSyncer (highest_accepted_round <= 1 path).
+        // The SYNC-FIRST barrier already ensures Go is caught up before we reach here.
         let is_designated_validator = storage.is_in_committee;
-        let start_as_validator = is_designated_validator
-            && (dag_has_history || storage.last_global_exec_index <= storage.epoch_base_exec_index);
+        let start_as_validator = is_designated_validator;
 
         let (authority, commit_consumer_holder) = if start_as_validator {
             info!("🚀 Starting consensus authority node immediately (in-sync confirmed)...");
@@ -1457,7 +1452,6 @@ impl ConsensusNode {
             clock,
             transaction_verifier,
             tx_recycler,
-            start_as_validator,
         })
     }
 
@@ -1535,12 +1529,10 @@ impl ConsensusNode {
                 config.epochs_to_keep,
             )),
             coordination_hub: coordination_hub.clone(),
-            // Phase 2: In-committee nodes start as SyncingUp. They will explicitly catch up
-            // via startup.rs and then reliably transition to Validator mode.
-            node_mode: if consensus.start_as_validator {
+            // In-committee nodes are always Validator. Catch-up is handled by CommitSyncer
+            // (cold-start path: highest_accepted_round <= 1).
+            node_mode: if storage.is_in_committee {
                 NodeMode::Validator
-            } else if storage.is_in_committee {
-                NodeMode::SyncingUp
             } else {
                 NodeMode::SyncOnly
             },
