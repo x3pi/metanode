@@ -679,26 +679,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
         
         for authority in target_authorities {
-            if let Ok(Ok((serialized_commits, serialized_blocks))) = tokio::time::timeout(
+            if let Ok(Ok((serialized_commits, _))) = tokio::time::timeout(
                 Duration::from_secs(5),
                 self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
             ).await {
-                if let Ok(Ok((commits, _))) = tokio::task::spawn_blocking({
-                    let inner = self.inner.clone();
-                    let h_range = range.clone();
-                    move || inner.verify_commits(authority, h_range, serialized_commits, serialized_blocks)
-                }).await {
-                    if let Some(commit) = commits.first() {
+                if let Some(serialized) = serialized_commits.first() {
+                    if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
                         use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
                         let timestamp_ms = commit.timestamp_ms(); 
+                        let digest = crate::commit::TrustedCommit::compute_digest(serialized);
                         
                         self.inner.dag_state.write().reset_to_network_baseline(
                             prev_index as u32,
                             prev_index,
-                            commit.reference().digest,
+                            digest,
                             timestamp_ms
                         );
-                        tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={})", prev_index, commit.reference().digest, timestamp_ms);
+                        tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={})", prev_index, digest, timestamp_ms);
                         return;
                     }
                 }
