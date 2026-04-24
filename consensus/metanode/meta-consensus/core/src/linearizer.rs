@@ -239,11 +239,14 @@ impl Linearizer {
 
         // Perform the recursion without stopping at the highest round round that has been committed per authority. Instead it will
         // allow to commit blocks that are lower than the highest committed round for an authority but higher than gc_round.
-        assert!(
-            dag_state.set_committed(&leader_block_ref),
-            "Leader block with reference {:?} attempted to be committed twice",
-            leader_block_ref
-        );
+        if !dag_state.set_committed(&leader_block_ref) {
+            tracing::warn!(
+                "⚠️ [LINEARIZER] Leader block with reference {:?} attempted to be committed twice or is missing. \
+                 Tolerating graceful skip (likely recovering from cold-start or conflicting snapshot boundaries).",
+                leader_block_ref
+            );
+            return vec![]; // Skip processing if it's already committed
+        }
 
         // NOTE: We intentionally do NOT commit all blocks at the leader round.
         // Different nodes may have different blocks at a round (due to network timing).

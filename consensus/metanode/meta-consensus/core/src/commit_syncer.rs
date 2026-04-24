@@ -294,7 +294,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             
             // Fast-forward DAG state to match Go Execution Engine's progress
             // We use highest_handled_index as the base target round for GC dropping
-            self.inner.dag_state.write().reset_to_network_baseline(highest_handled_index as u32, highest_handled_index, crate::commit::CommitDigest::MIN);
+            self.inner.dag_state.write().reset_to_network_baseline(highest_handled_index as u32, highest_handled_index, crate::commit::CommitDigest::MIN, 0);
             self.synced_commit_index = highest_handled_index;
             
             // Update local_commit for the phase evaluation below!
@@ -402,6 +402,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     if now.duration_since(last_state_check) >= check_interval {
                         let old_state = self.coordination_hub.get_phase();
                         self.update_state();
+                        self.patch_baseline_if_needed().await;
                         let new_state = self.coordination_hub.get_phase();
                         
                         let local_commit = self.inner.dag_state.read().last_commit_index();
@@ -656,6 +657,54 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .insert((range_start..=quorum_commit_index).into());
             self.highest_scheduled_index = Some(quorum_commit_index);
         }
+    }
+
+    /// Fetches the real digest and timestamp from the network for a synthetic baseline commit.
+    /// This ensures timestamp monotonicity calculations work correctly for subsequent commits
+    /// after a Node fast-forwards its DAG from an empty state to match Go's catchup sync progress.
+    async fn patch_baseline_if_needed(&mut self) {
+        if self.synced_commit_index == 0 { return; }
+        if self.inner.dag_state.read().last_commit_digest() != crate::commit::CommitDigest::MIN { return; }
+        
+        let prev_index = self.synced_commit_index;
+        tracing::info!("🔗 Fetching network digest and timestamp for baseline commit #{}", prev_index);
+        
+        let mut target_authorities = self.inner.context.committee.authorities()
+            .filter_map(|(i, _)| if i != self.inner.context.own_index { Some(i) } else { None })
+            .collect::<Vec<_>>();
+            
+        use rand::seq::SliceRandom;
+        target_authorities.shuffle(&mut rand::thread_rng());
+        
+        let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
+        
+        for authority in target_authorities {
+            if let Ok(Ok((serialized_commits, serialized_blocks))) = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
+            ).await {
+                if let Ok(Ok((commits, _))) = tokio::task::spawn_blocking({
+                    let inner = self.inner.clone();
+                    let h_range = range.clone();
+                    move || inner.verify_commits(authority, h_range, serialized_commits, serialized_blocks)
+                }).await {
+                    if let Some(commit) = commits.first() {
+                        use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
+                        let timestamp_ms = commit.timestamp_ms(); 
+                        
+                        self.inner.dag_state.write().reset_to_network_baseline(
+                            prev_index as u32,
+                            prev_index,
+                            commit.reference().digest,
+                            timestamp_ms
+                        );
+                        tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={})", prev_index, commit.reference().digest, timestamp_ms);
+                        return;
+                    }
+                }
+            }
+        }
+        tracing::warn!("⚠️ Failed to fetch baseline digest for commit #{}", prev_index);
     }
 
     /// Processes fetched commits and sends them to Core.

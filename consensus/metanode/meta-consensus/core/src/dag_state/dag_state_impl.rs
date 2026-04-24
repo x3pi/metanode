@@ -425,6 +425,7 @@ impl DagState {
         target_round: Round,
         synced_commit_index: crate::commit::CommitIndex,
         real_digest: crate::commit::CommitDigest,
+        timestamp_ms: consensus_types::block::BlockTimestampMs,
     ) {
         if self.last_commit.is_some() && self.last_commit_digest() != crate::commit::CommitDigest::MIN {
             // Protect against accidentally resetting an active DAG
@@ -438,7 +439,7 @@ impl DagState {
         let synthetic_commit = TrustedCommit::new_for_test(
             target_index,
             real_digest,
-            0, // ALWAYS use 0 so the next network commit naturally satisfies monotonic guarantees
+            timestamp_ms, // CRITICAL FORK-SAFETY: Must match the network's timestamp for monotonic guarantees
             BlockRef::new(
                 target_round,
                 consensus_config::AuthorityIndex::ZERO,
