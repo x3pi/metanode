@@ -44,6 +44,7 @@ var (
 	API_URL          string
 	AUTO_REGISTER_BLS bool
 	ASYNC            bool
+	NODE_URL         string
 )
 
 // SCData defines a single transaction action (deploy or call)
@@ -68,6 +69,7 @@ func main() {
 	flag.BoolVar(&AUTO_REGISTER_BLS, "register-bls", false, "Automatically check and register BLS key if missing")
 	flag.StringVar(&API_URL, "api-url", "http://127.0.0.1:8757", "HTTP API URL for eth_call (read_call action)")
 	flag.BoolVar(&ASYNC, "async", false, "Send all transactions asynchronously and wait for receipts at the end (groups TXs into one block)")
+	flag.StringVar(&NODE_URL, "node", "", "Override config node connection address (e.g. 127.0.0.1:4200)")
 	flag.Parse()
 
 	// ═══════════════════════════════════════════════════════════════
@@ -113,6 +115,10 @@ func main() {
 		os.Exit(1)
 	}
 	config := configIface.(*c_config.ClientConfig)
+
+	if NODE_URL != "" {
+		config.ParentConnectionAddress = NODE_URL
+	}
 
 	// Load transaction data
 	datas := loadTransactionData()

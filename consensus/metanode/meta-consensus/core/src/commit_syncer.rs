@@ -90,6 +90,10 @@ impl CommitSyncerHandle {
             }
         }
     }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        !self.schedule_task.is_finished()
+    }
 }
 
 pub(crate) struct CommitSyncer<C: NetworkClient> {
@@ -354,7 +358,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         return;
                     }
                     let (target_end, commits) = result.expect("inflight fetch result should be Ok after error handling above");
-                    self.handle_fetch_result(target_end, commits).await;
+                    let should_shutdown = self.handle_fetch_result(target_end, commits).await;
+                    if should_shutdown {
+                        warn!("🔴 [COMMIT-SYNCER] CoreThread is gone. Shutting down schedule_loop.");
+                        self.inflight_fetches.shutdown().await;
+                        return;
+                    }
                 }
                 _ = &mut rx_shutdown => {
                     // Shutdown requested.
@@ -386,12 +395,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
-        // Track synced commits purely via state logic
-        if self.coordination_hub.is_healthy() {
-            self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
-        } else {
-            self.synced_commit_index = self.synced_commit_index.max(highest_handled_index);
-        }
+        // Track synced commits: ALWAYS use the max of local DAG commit and
+        // Go execution progress, regardless of phase. Using only
+        // highest_handled_index during CatchingUp caused synced to lag behind
+        // local_commit, creating permanent gaps with fetched ranges.
+        self.synced_commit_index = self
+            .synced_commit_index
+            .max(local_commit_index)
+            .max(highest_handled_index);
 
         let unhandled_commits_threshold = self.unhandled_commits_threshold();
         // Throttle noisy logs:
@@ -539,11 +550,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
+    /// Processes fetched commits and sends them to Core.
+    /// Returns `true` if the CoreThread has shut down and the schedule_loop should exit.
     async fn handle_fetch_result(
         &mut self,
         target_end: CommitIndex,
         certified_commits: CertifiedCommits,
-    ) {
+    ) -> bool {
         assert!(!certified_commits.commits().is_empty());
 
         let (total_blocks_fetched, total_blocks_size_bytes) = certified_commits
@@ -598,11 +611,29 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.pending_fetches
                 .insert((commit_end + 1..=target_end).into());
         }
-        // Make sure synced_commit_index is up to date, but only if healthy!
-        if self.coordination_hub.is_healthy() {
-            self.synced_commit_index = self
-                .synced_commit_index
-                .max(self.inner.dag_state.read().last_commit_index());
+        // ═══════════════════════════════════════════════════════════════════════
+        // CRITICAL FIX: Always keep synced_commit_index >= local DAG commit.
+        // Previously this was gated by is_healthy(), which caused a PERMANENT
+        // STALL during CatchingUp: if a commit was already in the local DAG
+        // (from a previous add_certified_commits call) but synced_commit_index
+        // hadn't advanced, a gap formed between synced and the next fetched
+        // range. Since fetched ranges require synced+1 >= range.start(), the
+        // gap blocked ALL processing forever.
+        //
+        // Example: synced=4301, local_commit=4302, fetched starts at 4303
+        // → needs 4302 to be fetched, but it's already local → gap forever
+        // ═══════════════════════════════════════════════════════════════════════
+        {
+            let local_commit = self.inner.dag_state.read().last_commit_index();
+            if local_commit > self.synced_commit_index {
+                tracing::info!(
+                    "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
+                    self.synced_commit_index,
+                    local_commit,
+                    self.coordination_hub.get_phase()
+                );
+                self.synced_commit_index = local_commit;
+            }
         }
         info!(
             "[NODE4-DEBUG] fetched result: range={}→{}, synced_commit={}, pending_ranges={}",
@@ -634,14 +665,29 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         .pop_first()
                         .expect("checked first_key_value above")
                 } else {
-                    // Found gap between earliest fetched block and latest synced block,
-                    // so not sending additional blocks to Core.
-                    tracing::info!(
-                        "[NODE4-DEBUG] GAP DETECTED: fetched_range={}→{} but synced={}",
+                    // Found gap between earliest fetched block and latest synced block.
+                    // Schedule a fetch for the missing range to fill the gap.
+                    let gap_start = self.synced_commit_index + 1;
+                    let gap_end = fetched_commit_range.start() - 1;
+                    tracing::warn!(
+                        "[COMMIT-SYNCER] GAP DETECTED: fetched_range={}→{} but synced={}. Scheduling gap fill {}→{}",
                         fetched_commit_range.start(),
                         fetched_commit_range.end(),
-                        self.synced_commit_index
+                        self.synced_commit_index,
+                        gap_start,
+                        gap_end
                     );
+                    if gap_start <= gap_end {
+                        let gap_range: CommitRange = (gap_start..=gap_end).into();
+                        // Only insert if not already inflight or pending
+                        if !self.pending_fetches.iter().any(|r| r.start() <= gap_start && r.end() >= gap_end) {
+                            tracing::info!(
+                                "[COMMIT-SYNCER] Inserting gap-fill fetch: {:?}",
+                                gap_range
+                            );
+                            self.pending_fetches.insert(gap_range);
+                        }
+                    }
                     metrics.commit_sync_gap_on_processing.inc();
                     break;
                 };
@@ -707,13 +753,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
                 Err(e) => {
                     error!(
-                        "[NODE4-DEBUG] Core FAILED to process range {}→{}: {}",
+                        "🔴 [COMMIT-SYNCER] Core FAILED to process range {}→{}: {}. CoreThread likely shut down.",
                         fetched_commit_range.start(),
                         fetched_commit_range.end(),
                         e
                     );
-                    info!("Failed to add blocks, shutting down: {}", e);
-                    return;
+                    return true; // Signal schedule_loop to exit
                 }
             };
 
@@ -734,6 +779,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         metrics
             .commit_sync_highest_synced_index
             .set(self.synced_commit_index as i64);
+
+        false // No shutdown needed
     }
 
     fn try_start_fetches(&mut self) {

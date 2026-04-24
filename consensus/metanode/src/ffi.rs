@@ -170,39 +170,45 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
             };
 
             rt.block_on(async {
-                let config_path = std::path::PathBuf::from(config_path_str);
-                let mut node_config = match NodeConfig::load(&config_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Failed to load configuration from {:?}: {}", config_path, e);
-                        return;
+                loop {
+                    let config_path = std::path::PathBuf::from(config_path_str.clone());
+                    let mut node_config = match NodeConfig::load(&config_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Failed to load configuration from {:?}: {}", config_path, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
+
+                    // Override storage path to live inside Go's data directory if provided
+                    if !data_dir_str.is_empty() {
+                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
+                        info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
                     }
-                };
 
-                // Override storage path to live inside Go's data directory if provided
-                if !data_dir_str.is_empty() {
-                    node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
-                    info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
-                }
+                    info!("Node ID: {}", node_config.node_id);
+                    info!("Network address: {}", node_config.network_address);
 
-                info!("Node ID: {}", node_config.node_id);
-                info!("Network address: {}", node_config.network_address);
+                    let registry = prometheus::Registry::new();
+                    let startup_config = StartupConfig::new(node_config, registry, None);
 
-                let registry = prometheus::Registry::new();
-                let startup_config = StartupConfig::new(node_config, registry, None);
+                    let initialized_node = match InitializedNode::initialize(startup_config).await {
+                        Ok(node) => node,
+                        Err(e) => {
+                            error!("Failed to initialize node: {}", e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
 
-                let initialized_node = match InitializedNode::initialize(startup_config).await {
-                    Ok(node) => node,
-                    Err(e) => {
-                        error!("Failed to initialize node: {}", e);
-                        return;
+                    if let Err(e) = initialized_node.run_main_loop().await {
+                        error!("Consensus main loop exited with error: {}", e);
                     }
-                };
-
-                if let Err(e) = initialized_node.run_main_loop().await {
-                    error!("Consensus main loop exited with error: {}", e);
+                    
+                    tracing::warn!("🔄 [FFI RESTART] Consensus Node crashed or exited. Restarting in 5 seconds...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
-                info!("Consensus main loop completed.");
             });
         }));
 

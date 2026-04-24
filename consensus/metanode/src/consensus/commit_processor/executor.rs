@@ -79,6 +79,56 @@ pub async fn dispatch_commit(
         );
         return Ok(1);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CATCH-UP FORK GUARD: Suppress locally-produced commits during catch-up.
+    //
+    // ROOT CAUSE: When a node cold-starts after restore, it transitions from
+    // "syncing certified commits from peers" to "participating in local consensus".
+    // During this transition, the local DAG may produce commits with DIFFERENT
+    // metadata (leader, timestamp, GEI) than the network's canonical commits,
+    // because the local DAG state differs from the network's.
+    //
+    // DETECTION: If the commit was decided with local blocks (decided_with_local_blocks=true)
+    // AND Go is significantly behind (lag > 10 blocks), the node is still catching up.
+    // In this state, locally-produced commits are unreliable and must be skipped.
+    //
+    // SAFETY:
+    // - Synced commits (decided_with_local_blocks=false) always pass through
+    //   because they are canonical commits from the network majority.
+    // - EndOfEpoch commits always pass through for epoch transition safety.
+    // - Once the node catches up (lag ≤ 10), local commits are trusted again.
+    // ═══════════════════════════════════════════════════════════════════
+    if subdag.decided_with_local_blocks && total_transactions > 0 {
+        if let Some(ref client) = executor_client {
+            let go_gei = if let Some(ref shared_gei) = shared_last_global_exec_index {
+                *shared_gei.lock().await
+            } else {
+                client.get_last_global_exec_index().await.unwrap_or(0)
+            };
+
+            let lag = global_exec_index.saturating_sub(go_gei);
+            if lag > 10 {
+                let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();
+                if !has_end_of_epoch {
+                    warn!(
+                        "🛡️ [CATCH-UP FORK GUARD] Suppressing locally-decided commit #{} (GEI={}, txs={}) — \
+                         Go is {} blocks behind (go_gei={}). Local DAG may produce different metadata than network. \
+                         Only synced commits (decided_with_local_blocks=false) are trusted during catch-up.",
+                        commit_index, global_exec_index, total_transactions, lag, go_gei
+                    );
+                    // Still update shared GEI counter so tracking advances
+                    if let Some(shared_index) = shared_last_global_exec_index.clone() {
+                        let mut index_guard = shared_index.lock().await;
+                        if global_exec_index > *index_guard {
+                            *index_guard = global_exec_index;
+                        }
+                    }
+                    return Ok(1);
+                }
+            }
+        }
+    }
     let leader_address: Option<Vec<u8>> = if executor_client.is_some() {
         let leader_author_index = subdag.leader.author.value();
 

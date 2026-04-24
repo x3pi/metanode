@@ -232,204 +232,36 @@ impl InitializedNode {
 
     /// Run the main event loop
     pub async fn run_main_loop(self) -> Result<()> {
-        // --- [SYNC-BEFORE-CONSENSUS] ---
-        // Block startup until we catch up with the network
-        // This prevents the node from proposing blocks on a fork or when behind
-        let catchup_manager = {
-            let node_guard = self.node.lock().await;
-            if let Some(client) = node_guard.executor_client.clone() {
-                Some(crate::node::catchup::CatchupManager::new(
-                    client,
-                    self.node_config.executor_receive_socket_path.clone(),
-                    self.node_config.peer_rpc_addresses.clone(),
-                ))
-            } else {
-                warn!("⚠️ [STARTUP] No executor client available, skipping catchup check");
-                None
-            }
-        };
-
         // ═══════════════════════════════════════════════════════════════════════
-        // SNAPSHOT RESTORE SUPPORT for SyncOnly nodes:
-        // Previously, SyncOnly skipped catchup entirely, causing nodes restored
-        // from Go snapshot to get stuck (commit_syncer at stale epoch = "Not
-        // enough votes"). Now we run a LIGHTWEIGHT epoch-catchup: sync Go blocks
-        // from peers until Go reaches the current network epoch. After Go catches
-        // up, the existing epoch_monitor detects the epoch change and triggers
-        // consensus restart at the correct epoch. Combined with the cold-start
-        // fast-forward in commit_syncer, the node does NOT need Rust consensus
-        // storage copied from another node.
+        // STARTUP SYNC: CommitSyncer handles all catch-up automatically.
         //
-        // The old deadlock (can't match epoch without blocks, can't get blocks
-        // without matching epoch) is broken by sync_go_to_current_epoch() which
-        // fetches blocks from peer Go nodes regardless of epoch match.
+        // CommitSyncer::update_state() detects DAG empty → calls
+        // reset_to_network_baseline() → fast-forwards. No manual sync needed.
+        // RustSyncNode handles SyncOnly block sync. epoch_monitor handles
+        // cross-epoch catch-up.
+        //
+        // This loop's sole responsibility is the Supervisor pattern:
+        // poll is_alive() every 5s and trigger auto-restart if consensus dies.
         // ═══════════════════════════════════════════════════════════════════════
-        let is_sync_only_mode = {
-            let node_guard = self.node.lock().await;
-            matches!(node_guard.node_mode, crate::node::NodeMode::SyncOnly)
-        };
+        info!("✅ [STARTUP] Node initialized. Entering supervisor loop.");
 
-        if is_sync_only_mode {
-            // SyncOnly: Run lightweight epoch-catchup only (no consensus join wait)
-            if let Some(ref cm) = catchup_manager {
-                info!("📋 [STARTUP] SyncOnly mode: running epoch-catchup before sync_loop...");
-                let local_epoch = {
-                    let node_guard = self.node.lock().await;
-                    node_guard.current_epoch
-                };
-                match cm.check_sync_status(local_epoch, 0).await {
-                    Ok(status) if !status.epoch_match => {
-                        info!(
-                            "🔄 [STARTUP] SyncOnly epoch mismatch: Local={}, Network={}. Syncing Go blocks...",
-                            local_epoch, status.go_epoch
-                        );
-                        match cm.sync_go_to_current_epoch(status.go_epoch).await {
-                            Ok(synced) => {
-                                info!(
-                                    "✅ [STARTUP] SyncOnly epoch-catchup complete: {} blocks synced. \
-                                     epoch_monitor will handle consensus restart at correct epoch.",
-                                    synced
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "⚠️ [STARTUP] SyncOnly epoch-catchup failed: {}. \
-                                     sync_loop will handle catchup at runtime.",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        info!("✅ [STARTUP] SyncOnly: epoch matches network, no catchup needed.");
-                    }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ [STARTUP] SyncOnly sync status check failed: {}. Proceeding.",
-                            e
-                        );
+        let mut check_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = check_interval.tick() => {
+                    let is_alive = { self.node.lock().await.is_alive() };
+                    if !is_alive {
+                        tracing::error!("🔴 [SUPERVISOR] Lõi đồng thuận đã Crash! Kích hoạt quy trình Auto-Restart...");
+                        // Prevent waiting for graceful shutdown if internal components are dead
+                        return Err(anyhow::anyhow!("ConsensusNode internal tasks crashed"));
                     }
                 }
-            } else {
-                info!("📋 [STARTUP] SyncOnly mode: no executor client, skipping catchup.");
-            }
-        } else if let Some(cm) = catchup_manager {
-                // ═══════════════════════════════════════════════════════════════
-                // SNAPSHOT RESTORE: Even when "not lagging" (no peer reference),
-                // the node may be behind by entire epochs after snapshot restore.
-                // Check if Go epoch matches network epoch — if not, sync Go
-                // blocks from peers until Go catches up to the current epoch.
-                // Without this, the node joins consensus at a stale epoch and
-                // commit_syncer fails with "wrong epoch" on every fetch.
-                // ═══════════════════════════════════════════════════════════════
-                info!("✅ [STARTUP] Node is starting directly as Validator (lag is below threshold). Checking epoch match before proceeding...");
-                let local_epoch = {
-                    let node_guard = self.node.lock().await;
-                    node_guard.current_epoch
-                };
-                match cm.check_sync_status(local_epoch, 0).await {
-                    Ok(status) if !status.epoch_match => {
-                        warn!(
-                            "🔄 [STARTUP] Epoch mismatch detected at Validator startup: Local epoch={}, Network epoch={}. Running cross-epoch sync...",
-                            local_epoch, status.go_epoch
-                        );
-                        match cm.sync_go_to_current_epoch(status.go_epoch).await {
-                            Ok(synced) => {
-                                info!(
-                                    "✅ [STARTUP] Cross-epoch sync complete: {} blocks synced. epoch_monitor will handle transition.",
-                                    synced
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "⚠️ [STARTUP] Cross-epoch sync failed: {}. Proceeding anyway — epoch_monitor may handle it later.",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Ok(_status)
-                        if matches!(
-                            *cm.state.read().await,
-                            crate::node::catchup::CatchupState::BehindRustLocal { .. }
-                        ) =>
-                    {
-                        let state = cm.state.read().await.clone();
-                        if let crate::node::catchup::CatchupState::BehindRustLocal {
-                            target_gei,
-                            current_gei,
-                        } = state
-                        {
-                            warn!("🔄 [STARTUP] Go is behind local Rust storage! Fast-forwarding directly from local DB (GEI {} -> {})...", current_gei, target_gei);
-                            let storage_path = std::path::Path::new(&self.node_config.storage_path);
-                            match cm
-                                .sync_blocks_from_local_rust(
-                                    storage_path,
-                                    current_gei,
-                                    target_gei,
-                                )
-                                .await
-                            {
-                                Ok(synced) => {
-                                    info!("✅ [STARTUP] Local rust fast-forward complete: {} blocks synced directly.", synced);
-                                }
-                                Err(e) => {
-                                    warn!("⚠️ [STARTUP] Local rust fast-forward failed: {}. Will retry or fallback...", e);
-                                }
-                            }
-                        }
-                    }
-                    Ok(status) if status.block_gap > 10 => {
-                        // ═══════════════════════════════════════════════════════
-                        // SNAPSHOT RESTORE BLOCK GAP FIX: Epoch matches, but Go
-                        // is behind network by >10 blocks (e.g., snapshot at 3050
-                        // but network at 3255). Without syncing these blocks from
-                        // peers FIRST, the Rust commit processor will ask Go for
-                        // blocks that don't exist yet, and block sync keeps
-                        // requesting from Go Master returning 0 blocks forever.
-                        // ═══════════════════════════════════════════════════════
-                        warn!(
-                            "🔄 [STARTUP] Epoch matches but Go is behind by {} blocks (Go={}, Network={}). Syncing gap from peers...",
-                            status.block_gap, status.go_last_block, status.network_block_height
-                        );
-                        let mut current_go_block = status.go_last_block;
-                        let target = status.network_block_height;
-                        let mut total_synced = 0u64;
-                        while current_go_block < target {
-                            let fetch_to = std::cmp::min(current_go_block + 50, target);
-                            match cm.sync_blocks_from_peers(current_go_block, fetch_to).await {
-                                Ok(synced) => {
-                                    if synced == 0 {
-                                        break;
-                                    }
-                                    current_go_block += synced;
-                                    total_synced += synced;
-                                }
-                                Err(e) => {
-                                    warn!("⚠️ [STARTUP] Block gap sync failed: {}. Proceeding — commit processor will retry.", e);
-                                    break;
-                                }
-                            }
-                        }
-                        info!(
-                            "✅ [STARTUP] Block gap sync complete: {} blocks synced. Go should be near block {}.",
-                            total_synced, current_go_block
-                        );
-                    }
-                    Ok(_) => {
-                        info!("✅ [STARTUP] Epoch matches network and block gap is small. Consensus syncing will handle any minor lag.");
-                    }
-                    Err(e) => {
-                        warn!("⚠️ [STARTUP] Epoch check failed: {}. Proceeding anyway.", e);
-                    }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, initiating shutdown...");
+                    break;
                 }
             }
-
-            info!("✅ [STARTUP] Validator started with consensus authority active. CommitSyncer will handle any catch-up.");
-
-        info!("Press Ctrl+C to stop the node");
-        tokio::signal::ctrl_c().await?;
-        info!("Received Ctrl+C, initiating shutdown...");
+        }
         self.shutdown().await
     }
 

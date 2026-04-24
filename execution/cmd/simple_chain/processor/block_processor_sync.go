@@ -767,6 +767,94 @@ PROCESS_BLOCK:
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PHASE 1 DIAGNOSTIC: Log all 9 hash-input fields for fork forensics.
+	// When a fork is detected by block_hash_checker, compare these logs between
+	// nodes to identify EXACTLY which field(s) diverged.
+	// ═══════════════════════════════════════════════════════════════════════════
+	logger.Info("🔍 [FORK-DIAG] Block #%d hash=%s | leader=%s | ts=%d | GEI=%d | epoch=%d | stateRoot=%s | stakeRoot=%s | rcptRoot=%s | txRoot=%s",
+		newBlock.Header().BlockNumber(),
+		newBlock.Header().Hash().Hex(),
+		newBlock.Header().LeaderAddress().Hex(),
+		newBlock.Header().TimeStamp(),
+		newBlock.Header().GlobalExecIndex(),
+		newBlock.Header().Epoch(),
+		newBlock.Header().AccountStatesRoot().Hex(),
+		newBlock.Header().StakeStatesRoot().Hex(),
+		newBlock.Header().ReceiptRoot().Hex(),
+		newBlock.Header().TransactionsRoot().Hex(),
+	)
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PHASE 2: POST-CREATE FORK GUARD
+	//
+	// ROOT CAUSE: When a node cold-starts after restore, Rust's DAG replay may
+	// produce commits with different metadata (leader, timestamp, GEI) than
+	// the network's canonical commits. The locally-created block will have the
+	// same stateRoot (same TXs executed) but a DIFFERENT hash.
+	//
+	// FIX: After creating a block, check if P2P sync has already written a
+	// block at this number with a DIFFERENT hash. If so, adopt the P2P version
+	// (which is network-authoritative) and discard our locally-created block.
+	//
+	// FORK-SAFETY: All nodes that are in-sync produce the same blocks, so they
+	// never trigger this guard. Only nodes catching up after restart trigger it.
+	// ═══════════════════════════════════════════════════════════════════════════
+	{
+		existingHash, existsInMap := blockchain.GetBlockChainInstance().GetBlockHashByNumber(*currentBlockNumber)
+		if existsInMap && existingHash != (common.Hash{}) {
+			localHash := newBlock.Header().Hash()
+			if localHash != existingHash {
+				// FORK DETECTED: locally-created block differs from P2P-synced version
+				existingBlock, fetchErr := bp.chainState.GetBlockDatabase().GetBlockByHash(existingHash)
+				if fetchErr == nil && existingBlock != nil {
+					logger.Warn("🛡️ [POST-CREATE-FORK-GUARD] Block #%d: local hash=%s ≠ P2P hash=%s. "+
+						"Adopting P2P version (network-authoritative). "+
+						"Local: leader=%s ts=%d GEI=%d | P2P: leader=%s ts=%d GEI=%d",
+						*currentBlockNumber,
+						localHash.Hex()[:18]+"...", existingHash.Hex()[:18]+"...",
+						newBlock.Header().LeaderAddress().Hex(),
+						newBlock.Header().TimeStamp(),
+						newBlock.Header().GlobalExecIndex(),
+						existingBlock.Header().LeaderAddress().Hex(),
+						existingBlock.Header().TimeStamp(),
+						existingBlock.Header().GlobalExecIndex(),
+					)
+
+					// Replace our block with the network's authoritative version
+					bp.SetLastBlock(existingBlock)
+					bp.nextBlockNumber.Store(*currentBlockNumber + 1)
+					headerCopy := existingBlock.Header()
+					bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+					// Rebuild state from authoritative block
+					if _, rebuildErr := bp.chainState.CommitBlockState(existingBlock,
+						blockchain.WithRebuildTries(),
+					); rebuildErr != nil {
+						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to rebuild state for block #%d: %v",
+							*currentBlockNumber, rebuildErr)
+					} else {
+						// Clear cached state to prevent stale EVM reads
+						mvm.ClearAllMVMApi()
+						mvm.CallClearAllStateInstances()
+						logger.Info("🛡️ [POST-CREATE-FORK-GUARD] ✅ Adopted P2P block #%d, rebuilt tries, cleared caches",
+							*currentBlockNumber)
+					}
+
+					// Update GEI tracking and continue to next block
+					bp.pushAsyncGEIUpdate(globalExecIndex)
+					*nextExpectedGlobalExecIndex = globalExecIndex + 1
+					if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+						delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+						epochData = pendingBlock
+						goto PROCESS_SINGLE_EPOCH_DATA_START
+					}
+					return
+				}
+			}
+		}
+	}
+
 	// Update GlobalExecIndex tracking (persistent)
 	bp.pushAsyncGEIUpdate(globalExecIndex)
 

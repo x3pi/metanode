@@ -190,17 +190,21 @@ impl Core {
             self.transaction_certifier
                 .add_voted_blocks(blocks.into_iter().map(|b| (b, vec![])).collect());
 
+            // NOTE: Certifier vote blocks are already processed in add_certified_commits()
+            // via self.block_manager.try_accept_blocks(votes) (line 54).
+            // The votes contain reject vote information needed by CommitFinalizer.
+
             // If there is no certified commit to process, run the decision rule.
-            let (decided_leaders, local) = if certified_leaders.is_empty() {
+            let (decided_leaders, local, precomputed_commits) = if certified_leaders.is_empty() {
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
                 // Truncate the decided leaders to fit the commit schedule limit.
                 if decided_leaders.len() >= commits_until_update {
                     let _ = decided_leaders.split_off(commits_until_update);
                 }
-                (decided_leaders, true)
+                (decided_leaders, true, None)
             } else {
-                (certified_leaders, false)
+                (certified_leaders, false, Some(decided_certified_commits))
             };
 
             // If the decided leaders list is empty then just break the loop.
@@ -237,7 +241,7 @@ impl Core {
             // TODO: refcount subdags
             let subdags = self
                 .commit_observer
-                .handle_commit(sequenced_leaders, local)?;
+                .handle_commit(sequenced_leaders, precomputed_commits, local)?;
 
             // Update adaptive delay state with new commit index
             if let Some(adaptive_delay_state) = &self.adaptive_delay_state {

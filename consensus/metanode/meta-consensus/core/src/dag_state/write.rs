@@ -147,11 +147,26 @@ impl DagState {
             }
             false
         } else {
-            // GRACEFUL (2026-03-24): After snapshot restore + amnesia recovery,
-            // own-slot conflict blocks are rejected and NOT added to recent_blocks.
-            // The linearizer may still reference them. Return false instead of panic.
+            // Block is not in cache. It might have been evicted from memory (e.g. older than `eviction_round`)
+            // but is still needed for a new commit (e.g. during CommitSyncer catch-up).
+            // Fetch it from DB and cache it to prevent the linearizer from double-committing it.
+            if let Ok(mut blocks) = self.store.read_blocks(&[*block_ref]) {
+                if let Some(Some(block)) = blocks.pop() {
+                    tracing::debug!(
+                        "⚠️ [DAG] set_committed: Block {:?} not in cache, loaded from DB and cached.",
+                        block_ref
+                    );
+                    let mut info = BlockInfo::new(block);
+                    info.committed = true;
+                    self.recent_blocks.insert(*block_ref, info);
+                    return true;
+                }
+            }
+
+            // GRACEFUL: After snapshot restore + amnesia recovery, own-slot conflict blocks
+            // are rejected and NOT added to recent_blocks or DB. Linearizer may still reference them.
             tracing::warn!(
-                "⚠️ [DAG] set_committed: Block {:?} not found in cache (likely own-slot conflict after restore). Treating as not committed.",
+                "⚠️ [DAG] set_committed: Block {:?} not found in cache OR DB (likely own-slot conflict after restore). Treating as not committed.",
                 block_ref
             );
             false
@@ -163,11 +178,11 @@ impl DagState {
         match self.recent_blocks.get(block_ref) {
             Some(info) => info.committed,
             None => {
-                // GRACEFUL (2026-03-24): After snapshot restore + amnesia recovery,
-                // own-slot conflict blocks are rejected and NOT added to recent_blocks.
-                // The linearizer may still reference them. Return false instead of panic.
-                tracing::warn!(
-                    "⚠️ [DAG] is_committed: Block {} not found in cache (likely own-slot conflict after restore). Treating as not committed.",
+                // Block could be evicted or an own-slot conflict.
+                // We return false, allowing the caller (e.g. Linearizer) to fetch it
+                // from DB (via get_blocks) and then `set_committed` will cache it.
+                tracing::debug!(
+                    "⚠️ [DAG] is_committed: Block {} not found in cache. Returning false.",
                     block_ref
                 );
                 false

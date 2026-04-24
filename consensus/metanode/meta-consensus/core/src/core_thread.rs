@@ -103,6 +103,10 @@ impl CoreThreadHandle {
             join_handle.await.ok();
         }
     }
+
+    pub fn is_alive(&self) -> bool {
+        self.join_handle.as_ref().map_or(false, |h| !h.is_finished())
+    }
 }
 
 // ============================================================================
@@ -252,7 +256,13 @@ impl ChannelCoreThreadDispatcher {
         let join_handle = spawn_logged_monitored_task!(
             async move {
                 if let Err(err) = core_thread.run().await {
-                    if !matches!(err, ConsensusError::Shutdown) {
+                    if matches!(err, ConsensusError::Shutdown) {
+                        tracing::warn!(
+                            "🔴 [CORE THREAD] Exiting due to Shutdown. \
+                             This may be intentional (epoch transition / stop()) or caused by \
+                             CommitFinalizer crash. Check for '⚠️ [COMMIT-FINALIZER]' warnings above."
+                        );
+                    } else {
                         panic!("Fatal error occurred: {err}");
                     }
                 }

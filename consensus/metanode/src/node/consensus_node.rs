@@ -604,11 +604,141 @@ impl ConsensusNode {
 
         let (committee, validator_eth_addresses) =
             super::committee::build_committee_with_eth_addresses(validators_to_use, current_epoch)?;
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // COMMITTEE VERIFICATION: Compute deterministic hash and validate with peers.
+        //
+        // The committee determines leader election → LeaderAddress in block header.
+        // If ANY node uses a DIFFERENT committee, it will produce different leader
+        // addresses → different block hashes → FORK.
+        //
+        // CRITICAL: After snapshot restore, local Go may return stale validators
+        // from a previous epoch. The committee hash catches this early.
+        // ═══════════════════════════════════════════════════════════════════════════
+        let committee_hash = super::committee_source::calculate_committee_hash(&committee);
+        let committee_hash_hex = hex::encode(&committee_hash[..8]);
         info!(
-            "✅ Loaded committee with {} authorities and {} eth_addresses (from epoch boundary)",
+            "✅ Loaded committee with {} authorities and {} eth_addresses (from epoch boundary). \
+             Committee hash={}... (epoch {})",
             committee.size(),
-            validator_eth_addresses.len()
+            validator_eth_addresses.len(),
+            committee_hash_hex,
+            current_epoch
         );
+
+        // Log each validator's ETH address for forensic verification across nodes
+        for (idx, eth_addr) in validator_eth_addresses.iter().enumerate() {
+            if eth_addr.len() == 20 {
+                info!(
+                    "  📋 [COMMITTEE] Validator {}: ETH=0x{}",
+                    idx, hex::encode(eth_addr)
+                );
+            } else {
+                warn!(
+                    "  ⚠️ [COMMITTEE] Validator {}: INVALID ETH address ({} bytes)",
+                    idx, eth_addr.len()
+                );
+            }
+        }
+
+        // Cross-validate committee with peers during cold-start
+        // (empty DAG indicates restore — committee may be stale from local Go)
+        let epoch_db_path_for_committee_check = config
+            .storage_path
+            .join("epochs")
+            .join(format!("epoch_{}", current_epoch))
+            .join("consensus_db");
+        let dag_has_history_for_committee = epoch_db_path_for_committee_check.exists()
+            && std::fs::read_dir(&epoch_db_path_for_committee_check)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+
+        if !dag_has_history_for_committee && !config.peer_rpc_addresses.is_empty() {
+            info!(
+                "🔍 [COMMITTEE VERIFY] Cold-start detected. Cross-validating committee with peers..."
+            );
+            for peer_addr in &config.peer_rpc_addresses {
+                match crate::network::peer_rpc::query_peer_epoch_boundary_data(
+                    peer_addr,
+                    current_epoch,
+                )
+                .await
+                {
+                    Ok(boundary) => {
+                        if !boundary.validators.is_empty() {
+                            // Build peer committee to compute hash
+                            use super::executor_client::proto::ValidatorInfo as ProtoVI;
+                            let peer_validators: Vec<ProtoVI> = boundary
+                                .validators
+                                .into_iter()
+                                .map(|v| ProtoVI {
+                                    address: v.address,
+                                    stake: v.stake.to_string(),
+                                    name: v.name,
+                                    authority_key: v.authority_key,
+                                    protocol_key: v.protocol_key,
+                                    network_key: v.network_key,
+                                    description: String::new(),
+                                    website: String::new(),
+                                    image: String::new(),
+                                    commission_rate: 0,
+                                    min_self_delegation: String::new(),
+                                    accumulated_rewards_per_share: String::new(),
+                                    p2p_address: String::new(),
+                                })
+                                .collect();
+
+                            match super::committee::build_committee_from_validator_list(
+                                peer_validators,
+                                current_epoch,
+                            ) {
+                                Ok(peer_committee) => {
+                                    let peer_hash =
+                                        super::committee_source::calculate_committee_hash(
+                                            &peer_committee,
+                                        );
+                                    let peer_hash_hex = hex::encode(&peer_hash[..8]);
+
+                                    if committee_hash == peer_hash {
+                                        info!(
+                                            "✅ [COMMITTEE VERIFY] Peer {} committee matches! hash={}...",
+                                            peer_addr, peer_hash_hex
+                                        );
+                                    } else {
+                                        warn!(
+                                            "🚨 [COMMITTEE VERIFY] Peer {} committee MISMATCH! \
+                                             local={}... ≠ peer={}... (epoch {}). \
+                                             This WILL cause block hash divergence!",
+                                            peer_addr,
+                                            committee_hash_hex,
+                                            peer_hash_hex,
+                                            current_epoch
+                                        );
+                                        warn!(
+                                            "🚨 [COMMITTEE VERIFY] Local: {} authorities, Peer: {} authorities",
+                                            committee.size(), peer_committee.size()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "⚠️ [COMMITTEE VERIFY] Failed to build peer committee from {}: {}",
+                                        peer_addr, e
+                                    );
+                                }
+                            }
+                            break; // Only need one peer to verify
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "⚠️ [COMMITTEE VERIFY] Failed to query peer {}: {}",
+                            peer_addr, e
+                        );
+                    }
+                }
+            }
+        }
 
         // EXECUTION INDEX SYNC
         let last_global_exec_index = Self::calculate_last_global_exec_index(
@@ -1017,260 +1147,19 @@ impl ConsensusNode {
         });
 
         // ═══════════════════════════════════════════════════════════════════════════
-        // SYNC-FIRST BARRIER (Phase 1 — Snapshot Restore Redesign)
+        // SYNC-FIRST BARRIER: REMOVED (2026-04-24)
         //
-        // PROBLEM: After snapshot restore, Go is at block N (e.g., 50) but the cluster
-        // is at block M (e.g., 300). Without this barrier, Rust starts consensus and
-        // sends live commits to Go — but these commits contain transactions from round
-        // 3000+ of the DAG, NOT the original transactions for blocks 51-300.
-        // Go creates block 51 with WRONG transactions → stateRoot diverges → FORK.
+        // Previously this section created a CatchupManager and ran block/epoch sync
+        // before starting consensus (~70 lines + 2s sleep). This is redundant because:
         //
-        // FIX: Before spawning CommitProcessor, fetch the gap blocks from peers and
-        // send them to Go for NOMT execution. This ensures Go has the EXACT same state
-        // as the cluster before receiving any new consensus commits.
+        // 1. CommitSyncer::update_state() detects local_commit==0 && handled>0
+        //    → calls reset_to_network_baseline() → fast-forwards DAG automatically
+        // 2. RustSyncNode handles block gap for SyncOnly nodes
+        // 3. epoch_monitor handles cross-epoch catch-up
         //
-        // SAFETY: This runs BEFORE CommitProcessor::run() and ConsensusAuthority::start(),
-        // so there are no race conditions between sync blocks and live commits.
+        // Removing this eliminates ~2s startup delay and ~70 lines of duplicate logic.
+        // CommitSyncer is the single source of truth for DAG catch-up.
         // ═══════════════════════════════════════════════════════════════════════════
-        if config.executor_read_enabled && !config.peer_rpc_addresses.is_empty() {
-            info!(
-                "🔄 [SYNC-FIRST] Checking if Go Master needs catch-up before starting consensus..."
-            );
-
-            // Wait a moment for Go Master socket to be fully ready
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-            // Step 1: Query Go Master's current block height
-            let go_block = match executor_client_for_proc.get_last_block_number().await {
-                Ok((block, _, _)) => block,
-                Err(e) => {
-                    warn!("⚠️ [SYNC-FIRST] Could not query Go block height: {}. Proceeding without sync.", e);
-                    0
-                }
-            };
-
-            // Step 2: Query peers for cluster's current block height
-            let peer_block = match crate::network::peer_rpc::query_peer_epochs_network(
-                &config.peer_rpc_addresses,
-            )
-            .await
-            {
-                Ok((_epoch, block, _addr, _gei)) => block,
-                Err(e) => {
-                    warn!("⚠️ [SYNC-FIRST] Could not query peer block height: {}. Proceeding without sync.", e);
-                    0
-                }
-            };
-
-            let gap = peer_block.saturating_sub(go_block);
-
-            if peer_block > 0 && gap > 5 {
-                info!("╔══════════════════════════════════════════════════════════════╗");
-                info!(
-                    "║  🔄 SYNC-FIRST: Go Master is {} blocks behind cluster      ║",
-                    gap
-                );
-                info!(
-                    "║  Go block: {}, Cluster block: {}                            ║",
-                    go_block, peer_block
-                );
-                info!("║  Fetching + executing blocks from peers BEFORE consensus... ║");
-                info!("╚══════════════════════════════════════════════════════════════╝");
-
-                // Step 3: Fetch blocks from peers in batches of 200 and send to Go for execution
-                let batch_size = 200u64;
-                let mut current_from = go_block + 1;
-                let mut total_synced = 0u64;
-
-                while current_from <= peer_block {
-                    let current_to = std::cmp::min(current_from + batch_size - 1, peer_block);
-
-                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                        &config.peer_rpc_addresses,
-                        current_from,
-                        current_to,
-                    )
-                    .await
-                    {
-                        Ok(blocks) => {
-                            if blocks.is_empty() {
-                                warn!("⚠️ [SYNC-FIRST] Got 0 blocks for range {}-{}. Peers may not have these blocks yet.", current_from, current_to);
-                                break;
-                            }
-                            let fetched_count = blocks.len();
-                            let max_fetched = blocks
-                                .iter()
-                                .map(|b| b.block_number)
-                                .max()
-                                .unwrap_or(current_from);
-
-                            match executor_client_for_proc
-                                .sync_and_execute_blocks(blocks)
-                                .await
-                            {
-                                Ok((synced, last_block, _gei)) => {
-                                    total_synced += synced;
-                                    info!("✅ [SYNC-FIRST] Synced+Executed {fetched_count} blocks ({current_from}→{last_block}). Total: {total_synced}/{gap}");
-                                    current_from = std::cmp::max(current_from + 1, last_block + 1);
-                                }
-                                Err(e) => {
-                                    tracing::error!("❌ [SYNC-FIRST] Failed to execute blocks {current_from}-{current_to} via UDS: {e}");
-                                    break;
-                                }
-                            }
-
-                            // Advance past what we actually fetched (handle sparse blocks)
-                            current_from = std::cmp::max(current_from, max_fetched + 1);
-                        }
-                        Err(e) => {
-                            tracing::error!("❌ [SYNC-FIRST] Failed to fetch blocks {current_from}-{current_to} from peers: {e}");
-                            break;
-                        }
-                    }
-
-                    // Yield to let other tasks (socket listeners) run
-                    tokio::task::yield_now().await;
-                }
-
-                // Step 4: Verify Go caught up (blocks)
-                let new_go_block = executor_client_for_proc
-                    .get_last_block_number()
-                    .await
-                    .map(|(b, _, _)| b)
-                    .unwrap_or(go_block);
-                let remaining_gap = peer_block.saturating_sub(new_go_block);
-
-                if remaining_gap <= 5 {
-                    info!("╔══════════════════════════════════════════════════════════════╗");
-                    info!(
-                        "║  ✅ SYNC-FIRST COMPLETE: Go caught up {} → {}              ║",
-                        go_block, new_go_block
-                    );
-                    info!(
-                        "║  Total synced: {} blocks. Ready for consensus.              ║",
-                        total_synced
-                    );
-                    info!("╚══════════════════════════════════════════════════════════════╝");
-                } else {
-                    warn!("⚠️ [SYNC-FIRST] Go partially synced: {} → {} (still {} blocks behind). Consensus will start with gap.",
-                        go_block, new_go_block, remaining_gap);
-                }
-
-                // ═══════════════════════════════════════════════════════════════
-                // Step 5: GEI GAP SYNC — Fill empty commits between Go and cluster
-                //
-                // After syncing BLOCKS, Go may have block=144 but GEI=1575, while
-                // the cluster has block=144 but GEI=2342. The 767 empty GEIs are
-                // consensus rounds with 0 transactions — they advance the GEI but
-                // don't create blocks. Without filling this gap, when consensus
-                // starts, the first commit would have GEI=2342 but Go expects 1576,
-                // causing massive out-of-order processing.
-                //
-                // FIX: Fetch executable blocks (including empty commits) from peer
-                // Rust nodes and pipe them to Go via UDS. Go's batch-drain will
-                // quickly absorb them.
-                // ═══════════════════════════════════════════════════════════════
-                let go_gei = executor_client_for_proc
-                    .get_last_global_exec_index()
-                    .await
-                    .unwrap_or(0);
-                let peer_gei = match crate::network::peer_rpc::query_peer_epochs_network(
-                    &config.peer_rpc_addresses,
-                )
-                .await
-                {
-                    Ok((_ep, _bl, _addr, gei)) => gei,
-                    Err(_) => 0,
-                };
-                let gei_gap = peer_gei.saturating_sub(go_gei);
-                if gei_gap > 10 {
-                    info!("╔══════════════════════════════════════════════════════════════╗");
-                    info!(
-                        "║  🔄 SYNC-FIRST GEI: Go GEI={} behind cluster GEI={}       ║",
-                        go_gei, peer_gei
-                    );
-                    info!(
-                        "║  Gap: {} empty commits to fill                              ║",
-                        gei_gap
-                    );
-                    info!("╚══════════════════════════════════════════════════════════════╝");
-
-                    // Fetch executable blocks (empty commits) from peer Rust nodes
-                    let fetch_from = go_gei + 1;
-                    let fetch_to = peer_gei;
-                    let batch_gei_size = 500u64;
-                    let mut gei_from = fetch_from;
-                    let mut total_gei_synced = 0u64;
-
-                    while gei_from <= fetch_to {
-                        let gei_to = std::cmp::min(gei_from + batch_gei_size - 1, fetch_to);
-
-                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(
-                            &config.peer_rpc_addresses,
-                            gei_from,
-                            gei_to,
-                        )
-                        .await
-                        {
-                            Ok(blocks) => {
-                                if blocks.is_empty() {
-                                    info!("⚠️ [SYNC-FIRST GEI] No executable blocks from peers for GEI {}-{}. Peers may not store these.", gei_from, gei_to);
-                                    break;
-                                }
-                                let fetched_count = blocks.len();
-                                // Send each executable block to Go via UDS
-                                let mut sent_ok = 0u64;
-                                for (gei_num, block_bytes) in blocks {
-                                    match executor_client_for_proc
-                                        .send_block_data(
-                                            &block_bytes,
-                                            gei_num,
-                                            storage.current_epoch,
-                                            0,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => sent_ok += 1,
-                                        Err(e) => {
-                                            warn!("⚠️ [SYNC-FIRST GEI] Failed to send GEI {} to Go: {}", gei_num, e);
-                                            break;
-                                        }
-                                    }
-                                }
-                                total_gei_synced += sent_ok;
-                                info!("✅ [SYNC-FIRST GEI] Sent {}/{} executable blocks (GEI {}-{}). Total: {}/{}",
-                                    sent_ok, fetched_count, gei_from, gei_to, total_gei_synced, gei_gap);
-                                gei_from = gei_to + 1;
-                            }
-                            Err(e) => {
-                                warn!("⚠️ [SYNC-FIRST GEI] Failed to fetch GEI {}-{} from peers: {}. Go TRANSITION SYNC will handle remaining gap.", gei_from, gei_to, e);
-                                break;
-                            }
-                        }
-
-                        tokio::task::yield_now().await;
-                    }
-
-                    // Wait briefly for Go to process the batch-drained empty commits
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    let final_go_gei = executor_client_for_proc
-                        .get_last_global_exec_index()
-                        .await
-                        .unwrap_or(0);
-                    let final_gap = peer_gei.saturating_sub(final_go_gei);
-                    info!("📊 [SYNC-FIRST GEI] After GEI sync: Go GEI={}, cluster GEI={}, remaining gap={}",
-                        final_go_gei, peer_gei, final_gap);
-                } else if peer_gei > 0 {
-                    info!("✅ [SYNC-FIRST GEI] Go GEI={} matches cluster GEI={} (gap={}). No GEI sync needed.",
-                        go_gei, peer_gei, gei_gap);
-                }
-            } else if peer_block > 0 {
-                info!("✅ [SYNC-FIRST] Go Master is up-to-date (go_block={}, peer_block={}, gap={}). No sync needed.",
-                    go_block, peer_block, gap);
-            } else {
-                info!("ℹ️ [SYNC-FIRST] Could not determine peer block height. Skipping sync-first check.");
-            }
-        }
 
         // ♻️ TX Recycler: Create shared instance for tracking and recycling uncommitted TXs
         let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());
@@ -1407,8 +1296,8 @@ impl ConsensusNode {
         // (before executor_client_for_proc) for backpressure wiring
 
         // Simplified validator startup: if node is in committee, always start consensus.
-        // Cold-start / restart catch-up is handled by CommitSyncer (highest_accepted_round <= 1 path).
-        // The SYNC-FIRST barrier already ensures Go is caught up before we reach here.
+        // Cold-start / restart catch-up is handled by CommitSyncer (reset_to_network_baseline).
+        // CommitSyncer detects empty DAG → fast-forwards → fetches real commits from peers.
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
 
@@ -1652,5 +1541,13 @@ impl ConsensusNode {
         recovery::perform_fork_detection_check(&node).await?;
 
         Ok(node)
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        if let Some(authority) = &self.authority {
+            authority.is_alive()
+        } else {
+            true
+        }
     }
 }

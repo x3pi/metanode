@@ -697,12 +697,28 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 	if syncComplete || epoch == 0 {
 		validators, err = rh.GetValidatorsAtBlockInternal(boundaryBlock)
 	} else {
-		// Sync not complete - return validators at current state
-		// This is acceptable because Rust has already verified the epoch transition
+		// ═══════════════════════════════════════════════════════════════════
+		// FORK-SAFETY: DO NOT return validators from non-boundary block!
+		//
+		// When sync is incomplete, the boundary block (last block of prev epoch)
+		// is not yet available in local DB. Previously this fell back to
+		// GetValidatorsAtBlockInternal(lastBlock), but if lastBlock has
+		// DIFFERENT validators than boundaryBlock (e.g., a validator was
+		// added/removed between the two blocks), Rust would build a WRONG
+		// committee → wrong leader addresses → block hash divergence → FORK.
+		//
+		// FIX: Return an error. Rust's fetch_committee() has retry logic
+		// (60 attempts, 500ms delay) and will retry until sync completes
+		// and boundary block becomes available.
+		// ═══════════════════════════════════════════════════════════════════
 		lastBlock := storage.GetLastBlockNumber()
-		logger.Warn("⚠️ [EPOCH BOUNDARY] Sync incomplete, using validators at block %d instead of %d",
-			lastBlock, boundaryBlock)
-		validators, err = rh.GetValidatorsAtBlockInternal(lastBlock)
+		logger.Error("❌ [EPOCH BOUNDARY] Boundary block %d NOT synced yet (lastBlock=%d). "+
+			"REFUSING to return validators from non-boundary block to prevent committee mismatch → fork! "+
+			"Rust should retry after sync completes.", boundaryBlock, lastBlock)
+		return nil, fmt.Errorf(
+			"boundary block %d not synced yet (lastBlock=%d, epoch=%d). "+
+				"Cannot return committee from non-boundary block — this would cause fork. "+
+				"Retry after sync completes", boundaryBlock, lastBlock, epoch)
 	}
 
 	if err != nil {

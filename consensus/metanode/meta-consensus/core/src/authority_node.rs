@@ -139,6 +139,13 @@ impl ConsensusAuthority {
             }
         }
     }
+
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::WithTonic(Some(authority)) => authority.is_alive(),
+            Self::WithTonic(None) => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -550,6 +557,21 @@ where
             .node_metrics
             .uptime
             .observe(self.start_time.elapsed().as_secs_f64());
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        let syncer_alive = self.commit_syncer_handle.is_alive();
+        let core_alive = self.core_thread_handle.is_alive();
+        
+        if !syncer_alive || !core_alive {
+            tracing::warn!(
+                "🔴 [AUTHORITY LIVENESS] Node internal task crashed! CommitSyncer alive: {}, CoreThread alive: {}",
+                syncer_alive, core_alive
+            );
+            false
+        } else {
+            true
+        }
     }
 
     pub(crate) fn transaction_client(&self) -> Arc<TransactionClient> {

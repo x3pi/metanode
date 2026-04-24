@@ -25,10 +25,8 @@ use crate::node::tx_submitter::TransactionClientProxy;
 
 // Declare submodules
 
-pub mod catchup;
 pub mod committee;
 pub mod committee_source;
-pub mod dual_stream;
 pub mod block_delivery;
 pub mod epoch_checkpoint;
 pub mod epoch_monitor;

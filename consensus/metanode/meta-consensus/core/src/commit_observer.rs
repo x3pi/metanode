@@ -113,6 +113,7 @@ impl CommitObserver {
     pub(crate) fn handle_commit(
         &mut self,
         committed_leaders: Vec<VerifiedBlock>,
+        precomputed_commits: Option<Vec<crate::commit::CertifiedCommit>>,
         local: bool,
     ) -> ConsensusResult<Vec<CommittedSubDag>> {
         let _s = self
@@ -123,7 +124,7 @@ impl CommitObserver {
             .with_label_values(&["CommitObserver::handle_commit"])
             .start_timer();
 
-        let mut committed_sub_dags = self.commit_interpreter.handle_commit(committed_leaders);
+        let mut committed_sub_dags = self.commit_interpreter.handle_commit(committed_leaders, precomputed_commits);
         self.report_metrics(&committed_sub_dags);
 
         // Set if the commit is produced from local DAG, or received through commit sync.
@@ -460,14 +461,14 @@ mod tests {
 
         // Commit first 5 leaders.
         let mut commits = observer
-            .handle_commit(leaders[0..5].to_vec(), true)
+            .handle_commit(leaders[0..5].to_vec(), None, true)
             .unwrap();
 
         // Trigger a leader schedule update.
         leader_schedule.update_leader_schedule_v2(&dag_state);
 
         // Commit the next 5 leaders.
-        commits.extend(observer.handle_commit(leaders[5..].to_vec(), true).unwrap());
+        commits.extend(observer.handle_commit(leaders[5..].to_vec(), None, true).unwrap());
 
         // Check commits are returned by CommitObserver::handle_commit is accurate
         let mut expected_stored_refs: Vec<BlockRef> = vec![];
@@ -614,7 +615,7 @@ mod tests {
         // consumer of the consensus output channel.
         let expected_last_processed_index: usize = 2;
         let mut commits = observer
-            .handle_commit(leaders[..expected_last_processed_index].to_vec(), true)
+            .handle_commit(leaders[..expected_last_processed_index].to_vec(), None, true)
             .unwrap();
 
         // Check commits sent over consensus output channel is accurate
@@ -644,7 +645,7 @@ mod tests {
         // the consumer side where the commits were not persisted.
         commits.append(
             &mut observer
-                .handle_commit(leaders[expected_last_processed_index..].to_vec(), true)
+                .handle_commit(leaders[expected_last_processed_index..].to_vec(), None, true)
                 .unwrap(),
         );
 
