@@ -5,6 +5,8 @@ package processor
 import (
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -148,6 +150,9 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 	var beginBlock, endBlock *big.Int
 	var skippedMissingHash, skippedLoadBlockErr uint64
 	var scannedBlocks, scannedTxs, scannedEventLogs uint64
+	missingHashBlockNums := make([]uint64, 0)
+	loadErrBlockNums := make([]uint64, 0)
+	matchedBlockNums := make(map[uint64]struct{})
 
 	// Determine block range
 	if crit.BlockHash != nil {
@@ -205,13 +210,47 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 	currentBlockNum := new(big.Int).Set(beginBlock)
 	for currentBlockNum.Cmp(endBlock) <= 0 {
 		scannedBlocks++
-		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(currentBlockNum.Uint64())
+		current := currentBlockNum.Uint64()
+		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(current)
 		if !ok {
-			return nil, fmt.Errorf("block %d not found or not synced yet", currentBlockNum.Uint64())
+			skippedMissingHash++
+			missingHashBlockNums = append(missingHashBlockNums, current)
+
+			lastBlockNum := bp.GetLastBlock().Header().BlockNumber()
+			prevExists := false
+			prevHash := common.Hash{}
+			if current > 0 {
+				prevHash, prevExists = blockchain.GetBlockChainInstance().GetBlockHashByNumber(current - 1)
+			}
+			nextHash, nextExists := blockchain.GetBlockChainInstance().GetBlockHashByNumber(current + 1)
+
+			logger.Warn(
+				"[Chain][GetLogs][Debug] missing block-hash mapping block=%d range=%d..%d last=%d prevExists=%t prevHash=%s nextExists=%t nextHash=%s",
+				current,
+				beginBlock.Uint64(),
+				endBlock.Uint64(),
+				lastBlockNum,
+				prevExists,
+				prevHash.Hex(),
+				nextExists,
+				nextHash.Hex(),
+			)
+
+			return nil, fmt.Errorf("block %d not found or not synced yet", current)
 		}
 
 		blockData, err := bp.chainState.GetBlockDatabase().GetBlockByHash(hash)
 		if err != nil {
+			skippedLoadBlockErr++
+			loadErrBlockNums = append(loadErrBlockNums, current)
+			cacheBlock := blockchain.GetBlockChainInstance().GetBlock(hash)
+			logger.Warn(
+				"[Chain][GetLogs][Debug] failed DB load by hash block=%d hash=%s cacheHasBlock=%t err=%v",
+				current,
+				hash.Hex(),
+				cacheBlock != nil,
+				err,
+			)
 			return nil, fmt.Errorf("failed to get block data for hash %s: %w", hash.Hex(), err)
 		}
 
@@ -257,6 +296,7 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 					BlockHash:   hash,
 				}
 				eventLogs = append(eventLogs, evL)
+				matchedBlockNums[blockNumberUint64] = struct{}{}
 				if len(eventLogs) > maxLogsPerRequest {
 					return nil, fmt.Errorf("log result exceeds maximum of %d entries", maxLogsPerRequest)
 				}
@@ -265,14 +305,24 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 
 		currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 	}
+	matchedBlockList := make([]uint64, 0, len(matchedBlockNums))
+	for b := range matchedBlockNums {
+		matchedBlockList = append(matchedBlockList, b)
+	}
+	sort.Slice(matchedBlockList, func(i, j int) bool { return matchedBlockList[i] < matchedBlockList[j] })
+
 	logger.Info(
-		"[Chain][GetLogs] scan summary scannedBlocks=%d scannedTxs=%d scannedEventLogs=%d matched=%d missingHashBlocks=%d blockLoadErrors=%d",
+		"[Chain][GetLogs] scan summary scannedBlocks=%d scannedTxs=%d scannedEventLogs=%d matched=%d missingHashBlocks=%d missingList=%s blockLoadErrors=%d loadErrList=%s matchedBlockCount=%d matchedBlocks=%s",
 		scannedBlocks,
 		scannedTxs,
 		scannedEventLogs,
 		len(eventLogs),
 		skippedMissingHash,
+		formatBlockList(missingHashBlockNums, 20),
 		skippedLoadBlockErr,
+		formatBlockList(loadErrBlockNums, 20),
+		len(matchedBlockList),
+		formatBlockList(matchedBlockList, 20),
 	)
 
 	return eventLogs, nil
@@ -282,6 +332,21 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 // Delegates to rpcquery.ConvertLogsToProto for the pure conversion logic.
 func (bp *BlockProcessor) convertLogsToProto(logs []*types.Log) []*mt_proto.LogEntry {
 	return rpcquery.ConvertLogsToProto(logs)
+}
+
+func formatBlockList(blocks []uint64, limit int) string {
+	if len(blocks) == 0 {
+		return "[]"
+	}
+	if limit <= 0 || len(blocks) <= limit {
+		return fmt.Sprintf("%v", blocks)
+	}
+	parts := make([]string, 0, limit+1)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, fmt.Sprintf("%d", blocks[i]))
+	}
+	parts = append(parts, fmt.Sprintf("...(+%d)", len(blocks)-limit))
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // sendLogsError sends error response with header ID

@@ -1,0 +1,12 @@
+{
+    "type": "get_transaction_by_hash",
+    "rpc_urls": [
+        "http://192.168.1.233:8757",
+        "http://192.168.1.233:10747",
+        "http://192.168.1.233:10749",
+        "http://192.168.1.233:10750"
+    ],
+    "params": {
+        "hash": "0xd1749100a45cb382dc4ee3e2528d7b1babfa91889284b3821acda7ae4b4efc33"
+    }
+}
