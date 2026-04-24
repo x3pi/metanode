@@ -431,13 +431,13 @@ impl ExecutorClient {
                     {
                         let go_next_expected = go_last_gei + 1;
 
+                        let mut buffer = self.send_buffer.lock().await;
                         let mut next_expected_guard = self.next_expected_index.lock().await;
                         if go_next_expected > *next_expected_guard {
                             info!("📊 [SINGLE-SOURCE-TRUTH] Updating next_expected from {} to {} (from Go last_gei={})",
                                 *next_expected_guard, go_next_expected, go_last_gei);
                             *next_expected_guard = go_next_expected;
 
-                            let mut buffer = self.send_buffer.lock().await;
                             let before_clear = buffer.len();
                             buffer.retain(|&k, _| k >= go_next_expected);
                             let after_clear = buffer.len();
@@ -456,7 +456,6 @@ impl ExecutorClient {
                             // SAFE: advance next_expected to min_buffered so flush_buffer
                             // can start sending. Go will receive blocks in sequential GEI
                             // order from flush_buffer (BTreeMap + sequential iteration).
-                            let buffer = self.send_buffer.lock().await;
                             let min_buf = *buffer.keys().next().unwrap_or(&0);
                             if min_buf > *next_expected_guard {
                                 warn!("🚀 [RESTORE-GAP-BRIDGE] Go is behind (gei={}), buffer starts at {}. Advancing next_expected {} → {} to bridge transition gap",

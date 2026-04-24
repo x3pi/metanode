@@ -809,7 +809,7 @@ impl ConsensusNode {
 
         // Recovery check
         if config.executor_read_enabled && last_global_exec_index > 0 {
-            recovery::perform_block_recovery_check(
+            if let Err(e) = recovery::perform_block_recovery_check(
                 &executor_client,
                 last_global_exec_index,
                 epoch_base_exec_index,
@@ -817,7 +817,9 @@ impl ConsensusNode {
                 &config.storage_path,
                 config.node_id as u32,
             )
-            .await?;
+            .await {
+                warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
+            }
         }
 
         let protocol_keypair = config.load_protocol_keypair()?;

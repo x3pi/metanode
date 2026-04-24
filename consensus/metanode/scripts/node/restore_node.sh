@@ -303,7 +303,7 @@ tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
 echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
 echo -e "${CYAN}  [5b] Waiting for Go Master socket...${NC}"
-wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 120
+wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 600
 
 echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10

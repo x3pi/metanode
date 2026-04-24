@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block::{BlockAPI, Slot, VerifiedBlock},
+    error::{ConsensusError, ConsensusResult},
     leader_scoring::ReputationScores,
     storage::Store,
     system_transaction::{extract_system_transaction, SystemTransaction},
@@ -613,6 +614,56 @@ pub fn load_committed_subdag_from_store(
     }
 
     subdag
+}
+
+pub fn try_load_committed_subdag_from_store(
+    store: &dyn Store,
+    commit: TrustedCommit,
+    reputation_scores_desc: Vec<(AuthorityIndex, u64)>,
+) -> ConsensusResult<CommittedSubDag> {
+    let mut leader_block_idx = None;
+    let commit_blocks = store
+        .read_blocks(commit.blocks())
+        .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read blocks: {:?}", e)))?;
+    
+    let mut blocks = Vec::with_capacity(commit_blocks.len());
+    for (idx, commit_block_opt) in commit_blocks.into_iter().enumerate() {
+        let commit_block = commit_block_opt.ok_or_else(|| {
+            ConsensusError::StorageFailure(format!("Missing block referenced in commit {}", commit.index()))
+        })?;
+        if commit_block.reference() == commit.leader() {
+            leader_block_idx = Some(idx);
+        }
+        blocks.push(commit_block);
+    }
+    
+    let leader_block_idx = leader_block_idx.ok_or_else(|| {
+        ConsensusError::StorageFailure(format!("Leader block missing from sub-dag in commit {}", commit.index()))
+    })?;
+    let leader_block_ref = blocks[leader_block_idx].reference();
+
+    let mut subdag = CommittedSubDag::new(
+        leader_block_ref,
+        blocks,
+        commit.timestamp_ms(),
+        commit.reference(),
+        commit.global_exec_index(),
+    );
+    subdag.reputation_scores_desc = reputation_scores_desc;
+
+    let reject_votes = store
+        .read_rejected_transactions(commit.reference())
+        .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read rejected txs: {:?}", e)))?;
+    if let Some(reject_votes) = reject_votes {
+        subdag.decided_with_local_blocks = true;
+        subdag.recovered_rejected_transactions = true;
+        subdag.rejected_transactions_by_block = reject_votes;
+    } else {
+        subdag.decided_with_local_blocks = false;
+        subdag.recovered_rejected_transactions = false;
+    }
+
+    Ok(subdag)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -167,6 +167,9 @@ pub enum ConsensusError {
     #[error("RocksDB failure: {0}")]
     RocksDBFailure(#[from] TypedStoreError),
 
+    #[error("Storage failure: {0}")]
+    StorageFailure(String),
+
     #[error("Unknown network peer: {0}")]
     UnknownNetworkPeer(String),
 
