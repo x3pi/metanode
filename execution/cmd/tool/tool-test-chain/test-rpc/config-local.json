@@ -1,21 +1,5 @@
 {
-    "rpc_urls": [
-        "http://127.0.0.1:8757",
-        "http://127.0.0.1:10747",
-        "http://127.0.0.1:10749",
-        "http://127.0.0.1:10750"
-    ],
-    "type": "get_logs",
-    "timeout_seconds": 10,
-    "params": {
-        "from_block": "0x1",
-        "to_block": "0x1",
-        "address": "0x00000000000000000000000000000000B429C0B2",
-        "topics": [
-            [
-                "0xb528e3a3d4cbfd0b61a83cc28a004e801777b8ed6274adee62a727632fee66dd",
-                "0xa92be8788ad097ce638b4b327d9930cc1d8545abf05c0a399f37b7a6ce8b94ce"
-            ]
-        ]
-    }
+    "rpc_url": "http://127.0.0.1:8545",
+    "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+    "chain_id": 991
 }

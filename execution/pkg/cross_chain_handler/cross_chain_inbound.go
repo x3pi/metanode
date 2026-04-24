@@ -162,14 +162,20 @@ func (h *CrossChainHandler) executeMintForInbound(
 		if mintStatus != 0 {
 			statusStr = "FAILED"
 		}
-		logger.Info("[MSGID-TRACE] ➡️  [3/4] INBOUND chain=%s EMITTING MessageReceived: messageId=%s (=%x) status=%s src=%s sender=%s val=%s",
+		logger.Info("[MSGID-TRACE] ➡️  [3/4] INBOUND chain=%s EMITTING MessageReceived: msgId=%s status=%s src=%s sender=%s val=%s recipient=%s%s",
 			h.cachedChainId.String(),
 			"0x"+fmt.Sprintf("%x", pkt.MessageId[:]),
-			pkt.MessageId[:4], // short preview
 			statusStr,
 			pkt.SourceNationId.String(),
 			pkt.Sender.Hex(),
 			val.String(),
+			recipient.Hex(),
+			func() string {
+				if mintStatus == 0 {
+					return " ✨ MINT SUCCESS"
+				}
+				return " ❌ MINT FAILED"
+			}(),
 		)
 	} else {
 		logger.Error("[BatchSubmit] ❌ Failed to pack MessageReceived event: %v", err)

@@ -207,16 +207,12 @@ func (bp *BlockProcessor) getLogs(crit filters.FilterCriteria) ([]*types.Log, er
 		scannedBlocks++
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(currentBlockNum.Uint64())
 		if !ok {
-			skippedMissingHash++
-			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
-			continue
+			return nil, fmt.Errorf("block %d not found or not synced yet", currentBlockNum.Uint64())
 		}
 
 		blockData, err := bp.chainState.GetBlockDatabase().GetBlockByHash(hash)
 		if err != nil {
-			skippedLoadBlockErr++
-			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
-			continue
+			return nil, fmt.Errorf("failed to get block data for hash %s: %w", hash.Hex(), err)
 		}
 
 		rcpDb, err := receipt.NewReceiptsFromRoot(blockData.Header().ReceiptRoot(), bp.storageManager.GetStorageReceipt())
