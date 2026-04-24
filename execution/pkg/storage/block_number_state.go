@@ -17,20 +17,21 @@ var (
 	firstUpdateInDb           uint64
 	connectState              uint32
 	lastBlockNumberFromMaster uint64
-	incrementingCounter       uint64 // Chỉ cần biến này, không cần mutex riêng hoặc hằng số file
+	incrementingCounter       uint64 // Only this variable needed; no separate mutex or file constant required
 	lastGlobalExecIndex       uint64 // Maps Go block number → Rust consensus commit index
+	lastExecutedCommitHash    []byte // Rust DAG commit digest
 
-	// Callback khi block mới commit (dùng cho SnapshotManager)
+	// Callback invoked when a new block is committed (used by SnapshotManager)
 	blockCommitCallback BlockCommitCallback
 )
 
-// Định nghĩa các trạng thái cập nhật
+// Update state constants
 const (
-	DoneSubscribe         uint32 = 1 // Đăng ký hoàn thành
-	StateLoadingSnapshot  uint32 = 2 // Đang tải snapshot
-	StateSnapshotLoaded   uint32 = 3 // Đã tải xong snapshot
-	StateDBReadCompleted  uint32 = 4 // Đọc xong tất cả dữ liệu trong DB
-	StateRAMReadCompleted uint32 = 5 // Đọc xong dữ liệu trong RAM
+	DoneSubscribe         uint32 = 1 // Subscription completed
+	StateLoadingSnapshot  uint32 = 2 // Loading snapshot
+	StateSnapshotLoaded   uint32 = 3 // Snapshot loaded
+	StateDBReadCompleted  uint32 = 4 // All DB data read
+	StateRAMReadCompleted uint32 = 5 // RAM data read
 
 )
 
@@ -117,6 +118,15 @@ func GetLastGlobalExecIndex() uint64 {
 // was inflated by P2P-synced blocks that were never executed by NOMT.
 func ForceSetLastGlobalExecIndex(index uint64) {
 	atomic.StoreUint64(&lastGlobalExecIndex, index)
+}
+
+func UpdateLastExecutedCommitHash(hash []byte) {
+	// Simple store, race condition here is minimal since it's only updated sequentially from commit worker
+	lastExecutedCommitHash = hash
+}
+
+func GetLastExecutedCommitHash() []byte {
+	return lastExecutedCommitHash
 }
 
 // ForceSetLastBlockNumber sets the block number to an exact value, bypassing

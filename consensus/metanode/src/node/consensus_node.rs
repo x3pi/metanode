@@ -53,6 +53,7 @@ struct StorageSetup {
     network_keypair: consensus_config::NetworkKeyPair,
     /// Epoch duration in seconds, loaded from Go via protobuf (from genesis.json)
     epoch_duration_from_go: u64,
+    last_executed_commit_hash: [u8; 32],
 }
 
 /// Results from consensus setup phase.
@@ -149,7 +150,7 @@ impl ConsensusNode {
 
             for attempt in 1..=max_retries {
                 match executor_client.get_last_block_number().await {
-                    Ok((n, _, _is_ready)) => {
+                    Ok((n, _, _is_ready, _)) => {
                         block_num = n;
                         if n > 0 || _is_ready {
                             info!(
@@ -201,61 +202,54 @@ impl ConsensusNode {
         // when Go processes blocks up to the epoch boundary.
         // ═══════════════════════════════════════════════════════════════════════
         let (go_epoch, peer_last_block, best_socket) = {
-            // SNAPSHOT RESTORE FIX: If we already know block > 0 (from retry above),
-            // Go should also report epoch > 0. Retry until epoch matches.
-            let epoch = if latest_block_number > 0 {
-                let max_epoch_retries = 30;
-                let retry_interval = std::time::Duration::from_millis(500);
-                let mut final_epoch = 0u64;
+            // Get epoch from Go Master. Epoch 0 is valid for genesis-era chains.
+            // No retry needed — Go has already loaded blockchain state by this point,
+            // as evidenced by latest_block_number being available.
+            let epoch = match executor_client.get_current_epoch().await {
+                Ok(e) => {
+                    info!(
+                        "✅ [STARTUP] Got epoch {} from Go (block={})",
+                        e, latest_block_number
+                    );
+                    e
+                }
+                Err(e) => {
+                    // Retry a few times for transient RPC errors only
+                    let max_retries = 5;
+                    let retry_interval = std::time::Duration::from_millis(500);
+                    let mut final_epoch = 0u64;
+                    let mut last_err = e;
 
-                for attempt in 1..=max_epoch_retries {
-                    match executor_client.get_current_epoch().await {
-                        Ok(e) => {
-                            final_epoch = e;
-                            if e > 0 {
+                    for attempt in 2..=max_retries {
+                        warn!(
+                            "⚠️ [STARTUP] Failed to get epoch (attempt {}/{}): {}. Retrying...",
+                            attempt, max_retries, last_err
+                        );
+                        tokio::time::sleep(retry_interval).await;
+                        match executor_client.get_current_epoch().await {
+                            Ok(e) => {
                                 info!(
                                     "✅ [STARTUP] Got epoch {} from Go (attempt {}, block={})",
                                     e, attempt, latest_block_number
                                 );
+                                final_epoch = e;
+                                last_err = anyhow::anyhow!("resolved");
                                 break;
-                            } else if attempt < max_epoch_retries {
-                                info!(
-                                    "⏳ [STARTUP] Go returned epoch=0 but block={}. DB still loading. Retrying in {}s... (attempt {}/{})",
-                                    latest_block_number, retry_interval.as_secs(), attempt, max_epoch_retries
-                                );
-                                tokio::time::sleep(retry_interval).await;
                             }
-                        }
-                        Err(e) => {
-                            if attempt < max_epoch_retries {
-                                warn!(
-                                    "⚠️ [STARTUP] Failed to get epoch (attempt {}/{}): {}. Retrying...",
-                                    attempt, max_epoch_retries, e
-                                );
-                                tokio::time::sleep(retry_interval).await;
-                            } else {
-                                return Err(anyhow::anyhow!(
-                                    "Failed to fetch epoch from Go after {} attempts: {}",
-                                    max_epoch_retries,
-                                    e
-                                ));
+                            Err(e) => {
+                                last_err = e;
                             }
                         }
                     }
+                    if last_err.to_string() != "resolved" {
+                        return Err(anyhow::anyhow!(
+                            "Failed to fetch epoch from Go after {} attempts: {}",
+                            max_retries,
+                            last_err
+                        ));
+                    }
+                    final_epoch
                 }
-
-                if final_epoch == 0 && latest_block_number > 0 {
-                    warn!(
-                        "⚠️ [STARTUP] Go still reporting epoch=0 despite block={}. Snapshot data may not have loaded correctly.",
-                        latest_block_number
-                    );
-                }
-                final_epoch
-            } else {
-                executor_client
-                    .get_current_epoch()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to fetch current epoch from Go: {}", e))?
             };
 
             info!(
@@ -741,7 +735,7 @@ impl ConsensusNode {
         }
 
         // EXECUTION INDEX SYNC
-        let last_global_exec_index = Self::calculate_last_global_exec_index(
+        let (last_global_exec_index, last_executed_commit_hash) = Self::calculate_last_global_exec_index(
             config,
             &executor_client,
             &best_socket,
@@ -869,24 +863,25 @@ impl ConsensusNode {
             protocol_keypair,
             network_keypair,
             epoch_duration_from_go,
+            last_executed_commit_hash,
         })
     }
 
-    /// Determines the effective last global execution index from local Go, peers, and persisted state.
+    /// Determines the effective last global execution index and commit hash from local Go, peers, and persisted state.
     async fn calculate_last_global_exec_index(
         config: &NodeConfig,
         executor_client: &Arc<ExecutorClient>,
         best_socket: &str,
         peer_last_block: u64,
-    ) -> u64 {
+    ) -> (u64, [u8; 32]) {
         if !config.executor_read_enabled {
-            return 0;
+            return (0, [0; 32]);
         }
 
-        let (local_go_block, _, _go_ready) = executor_client
+        let (local_go_block, _, _go_ready, last_executed_commit_hash) = executor_client
             .get_last_block_number()
             .await
-            .unwrap_or((0, 0, false));
+            .unwrap_or((0, 0, false, [0; 32]));
         let local_go_gei = executor_client
             .get_last_global_exec_index()
             .await
@@ -924,7 +919,7 @@ impl ConsensusNode {
                 warn!("🚨 [STARTUP] STALE CHAIN DETECTED: Local ({}) is ahead of Peer ({})! Forcing resync from Peer.", 
                        local_go_block, peer_last_block);
                 // In recovery we just use the local GEI anyway because Go Master blocks handles actual rollback if needed
-                local_go_gei
+                (local_go_gei, last_executed_commit_hash)
             } else if local_go_block < peer_last_block.saturating_sub(5) {
                 let lag = peer_last_block - local_go_block;
                 info!(
@@ -932,13 +927,13 @@ impl ConsensusNode {
                     local_go_block, peer_last_block, lag, local_go_block
                 );
                 // Flag as lagging if behind by more than 50 blocks
-                local_go_gei
+                (local_go_gei, last_executed_commit_hash)
             } else {
                 info!(
                     "✅ [STARTUP] Local and Peer are in sync (LocalBlock={}, PeerBlock={}). Using Local Go GEI: {} as authoritative.",
                     local_go_block, peer_last_block, local_go_gei
                 );
-                local_go_gei
+                (local_go_gei, last_executed_commit_hash)
             }
         } else {
             if persisted_index > local_go_gei {
@@ -949,7 +944,7 @@ impl ConsensusNode {
                 "📊 [STARTUP] No peer reference, using Local Go Last GEI: {} (Block: {})",
                 local_go_gei, local_go_block
             );
-            local_go_gei
+            (local_go_gei, last_executed_commit_hash)
         }
     }
 
@@ -983,8 +978,14 @@ impl ConsensusNode {
             "📊 [STARTUP] CommitConsumerArgs: go_replay_after={} (from last_global_exec_index={})",
             go_replay_after, storage.last_global_exec_index
         );
+        // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+        info!(
+            "🤝 [HANDSHAKE] Passing last_executed_commit_hash from Go to Rust DAG: {:?}",
+            hex::encode(storage.last_executed_commit_hash)
+        );
+
         let (commit_consumer, commit_receiver, mut block_receiver) =
-            CommitConsumerArgs::new(go_replay_after, go_replay_after);
+            CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash);
         let current_commit_index = Arc::new(AtomicU32::new(0));
         let is_transitioning = Arc::new(AtomicBool::new(false));
 

@@ -234,8 +234,10 @@ pub async fn transition_mode_only(
     } else {
         0
     };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after, go_replay_after);
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
@@ -422,7 +424,7 @@ pub(super) async fn handle_synconly_upgrade_wait(
         }
 
         let go_current_block = match fresh_executor_client.get_last_block_number().await {
-            Ok((b, _, _)) => b,
+            Ok((b, _, _, _)) => b,
             Err(e) => {
                 if attempt.is_multiple_of(20) {
                     warn!(

@@ -155,7 +155,7 @@ pub fn start_unified_epoch_monitor(
                 {
                     // Get current Go block number
                     let go_block = match client_arc.get_last_block_number().await {
-                        Ok((b, _, _)) => b,
+                        Ok((b, _, _, _)) => b,
                         Err(_) => {
                             continue;
                         }
@@ -294,10 +294,10 @@ pub fn start_unified_epoch_monitor(
                                 );
 
                                 // Fetch blocks up to boundary from peers
-                                let (go_block, _, _go_ready) = client_arc
+                                let (go_block, _, _go_ready, _) = client_arc
                                     .get_last_block_number()
                                     .await
-                                    .unwrap_or((0, 0, false));
+                                    .unwrap_or((0, 0, false, [0; 32]));
                                 if go_block < data.boundary_block {
                                     // Fetch missing blocks
                                     match crate::network::peer_rpc::fetch_blocks_from_peer(
@@ -483,10 +483,10 @@ pub fn start_unified_epoch_monitor(
                 let (new_epoch, epoch_timestamp_ms, boundary_block, boundary_gei) = boundary_data;
 
                 // First ensure Go has enough blocks for this epoch
-                let (go_block, _, _go_ready) = client_arc
+                let (go_block, _, _go_ready, _) = client_arc
                     .get_last_block_number()
                     .await
-                    .unwrap_or((0, 0, false));
+                    .unwrap_or((0, 0, false, [0; 32]));
                 if go_block < boundary_block && !peer_rpc.is_empty() {
                     match crate::network::peer_rpc::fetch_blocks_from_peer(
                         &peer_rpc,

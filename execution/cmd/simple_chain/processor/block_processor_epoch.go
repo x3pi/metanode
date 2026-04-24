@@ -18,6 +18,17 @@ func (bp *BlockProcessor) updateAndPersistLastGlobalExecIndex(index uint64) {
 	}
 }
 
+// updateAndPersistLastExecutedCommitHash updates the commit hash in memory and persists it
+func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
+	if len(hash) == 0 {
+		return
+	}
+	storage.UpdateLastExecutedCommitHash(hash)
+	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+		bp.storageManager.GetStorageBackupDb().Put(storage.LastExecutedCommitHashKey.Bytes(), hash)
+	}
+}
+
 // geiWorker processes coalesced GEI updates, sending only the latest to commitChannel
 func (bp *BlockProcessor) geiWorker() {
 	for index := range bp.geiUpdateChan {
@@ -51,10 +62,19 @@ func (bp *BlockProcessor) geiWorker() {
 // pushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
 // This ensures that the global_exec_index is persisted to DB *strictly after*
 // any pending blocks with transactions. Prevents GEI from racing ahead of lost async blocks.
-func (bp *BlockProcessor) pushAsyncGEIUpdate(index uint64) {
+func (bp *BlockProcessor) pushAsyncGEIUpdate(index uint64, hash []byte) {
 	if index == 0 {
 		return
 	}
+	// We only use the channel to track the highest GEI. The hash will be stored immediately if batch-drain is not used.
+	// Actually, batch-drain handles highestGEI itself, pushAsyncGEIUpdate is for normal processing.
+	// Let's create an explicit CommitJob for the hash since geiUpdateChan only takes uint64.
+	// But it's simpler to just persist it directly if we want.
+	// Wait, geiUpdateChan coalesces GEI! We should just send a full CommitJob directly for empty commits!
+	// No, geiUpdateChan is for coalescing. I will just update the memory state for now, and the CommitWorker will persist it when it gets the next job.
+	// But empty blocks don't trigger CommitWorker unless they are large in number.
+	// Actually, I can just persist it directly here!
+	bp.updateAndPersistLastExecutedCommitHash(hash)
 	select {
 	case bp.geiUpdateChan <- index:
 		// Sent successfully

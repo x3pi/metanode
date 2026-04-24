@@ -18,7 +18,7 @@ use crate::{
     block_manager::BlockManager,
     block_verifier::SignedBlockVerifier,
     commit_observer::CommitObserver,
-    commit_syncer::{CommitSyncer, CommitSyncerHandle},
+    commit_syncer::CommitSyncerHandle,
     commit_vote_monitor::CommitVoteMonitor,
     context::{Clock, Context},
     core::{Core, CoreSignals},
@@ -624,7 +624,7 @@ mod tests {
         let protocol_keypair = keypairs[own_index].1.clone();
         let network_keypair = keypairs[own_index].0.clone();
 
-        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0, [0; 32]);
 
         let authority = ConsensusAuthority::start(
             network_type,
@@ -644,7 +644,7 @@ mod tests {
             0,
             None,
             None, // legacy_store_manager
-            crate::coordination_hub::ConsensusCoordinationHub::new(),
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
         )
         .await;
 
@@ -1012,7 +1012,7 @@ mod tests {
         let protocol_keypair = keypairs[index].1.clone();
         let network_keypair = keypairs[index].0.clone();
 
-        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
 
         let authority = ConsensusAuthority::start(
             network_type,

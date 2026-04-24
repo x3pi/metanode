@@ -136,5 +136,73 @@ Với kiến trúc **Async Broadcaster with Deferred Ticket** mới được áp
 1. **Bóc tách I/O khỏi RAM:** Hàm `DagState::flush()` không còn chặn CoreThread nữa. Nó chỉ vào chiếm Lock 1 micro-giây để bốc lấy gói khối (`pending_blocks`) rồi đẩy qua một nhánh Task Nền (`tokio::task::spawn_blocking`), sau đó lập tức nhả ổ khóa ra. Nhờ vậy, mạng P2P và các thành phần đọc biến `DagState` tiếp tục hoạt động siêu tốc ngang vận tốc RAM.
 2. **Chiếc Vé Hứa (Flush Ticket):** Thay vì đứng chờ đợi, `flush()` cấp lại 1 vé tín hiệu (`tokio::sync::oneshot::Receiver`). 
 3. **Phát Sóng Khối Trì Hoãn (Deferred Broadcasting):** Để triệt tiêu rủi ro mất mạng lúc lưu ổ đĩa gây ra rẽ nhánh Fork. Proposer tại `try_new_block` khi tạo thành công Khối mới, thay vì bung lụa gửi đi cho mạng P2P (broadcast), nó sẽ bàn giao khối cùng tấm Vé Hứa cho một Khối Lệnh Chờ (`CoreSignals::new_block_with_ticket`).
-   - Sứ giả phát sóng sẽ bị buộc dừng khẩn cấp ở hàm `.await` để chờ hiệu lệnh đĩa từ tấm Vé.
    - Khi ổ đĩa SSD vang tiếng click (thành công), khối mới lập tức tràn ra ngoài mạng Blockchain để xin phiếu bầu. Hoàn toàn không còn đợt gián đoạn băng thông nào trên trục lõi rẽ nhánh.
+
+---
+
+## 5. Kiến Trúc Quản Lý Khởi Động & Phục Hồi (Startup & Recovery Lifecycle)
+
+Một thách thức lớn trong thực tế là quản lý vòng đời khởi động lại (Restart/Recovery). Khi node gặp sự cố (cúp điện, crash), **Go Master** và **Rust Consensus** có thể bị lệch pha. Dữ liệu tối thiểu và duy nhất đáng tin cậy lúc này là trạng thái lưu trên ổ cứng của Go: `Last_Executed_Block_Number`, `Last_Executed_Block_Hash` và `Current_Term` (hay GEI - Go Execution Interface).
+
+Để đảm bảo trạng thái thống nhất và **tuyệt đối không gây phân nhánh (fork)** trước khi node thực sự "Ready", MetaNode áp dụng mô hình **Cỗ Máy Trạng Thái Khởi Động (Startup State Machine)** với 6 Giai Đoạn (Phases) nghiêm ngặt do `AuthorityNode` và `CommitObserver` điều phối:
+
+### Mô Hình Các Giai Đoạn Khởi Động
+
+```mermaid
+stateDiagram-v2
+    [*] --> Phase1_Handshake: Bật Node (Start)
+
+    Phase1_Handshake --> Phase2_LocalDAG: Go báo cáo (Block N, Hash X, Term T)
+    Phase2_LocalDAG --> Phase3_NetworkCatchup: Nạp xong RocksDB lên RAM
+    Phase3_NetworkCatchup --> Phase3B_StateSyncing: Lag > 50k commits
+    Phase3_NetworkCatchup --> Phase4_Committee: Mạng đồng bộ xong DAG đến nay
+    Phase3B_StateSyncing --> Phase1_Handshake: Snapshot mới từ mạng
+    Phase4_Committee --> Phase5_Alignment: Chốt danh sách Validator
+    Phase5_Alignment --> Phase6_Active: Bơm Block N+1 cho Go
+    Phase6_Active --> [*]: Tham gia Vote/Báo Block mới
+```
+
+#### 🤝 Phase 1: Bắt tay Nội Bộ (State Handshake)
+- Khi Rust Consensus khởi động, nó **không kết nối mạng P2P ngay lập tức**.
+- Rust gọi RPC/IPC sang Go Master yêu cầu **Cột mốc mới nhất**: Khối đã chạy cuối cùng (`latest_block`), Mã Hash của nó (`latest_hash`) và Term hiện hành.
+
+#### 💽 Phase 2: Khôi phục DAG Cục bộ (Local DAG Recovery)
+- `DagState` và `BlockManager` đọc cấu trúc mạng lưới DAG từ `RocksDB` cục bộ.
+- Xây dựng lại biểu đồ quan hệ Cha-Con trên RAM lên tới điểm cao nhất có thể trong đĩa cứng.
+
+#### 🌐 Phase 3: Bắt kịp Mạng lưới (Network Catch-up / Sync)
+Tùy thuộc vào mức độ lạc hậu của nút so với mạng mà tiến trình này chia làm 2 nhánh:
+
+- **Nhánh 3A - Đồng bộ DAG Theo Khối (Cùng Epoch hoặc Lệch Ít, VD: 1 Epoch):** 
+  - Nếu nút bị chậm giới hạn trong 1 Epoch hoặc khoảng cách khối không quá lớn, `CommitSyncer` và `Synchronizer` sẽ tải tịnh tiến các khối bị thiếu (Missing Blocks) hoặc **Tải theo cụm (Batch Block Download)** để tốc độ hóa việc vá cây DAG. Nút sẽ dịch chuyển xuyên qua ranh giới Epoch cũ và bắt kịp `Network Tip` một cách an toàn mà vẫn để máy ảo Go đuổi theo tuần tự.
+- **Nhánh 3B - Tụt Hậu Epoch Quá Sâu (Deep Epoch Lag / Fast-Forward Snapshot):** 
+  - Khi node phát hiện `Network_Epoch` đã vượt quá xa mức chịu đựng (VD: Lệch từ 2 Epochs trở lên), việc tải và chạy lại (replay) toàn bộ hàng triệu khối của các Epoch cũ trong `Linearizer` là một thảm họa phi thực tế, dẫn tới chết nghẽn RAM do hết hạn chứng chỉ (cerificate expiration) và thay đổi Committee liên tục.
+  - Lúc này, node tự động ngắt cơ chế quét quét tải khối và chuyển sang **State Sync (Cấy Snapshot)** hoặc **Epoch Fast-Forward**.
+  - Node tải **Biên lai chốt sổ (Certified/Epoch Commit)** của Epoch mới nhất. Sau đó xả rỗng DAG cũ, giao phó Go Master khôi phục trạng thái bằng file Snapshot mạng thay vì chạy lại lịch sử. Quá trình bắt đầu lại từ `Phase 1` với mốc `N` mới do mạng quyết định.
+
+- **Nhánh 3C - Tụt Hậu Commit Quá Sâu (Deep Commit Lag / StateSyncing):**
+  - Khi node bị tụt hậu hơn **50,000 commits** so với mạng (tính theo `local_commit < quorum_commit - 50_000`), `CommitSyncer` chuyển sang phase `StateSyncing`.
+  - Trong phase này, P2P batch block download bị tạm dừng hoàn toàn. Node chờ Go Engine khôi phục trạng thái từ Snapshot thay vì tải từng khối lẻ.
+  - `CommitSyncer` không còn lập lịch `try_schedule_once()` cho đến khi phase chuyển về `CatchingUp` hoặc `Healthy`.
+
+- **Ghi chú an toàn:** Trong suốt Phase 1->5, Node hoàn toàn ở chế độ `SyncOnly` (Chỉ nghe, Không Đề xuất khối, Không Bỏ phiếu).
+
+#### 🏛️ Phase 4: Xác định Ủy Ban (Committee Determination)
+- Tại ranh giới của Term/Epoch (ngay sau khi tải đủ DAG liên quan đến Term hiện tại), mô-đun `EpochChange` sẽ trích xuất thông tin Stake và xác định danh sách **Committee (Nhóm Ủy ban Validator)** có quyền biểu quyết ở Term này.
+
+#### 📏 Phase 5: Canh lề Trạng thái & Lọc Giao Giao Block (State Alignment & Delivery Filtering)
+Đây là chốt chặn cực kỳ quan trọng để chống Fork giữa Rust và Go:
+1. `Linearizer` bắt đầu quét từ trên xuống dưới DAG đã đồng bộ và tạo ra một cuộn dây chuyền tính trạng (Linearized Chain).
+2. `CommitObserver` đóng vai trò **Người gác cổng**:
+   - Nếu `Linearizer` nhả ra một khối có `Number <= N` (N là khối Go đã báo cáo ở Phase 1): **Bỏ qua (Discard)**. Không đẩy sang Go để tránh chạy lại 2 lần.
+   - **Xác minh Hash Anti-Fork:** Khi `Linearizer` duyệt tới khối thứ `N`, `CommitObserver` TỰ ĐỘNG kiểm tra chéo bằng `last_executed_commit_hash` được truyền qua `CommitConsumerArgs::new(replay_index, processed_index, last_executed_commit_hash)`:
+     - `Hash_Của_Khối_N_Trên_DAG == last_executed_commit_hash (của Go)`.
+     - ❌ *Nếu sai:* Tức là node đã bị rẽ nhánh (Forked/Corrupted RocksDB). Node phải **Panic ngay lập tức** để người quản trị tải lại Snapshot, cấm tuyệt đối việc ghi đè gây nát trạng thái.
+     - ✅ *Nếu đúng:* Trạng thái khớp hoàn hảo.
+   - Trường `commit_hash` trong message `ExecutableBlock` (Protobuf field 9) chứa digest của Rust DAG commit. Go Engine **bắt buộc** lưu trữ hash này và trả lại trong `LastBlockNumberResponse` để phục vụ kiểm tra chéo ở các lần khởi động sau.
+   - Khi đó, khối đầu tiên được đẩy qua kênh MPSC sang cho máy ảo Go sẽ chính xác là khối **`N + 1`**.
+
+#### ⚡ Phase 6: Chế Độ Tham Gia Tích Cực (Active Mode)
+- Chỉ khi nút Go đã tiếp nhận đủ mọi khối `N+1, N+2...` và báo "Đã bắt kịp hoàn toàn Mạng (Fully Synced)".
+- `AuthorityNode` gạt công tắc trạng thái từ `SyncOnly` sang **`Active`**.
+- Lúc này, Node mới bắt đầu chia sẻ Mempool, đề xuất Block mới (Proposer), và gửi chữ ký biểu quyết. Hệ thống hoàn chỉnh việc hồi sinh an toàn, bảo đảm đồng thuận mạnh mẽ (Strong Consistency).

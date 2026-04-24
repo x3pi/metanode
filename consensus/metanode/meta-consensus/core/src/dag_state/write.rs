@@ -494,7 +494,7 @@ impl DagState {
 
         let (tx_flush, rx_flush) = tokio::sync::oneshot::channel();
         let store = self.store.clone();
-        let metrics = self.context.metrics.node_metrics.clone();
+        let context = self.context.clone();
 
         debug!(
             "Flushing {} blocks ({}), {} commits ({}), {} commit infos ({}), {} finalized commits ({}) to storage.",
@@ -530,7 +530,7 @@ impl DagState {
             store
                 .write(write_batch)
                 .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
-            metrics.dag_state_store_write_count.inc();
+            context.metrics.node_metrics.dag_state_store_write_count.inc();
             // Notify waiters that flush is complete
             let _ = tx_flush.send(());
         });

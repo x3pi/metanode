@@ -505,7 +505,7 @@ mod test {
         let (signals, signal_receivers) = CoreSignals::new(context.clone());
         let _block_receiver = signal_receivers.block_broadcast_receiver();
         let (commit_consumer, _commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, 0);
+            CommitConsumerArgs::new(0, 0, [0; 32]);
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
             dag_state.clone(),
@@ -538,7 +538,7 @@ mod test {
             round_tracker,
             None, // adaptive_delay_state - not used in tests
             None, // system_transaction_provider - not used in tests
-            crate::coordination_hub::ConsensusCoordinationHub::new(),
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
         );
 
         let (core_dispatcher, handle) =

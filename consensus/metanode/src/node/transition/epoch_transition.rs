@@ -557,7 +557,7 @@ async fn stop_authority_and_poll_go(
     let raw_synced_block = executor_client
         .get_last_block_number()
         .await
-        .map(|(b, _, _)| b)
+        .map(|(b, _, _, _)| b)
         .unwrap_or(0);
     let raw_synced = std::cmp::max(raw_synced_gei, raw_synced_block);
 

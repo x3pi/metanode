@@ -246,6 +246,7 @@ type LastBlockNumberResponse struct {
 	LastBlockNumber     uint64 `protobuf:"varint,1,opt,name=last_block_number,json=lastBlockNumber,proto3" json:"last_block_number,omitempty"`               // Last block number from Go Master DB
 	LastGlobalExecIndex uint64 `protobuf:"varint,2,opt,name=last_global_exec_index,json=lastGlobalExecIndex,proto3" json:"last_global_exec_index,omitempty"` // Last processed GlobalExecIndex (includes empty commits)
 	IsReady             bool   `protobuf:"varint,3,opt,name=is_ready,json=isReady,proto3" json:"is_ready,omitempty"`                                         // True if Master is fully synced/ready
+	LastExecutedCommitHash []byte `protobuf:"bytes,4,opt,name=last_executed_commit_hash,json=lastExecutedCommitHash,proto3" json:"last_executed_commit_hash,omitempty"` // Hash of the last executed commit for anti-fork check
 }
 
 func (x *LastBlockNumberResponse) Reset() {
@@ -299,6 +300,13 @@ func (x *LastBlockNumberResponse) GetIsReady() bool {
 		return x.IsReady
 	}
 	return false
+}
+
+func (x *LastBlockNumberResponse) GetLastExecutedCommitHash() []byte {
+	if x != nil {
+		return x.LastExecutedCommitHash
+	}
+	return nil
 }
 
 // Sui-style epoch transition messages

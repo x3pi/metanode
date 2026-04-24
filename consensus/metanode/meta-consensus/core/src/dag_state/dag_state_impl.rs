@@ -438,7 +438,7 @@ impl DagState {
         let synthetic_commit = TrustedCommit::new_for_test(
             target_index,
             real_digest,
-            self.context.clock.timestamp_utc_ms(),
+            0, // ALWAYS use 0 so the next network commit naturally satisfies monotonic guarantees
             BlockRef::new(
                 target_round,
                 consensus_config::AuthorityIndex::ZERO,

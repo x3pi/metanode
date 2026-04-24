@@ -428,7 +428,7 @@ impl Core {
         // - CatchingUp: node is syncing commits from the network.
         // - Healthy: normal consensus — proposals allowed.
         // ═══════════════════════════════════════════════════════════════════
-        if self.coordination_hub.is_catching_up() || self.coordination_hub.is_bootstrapping() {
+        if self.coordination_hub.should_skip_proposal() {
             debug!(
                 "Skip proposing for round {}: node phase is {:?}",
                 clock_round, self.coordination_hub.get_phase()

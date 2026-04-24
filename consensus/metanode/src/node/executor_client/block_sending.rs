@@ -203,6 +203,7 @@ impl ExecutorClient {
                     leader_author_index: subdag.leader.author.value() as u32,
                     leader_address: leader_address.clone().unwrap_or_default(),
                     block_number,
+                    commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -622,7 +623,7 @@ impl ExecutorClient {
 
         // Phase 5: Go verification (periodic RPC check)
         if last_idx.is_multiple_of(GO_VERIFICATION_INTERVAL) {
-            if let Ok((go_last_block, _, _)) = self.get_last_block_number().await {
+            if let Ok((go_last_block, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
                     error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
@@ -784,6 +785,7 @@ impl ExecutorClient {
             leader_author_index: subdag.leader.author.value() as u32,
             leader_address: leader_address.unwrap_or_default(),
             block_number,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
         };
 
         let mut buf = Vec::new();
@@ -913,6 +915,7 @@ impl ExecutorClient {
             leader_author_index: subdag.leader.author.value() as u32,
             leader_address: leader_address.unwrap_or_default(),
             block_number,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
         };
 
         // Encode to protobuf bytes using prost::Message::encode

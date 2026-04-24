@@ -140,22 +140,23 @@ impl CommitFinalizer {
                         .leader
                         .round,
                 );
-                let mut dag_state = self.dag_state.write();
-                if !already_finalized {
-                    // Records rejected transactions in newly finalized commits.
-                    for commit in &finalized_commits {
-                        dag_state.add_finalized_commit(
-                            commit.commit_ref,
-                            commit.rejected_transactions_by_block.clone(),
-                        );
+                let flush_ticket = {
+                    let mut dag_state = self.dag_state.write();
+                    if !already_finalized {
+                        // Records rejected transactions in newly finalized commits.
+                        for commit in &finalized_commits {
+                            dag_state.add_finalized_commit(
+                                commit.commit_ref,
+                                commit.rejected_transactions_by_block.clone(),
+                            );
+                        }
                     }
-                }
-                // Commits and committed blocks must be persisted to storage before sending them to Sui
-                // to execute their finalized transactions.
-                // Commit metadata and uncommitted blocks can be persisted more lazily because they are recoverable.
-                // But for simplicity, all unpersisted commits and blocks are flushed to storage.
-                let flush_ticket = dag_state.flush();
-                drop(dag_state);
+                    // Commits and committed blocks must be persisted to storage before sending them to Sui
+                    // to execute their finalized transactions.
+                    // Commit metadata and uncommitted blocks can be persisted more lazily because they are recoverable.
+                    // But for simplicity, all unpersisted commits and blocks are flushed to storage.
+                    dag_state.flush()
+                };
 
                 if let Some(rx) = flush_ticket {
                     if let Err(e) = rx.await {

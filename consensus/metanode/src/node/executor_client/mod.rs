@@ -338,7 +338,7 @@ impl ExecutorClient {
         // Query Go Master for last_block_number and last_global_exec_index directly
         let last_go_state_opt = loop {
             match self.get_last_block_number().await {
-                Ok((bn, gei, is_ready)) => {
+                Ok((bn, gei, is_ready, _)) => {
                     if is_ready {
                         break Some((bn, gei));
                     } else {

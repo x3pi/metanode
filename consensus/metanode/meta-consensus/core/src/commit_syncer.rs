@@ -206,7 +206,7 @@ impl CommitSyncerSupervisor {
     ) -> CommitSyncerHandle {
         let (tx_shutdown, mut rx_shutdown) = oneshot::channel();
         
-        let supervisor_task = spawn_logged_monitored_task!(
+        let supervisor_task = tokio::task::spawn(
             async move {
                 let mut restart_delay = Duration::from_secs(1);
                 loop {
@@ -249,8 +249,7 @@ impl CommitSyncerSupervisor {
                         }
                     }
                 }
-            },
-            "commit_syncer_supervisor"
+            }
         );
 
         CommitSyncerHandle {
@@ -258,13 +257,18 @@ impl CommitSyncerSupervisor {
             tx_shutdown,
         }
     }
+}
 
+impl<C: NetworkClient> CommitSyncer<C> {
     // Derived interval 
     fn poll_interval(&self) -> Duration {
         match self.coordination_hub.get_phase() {
+            crate::coordination_hub::NodeConsensusPhase::Initializing => Duration::from_secs(1),
             crate::coordination_hub::NodeConsensusPhase::CatchingUp => Duration::from_millis(150),
             crate::coordination_hub::NodeConsensusPhase::Bootstrapping => Duration::from_millis(200),
+            crate::coordination_hub::NodeConsensusPhase::Aligning => Duration::from_millis(200),
             crate::coordination_hub::NodeConsensusPhase::Healthy => Duration::from_secs(2),
+            crate::coordination_hub::NodeConsensusPhase::StateSyncing => Duration::from_secs(5),
         }
     }
 
@@ -304,16 +308,25 @@ impl CommitSyncerSupervisor {
         // quorum_commit = network consensus progress
         // highest_handled_index = Go execution progress (independent of consensus)
         let is_behind = local_commit < quorum_commit;
+        let lag = quorum_commit.saturating_sub(local_commit);
 
-        let next_phase = if is_behind {
+        let next_phase = if lag > 50_000 {
+            crate::coordination_hub::NodeConsensusPhase::StateSyncing
+        } else if is_behind {
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
         } else {
             crate::coordination_hub::NodeConsensusPhase::Healthy
         };
 
-        if current_phase != next_phase && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
+        if current_phase != next_phase
+            && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+            && current_phase != crate::coordination_hub::NodeConsensusPhase::Initializing
+            && current_phase != crate::coordination_hub::NodeConsensusPhase::Aligning
+        {
             self.coordination_hub.set_phase(next_phase);
-        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping {
+        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+            || current_phase == crate::coordination_hub::NodeConsensusPhase::Initializing
+        {
             // ════════════════════════════════════════════════════════════════
             // BOOTSTRAPPING EXIT LOGIC — two distinct scenarios:
             //
@@ -399,9 +412,12 @@ impl CommitSyncerSupervisor {
                             "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",
                             new_state, local_commit, quorum_commit, lag,
                             match new_state {
+                                crate::coordination_hub::NodeConsensusPhase::Initializing => "INITIALIZING",
                                 crate::coordination_hub::NodeConsensusPhase::CatchingUp => "SYNC_ONLY (CatchingUp)",
                                 crate::coordination_hub::NodeConsensusPhase::Bootstrapping => "BOOTSTRAPPING",
+                                crate::coordination_hub::NodeConsensusPhase::Aligning => "ALIGNING (Go↔Rust)",
                                 crate::coordination_hub::NodeConsensusPhase::Healthy => "CONSENSUS (Healthy)",
+                                crate::coordination_hub::NodeConsensusPhase::StateSyncing => "CONSENSUS (StateSyncing)",
                             }
                         );
 
@@ -465,6 +481,11 @@ impl CommitSyncerSupervisor {
     }
 
     fn try_schedule_once(&mut self) {
+        if self.coordination_hub.is_state_syncing() {
+            tracing::info!("⏳ [COMMIT-SYNCER] Node is in StateSyncing phase. Pausing batch block downloads until state snapshot is applied.");
+            return;
+        }
+
         let quorum_commit_index = self.inner.commit_vote_monitor.quorum_commit_index();
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
         let metrics = &self.inner.context.metrics.node_metrics;
@@ -1171,6 +1192,7 @@ impl CommitSyncerSupervisor {
                         .zip(signed_blocks.into_iter())
                         .zip(serialized_blocks.into_iter())
                     {
+                        let serialized: Bytes = serialized.into();
                         let signed_block_digest = VerifiedBlock::compute_digest(&serialized);
                         let received_block_ref = BlockRef::new(
                             signed_block.round(),

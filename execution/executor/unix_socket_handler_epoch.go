@@ -461,9 +461,10 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	response := &pb.LastBlockNumberResponse{
-		LastBlockNumber:     returnBlockNumber,
-		LastGlobalExecIndex: lastGEI,
-		IsReady:             isReady,
+		LastBlockNumber:        returnBlockNumber,
+		LastGlobalExecIndex:    lastGEI,
+		IsReady:                isReady,
+		LastExecutedCommitHash: storage.GetLastExecutedCommitHash(),
 	}
 
 	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d (counter=%d, validated=%d, is_ready=%v)",

@@ -32,8 +32,10 @@ pub(super) async fn setup_validator_consensus(
     } else {
         0
     };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after, go_replay_after);
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
@@ -156,8 +158,10 @@ pub(super) async fn setup_synconly_sync(
     } else {
         0
     };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (_commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync);
+        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
