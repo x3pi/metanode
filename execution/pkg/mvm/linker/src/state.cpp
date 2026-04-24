@@ -66,6 +66,7 @@ std::unordered_map<uint256_t, shared_ptr<State>, AddressStdHash> State::instance
 std::shared_mutex State::instances_mutex;
 
 void State::clearAllInstances() {
+  std::unique_lock<std::shared_mutex> write_lock(instances_mutex);
   std::cerr << "[State] Clearing all " << instances.size()
             << " cached State instances (sync→validator transition)"
             << std::endl;
@@ -239,35 +240,38 @@ void state_cleaner_task() {
       const auto idle_threshold = std::chrono::minutes(2); // Idle threshold
 
       // --- Phase 1: Identify potentially idle instances ---
-      for (auto it = State::instances.cbegin(); it != State::instances.cend();
-           ++it) {
-        if (it->second) { // Check if the shared_ptr is valid
-          try {
-            auto last_interaction = it->second->get_last_interaction_time();
-            auto time_since_interaction =
-                std::chrono::duration_cast<std::chrono::minutes>(
-                    now - last_interaction);
+      {
+        std::shared_lock<std::shared_mutex> read_lock(State::instances_mutex);
+        for (auto it = State::instances.cbegin(); it != State::instances.cend();
+             ++it) {
+          if (it->second) { // Check if the shared_ptr is valid
+            try {
+              auto last_interaction = it->second->get_last_interaction_time();
+              auto time_since_interaction =
+                  std::chrono::duration_cast<std::chrono::minutes>(
+                      now - last_interaction);
 
-            if (time_since_interaction >= idle_threshold) {
-              // Instance is idle, check use count
-              std::shared_ptr<State> temp_ptr =
-                  it->second; // Temporary copy for use_count check
-              long count = temp_ptr.use_count();
-              // If only the map and our temp_ptr hold it (count <= 2), it's a
-              // candidate
-              if (count <= 2) {
-                keys_to_erase.push_back(it->first); // Add uint256_t key
-              } else {
+              if (time_since_interaction >= idle_threshold) {
+                // Instance is idle, check use count
+                std::shared_ptr<State> temp_ptr =
+                    it->second; // Temporary copy for use_count check
+                long count = temp_ptr.use_count();
+                // If only the map and our temp_ptr hold it (count <= 2), it's a
+                // candidate
+                if (count <= 2) {
+                  keys_to_erase.push_back(it->first); // Add uint256_t key
+                } else {
+                }
               }
+            } catch (const std::exception &e) {
+            } catch (...) {
             }
-          } catch (const std::exception &e) {
-          } catch (...) {
+          } else {
+            // Found a null pointer in the map - definitely remove it
+            keys_to_erase.push_back(it->first);
           }
-        } else {
-          // Found a null pointer in the map - definitely remove it
-          keys_to_erase.push_back(it->first);
-        }
-      } // End Phase 1 loop
+        } // End Phase 1 loop
+      }
 
       // --- Phase 2: Attempt to erase identified instances ---
       if (!keys_to_erase.empty()) {

@@ -66,9 +66,11 @@ namespace mvm
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
         if (!get_rs.success)
         {
+            if (get_rs.value) free(get_rs.value); // In case it returns pointer on failure
             return 0;
         }
         uint256_t value = mvm::from_big_endian(get_rs.value, 32u);
+        free(get_rs.value); // Free memory allocated by Go C.CBytes
         cache[key] = value;
 
         if (isCache && State::instanceExists(address))

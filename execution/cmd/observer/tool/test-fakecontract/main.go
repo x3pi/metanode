@@ -2066,6 +2066,25 @@ func spamCrossChainTPS(
 			select {
 			case <-deadline:
 				fmt.Printf("\n  ⏱️  TIMEOUT! Chưa đủ %d ví nhận được tiền\n", numWallets)
+				filename := "failed_wallets.txt"
+				f, err := os.Create(filename)
+				if err != nil {
+					fmt.Printf("❌ Không thể tạo file %s: %v\n", filename, err)
+				} else {
+					defer f.Close()
+					fmt.Fprintf(f, "📋 Danh sách ví chưa đủ tiền (Timeout tại %s):\n", time.Now().Format("2006-01-02 15:04:05"))
+					for _, w := range unreachedWallets {
+						currentBal, _ := destClient.BalanceAt(context.Background(), w.From, nil)
+						targetBal := new(big.Int).Add(w.InitialBalance, expectedPerWallet)
+						fmt.Fprintf(f, "Wallet: %s | Hiện tại: %s ETH | Mong muốn: %s ETH\n",
+							w.From.Hex(),
+							new(big.Float).Quo(new(big.Float).SetInt(currentBal), big.NewFloat(1e18)).Text('f', 8),
+							new(big.Float).Quo(new(big.Float).SetInt(targetBal), big.NewFloat(1e18)).Text('f', 8))
+					}
+					fmt.Printf("  📄 Danh sách ví lỗi đã được ghi vào file: %s\n", filename)
+				}
+				fmt.Println("\n  ❌ Dừng test do timeout.")
+				return
 			case <-ticker.C:
 				var checkWg sync.WaitGroup
 				checkSem := make(chan struct{}, 50) // 50 worker

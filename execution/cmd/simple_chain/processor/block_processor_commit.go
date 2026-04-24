@@ -101,12 +101,12 @@ func (bp *BlockProcessor) commitWorker() {
 		//   - block_processor_processing.go only runs in single-node mode
 		//   - block_processor_txs.go only runs on sub-nodes
 		// Without this, GetBlockHashByNumber returns false → eth_getBlockByNumber returns null.
-		// blockHash := job.Block.Header().Hash()
-		// if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(blockNum, blockHash); err != nil {
-		// 	logger.Error("commitWorker: SetBlockNumberToHash failed for block #%d: %v", blockNum, err)
-		// } else {
-		// 	logger.Info("🗺️  [MASTER] SetBlockNumberToHash: block #%d → hash=%s", blockNum, blockHash.Hex()[:16]+"...")
-		// }
+		blockHash := job.Block.Header().Hash()
+		if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("commitWorker: SetBlockNumberToHash failed for block #%d: %v", blockNum, err)
+		} else {
+			logger.Info("🗺️  [MASTER] SetBlockNumberToHash: block #%d → hash=%s", blockNum, blockHash.Hex()[:16]+"...")
+		}
 		saveDuration := time.Since(startSave)
 
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.

@@ -9,8 +9,9 @@ import (
 	"runtime"
 	runtime_debug "runtime/debug"
 
-	"github.com/ethereum/go-ethereum/common"
 	"context"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -225,7 +226,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if isStateChanging {
 		accountRoot := processResults.Root
 		lastConfirmedBlock := bp.GetLastBlock()
-		
+
 		bl, err = GenerateBlockData(
 			lastConfirmedBlock.Header(), blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
@@ -256,11 +257,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	phase2Elapsed := time.Since(phase2Start)
 
 	phase3Start := time.Now()
-	err = blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(bl.Header().BlockNumber()), bl.Header().Hash())
-	if err != nil {
-		bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
-		logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
-	}
+	// err = blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(bl.Header().BlockNumber()), bl.Header().Hash())
+	// if err != nil {
+	// 	bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
+	// 	logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
+	// }
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
 	// TxHashMapBlockNumber is a non-critical in-memory index for TX lookup.
 	// Run it async but track via WaitGroup so commitWorker waits before broadcasting receipts.
@@ -464,6 +465,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 		txDB.Discard()
 	}
 }
+
 // ForceCommit triggers an immediate block generation by sending a signal to forceCommitChan
 func (bp *BlockProcessor) ForceCommit() {
 	select {

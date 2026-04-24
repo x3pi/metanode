@@ -50,7 +50,7 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 			time.Sleep(s.scanInterval)
 			continue
 		}
-		logger.Info("📍 [Scanner][%s] Node %s head=%d lastScanned=%d", rc.Name, client.GetNodeAddr(), latestBlock, lastBlock)
+
 
 		if latestBlock <= lastBlock {
 			// Đã scan hết, chờ block mới
@@ -66,7 +66,7 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 
 		// Scan từng block một từ lastBlock+1 đến latestBlock
 		for blockNum := lastBlock + 1; blockNum <= latestBlock; blockNum++ {
-			logger.Info("🔍 [Scanner][%s] Scanning block %d", rc.Name, blockNum)
+
 			hasEvents, errScan := s.scanAndSubmit(rc, client, blockNum)
 			if errScan != nil {
 				// GetLogs thất bại — dừng, thử lại block này ở vòng ngoài
@@ -121,17 +121,6 @@ func (s *CrossChainScanner) scanAndSubmit(
 	new(big.Int).SetUint64(s.cfg.NationId).FillBytes(localNationTopic[:])
 
 	// Gộp quét MessageSent và MessageReceived thành 1 lệnh RPC duy nhất giúp tăng tốc HTTP/TCP lên gấp đôi
-	logger.Info(
-		"🔍 [Scanner][%s] Querying block=%d node=%s contract=%s topicSent=%s topicRecv=%s localNationId=%d(localTopic=%s)",
-		rc.Name,
-		blockNum,
-		client.GetNodeAddr(),
-		contractAddr.Hex(),
-		messageSentTopic.Hex(),
-		messageReceivedTopic.Hex(),
-		s.cfg.NationId,
-		localNationTopic.Hex(),
-	)
 	resp, err := client.ChainGetLogs(
 		nil,
 		blockStr,
@@ -184,17 +173,7 @@ func (s *CrossChainScanner) scanAndSubmit(
 			}
 			return 0
 		}(), client.GetNodeAddr(), len(allLogs))
-	if len(allLogs) == 0 {
-		logger.Info(
-			"🧪 [Scanner][%s] Block %d debug: sentTopic=%d recvTopic=%d sentNationMismatch=%d recvNationMismatch=%d",
-			rc.Name,
-			blockNum,
-			sentTopicCount,
-			recvTopicCount,
-			sentNationMismatch,
-			recvNationMismatch,
-		)
-	}
+
 
 	hasEvents := false
 	if len(allLogs) > 0 {
