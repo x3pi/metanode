@@ -147,19 +147,28 @@ impl CommitObserver {
         }
 
         for commit in committed_sub_dags.iter() {
-            // Failures in sender.send() during cold-start sync should not kill CoreThread.
-            // The CommitFinalizer's channel may close if the task exits (e.g., due to
-            // processing a large batch of synced commits). Log and continue — the
-            // commit is still persisted in DagState and will be re-sent on restart.
+            // Failures in sender.send() during cold-start sync indicates the Finalizer task panicked or died.
+            // We must auto-restart it to prevent Execution Stall.
             if let Err(e) = self.commit_finalizer_handle.send(commit.clone()) {
                 tracing::warn!(
                     "⚠️ [COMMIT-OBSERVER] Failed to send commit {} to finalizer (channel closed): {:?}. \
-                     Commit is persisted in DagState. This is expected during cold-start bulk sync.",
+                     Task died. Restarting CommitFinalizer automatically.",
                     commit.commit_ref, e
                 );
-                // Don't propagate the error — let CoreThread survive.
-                // The commit is buffered in DagState and will be re-processed.
-                break;
+                
+                self.commit_finalizer_handle = CommitFinalizer::start(
+                    self.context.clone(),
+                    self.dag_state.clone(),
+                    self.transaction_certifier.clone(),
+                    self.commit_sender_keeper.clone(),
+                );
+                
+                // Retry sending the commit
+                if let Err(e2) = self.commit_finalizer_handle.send(commit.clone()) {
+                    tracing::error!("🚨 [COMMIT-OBSERVER] Auto-restart failed! Could not queue commit: {:?}", e2);
+                } else {
+                    tracing::info!("✅ [COMMIT-OBSERVER] CommitFinalizer auto-restart successful.");
+                }
             }
         }
 
@@ -314,19 +323,23 @@ impl CommitObserver {
                         .recover_and_vote_on_blocks(committed_sub_dag.blocks.clone());
                 }
 
-                if let Err(e) = self.commit_finalizer_handle.send(committed_sub_dag) {
-                    // During recovery, the commit processor may encounter an EndOfEpoch
-                    // transaction and trigger an epoch transition, which closes the commit
-                    // channel. When this happens, the CommitFinalizer's run loop exits,
-                    // closing its internal channel. This is expected behavior — not a crash.
-                    info!(
-                        "Commit finalizer channel closed during recovery at commit {last_sent_commit_index} \
-                         (likely epoch transition triggered): {e:?}. \
-                         Stopping recovery — remaining commits will be replayed in the new epoch."
+                if let Err(e) = self.commit_finalizer_handle.send(committed_sub_dag.clone()) {
+                    tracing::warn!(
+                        "⚠️ Commit finalizer channel closed during recovery at commit {} \
+                         (likely task crashed): {:?}. Restarting Finalizer...",
+                        last_sent_commit_index, e
                     );
-                    // Adjust last_sent_commit_index back since this commit was not actually sent.
-                    last_sent_commit_index -= 1;
-                    break;
+                    self.commit_finalizer_handle = CommitFinalizer::start(
+                        self.context.clone(),
+                        self.dag_state.clone(),
+                        self.transaction_certifier.clone(),
+                        self.commit_sender_keeper.clone(),
+                    );
+                    // Retry once
+                    if let Err(e2) = self.commit_finalizer_handle.send(committed_sub_dag) {
+                        tracing::error!("🚨 Failed to re-queue commit during recovery: {:?}", e2);
+                        break;
+                    }
                 }
 
                 self.context
