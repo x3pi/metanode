@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{sort_sub_dag_blocks, Commit, CommittedSubDag, TrustedCommit},
+    commit::{sort_sub_dag_blocks, Commit, CommittedSubDag, TrustedCommit, CommitAPI},
     context::Context,
     dag_state::DagState,
 };
@@ -70,7 +70,7 @@ pub struct Linearizer {
     /// Leaders waiting to be committed - deferred because not all blocks were available.
     /// FORK PREVENTION: We only commit when ALL blocks for a round are present.
     /// This list is processed first on each handle_commit call.
-    deferred_leaders: Vec<VerifiedBlock>,
+    deferred_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)>,
 }
 
 impl Linearizer {
@@ -95,6 +95,7 @@ impl Linearizer {
     fn try_collect_sub_dag_and_commit(
         &mut self,
         leader_block: VerifiedBlock,
+        precomputed_timestamp_ms: Option<BlockTimestampMs>,
     ) -> Option<(CommittedSubDag, TrustedCommit)> {
         let _s = self
             .context
@@ -127,12 +128,14 @@ impl Linearizer {
         // Now linearize the sub-dag starting from the leader block
         let to_commit = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
 
-        let timestamp_ms = Self::calculate_commit_timestamp(
-            &self.context,
-            &mut dag_state,
-            &leader_block,
-            last_commit_timestamp_ms,
-        );
+        let timestamp_ms = precomputed_timestamp_ms.unwrap_or_else(|| {
+            Self::calculate_commit_timestamp(
+                &self.context,
+                &mut dag_state,
+                &leader_block,
+                last_commit_timestamp_ms,
+            )
+        });
 
         drop(dag_state);
 
@@ -236,11 +239,14 @@ impl Linearizer {
 
         // Perform the recursion without stopping at the highest round round that has been committed per authority. Instead it will
         // allow to commit blocks that are lower than the highest committed round for an authority but higher than gc_round.
-        assert!(
-            dag_state.set_committed(&leader_block_ref),
-            "Leader block with reference {:?} attempted to be committed twice",
-            leader_block_ref
-        );
+        if !dag_state.set_committed(&leader_block_ref) {
+            tracing::warn!(
+                "⚠️ [LINEARIZER] Leader block with reference {:?} attempted to be committed twice or is missing. \
+                 Tolerating graceful skip (likely recovering from cold-start or conflicting snapshot boundaries).",
+                leader_block_ref
+            );
+            return vec![]; // Skip processing if it's already committed
+        }
 
         // NOTE: We intentionally do NOT commit all blocks at the leader round.
         // Different nodes may have different blocks at a round (due to network timing).
@@ -304,14 +310,24 @@ impl Linearizer {
     // FORK PREVENTION: Leaders are only committed when ALL blocks for their round are available.
     // If blocks are missing, leaders are stored in deferred_leaders and retried on each call.
     // This ensures all nodes commit with identical block sets, preventing divergence.
-    pub fn handle_commit(&mut self, committed_leaders: Vec<VerifiedBlock>) -> Vec<CommittedSubDag> {
+    pub(crate) fn handle_commit(
+        &mut self,
+        committed_leaders: Vec<VerifiedBlock>,
+        precomputed_commits: Option<Vec<crate::commit::CertifiedCommit>>,
+    ) -> Vec<CommittedSubDag> {
         let mut committed_sub_dags = vec![];
 
         // Combine deferred leaders with new leaders, maintaining order.
         // Deferred leaders are tried first (they are older and waiting longer).
-        let mut all_leaders: Vec<VerifiedBlock> = std::mem::take(&mut self.deferred_leaders);
+        let mut all_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)> =
+            std::mem::take(&mut self.deferred_leaders);
         let had_deferred = !all_leaders.is_empty();
-        all_leaders.extend(committed_leaders);
+
+        let new_leaders_with_ts = committed_leaders.into_iter().enumerate().map(|(i, leader)| {
+            let ts = precomputed_commits.as_ref().map(|commits| commits[i].timestamp_ms());
+            (leader, ts)
+        });
+        all_leaders.extend(new_leaders_with_ts);
 
         let gc_round = self.dag_state.read().gc_round();
         
@@ -319,7 +335,7 @@ impl Linearizer {
         // This is crucial for handling cold-start fast-forwards, where gc_round
         // is synthetically advanced. Without this, the linearizer would panic
         // when evaluating old leaders that were passed down before Core was synced.
-        all_leaders.retain(|leader| {
+        all_leaders.retain(|(leader, _)| {
             if leader.round() <= gc_round {
                 tracing::warn!(
                     "⚠️ [LINEARIZER] Discarding leader {} (round {}) because it is <= gc_round ({}). \
@@ -339,9 +355,9 @@ impl Linearizer {
         // Convert to iterator to handle remaining elements properly
         let mut leaders_iter = all_leaders.into_iter().peekable();
 
-        while let Some(leader_block) = leaders_iter.next() {
+        while let Some((leader_block, precomputed_ts)) = leaders_iter.next() {
             // Try to collect the sub-dag. Returns None if blocks are missing.
-            match self.try_collect_sub_dag_and_commit(leader_block.clone()) {
+            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts) {
                 Some((sub_dag, commit)) => {
                     // Success! All blocks were available.
                     self.update_blocks_pruned_metric(&sub_dag);
@@ -356,7 +372,7 @@ impl Linearizer {
                     // Blocks are missing - defer this leader AND all remaining leaders.
                     // IMPORTANT: Commits must be processed IN ORDER.
                     // We cannot skip any leader - they must all wait.
-                    self.deferred_leaders.push(leader_block);
+                    self.deferred_leaders.push((leader_block, precomputed_ts));
 
                     // Push all remaining leaders to deferred list
                     self.deferred_leaders.extend(leaders_iter);

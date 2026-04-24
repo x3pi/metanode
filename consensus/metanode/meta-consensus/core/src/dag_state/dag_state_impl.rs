@@ -412,130 +412,55 @@ impl DagState {
     }
 
     /// ═══════════════════════════════════════════════════════════════════
-    /// COLD-START GC ADVANCE: After snapshot restore, the DAG is empty
-    /// and gc_round = 0. This causes ALL incoming blocks (from round 1
-    /// to HEAD) to need ancestors → they all get suspended → the suspended
-    /// buffer fills up → HEAD blocks are dropped → DEADLOCK.
+    /// DAG NETWORK BASELINE RESET: Unifies cold-start orchestration.
+    /// Injects a synthetic commit at `target_round` so that `gc_round` is correctly
+    /// aligned, blocks below `gc_round` are GC'd instead of deadlocking the node,
+    /// and the global commit index maps to Go's state perfectly.
     ///
-    /// This method creates a synthetic commit at `target_round` so that
-    /// gc_round = target_round - gc_depth. Blocks below gc_round are then
-    /// GC'd instead of suspended, freeing the buffer for HEAD blocks.
-    ///
-    /// SAFETY: This is only called during cold-start (local_commit=0,
-    /// quorum far ahead). The synthetic commit doesn't affect consensus
-    /// correctness because the node has no local commits to conflict with.
+    /// The Coordination Hub calls this during the FastForwarding phase.
+    /// SAFETY: Must only be called when DAG is empty / local_commit=0.
     /// ═══════════════════════════════════════════════════════════════════
-    pub fn cold_start_advance_gc_round(&mut self, target_round: Round, synced_commit_index: crate::commit::CommitIndex) {
-        let gc_depth = self.context.protocol_config.gc_depth();
-        let current_gc_round = self.gc_round();
-
-        // Only advance if the target would actually help
-        let new_gc_round = target_round.saturating_sub(gc_depth);
-        if new_gc_round <= current_gc_round {
+    pub fn reset_to_network_baseline(
+        &mut self,
+        target_round: Round,
+        synced_commit_index: crate::commit::CommitIndex,
+        real_digest: crate::commit::CommitDigest,
+        timestamp_ms: consensus_types::block::BlockTimestampMs,
+    ) {
+        if self.last_commit.is_some() && self.last_commit_digest() != crate::commit::CommitDigest::MIN {
+            // Protect against accidentally resetting an active DAG
+            tracing::warn!("DAG network baseline reset aborted: DAG is already active.");
             return;
         }
 
-        // Create a minimal synthetic commit at the target round
-        // FRAGMENTATION & GEI FIX: Inherit the network's commit index instead of resetting to 1.
-        // If we reset to 1, the Linearizer will output local commits starting at 2, completely 
-        // misaligning local GEI with network GEI, leading to consensus forks!
+        let gc_depth = self.context.protocol_config.gc_depth();
+        let target_index = synced_commit_index.max(1);
+        
         let synthetic_commit = TrustedCommit::new_for_test(
-            synced_commit_index.max(1), // use synced commit index from network quorum
-            crate::commit::CommitDigest::MIN,
-            self.context.clock.timestamp_utc_ms(),
+            target_index,
+            real_digest,
+            timestamp_ms, // CRITICAL FORK-SAFETY: Must match the network's timestamp for monotonic guarantees
             BlockRef::new(
                 target_round,
                 consensus_config::AuthorityIndex::ZERO,
                 consensus_types::block::BlockDigest::MIN,
             ),
             vec![],
-            0, // global_exec_index doesn't matter for gc_round
+            0,
         );
 
         tracing::warn!(
-            "🧹 [COLD-START] Advancing GC round: {} → {} (synthetic commit at round {}, gc_depth={})",
-            current_gc_round,
-            new_gc_round,
-            target_round,
-            gc_depth,
+            "🧹 [DAG-RESET] Baseline injected: index={}, gc_round={}, digest_patched={}",
+            target_index,
+            target_round.saturating_sub(gc_depth),
+            real_digest != crate::commit::CommitDigest::MIN
         );
 
         self.last_commit = Some(synthetic_commit);
 
-        // Update last_committed_rounds to the target round for all authorities
-        // This ensures blocks below target_round are considered committed
+        // Update last_committed_rounds to the target round targeting GC efficiency
         for round in self.last_committed_rounds.iter_mut() {
             *round = std::cmp::max(*round, target_round);
-        }
-    }
-
-    /// ═══════════════════════════════════════════════════════════════════
-    /// SYNC-FIRST ALIGNMENT: After snapshot restore, the DAG is empty
-    /// (last_commit_index = 0). But Go may have advanced significantly via 
-    /// SYNC-FIRST (e.g. GEI = 2338, epoch_base = 1332). 
-    /// If Rust starts creating commits from index 1, it will output GEI 1333,
-    /// which overlaps with old blocks and is rejected by Go, causing a massive divergence.
-    /// This method explicitly sets the last_commit to the correct index so that
-    /// the first generated commit perfectly aligns with Go's expected GEI.
-    /// ═══════════════════════════════════════════════════════════════════
-    pub fn align_commit_index_with_go(&mut self, next_commit_index_from_go: crate::commit::CommitIndex) {
-        if self.last_commit.is_some() {
-            // Only align if DAG is empty (cold start)
-            return;
-        }
-
-        let target_index = next_commit_index_from_go.saturating_sub(1);
-        if target_index == 0 {
-            return;
-        }
-
-        tracing::warn!(
-            "🔧 [SYNC-FIRST ALIGNMENT] Empty DAG detected. Injecting synthetic commit \
-             at index {} so the next commit perfectly aligns with Go's expected state.",
-            target_index
-        );
-
-        let synthetic_commit = TrustedCommit::new_for_test(
-            target_index,
-            crate::commit::CommitDigest::MIN,
-            self.context.clock.timestamp_utc_ms(),
-            BlockRef::new(
-                0,
-                consensus_config::AuthorityIndex::ZERO,
-                consensus_types::block::BlockDigest::MIN,
-            ),
-            vec![],
-            0, // GEI doesn't matter here
-        );
-
-        self.last_commit = Some(synthetic_commit);
-    }
-
-    /// ═══════════════════════════════════════════════════════════════════
-    /// COLD-START DIGEST ALIGNMENT: Resolves hash discrepancy panics out of 
-    /// cold-start by patching the `MIN` digest on the synthetic commit.
-    /// ═══════════════════════════════════════════════════════════════════
-    pub fn patch_synthetic_commit_digest(&mut self, target_index: crate::commit::CommitIndex, real_digest: crate::commit::CommitDigest) {
-        if let Some(commit) = self.last_commit.as_ref() {
-            if commit.index() == target_index && self.last_commit_digest() == crate::commit::CommitDigest::MIN {
-                tracing::warn!(
-                    "🔧 [SYNC-FIRST DIGEST ALIGNMENT] Patching synthetic commit {} with real previous_digest",
-                    target_index
-                );
-                let patched_commit = TrustedCommit::new_for_test(
-                    target_index,
-                    real_digest,
-                    self.context.clock.timestamp_utc_ms(),
-                    BlockRef::new(
-                        0,
-                        consensus_config::AuthorityIndex::ZERO,
-                        consensus_types::block::BlockDigest::MIN,
-                    ),
-                    vec![],
-                    0, 
-                );
-                self.last_commit = Some(patched_commit);
-            }
         }
     }
 }

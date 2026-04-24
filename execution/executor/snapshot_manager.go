@@ -41,6 +41,7 @@ type SnapshotManager struct {
 	blocksAfterEpoch  int    // Số blocks chờ sau epoch transition (mặc định 20)
 	snapshotMethod    string // "hardlink", "rsync", hoặc "hybrid"
 	snapshotSourceDir string // Thư mục cần snapshot (cho rsync/hybrid method, vd: data-write)
+	frequencyBlocks   uint64 // Nếu > 0, tạo snapshot định kỳ mỗi N block thay vì chờ hết epoch
 
 	// Filesystem capabilities
 	reflinkSupported bool // true nếu filesystem hỗ trợ cp --reflink (btrfs, xfs)
@@ -77,9 +78,10 @@ type SnapshotManager struct {
 	nomtSnapshotCallback func(destPath string, useReflink bool) error
 
 	// Callbacks for pausing/resuming execution
-	pauseCallback      func()
-	resumeCallback     func()
-	rustPauseCallback  func()
+	waitPersistenceCallback func()
+	pauseCallback           func()
+	resumeCallback          func()
+	rustPauseCallback       func()
 	rustResumeCallback func()
 
 	// Callback to get the current exact StateRoot
@@ -205,6 +207,23 @@ func (sm *SnapshotManager) SetRustResumeCallback(cb func()) {
 	sm.rustResumeCallback = cb
 }
 
+// SetWaitPersistenceCallback registers a callback to wait for async commit jobs before snapping
+func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.waitPersistenceCallback = cb
+}
+
+// SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
+func (sm *SnapshotManager) SetSnapshotFrequency(frequency int) {
+	if frequency < 0 {
+		frequency = 0
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.frequencyBlocks = uint64(frequency)
+}
+
 // OnEpochAdvanced được gọi khi epoch transition xảy ra
 func (sm *SnapshotManager) OnEpochAdvanced(boundaryBlock uint64, newEpoch uint64) {
 	if !sm.enabled {
@@ -235,12 +254,13 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 		return
 	}
 
-	// Trigger snapshots every 50 blocks for testing purposes,
-	// or if epoch advanced properly.
-	isTestTrigger := blockNumber > 0 && blockNumber%50 == 0
+	// Tính năng 1: Tạo snapshot khi nhận được tín hiệu qua Epoch
 	isStandardTrigger := sm.snapshotPending && blockNumber >= (sm.epochBoundaryBlock+uint64(sm.blocksAfterEpoch))
 
-	if !isTestTrigger && !isStandardTrigger {
+	// Tính năng 2: Tạo snapshot tĩnh dựa trên chu kỳ block cố định
+	isPeriodicTrigger := sm.frequencyBlocks > 0 && blockNumber > 0 && blockNumber%sm.frequencyBlocks == 0
+
+	if !isStandardTrigger && !isPeriodicTrigger {
 		sm.mu.Unlock()
 		return
 	}
@@ -262,6 +282,15 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 
 		logger.Info("📸 [SNAPSHOT] ⏰ Trigger! Creating snapshot at block %d (epoch=%d, boundary=%d, method=%s)",
 			blockNumber, epoch, boundaryBlock, sm.snapshotMethod)
+
+		// Đợi toàn bộ các Goroutine Commit ghi vào MVM, PebbleDB và NOMT hoàn tất
+		sm.mu.Lock()
+		waitCb := sm.waitPersistenceCallback
+		sm.mu.Unlock()
+		if waitCb != nil {
+			logger.Info("⏳ [SNAPSHOT] Waiting for BlockProcessor async persistence pipeline to finish...")
+			waitCb()
+		}
 
 		// Trigger storage flush immediately before snapshot
 		sm.mu.Lock()

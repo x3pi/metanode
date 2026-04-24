@@ -6,7 +6,7 @@ use crate::node::executor_client::ExecutorClient;
 use anyhow::Result;
 use consensus_core::{storage::rocksdb_store::RocksDBStore, storage::Store, BlockAPI, CommitAPI};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub async fn perform_block_recovery_check(
     executor_client: &Arc<ExecutorClient>,
@@ -118,11 +118,17 @@ pub async fn perform_block_recovery_check(
 
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
-        let subdag = consensus_core::load_committed_subdag_from_store(
+        let subdag = match consensus_core::try_load_committed_subdag_from_store(
             recovery_store.as_ref(),
             commit,
             vec![],
-        );
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("⚠️ [RECOVERY] Critical failure loading commit {}: {}. Recovery cannot proceed sequentially.", commit_index, e);
+                return Err(anyhow::anyhow!("Missing block data for commit {}. Deferring to network sync.", commit_index));
+            }
+        };
 
         // Count total TXs to determine how many GEIs this commit will consume
         let total_txs: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();

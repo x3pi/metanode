@@ -958,12 +958,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		return true
 	})
 
-	// TPS OPT Phase 1: Bounded eviction for loadedAccounts.
-	// loadedAccounts grows unbounded across blocks (~10-30K new entries/block).
-	// After 10 blocks, clear it to cap memory at ~300K entries max.
-	// This prevents GC pressure from scanning millions of stale interface{} entries.
-	// FORK-SAFETY: loadedAccounts is a read-only cache — clearing it only
-	// causes re-reads from LRU/trie, which produce identical values.
+	// TPS OPT Phase 1: Bounded eviction for loadedAccounts and lruCache.
+	// loadedAccounts and lruCache grow unbounded across blocks (~10-30K new entries/block).
+	// After 10 blocks, clear them to cap memory. 
+	// FORK-SAFETY: these are read-only caches — clearing/rotating them only
+	// causes re-reads from trie, which produce identical values.
 	db.blocksSinceLoadedClear++
 	if db.blocksSinceLoadedClear >= 10 {
 		db.loadedAccounts.Range(func(key, _ interface{}) bool {
@@ -972,6 +971,15 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		})
 		db.blocksSinceLoadedClear = 0
 		logger.Debug("[TPS-OPT] Cleared loadedAccounts cache (bounded eviction every 10 blocks)")
+
+		// Also rotate lruCache generationally to prevent OOM
+		if db.lruCache != nil {
+			db.lruMu.Lock()
+			db.lruCacheOld = db.lruCache
+			db.lruCache = make(map[common.Address][]byte, 200000)
+			db.lruMu.Unlock()
+			logger.Debug("[TPS-OPT] Rotated lruCache (bounded eviction double-generation swap)")
+		}
 	}
 
 	var newHash common.Hash

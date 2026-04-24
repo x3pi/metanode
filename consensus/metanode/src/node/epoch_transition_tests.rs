@@ -575,7 +575,7 @@ use crate::node::sync_controller::SyncController;
 
 #[tokio::test]
 async fn test_sync_controller_enable_disable_cycle() {
-    let controller = SyncController::new();
+    let controller = SyncController::default();
     assert!(controller.is_disabled());
 
     // Can't enable without a real handle, but we can test disable from disabled state
@@ -589,7 +589,7 @@ async fn test_sync_controller_enable_disable_cycle() {
 
 #[tokio::test]
 async fn test_sync_controller_double_disable() {
-    let controller = SyncController::new();
+    let controller = SyncController::default();
 
     // Both disable calls should be safe
     let r1 = controller.disable_sync().await.unwrap();

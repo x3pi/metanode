@@ -196,6 +196,18 @@ func (app *App) initBlockchain() error {
 			storage.UpdateLastGlobalExecIndex(targetGEI)
 		}
 
+		// ─── Initialize LastExecutedCommitHash from BackupDb ──────────
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
+			if hashBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastExecutedCommitHashKey.Bytes()); err == nil && len(hashBytes) > 0 {
+				storage.UpdateLastExecutedCommitHash(hashBytes)
+				logger.Info("✅ [STARTUP] Loaded LastExecutedCommitHash from BackupDb: %x", hashBytes)
+			} else {
+				// Use zero hash if not found (genesis or first upgrade)
+				storage.UpdateLastExecutedCommitHash(make([]byte, 32))
+				logger.Info("ℹ️  [STARTUP] Defaulted LastExecutedCommitHash to zero hash (not found in BackupDb)")
+			}
+		}
+
 		// ─── Startup State Sync Logging ────────────────────────────────
 		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s",
 			app.startLastBlock.Header().BlockNumber(),

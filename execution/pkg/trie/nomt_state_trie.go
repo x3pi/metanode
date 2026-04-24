@@ -3,6 +3,7 @@ package trie
 import (
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 
@@ -891,8 +892,17 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					group.values = append(group.values, nomtValues[i])
 				}
 
+				// FIX: Map iteration is random. Sort addresses to ensure deterministic
+				// commit sequences, reproducing the exact state transitions as the master node.
+				var sortedAddrs []string
+				for addrHex := range groupedByAddr {
+					sortedAddrs = append(sortedAddrs, addrHex)
+				}
+				slices.Sort(sortedAddrs)
+
 				totalKeys := 0
-				for addrHex, group := range groupedByAddr {
+				for _, addrHex := range sortedAddrs {
+					group := groupedByAddr[addrHex]
 					// Match the keyPrefix format used in trie_factory.go line 111:
 					//   keyPrefix = namespace + "_" + hex.EncodeToString(pg.GetPrefix())
 					keyPrefix := namespace + "_" + addrHex

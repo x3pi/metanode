@@ -60,6 +60,18 @@ pub fn start_unified_epoch_monitor(
         let fast_cycles_max: u32 = 30; // Stay fast for 30 cycles (30s at 1s interval)
         let mut fast_cycles_remaining: u32 = 0;
 
+        // ═══════════════════════════════════════════════════════════════
+        // BLOCK STALL DETECTOR: Track Go block progress for Validators.
+        // If Go blocks stop advancing while peers are ahead, fetch blocks
+        // via P2P to un-stall CommitSyncer (which needs highest_handled_index
+        // to advance for DAG fast-forward/catch-up).
+        // ═══════════════════════════════════════════════════════════════
+        let mut stall_last_go_block: u64 = 0;
+        let mut stall_count: u32 = 0;
+        const STALL_THRESHOLD: u32 = 3;       // 3 consecutive stalls → trigger recovery (30s at 10s poll)
+        const STALL_MIN_GAP: u64 = 10;        // Minimum block gap to consider "stalled"
+        const STALL_FETCH_BATCH: u64 = 500;   // Max blocks to fetch per recovery cycle
+
         loop {
             // T3-4: Use adaptive interval
             let current_interval = if fast_cycles_remaining > 0 {
@@ -81,33 +93,32 @@ pub fn start_unified_epoch_monitor(
 
             // 2. Get NETWORK epoch from peers (critical for late-joiners!)
             // Use peer_rpc_addresses for WAN-based discovery
-            let network_epoch = {
+            // Also capture peer's best block number for stall detection
+            let (network_epoch, peer_best_block) = {
                 let peer_rpc = config_clone.peer_rpc_addresses.clone();
-                let _own_socket = config_clone.executor_receive_socket_path.clone();
 
                 if !peer_rpc.is_empty() {
                     // WAN-based discovery (TCP) - recommended for cross-node sync
                     match crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc).await {
-                        Ok((epoch, _block, peer, _global_exec_index)) => {
+                        Ok((epoch, block, peer, _global_exec_index)) => {
                             if epoch > local_go_epoch {
                                 info!(
                                     "🌐 [EPOCH MONITOR] Network epoch {} from peer {} is AHEAD of local Go epoch {}",
                                     epoch, peer, local_go_epoch
                                 );
                             }
-                            epoch
+                            (epoch, block)
                         }
-                        Err(_) => local_go_epoch, // Fallback to local
+                        Err(_) => (local_go_epoch, 0u64), // Fallback to local
                     }
                 } else {
                     // No WAN peers configured - use local Go epoch
-                    // NOTE: LAN peer_executor_sockets was removed. For cross-node sync, configure peer_rpc_addresses.
-                    local_go_epoch
+                    (local_go_epoch, 0u64)
                 }
             };
 
             // 3. Get current Rust epoch from node
-            let (rust_epoch, _current_mode) =
+            let (rust_epoch, current_mode) =
                 if let Some(node_arc) = crate::node::get_transition_handler_node().await {
                     let node_guard = node_arc.lock().await;
                     (node_guard.current_epoch, node_guard.node_mode.clone())
@@ -129,110 +140,110 @@ pub fn start_unified_epoch_monitor(
             // Use network_epoch instead of local_go_epoch!
             if network_epoch <= rust_epoch {
                 // ═══════════════════════════════════════════════════════════
-                // SAME-EPOCH PROMOTION: SyncOnly → Validator without epoch change
+                // SAME-EPOCH: No epoch transition needed.
                 //
-                // When a node is restored from snapshot and starts in SyncOnly,
-                // it needs to be promoted to Validator WITHIN the same epoch
-                // once Go has caught up. Without this, the node would stay
-                // SyncOnly until the next epoch transition — which could be
-                // minutes or hours away.
+                // DESIGN: No mid-epoch validator promotion/demotion.
+                // Validator role changes ONLY happen during epoch transitions.
                 //
-                // This makes snapshot restore behave like a node restart:
-                // sync up → join consensus immediately.
+                // HOWEVER: If this Validator's Go blocks are stalled (not
+                // advancing), we need to intervene by fetching blocks from
+                // peers via P2P. This un-stalls CommitSyncer which needs
+                // Go's highest_handled_index to advance for DAG catch-up.
                 // ═══════════════════════════════════════════════════════════
-                if matches!(_current_mode, crate::node::NodeMode::SyncOnly)
-                    || matches!(_current_mode, crate::node::NodeMode::SyncingUp)
+                if matches!(current_mode, crate::node::NodeMode::Validator)
+                    && !config_clone.peer_rpc_addresses.is_empty()
                 {
-                    // Check if this node should be a Validator
-                    let own_protocol_pubkey = {
-                        if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                            let node_guard = node_arc.lock().await;
-                            node_guard.protocol_keypair.public().clone()
-                        } else {
+                    // Get current Go block number
+                    let go_block = match client_arc.get_last_block_number().await {
+                        Ok((b, _, _, _)) => b,
+                        Err(_) => {
                             continue;
                         }
                     };
 
-                    let role = match crate::node::transition::demotion::determine_role_for_epoch(
-                        rust_epoch,
-                        &own_protocol_pubkey,
-                        &config_clone,
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
+                    // Check if Go blocks are stalled: not advancing AND peers are ahead
+                    if peer_best_block > go_block + STALL_MIN_GAP {
+                        if go_block == stall_last_go_block && go_block > 0 {
+                            stall_count += 1;
+                        } else if go_block == 0 && stall_last_go_block == 0 {
+                            // Fresh node at block 0 — also counts as stalled
+                            stall_count += 1;
+                        } else {
+                            // Block advanced — reset stall counter
+                            stall_count = 0;
+                        }
+                        stall_last_go_block = go_block;
 
-                    if matches!(role, crate::node::NodeMode::Validator) {
-                        // Node IS in committee — check if Go has caught up
-                        let (go_block, _, _) = client_arc
-                            .get_last_block_number()
-                            .await
-                            .unwrap_or((0, 0, false));
-
-                        // Query network block height
-                        let net_block = {
-                            let peer_rpc = config_clone.peer_rpc_addresses.clone();
-                            if !peer_rpc.is_empty() {
-                                match crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc)
-                                    .await
-                                {
-                                    Ok((_ep, blk, _peer, _gei)) => blk,
-                                    Err(_) => go_block, // assume caught up if can't query
-                                }
-                            } else {
-                                go_block
-                            }
-                        };
-
-                        let gap = net_block.saturating_sub(go_block);
-                        if gap <= 3 {
-                            info!(
-                                "🚀 [EPOCH MONITOR] Same-epoch promotion! {:?} → Validator in epoch {} (Go block={}, network={})",
-                                _current_mode, rust_epoch, go_block, net_block
+                        if stall_count >= STALL_THRESHOLD {
+                            let fetch_to = std::cmp::min(
+                                go_block + STALL_FETCH_BATCH,
+                                peer_best_block,
+                            );
+                            warn!(
+                                "🚨 [STALL RECOVERY] Validator blocks stalled! go_block={}, peer_block={}, stall_count={}. Fetching blocks {}→{} from peers...",
+                                go_block, peer_best_block, stall_count, go_block + 1, fetch_to
                             );
 
-                            // Get synced_global_exec_index from Go
-                            let synced_gei = client_arc
-                                .get_last_global_exec_index()
-                                .await
-                                .unwrap_or(go_block);
-
-                            if let Some(node_arc) = crate::node::get_transition_handler_node().await
+                            match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                &config_clone.peer_rpc_addresses,
+                                go_block + 1,
+                                fetch_to,
+                            )
+                            .await
                             {
-                                let mut node_guard = node_arc.lock().await;
-                                // Update epoch/GEI state before transition
-                                node_guard.current_epoch = rust_epoch;
-                                node_guard.last_global_exec_index = synced_gei;
+                                Ok(blocks) if !blocks.is_empty() => {
+                                    let count = blocks.len();
+                                    match client_arc.sync_and_execute_blocks(blocks).await {
+                                        Ok((synced, last, _gei)) => {
+                                            info!(
+                                                "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",
+                                                synced, last
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "⚠️ [STALL RECOVERY] sync_and_execute_blocks failed: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                    let _ = count;
 
-                                match crate::node::transition::mode_transition::transition_mode_only(
-                                    &mut node_guard,
-                                    rust_epoch,
-                                    0, // boundary_block unused
-                                    synced_gei,
-                                    &config_clone,
-                                ).await {
-                                    Ok(()) => {
-                                        info!(
-                                            "✅ [EPOCH MONITOR] Same-epoch promotion complete! Node is now Validator at epoch {} (GEI={})",
-                                            rust_epoch, synced_gei
-                                        );
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "❌ [EPOCH MONITOR] Same-epoch promotion failed: {}. Will retry next cycle.",
-                                            e
-                                        );
-                                    }
+                                    // Switch to fast polling to detect rapid recovery
+                                    fast_cycles_remaining = fast_cycles_max;
+                                }
+                                Ok(_) => {
+                                    info!(
+                                        "ℹ️ [STALL RECOVERY] No blocks available from peers (go_block={}, peer_block={})",
+                                        go_block, peer_best_block
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "⚠️ [STALL RECOVERY] Block fetch failed: {}",
+                                        e
+                                    );
                                 }
                             }
+
+                            // Reset stall counter after recovery attempt (will re-trigger if still stalled)
+                            stall_count = 0;
                         } else {
                             debug!(
-                                "⏳ [EPOCH MONITOR] {:?} node in committee but Go still catching up: gap={} blocks (Go={}, network={})",
-                                _current_mode, gap, go_block, net_block
+                                "⏳ [STALL DETECT] go_block={}, peer_block={}, stall_count={}/{}",
+                                go_block, peer_best_block, stall_count, STALL_THRESHOLD
                             );
                         }
+                    } else {
+                        // No stall condition — blocks are advancing or no gap
+                        if stall_count > 0 {
+                            info!(
+                                "✅ [STALL CLEARED] go_block={}, peer_block={} (gap < {}). Resuming normal monitoring.",
+                                go_block, peer_best_block, STALL_MIN_GAP
+                            );
+                        }
+                        stall_count = 0;
+                        stall_last_go_block = go_block;
                     }
                 }
 
@@ -245,9 +256,7 @@ pub fn start_unified_epoch_monitor(
             // SyncOnly nodes don't run full transitions, but Go must advance epoch
             // to serve blocks at the correct epoch to other nodes and to itself.
             // ═══════════════════════════════════════════════════════════════
-            if matches!(_current_mode, crate::node::NodeMode::SyncOnly)
-                || matches!(_current_mode, crate::node::NodeMode::SyncingUp)
-            {
+            if matches!(current_mode, crate::node::NodeMode::SyncOnly) {
                 // Skip if Go is already caught up
                 if local_go_epoch >= network_epoch {
                     continue;
@@ -285,10 +294,10 @@ pub fn start_unified_epoch_monitor(
                                 );
 
                                 // Fetch blocks up to boundary from peers
-                                let (go_block, _, _go_ready) = client_arc
+                                let (go_block, _, _go_ready, _) = client_arc
                                     .get_last_block_number()
                                     .await
-                                    .unwrap_or((0, 0, false));
+                                    .unwrap_or((0, 0, false, [0; 32]));
                                 if go_block < data.boundary_block {
                                     // Fetch missing blocks
                                     match crate::network::peer_rpc::fetch_blocks_from_peer(
@@ -474,10 +483,10 @@ pub fn start_unified_epoch_monitor(
                 let (new_epoch, epoch_timestamp_ms, boundary_block, boundary_gei) = boundary_data;
 
                 // First ensure Go has enough blocks for this epoch
-                let (go_block, _, _go_ready) = client_arc
+                let (go_block, _, _go_ready, _) = client_arc
                     .get_last_block_number()
                     .await
-                    .unwrap_or((0, 0, false));
+                    .unwrap_or((0, 0, false, [0; 32]));
                 if go_block < boundary_block && !peer_rpc.is_empty() {
                     match crate::network::peer_rpc::fetch_blocks_from_peer(
                         &peer_rpc,

@@ -25,7 +25,17 @@ pub(super) async fn setup_validator_consensus(
     committee: consensus_config::Committee,
     config: &NodeConfig,
 ) -> Result<()> {
-    let (commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
+    // can fast-forward baseline and skip re-fetching old commits.
+    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
+        node.last_global_exec_index as u32
+    } else {
+        0
+    };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    let (commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
@@ -56,17 +66,7 @@ pub(super) async fn setup_validator_consensus(
         None
     };
 
-    // Initialize BlockCoordinator for dual-stream block production
-    // Use same initial_next_expected as executor client for consistency
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        initial_next_expected,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!(
-        "📦 [COORDINATOR] BlockCoordinator initialized for epoch {} (next_expected={})",
-        new_epoch, initial_next_expected
-    );
+
 
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
@@ -84,7 +84,6 @@ pub(super) async fn setup_validator_consensus(
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone())
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
@@ -108,7 +107,6 @@ pub(super) async fn setup_validator_consensus(
             NetworkType::Tonic,
             epoch_timestamp,
             actual_epoch_base,
-            node.last_global_exec_index,
             node.own_index,
             committee,
             params,
@@ -122,6 +120,7 @@ pub(super) async fn setup_validator_consensus(
             node.boot_counter,
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()),
+            node.coordination_hub.clone(),
         )
         .await,
     );
@@ -153,10 +152,20 @@ pub(super) async fn setup_synconly_sync(
 ) -> Result<()> {
     info!("🔄 [EPOCH TRANSITION] SyncOnly mode - setting up CommitProcessor for epoch detection");
 
-    let (_commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: SyncOnly also passes Go state for consistency.
+    let go_replay_after_sync = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
+        node.last_global_exec_index as u32
+    } else {
+        0
+    };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    let (_commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
     // Use boundary_gei for epoch_base
     let actual_epoch_base = boundary_gei;
@@ -181,17 +190,6 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
-    // Initialize BlockCoordinator - use same initial_next_expected for consistency
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        initial_next_expected,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!(
-        "📦 [COORDINATOR] BlockCoordinator initialized for SyncOnly epoch {} (next_expected={})",
-        new_epoch, initial_next_expected
-    );
-
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -207,14 +205,24 @@ pub(super) async fn setup_synconly_sync(
         .with_epoch_info(new_epoch, actual_epoch_base)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
+        .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone())
+
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
-    if let Some(c) = exec_client_proc {
-        processor = processor.with_executor_client(c);
+    if let Some(c) = exec_client_proc.clone() {
+        processor = processor.with_executor_client(c.clone());
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                c,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
+        });
     }
 
     tokio::spawn(async move {

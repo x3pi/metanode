@@ -399,6 +399,13 @@ func NewBlockProcessor(
 			executor.ResumeRustConsensus()
 		})
 
+		// Fix: Synchronize snapshot triggering with the asynchronous commit pipeline
+		// This guarantees that pebbleDB and fully flush to memory tables and NOMT
+		// has synced the current block before snapshot logic begins closing DB handlers
+		snapshotManager.SetWaitPersistenceCallback(func() {
+			bp.WaitForPersistence()
+		})
+
 		// Wrap the force flush callback to also wait for persistence
 		if storageMgr := bp.chainState.GetStorageManager(); storageMgr != nil {
 			snapshotManager.SetForceFlushCallback(func() error {
@@ -422,10 +429,11 @@ func NewBlockProcessor(
 		}
 	}
 
-	// PEER DISCOVERY: Start TCP listener for remote Rust nodes to query this Go Master
-	// This enables distributed deployment (nodes on different machines)
+	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer
+	// which now listens on config.PeerRPCPort (e.g. 1920x) for HTTP JSON-RPC.
 	if config.PeerRPCPort > 0 {
-		go bp.runPeerDiscoverySocket(config.PeerRPCPort)
+		// go bp.runPeerDiscoverySocket(config.PeerRPCPort)
+		logger.Info("🌐 [PEER DISCOVERY] Go Master TCP socket listener is intentionally disabled to avoid port conflict with Rust PeerRpcServer")
 	}
 
 

@@ -11,7 +11,15 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
+
+type TrieDatabaseSnapshot struct {
+	TrieCopy p_trie.StateTrie
+	BackUpDb []byte
+	SubPath  string
+	Status   TrieDatabaseStatus
+}
 
 // TrieDatabaseManager quản lý nhiều TrieDatabase
 type TrieDatabaseManager struct {
@@ -41,17 +49,23 @@ func GetTrieDatabaseManager() *TrieDatabaseManager {
 	return instance
 }
 
-// CommitAllTrieDatabases duyệt qua tất cả các TrieDatabase và commit chúng.
-func (manager *TrieDatabaseManager) CommitAllTrieDatabases() error {
-
-	trieIDs := manager.ListAllIDs()
+func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*TrieDatabaseSnapshot) error {
+	trieIDs := make([]common.Hash, 0, len(snapshots))
+	for id := range snapshots {
+		trieIDs = append(trieIDs, id)
+	}
 	slices.SortFunc(trieIDs, func(a, b common.Hash) int {
 		return bytes.Compare(a[:], b[:])
 	})
 
 	for _, id := range trieIDs {
-		trieDB := manager.trieDatabases[id]
-		switch trieDB.GetStatus() {
+		snapshot := snapshots[id]
+		trieDB, exists := manager.trieDatabases[id]
+		if !exists {
+			continue // Should not happen in normal flow, but safety check
+		}
+		
+		switch snapshot.Status {
 		case Deleted:
 			if err := manager.DeleteTrieDatabase(id); err != nil {
 				logger.Error("Failed to delete TrieDatabase", "id", id, "error", err)
@@ -63,17 +77,49 @@ func (manager *TrieDatabaseManager) CommitAllTrieDatabases() error {
 				return err
 			}
 		case Committed:
-			key := trieDB.GetSubPath()
-			value := trieDB.backUpDb
+			key := snapshot.SubPath
+			value := snapshot.BackUpDb
 			// Thêm key-value vào map mới này
 			manager.collectedBatches[key] = value
-			if _, err := trieDB.Commit(); err != nil {
-				return err // Trả về lỗi nếu bất kỳ commit nào không thành công
+			
+			// Commit directly from the snapshot copy
+			if snapshot.TrieCopy != nil {
+				root, nodeSet, _, err := snapshot.TrieCopy.Commit(true)
+				if err != nil {
+					return err
+				}
+				if nodeSet != nil && len(nodeSet.Nodes) > 0 {
+					batch := make([][2][]byte, 0, len(nodeSet.Nodes))
+					for _, node := range nodeSet.Nodes {
+						if node.Hash == (common.Hash{}) {
+							continue
+						}
+						batch = append(batch, [2][]byte{node.Hash.Bytes(), node.Blob})
+					}
+					if len(batch) > 0 {
+						if err := trieDB.db.BatchPut(batch); err != nil {
+							return fmt.Errorf("DB BatchPut failed: %w", err)
+						}
+					}
+				}
+				// ─── SAFE UPDATE OF LIVE TRIE ──────────────────────────────
+				// Update the origin root for future discards
+				trieDB.originRootHash = root
+				// Create a new readonly trie based on the committed root
+				newTrie, err := p_trie.NewStateTrie(root, trieDB.db, false)
+				if err != nil {
+					logger.Error("Error creating new trie after commit: %v", err)
+					return err
+				}
+				// Safely bind the new trie. Pending dirty data in dirtyData is NOT lost
+				// because dirtyData is separate from trieR.
+				trieDB.trieR = newTrie
 			}
 		}
 	}
 	return nil
 }
+
 func (manager *TrieDatabaseManager) GetCollectedBatches() map[string][]byte {
 	result := manager.collectedBatches
 	// Zero-copy swap: return the current map and initialize a new one for the next block
@@ -84,6 +130,30 @@ func (manager *TrieDatabaseManager) GetCollectedBatches() map[string][]byte {
 // ResetCollectedBatches xoa toan bo du lieu (hien tai duoc tich hop vao GetCollectedBatches nhung giu lại de backward compatibility)
 func (manager *TrieDatabaseManager) ResetCollectedBatches() {
 	manager.collectedBatches = make(map[string][]byte)
+}
+
+func (manager *TrieDatabaseManager) SnapshotAllTrieDatabases() map[common.Hash]*TrieDatabaseSnapshot {
+	snapshots := make(map[common.Hash]*TrieDatabaseSnapshot)
+	for id, trieDB := range manager.trieDatabases {
+		var trieCopy p_trie.StateTrie
+		if trieDB.trieR != nil {
+			trieCopy = trieDB.trieR.Copy()
+		}
+		
+		var backUpDb []byte
+		if trieDB.backUpDb != nil {
+			backUpDb = make([]byte, len(trieDB.backUpDb))
+			copy(backUpDb, trieDB.backUpDb)
+		}
+		
+		snapshots[id] = &TrieDatabaseSnapshot{
+			TrieCopy: trieCopy,
+			BackUpDb: backUpDb,
+			SubPath:  trieDB.subPath,
+			Status:   trieDB.status,
+		}
+	}
+	return snapshots
 }
 
 func (manager *TrieDatabaseManager) IntermediateRoot() error {

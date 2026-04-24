@@ -325,6 +325,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 						draining = false
 						// Process the batch first
 						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash()) // update hash from the last empty commit
 						nextExpectedGlobalExecIndex = highestGEI + 1
 						if lastEpochNum > 0 {
 							bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)

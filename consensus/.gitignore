@@ -82,17 +82,17 @@ metanode/config/storage/
 # =============================================================================
 
 # Node configuration files (may contain sensitive data)
-metanode/config/node_*.toml
-metanode/config/committee.json
-metanode/config/committee_*.json
-metanode/config/epoch_timestamp.txt
+# metanode/config/node_*.toml
+# metanode/config/committee.json
+# metanode/config/committee_*.json
+# metanode/config/epoch_timestamp.txt
 
 # Cryptographic keys (NEVER COMMIT - Contains private keys!)
-metanode/config/node_*_protocol_key.json
-metanode/config/node_*_network_key.json
+# metanode/config/node_*_protocol_key.json
+# metanode/config/node_*_network_key.json
 **/private_key.pem
 **/secret_key.pem
-**/*_key.json
+# **/*_key.json
 
 # Environment files (may contain secrets)
 **/.env
@@ -179,8 +179,8 @@ Thumbs.db
 
 # External binaries (built from source)
 sui
-simple_chain
-**/simple_chain
+# /simple_chain
+# **/simple_chain
 **/mysticeti-*
 
 # Go binaries

@@ -147,11 +147,12 @@ type SimpleChainConfig struct {
 	AppPepper      string `json:"app_pepper,omitempty"`
 
 	// Snapshot configuration
-	SnapshotEnabled     bool   `json:"snapshot_enabled"`      // Bật/tắt tự động snapshot
-	SnapshotServerPort  int    `json:"snapshot_server_port"`  // Port HTTP server cho snapshot (default: 8700)
-	SnapshotBlocksDelay int    `json:"snapshot_blocks_delay"` // Số blocks chờ sau epoch transition (default: 20)
-	SnapshotMethod      string `json:"snapshot_method"`       // "hardlink" (default) hoặc "rsync" (safe cho Xapian)
-	SnapshotSourceDir   string `json:"snapshot_source_dir"`   // Thư mục cần snapshot (mặc định = RootPath parent)
+	SnapshotEnabled         bool   `json:"snapshot_enabled"`                    // Bật/tắt tự động snapshot
+	SnapshotServerPort      int    `json:"snapshot_server_port"`                // Port HTTP server cho snapshot (default: 8700)
+	SnapshotBlocksDelay     int    `json:"snapshot_blocks_delay"`               // Số blocks chờ sau epoch transition (default: 20)
+	SnapshotMethod          string `json:"snapshot_method"`                     // "hardlink" (default) hoặc "rsync" (safe cho Xapian)
+	SnapshotSourceDir       string `json:"snapshot_source_dir"`                 // Thư mục cần snapshot (mặc định = RootPath parent)
+	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
 
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.

@@ -227,6 +227,13 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                     retries += 1;
                                     break 'stream;
                                 }
+                                ConsensusError::Shutdown => {
+                                    debug!(
+                                        "Subscriber block handler shut down for peer {} {}",
+                                        peer, peer_hostname
+                                    );
+                                    break 'stream;
+                                }
                                 _ => {
                                     info!(
                                         "Invalid block received from peer {} {}: {}",

@@ -18,11 +18,11 @@ use crate::{
     block_manager::BlockManager,
     block_verifier::SignedBlockVerifier,
     commit_observer::CommitObserver,
-    commit_syncer::{CommitSyncer, CommitSyncerHandle},
+    commit_syncer::CommitSyncerHandle,
     commit_vote_monitor::CommitVoteMonitor,
     context::{Clock, Context},
     core::{Core, CoreSignals},
-    core_thread::{ChannelCoreThreadDispatcher, CoreThreadDispatcher, CoreThreadHandle},
+    core_thread::{ChannelCoreThreadDispatcher, CoreThreadHandle},
     dag_state::DagState,
     leader_schedule::LeaderSchedule,
     leader_timeout::{LeaderTimeoutTask, LeaderTimeoutTaskHandle},
@@ -54,7 +54,6 @@ impl ConsensusAuthority {
         network_type: NetworkType,
         epoch_start_timestamp_ms: u64,
         epoch_base_index: u64,
-        last_global_exec_index: u64,
         own_index: AuthorityIndex,
         committee: Committee,
         parameters: Parameters,
@@ -73,13 +72,13 @@ impl ConsensusAuthority {
         system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
         // Legacy store manager from ConsensusNode, to avoid re-opening locked RocksDB files
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         match network_type {
             NetworkType::Tonic => {
                 let authority = AuthorityNode::start(
                     epoch_start_timestamp_ms,
                     epoch_base_index,
-                    last_global_exec_index,
                     own_index,
                     committee,
                     parameters,
@@ -93,6 +92,7 @@ impl ConsensusAuthority {
                     boot_counter,
                     system_transaction_provider,
                     legacy_store_manager,
+                    coordination_hub,
                 )
                 .await;
                 Self::WithTonic(Some(authority))
@@ -137,6 +137,13 @@ impl ConsensusAuthority {
             Self::WithTonic(None) => {
                 panic!("take_store() called after authority was stopped — caller must check lifecycle before access")
             }
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::WithTonic(Some(authority)) => authority.is_alive(),
+            Self::WithTonic(None) => false,
         }
     }
 }
@@ -207,7 +214,6 @@ where
     pub(crate) async fn start(
         epoch_start_timestamp_ms: u64,
         epoch_base_index: u64,
-        last_global_exec_index: u64,
         own_index: AuthorityIndex,
         committee: Committee,
         parameters: Parameters,
@@ -225,6 +231,7 @@ where
         // Legacy store manager passed from ConsensusNode to avoid RocksDB lock conflicts
         // during epoch transitions. If None, no legacy stores will be available.
         existing_legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         assert!(
             committee.is_valid_index(own_index),
@@ -306,15 +313,26 @@ where
             "consensus db_path must be valid UTF-8 — check Parameters::db_path configuration",
         );
         let store = Arc::new(RocksDBStore::new(store_path));
-        let mut dag_state = DagState::new(context.clone(), store.clone());
+        let dag_state = DagState::new(context.clone(), store.clone());
 
-        // FORK PREVENTION: If DAG is empty (snapshot restore) but Go is already ahead,
-        // we MUST align the initial commit index with Go's expected state
-        if last_global_exec_index > epoch_base_index {
-            let next_commit_index = (last_global_exec_index - epoch_base_index) as u32 + 1;
-            dag_state.align_commit_index_with_go(next_commit_index);
-        }
+        // CRITICAL FIX: Align the CommitConsumerMonitor with the GREATER of:
+        // 1. DAG state's last_commit_index (persisted Rust consensus progress)
+        // 2. Go's replay_after_commit_index (Go execution progress from snapshot)
+        // On snapshot restart: DAG is empty (0), but Go has processed up to replay_after (e.g. 1000).
+        // Using max() ensures CommitSyncer detects the snapshot state and triggers fast-forward.
+        let go_handled = commit_consumer.replay_after_commit_index;
+        let dag_handled = dag_state.last_commit_index();
+        let effective_handled = go_handled.max(dag_handled);
+        commit_consumer.monitor().set_highest_handled_commit(effective_handled);
+        info!(
+            "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
+            go_handled, dag_handled, effective_handled
+        );
 
+        // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
+        // during the FastForwarding phase (see commit_syncer.rs). 
+        // We intentionally do NOT align here because we need real network data
+        // (commits from peers) to determine the correct baseline.
         let dag_state = Arc::new(RwLock::new(dag_state));
 
         let block_verifier = Arc::new(SignedBlockVerifier::new(
@@ -333,6 +351,7 @@ where
             context.clone(),
             signals_receivers.block_broadcast_receiver(),
             transaction_certifier.clone(),
+            coordination_hub.clone(),
         );
 
         info!(
@@ -342,9 +361,8 @@ where
         let proposed_block_handler =
             spawn_logged_monitored_task!(proposed_block_handler.run(), "proposed_block_handler");
 
-        let highest_accepted_round_at_start = dag_state.read().highest_accepted_round();
         let sync_last_known_own_block = boot_counter == 0
-            && highest_accepted_round_at_start == 0
+            && dag_state.read().highest_accepted_round() == 0
             && !context
                 .parameters
                 .sync_last_known_own_block_timeout
@@ -371,28 +389,8 @@ where
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
-        // Create adaptive delay state
-        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(
-            min_round_delay_ms,
-            adaptive_delay_enabled,
-        ));
-        info!(
-            "Adaptive delay enabled: base_delay={}ms",
-            min_round_delay_ms
-        );
-
-        // ═══════════════════════════════════════════════════════════════════
-        // QUORUM READINESS GATE: Create flag that blocks proposals until
-        // enough peers are connected. This prevents startup forks where
-        // isolated subgroups form independent consensus.
-        // ═══════════════════════════════════════════════════════════════════
-        let quorum_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let quorum_threshold = context.committee.quorum_threshold();
-        let committee_size = context.committee.size();
-        info!(
-            "🔒 [QUORUM GATE] Initialized: quorum_threshold={}, committee_size={}",
-            quorum_threshold, committee_size
-        );
+        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
+        info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
 
         let core = Core::new(
             context.clone(),
@@ -408,7 +406,7 @@ where
             round_tracker.clone(),
             Some(adaptive_delay_state.clone()),
             system_transaction_provider, // System transaction provider for Sui-style epoch transition
-            quorum_ready.clone(),
+            coordination_hub.clone(),
         );
 
         let (core_dispatcher, core_thread_handle) =
@@ -430,7 +428,7 @@ where
             sync_last_known_own_block,
         );
 
-        let commit_syncer_handle = CommitSyncer::new(
+        let commit_syncer_handle = crate::commit_syncer::CommitSyncerSupervisor::start(
             context.clone(),
             core_dispatcher.clone(),
             commit_vote_monitor.clone(),
@@ -439,9 +437,9 @@ where
             transaction_certifier.clone(),
             network_client.clone(),
             dag_state.clone(),
+            coordination_hub,
             Some(adaptive_delay_state.clone()),
-        )
-        .start();
+        );
 
         let round_prober_handle = RoundProber::new(
             context.clone(),
@@ -501,107 +499,6 @@ where
 
         network_manager.install_service(network_service).await;
 
-        // ═══════════════════════════════════════════════════════════════════
-        // QUORUM MONITOR: Polls highest_received_rounds to detect real peers.
-        //
-        // No deadlock because round 1 proposals are ALWAYS allowed by the
-        // quorum gate in proposer.rs (clock_round > 1 check). Round 1 blocks
-        // flow freely through the network, updating highest_received_rounds.
-        // Once peers with total stake ≥ quorum_threshold show round > 0,
-        // quorum_ready is set and round 2+ proposals are unlocked.
-        //
-        // NOTE: quorum_threshold is STAKE-weighted (e.g., 2667 for 4×1000),
-        // so we must sum peer stakes, not count peers.
-        //
-        // Timeout after 30s as a safety fallback.
-        // ═══════════════════════════════════════════════════════════════════
-        {
-            let quorum_ready_clone = quorum_ready.clone();
-            let dispatcher_clone = core_dispatcher.clone();
-            let quorum_threshold_val = quorum_threshold;
-            let own_index_val = context.own_index;
-            let committee_size_val = committee_size;
-            // Collect per-authority stakes for stake-weighted comparison
-            let authority_stakes: Vec<u64> = context
-                .committee
-                .authorities()
-                .map(|(_, a)| a.stake)
-                .collect();
-            let own_stake = authority_stakes[own_index_val.value()];
-            let total_stake: u64 = authority_stakes.iter().sum();
-            info!(
-                "🔒 [QUORUM GATE] Initialized: quorum_threshold={} (stake-weighted), \
-                 total_stake={}, own_stake={}, committee_size={}",
-                quorum_threshold_val, total_stake, own_stake, committee_size_val
-            );
-            // COLD-START: If boot_counter > 0 and DAG is empty, Phase 1 sync
-            // already verified peers are reachable. Use shorter timeout (5s)
-            // instead of 30s to avoid blocking proposals at high rounds.
-            // NOTE: highest_accepted_round was captured before dag_state was
-            // moved into Subscriber::new, reuse it here.
-            let is_cold_start_boot = boot_counter > 0
-                && highest_accepted_round_at_start == 0;
-            let gate_timeout_secs = if is_cold_start_boot { 5u64 } else { 30u64 };
-            if is_cold_start_boot {
-                info!(
-                    "⚡ [QUORUM GATE] Cold-start detected (boot_counter={}, empty DAG). \
-                     Reduced timeout to {}s (was 30s).",
-                    boot_counter, gate_timeout_secs
-                );
-            }
-            tokio::spawn(async move {
-                let timeout = tokio::time::Duration::from_secs(gate_timeout_secs);
-                let start = tokio::time::Instant::now();
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
-
-                loop {
-                    interval.tick().await;
-
-                    // Safety timeout
-                    if start.elapsed() >= timeout {
-                        tracing::warn!(
-                            "⚠️ [QUORUM GATE] Timeout after {}s. Enabling proposals as fallback.",
-                            gate_timeout_secs
-                        );
-                        quorum_ready_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break;
-                    }
-
-                    // Sum stakes of peers with received rounds > 0
-                    let received_rounds = dispatcher_clone.highest_received_rounds();
-                    let mut active_stake: u64 = own_stake; // include ourselves
-                    let mut peers_heard: usize = 0;
-                    for (i, round) in received_rounds.iter().enumerate() {
-                        if i != own_index_val.value() && *round > 0 {
-                            active_stake += authority_stakes[i];
-                            peers_heard += 1;
-                        }
-                    }
-
-                    if active_stake >= quorum_threshold_val {
-                        tracing::info!(
-                            "🔓 [QUORUM GATE] Quorum reached: stake {}/{} ({} peers + self). \
-                             Enabling round 2+ proposals.",
-                            active_stake,
-                            total_stake,
-                            peers_heard
-                        );
-                        quorum_ready_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break;
-                    }
-
-                    tracing::debug!(
-                        "🔒 [QUORUM GATE] Waiting: stake {}/{} ({} peers), \
-                         need {} for quorum. Elapsed: {:?}",
-                        active_stake,
-                        total_stake,
-                        peers_heard,
-                        quorum_threshold_val,
-                        start.elapsed()
-                    );
-                }
-            });
-        }
 
         info!(
             "✅ [AUTHORITY NODE] Consensus authority started, took {:?}",
@@ -648,10 +545,10 @@ where
         self.round_prober_handle.stop().await;
         self.proposed_block_handler.abort();
         self.leader_timeout_handle.stop().await;
+        // Stop block subscriptions before stopping Core to prevent sending blocks to closed channel.
+        self.subscriber.stop();
         // Shutdown Core to stop block productions and broadcast.
         self.core_thread_handle.stop().await;
-        // Stop block subscriptions before stopping network server.
-        self.subscriber.stop();
         self.network_manager.stop().await;
 
         self.context
@@ -659,6 +556,21 @@ where
             .node_metrics
             .uptime
             .observe(self.start_time.elapsed().as_secs_f64());
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        let syncer_alive = self.commit_syncer_handle.is_alive();
+        let core_alive = self.core_thread_handle.is_alive();
+        
+        if !syncer_alive || !core_alive {
+            tracing::warn!(
+                "🔴 [AUTHORITY LIVENESS] Node internal task crashed! CommitSyncer alive: {}, CoreThread alive: {}",
+                syncer_alive, core_alive
+            );
+            false
+        } else {
+            true
+        }
     }
 
     pub(crate) fn transaction_client(&self) -> Arc<TransactionClient> {
@@ -712,7 +624,7 @@ mod tests {
         let protocol_keypair = keypairs[own_index].1.clone();
         let network_keypair = keypairs[own_index].0.clone();
 
-        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0, [0; 32]);
 
         let authority = ConsensusAuthority::start(
             network_type,
@@ -732,6 +644,7 @@ mod tests {
             0,
             None,
             None, // legacy_store_manager
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
         )
         .await;
 
@@ -1099,7 +1012,7 @@ mod tests {
         let protocol_keypair = keypairs[index].1.clone();
         let network_keypair = keypairs[index].0.clone();
 
-        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
 
         let authority = ConsensusAuthority::start(
             network_type,

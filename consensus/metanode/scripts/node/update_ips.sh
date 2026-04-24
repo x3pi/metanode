@@ -50,7 +50,7 @@ GO_CONFIG_DIR="$GO_DIR/cmd/simple_chain"
 # Consensus P2P ports per node
 CONSENSUS_PORTS=(9000 9001 9002 9003 9004)
 # Peer RPC ports per node
-PEER_RPC_PORTS=(19000 19001 19002 19003 19004)
+PEER_RPC_PORTS=(19200 19201 19202 19203 19204)
 # Rust RPC ports (metrics + 1000) per node
 RUST_RPC_PORTS=(10100 10101 10102 10103 10104)
 # altRust RPC ports for meta_node_rpc_address (some configs use 10111, 10112 etc)

@@ -203,6 +203,7 @@ impl ExecutorClient {
                     leader_author_index: subdag.leader.author.value() as u32,
                     leader_address: leader_address.clone().unwrap_or_default(),
                     block_number,
+                    commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -430,13 +431,13 @@ impl ExecutorClient {
                     {
                         let go_next_expected = go_last_gei + 1;
 
+                        let mut buffer = self.send_buffer.lock().await;
                         let mut next_expected_guard = self.next_expected_index.lock().await;
                         if go_next_expected > *next_expected_guard {
                             info!("📊 [SINGLE-SOURCE-TRUTH] Updating next_expected from {} to {} (from Go last_gei={})",
                                 *next_expected_guard, go_next_expected, go_last_gei);
                             *next_expected_guard = go_next_expected;
 
-                            let mut buffer = self.send_buffer.lock().await;
                             let before_clear = buffer.len();
                             buffer.retain(|&k, _| k >= go_next_expected);
                             let after_clear = buffer.len();
@@ -455,7 +456,6 @@ impl ExecutorClient {
                             // SAFE: advance next_expected to min_buffered so flush_buffer
                             // can start sending. Go will receive blocks in sequential GEI
                             // order from flush_buffer (BTreeMap + sequential iteration).
-                            let buffer = self.send_buffer.lock().await;
                             let min_buf = *buffer.keys().next().unwrap_or(&0);
                             if min_buf > *next_expected_guard {
                                 warn!("🚀 [RESTORE-GAP-BRIDGE] Go is behind (gei={}), buffer starts at {}. Advancing next_expected {} → {} to bridge transition gap",
@@ -622,7 +622,7 @@ impl ExecutorClient {
 
         // Phase 5: Go verification (periodic RPC check)
         if last_idx.is_multiple_of(GO_VERIFICATION_INTERVAL) {
-            if let Ok((go_last_block, _, _)) = self.get_last_block_number().await {
+            if let Ok((go_last_block, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
                     error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
@@ -784,6 +784,7 @@ impl ExecutorClient {
             leader_author_index: subdag.leader.author.value() as u32,
             leader_address: leader_address.unwrap_or_default(),
             block_number,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
         };
 
         let mut buf = Vec::new();
@@ -913,6 +914,7 @@ impl ExecutorClient {
             leader_author_index: subdag.leader.author.value() as u32,
             leader_address: leader_address.unwrap_or_default(),
             block_number,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
         };
 
         // Encode to protobuf bytes using prost::Message::encode

@@ -25,7 +25,6 @@ use parking_lot::{Mutex, RwLock};
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
 use tap::TapFallible;
 use tokio::{
-    runtime::Handle,
     sync::{mpsc::error::TrySendError, oneshot},
     task::{JoinError, JoinSet},
     time::{sleep, sleep_until, timeout, Instant},
@@ -556,25 +555,33 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         // Limit the number of the returned blocks processed.
         serialized_blocks.truncate(context.parameters.max_blocks_per_sync);
 
-        // Verify all the fetched blocks
-        let blocks = Handle::current()
-            .spawn_blocking({
-                let block_verifier = block_verifier.clone();
-                let context = context.clone();
-                let dag_state = dag_state.clone();
-                move || {
-                    Self::verify_blocks(
-                        serialized_blocks,
-                        block_verifier,
-                        transaction_certifier,
-                        &context,
-                        peer_index,
-                        dag_state,
-                    )
-                }
-            })
-            .await
-            .expect("Spawn blocking should not fail")?;
+        // Verify all the fetched blocks in parallel chunks
+        let chunk_size = std::cmp::max(1, context.parameters.max_blocks_per_sync / 4.max(1));
+        let mut verification_tasks = Vec::new();
+        for chunk in serialized_blocks.chunks(chunk_size) {
+            let chunk = chunk.to_vec();
+            let block_verifier = block_verifier.clone();
+            let context = context.clone();
+            let dag_state = dag_state.clone();
+            let transaction_certifier = transaction_certifier.clone();
+            
+            verification_tasks.push(tokio::task::spawn_blocking(move || {
+                Self::verify_blocks(
+                    chunk,
+                    block_verifier,
+                    transaction_certifier,
+                    &context,
+                    peer_index,
+                    dag_state,
+                )
+            }));
+        }
+
+        let mut blocks = Vec::new();
+        for result in futures::future::join_all(verification_tasks).await {
+            let verified_chunk = result.expect("Spawn blocking should not fail")?;
+            blocks.extend(verified_chunk);
+        }
 
         // Record commit votes from the verified blocks.
         for block in &blocks {

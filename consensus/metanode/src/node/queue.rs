@@ -201,19 +201,33 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
                     break;
                 }
             };
-            match proxy.submit(vec![tx_data.clone()]).await {
-                Ok(_) => {
+            // Use a timeout so that if the consensus channel is full/stalled, we don't hang the thread FOREVER.
+            // If it times out, we treat it as a failure and let the retry/total_timeout logic handle it.
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(5000),
+                proxy.submit(vec![tx_data.clone()])
+            ).await {
+                Ok(Ok(_)) => {
                     successful_count += 1;
                     submitted = true;
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     retry += 1;
                     // Cap delay to prevent exponential explosion
                     let delay = std::cmp::min(200 * (1u64 << (retry - 1)), max_delay_ms);
                     warn!(
                         "⚠️ Failed to submit (attempt {}/{}): {}. Retry in {}ms",
                         retry, max_retries, e, delay
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+                Err(_) => {
+                    retry += 1;
+                    let delay = std::cmp::min(200 * (1u64 << (retry - 1)), max_delay_ms);
+                    warn!(
+                        "⚠️ Timeout submitting tx (attempt {}/{}). Retry in {}ms",
+                        retry, max_retries, delay
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }

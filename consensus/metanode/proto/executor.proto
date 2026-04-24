@@ -40,5 +40,8 @@ message ExecutableBlock {
     // Go MUST use this block number to ensure all nodes agree on block heights,
     // avoiding inflation from edge cases like repeated empty epoch boundary processing.
     uint64 block_number = 8;
+    // CRITICAL FORK-SAFETY: Rust DAG commit digest
+    // Go MUST store this hash and return it in LastBlockNumberResponse for anti-fork checks
+    bytes commit_hash = 9;
 }
 

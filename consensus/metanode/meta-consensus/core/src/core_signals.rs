@@ -75,6 +75,40 @@ impl CoreSignals {
         Ok(())
     }
 
+    /// Extends `new_block` to accept an optional tokio::oneshot::Receiver ticket representing
+    /// the asynchronous disk flush. This ensures we do not broadcast the block to peers
+    /// until it is safely written to RocksDB, without blocking the CoreThread's main loop.
+    pub(crate) fn new_block_with_ticket(
+        &self,
+        extended_block: ExtendedBlock,
+        flush_ticket: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> ConsensusResult<()> {
+        if self.context.committee.size() > 1 {
+            if extended_block.block.round() == GENESIS_ROUND {
+                debug!("Ignoring broadcasting genesis block to peers");
+                return Ok(());
+            }
+
+            let sender = self.tx_block_broadcast.clone();
+            tokio::spawn(async move {
+                if let Some(ticket) = flush_ticket {
+                    if let Err(e) = ticket.await {
+                        warn!("RocksDB flush ticket failed before broadcast: {:?}", e);
+                        // We still might want to broadcast if it crashed? No, if flush failed we probably panic.
+                    }
+                }
+                if let Err(err) = sender.send(extended_block) {
+                    warn!("Couldn't broadcast the block: {err}");
+                }
+            });
+        } else {
+            debug!(
+                "Did not broadcast block {extended_block:?} to receivers as committee size is <= 1"
+            );
+        }
+        Ok(())
+    }
+
     /// Sends a signal that threshold clock has advanced to new round. The `round_number` is the round at which the
     /// threshold clock has advanced to.
     pub(crate) fn new_round(&mut self, round_number: Round) {

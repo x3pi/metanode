@@ -19,7 +19,7 @@ use mysten_metrics::{
 use parking_lot::RwLock;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
-use tracing::warn;
+
 
 use crate::{
     block::VerifiedBlock,
@@ -102,6 +102,10 @@ impl CoreThreadHandle {
         if let Some(join_handle) = self.join_handle.take() {
             join_handle.await.ok();
         }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.join_handle.as_ref().map_or(false, |h| !h.is_finished())
     }
 }
 
@@ -252,7 +256,13 @@ impl ChannelCoreThreadDispatcher {
         let join_handle = spawn_logged_monitored_task!(
             async move {
                 if let Err(err) = core_thread.run().await {
-                    if !matches!(err, ConsensusError::Shutdown) {
+                    if matches!(err, ConsensusError::Shutdown) {
+                        tracing::warn!(
+                            "🔴 [CORE THREAD] Exiting due to Shutdown. \
+                             This may be intentional (epoch transition / stop()) or caused by \
+                             CommitFinalizer crash. Check for '⚠️ [COMMIT-FINALIZER]' warnings above."
+                        );
+                    } else {
                         panic!("Fatal error occurred: {err}");
                     }
                 }
@@ -280,7 +290,7 @@ impl ChannelCoreThreadDispatcher {
         self.context.metrics.node_metrics.core_lock_enqueued.inc();
         if let Some(sender) = self.sender.upgrade() {
             if let Err(err) = sender.send(command).await {
-                warn!(
+                tracing::debug!(
                     "Couldn't send command to core thread, probably is shutting down: {}",
                     err
                 );
@@ -495,7 +505,7 @@ mod test {
         let (signals, signal_receivers) = CoreSignals::new(context.clone());
         let _block_receiver = signal_receivers.block_broadcast_receiver();
         let (commit_consumer, _commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, 0);
+            CommitConsumerArgs::new(0, 0, [0; 32]);
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
             dag_state.clone(),
@@ -528,7 +538,7 @@ mod test {
             round_tracker,
             None, // adaptive_delay_state - not used in tests
             None, // system_transaction_provider - not used in tests
-            Arc::new(std::sync::atomic::AtomicBool::new(true)), // quorum_ready - always ready in tests
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
         );
 
         let (core_dispatcher, handle) =

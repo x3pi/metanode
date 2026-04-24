@@ -119,7 +119,7 @@ pub struct BlockCoordinator {
     /// Consensus lock — when true, sync blocks are immediately rejected.
     /// This prevents buffering sync blocks when consensus is actively producing,
     /// eliminating unnecessary resource usage and race conditions.
-    /// Toggled ON by DualStreamController on convergence or startup catch-up complete.
+    /// Toggled ON when consensus is active and producing blocks.
     /// Toggled OFF when node needs to catch up from peers (cold start, lag recovery).
     consensus_locked: Arc<AtomicBool>,
 

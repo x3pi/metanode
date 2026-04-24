@@ -22,7 +22,6 @@ use tracing::{debug, info, warn};
 
 /// Calculate a deterministic hash of the committee for verification/debugging
 /// This hash can be compared across nodes to detect committee mismatches
-#[allow(dead_code)]
 pub fn calculate_committee_hash(committee: &Committee) -> [u8; 32] {
     let mut hasher = Keccak256::new();
 
@@ -83,7 +82,7 @@ impl CommitteeSource {
         let local_block = local_client
             .get_last_block_number()
             .await
-            .map(|(b, _, _)| b)
+            .map(|(b, _, _, _)| b)
             .unwrap_or(0);
 
         info!(
