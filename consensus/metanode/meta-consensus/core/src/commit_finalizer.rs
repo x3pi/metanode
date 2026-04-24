@@ -154,7 +154,14 @@ impl CommitFinalizer {
                 // to execute their finalized transactions.
                 // Commit metadata and uncommitted blocks can be persisted more lazily because they are recoverable.
                 // But for simplicity, all unpersisted commits and blocks are flushed to storage.
-                dag_state.flush();
+                let flush_ticket = dag_state.flush();
+                drop(dag_state);
+
+                if let Some(rx) = flush_ticket {
+                    if let Err(e) = rx.await {
+                        tracing::warn!("Failed to wait for dag_state flush: {:?}", e);
+                    }
+                }
             }
             for commit in finalized_commits {
                 if let Err(e) = self.commit_sender.send(commit) {

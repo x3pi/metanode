@@ -428,7 +428,7 @@ where
             sync_last_known_own_block,
         );
 
-        let commit_syncer_handle = CommitSyncer::new(
+        let commit_syncer_handle = crate::commit_syncer::CommitSyncerSupervisor::start(
             context.clone(),
             core_dispatcher.clone(),
             commit_vote_monitor.clone(),
@@ -439,8 +439,7 @@ where
             dag_state.clone(),
             coordination_hub,
             Some(adaptive_delay_state.clone()),
-        )
-        .start();
+        );
 
         let round_prober_handle = RoundProber::new(
             context.clone(),

@@ -138,7 +138,7 @@ impl DagState {
     }
 
     // Sets the block as committed in the cache. If the block is set as committed for first time, then true is returned, otherwise false is returned instead.
-    // Method will panic if the block is not found in the cache.
+    // If the block is not found in the cache, it gracefully attempts to load it from the database instead of panicking.
     pub fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
         if let Some(block_info) = self.recent_blocks.get_mut(block_ref) {
             if !block_info.committed {
@@ -470,7 +470,7 @@ impl DagState {
     ///
     /// After each flush, DagState becomes persisted in storage and it expected to recover
     /// all internal states from storage after restarts.
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let _s = self
             .context
             .metrics
@@ -489,8 +489,12 @@ impl DagState {
             && pending_commit_info.is_empty()
             && pending_finalized_commits.is_empty()
         {
-            return;
+            return None;
         }
+
+        let (tx_flush, rx_flush) = tokio::sync::oneshot::channel();
+        let store = self.store.clone();
+        let metrics = self.context.metrics.node_metrics.clone();
 
         debug!(
             "Flushing {} blocks ({}), {} commits ({}), {} commit infos ({}), {} finalized commits ({}) to storage.",
@@ -515,19 +519,21 @@ impl DagState {
                 .map(|(commit_ref, _)| commit_ref.to_string())
                 .join(","),
         );
-        self.store
-            .write(WriteBatch::new(
-                pending_blocks,
-                pending_commits,
-                pending_commit_info,
-                pending_finalized_commits,
-            ))
-            .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
-        self.context
-            .metrics
-            .node_metrics
-            .dag_state_store_write_count
-            .inc();
+        let write_batch = WriteBatch::new(
+            pending_blocks,
+            pending_commits,
+            pending_commit_info,
+            pending_finalized_commits,
+        );
+
+        tokio::task::spawn_blocking(move || {
+            store
+                .write(write_batch)
+                .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
+            metrics.dag_state_store_write_count.inc();
+            // Notify waiters that flush is complete
+            let _ = tx_flush.send(());
+        });
 
         // Clean up old cached data. After flushing, all cached blocks are guaranteed to be persisted.
         for (authority_index, _) in self.context.committee.authorities() {
@@ -553,6 +559,8 @@ impl DagState {
                 .map(std::collections::BTreeSet::len)
                 .sum::<usize>() as i64,
         );
+
+        Some(rx_flush)
     }
 
     pub fn recover_last_commit_info(&self) -> Option<(CommitRef, CommitInfo)> {

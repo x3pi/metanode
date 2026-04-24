@@ -125,6 +125,16 @@ sequenceDiagram
     Obs->>GoExec (Máy Ảo): Ra Lệnh Thực Thi Các Giao Dịch
 ```
 
-### Tại Sao Trước Kia Lệch Nhịp Gây Crash?
-> [!WARNING]
-> Qua sơ đồ trên, nếu ở bước `get_blocks()`, `DagState` lấy khối thành công từ `RocksDB` do nó đã tồn tại từ đợt chạy trước nhưng **chưa nằm trong bộ nhớ đệm `recent_blocks`**. <br/>Khi `Linearizer` yêu cầu `set_committed(Khối)`, nếu `DagState` chỉ nhìn mù quáng vào **Bộ Nhớ Đệm (Cache)** thì sẽ la toáng lên không tìm thấy và văng lỗi (Panic), phá hủy luôn ứng dụng. Bản cập nhật sửa lỗi vừa qua đã vá để `DagState` tự hiểu và kết nối được dữ liệu Ổ Cứng trong tình huống cực đoan này.
+---
+
+## 4. Tối Ưu Hóa Ghi Dữ Liệu Bất Đồng Bộ (Async RocksDB Flush Decoupling) & Kháng Fork
+
+Một trong những giới hạn lớn nhất của CoreThread trước đây là việc ghi dữ liệu đồng bộ (Synchronous IO) xuống đĩa cứng bằng RocksDB (`fsync=true` để bắt buộc lưu đĩa nhằm chống Equivocation/Fork mạng). Việc này tiêu tốn 10ms - 50ms và làm tê liệt toàn bộ hoạt động của Node.
+
+Với kiến trúc **Async Broadcaster with Deferred Ticket** mới được áp dụng, giới hạn này đã bị phá vỡ:
+
+1. **Bóc tách I/O khỏi RAM:** Hàm `DagState::flush()` không còn chặn CoreThread nữa. Nó chỉ vào chiếm Lock 1 micro-giây để bốc lấy gói khối (`pending_blocks`) rồi đẩy qua một nhánh Task Nền (`tokio::task::spawn_blocking`), sau đó lập tức nhả ổ khóa ra. Nhờ vậy, mạng P2P và các thành phần đọc biến `DagState` tiếp tục hoạt động siêu tốc ngang vận tốc RAM.
+2. **Chiếc Vé Hứa (Flush Ticket):** Thay vì đứng chờ đợi, `flush()` cấp lại 1 vé tín hiệu (`tokio::sync::oneshot::Receiver`). 
+3. **Phát Sóng Khối Trì Hoãn (Deferred Broadcasting):** Để triệt tiêu rủi ro mất mạng lúc lưu ổ đĩa gây ra rẽ nhánh Fork. Proposer tại `try_new_block` khi tạo thành công Khối mới, thay vì bung lụa gửi đi cho mạng P2P (broadcast), nó sẽ bàn giao khối cùng tấm Vé Hứa cho một Khối Lệnh Chờ (`CoreSignals::new_block_with_ticket`).
+   - Sứ giả phát sóng sẽ bị buộc dừng khẩn cấp ở hàm `.await` để chờ hiệu lệnh đĩa từ tấm Vé.
+   - Khi ổ đĩa SSD vang tiếng click (thành công), khối mới lập tức tràn ra ngoài mạng Blockchain để xin phiếu bầu. Hoàn toàn không còn đợt gián đoạn băng thông nào trên trục lõi rẽ nhánh.

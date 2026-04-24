@@ -158,10 +158,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             dag_state,
         });
         let synced_commit_index = inner.dag_state.read().last_commit_index();
-        eprintln!(
-            "🔧 [COMMIT-SYNCER-CONSTRUCT] synced_commit_index={}",
-            synced_commit_index
-        );
+        
         CommitSyncer {
             inner,
             inflight_fetches: JoinSet::new(),
@@ -180,11 +177,84 @@ impl<C: NetworkClient> CommitSyncer<C> {
     }
 
     pub(crate) fn start(self) -> CommitSyncerHandle {
-        eprintln!("🔧 [COMMIT-SYNCER-START] Spawning schedule_loop task");
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let schedule_task = spawn_logged_monitored_task!(self.schedule_loop(rx_shutdown,));
+        let schedule_task = spawn_logged_monitored_task!(self.schedule_loop(rx_shutdown), "commit_syncer_loop");
         CommitSyncerHandle {
             schedule_task,
+            tx_shutdown,
+        }
+    }
+}
+
+/// A Supervisor that wraps CommitSyncer initialization and monitors its task.
+/// If CommitSyncer crashes, it is automatically restarted with backoff to prevent node shutdown.
+pub(crate) struct CommitSyncerSupervisor;
+
+impl CommitSyncerSupervisor {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start<C: NetworkClient + 'static>(
+        context: Arc<Context>,
+        core_thread_dispatcher: Arc<dyn CoreThreadDispatcher>,
+        commit_vote_monitor: Arc<CommitVoteMonitor>,
+        commit_consumer_monitor: Arc<CommitConsumerMonitor>,
+        block_verifier: Arc<dyn BlockVerifier>,
+        transaction_certifier: TransactionCertifier,
+        network_client: Arc<C>,
+        dag_state: Arc<RwLock<DagState>>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+        adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+    ) -> CommitSyncerHandle {
+        let (tx_shutdown, mut rx_shutdown) = oneshot::channel();
+        
+        let supervisor_task = spawn_logged_monitored_task!(
+            async move {
+                let mut restart_delay = Duration::from_secs(1);
+                loop {
+                    tracing::info!("🛡️ [SUPERVISOR] Starting CommitSyncer task...");
+                    let syncer = CommitSyncer::new(
+                        context.clone(),
+                        core_thread_dispatcher.clone(),
+                        commit_vote_monitor.clone(),
+                        commit_consumer_monitor.clone(),
+                        block_verifier.clone(),
+                        transaction_certifier.clone(),
+                        network_client.clone(),
+                        dag_state.clone(),
+                        coordination_hub.clone(),
+                        adaptive_delay_state.clone(),
+                    );
+                    
+                    let mut handle = syncer.start();
+
+                    tokio::select! {
+                        res = &mut handle.schedule_task => {
+                            if let Err(e) = res {
+                                if e.is_panic() {
+                                    tracing::error!("🔴 [SUPERVISOR] CommitSyncer panicked! Restarting in {:?}...", restart_delay);
+                                } else {
+                                    tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
+                                }
+                            } else {
+                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected? Restarting in {:?}...", restart_delay);
+                            }
+                            
+                            tokio::time::sleep(restart_delay).await;
+                            // Exponential backoff capped at 10 seconds
+                            restart_delay = std::cmp::min(restart_delay * 2, Duration::from_secs(10));
+                        }
+                        _ = &mut rx_shutdown => {
+                            tracing::info!("🛡️ [SUPERVISOR] Shutdown signal received. Stopping CommitSyncer...");
+                            handle.stop().await;
+                            break;
+                        }
+                    }
+                }
+            },
+            "commit_syncer_supervisor"
+        );
+
+        CommitSyncerHandle {
+            schedule_task: supervisor_task,
             tx_shutdown,
         }
     }
@@ -297,7 +367,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         loop {
             tokio::select! {
-                // Periodically, schedule new fetches if the node is falling behind.
+                // Standby Mode Wakeup: Wakes up instantly when the quorum advances while we're sleeping
+                _ = self.inner.commit_vote_monitor.quorum_advanced_notify.notified() => {
+                    let now = tokio::time::Instant::now();
+                    // Throttle state checks slightly to avoid rapid toggling
+                    if now.duration_since(last_state_check) >= Duration::from_millis(100) {
+                        self.update_state();
+                        last_state_check = now;
+                    }
+                    self.try_schedule_once();
+                }
+                // Periodically, schedule new fetches if the node is falling behind or still catching up.
                 _ = interval.tick() => {
                     // STATE MACHINE: Check for state transitions dynamically
                     let now = tokio::time::Instant::now();
@@ -341,9 +421,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 "⚡ [STATE-CHANGE] {:?} → {:?}, interval: {}ms → {}ms",
                                 old_state, new_state, old_ms, target_interval.as_millis()
                             );
+                            
+                            if new_state == crate::coordination_hub::NodeConsensusPhase::Healthy {
+                                info!("🛌 [STANDBY MODE] CommitSyncer has entered Standby Mode. Sleeping until quorum advances...");
+                                // When switching to Healthy, the 2-second interval tick continues as a background heartbeat,
+                                // but we rely primarily on `quorum_advanced_notify` to wake up instantly.
+                            }
                         }
                         last_state_check = now;
                     }
+                    // Only try to schedule if we're not fully healthy/standby, or if this is the heartbeat tick
                     self.try_schedule_once();
                 }
                 // Handles results from fetch tasks.

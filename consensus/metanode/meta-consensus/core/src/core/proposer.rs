@@ -27,8 +27,8 @@ impl Core {
         if !self.should_propose() {
             return Ok(None);
         }
-        if let Some(extended_block) = self.try_new_block(force) {
-            self.signals.new_block(extended_block.clone())?;
+        if let Some((extended_block, flush_ticket)) = self.try_new_block(force) {
+            self.signals.new_block_with_ticket(extended_block.clone(), flush_ticket)?;
 
             fail_point!("consensus-after-propose");
 
@@ -41,7 +41,10 @@ impl Core {
 
     /// Attempts to propose a new block for the next round. If a block has already proposed for latest
     /// or earlier round, then no block is created and None is returned.
-    pub(crate) fn try_new_block(&mut self, force: bool) -> Option<ExtendedBlock> {
+    pub(crate) fn try_new_block(
+        &mut self,
+        force: bool,
+    ) -> Option<(ExtendedBlock, Option<tokio::sync::oneshot::Receiver<()>>)> {
         let _s = self
             .context
             .metrics
@@ -384,7 +387,8 @@ impl Core {
         }
 
         // Ensure the new block and its ancestors are persisted, before broadcasting it.
-        self.dag_state.write().flush();
+        // We defer the real wait for the flush ticket in the broadcaster task to prevent blocking CoreThread.
+        let flush_ticket = self.dag_state.write().flush();
 
         // Now acknowledge the transactions for their inclusion to block
         ack_transactions(verified_block.reference());
@@ -408,7 +412,7 @@ impl Core {
             .write()
             .update_from_verified_block(&extended_block);
 
-        Some(extended_block)
+        Some((extended_block, flush_ticket))
     }
 
     /// Whether the core should propose new blocks.
