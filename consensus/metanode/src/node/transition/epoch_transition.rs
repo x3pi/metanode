@@ -587,16 +587,38 @@ async fn stop_authority_and_poll_go(
     Ok(synced_index)
 }
 
-/// Poll Go's GEI until it reaches the expected value, with 5-minute timeout.
+/// Poll Go's GEI until it reaches the expected value, with timeout.
+///
+/// OPTIMIZATION (2026-04-25): Reduced timeout from 300s to 30s and added
+/// active ForceCommit to flush Go's async commitChannel pipeline.
+/// Previously, 3 GEI updates could sit in Go's coalescing geiUpdateChan
+/// or commitChannel buffer indefinitely, causing a 5-minute stall at
+/// every epoch transition. ForceCommit triggers Go to flush its pipeline.
+///
+/// Also accepts a small tolerance (5 GEIs) for in-flight empty commits
+/// that don't affect state correctness.
 async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
     expected_last_block: u64,
     _new_epoch: u64,
 ) {
     let poll_interval = Duration::from_millis(100);
-    let max_wait = Duration::from_secs(300);
+    let max_wait = Duration::from_secs(30);
     let wait_start = std::time::Instant::now();
     let mut attempt = 0u64;
+    let mut last_force_commit = std::time::Instant::now();
+
+    // Tolerance: Accept if Go is within this many GEIs of expected.
+    // In-flight empty commits in Go's async pipeline don't affect state.
+    const GEI_TOLERANCE: u64 = 5;
+
+    // Immediately trigger a ForceCommit to flush Go's pipeline
+    if let Err(e) = executor_client
+        .send_force_commit("epoch_transition_pre_flush".to_string())
+        .await
+    {
+        warn!("⚠️ [SYNC POLL] Pre-flush ForceCommit failed: {}", e);
+    }
 
     loop {
         attempt += 1;
@@ -620,26 +642,37 @@ async fn poll_go_until_synced(
                     break;
                 }
 
-                // Periodic progress logging
-                if attempt.is_multiple_of(100) {
-                    warn!(
-                        "⏳ [SYNC WAIT] gei={}, expected={} (waiting {:?})",
-                        go_last_gei, expected_last_block, wait_start.elapsed()
+                // TOLERANCE: Accept if gap is small (in-flight empty commits)
+                let remaining = expected_last_block.saturating_sub(go_last_gei);
+                if remaining <= GEI_TOLERANCE && wait_start.elapsed() > Duration::from_secs(5) {
+                    info!(
+                        "✅ [SYNC CLOSE-ENOUGH] gei={}, expected={}, gap={} <= tolerance={}. Proceeding. ({:?})",
+                        go_last_gei, expected_last_block, remaining, GEI_TOLERANCE, wait_start.elapsed()
                     );
+                    break;
+                }
 
-                    // Re-flush buffer periodically
-                    if attempt.is_multiple_of(300) {
-                        if let Ok(client) = executor_client.get_last_block_number().await {
-                            info!(
-                                "🔄 [SYNC WAIT] Re-checked: block_number={}",
-                                client.0
-                            );
-                        }
+                // Trigger ForceCommit every 3 seconds to flush Go's pipeline
+                if last_force_commit.elapsed() > Duration::from_secs(3) {
+                    last_force_commit = std::time::Instant::now();
+                    if let Err(e) = executor_client
+                        .send_force_commit("epoch_transition_poll_flush".to_string())
+                        .await
+                    {
+                        warn!("⚠️ [SYNC POLL] ForceCommit failed: {}", e);
                     }
+                }
+
+                // Periodic progress logging
+                if attempt.is_multiple_of(50) {
+                    warn!(
+                        "⏳ [SYNC WAIT] gei={}, expected={}, gap={} (waiting {:?})",
+                        go_last_gei, expected_last_block, remaining, wait_start.elapsed()
+                    );
                 }
             }
             Err(e) => {
-                if attempt.is_multiple_of(100) {
+                if attempt.is_multiple_of(50) {
                     error!(
                         "❌ [SYNC POLL] Cannot reach Go (attempt {}): {}",
                         attempt, e

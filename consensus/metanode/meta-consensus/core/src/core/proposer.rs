@@ -58,7 +58,7 @@ impl Core {
             let dag_state = self.dag_state.read();
             let clock_round = dag_state.threshold_clock_round();
             if clock_round <= dag_state.get_last_proposed_block().round() {
-                debug!(
+                info!(
                     "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
                     clock_round,
                     dag_state.get_last_proposed_block().round()
@@ -460,7 +460,7 @@ impl Core {
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {
             // First boot: allow proposing even without synced proposed round
-            debug!(
+            info!(
                 "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round",
                 clock_round
             );
@@ -468,7 +468,7 @@ impl Core {
         };
         
         if clock_round <= last_known_proposed_round {
-            debug!(
+            info!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"
             );
             core_skipped_proposals

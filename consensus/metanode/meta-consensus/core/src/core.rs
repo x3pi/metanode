@@ -205,23 +205,32 @@ impl Core {
         } else {
             let last_proposed_block = self.dag_state.read().get_last_proposed_block();
 
-            if self.should_propose() {
-                assert!(
-                    last_proposed_block.round() > GENESIS_ROUND,
-                    "At minimum a block of round higher than genesis should have been produced during recovery"
+            if self.should_propose() && last_proposed_block.round() == GENESIS_ROUND {
+                // SNAPSHOT RESTORE SAFETY: After snapshot restore, DAG is empty so the
+                // last proposed block is the genesis block (round 0). This is a valid
+                // state — CommitSyncer will fast-forward the DAG baseline and the node
+                // will eventually propose once it catches up with the network.
+                // Previously this was an assertion panic that killed the entire node.
+                info!(
+                    "⚠️ [RECOVERY] DAG is at genesis round (snapshot restore). \
+                     Skipping proposal — CommitSyncer will fast-forward."
                 );
             }
 
             // if no new block proposed then just re-broadcast the last proposed one to ensure liveness.
-            self.signals
-                .new_block(ExtendedBlock {
-                    block: last_proposed_block.clone(),
-                    excluded_ancestors: vec![],
-                })
-                .map_err(|e| {
-                    tracing::warn!("Failed to signal new block during recovery: {e}");
-                    ConsensusError::Shutdown
-                })?;
+            // NOTE: During early startup, receivers may not be subscribed yet, causing
+            // broadcast send to fail. This is non-fatal — the node will propose
+            // naturally once CommitSyncer establishes the baseline.
+            if let Err(e) = self.signals.new_block(ExtendedBlock {
+                block: last_proposed_block.clone(),
+                excluded_ancestors: vec![],
+            }) {
+                tracing::warn!(
+                    "⚠️ [RECOVERY] Failed to signal new block during recovery \
+                     (broadcast channel may have no receivers yet): {e}. \
+                     This is normal during snapshot restore."
+                );
+            }
             last_proposed_block
         };
 

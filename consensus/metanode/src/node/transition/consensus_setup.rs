@@ -68,6 +68,17 @@ pub(super) async fn setup_validator_consensus(
 
 
 
+    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
+    // GEI = epoch_base_index + commit_index + fragment_offset
+    // So commit_index = GEI - epoch_base_index - fragment_offset
+    // For simplicity at startup, we use the node's last_global_exec_index + 1 as starting point.
+    // The AUTO-JUMP logic will adjust if there's a mismatch.
+    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    info!(
+        "📊 [COMMIT PROCESSOR INIT] next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+    );
+
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -81,6 +92,7 @@ pub(super) async fn setup_validator_consensus(
         )
         .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
         .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_cb)
@@ -190,6 +202,13 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
+    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
+    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    info!(
+        "📊 [COMMIT PROCESSOR INIT] SyncOnly: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+    );
+
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -203,11 +222,11 @@ pub(super) async fn setup_synconly_sync(
         )
         .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
         .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());

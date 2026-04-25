@@ -186,20 +186,35 @@ impl CommitObserver {
 
         if replay_after_commit_index > 0 {
             // PHASE 5: Scan for Block N to perform Anti-Fork Hash Check
-            let go_commits = self.store.scan_commits((replay_after_commit_index..=replay_after_commit_index).into()).expect("Scanning for Go last commit should not fail");
-            if let Some(go_commit) = go_commits.first() {
-                if go_commit.digest().into_inner() != commit_consumer.last_executed_commit_hash {
-                    panic!(
-                        "🚨 [ANTI-FORK] FORK DETECTED! DAG DB is corrupted or network fork occurred. \
-                         Hash from Go ({:?}) != Local hash at block {} ({:?})",
-                        commit_consumer.last_executed_commit_hash,
-                        replay_after_commit_index,
-                        go_commit.digest().into_inner()
-                    );
+            // SAFETY: When Go returns commit_hash as all zeros (e.g., after snapshot
+            // restore before any real commits), skip the check since the zero hash
+            // is a sentinel value, not a real commit digest.
+            let go_hash = commit_consumer.last_executed_commit_hash;
+            let is_zero_hash = go_hash == [0u8; 32];
+
+            if is_zero_hash {
+                tracing::info!(
+                    "⏭️ [ANTI-FORK] Skipping hash check: Go returned zero commit hash \
+                     (snapshot restore or uninitialized). replay_after={}",
+                    replay_after_commit_index
+                );
+            } else {
+                let go_commits = self.store.scan_commits((replay_after_commit_index..=replay_after_commit_index).into()).expect("Scanning for Go last commit should not fail");
+                if let Some(go_commit) = go_commits.first() {
+                    if go_commit.digest().into_inner() != go_hash {
+                        panic!(
+                            "🚨 [ANTI-FORK] FORK DETECTED! DAG DB is corrupted or network fork occurred. \
+                             Hash from Go ({:?}) != Local hash at block {} ({:?})",
+                            go_hash,
+                            replay_after_commit_index,
+                            go_commit.digest().into_inner()
+                        );
+                    }
+                    tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
                 }
-                tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
             }
         }
+
 
         let last_commit = self
             .store

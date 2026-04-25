@@ -768,21 +768,22 @@ PROCESS_BLOCK:
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// PHASE 1 DIAGNOSTIC: Log all 9 hash-input fields for fork forensics.
-	// When a fork is detected by block_hash_checker, compare these logs between
-	// nodes to identify EXACTLY which field(s) diverged.
+	// PHASE 1 DIAGNOSTIC: Log hash-input fields for fork forensics.
+	// Hash includes: BlockNumber, AccountStatesRoot, StakeStatesRoot, ReceiptRoot,
+	//                LeaderAddress, TimeStamp, TransactionsRoot, Epoch
+	// Hash EXCLUDES: GlobalExecIndex (non-deterministic during restore), LastBlockHash
 	// ═══════════════════════════════════════════════════════════════════════════
-	logger.Info("🔍 [FORK-DIAG] Block #%d hash=%s | leader=%s | ts=%d | GEI=%d | epoch=%d | stateRoot=%s | stakeRoot=%s | rcptRoot=%s | txRoot=%s",
+	logger.Info("🔍 [FORK-DIAG] Block #%d hash=%s | leader=%s | ts=%d | epoch=%d | stateRoot=%s | stakeRoot=%s | rcptRoot=%s | txRoot=%s | GEI=%d (excluded from hash)",
 		newBlock.Header().BlockNumber(),
 		newBlock.Header().Hash().Hex(),
 		newBlock.Header().LeaderAddress().Hex(),
 		newBlock.Header().TimeStamp(),
-		newBlock.Header().GlobalExecIndex(),
 		newBlock.Header().Epoch(),
 		newBlock.Header().AccountStatesRoot().Hex(),
 		newBlock.Header().StakeStatesRoot().Hex(),
 		newBlock.Header().ReceiptRoot().Hex(),
 		newBlock.Header().TransactionsRoot().Hex(),
+		newBlock.Header().GlobalExecIndex(),
 	)
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -826,6 +827,11 @@ PROCESS_BLOCK:
 					bp.nextBlockNumber.Store(*currentBlockNumber + 1)
 					headerCopy := existingBlock.Header()
 					bp.chainState.SetcurrentBlockHeader(&headerCopy)
+					
+					// CRITICAL: Update BlockNumber -> Hash mapping so JSON-RPC returns the correct authoritative parent hashes
+					if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(*currentBlockNumber, existingHash); err != nil {
+						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to remap block #%d to P2P hash: %v", *currentBlockNumber, err)
+					}
 
 					// Rebuild state from authoritative block
 					if _, rebuildErr := bp.chainState.CommitBlockState(existingBlock,

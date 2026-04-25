@@ -206,3 +206,131 @@ Tùy thuộc vào mức độ lạc hậu của nút so với mạng mà tiến 
 - Chỉ khi nút Go đã tiếp nhận đủ mọi khối `N+1, N+2...` và báo "Đã bắt kịp hoàn toàn Mạng (Fully Synced)".
 - `AuthorityNode` gạt công tắc trạng thái từ `SyncOnly` sang **`Active`**.
 - Lúc này, Node mới bắt đầu chia sẻ Mempool, đề xuất Block mới (Proposer), và gửi chữ ký biểu quyết. Hệ thống hoàn chỉnh việc hồi sinh an toàn, bảo đảm đồng thuận mạnh mẽ (Strong Consistency).
+
+---
+
+## 6. Quy Tắc Hash Khối (Block Hash Determinism)
+
+Block hash được tính bằng Keccak256 trên protobuf serialize **có chọn lọc** các trường header. Quy tắc quan trọng:
+
+- **INCLUDED**: `BlockNumber`, `AccountStatesRoot`, `StakeStatesRoot`, `ReceiptRoot`, `LeaderAddress`, `TimeStamp`, `TransactionsRoot`, `Epoch`
+- **EXCLUDED**: `LastBlockHash` (chống hash chain divergence khi restart), `GlobalExecIndex` (non-deterministic mapping Rust→Go), `AggregateSignature` (set sau khi hash)
+
+> [!IMPORTANT]
+> **`GlobalExecIndex` bị loại khỏi hash** vì GEI là mapping từ Rust commit index → Go block number. Khi node restore/catch-up, cùng một block có thể nhận GEI khác nhau tùy theo thứ tự xử lý commit (synced vs local DAG replay). GEI vẫn được lưu trong header cho monitoring nhưng KHÔNG ảnh hưởng block identity.
+
+---
+
+## 7. Pipeline Rust→Go (Commit Execution Pipeline)
+
+Đây là phần QUAN TRỌNG NHẤT gây ra hầu hết lỗi stall/fork. Pipeline truyền commit từ Rust consensus sang Go execution:
+
+### 7.1. Luồng dữ liệu chi tiết
+
+```mermaid
+graph LR
+    subgraph Rust
+        CP["CommitProcessor<br/>(tuần tự theo commit_index)"]
+        DC["dispatch_commit()<br/>(phân loại empty/non-empty)"]
+        FFI["CGo FFI Call"]
+    end
+    
+    subgraph Go
+        BSD["processSingleEpochData<br/>(xử lý từng commit)"]
+        
+        subgraph "Empty Commit Path"
+            GEI_CH["geiUpdateChan<br/>(buffered channel)"]
+            GEI_W["geiWorker<br/>(coalesce highest GEI)"]
+        end
+        
+        subgraph "Non-Empty Commit Path"
+            TX["Process Transactions"]
+            BLK["Create Block"]
+        end
+        
+        CC["commitChannel"]
+        CW["commitWorker<br/>(persist to DB)"]
+    end
+    
+    CP --> DC
+    DC -->|"empty: skip FFI"| CP2["Update shared GEI<br/>+ skip_empty_commit"]
+    DC -->|"non-empty"| FFI --> BSD
+    BSD -->|"0 tx"| GEI_CH --> GEI_W --> CC
+    BSD -->|"has tx"| TX --> BLK --> CC
+    CC --> CW
+    
+    style DC fill:#ff9,stroke:#f90
+    style GEI_W fill:#f99,stroke:#f00
+```
+
+### 7.2. Bất Biến An Toàn (Safety Invariants)
+
+| # | Bất Biến | Cách Bảo Vệ |
+|---|----------|-------------|
+| 1 | Mọi BFT-certified commit PHẢI được thực thi | CATCH-UP FORK GUARD đã bị XÓA — không suppress commit nào |
+| 2 | GEI phải tăng đơn điệu | `storage.UpdateLastGlobalExecIndex()` dùng `atomic.CompareAndSwap` |  
+| 3 | Empty commits không qua FFI | `dispatch_commit()` fast-path: chỉ update shared_gei + executor skip |
+| 4 | Epoch transition chờ Go flush xong | `poll_go_until_synced` + `ForceCommit` mỗi 3s, tolerance ≤5 GEI |
+| 5 | Snapshot restore tạo gap → auto-jump | FORWARD-JUMP: khi ≥10 pending + gap >20, nhảy đến smallest_pending |
+| 6 | Block hash deterministic | GEI và LastBlockHash **KHÔNG** nằm trong hash |
+
+### 7.3. Điểm Nghẽn Đã Biết & Fix
+
+#### ❌ CATCH-UP FORK GUARD (ĐÃ XÓA)
+- **Trước**: Khi Go lag >10, suppress non-empty commits → `stateRoot` diverge → FORK
+- **Sau**: Tất cả commits qua BFT đều canonical, thực thi vô điều kiện
+
+#### ⏱️ Epoch Transition Stall (ĐÃ FIX) 
+- **Trước**: `poll_go_until_synced` chờ 300s thụ động, Go async pipeline giữ 3 GEI cuối trong buffer
+- **Sau**: Timeout 30s + `ForceCommit` flush Go pipeline + tolerance ≤5 GEI
+
+#### 🚀 Snapshot Restore Gap (ĐÃ FIX)
+- **Trước**: CommitProcessor stuck vĩnh viễn chờ commits không bao giờ đến (DAG đã reset)  
+- **Sau**: FORWARD-JUMP batch drain — phát hiện gap, nhảy đến pending, batch-skip empties
+
+#### ⚠️ Go geiUpdateChan Ordering (GIÁM SÁT)
+- Go dùng **coalescing channel** cho empty commits: chỉ giữ GEI cao nhất
+- Khi channel full, GEI có thể bị drop → Rust poll thấy GEI cũ → stall ngắn
+- **Mitigation**: ForceCommit + tolerance trong poll_go_until_synced
+
+---
+
+## 8. Quy Trình Phục Hồi Snapshot (Snapshot Restore Recovery)
+
+```mermaid
+sequenceDiagram
+    participant Admin as Operator
+    participant Script as restore_node.sh
+    participant Go as Go Master
+    participant Rust as Rust Consensus
+    participant DAG as DagState/RocksDB
+
+    Admin->>Script: ./restore_node.sh 1
+    Script->>Go: Stop node process
+    Script->>Go: Copy snapshot to data dir
+    Script->>DAG: rm -rf rust_consensus (clean DAG)
+    Script->>Go: Restart node
+    
+    Go->>Rust: FFI init: last_block=N, hash=0x00..00 (sentinel)
+    Rust->>DAG: Load empty DAG → 0 commits
+    
+    Note over Rust: CommitObserver: hash=0 → skip ANTI-FORK check
+    Note over Rust: Core::recover: empty DAG → skip assertion
+    
+    Rust->>Rust: Connect P2P, start CommitSyncer
+    Rust->>Rust: CommitSyncer fetches commits from peers
+    Rust->>Rust: CoreThread receives commits starting at index ~5000+
+    
+    Note over Rust: CommitProcessor: expected=1, received=5000+
+    Note over Rust: FORWARD-JUMP: gap=4999 > 20, pending≥10
+    Note over Rust: Jump to 5000, batch-drain empties
+    
+    Rust->>Go: dispatch_commit(non-empty commits)
+    Go->>Go: Process transactions, create blocks
+    
+    Note over Rust: Node catches up to network tip ✅
+```
+
+> [!CAUTION]  
+> **Hash = 0x00..00 sau restore**: Đây là sentinel value, KHÔNG phải lỗi. Go trả về zero hash vì `LastExecutedCommitHash` chưa tồn tại trong BackupDB (key được tạo bởi feature mới). Hash sẽ tự có giá trị thật sau commit đầu tiên. ANTI-FORK check tự động skip khi hash=0.
+

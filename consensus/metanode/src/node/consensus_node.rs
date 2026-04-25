@@ -1050,6 +1050,19 @@ impl ConsensusNode {
 
         let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
+        // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
+        // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
+        // causing GEI miscalculation and hash divergence between nodes after restart.
+        let next_expected_commit_index = if config.executor_read_enabled {
+            (storage.last_global_exec_index.saturating_sub(storage.epoch_base_exec_index) + 1) as u32
+        } else {
+            1
+        };
+        info!(
+            "📊 [COMMIT PROCESSOR INIT] Startup: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+            next_expected_commit_index, storage.last_global_exec_index, storage.epoch_base_exec_index
+        );
+
         let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
             commit_receiver,
         )
@@ -1078,6 +1091,7 @@ impl ConsensusNode {
         })
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
         .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
+        .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(is_transitioning.clone())
         .with_pending_transactions_queue(pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_transition_callback)
@@ -1131,6 +1145,96 @@ impl ConsensusNode {
                 None,
             ))
         };
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STARTUP STATE SYNC BARRIER (2026-04-24)
+        //
+        // When a node restarts from a stale snapshot (or genesis) while the network
+        // has advanced, its local Go state is behind peers. If we start consensus
+        // immediately, the node will produce/verify blocks with a divergent state
+        // root because its GEI and account state lag behind. This causes a PERMANENT
+        // fork (hash mismatch on every block).
+        //
+        // Fix: Query peers for their latest block. If local Go is behind by more
+        // than a small threshold, fetch missing blocks via P2P and execute them
+        // through Go BEFORE allowing consensus to start.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            let barrier_client = executor_client_for_proc.clone();
+            let barrier_peers = config.peer_rpc_addresses.clone();
+
+            // Give Go a moment to finish its own initialization
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let local_block = match barrier_client.get_last_block_number().await {
+                Ok((block, _gei, _ready, _hash)) => block,
+                Err(e) => {
+                    tracing::warn!("⚠️ [STARTUP-SYNC] Cannot query local block: {}. Skipping barrier.", e);
+                    0
+                }
+            };
+
+            // Find the highest block among peers
+            let mut max_peer_block = 0u64;
+            let mut max_peer_gei = 0u64;
+            for peer_addr in &barrier_peers {
+                match crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                    Ok(info) => {
+                        if info.last_block > max_peer_block {
+                            max_peer_block = info.last_block;
+                            max_peer_gei = info.last_global_exec_index;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("⚠️ [STARTUP-SYNC] Peer {} info query failed: {}", peer_addr, e);
+                    }
+                }
+            }
+
+            if max_peer_block > 0 && local_block < max_peer_block {
+                let _gap = max_peer_block - local_block;
+                tracing::warn!(
+                    "🚨 [STARTUP-SYNC] Local state BEHIND network! local_block={}, peer_block={}, peer_gei={}. Triggering pre-consensus sync...",
+                    local_block, max_peer_block, max_peer_gei
+                );
+
+                let from_block = local_block + 1;
+                let to_block = max_peer_block;
+
+                match crate::network::peer_rpc::fetch_blocks_from_peer(&barrier_peers, from_block, to_block).await {
+                    Ok(blocks) if !blocks.is_empty() => {
+                        tracing::info!(
+                            "🔄 [STARTUP-SYNC] Fetched {} blocks ({}-{}). Executing...",
+                            blocks.len(),
+                            blocks.first().map(|b| b.block_number).unwrap_or(0),
+                            blocks.last().map(|b| b.block_number).unwrap_or(0)
+                        );
+                        match barrier_client.sync_and_execute_blocks(blocks).await {
+                            Ok((synced, last_block, _gei)) => {
+                                tracing::info!(
+                                    "✅ [STARTUP-SYNC] Pre-consensus sync complete: executed {} blocks (last_block={})",
+                                    synced, last_block
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ [STARTUP-SYNC] Failed to execute fetched blocks: {}", e);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!("⚠️ [STARTUP-SYNC] Fetched 0 blocks from peers. Cannot sync state.");
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ [STARTUP-SYNC] Failed to fetch blocks from peers: {}", e);
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}). Starting consensus...",
+                    local_block, max_peer_block
+                );
+            }
+        }
 
         let executor_client_for_init = executor_client_for_proc.clone();
         tokio::spawn(async move {
@@ -1304,8 +1408,19 @@ impl ConsensusNode {
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
 
+        // CRITICAL: Transition from Initializing → Bootstrapping BEFORE starting authority.
+        // This ensures Core::recover() sees should_skip_proposal()=true, preventing
+        // assertion panics when the DAG is empty after snapshot restore.
+        // CommitSyncer will later transition Bootstrapping → CatchingUp/Healthy.
+        if start_as_validator {
+            coordination_hub.set_phase(
+                consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
+            );
+        }
+
         let (authority, commit_consumer_holder) = if start_as_validator {
-            info!("🚀 Starting consensus authority node immediately (in-sync confirmed)...");
+            info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
+
             (
                 Some(
                     ConsensusAuthority::start(

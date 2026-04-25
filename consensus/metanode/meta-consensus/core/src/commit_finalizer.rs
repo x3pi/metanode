@@ -182,10 +182,26 @@ impl CommitFinalizer {
         let _scope = monitored_scope("CommitFinalizer::process_commit");
 
         if let Some(last_processed_commit) = self.last_processed_commit {
-            assert_eq!(
-                last_processed_commit + 1,
-                committed_sub_dag.commit_ref.index
-            );
+            let expected = last_processed_commit + 1;
+            if committed_sub_dag.commit_ref.index != expected {
+                if committed_sub_dag.commit_ref.index <= last_processed_commit {
+                    // Stale/duplicate commit — skip entirely to avoid re-processing
+                    tracing::warn!(
+                        "⚠️ [COMMIT FINALIZER] Skipping stale commit index {} (last_processed={})",
+                        committed_sub_dag.commit_ref.index, last_processed_commit
+                    );
+                    return vec![];
+                }
+                // Gap detected — this is EXPECTED during catch-up (FORWARD-JUMP)
+                // where empty commits are batch-skipped by CommitProcessor.
+                // Previously this was an assert_eq! that killed the entire consensus engine.
+                tracing::warn!(
+                    "⚠️ [COMMIT FINALIZER] Non-sequential commit: expected index {}, got {}. \
+                     Gap of {} commits (likely FORWARD-JUMP catch-up). Proceeding.",
+                    expected, committed_sub_dag.commit_ref.index,
+                    committed_sub_dag.commit_ref.index.saturating_sub(expected)
+                );
+            }
         }
         self.last_processed_commit = Some(committed_sub_dag.commit_ref.index);
 

@@ -170,6 +170,12 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
             };
 
             rt.block_on(async {
+                // Persistent registry survives across restart cycles.
+                // Creating a new Registry each loop would orphan previously-registered
+                // global metrics (OnceLock), causing silent metric gaps or panics.
+                let persistent_registry = prometheus::Registry::new();
+                let mut restart_count = 0u32;
+
                 loop {
                     let config_path = std::path::PathBuf::from(config_path_str.clone());
                     let mut node_config = match NodeConfig::load(&config_path) {
@@ -190,13 +196,27 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
                     info!("Node ID: {}", node_config.node_id);
                     info!("Network address: {}", node_config.network_address);
 
-                    let registry = prometheus::Registry::new();
-                    let startup_config = StartupConfig::new(node_config, registry, None);
+                    if restart_count > 0 {
+                        info!(
+                            "🔄 [FFI RESTART] Attempt #{} — previous instance crashed. \
+                             Waiting 10s for old connections/tasks to drain...",
+                            restart_count
+                        );
+                        // Extended delay: old TCP connections (consensus P2P, gRPC) need
+                        // TIME_WAIT to expire. 5s was too aggressive — peers still had
+                        // open connections to old ports, causing bind/connect failures.
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    }
+
+                    let startup_config = StartupConfig::new(
+                        node_config, persistent_registry.clone(), None
+                    );
 
                     let initialized_node = match InitializedNode::initialize(startup_config).await {
                         Ok(node) => node,
                         Err(e) => {
                             error!("Failed to initialize node: {}", e);
+                            restart_count += 1;
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                             continue;
                         }
@@ -205,9 +225,13 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
                     if let Err(e) = initialized_node.run_main_loop().await {
                         error!("Consensus main loop exited with error: {}", e);
                     }
-                    
-                    tracing::warn!("🔄 [FFI RESTART] Consensus Node crashed or exited. Restarting in 5 seconds...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                    restart_count += 1;
+                    tracing::warn!(
+                        "🔄 [FFI RESTART] Consensus Node crashed (restart #{}). \
+                         All authority tasks will be dropped. Restarting...",
+                        restart_count
+                    );
                 }
             });
         }));
