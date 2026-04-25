@@ -20,6 +20,8 @@ type PendingBatchData struct {
 	Timestamp   time.Time
 	SubmitBlock uint64      // Block number trên local chain lúc batchSubmit được gửi (để Resweeper quét từ block này)
 	TxHash      common.Hash // Thẻ lưu txHash của submitBatch để theo dõi
+	RetryCount  int         // Số lần resubmit do Resweeper thực hiện
+	LastError   string      // Lưu lỗi gần nhất khi resubmit thất bại
 }
 
 // scanProgressUpdate là yêu cầu cập nhật lastBlock lên config SMC sau khi gửi batch thành công
@@ -40,6 +42,7 @@ type CrossChainScanner struct {
 	localBlockCh   chan uint64
 	txHashToWallet sync.Map
 	pendingBatches sync.Map                        // map[[32]byte]*PendingBatchData
+	batchFoundAt   sync.Map                        // map[[32]byte]uint64: batchId -> blockNumber where GetLogs found
 	remoteClients  map[uint64][]*client_tcp.Client // client pool cho từng remote chain
 }
 

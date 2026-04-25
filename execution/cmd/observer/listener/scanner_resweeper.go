@@ -12,6 +12,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
+const (
+	maxResubmitAttempts = 12
+)
+
 // runResweeper quét lại các batch đang ở trạng thái Pending.
 // Nếu một batch đã gửi nhưng chưa thấy log (MessageReceived hoặc OutboundResult)
 // sau 20s, nó sẽ thực hiện quét lại (rescan) trên node mục tiêu.
@@ -132,7 +136,7 @@ func (s *CrossChainScanner) ProcessSingleResweep(
 	}
 
 	if latestBlk < fromBlk {
-		logger.Warn("🧹 [Resweeper] Node %s is behind? (latest=%d < searchFrom=%d). Skipping batch %x", 
+		logger.Warn("🧹 [Resweeper] Node %s is behind? (latest=%d < searchFrom=%d). Skipping batch %x",
 			localConnClient.GetNodeAddr(), latestBlk, fromBlk, batchId[:4])
 		return
 	}
@@ -160,11 +164,36 @@ func (s *CrossChainScanner) ProcessSingleResweep(
 		if len(respRecv.Logs) >= 2 {
 			logger.Error("🚨 [Resweeper] DUPLICATE DETECTED: Batch %x found %d times on chain!", batchId[:4], len(respRecv.Logs))
 		}
-		logger.Info("🧹 [Resweeper] Batch %x HOÀN THÀNH - Log found at node %s. Removing from pending.", batchId[:4], localConnClient.GetNodeAddr())
+		foundBlock := respRecv.Logs[0].GetBlockNumber()
+		s.batchFoundAt.Store(batchId, foundBlock)
+		logger.Info("🧹 [Resweeper] Batch %x HOÀN THÀNH - Log found at block %d on node %s. Removing from pending.",
+			batchId[:4], foundBlock, localConnClient.GetNodeAddr())
 		s.pendingBatches.Delete(key)
 	} else {
 		// Không thấy log => Có thể TX bị rớt hoặc Node chưa sync kịp
 		logger.Warn("🧹 [Resweeper] Batch %x NOT FOUND on node %s (checked blocks %d to %d). Will retry later.",
 			batchId[:4], localConnClient.GetNodeAddr(), fromBlk, latestBlk)
+
+		if data.RetryCount >= maxResubmitAttempts {
+			logger.Warn("🧹 [Resweeper] Batch %x reached max resubmit attempts (%d). Keep scanning only.",
+				batchId[:4], data.RetryCount)
+			return
+		}
+
+		txHash, targetIndex, submitErr := s.submitBatch(data.RemoteChain, data.Events, -1)
+		if submitErr != nil {
+			data.LastError = submitErr.Error()
+			logger.Warn("🧹 [Resweeper] Re-submit failed for batch %x at node index=%d: %v. Will retry next scan cycle.",
+				batchId[:4], -1, submitErr)
+			return
+		}
+		data.TxHash = txHash
+		data.TargetIndex = targetIndex
+		data.Timestamp = time.Now()
+		data.RetryCount++
+		data.LastError = ""
+
+		logger.Info("🧹 [Resweeper] Re-submitted batch %x: retry=%d nodeIndex=%d txHash=%s submitBlock=%d",
+			batchId[:4], data.RetryCount, data.TargetIndex, data.TxHash.Hex(), data.SubmitBlock)
 	}
 }

@@ -160,6 +160,23 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]uint64 {
 		return result
 	}
 
+	// Lấy cấu hình scanMode của embassy từ contract
+	scanMode := uint8(0)
+	if modeCalldata, err := s.cfg.ConfigAbi.Pack("getEmbassyScanMode", embassyAddr); err == nil {
+		if receipt, err := tx_helper.SendReadTransaction("getEmbassyScanMode", defCli, s.cfg, configContract, embassyAddr, modeCalldata, nil); err == nil {
+			if len(receipt.Return()) > 0 {
+				if method, ok := s.cfg.ConfigAbi.Methods["getEmbassyScanMode"]; ok {
+					if vals, err := method.Outputs.Unpack(receipt.Return()); err == nil && len(vals) > 0 {
+						if modeVal, ok := vals[0].(uint8); ok {
+							scanMode = modeVal
+						}
+					}
+				}
+			}
+		}
+	}
+	logger.Info("📋 [Scanner] Embassy config ScanMode = %d", scanMode)
+
 	for _, rc := range s.cfg.RemoteChains {
 		logger.Info("CCCCCCCCCCCCCCCCCCCCCCCCCCC %v, rc %v", s.cfg.RemoteChains, rc)
 		nationIdBig := new(big.Int).SetUint64(rc.NationId)
@@ -206,6 +223,36 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]uint64 {
 
 		blk := lastBlock.Uint64()
 		if blk == 0 {
+			if scanMode == 2 {
+				remoteCli, _ := s.GetActiveRemoteClient(rc.NationId, 0)
+				if remoteCli != nil {
+					latestBlock, err := remoteCli.ChainGetBlockNumber()
+					if err == nil && latestBlock > 0 {
+						result[rc.NationId] = latestBlock
+						logger.Info("📋 [Scanner] Resume nationId=%d from latest block %d (scanMode=2)", rc.NationId, latestBlock)
+						continue
+					} else {
+						logger.Warn("⚠️  [Scanner] Cannot fetch latest block for nationId=%d: %v", rc.NationId, err)
+					}
+				}
+			} else if scanMode == 1 {
+				// Fetch max block from all embassies
+				if maxCalldata, err := s.cfg.ConfigAbi.Pack("getScanBlockRange", nationIdBig); err == nil {
+					if maxReceipt, err := tx_helper.SendReadTransaction("getScanBlockRange", defCli, s.cfg, configContract, embassyAddr, maxCalldata, nil); err == nil {
+						if len(maxReceipt.Return()) > 0 {
+							if method, ok := s.cfg.ConfigAbi.Methods["getScanBlockRange"]; ok {
+								if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 1 {
+									if maxBlk, ok := vals[1].(*big.Int); ok && maxBlk != nil && maxBlk.Uint64() > 0 {
+										result[rc.NationId] = maxBlk.Uint64()
+										logger.Info("📋 [Scanner] Resume nationId=%d from MAX block %d (scanMode=1)", rc.NationId, maxBlk.Uint64())
+										continue
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 			continue
 		}
 		// +1 vì blk là block đã scan xong → tiếp theo là blk+1

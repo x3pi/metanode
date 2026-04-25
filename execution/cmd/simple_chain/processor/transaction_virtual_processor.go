@@ -303,14 +303,11 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			verifiedEmbassyAddr, sender.Hex())
 		return nil, fmt.Errorf("batchSubmit: BLS signature verification failed for embassy %s", verifiedEmbassyAddr), nil
 	}
-	logger.Info("[VIRTUAL CC batchSubmit] ✅ BLS verified (direct lookup): embassy=%s sender=%s", verifiedEmbassyAddr, sender.Hex())
-
 	// ── 4. Vote KEY = sha256(ABI(events only)) — loại bỏ pubkey ──────────
 	// Re-pack chỉ arg events (args[0]) → tất cả embassy cùng hash vì events giống nhau.
 	eventsOnlyPacked, packErr := batchMethod.Inputs[:1].Pack(batchArgs[0])
 	var key [32]byte
 	if packErr != nil {
-		// Fallback: hash toàn bộ inputData nếu re-pack lỗi
 		logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ Failed to re-pack events for vote key: %v, using inputData fallback", packErr)
 		return nil, fmt.Errorf("batchSubmit: failed to re-pack events for vote key: %v", packErr), nil
 	} else {
@@ -327,7 +324,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 
 	total := acc.GetTotalEmbassies()
 	q := acc.quorum(total)
-
+	logger.Info("[VIRTUAL CC batchSubmit] total: %d, q: %d", total, q)
 	if !isFirstQuorum {
 		// Chưa đủ quorum: ReadOnly=true → master tạo receipt ngay (nonce-only), không execute state.
 		logger.Info("[VIRTUAL CC batchSubmit] ⏳ SIG_ACK %d/%d (quorum=%d) embassy=%s key=%x",
@@ -342,18 +339,6 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		voteCount, total, verifiedEmbassyAddr, key[:8], updatedTx.Hash().Hex())
 	updatedTx.SetReadOnly(false)
 
-	// ── Fake EVM dry-run để lấy relatedAddresses ─────────────────────────
-	// Chỉ làm cho CC_EXECUTE (SIG_ACK không execute state nên không cần).
-	// Với mỗi INBOUND packet có Target != address{} (sendMessage path),
-	// ta gọi giả EVM với đúng payload của packet để EVM touch đúng storage slots,
-	// từ đó GetCurrentRelatedAddresses() trả về danh sách chính xác.
-	//
-	// QUAN TRỌNG: Mỗi contract dry-run dùng mvmId RIÊNG để tránh:
-	//   1. C++ state cache (State::instances) bị lẫn lộn giữa các contract — mỗi
-	//      Execute ghi dirty state vào C++ cache theo key mvmId, nếu dùng chung thì
-	//      lần sau đọc nhầm storage của contract trước.
-	//   2. currentRelatedAddresses (sync.Map trên MVMApi) accumulate tất cả địa chỉ
-	//      từ mọi lần Execute — dùng chung sẽ không biết địa chỉ nào thuộc target nào.
 	ctx := context.Background()
 	targets := ccHandler.ExtractCrossChainTargets(inputData)
 	if len(targets) > 0 {
@@ -375,7 +360,6 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 					}
 					continue
 				}
-				logger.Info("_______________________call contract")
 				// ── sendMessage path: EVM dry-run với mvmId riêng cho từng target ──
 				// Mỗi target có mvmId = hash(txHash + target + index) để C++ state cache
 				// và relatedAddresses hoàn toàn độc lập nhau.

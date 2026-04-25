@@ -38,6 +38,9 @@ type CCBatchVoteAccumulator struct {
 var (
 	globalCCBatchAccumulator     *CCBatchVoteAccumulator
 	globalCCBatchAccumulatorOnce sync.Once
+
+	CleanupCCBatchInterval = 1 * time.Second
+	CleanupCCBatchExpiry   = 2 * time.Minute
 )
 
 // GetCCBatchVoteAccumulator trả về singleton.
@@ -113,12 +116,12 @@ func (a *CCBatchVoteAccumulator) AddVoteByKey(
 	return voteCount, isFirstQuorum, nil
 }
 
-// cleanupLoop xóa entry cũ hơn 1 phút đã execute xong.
+// cleanupLoop xóa entry cũ đã execute xong.
 func (a *CCBatchVoteAccumulator) cleanupLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(CleanupCCBatchInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		expireBefore := time.Now().Add(-1 * time.Minute)
+		expireBefore := time.Now().Add(-1 * CleanupCCBatchExpiry)
 		var deleted int
 		a.entries.Range(func(k, v interface{}) bool {
 			state := v.(*ccBatchVoteState)
