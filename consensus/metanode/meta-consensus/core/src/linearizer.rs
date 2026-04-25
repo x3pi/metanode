@@ -126,7 +126,13 @@ impl Linearizer {
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
         // Now linearize the sub-dag starting from the leader block
-        let to_commit = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+        let to_commit = match Self::linearize_sub_dag(leader_block.clone(), &mut dag_state) {
+            Some(blocks) => blocks,
+            None => {
+                tracing::info!("⚠️ [LINEARIZER] Missing blocks to linearize sub-dag for leader {:?}. Deferring commit.", leader_block.reference());
+                return None;
+            }
+        };
 
         let timestamp_ms = precomputed_timestamp_ms.unwrap_or_else(|| {
             Self::calculate_commit_timestamp(
@@ -226,71 +232,64 @@ impl Linearizer {
     pub(crate) fn linearize_sub_dag(
         leader_block: VerifiedBlock,
         dag_state: &mut impl BlockStoreAPI,
-    ) -> Vec<VerifiedBlock> {
-        // The GC round here is calculated based on the last committed round of the leader block. The algorithm will attempt to
-        // commit blocks up to this GC round. Once this commit has been processed and written to DagState, then gc round will update
-        // and on the processing of the next commit we'll have it already updated, so no need to do any gc_round recalculations here.
-        // We just use whatever is currently in DagState.
+    ) -> Option<Vec<VerifiedBlock>> {
+        // The GC round here is calculated based on the last committed round of the leader block.
         let gc_round: Round = dag_state.gc_round();
         let leader_block_ref = leader_block.reference();
-        let _leader_round = leader_block.round();
-        let mut buffer = vec![leader_block];
+        let mut buffer = vec![leader_block.clone()];
         let mut to_commit = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(leader_block_ref);
 
-        // Perform the recursion without stopping at the highest round round that has been committed per authority. Instead it will
-        // allow to commit blocks that are lower than the highest committed round for an authority but higher than gc_round.
-        if !dag_state.set_committed(&leader_block_ref) {
+        if dag_state.is_committed(&leader_block_ref) {
             tracing::warn!(
-                "⚠️ [LINEARIZER] Leader block with reference {:?} attempted to be committed twice or is missing. \
-                 Tolerating graceful skip (likely recovering from cold-start or conflicting snapshot boundaries).",
+                "⚠️ [LINEARIZER] Leader block with reference {:?} was already committed.",
                 leader_block_ref
             );
-            return vec![]; // Skip processing if it's already committed
+            return Some(vec![]);
         }
-
-        // NOTE: We intentionally do NOT commit all blocks at the leader round.
-        // Different nodes may have different blocks at a round (due to network timing).
-        // To ensure determinism, we ONLY commit what the leader references (its ancestors).
-        // All nodes receive the same leader block, so they will commit the same blocks.
 
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
 
-            let ancestors: Vec<VerifiedBlock> = dag_state
-                .get_blocks(
-                    &x.ancestors()
-                        .iter()
-                        .copied()
-                        .filter(|ancestor| {
-                            ancestor.round > gc_round && !dag_state.is_committed(ancestor)
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .into_iter()
-                .filter_map(|ancestor_opt| {
-                    // During commit sync, some ancestor blocks might not be in dag_state yet.
-                    // Skip them gracefully instead of panicking.
-                    if ancestor_opt.is_none() {
-                        tracing::warn!(
-                            "⚠️ [LINEARIZER] Missing uncommitted ancestor block during linearization - will be synced later"
-                        );
-                    }
-                    ancestor_opt
+            let uncommitted_ancestors: Vec<BlockRef> = x.ancestors()
+                .iter()
+                .copied()
+                .filter(|ancestor| {
+                    ancestor.round > gc_round && !dag_state.is_committed(ancestor)
                 })
                 .collect();
-
-            for ancestor in ancestors {
-                buffer.push(ancestor.clone());
-                assert!(
-                    dag_state.set_committed(&ancestor.reference()),
-                    "Block with reference {:?} attempted to be committed twice",
-                    ancestor.reference()
-                );
+                
+            let ancestor_blocks = dag_state.get_blocks(&uncommitted_ancestors);
+            
+            for (idx, ancestor_opt) in ancestor_blocks.into_iter().enumerate() {
+                match ancestor_opt {
+                    Some(ancestor) => {
+                        if visited.insert(ancestor.reference()) {
+                            buffer.push(ancestor);
+                        }
+                    },
+                    None => {
+                        let missing_ref = uncommitted_ancestors[idx];
+                        tracing::warn!(
+                            "⚠️ [LINEARIZER] FORK PREVENTION: Missing uncommitted ancestor block {:?} during linearization! \
+                             Aborting sub-dag collection to prevent state divergence. Will retry when block arrives.", missing_ref
+                        );
+                        return None;
+                    }
+                }
             }
         }
-
-        // The above code should have not yielded any blocks that are <= gc_round, but just to make sure that we'll never
-        // commit anything that should be garbage collected we attempt to prune here as well.
+        
+        // NOW that we successfully collected ALL blocks, we can safely commit them!
+        for block in &to_commit {
+            assert!(
+                dag_state.set_committed(&block.reference()),
+                "Block with reference {:?} attempted to be committed twice",
+                block.reference()
+            );
+        }
+        
         assert!(
             to_commit.iter().all(|block| block.round() > gc_round),
             "No blocks <= {gc_round} should be committed. Leader round {}, blocks {to_commit:?}.",
@@ -300,7 +299,7 @@ impl Linearizer {
         // Sort the blocks of the sub-dag blocks
         sort_sub_dag_blocks(&mut to_commit);
 
-        to_commit
+        Some(to_commit)
     }
 
     // This function should be called whenever a new commit is observed. This will
