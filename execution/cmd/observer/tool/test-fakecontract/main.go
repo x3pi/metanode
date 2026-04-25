@@ -553,32 +553,27 @@ func autoAddEmbassyKeys(
 		return
 	}
 
-	// Debug: đọc owner() từ contract — eth_call trả về hex string, phải decode đúng kiểu
-	ownerData, _ := parsedConfigABI.Pack("owner")
-	var ownerHex string
-	callErr := client.Client().CallContext(context.Background(), &ownerHex, "eth_call",
+	// Debug: kiểm tra quyền owner của caller
+	isOwnerData, _ := parsedConfigABI.Pack("isOwner", from)
+	var isOwnerResultHex string
+	callErr := client.Client().CallContext(context.Background(), &isOwnerResultHex, "eth_call",
 		map[string]interface{}{
 			"from": from.Hex(),
 			"to":   contractAddr.Hex(),
-			"data": "0x" + hex.EncodeToString(ownerData),
+			"data": "0x" + hex.EncodeToString(isOwnerData),
 		}, "latest")
+	
 	if callErr != nil {
-		fmt.Printf("   ⚠️  owner() eth_call error: %v\n", callErr)
+		fmt.Printf("   ⚠️  isOwner() eth_call error: %v\n", callErr)
 	} else {
-		ownerHex = strings.TrimPrefix(ownerHex, "0x")
-		if len(ownerHex) >= 64 {
-			ownerAddr := common.HexToAddress(ownerHex[24:64]) // last 20 bytes of 32-byte word
-			fmt.Printf("   📋 Contract owner : %s\n", ownerAddr.Hex())
-			fmt.Printf("   📋 Caller (from)  : %s\n", from.Hex())
-			if ownerAddr != from {
-				fmt.Printf("   ❌ FATAL: caller != owner → addEmbassy sẽ revert với 'Only owner'\n")
-				fmt.Printf("      Hãy dùng đúng PRIVATE_KEY của owner trong .env\n")
-				return
-			} else {
-				fmt.Printf("   ✅ Owner check OK\n")
-			}
+		isOwnerResultHex = strings.TrimPrefix(isOwnerResultHex, "0x")
+		// Trả về bool (32 bytes), true là 0x...1
+		if len(isOwnerResultHex) >= 64 && isOwnerResultHex[63] == '1' {
+			fmt.Printf("   ✅ Caller %s là owner hợp lệ\n", from.Hex())
 		} else {
-			fmt.Printf("   ⚠️  owner() returned empty → contract có thể không có bytecode tại %s\n", contractAddr.Hex())
+			fmt.Printf("   ❌ FATAL: Caller %s KHÔNG phải là owner → các thao tác admin sẽ revert\n", from.Hex())
+			fmt.Printf("      Hãy dùng đúng PRIVATE_KEY của owner trong .env\n")
+			return
 		}
 	}
 

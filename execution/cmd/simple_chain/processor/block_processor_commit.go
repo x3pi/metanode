@@ -102,12 +102,6 @@ func (bp *BlockProcessor) commitWorker() {
 		//   - block_processor_processing.go only runs in single-node mode
 		//   - block_processor_txs.go only runs on sub-nodes
 		// Without this, GetBlockHashByNumber returns false → eth_getBlockByNumber returns null.
-		blockHash := job.Block.Header().Hash()
-		if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("commitWorker: SetBlockNumberToHash failed for block #%d: %v", blockNum, err)
-		} else {
-			logger.Info("🗺️  [MASTER] SetBlockNumberToHash: block #%d → hash=%s", blockNum, blockHash.Hex()[:16]+"...")
-		}
 		saveDuration := time.Since(startSave)
 
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.
@@ -230,7 +224,7 @@ func (bp *BlockProcessor) commitWorker() {
 			for _, logs := range job.ProcessResults.EventLogs {
 				allEventLogs = append(allEventLogs, logs...)
 			}
-			
+
 			go func(wg *sync.WaitGroup, block types.Block, receipts []types.Receipt, events []types.EventLog) {
 				if wg != nil {
 					wg.Wait()
@@ -242,7 +236,6 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
 	}
 }
-
 
 // commitToMemoryParallel performs parallel memory commit operations.
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
@@ -274,8 +267,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		duration time.Duration
 	}
 
-	// Count total tasks: txDB + Receipts + (if stateChanging: AccountPipeline + StakePipeline + TrieDB + BlockChain)
-	totalTasks := 2
+	// Count total tasks: txDB + Receipts + BlockChain + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
+	totalTasks := 3
 	if isStateChanging {
 		// CRITICAL FIX: SmartContractDB MUST commit sequentially BEFORE AccountStateDB!
 		// SmartContractDB.Commit() computes the new StorageRoot for contracts and late-binds
@@ -287,7 +280,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 		logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
 
-		totalTasks += 4
+		totalTasks += 3
 	}
 
 	var wg sync.WaitGroup
@@ -311,7 +304,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 
 	if isStateChanging {
 		// Launch ALL state-changing commits in parallel
-		wg.Add(4)
+		wg.Add(3)
 
 		// AccountStateDB.CommitPipeline — the heaviest task (~600-900ms for 50k TXs)
 		go func() {
@@ -338,15 +331,17 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			err := trie_database.GetTrieDatabaseManager().CommitSnapshots(trieDBSnapshots)
 			resultsChan <- taskResult{name: "TrieDatabases", err: err, duration: time.Since(start)}
 		}()
-
-		// BlockChain
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-			err := blockchain.GetBlockChainInstance().Commit()
-			resultsChan <- taskResult{name: "BlockChain", err: err, duration: time.Since(start)}
-		}()
 	}
+
+	// ALWAYS commit BlockChain mappings (BlockNumber->Hash, TxHash->BlockNumber)
+	// even for empty blocks (isStateChanging == false) so they don't expire from cache!
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		start := time.Now()
+		err := blockchain.GetBlockChainInstance().Commit()
+		resultsChan <- taskResult{name: "BlockChain", err: err, duration: time.Since(start)}
+	}()
 
 	go func() {
 		wg.Wait()
@@ -543,7 +538,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		MapppingBatch:             job.MappingBatch,
 		StakeState:                job.StakeBatch,
 		TrieDatabaseBatchPut:      job.TrieBatchSnapshot,
-		FullDbLogs:                nil, 
+		FullDbLogs:                nil,
 	}
 
 	backupBytes, err := storage.SerializeBackupDb(backupData)

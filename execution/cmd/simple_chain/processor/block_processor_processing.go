@@ -249,19 +249,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		bl.Header().SetGlobalExecIndex(globalExecIndex)
 	}
 
-	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
-	bp.SetLastBlock(bl)
-	headerCopy := bl.Header()
-	bp.chainState.SetcurrentBlockHeader(&headerCopy)
-
 	phase2Elapsed := time.Since(phase2Start)
 
 	phase3Start := time.Now()
-	// err = blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(bl.Header().BlockNumber()), bl.Header().Hash())
-	// if err != nil {
-	// 	bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
-	// 	logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
-	// }
+	err = blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(bl.Header().BlockNumber()), bl.Header().Hash())
+	if err != nil {
+		bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
+		logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
+	}
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
 	// TxHashMapBlockNumber is a non-critical in-memory index for TX lookup.
 	// Run it async but track via WaitGroup so commitWorker waits before broadcasting receipts.
@@ -377,6 +372,13 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			batchID, bl.Header().BlockNumber(), len(processResults.Transactions),
 			phase1Elapsed, phase2Elapsed, phase31Elapsed, phase32Elapsed, phase4Elapsed, overallElapsed)
 	}
+
+	// CRITICAL FORK-SAFETY: Update lastBlock only AFTER memory commits are done
+	// This prevents RPC clients (like eth_getCode) from retrieving a block
+	// before its state data is fully prepared in cache/LevelDB.
+	bp.SetLastBlock(bl)
+	headerCopy := bl.Header()
+	bp.chainState.SetcurrentBlockHeader(&headerCopy)
 
 	return bl
 }

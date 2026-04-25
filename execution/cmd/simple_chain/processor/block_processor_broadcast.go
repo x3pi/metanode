@@ -77,7 +77,9 @@ func (bp *BlockProcessor) checkForConfigUpdates(allEventLogs []types.EventLog) {
 	for _, eventLog := range allEventLogs {
 		if common.Address(eventLog.Address()) == configAddr {
 			if len(eventLog.Topics()) > 0 {
-				topic0 := common.BytesToHash([]byte(eventLog.Topics()[0])).Hex()
+				topic0Str := eventLog.Topics()[0]
+				logger.Info("🔄 [CrossChain] Broadcast detected ConfigRegistry event: %s", topic0Str)
+				topic0 := common.HexToHash(topic0Str).Hex()
 				if topic0 == embassyAddedTopic || topic0 == embassyRemovedTopic ||
 					topic0 == chainRegisteredTopic || topic0 == chainUnregisteredTopic {
 					logger.Info("🔄 [CrossChain] Broadcast detected ConfigRegistry event: %s", topic0)
@@ -148,9 +150,6 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 			allEthEventLogs = append(allEthEventLogs, evL)
 		}
 	}
-	logger.Info("broadcastEventsAndReceipts: converted event logs",
-		"blockNumber", lastBlock.Header().BlockNumber(),
-		"ethEventLogs", len(allEthEventLogs))
 	// Check context before sending
 	select {
 	case <-ctx.Done():
@@ -176,8 +175,6 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 			"revertedReceipts", revertedCount,
 			"successReceipts", len(allReceipts)-revertedCount)
 		// ✅ Child node will broadcast ALL receipts (including revert) to client connections
-		logger.Info("🚀 [RECEIPT BROADCAST] Block #%d: broadcasting %d receipts",
-			blockNum, len(allReceipts))
 		go bp.BroadCastReceipts(allReceipts)
 	} else {
 		// logger.Warn("⚠️  [RECEIPT BROADCAST] broadcastEventsAndReceipts: no receipts to broadcast for block #%d",
