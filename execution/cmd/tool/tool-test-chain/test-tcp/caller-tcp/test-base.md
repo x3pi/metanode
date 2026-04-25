@@ -1,3 +1,7 @@
+```bash
+go run -tags tool base.go -config=./base/config-getlogs.json
+```
+
 # TCP Base Tool (base.go)
 
 Tool nay dung chung de check nhieu node TCP trong mot lan chay.
@@ -21,7 +25,7 @@ go run -tags tool base.go
 Hoac chi dinh file config:
 
 ```bash
-go run -tags tool base.go -config=./base/config-local-multi.json
+go run -tags tool base.go -config=./base/config-getlogs.json
 ```
 
 ## 2) Cau hinh mau

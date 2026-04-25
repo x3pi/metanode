@@ -1,6 +1,7 @@
 
 ```bash
 go run -tags tool base.go -config=./base/config-getlogs.json
+go run -tags tool base.go -config=./base/config-blocktransactions.json
 ```
 
 

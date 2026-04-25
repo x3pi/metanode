@@ -65,9 +65,11 @@ func main() {
 	}
 
 	handlers := map[string]func(string, Config) (string, error){
-		"get_logs":      runGetLogs,
-		"account_state": runAccountState,
-		"get_chain_id":  runGetChainID,
+		"get_logs":                runGetLogs,
+		"account_state":           runAccountState,
+		"get_chain_id":            runGetChainID,
+		"get_transaction_by_hash": runGetTransactionByHash,
+		"get_block_transactions":  runGetBlockTransactions,
 	}
 
 	runType := strings.ToLower(strings.TrimSpace(cfg.Type))
@@ -214,6 +216,77 @@ func runGetChainID(url string, cfg Config) (string, error) {
 	}
 
 	return fmt.Sprintf("chain_id=%s", chainID), nil
+}
+
+func runGetTransactionByHash(url string, cfg Config) (string, error) {
+	hash, ok := readStringParam(cfg.Params, "hash")
+	if !ok {
+		return "", fmt.Errorf("params.hash is required")
+	}
+
+	result, err := callRPC(url, cfg.TimeoutSeconds, "eth_getTransactionByHash", []interface{}{hash})
+	if err != nil {
+		return "", err
+	}
+
+	if string(result) == "null" {
+		return "null (không tìm thấy transaction)", nil
+	}
+
+	var tx map[string]interface{}
+	if err := json.Unmarshal(result, &tx); err != nil {
+		return "", fmt.Errorf("failed to parse result: %w", err)
+	}
+
+	blockHash, _ := tx["blockHash"].(string)
+	blockNumber, _ := tx["blockNumber"].(string)
+	txIndex, _ := tx["transactionIndex"].(string)
+
+	return fmt.Sprintf("blockNumber=%s | blockHash=%s | txIndex=%s", blockNumber, blockHash, txIndex), nil
+}
+
+func runGetBlockTransactions(url string, cfg Config) (string, error) {
+	blockRaw, ok := readParam(cfg.Params, "block")
+	if !ok {
+		return "", fmt.Errorf("params.block is required")
+	}
+	block, err := normalizeBlockParam(blockRaw)
+	if err != nil {
+		return "", fmt.Errorf("params.block: %w", err)
+	}
+
+	result, err := callRPC(url, cfg.TimeoutSeconds, "eth_getBlockByNumber", []interface{}{block, false})
+	if err != nil {
+		return "", err
+	}
+
+	if string(result) == "null" {
+		return "null (block không tồn tại)", nil
+	}
+
+	var blockData map[string]interface{}
+	if err := json.Unmarshal(result, &blockData); err != nil {
+		return "", fmt.Errorf("failed to parse result: %w", err)
+	}
+
+	txsRaw, ok := blockData["transactions"].([]interface{})
+	if !ok {
+		return "0 transactions", nil
+	}
+
+	txCount := len(txsRaw)
+	if txCount == 0 {
+		return "0 transactions", nil
+	}
+
+	var txHashes []string
+	for _, tx := range txsRaw {
+		if hashStr, ok := tx.(string); ok {
+			txHashes = append(txHashes, hashStr)
+		}
+	}
+
+	return fmt.Sprintf("%d transactions: %v", txCount, txHashes), nil
 }
 
 func callRPC(url string, timeoutSeconds int, method string, params interface{}) (json.RawMessage, error) {
