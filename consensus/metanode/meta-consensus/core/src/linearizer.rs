@@ -70,7 +70,7 @@ pub struct Linearizer {
     /// Leaders waiting to be committed - deferred because not all blocks were available.
     /// FORK PREVENTION: We only commit when ALL blocks for a round are present.
     /// This list is processed first on each handle_commit call.
-    deferred_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)>,
+    deferred_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)>,
 }
 
 impl Linearizer {
@@ -95,7 +95,7 @@ impl Linearizer {
     fn try_collect_sub_dag_and_commit(
         &mut self,
         leader_block: VerifiedBlock,
-        precomputed_timestamp_ms: Option<BlockTimestampMs>,
+        precomputed_commit: Option<crate::commit::CertifiedCommit>,
     ) -> Option<(CommittedSubDag, TrustedCommit)> {
         let _s = self
             .context
@@ -126,7 +126,18 @@ impl Linearizer {
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
         // Now linearize the sub-dag starting from the leader block
-        let to_commit = match Self::linearize_sub_dag(leader_block.clone(), &mut dag_state) {
+        let to_commit = if let Some(commit) = precomputed_commit.as_ref() {
+            let mut blocks = commit.blocks().to_vec();
+            for block in &blocks {
+                dag_state.set_committed(&block.reference());
+            }
+            crate::commit::sort_sub_dag_blocks(&mut blocks);
+            Some(blocks)
+        } else {
+            Self::linearize_sub_dag(leader_block.clone(), &mut dag_state)
+        };
+
+        let to_commit = match to_commit {
             Some(blocks) => blocks,
             None => {
                 tracing::info!("⚠️ [LINEARIZER] Missing blocks to linearize sub-dag for leader {:?}. Deferring commit.", leader_block.reference());
@@ -134,14 +145,16 @@ impl Linearizer {
             }
         };
 
-        let timestamp_ms = precomputed_timestamp_ms.unwrap_or_else(|| {
+        let timestamp_ms = if let Some(commit) = precomputed_commit.as_ref() {
+            commit.timestamp_ms()
+        } else {
             Self::calculate_commit_timestamp(
                 &self.context,
                 &mut dag_state,
                 &leader_block,
                 last_commit_timestamp_ms,
             )
-        });
+        };
 
         drop(dag_state);
 
@@ -318,13 +331,13 @@ impl Linearizer {
 
         // Combine deferred leaders with new leaders, maintaining order.
         // Deferred leaders are tried first (they are older and waiting longer).
-        let mut all_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)> =
+        let mut all_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)> =
             std::mem::take(&mut self.deferred_leaders);
         let had_deferred = !all_leaders.is_empty();
 
         let new_leaders_with_ts = committed_leaders.into_iter().enumerate().map(|(i, leader)| {
-            let ts = precomputed_commits.as_ref().map(|commits| commits[i].timestamp_ms());
-            (leader, ts)
+            let commit = precomputed_commits.as_ref().map(|commits| commits[i].clone());
+            (leader, commit)
         });
         all_leaders.extend(new_leaders_with_ts);
 
@@ -356,7 +369,7 @@ impl Linearizer {
 
         while let Some((leader_block, precomputed_ts)) = leaders_iter.next() {
             // Try to collect the sub-dag. Returns None if blocks are missing.
-            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts) {
+            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts.clone()) {
                 Some((sub_dag, commit)) => {
                     // Success! All blocks were available.
                     self.update_blocks_pruned_metric(&sub_dag);

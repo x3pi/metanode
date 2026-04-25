@@ -301,17 +301,39 @@ impl CommitProcessor {
         //   commit_6 (normal)               → GEI = base+6+2 = base+8 ← correct!
         // FORK-SAFETY: All nodes use the same MAX_TXS_PER_GO_BLOCK → identical offsets.
         // RS-2: Load persisted offset from disk for crash recovery.
+        // If disk is wiped (e.g. snapshot restore), recalculate mathematically:
+        // last_gei = epoch_base + (next_expected_index - 1) + offset
+        let math_offset = if let Some(ref shared_idx) = self.shared_last_global_exec_index {
+            let last_gei = *shared_idx.lock().await;
+            let expected_last_commit_in_epoch = (next_expected_index.saturating_sub(1)) as u64;
+            if last_gei > epoch_base_index + expected_last_commit_in_epoch {
+                last_gei - epoch_base_index - expected_last_commit_in_epoch
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         let mut cumulative_fragment_offset: u64 = if let Some(ref sp) = self.storage_path {
             let loaded = crate::node::executor_client::persistence::load_fragment_offset(sp);
-            if loaded > 0 {
+            if loaded == 0 && math_offset > 0 {
+                info!(
+                    "📂 [FRAGMENT-OFFSET] Recovered offset={} mathematically from GEI difference (snapshot restore)",
+                    math_offset
+                );
+                math_offset
+            } else if loaded > 0 {
                 info!(
                     "📂 [FRAGMENT-OFFSET] Recovered persisted offset={} from disk",
                     loaded
                 );
+                loaded
+            } else {
+                0
             }
-            loaded
         } else {
-            0
+            math_offset
         };
         let storage_path_for_persist = self.storage_path.clone();
 

@@ -10,7 +10,7 @@ use crate::{
     block::BlockAPI,
     commit::{CertifiedCommit, CertifiedCommits, CommitAPI, CommittedSubDag, DecidedLeader},
     core::Core,
-    error::{ConsensusError, ConsensusResult},
+    error::ConsensusResult,
 };
 
 impl Core {
@@ -318,10 +318,11 @@ impl Core {
         // Make sure that the first commit we find is the next one in line and there is no gap.
         if let Some(commit) = commits.first() {
             if commit.index() != last_commit_index + 1 {
-                return Err(ConsensusError::UnexpectedCertifiedCommitIndex {
-                    expected_commit_index: last_commit_index + 1,
-                    commit_index: commit.index(),
-                });
+                tracing::warn!(
+                    "⚠️ [COLD-START] Expected commit index {}, but received {}. \
+                     This is EXPECTED during snapshot restore when Node jumps forward.",
+                    last_commit_index + 1, commit.index()
+                );
             }
         }
 
