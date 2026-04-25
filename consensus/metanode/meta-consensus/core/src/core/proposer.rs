@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, iter, sync::atomic::Ordering, time::Duration, vec};
+use std::{collections::BTreeSet, iter, time::Duration, vec};
 
 use itertools::Itertools as _;
 use tokio::time::Instant;
@@ -27,8 +27,8 @@ impl Core {
         if !self.should_propose() {
             return Ok(None);
         }
-        if let Some(extended_block) = self.try_new_block(force) {
-            self.signals.new_block(extended_block.clone())?;
+        if let Some((extended_block, flush_ticket)) = self.try_new_block(force) {
+            self.signals.new_block_with_ticket(extended_block.clone(), flush_ticket)?;
 
             fail_point!("consensus-after-propose");
 
@@ -41,7 +41,10 @@ impl Core {
 
     /// Attempts to propose a new block for the next round. If a block has already proposed for latest
     /// or earlier round, then no block is created and None is returned.
-    pub(crate) fn try_new_block(&mut self, force: bool) -> Option<ExtendedBlock> {
+    pub(crate) fn try_new_block(
+        &mut self,
+        force: bool,
+    ) -> Option<(ExtendedBlock, Option<tokio::sync::oneshot::Receiver<()>>)> {
         let _s = self
             .context
             .metrics
@@ -384,7 +387,8 @@ impl Core {
         }
 
         // Ensure the new block and its ancestors are persisted, before broadcasting it.
-        self.dag_state.write().flush();
+        // We defer the real wait for the flush ticket in the broadcaster task to prevent blocking CoreThread.
+        let flush_ticket = self.dag_state.write().flush();
 
         // Now acknowledge the transactions for their inclusion to block
         ack_transactions(verified_block.reference());
@@ -408,7 +412,7 @@ impl Core {
             .write()
             .update_from_verified_block(&extended_block);
 
-        Some(extended_block)
+        Some((extended_block, flush_ticket))
     }
 
     /// Whether the core should propose new blocks.
@@ -417,178 +421,25 @@ impl Core {
         let core_skipped_proposals = &self.context.metrics.node_metrics.core_skipped_proposals;
 
         // ═══════════════════════════════════════════════════════════════════
-        // QUORUM GATE: Prevents startup forks by gating round 2+ proposals
-        // until we've heard from enough peers (quorum_threshold).
-        //
-        // Round 1 proposals are ALWAYS allowed — this is critical because:
-        //   1. Round 1 blocks flow freely through the network
-        //   2. Peers update highest_received_rounds when they receive them
-        //   3. The quorum monitor detects enough peers from these updates
-        //   4. It then sets quorum_ready=true, unlocking round 2+ proposals
-        //
-        // Without this, ALL proposals are blocked → no blocks sent →
-        // highest_received_rounds never updates → DEADLOCK.
-        //
-        // Commits require round 3+ blocks, so gating round 2 is sufficient
-        // to prevent isolated subgroups from committing divergent leaders.
-        // Once quorum_ready latches to true, it stays true permanently.
+        // PHASE CHECK: Block proposals during both CatchingUp AND Bootstrapping.
+        // - Bootstrapping: snapshot restore in progress, baseline not yet
+        //   established. Proposing here risks equivocation if the node
+        //   previously proposed at a higher round before the snapshot.
+        // - CatchingUp: node is syncing commits from the network.
+        // - Healthy: normal consensus — proposals allowed.
         // ═══════════════════════════════════════════════════════════════════
-        if clock_round > 1 && !self.quorum_ready.load(Ordering::Relaxed) {
-            // ═══════════════════════════════════════════════════════════════
-            // COLD-START BYPASS: After snapshot restore, CommitSyncer GC
-            // advance jumps the threshold clock from round 1 to 10000+.
-            // The quorum gate would block proposals for up to 30s.
-            // During cold-start (no local progress since Core creation),
-            // bypass the gate — the node MUST propose to join consensus.
-            // ═══════════════════════════════════════════════════════════════
-            let local_ci = self.dag_state.read().last_commit_index();
-            let no_progress = local_ci <= self.initial_commit_index;
-            if !no_progress {
-                debug!(
-                    "🔒 [QUORUM GATE] Round {} proposals blocked: waiting for peer quorum \
-                     (round 1 allowed freely to bootstrap peer detection)",
-                    clock_round
-                );
-                core_skipped_proposals
-                    .with_label_values(&["quorum_gate_waiting"])
-                    .inc();
-                return false;
-            }
+        if self.coordination_hub.should_skip_proposal() {
             debug!(
-                "🔓 [QUORUM GATE] Cold-start bypass: round {} allowed despite quorum not ready \
-                 (local_commit={} <= initial_commit={})",
-                clock_round, local_ci, self.initial_commit_index
+                "Skip proposing for round {}: node phase is {:?}",
+                clock_round, self.coordination_hub.get_phase()
             );
-        }
-
-        // CRITICAL: Check if node is lagging and prioritize sync over consensus
-        // When lag is significant, skip proposing new blocks to focus on syncing commits
-        let local_commit_index = self.dag_state.read().last_commit_index();
-        let quorum_commit_index = self
-            .context
-            .metrics
-            .node_metrics
-            .commit_sync_quorum_index
-            .get() as u32;
-
-        // Thresholds for skipping consensus when lagging:
-        // - MODERATE_LAG: 100 commits or 10% behind quorum -> skip consensus, prioritize sync
-        // - SEVERE_LAG: 200 commits or 15% behind quorum -> aggressively skip consensus
-        const MODERATE_LAG_THRESHOLD: u32 = 100; // Skip consensus if lag > 100 commits
-        const SEVERE_LAG_THRESHOLD: u32 = 200; // Aggressively skip consensus if lag > 200 commits
-        const MODERATE_LAG_PERCENTAGE: f64 = 10.0; // Skip consensus if lag > 10% of quorum
-        const SEVERE_LAG_PERCENTAGE: f64 = 15.0; // Aggressively skip if lag > 15% of quorum
-
-        // HYSTERESIS: To prevent oscillation, use lower threshold when recovering from sync mode
-        // When lag was high and is now decreasing, require lag to drop below 80% of threshold
-        // before resuming consensus. This ensures smooth transition back to consensus.
-        const HYSTERESIS_FACTOR: f64 = 0.8; // Resume consensus when lag < 80% of threshold
-
-        let lag = quorum_commit_index.saturating_sub(local_commit_index);
-        let lag_percentage = if quorum_commit_index > 0 {
-            (lag as f64 / quorum_commit_index as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        // Check if we should skip consensus
-        // Use hysteresis: if we were in sync mode, require lag to drop below 80% of threshold
-        let moderate_lag_threshold_with_hysteresis =
-            (MODERATE_LAG_THRESHOLD as f64 * HYSTERESIS_FACTOR) as u32;
-        let moderate_lag_percentage_with_hysteresis = MODERATE_LAG_PERCENTAGE * HYSTERESIS_FACTOR;
-
-        // Determine if we should skip consensus
-        // If lag is above threshold OR above hysteresis threshold (for smooth recovery)
-        let should_skip_consensus =
-            lag > MODERATE_LAG_THRESHOLD || lag_percentage > MODERATE_LAG_PERCENTAGE;
-        let is_severe_lag = lag > SEVERE_LAG_THRESHOLD || lag_percentage > SEVERE_LAG_PERCENTAGE;
-
-        // Check if we're recovering (lag was high but now decreasing)
-        let is_recovering = lag <= moderate_lag_threshold_with_hysteresis
-            && lag_percentage <= moderate_lag_percentage_with_hysteresis;
-
-        // CRITICAL FORK-PREVENTION: The "Fresh DAG" rule was REMOVED.
-        // Previously, we blocked nodes with a fresh DAG from proposing to prevent forks
-        // caused by mismatched genesis blocks. However, the genesis timestamp is now
-        // unified and strictly matches the network's timestamp. Restored nodes will
-        // generate identical genesis hashes and can safely join consensus mid-epoch.
-
-        // ═══════════════════════════════════════════════════════════════════
-        // COLD-START EXEMPTION: After snapshot restore, the DAG is wiped
-        // but local_commit_index may be non-zero (set from snapshot GEI).
-        // The node is stuck with massive lag vs quorum, which would block
-        // proposals forever. Detect cold-start by TWO conditions:
-        //   (a) clock_round <= 1: very early cold-start (DAG just created)
-        //   (b) no_local_progress: local_commit_index hasn't advanced
-        //       beyond the initial synthetic value set at Core creation.
-        //       After align_commit_index_with_go or cold_start_advance_gc_round,
-        //       commit_index may be high but ALL from synthetic commits.
-        //       The node hasn't produced ANY real local consensus commits.
-        //
-        // Proposing is ESSENTIAL: the node must create DAG blocks to
-        // participate in consensus. Without this exemption there's a
-        // deadlock: no proposals → no commits → lag never decreases.
-        //
-        // Once local_commit_index advances beyond initial_commit_index
-        // (meaning the node successfully joined consensus and committed),
-        // the exemption is lifted and normal lag management resumes.
-        // ═══════════════════════════════════════════════════════════════════
-        let no_local_progress = local_commit_index <= self.initial_commit_index;
-        if (clock_round <= 1 || no_local_progress) && quorum_commit_index > 200 {
-            // Cold-start: allow proposing despite lag
-            debug!(
-                "🚀 [COLD-START] Allowing proposal at round {} despite lag={} (clock_round={}, local_commit={}, cold-start bootstrap)",
-                clock_round, lag, clock_round, local_commit_index
-            );
-            // Fall through to remaining checks (propagation delay, etc.)
-        } else if should_skip_consensus {
-            if is_severe_lag {
-                // Severe lag: Skip consensus aggressively
-                debug!(
-                    "Skip proposing for round {} due to severe lag: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Prioritizing sync over consensus.",
-                    clock_round, lag, lag_percentage, local_commit_index, quorum_commit_index
-                );
-                core_skipped_proposals
-                    .with_label_values(&["severe_lag_prioritize_sync"])
-                    .inc();
-            } else {
-                // Moderate lag: Skip consensus to prioritize sync
-                debug!(
-                    "Skip proposing for round {} due to moderate lag: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Prioritizing sync over consensus.",
-                    clock_round, lag, lag_percentage, local_commit_index, quorum_commit_index
-                );
-                core_skipped_proposals
-                    .with_label_values(&["moderate_lag_prioritize_sync"])
-                    .inc();
-            }
+            core_skipped_proposals
+                .with_label_values(&["catching_up"])
+                .inc();
             return false;
         }
 
-        // If we're recovering from sync mode (lag dropped below hysteresis threshold), log transition
-        if is_recovering && lag > 0 {
-            info!(
-                "✅ [CONSENSUS-RESUME] Resuming consensus after catch-up: lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}. Node has caught up, returning to normal consensus mode.",
-                lag, lag_percentage, local_commit_index, quorum_commit_index
-            );
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // COLD-START EXEMPTION (part 2): After snapshot restore, amnesia
-        // recovery syncs the old last_known_proposed_round from peers (e.g.
-        // round 4828). But the fresh DAG starts at round 1, so clock_round(1)
-        // <= last_known_proposed_round(4828) → proposal blocked forever.
-        // During cold-start, skip propagation delay and proposed round checks.
-        //
-        // Extended detection: also covers the catch-up window AFTER
-        // clock_round advances (once peer blocks are received). Without
-        // this, the node's first round-1 proposal succeeds, then peer
-        // blocks push clock_round to 10000+ but local_commit_index hasn't
-        // advanced → lag check blocks all subsequent proposals → DEADLOCK.
-        // ═══════════════════════════════════════════════════════════════════
-        let is_cold_start = (clock_round <= 1 || no_local_progress) && quorum_commit_index > 200;
-
-        if !is_cold_start
-            && self.propagation_delay
+        if self.propagation_delay
                 > self
                     .context
                     .parameters
@@ -608,23 +459,15 @@ impl Core {
         }
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {
-            if !is_cold_start {
-                debug!(
-                    "Skip proposing for round {clock_round}, last known proposed round has not been synced yet."
-                );
-                core_skipped_proposals
-                    .with_label_values(&["no_last_known_proposed_round"])
-                    .inc();
-                return false;
-            }
-            // Cold-start: allow proposing even without synced proposed round
+            // First boot: allow proposing even without synced proposed round
             debug!(
-                "🚀 [COLD-START] Allowing proposal at round {} without last_known_proposed_round (cold-start bootstrap)",
+                "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round",
                 clock_round
             );
             return true;
         };
-        if !is_cold_start && clock_round <= last_known_proposed_round {
+        
+        if clock_round <= last_known_proposed_round {
             debug!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"
             );

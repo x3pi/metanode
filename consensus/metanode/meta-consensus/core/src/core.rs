@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
     vec,
 };
 
@@ -102,19 +102,8 @@ pub(crate) struct Core {
     /// System transaction provider (for EndOfEpoch transactions)
     /// None if using legacy Proposal/Vote/Quorum mechanism
     pub(crate) system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
-    /// Quorum readiness gate: blocks proposals until enough peers have been heard from.
-    /// Set to `true` by the authority node after detecting ≥ quorum_threshold unique peers.
-    /// Prevents fork at startup where isolated subgroups form independent consensus.
-    pub(crate) quorum_ready: Arc<AtomicBool>,
-    /// ═══════════════════════════════════════════════════════════════════
-    /// COLD-START CATCH-UP: Commit index at Core creation time.
-    /// After snapshot restore, align_commit_index_with_go sets a synthetic
-    /// commit index. Until the node produces NEW commits beyond this value,
-    /// it is still catching up and must NOT be blocked by the lag-based
-    /// proposal skip — otherwise a deadlock occurs:
-    ///   no proposals → no commits → lag never decreases → proposals blocked.
-    /// ═══════════════════════════════════════════════════════════════════
-    pub(crate) initial_commit_index: u32,
+    /// System phase coordination
+    pub(crate) coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
 }
 
 impl Core {
@@ -133,7 +122,7 @@ impl Core {
         round_tracker: Arc<RwLock<PeerRoundTracker>>,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
         system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
-        quorum_ready: Arc<AtomicBool>,
+        coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     ) -> Self {
         let last_decided_leader = dag_state.read().last_commit_leader();
         let number_of_leaders = context
@@ -153,14 +142,6 @@ impl Core {
 
         let last_signaled_round = last_proposed_block.round();
 
-        // Recover the last included ancestor rounds based on the last proposed block. That will allow
-        // to perform the next block proposal by using ancestor blocks of higher rounds and avoid
-        // re-including blocks that have been already included in the last (or earlier) block proposal.
-        // This is only strongly guaranteed for a quorum of ancestors. It is still possible to re-include
-        // a block from an authority which hadn't been added as part of the last proposal hence its
-        // latest included ancestor is not accurately captured here. This is considered a small deficiency,
-        // and it mostly matters just for this next proposal without any actual penalties in performance
-        // or block proposal.
         let mut last_included_ancestors = vec![None; context.committee.size()];
         for ancestor in last_proposed_block.ancestors() {
             last_included_ancestors[ancestor.author] = Some(*ancestor);
@@ -169,7 +150,6 @@ impl Core {
         let min_propose_round = if sync_last_known_own_block {
             None
         } else {
-            // if the sync is disabled then we practically don't want to impose any restriction.
             Some(0)
         };
 
@@ -181,8 +161,6 @@ impl Core {
         let mut ancestor_state_manager =
             AncestorStateManager::new(context.clone(), dag_state.clone());
         ancestor_state_manager.set_propagation_scores(propagation_scores);
-
-        let initial_commit_index = dag_state.read().last_commit_index();
 
         Self {
             context,
@@ -204,8 +182,7 @@ impl Core {
             round_tracker,
             adaptive_delay_state,
             system_transaction_provider,
-            quorum_ready,
-            initial_commit_index,
+            coordination_hub,
         }
         .recover()
         .expect("Core::recover() failed")

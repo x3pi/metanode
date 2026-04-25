@@ -24,11 +24,10 @@ use crate::node::executor_client::ExecutorClient;
 use crate::node::tx_submitter::TransactionClientProxy;
 
 // Declare submodules
-pub mod block_coordinator;
-pub mod catchup;
+
 pub mod committee;
 pub mod committee_source;
-pub mod dual_stream;
+pub mod block_delivery;
 pub mod epoch_checkpoint;
 pub mod epoch_monitor;
 pub mod epoch_transition_manager;
@@ -61,15 +60,14 @@ use epoch_store::load_legacy_epoch_stores;
 #[cfg(test)]
 mod epoch_transition_tests;
 
-/// Node operation modes
+/// Node operation modes — simplified: only two states.
+/// Validator always starts consensus immediately; catch-up is handled internally by CommitSyncer.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NodeMode {
     /// Node only syncs data, does not participate in voting
     SyncOnly,
-    /// Node participates in consensus and voting
+    /// Node participates in consensus and voting (catches up via CommitSyncer if needed)
     Validator,
-    /// Node is catching up with the network (syncing epoch/commits)
-    SyncingUp,
 }
 
 /// Pending epoch transition that is deferred until sync is complete
@@ -115,6 +113,7 @@ pub struct ConsensusNode {
     /// Legacy epoch store manager - keeps RocksDB stores from previous epochs
     /// open for read-only sync access. Only stores (not full authorities) are kept.
     pub(crate) legacy_store_manager: Arc<consensus_core::LegacyEpochStoreManager>,
+    pub(crate) coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     pub(crate) node_mode: NodeMode,
     pub(crate) execution_lock: Arc<tokio::sync::RwLock<u64>>,
     pub(crate) reconfig_state: Arc<tokio::sync::RwLock<consensus_core::ReconfigState>>,
@@ -176,25 +175,11 @@ pub struct ConsensusNode {
     pub(crate) epoch_eth_addresses:
         Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
 
-    /// Block Coordinator for dual-stream block production
-    /// Handles both Consensus and Sync streams with deduplication and priority
-    pub(crate) block_coordinator: Option<Arc<block_coordinator::BlockCoordinator>>,
-
     /// Peer RPC addresses for cross-node block fetching during epoch transitions
     pub(crate) peer_rpc_addresses: Vec<String>,
 
     /// TX recycler for tracking and re-submitting stale TXs
     pub(crate) tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-
-    /// Cold-start flag: set to true when DAG was wiped (snapshot restore).
-    /// When true, the node stays in SyncingUp mode and runs blocking Phase 1
-    /// peer sync first. After sync completes, ConsensusAuthority starts and
-    /// DualStreamController handles the overlap period (Phase 4).
-    pub(crate) cold_start: bool,
-    /// CRITICAL: GEI captured at snapshot restore time (before peer sync).
-    /// Used by mode_transition.rs for cold_start_skip_gei calculation.
-    /// Must be the GEI at snapshot time, NOT after peer sync.
-    pub(crate) cold_start_snapshot_gei: u64,
 }
 
 // ConsensusNode constructors are in consensus_node.rs

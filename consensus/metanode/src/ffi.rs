@@ -14,6 +14,9 @@ pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
 // The global channel sender for zero-copy FFI transaction submission
 pub static FFI_TX_SENDER: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>> = OnceLock::new();
 
+pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
+
+
 #[repr(C)]
 pub struct GoCallbacks {
     /// Send an executable block to Go for execution.
@@ -29,6 +32,8 @@ pub struct GoCallbacks {
     >,
     /// Free a buffer previously allocated by Go (e.g., returned via out_payload).
     pub free_go_buffer: Option<extern "C" fn(ptr: *mut u8)>,
+    /// Get the current state root from Go AccountStateDB
+    pub get_state_root: Option<extern "C" fn() -> *mut c_char>,
 }
 
 /// Register the CGo callbacks.
@@ -42,13 +47,39 @@ pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
 /// Pulse pause to Rust consensus
 #[no_mangle]
 pub extern "C" fn metanode_pause_consensus() {
-    info!("⏸️ [FFI] metanode_pause_consensus called (Stub) - TO DO: implement flush/pause RocksDB");
+    info!("⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK...");
+    let guard = consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write().expect("Failed to acquire write lock for pausing consensus");
+    unsafe {
+        PAUSE_GUARD = Some(std::mem::transmute(guard));
+    }
+    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED.");
 }
 
 /// Resume Rust consensus
 #[no_mangle]
 pub extern "C" fn metanode_resume_consensus() {
-    info!("▶️ [FFI] metanode_resume_consensus called (Stub) - TO DO: implement resume RocksDB");
+    info!("▶️ [FFI] metanode_resume_consensus called - dropping write lock...");
+    unsafe {
+        PAUSE_GUARD = None;
+    }
+    info!("▶️ [FFI] metanode_resume_consensus: RocksDB writes RESUMED.");
+}
+
+/// Call into Go to get the exact final StateRoot
+pub fn get_go_state_root() -> String {
+    if let Some(callbacks) = GO_CALLBACKS.get() {
+        if let Some(func) = callbacks.get_state_root {
+            let ptr = func();
+            if !ptr.is_null() {
+                let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+                if let Some(free_func) = callbacks.free_go_buffer {
+                    free_func(ptr as *mut u8);
+                }
+                return s;
+            }
+        }
+    }
+    String::new()
 }
 
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
@@ -139,39 +170,45 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
             };
 
             rt.block_on(async {
-                let config_path = std::path::PathBuf::from(config_path_str);
-                let mut node_config = match NodeConfig::load(&config_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Failed to load configuration from {:?}: {}", config_path, e);
-                        return;
+                loop {
+                    let config_path = std::path::PathBuf::from(config_path_str.clone());
+                    let mut node_config = match NodeConfig::load(&config_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Failed to load configuration from {:?}: {}", config_path, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
+
+                    // Override storage path to live inside Go's data directory if provided
+                    if !data_dir_str.is_empty() {
+                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
+                        info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
                     }
-                };
 
-                // Override storage path to live inside Go's data directory if provided
-                if !data_dir_str.is_empty() {
-                    node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
-                    info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
-                }
+                    info!("Node ID: {}", node_config.node_id);
+                    info!("Network address: {}", node_config.network_address);
 
-                info!("Node ID: {}", node_config.node_id);
-                info!("Network address: {}", node_config.network_address);
+                    let registry = prometheus::Registry::new();
+                    let startup_config = StartupConfig::new(node_config, registry, None);
 
-                let registry = prometheus::Registry::new();
-                let startup_config = StartupConfig::new(node_config, registry, None);
+                    let initialized_node = match InitializedNode::initialize(startup_config).await {
+                        Ok(node) => node,
+                        Err(e) => {
+                            error!("Failed to initialize node: {}", e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
 
-                let initialized_node = match InitializedNode::initialize(startup_config).await {
-                    Ok(node) => node,
-                    Err(e) => {
-                        error!("Failed to initialize node: {}", e);
-                        return;
+                    if let Err(e) = initialized_node.run_main_loop().await {
+                        error!("Consensus main loop exited with error: {}", e);
                     }
-                };
-
-                if let Err(e) = initialized_node.run_main_loop().await {
-                    error!("Consensus main loop exited with error: {}", e);
+                    
+                    tracing::warn!("🔄 [FFI RESTART] Consensus Node crashed or exited. Restarting in 5 seconds...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
-                info!("Consensus main loop completed.");
             });
         }));
 

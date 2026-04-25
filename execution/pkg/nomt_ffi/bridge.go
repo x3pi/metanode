@@ -30,13 +30,15 @@ type Handle struct {
 
 // Session wraps the opaque NOMT write session pointer.
 type Session struct {
-	ptr *C.SessionHandle
+	ptr    *C.SessionHandle
+	handle *Handle
 }
 
 // FinishedSession wraps an opaque pointer to a session that has finished
 // computing its Merkle root but has NOT yet written to disk.
 type FinishedSession struct {
-	ptr *C.FinishedSessionHandle
+	ptr    *C.FinishedSessionHandle
+	handle *Handle
 }
 
 // Open creates a new NOMT database at the given path.
@@ -193,19 +195,33 @@ func (h *Handle) Read(key [32]byte) ([]byte, bool, error) {
 // Add writes via Session.Write() or Session.BatchWrite(),
 // then call Session.Commit() to apply atomically.
 func BeginSession(h *Handle) *Session {
-	if h == nil || h.ptr == nil {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.ptr == nil {
 		return nil
 	}
 	ptr := C.nomt_session_begin(h.ptr)
 	if ptr == nil {
 		return nil
 	}
-	return &Session{ptr: ptr}
+	return &Session{ptr: ptr, handle: h}
 }
 
 // WarmUp sends an asynchronous prefetch request to the NOMT threadpool to load
 // the Merkle branch nodes from disk.
 func (s *Session) WarmUp(key [32]byte) error {
+	if s.ptr == nil || s.handle == nil {
+		return fmt.Errorf("nomt_ffi: invalid session")
+	}
+	s.handle.mu.RLock()
+	defer s.handle.mu.RUnlock()
+	if s.handle.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
+	}
+
 	ret := C.nomt_session_warm_up(
 		s.ptr,
 		(*C.uint8_t)(&key[0]),
@@ -219,6 +235,15 @@ func (s *Session) WarmUp(key [32]byte) error {
 // RecordRead records a previous read value for a key (for ReadThenWrite semantics).
 // This should be called for keys where the old value is known before writing.
 func (s *Session) RecordRead(key [32]byte, oldValue []byte) error {
+	if s.ptr == nil || s.handle == nil {
+		return fmt.Errorf("nomt_ffi: invalid session")
+	}
+	s.handle.mu.RLock()
+	defer s.handle.mu.RUnlock()
+	if s.handle.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
+	}
+
 	var valPtr *C.uint8_t
 	valLen := C.size_t(0)
 	if len(oldValue) > 0 {
@@ -241,6 +266,15 @@ func (s *Session) RecordRead(key [32]byte, oldValue []byte) error {
 // Write adds a single key-value write to the session.
 // Pass nil value to delete the key.
 func (s *Session) Write(key [32]byte, value []byte) error {
+	if s.ptr == nil || s.handle == nil {
+		return fmt.Errorf("nomt_ffi: invalid session")
+	}
+	s.handle.mu.RLock()
+	defer s.handle.mu.RUnlock()
+	if s.handle.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
+	}
+
 	var valPtr *C.uint8_t
 	valLen := C.size_t(0)
 	if len(value) > 0 {
@@ -267,12 +301,21 @@ func (s *Session) Write(key [32]byte, value []byte) error {
 // Implementation note: CGo forbids passing Go pointers that contain other Go pointers
 // into C. We flatten all values into a single contiguous byte array here.
 func (s *Session) BatchWrite(keys [][32]byte, values [][]byte) error {
+	if s.ptr == nil || s.handle == nil {
+		return fmt.Errorf("nomt_ffi: invalid session")
+	}
 	if len(keys) != len(values) {
 		return fmt.Errorf("nomt_ffi: BatchWrite keys/values length mismatch (%d vs %d)", len(keys), len(values))
 	}
 	n := len(keys)
 	if n == 0 {
 		return nil
+	}
+
+	s.handle.mu.RLock()
+	defer s.handle.mu.RUnlock()
+	if s.handle.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
 	// Flatten keys into contiguous byte array (N × 32 bytes) — single Go buffer, no nested pointers
@@ -350,6 +393,9 @@ func (s *Session) Commit(h *Handle) ([32]byte, error) {
 func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.ptr == nil {
+		return [32]byte{}, nil, fmt.Errorf("nomt_ffi: handle closed")
+	}
 
 	var newRoot [32]byte
 
@@ -363,7 +409,7 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 	if ptr == nil {
 		return newRoot, nil, fmt.Errorf("nomt_ffi: session finish failed")
 	}
-	return newRoot, &FinishedSession{ptr: ptr}, nil
+	return newRoot, &FinishedSession{ptr: ptr, handle: h}, nil
 }
 
 // CommitPayload performs the actual disk I/O to persist a FinishedSession.
@@ -376,6 +422,9 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	// Fast lock to ensure Handle isn't closed during commit
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
+	}
 
 	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
 	fs.ptr = nil // consumed
@@ -388,16 +437,24 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 
 // Abort discards an uncommitted session.
 func (s *Session) Abort() {
-	if s.ptr != nil {
-		C.nomt_session_abort(s.ptr)
+	if s.ptr != nil && s.handle != nil {
+		s.handle.mu.RLock()
+		defer s.handle.mu.RUnlock()
+		if s.handle.ptr != nil {
+			C.nomt_session_abort(s.ptr)
+		}
 		s.ptr = nil
 	}
 }
 
 // Abort discards an uncommitted finished session.
 func (fs *FinishedSession) Abort() {
-	if fs.ptr != nil {
-		C.nomt_finished_session_abort(fs.ptr)
+	if fs.ptr != nil && fs.handle != nil {
+		fs.handle.mu.RLock()
+		defer fs.handle.mu.RUnlock()
+		if fs.handle.ptr != nil {
+			C.nomt_finished_session_abort(fs.ptr)
+		}
 		fs.ptr = nil
 	}
 }

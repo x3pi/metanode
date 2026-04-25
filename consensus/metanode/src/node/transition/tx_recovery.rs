@@ -82,8 +82,11 @@ pub(super) async fn recover_epoch_pending_transactions(node: &mut ConsensusNode)
             let batch: Vec<Vec<u8>> = chunk.to_vec();
             let batch_len = batch.len();
 
-            match proxy.submit(batch.clone()).await {
-                Ok(_) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(5000), 
+                proxy.submit(batch.clone())
+            ).await {
+                Ok(Ok(_)) => {
                     recovered_count += batch_len;
                     info!(
                         "✅ [EPOCH RECOVERY] Batch {} recovered: {} TXs (total: {}/{})",
@@ -93,7 +96,7 @@ pub(super) async fn recover_epoch_pending_transactions(node: &mut ConsensusNode)
                         total_to_recover
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     failed_count += batch_len;
                     warn!(
                         "❌ [EPOCH RECOVERY] Batch {} failed ({} TXs): {}. Queuing for retry.",
@@ -102,6 +105,19 @@ pub(super) async fn recover_epoch_pending_transactions(node: &mut ConsensusNode)
                         e
                     );
                     // Put failed TXs back into pending queue for later retry
+                    let mut pending = node.pending_transactions_queue.lock().await;
+                    for tx_data in chunk {
+                        pending.push(tx_data.clone());
+                    }
+                }
+                Err(_) => {
+                    failed_count += batch_len;
+                    warn!(
+                        "❌ [EPOCH RECOVERY] Batch {} timed out ({} TXs). Queuing for retry.",
+                        batch_idx + 1,
+                        batch_len
+                    );
+                    // Put timed-out TXs back into pending queue for later retry
                     let mut pending = node.pending_transactions_queue.lock().await;
                     for tx_data in chunk {
                         pending.push(tx_data.clone());

@@ -81,6 +81,11 @@ type AccountStateDB struct {
 	// This acts as a lightweight, channel-based mutex.
 	nomtCommitGuard chan struct{}
 
+	// cacheEpoch tracks the generation of the trie/LRU caches. It is incremented
+	// by InvalidateAllCaches, ReloadTrie, and Discard to prevent stale reads
+	// from poisoning the newly constructed read caches concurrently.
+	cacheEpoch atomic.Uint64
+
 	// TPS OPT: Bounded eviction for loadedAccounts.
 	// loadedAccounts grows unbounded across blocks (Phase 4 optimization).
 	// Every N blocks, clear loadedAccounts to cap memory growth and reduce GC pressure.
@@ -172,6 +177,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 	db.originRootHash = rootHash
 	db.dirtyAccounts.Clear()  // Clear dirty accounts under lock
 	db.loadedAccounts.Clear() // Clear loaded accounts too
+	db.cacheEpoch.Add(1)      // FORK-SAFETY: invalidate concurrent reads
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -316,6 +322,7 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 	} else {
 		// TPS OPT: FlatStateTrie.Get() is fully thread-safe (internal RWMutex).
 		// Skip muTrie.Lock to eliminate serialization bottleneck on cache miss.
+		readEpoch := db.cacheEpoch.Load()
 		if db.isFlatTrie {
 			bData, err = db.trie.Get(address.Bytes())
 		} else {
@@ -333,9 +340,9 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 			return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 		}
 
-		db.lruMu.Lock()
-		db.lruCache[address] = bData
-		db.lruMu.Unlock()
+		// FORK-SAFETY: Only insert into lruCache if InvalidateAllCaches wasn't called
+		// during our trie read. Otherwise, we poison the new cache with old data.
+		db.setLruCacheSafe(address, bData, readEpoch)
 	}
 
 	if len(bData) == 0 {
@@ -419,6 +426,7 @@ func (db *AccountStateDB) GetAll() (map[common.Address]types.AccountState, error
 // the next read to go through trie.Get() which reads fresh data from NOMT/PebbleDB.
 func (db *AccountStateDB) InvalidateAllCaches() {
 	db.loadedAccounts.Clear()
+	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -438,6 +446,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	// Clear dirty accounts first
 	db.dirtyAccounts.Clear()
 	db.loadedAccounts.Clear()
+	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -508,6 +517,16 @@ func (db *AccountStateDB) Close() {
 			closer.Close()
 		}
 	}
+}
+
+// setLruCacheSafe safely inserts into the LRU cache, preventing stale data poisoning.
+// It checks if InvalidateAllCaches was called during the read operation.
+func (db *AccountStateDB) setLruCacheSafe(addr common.Address, data []byte, readEpoch uint64) {
+	db.lruMu.Lock()
+	if db.cacheEpoch.Load() == readEpoch {
+		db.lruCache[addr] = data
+	}
+	db.lruMu.Unlock()
 }
 
 // --- Internal Helper Methods ---
@@ -610,6 +629,7 @@ func (db *AccountStateDB) getOrCreateAccountState(
 		// so it still requires the exclusive write lock.
 		// ═══════════════════════════════════════════════════════════════
 		var err error
+		readEpoch := db.cacheEpoch.Load()
 		if db.isFlatTrie {
 			// FlatStateTrie: direct read without external lock
 			bData, err = db.trie.Get(address.Bytes())
@@ -630,9 +650,7 @@ func (db *AccountStateDB) getOrCreateAccountState(
 			return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 		}
 
-		db.lruMu.Lock()
-		db.lruCache[address] = bData
-		db.lruMu.Unlock()
+		db.setLruCacheSafe(address, bData, readEpoch)
 	}
 
 	// Biến tạm để giữ state sẽ được cung cấp cho LoadOrStore
@@ -752,6 +770,7 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 
 	// Phase 2: Batch trie read for misses (Parallelized using safe Trie copies avoiding lock starvation)
 	if len(addressesToReadFromTrie) > 0 {
+		readEpoch := db.cacheEpoch.Load()
 		db.muTrie.RLock()
 		if db.trie == nil {
 			db.muTrie.RUnlock()
@@ -834,9 +853,7 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 		for res := range resultsChan {
 			results = append(results, res)
 			if res.err == nil {
-				db.lruMu.Lock()
-				db.lruCache[res.addr] = res.bData
-				db.lruMu.Unlock()
+				db.setLruCacheSafe(res.addr, res.bData, readEpoch)
 			}
 		}
 	}
@@ -988,6 +1005,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 
 	if db.lruCache != nil {
 		db.lruMu.Lock()
+		db.cacheEpoch.Add(1) // FORK-SAFETY
 		db.lruCache = make(map[common.Address][]byte, 200000)
 		db.lruCacheOld = make(map[common.Address][]byte)
 		db.lruMu.Unlock()

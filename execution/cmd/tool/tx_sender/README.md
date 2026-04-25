@@ -68,10 +68,12 @@ Các hành động (`action`) được hỗ trợ:
 Khi chạy `go run .` hoặc build ra tệp nhị phân, bạn có thể truyền kèm nhiều cờ bổ trợ:
 
 - **`--config`**: Đường dẫn tới file cấu hình. Phù hợp nếu có nhiều network (Mặc định: `"config.json"`)
+- **`--node`**: Ghi đè địa chỉ TCP kết nối tới Node (Ví dụ: `127.0.0.1:4200`). Nếu không truyền, mặc định sẽ lấy từ trường `parent_connection_address` trong file cấu hình.
 - **`--data`**: Đường dẫn tới file kịch bản giao dịch (Mặc định: `"data.json"`)
 - **`--loop`**: Bật chế độ chạy lặp vô hạn. Tool sẽ thực thi tuần tự danh sách trong data.json, sau khi hoàn tất sẽ lặp lại chu kỳ (Phù hợp test chịu tải mạng lưới/spam tx).
 - **`--api-url`**: Cổng HTTP RPC của Node để dành cho các action `read_call` (Mặc định: `"http://127.0.0.1:8757"`)
 - **`--register-bls`**: Tool sẽ tự động kiểm tra xem key BLS của address đã được kích hoạt trên hệ thống hay chưa bằng vòng đời `nonce`. Nếu bật `--register-bls`, tool sẽ tự gửi giao dịch BLS cho ví mới trắng tinh. Mặc định là `false` để tránh việc gửi giao dịch làm kẹt luồng lúc Node gặp sự cố.
+- **`--async`**: Gửi tất cả giao dịch trong lô đồng loạt vào mạng mà không chờ Receipt cho từng cái ngay. Các giao dịch này có khả năng được đóng gói cùng nhau trong một khối duy nhất.
 
 ---
 

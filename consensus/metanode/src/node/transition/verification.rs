@@ -87,7 +87,7 @@ pub(super) async fn verify_epoch_consistency(
         node.current_epoch,
         node.node_mode,
         node.last_global_exec_index,
-        executor_client.get_last_block_number().await.map(|(b, _, _)| b).unwrap_or(0) >= node.last_global_exec_index
+        executor_client.get_last_block_number().await.map(|(b, _, _, _)| b).unwrap_or(0) >= node.last_global_exec_index
     );
 
     Ok(())
@@ -145,7 +145,13 @@ pub(super) async fn wait_for_consensus_ready(node: &ConsensusNode) -> bool {
 
 async fn test_consensus_readiness(node: &ConsensusNode) -> bool {
     if let Some(proxy) = &node.transaction_client_proxy {
-        (proxy.submit(vec![vec![0u8; 64]]).await).is_ok()
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            proxy.submit(vec![vec![0u8; 64]])
+        ).await {
+            Ok(res) => res.is_ok(),
+            Err(_) => false, // Timeout
+        }
     } else {
         false
     }

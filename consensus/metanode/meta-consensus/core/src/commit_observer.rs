@@ -113,6 +113,7 @@ impl CommitObserver {
     pub(crate) fn handle_commit(
         &mut self,
         committed_leaders: Vec<VerifiedBlock>,
+        precomputed_commits: Option<Vec<crate::commit::CertifiedCommit>>,
         local: bool,
     ) -> ConsensusResult<Vec<CommittedSubDag>> {
         let _s = self
@@ -123,7 +124,7 @@ impl CommitObserver {
             .with_label_values(&["CommitObserver::handle_commit"])
             .start_timer();
 
-        let mut committed_sub_dags = self.commit_interpreter.handle_commit(committed_leaders);
+        let mut committed_sub_dags = self.commit_interpreter.handle_commit(committed_leaders, precomputed_commits);
         self.report_metrics(&committed_sub_dags);
 
         // Set if the commit is produced from local DAG, or received through commit sync.
@@ -146,14 +147,29 @@ impl CommitObserver {
         }
 
         for commit in committed_sub_dags.iter() {
-            tracing::debug!(
-                "Sending commit {} leader {} to finalization and execution.",
-                commit.commit_ref,
-                commit.leader
-            );
-            tracing::trace!("Committed subdag: {:#?}", commit);
-            // Failures in sender.send() are assumed to be permanent
-            self.commit_finalizer_handle.send(commit.clone())?;
+            // Failures in sender.send() during cold-start sync indicates the Finalizer task panicked or died.
+            // We must auto-restart it to prevent Execution Stall.
+            if let Err(e) = self.commit_finalizer_handle.send(commit.clone()) {
+                tracing::warn!(
+                    "⚠️ [COMMIT-OBSERVER] Failed to send commit {} to finalizer (channel closed): {:?}. \
+                     Task died. Restarting CommitFinalizer automatically.",
+                    commit.commit_ref, e
+                );
+                
+                self.commit_finalizer_handle = CommitFinalizer::start(
+                    self.context.clone(),
+                    self.dag_state.clone(),
+                    self.transaction_certifier.clone(),
+                    self.commit_sender_keeper.clone(),
+                );
+                
+                // Retry sending the commit
+                if let Err(e2) = self.commit_finalizer_handle.send(commit.clone()) {
+                    tracing::error!("🚨 [COMMIT-OBSERVER] Auto-restart failed! Could not queue commit: {:?}", e2);
+                } else {
+                    tracing::info!("✅ [COMMIT-OBSERVER] CommitFinalizer auto-restart successful.");
+                }
+            }
         }
 
         self.dag_state
@@ -168,16 +184,41 @@ impl CommitObserver {
 
         let replay_after_commit_index = commit_consumer.replay_after_commit_index;
 
+        if replay_after_commit_index > 0 {
+            // PHASE 5: Scan for Block N to perform Anti-Fork Hash Check
+            let go_commits = self.store.scan_commits((replay_after_commit_index..=replay_after_commit_index).into()).expect("Scanning for Go last commit should not fail");
+            if let Some(go_commit) = go_commits.first() {
+                if go_commit.digest().into_inner() != commit_consumer.last_executed_commit_hash {
+                    panic!(
+                        "🚨 [ANTI-FORK] FORK DETECTED! DAG DB is corrupted or network fork occurred. \
+                         Hash from Go ({:?}) != Local hash at block {} ({:?})",
+                        commit_consumer.last_executed_commit_hash,
+                        replay_after_commit_index,
+                        go_commit.digest().into_inner()
+                    );
+                }
+                tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
+            }
+        }
+
         let last_commit = self
             .store
             .read_last_commit()
             .expect("Reading the last commit should not fail");
         let Some(last_commit) = &last_commit else {
-            assert_eq!(
-                replay_after_commit_index, 0,
-                "Commit replay should start at the beginning if there is no commit history"
-            );
-            info!("Nothing to recover for commit observer - starting new epoch");
+            // SNAPSHOT RESTART FIX: On snapshot restore, DAG store is empty (no commits)
+            // but Go has already executed up to replay_after_commit_index (e.g., 1000).
+            // This is a valid state — skip replay and let CommitSyncer fast-forward.
+            // The old assert_eq!(replay_after_commit_index, 0) would PANIC here.
+            if replay_after_commit_index > 0 {
+                info!(
+                    "📊 [SNAPSHOT] Commit observer: empty store but Go at index {}. \
+                     Skipping replay — CommitSyncer will fast-forward.",
+                    replay_after_commit_index
+                );
+            } else {
+                info!("Nothing to recover for commit observer - starting new epoch");
+            }
             return;
         };
 
@@ -282,19 +323,23 @@ impl CommitObserver {
                         .recover_and_vote_on_blocks(committed_sub_dag.blocks.clone());
                 }
 
-                if let Err(e) = self.commit_finalizer_handle.send(committed_sub_dag) {
-                    // During recovery, the commit processor may encounter an EndOfEpoch
-                    // transaction and trigger an epoch transition, which closes the commit
-                    // channel. When this happens, the CommitFinalizer's run loop exits,
-                    // closing its internal channel. This is expected behavior — not a crash.
-                    info!(
-                        "Commit finalizer channel closed during recovery at commit {last_sent_commit_index} \
-                         (likely epoch transition triggered): {e:?}. \
-                         Stopping recovery — remaining commits will be replayed in the new epoch."
+                if let Err(e) = self.commit_finalizer_handle.send(committed_sub_dag.clone()) {
+                    tracing::warn!(
+                        "⚠️ Commit finalizer channel closed during recovery at commit {} \
+                         (likely task crashed): {:?}. Restarting Finalizer...",
+                        last_sent_commit_index, e
                     );
-                    // Adjust last_sent_commit_index back since this commit was not actually sent.
-                    last_sent_commit_index -= 1;
-                    break;
+                    self.commit_finalizer_handle = CommitFinalizer::start(
+                        self.context.clone(),
+                        self.dag_state.clone(),
+                        self.transaction_certifier.clone(),
+                        self.commit_sender_keeper.clone(),
+                    );
+                    // Retry once
+                    if let Err(e2) = self.commit_finalizer_handle.send(committed_sub_dag) {
+                        tracing::error!("🚨 Failed to re-queue commit during recovery: {:?}", e2);
+                        break;
+                    }
                 }
 
                 self.context
@@ -405,7 +450,7 @@ mod tests {
         )));
         let last_processed_commit_index = 0;
         let (commit_consumer, mut commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, last_processed_commit_index);
+            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32]);
         let (blocks_sender, _blocks_receiver) = unbounded_channel("consensus_block_output");
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
@@ -452,14 +497,14 @@ mod tests {
 
         // Commit first 5 leaders.
         let mut commits = observer
-            .handle_commit(leaders[0..5].to_vec(), true)
+            .handle_commit(leaders[0..5].to_vec(), None, true)
             .unwrap();
 
         // Trigger a leader schedule update.
         leader_schedule.update_leader_schedule_v2(&dag_state);
 
         // Commit the next 5 leaders.
-        commits.extend(observer.handle_commit(leaders[5..].to_vec(), true).unwrap());
+        commits.extend(observer.handle_commit(leaders[5..].to_vec(), None, true).unwrap());
 
         // Check commits are returned by CommitObserver::handle_commit is accurate
         let mut expected_stored_refs: Vec<BlockRef> = vec![];
@@ -565,7 +610,7 @@ mod tests {
         );
         let last_processed_commit_index = 0;
         let (commit_consumer, mut commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, last_processed_commit_index);
+            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32]);
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
             dag_state.clone(),
@@ -606,7 +651,7 @@ mod tests {
         // consumer of the consensus output channel.
         let expected_last_processed_index: usize = 2;
         let mut commits = observer
-            .handle_commit(leaders[..expected_last_processed_index].to_vec(), true)
+            .handle_commit(leaders[..expected_last_processed_index].to_vec(), None, true)
             .unwrap();
 
         // Check commits sent over consensus output channel is accurate
@@ -636,7 +681,7 @@ mod tests {
         // the consumer side where the commits were not persisted.
         commits.append(
             &mut observer
-                .handle_commit(leaders[expected_last_processed_index..].to_vec(), true)
+                .handle_commit(leaders[expected_last_processed_index..].to_vec(), None, true)
                 .unwrap(),
         );
 
@@ -673,6 +718,7 @@ mod tests {
                 CommitConsumerArgs::new(
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
+                    [0; 32],
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -722,6 +768,7 @@ mod tests {
                 CommitConsumerArgs::new(
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
+                    [0; 32],
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -750,6 +797,7 @@ mod tests {
                 CommitConsumerArgs::new(
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
+                    [0; 32],
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -798,6 +846,7 @@ mod tests {
                 CommitConsumerArgs::new(
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
+                    [0; 32],
                 );
             let _observer = CommitObserver::new(
                 context.clone(),

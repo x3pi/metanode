@@ -65,7 +65,6 @@ type ClientConfig struct {
 	DemoAbi             abi.ABI `json:"-"`
 	EthPrivateKey       string  `json:"eth_private_key"`
 
-	// Remote chains to scan logs from (B, C, D...)
 	RemoteChains []RemoteChain `json:"remote_chains"`
 }
 

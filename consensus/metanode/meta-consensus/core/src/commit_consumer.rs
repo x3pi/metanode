@@ -20,6 +20,8 @@ pub struct CommitConsumerArgs {
     /// crash recovery when other components can wait for the consumer to finish processing
     /// up to this index.
     pub(crate) consumer_last_processed_commit_index: CommitIndex,
+    /// The hash of the last executed commit from Go Master state, used to perform anti-fork check at startup.
+    pub(crate) last_executed_commit_hash: [u8; 32],
 
     /// A channel to output the committed sub dags.
     pub(crate) commit_sender: UnboundedSender<CommittedSubDag>,
@@ -34,6 +36,7 @@ impl CommitConsumerArgs {
     pub fn new(
         replay_after_commit_index: CommitIndex,
         consumer_last_processed_commit_index: CommitIndex,
+        last_executed_commit_hash: [u8; 32],
     ) -> (
         Self,
         UnboundedReceiver<CommittedSubDag>,
@@ -50,6 +53,7 @@ impl CommitConsumerArgs {
             Self {
                 replay_after_commit_index,
                 consumer_last_processed_commit_index,
+                last_executed_commit_hash,
                 commit_sender,
                 block_sender,
                 monitor,

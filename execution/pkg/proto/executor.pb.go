@@ -109,6 +109,9 @@ type ExecutableBlock struct {
 	// Go MUST use this block number to ensure all nodes agree on block heights,
 	// avoiding inflation from edge cases like repeated empty epoch boundary processing.
 	BlockNumber uint64 `protobuf:"varint,8,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
+	// CRITICAL FORK-SAFETY: Rust DAG commit digest
+	// Go MUST store this hash and return it in LastBlockNumberResponse for anti-fork checks
+	CommitHash []byte `protobuf:"bytes,9,opt,name=commit_hash,json=commitHash,proto3" json:"commit_hash,omitempty"`
 }
 
 func (x *ExecutableBlock) Reset() {
@@ -197,6 +200,13 @@ func (x *ExecutableBlock) GetBlockNumber() uint64 {
 		return x.BlockNumber
 	}
 	return 0
+}
+
+func (x *ExecutableBlock) GetCommitHash() []byte {
+	if x != nil {
+		return x.CommitHash
+	}
+	return nil
 }
 
 var File_executor_proto protoreflect.FileDescriptor

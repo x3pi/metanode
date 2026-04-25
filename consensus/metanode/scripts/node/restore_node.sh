@@ -2,19 +2,6 @@
 # ═══════════════════════════════════════════════════════════════
 #  RESTORE NODE TỪ SNAPSHOT — SEQUENTIAL & FORK-SAFE
 #  Usage: ./restore_node.sh <node_id> [snapshot_name]
-#    node_id:       0-4 (bắt buộc)
-#    snapshot_name:  tên snapshot (tùy chọn, mặc định = tự detect mới nhất)
-#
-#  Ví dụ:
-#    ./restore_node.sh 2                          # tự tìm snapshot mới nhất
-#    ./restore_node.sh 2 snap_epoch_1_block_50    # chỉ định snapshot cụ thể
-#
-#  Fork-prevention measures:
-#    1. Enhanced Rust DAG cleanup (epochs, last_block_number, last_index)
-#    2. Pre-start snapshot data validation
-#    3. Sequential startup (Go Master→Go Sub→verify→Rust)
-#    4. Block sync monitoring (90s) — confirm sequential advance
-#    5. Hash divergence check against a reference node
 # ═══════════════════════════════════════════════════════════════
 set -e
 
@@ -31,7 +18,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
-BOLD='\033[1m'
 NC='\033[0m'
 
 # Paths
@@ -43,47 +29,32 @@ LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"
 
 # Snapshot source — HTTP server
-# Có thể override bằng biến môi trường: SNAP_SERVER=http://192.168.1.232:8701 ./restore_node.sh 2
-SNAP_SERVER="${SNAP_SERVER:-http://localhost:8701}"
+SNAP_SERVER="${SNAP_SERVER:-http://localhost:8600}"
 SNAP_API="$SNAP_SERVER/api/snapshots"
 SNAP_FILES_URL="$SNAP_SERVER/files"
-# Local fallback paths (chỉ dùng khi tất cả nodes trên cùng máy)
-SNAP_BASE_DIR="$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}"
 
 NODE_DATA="$GO_SIMPLE_ROOT/sample/node${NODE_ID}"
 
-# ─── RPC ports for hash divergence check ──────────────────────
 # Master RPC ports per node (from config-master-nodeX.json)
 MASTER_RPC_PORTS=(8757 10747 10749 10750 10748)
 
-# Config maps (same as resume_node.sh)
+# Config maps
 GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
-
 GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
-GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
-
 GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
-EXECUTOR_SOCKET=("/tmp/executor0.sock" "/tmp/executor1.sock" "/tmp/executor2.sock" "/tmp/executor3.sock" "/tmp/executor4.sock")
-
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
-# ─── Helpers ─────────────────────────────────────────────────
 wait_for_socket() {
-    local socket=$1
-    local name=$2
-    local timeout=${3:-120}
+    local socket=$1 name=$2 timeout=${3:-120}
     local start=$(date +%s)
     while true; do
         if [ -S "$socket" ]; then
-            local elapsed=$(( $(date +%s) - start ))
-            echo -e "${GREEN}  ✅ $name ready (${elapsed}s)${NC}"
+            echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"
             return 0
         fi
-        local elapsed=$(( $(date +%s) - start ))
-        if [ $elapsed -ge $timeout ]; then
+        if [ $(( $(date +%s) - start )) -ge $timeout ]; then
             echo -e "${RED}  ❌ Timeout waiting for $name (${timeout}s)${NC}"
             return 1
         fi
@@ -91,7 +62,6 @@ wait_for_socket() {
     done
 }
 
-# Find a reference node (any running node != NODE_ID) for hash comparison
 find_reference_node() {
     for i in 0 1 2 3 4; do
         [ "$i" -eq "$NODE_ID" ] && continue
@@ -117,8 +87,6 @@ echo -e "${GREEN}  📸 RESTORE Node $NODE_ID — Sequential & Fork-Safe${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
 
-# ─── Tìm snapshot mới nhất ────────────────────────────────────
-# Helper: find a snapshot dir across ALL LOCAL nodes' snapshot directories
 find_snap_dir_local() {
     local snap_name="$1"
     for i in 0 1 2 3 4; do
@@ -131,9 +99,8 @@ find_snap_dir_local() {
     return 1
 }
 
-# Determine download mode: local (cp) or network (wget)
-SNAP_MODE="network"  # default: download via HTTP
-SNAP_DIR=""          # will be set if local mode
+SNAP_MODE="network"
+SNAP_DIR=""
 
 echo -e "${BLUE}📡 Snapshot server: ${NC}$SNAP_SERVER"
 
@@ -142,8 +109,6 @@ if [ -n "$2" ]; then
     echo -e "${BLUE}📸 Sử dụng snapshot chỉ định: ${NC}$SNAP_NAME"
 else
     echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất...${NC}"
-    
-    # Lấy tên snapshot mới nhất từ API
     SNAP_NAME=$(curl -sf "$SNAP_API" 2>/dev/null \
         | python3 -c "import sys,json; snaps=json.load(sys.stdin); print(max(snaps, key=lambda x: x['block_number'])['snapshot_name'])" 2>/dev/null) || true
     
@@ -152,19 +117,15 @@ else
         echo "   Kiểm tra: curl $SNAP_API"
         exit 1
     fi
-    
     echo -e "${GREEN}  ✅ API trả về: ${NC}$SNAP_NAME"
 fi
 
-# Validate snapshot tồn tại — thử LOCAL trước (nhanh + đáng tin), HTTP fallback
-# 1) Kiểm tra trên LOCAL filesystem (chế độ dev, tất cả nodes cùng máy)
 LOCAL_DIR=$(find_snap_dir_local "$SNAP_NAME")
 if [ -n "$LOCAL_DIR" ]; then
     SNAP_DIR="$LOCAL_DIR"
     SNAP_MODE="local"
     echo -e "${GREEN}  ✅ Tìm thấy local: ${NC}$(basename $(dirname $SNAP_DIR))/$SNAP_NAME"
 else
-    # 2) Fallback: Kiểm tra qua HTTP
     HTTP_CHECK=$(curl -s -o /dev/null -w "%{http_code}" "$SNAP_FILES_URL/$SNAP_NAME/" 2>/dev/null)
     [ -z "$HTTP_CHECK" ] && HTTP_CHECK="000"
 
@@ -173,13 +134,10 @@ else
         SNAP_MODE="network"
     else
         echo -e "${RED}❌ Snapshot $SNAP_NAME không tìm thấy qua local lẫn HTTP!${NC}"
-        echo "   Local: $GO_SIMPLE_ROOT/snapshot_data_node*/$SNAP_NAME"
-        echo "   HTTP: $SNAP_FILES_URL/$SNAP_NAME/ (code=$HTTP_CHECK)"
         exit 1
     fi
 fi
 
-# Hiển thị thông tin
 if [ "$SNAP_MODE" = "local" ]; then
     SNAP_SIZE=$(du -sh "$SNAP_DIR" 2>/dev/null | awk '{print $1}')
     echo -e "${BLUE}  📦 Kích thước: ${NC}$SNAP_SIZE ${CYAN}(local copy)${NC}"
@@ -187,14 +145,13 @@ else
     echo -e "${BLUE}  📦 Download từ: ${NC}$SNAP_FILES_URL/$SNAP_NAME/ ${CYAN}(network)${NC}"
 fi
 
-# ─── Xác nhận ─────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}⚠️  Thao tác này sẽ:${NC}"
 echo "   1. Dừng Node $NODE_ID"
 echo "   2. Xóa TOÀN BỘ dữ liệu Node $NODE_ID (Go + Rust DAG)"
 echo "   3. Khôi phục từ snapshot: $SNAP_NAME"
 echo "   4. Validate dữ liệu snapshot"
-echo "   5. Khởi động tuần tự (Go Master→Go Sub→Rust)"
+echo "   5. Khởi động tuần tự (Go Master→Rust)"
 echo "   6. Giám sát sync tuần tự 90s"
 echo "   7. Kiểm tra hash divergence với mạng"
 echo ""
@@ -206,77 +163,45 @@ fi
 
 START_TIME=$(date +%s)
 
-# ══════════════════════════════════════════════════════════════
 # Step 1: Stop Node
-# ══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng Node $NODE_ID...${NC}"
-
-# Chạy script stop tiêu chuẩn
 "$SCRIPT_DIR/stop_node.sh" "$NODE_ID" 2>/dev/null || true
 
-echo -e "${YELLOW}  🔪 Fallback kill (đảm bảo node đã chết hoàn toàn)...${NC}"
-# Bắt buộc kill tmux sessions riêng của node này nếu stop_node.sh không dọn sạch
-for sess in "go-master-${NODE_ID}" "go-sub-${NODE_ID}" "metanode-${NODE_ID}"; do
+for sess in "go-master-${NODE_ID}" "metanode-${NODE_ID}"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
         tmux send-keys -t "$sess" C-c 2>/dev/null || true
         sleep 2
         tmux kill-session -t "$sess" 2>/dev/null || true
     fi
 done
-
-# Pkill các tiến trình rác của riêng Node ID
 pkill -f "config-master-node${NODE_ID}.json" 2>/dev/null || true
-pkill -f "config-sub-node${NODE_ID}.json" 2>/dev/null || true
-pkill -f "config/node-${NODE_ID}.toml" 2>/dev/null || true
+pkill -f "config/node_${NODE_ID}.toml" 2>/dev/null || true
 
 sleep 2
 echo -e "${GREEN}  ✅ Node $NODE_ID đã dừng hoàn toàn${NC}"
 
-# ══════════════════════════════════════════════════════════════
-# Step 2: Xóa data — ENHANCED: full Rust DAG cleanup
-# ══════════════════════════════════════════════════════════════
+# Step 2: Xóa data
 echo -e "${BLUE}[2/7] 🗑️  Xóa dữ liệu Node $NODE_ID (Go + Rust DAG)...${NC}"
-
-# Go data
-rm -rf "$NODE_DATA/data"
-rm -rf "$NODE_DATA/data-write"
-rm -rf "$NODE_DATA/back_up"
-rm -rf "$NODE_DATA/back_up_write"
-
-# Rust DAG — CRITICAL: xóa toàn bộ để tránh replay stale commits
+rm -rf "$NODE_DATA/data" 2>/dev/null || true
+rm -rf "$NODE_DATA/back_up" 2>/dev/null || true
 RUST_STORAGE="$METANODE_ROOT/config/storage/node_$NODE_ID"
-rm -rf "$RUST_STORAGE"
+rm -rf "$RUST_STORAGE" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Rust DAG storage đã xóa: ${NC}$RUST_STORAGE"
-
-# Clear old logs for this node to avoid confusion
 rm -f "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null || true
-rm -f "$LOG_DIR/node_$NODE_ID/go-sub-stdout.log" 2>/dev/null || true
 rm -f "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null || true
 mkdir -p "$LOG_DIR/node_$NODE_ID"
 echo -e "${GREEN}  ✅ Dữ liệu và logs đã xóa sạch${NC}"
 
-# ══════════════════════════════════════════════════════════════
-# Step 3: Restore từ Snapshot
-# ══════════════════════════════════════════════════════════════
+# Step 3: Restore
 echo -e "${BLUE}[3/7] 📸 Khôi phục từ $SNAP_NAME ($SNAP_MODE mode)...${NC}"
-
-# Tạo thư mục cha trước
 mkdir -p "$NODE_DATA/data/data"
-mkdir -p "$NODE_DATA/data-write/data"
 mkdir -p "$NODE_DATA/back_up"
-mkdir -p "$NODE_DATA/back_up_write"
 
 if [ "$SNAP_MODE" = "network" ]; then
-    # ═══════════════════════════════════════════════════════════
-    # NETWORK MODE: Download snapshot via HTTP using wget
-    # ═══════════════════════════════════════════════════════════
     TEMP_SNAP="/tmp/snapshot_restore_$$"
     mkdir -p "$TEMP_SNAP"
     echo -e "${CYAN}  📥 Downloading snapshot via HTTP...${NC}"
-    echo -e "${CYAN}     URL: $SNAP_FILES_URL/$SNAP_NAME/${NC}"
-    
-    # Download toàn bộ snapshot bằng wget (recursive, resume support)
     wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
         "$SNAP_FILES_URL/$SNAP_NAME/" \
         -P "$TEMP_SNAP" 2>&1 || {
@@ -284,113 +209,60 @@ if [ "$SNAP_MODE" = "network" ]; then
         rm -rf "$TEMP_SNAP"
         exit 1
     }
-    
-    # wget tải vào $TEMP_SNAP/$SNAP_NAME/ (do cấu trúc URL)
-    # Hoặc trực tiếp vào $TEMP_SNAP nếu --cut-dirs đúng
-    if [ -d "$TEMP_SNAP/$SNAP_NAME" ]; then
-        SNAP_DL_DIR="$TEMP_SNAP/$SNAP_NAME"
-    else
-        SNAP_DL_DIR="$TEMP_SNAP"
-    fi
-    
+    if [ -d "$TEMP_SNAP/$SNAP_NAME" ]; then SNAP_DL_DIR="$TEMP_SNAP/$SNAP_NAME"; else SNAP_DL_DIR="$TEMP_SNAP"; fi
     DL_SIZE=$(du -sh "$SNAP_DL_DIR" 2>/dev/null | awk '{print $1}')
     echo -e "${GREEN}  ✅ Downloaded: $DL_SIZE${NC}"
-    
-    # Set SNAP_DIR to downloaded dir for the copy logic below
     SNAP_DIR="$SNAP_DL_DIR"
 fi
 
-# ═══════════════════════════════════════════════════════════
-# Copy snapshot data to node dirs (works for both local and network mode)
-# SNAP_DIR is either local path or downloaded temp dir
-# ═══════════════════════════════════════════════════════════
-
-# Copy LevelDB dirs to BOTH Master (data/data) and Sub (data-write/data)
-echo "  📁 Mapping LevelDB & Xapian dirs..."
-LEVELDB_COUNT=0
-for folder in chaindata executor_state xapian_node xapian nomt_db; do
-  if [ -d "$SNAP_DIR/$folder" ]; then
-    cp -a "$SNAP_DIR/$folder" "$NODE_DATA/data/data/"
-    cp -a "$SNAP_DIR/$folder" "$NODE_DATA/data-write/data/"
-    LEVELDB_COUNT=$((LEVELDB_COUNT + 1))
+echo "  📁 Mapping data dirs..."
+for folder in "$SNAP_DIR"/*; do
+  folder_name=$(basename "$folder")
+  if [ "$folder_name" = "back_up" ]; then
+      cp -a "$folder"/* "$NODE_DATA/back_up/" 2>/dev/null || true
+  elif [ "$folder_name" = "metadata.json" ] || [ "$folder_name" = "index.html" ]; then
+      continue
+  elif [ -d "$folder" ]; then
+      cp -a "$folder" "$NODE_DATA/data/data/"
   fi
 done
-echo -e "${GREEN}  ✅ $LEVELDB_COUNT LevelDB dirs copied${NC}"
+# 🚨 CRITICAL: Remove `rust_consensus` imported from the snapshot to avoid split-brain.
+# Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a potentially dirty ahead-of-time DAG.
+rm -rf "$NODE_DATA/data/data/rust_consensus" 2>/dev/null || true
+echo -e "${GREEN}  ✅ Removed dirty rust_consensus to force clean Phase: Bootstrapping${NC}"
 
-# Copy PebbleDB dirs
-echo "  📁 Mapping PebbleDB dirs..."
-if [ -d "$SNAP_DIR/back_up" ]; then 
-    cp -a "$SNAP_DIR/back_up/"* "$NODE_DATA/back_up/" 2>/dev/null || true
-fi
-if [ -d "$SNAP_DIR/back_up_write" ]; then 
-    cp -a "$SNAP_DIR/back_up_write/"* "$NODE_DATA/back_up_write/" 2>/dev/null || true
-fi
+echo -e "${GREEN}  ✅ Data dirs copied${NC}"
 
-# ATOMIC METADATA: Copy metadata.json to ensure Go starts accurately aligned
 if [ -f "$SNAP_DIR/metadata.json" ]; then
-    echo "  📁 Copying atomic snapshot metadata.json..."
     cp -a "$SNAP_DIR/metadata.json" "$NODE_DATA/data/data/metadata.json" 2>/dev/null || true
     cp -a "$SNAP_DIR/metadata.json" "$NODE_DATA/data/metadata.json" 2>/dev/null || true
-    cp -a "$SNAP_DIR/metadata.json" "$NODE_DATA/data-write/data/metadata.json" 2>/dev/null || true
-    cp -a "$SNAP_DIR/metadata.json" "$NODE_DATA/data-write/metadata.json" 2>/dev/null || true
     cp -a "$SNAP_DIR/metadata.json" "$NODE_DATA/metadata.json" 2>/dev/null || true
     echo -e "${GREEN}  ✅ metadata.json restored${NC}"
-else
-    echo -e "${YELLOW}  ⚠️  Warning: metadata.json not found in snapshot${NC}"
 fi
 
-# CRITICAL: Copy epoch_data_backup.json — without this, Go starts at epoch 0
-echo "  📁 Copying epoch data..."
 EPOCH_RESTORED=false
-for EPOCH_SRC in "$SNAP_DIR/back_up/epoch_data_backup.json" "$SNAP_DIR/back_up_write/epoch_data_backup.json"; do
-    if [ -f "$EPOCH_SRC" ]; then
-        cp -a "$EPOCH_SRC" "$NODE_DATA/back_up/epoch_data_backup.json"
-        cp -a "$EPOCH_SRC" "$NODE_DATA/back_up_write/epoch_data_backup.json"
-        EPOCH_RESTORED=true
-        EPOCH_INFO=$(python3 -c "import json; d=json.load(open('$EPOCH_SRC')); print(f'epoch={d[\"current_epoch\"]}')" 2>/dev/null || echo "epoch=?")
-        echo -e "${GREEN}  ✅ Epoch data restored: ${EPOCH_INFO}${NC}"
-        break
-    fi
-done
+if [ -f "$SNAP_DIR/back_up/epoch_data_backup.json" ]; then
+    cp -a "$SNAP_DIR/back_up/epoch_data_backup.json" "$NODE_DATA/back_up/epoch_data_backup.json"
+    EPOCH_RESTORED=true
+    EPOCH_INFO=$(python3 -c "import json; d=json.load(open('$SNAP_DIR/back_up/epoch_data_backup.json')); print(f'epoch={d[\"current_epoch\"]}')" 2>/dev/null || echo "epoch=?")
+    echo -e "${GREEN}  ✅ Epoch data restored: ${EPOCH_INFO}${NC}"
+fi
+
 if [ "$EPOCH_RESTORED" = false ]; then
-    echo -e "${RED}  ❌ epoch_data_backup.json NOT found in snapshot!${NC}"
-    echo -e "${RED}     Go sẽ bắt đầu từ epoch 0 → RẤT DỄ GÂY FORK!${NC}"
-    echo -e "${YELLOW}     Tiếp tục nhưng cần theo dõi kỹ...${NC}"
+    echo -e "${RED}  ❌ epoch_data_backup.json NOT found in snapshot! Go sẽ bắt đầu từ epoch 0.${NC}"
 fi
 
-# Cleanup: remove stale LOCK files and temp download
 find "$NODE_DATA" -name "LOCK" -delete 2>/dev/null
-mkdir -p "$NODE_DATA/data/data/xapian_node"
-mkdir -p "$NODE_DATA/data-write/data/xapian_node"
-
-# Clean up temp download dir
-if [ "$SNAP_MODE" = "network" ] && [ -n "$TEMP_SNAP" ]; then
-    rm -rf "$TEMP_SNAP"
-    echo -e "${GREEN}  ✅ Temp download cleaned${NC}"
-fi
-
+if [ "$SNAP_MODE" = "network" ] && [ -n "$TEMP_SNAP" ]; then rm -rf "$TEMP_SNAP"; fi
 RESTORED_SIZE=$(du -sh "$NODE_DATA" 2>/dev/null | awk '{print $1}')
 echo -e "${GREEN}  ✅ Đã khôi phục tổng cộng: $RESTORED_SIZE${NC}"
 
-# NOTE: RESET_GEI markers REMOVED (2026-03-24)
-# Previously, we created RESET_GEI markers to reset Go's GEI to 0 on startup.
-# This caused FORK: Go syncs block HEADERS from peers (advancing block number)
-# but does NOT re-execute transactions → state frozen at snapshot nonce.
-# When new commits arrive with advanced nonce → NONCE-REJECT → stateRoot diverge.
-# Rust's COLD-START GUARD already handles commit deduplication via GEI comparison.
-# Go will start with correct GEI from snapshot. Sequential block guard handles
-# any duplicate blocks from peer sync.
-
-# ══════════════════════════════════════════════════════════════
-# Step 4: Pre-start Validation
-# ══════════════════════════════════════════════════════════════
+# Step 4: Validate
 echo -e "${BLUE}[4/7] 🔍 Kiểm tra tính toàn vẹn dữ liệu snapshot...${NC}"
 VALIDATION_OK=true
 
-# Check epoch data
 if [ -f "$NODE_DATA/back_up/epoch_data_backup.json" ]; then
-    python3 -c "import json; json.load(open('$NODE_DATA/back_up/epoch_data_backup.json'))" 2>/dev/null
-    if [ $? -eq 0 ]; then
+    if python3 -c "import json; json.load(open('$NODE_DATA/back_up/epoch_data_backup.json'))" 2>/dev/null; then
         echo -e "${GREEN}  ✅ epoch_data_backup.json — valid JSON${NC}"
     else
         echo -e "${RED}  ❌ epoch_data_backup.json — INVALID JSON!${NC}"
@@ -398,108 +270,61 @@ if [ -f "$NODE_DATA/back_up/epoch_data_backup.json" ]; then
     fi
 fi
 
-# Check key LevelDB dirs exist
-REQUIRED_DIRS=("chaindata" "nomt_db")
+REQUIRED_DIRS=("blocks" "nomt_db" "transaction_state")
 for dir in "${REQUIRED_DIRS[@]}"; do
-    if [ -d "$NODE_DATA/data/data/$dir" ] && [ -d "$NODE_DATA/data-write/data/$dir" ]; then
-        echo -e "${GREEN}  ✅ $dir/ — present in both Master & Sub${NC}"
+    if [ -d "$NODE_DATA/data/data/$dir" ]; then
+        echo -e "${GREEN}  ✅ $dir/ — present in Master${NC}"
     else
-        echo -e "${RED}  ❌ $dir/ — MISSING in Master or Sub!${NC}"
+        echo -e "${RED}  ❌ $dir/ — MISSING!${NC}"
         VALIDATION_OK=false
     fi
 done
 
-# Check PebbleDB has content
 PEBBLE_SIZE=$(du -sh "$NODE_DATA/back_up" 2>/dev/null | awk '{print $1}')
 if [ -n "$PEBBLE_SIZE" ] && [ "$PEBBLE_SIZE" != "0" ]; then
     echo -e "${GREEN}  ✅ PebbleDB back_up/ — $PEBBLE_SIZE${NC}"
 else
-    echo -e "${YELLOW}  ⚠️  PebbleDB back_up/ trống hoặc không tồn tại${NC}"
-fi
-
-# Verify Rust storage is clean
-if [ -d "$RUST_STORAGE" ] && [ "$(ls -A "$RUST_STORAGE" 2>/dev/null)" ]; then
-    echo -e "${RED}  ❌ Rust storage vẫn còn dữ liệu cũ!${NC}"
-    VALIDATION_OK=false
-else
-    echo -e "${GREEN}  ✅ Rust DAG storage — sạch${NC}"
+    echo -e "${YELLOW}  ⚠️  PebbleDB back_up/ trống hoặc không có data${NC}"
 fi
 
 if [ "$VALIDATION_OK" = false ]; then
     echo -e "${RED}  ⚠️  Validation có lỗi! Tiếp tục có thể gây fork.${NC}"
     read -p "  Vẫn tiếp tục? (y/N): " CONTINUE_ANYWAY
-    if [[ "$CONTINUE_ANYWAY" != "y" && "$CONTINUE_ANYWAY" != "Y" ]]; then
-        echo "Đã hủy."
-        exit 1
-    fi
+    if [[ "$CONTINUE_ANYWAY" != "y" && "$CONTINUE_ANYWAY" != "Y" ]]; then exit 1; fi
 fi
 
-# ══════════════════════════════════════════════════════════════
-# Step 5: Sequential Startup — Go Master → Go Sub → Rust
-# ══════════════════════════════════════════════════════════════
+# Step 5: Start Node
 echo -e "${BLUE}[5/7] 🚀 Khởi động tuần tự Node $NODE_ID...${NC}"
-
-# 5a. Start Go Master
 echo -e "${CYAN}  [5a] Go Master...${NC}"
 cd "$GO_SIMPLE_ROOT"
-
 DATA="${GO_DATA_DIR[$NODE_ID]}"
-XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
 tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
 echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
-# 5b. Wait for Go Master socket
 echo -e "${CYAN}  [5b] Waiting for Go Master socket...${NC}"
-wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 120
+wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 600
 
-# 5c. Start Go Sub
-echo -e "${CYAN}  [5c] Go Sub...${NC}"
-XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
-tmux new-session -d -s "${GO_SUB_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=${GO_SUB_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-sub-stdout.log\" 2>&1"
-echo -e "${GREEN}    🚀 Go Sub started (${GO_SUB_SESSION[$NODE_ID]})${NC}"
-
-# 5d. Wait for Go to load snapshot state — verify block height
-echo -e "${CYAN}  [5d] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
+echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10
+GO_BLOCK=$(grep -a "last_committed_block=" "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | sed -n 's/.*last_committed_block=\([0-9]*\).*/\1/p') || true
+if [ -n "$GO_BLOCK" ]; then echo -e "${GREEN}    ✅ Go Master nhận snapshot — block=$GO_BLOCK${NC}"; fi
 
-# Read Go's recognized block height
-GO_BLOCK=""
-for attempt in 1 2 3; do
-    GO_BLOCK=$(grep -a "last_committed_block=" "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | sed -n 's/.*last_committed_block=\([0-9]*\).*/\1/p') || true
-    [ -n "$GO_BLOCK" ] && break
-    sleep 3
-done
-
-if [ -n "$GO_BLOCK" ]; then
-    echo -e "${GREEN}    ✅ Go Master nhận snapshot — block=$GO_BLOCK${NC}"
-else
-    echo -e "${YELLOW}    ⚠️  Chưa đọc được block height từ Go Master log${NC}"
-fi
-
-# 5e. Start Rust Metanode
-echo -e "${CYAN}  [5e] Rust Metanode...${NC}"
+echo -e "${CYAN}  [5d] Rust Metanode...${NC}"
 cd "$METANODE_ROOT"
 tmux new-session -d -s "${RUST_SESSION[$NODE_ID]}" -c "$METANODE_ROOT" \
     "export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/rust.log\" 2>&1"
 echo -e "${GREEN}    🚀 Rust Metanode started (${RUST_SESSION[$NODE_ID]})${NC}"
 
-# ══════════════════════════════════════════════════════════════
-# Step 6: Sequential Sync Monitoring (180s)
-# ══════════════════════════════════════════════════════════════
+# Step 6: Sync Monitor
 echo ""
 echo -e "${BLUE}[6/7] 📊 Giám sát sync tuần tự (180s)...${NC}"
-echo -e "${BLUE}       Kiểm tra block đang tăng tuần tự, không bị stuck hay jump${NC}"
-
 PREV_BLOCK=""
 STUCK_COUNT=0
-MAX_STUCK=3  # 3 lần liên tiếp = 30s không tăng → cảnh báo
+MAX_STUCK=3
 
 for t in 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180; do
     sleep 10
-    
-    # 1. Read current block via RPC
     RESTORED_PORT=${MASTER_RPC_PORTS[$NODE_ID]}
     RESTORED_RESP=$(curl -sf -m 1 -X POST -H "Content-Type: application/json" \
         --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
@@ -508,116 +333,71 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180; do
     CURRENT_BLOCK=""
     if [ -n "$RESTORED_RESP" ]; then
         RESTORED_HEX=$(echo "$RESTORED_RESP" | python3 -c "import sys,json; r=json.load(sys.stdin).get('result',None); print(r if r else '')" 2>/dev/null || echo "")
-        if [ -n "$RESTORED_HEX" ] && [ "$RESTORED_HEX" != "0x" ]; then
-            CURRENT_BLOCK=$((16#${RESTORED_HEX#0x}))
-        fi
+        if [ -n "$RESTORED_HEX" ] && [ "$RESTORED_HEX" != "0x" ]; then CURRENT_BLOCK=$((16#${RESTORED_HEX#0x})); fi
     fi
     
-    # 2. Read GEI directly from Go's batch-drain log OR Rust's log
-    # Empty block batches do not increment CURRENT_BLOCK, but they do advance GEI
     GO_BATCH_GEI=$(grep -a 'BATCH-DRAIN' "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | grep -oP '\d+→\d+' | awk -F'→' '{print $2}' || echo "")
     RUST_GEI=$(grep -a 'GEI ' "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null | tail -1 | grep -oP '\d+→\d+' | awk -F'→' '{print $2}' || echo "")
     
-    # Determine the highest valid GEI found
     CURRENT_GEI=""
     if [ -n "$RUST_GEI" ] && [ -n "$GO_BATCH_GEI" ]; then
         if [ "$RUST_GEI" -gt "$GO_BATCH_GEI" ]; then CURRENT_GEI=$RUST_GEI; else CURRENT_GEI=$GO_BATCH_GEI; fi
-    elif [ -n "$RUST_GEI" ]; then
-        CURRENT_GEI=$RUST_GEI
-    elif [ -n "$GO_BATCH_GEI" ]; then
-        CURRENT_GEI=$GO_BATCH_GEI
+    elif [ -n "$RUST_GEI" ]; then CURRENT_GEI=$RUST_GEI
+    elif [ -n "$GO_BATCH_GEI" ]; then CURRENT_GEI=$GO_BATCH_GEI
     fi
 
-    # Formatting output for display
     DISP_BLOCK=${CURRENT_BLOCK:-"?"}
     DISP_GEI=${CURRENT_GEI:-"?"}
 
-    # If both block and GEI are entirely empty, the node hasn't initialized yet
     if [ -z "$CURRENT_BLOCK" ] && [ -z "$CURRENT_GEI" ]; then
         echo -e "  ${YELLOW}⏱️ +${t}s: node chưa khởi chạy xong (chưa có log & RPC)${NC}"
         continue
     fi
     
-    # Progress indicator prioritizes GEI (since empty blocks advance GEI but keep block static)
-    if [ -n "$CURRENT_GEI" ]; then
-        CURRENT_PROGRESS="$CURRENT_GEI"
-        PROG_LABEL="GEI"
-    else
-        CURRENT_PROGRESS="$CURRENT_BLOCK"
-        PROG_LABEL="block"
-    fi
+    CURRENT_PROGRESS=${CURRENT_GEI:-$CURRENT_BLOCK}
+    PROG_LABEL=$( [ -n "$CURRENT_GEI" ] && echo "GEI" || echo "block" )
     
-    # Detect stuck (no progress)
     if [ "$CURRENT_PROGRESS" = "$PREV_BLOCK" ]; then
         STUCK_COUNT=$((STUCK_COUNT + 1))
-        if [ $STUCK_COUNT -ge $MAX_STUCK ]; then
-            echo -e "  ${RED}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚠️ STUCK ${STUCK_COUNT}x liên tiếp!${NC}"
-        else
-            echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — (chưa tăng)${NC}"
-        fi
+        if [ $STUCK_COUNT -ge $MAX_STUCK ]; then echo -e "  ${RED}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚠️ STUCK ${STUCK_COUNT}x!${NC}"
+        else echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — (chưa tăng)${NC}"; fi
     else
         STUCK_COUNT=0
-        # Check for big jump (potential fork indicator)
         if [ -n "$PREV_BLOCK" ]; then
             JUMP=$((CURRENT_PROGRESS - PREV_BLOCK))
-            if [ $JUMP -gt 100 ]; then
-                echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚡ jump +$JUMP $PROG_LABEL${NC}"
-            else
-                echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ✅ +$JUMP $PROG_LABEL${NC}"
-            fi
+            if [ $JUMP -gt 100 ]; then echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚡ jump +$JUMP $PROG_LABEL${NC}"
+            else echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ✅ +$JUMP $PROG_LABEL${NC}"; fi
         else
             echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ✅ syncing${NC}"
         fi
     fi
-    
     PREV_BLOCK="$CURRENT_PROGRESS"
 done
 
-if [ $STUCK_COUNT -ge $MAX_STUCK ]; then
-    echo -e "${RED}  ⚠️  Node có thể bị stuck! Kiểm tra logs:${NC}"
-    echo "      tail -50 $LOG_DIR/node_$NODE_ID/rust.log"
-    echo "      tail -50 $LOG_DIR/node_$NODE_ID/go-master-stdout.log"
-fi
-
-# ══════════════════════════════════════════════════════════════
-# Step 7: Hash Divergence Check
-# ══════════════════════════════════════════════════════════════
+# Step 7: Hash Check
 echo ""
 echo -e "${BLUE}[7/7] 🔒 Kiểm tra hash divergence...${NC}"
-
-# Get restored node's current block via RPC
-RESTORED_PORT=${MASTER_RPC_PORTS[$NODE_ID]}
 RESTORED_RESP=$(curl -sf -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
     "http://127.0.0.1:$RESTORED_PORT" 2>/dev/null || echo "")
 
-if [ -z "$RESTORED_RESP" ]; then
-    echo -e "${YELLOW}  ⚠️  Không kết nối được RPC Node $NODE_ID (port $RESTORED_PORT) — bỏ qua hash check${NC}"
-else
+if [ -n "$RESTORED_RESP" ]; then
     RESTORED_HEX=$(echo "$RESTORED_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result','0x0'))" 2>/dev/null || echo "0x0")
     RESTORED_DEC=$((16#${RESTORED_HEX#0x}))
     echo -e "${BLUE}  Node $NODE_ID block hiện tại: $RESTORED_DEC${NC}"
     
-    # Find a reference node
     REF_NODE=$(find_reference_node)
-    
-    if [ -z "$REF_NODE" ]; then
-        echo -e "${YELLOW}  ⚠️  Không tìm được node tham chiếu — bỏ qua hash check${NC}"
-    else
+    if [ -n "$REF_NODE" ]; then
         REF_PORT=${MASTER_RPC_PORTS[$REF_NODE]}
-        echo -e "${BLUE}  Sử dụng Node $REF_NODE (port $REF_PORT) làm node tham chiếu${NC}"
         
-        # Compare hashes at the restored node's current block
         if [ $RESTORED_DEC -gt 0 ]; then
             CHECK_BLOCK_HEX=$(printf "0x%x" $RESTORED_DEC)
             
-            # Get hash from restored node
             HASH_RESTORED=$(curl -sf -X POST -H "Content-Type: application/json" \
                 --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$CHECK_BLOCK_HEX\",false],\"id\":1}" \
                 "http://127.0.0.1:$RESTORED_PORT" 2>/dev/null \
                 | python3 -c "import sys,json; r=json.load(sys.stdin).get('result',{}); print(r.get('hash','') if r else '')" 2>/dev/null || echo "")
             
-            # Get hash from reference node
             HASH_REFERENCE=$(curl -sf -X POST -H "Content-Type: application/json" \
                 --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$CHECK_BLOCK_HEX\",false],\"id\":1}" \
                 "http://127.0.0.1:$REF_PORT" 2>/dev/null \
@@ -626,46 +406,22 @@ else
             if [ -n "$HASH_RESTORED" ] && [ -n "$HASH_REFERENCE" ]; then
                 if [ "$HASH_RESTORED" = "$HASH_REFERENCE" ]; then
                     echo -e "${GREEN}  ✅ Block $RESTORED_DEC hash KHỚP giữa Node $NODE_ID và Node $REF_NODE${NC}"
-                    echo -e "${GREEN}     Hash: ${HASH_RESTORED:0:18}...${NC}"
                 else
                     echo -e "${RED}  ❌ FORK DETECTED! Block $RESTORED_DEC hash KHÁC NHAU!${NC}"
-                    echo -e "${RED}     Node $NODE_ID:  $HASH_RESTORED${NC}"
-                    echo -e "${RED}     Node $REF_NODE: $HASH_REFERENCE${NC}"
-                    echo ""
-                    echo -e "${RED}  🚨 HÀNH ĐỘNG CẦN THIẾT:${NC}"
-                    echo -e "${RED}     1. Dừng Node $NODE_ID: ./stop_node.sh $NODE_ID${NC}"
-                    echo -e "${RED}     2. Kiểm tra snapshot gốc có bị corruption${NC}"
-                    echo -e "${RED}     3. Thử restore lại từ snapshot khác${NC}"
                 fi
-            else
-                echo -e "${YELLOW}  ⚠️  Không lấy được hash block — bỏ qua (node đang sync?)${NC}"
             fi
-        else
-            echo -e "${YELLOW}  ⚠️  Block height = 0 — node chưa sync, bỏ qua hash check${NC}"
         fi
     fi
 fi
 
-# ══════════════════════════════════════════════════════════════
-# Summary
-# ══════════════════════════════════════════════════════════════
 ELAPSED=$(( $(date +%s) - START_TIME ))
-
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  ✅ RESTORE HOÀN TẤT trong ${ELAPSED}s${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
-echo -e "  ${BLUE}Snapshot:${NC}  $SNAP_NAME"
-echo -e "  ${BLUE}Node:${NC}     $NODE_ID"
-echo -e "  ${BLUE}Data:${NC}     $RESTORED_SIZE"
-echo ""
 echo -e "  ${BLUE}tmux sessions:${NC}"
-echo "    Go Master: tmux attach -t ${GO_MASTER_SESSION[$NODE_ID]}"
-echo "    Go Sub:    tmux attach -t ${GO_SUB_SESSION[$NODE_ID]}"
-echo "    Rust:      tmux attach -t ${RUST_SESSION[$NODE_ID]}"
-echo ""
-echo -e "  ${BLUE}Theo dõi:${NC}"
+echo "    Go Master: tmux attach -t go-master-${NODE_ID}"
+echo "    Rust:      tmux attach -t metanode-${NODE_ID}"
 echo "    tail -f $LOG_DIR/node_$NODE_ID/rust.log"
-echo "    tail -f $LOG_DIR/node_$NODE_ID/go-master-stdout.log"
 echo ""

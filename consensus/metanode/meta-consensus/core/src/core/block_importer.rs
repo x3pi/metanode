@@ -53,8 +53,8 @@ impl Core {
             self.try_signal_new_round();
         } else if !missing_block_refs.is_empty() {
             // ═══════════════════════════════════════════════════════════════════
-            // COLD-START UNSUSPEND: All blocks were suspended (no accepted).
-            // If GC was advanced externally (e.g., cold_start_advance_gc_round
+            // BOOTSTRAP UNSUSPEND: All blocks were suspended (no accepted).
+            // If GC was advanced externally (e.g., bootstrap_advance_gc_round
             // from CommitSyncer), suspended blocks whose missing ancestors are
             // now below the new GC round can be freed. Without this, they stay
             // stuck until the next successful add_certified_commits — which may

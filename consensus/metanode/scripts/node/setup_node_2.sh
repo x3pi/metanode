@@ -17,7 +17,7 @@ echo -e "\n\e[1;36m[2/3] Cấu hình Firewall (UFW)...\e[0m"
 # Rust Consensus P2P
 sudo ufw allow 9002/tcp
 # Peer Discovery Go Master
-sudo ufw allow 19002/tcp
+sudo ufw allow 19202/tcp
 # Go User RPC
 sudo ufw allow 10749/tcp
 # Go Internal P2P (Primary, Worker)

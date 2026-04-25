@@ -151,29 +151,7 @@ pub async fn transition_mode_only(
         }
     };
 
-    // CRITICAL FIX (2026-04-15): Use SNAPSHOT GEI from node.cold_start_snapshot_gei.
-    // This is captured in startup.rs BEFORE peer sync, ensuring it's the actual snapshot GEI.
-    // Using synced_global_exec_index or querying Go's live GEI would give the WRONG value
-    // because Go's state has been advanced by peer sync → wrong skip threshold → FORK.
-    let snapshot_gei_for_cold_start = if node.cold_start {
-        if node.cold_start_snapshot_gei > 0 {
-            info!(
-                "📸 [MODE TRANSITION] Cold-start: using snapshot GEI from node: {}. synced_global_exec_index={} will NOT be used",
-                node.cold_start_snapshot_gei, synced_global_exec_index
-            );
-            node.cold_start_snapshot_gei
-        } else {
-            tracing::error!(
-                "🚨 [MODE TRANSITION] FATAL: Cold-start requested but node.cold_start_snapshot_gei is 0! \
-                 The snapshot initial state was lost. Cannot transition to Validator mode safely without fork risk."
-            );
-            return Err(anyhow::anyhow!(
-                "Cold-start without snapshot GEI"
-            ));
-        }
-    } else {
-        0u64 // Not used when not cold-start
-    };
+
 
     // Update node mode (this also handles Go handoff)
     node.check_and_update_node_mode(&committee, config, true)
@@ -249,10 +227,21 @@ pub async fn transition_mode_only(
     );
 
     // Now setup authority components (same as in full transition)
-    let (commit_consumer, commit_receiver, mut block_receiver) = CommitConsumerArgs::new(0, 0);
+    // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
+    // can fast-forward and skip re-fetching commits Go already processed.
+    let go_replay_after = if node.executor_commit_enabled && synced_global_exec_index > 0 {
+        synced_global_exec_index as u32
+    } else {
+        0
+    };
+    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
+    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    let (commit_consumer, commit_receiver, mut block_receiver) =
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32]);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
     let exec_client_proc = if node.executor_commit_enabled {
         let client = Arc::new(ExecutorClient::new_with_initial_index(
@@ -270,15 +259,6 @@ pub async fn transition_mode_only(
         None
     };
 
-    // Initialize BlockCoordinator for dual-stream block production
-    let coordinator = Arc::new(crate::node::block_coordinator::BlockCoordinator::new(
-        synced_global_exec_index + 1,
-        crate::node::block_coordinator::CoordinatorConfig::default(),
-    ));
-    node.block_coordinator = Some(coordinator.clone());
-    info!("📦 [COORDINATOR] BlockCoordinator initialized for mode transition epoch {} (next_expected={})", 
-        epoch, synced_global_exec_index + 1);
-
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -294,35 +274,28 @@ pub async fn transition_mode_only(
         .with_epoch_info(epoch, epoch_base_gei_from_go)
         .with_is_transitioning(node.is_transitioning.clone())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
-        .with_epoch_transition_callback(epoch_cb)
-        .with_block_coordinator(coordinator.clone()); // Connect to BlockCoordinator
+        .with_delivery_sender(delivery_tx)
+        .with_epoch_transition_callback(epoch_cb);
 
-    // When cold_start, set the GEI threshold so commit_processor skips ALL
-    // replayed commits with GEI ≤ snapshot_gei_for_cold_start (GEI at snapshot time).
-    // CRITICAL FIX (2026-03-24): Also pass the cold_start Arc to the processor!
-    // Without this, the processor defaults cold_start=false and queries Go's live GEI
-    // (which may be inflated by peer-synced blocks without full state execution)
-    // instead of using snapshot GEI → nonce gap → FORK.
-    // CRITICAL FIX (2026-04-15): Use snapshot_gei_for_cold_start (from Go's state at snapshot)
-    // instead of synced_global_exec_index (network state after peer sync).
-    if node.cold_start {
-        let cold_start_arc = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        processor = processor
-            .with_cold_start(cold_start_arc)
-            .with_cold_start_skip_gei(snapshot_gei_for_cold_start);
-        info!(
-            "🛡️ [MODE TRANSITION] Cold-start: set cold_start=true + cold_start_skip_gei={} (from Go snapshot) to prevent replayed commits from creating duplicate blocks",
-            snapshot_gei_for_cold_start
-        );
-    }
+
+
 
     // Share epoch_eth_addresses HashMap reference for leader address lookup
     processor = processor
         .with_storage_path(node.storage_path.clone())
         .with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
-    if let Some(c) = exec_client_proc {
-        processor = processor.with_executor_client(c);
+    if let Some(c) = exec_client_proc.clone() {
+        processor = processor.with_executor_client(c.clone());
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                c,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
+        });
     }
 
     tokio::spawn(async move {
@@ -355,7 +328,6 @@ pub async fn transition_mode_only(
             NetworkType::Tonic,
             epoch_timestamp_to_use,
             epoch_base_gei_from_go,
-            synced_global_exec_index,
             node.own_index,
             committee,
             params,
@@ -369,6 +341,7 @@ pub async fn transition_mode_only(
             boot_counter_for_authority,
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()), // Pass legacy store manager to avoid RocksDB lock conflicts
+            node.coordination_hub.clone(),
         )
         .await,
     );
@@ -451,7 +424,7 @@ pub(super) async fn handle_synconly_upgrade_wait(
         }
 
         let go_current_block = match fresh_executor_client.get_last_block_number().await {
-            Ok((b, _, _)) => b,
+            Ok((b, _, _, _)) => b,
             Err(e) => {
                 if attempt.is_multiple_of(20) {
                     warn!(

@@ -50,6 +50,9 @@ impl RustSyncNode {
         let mut consecutive_errors: u32 = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 5;
         let mut last_sync_got_blocks = false; // Track if last sync fetched any blocks
+        // STARTUP OPTIMIZATION: Force turbo mode for first 30s after startup
+        // to minimize catch-up delay after snapshot restore
+        let startup_time = Instant::now();
 
         loop {
             // Determine if we're catching up (behind network)
@@ -62,7 +65,7 @@ impl RustSyncNode {
             let rust_epoch = self.current_epoch.load(Ordering::SeqCst);
             let epoch_behind = rust_epoch < go_epoch;
 
-            let new_turbo = catching_up || epoch_behind;
+            let new_turbo = catching_up || epoch_behind || startup_time.elapsed() < Duration::from_secs(30);
             if new_turbo != is_turbo_mode {
                 is_turbo_mode = new_turbo;
                 if is_turbo_mode {
@@ -230,7 +233,7 @@ impl RustSyncNode {
         if !peer_rpc_addresses.is_empty() {
             // Use Go's last block number as the sync cursor
             let go_block = match self.executor_client.get_last_block_number().await {
-                Ok((b, _, _)) => b,
+                Ok((b, _, _, _)) => b,
                 Err(e) => {
                     warn!("[RUST-SYNC] Failed to get last block number: {}", e);
                     return Ok(0);
@@ -275,23 +278,24 @@ impl RustSyncNode {
                 None => {
                     let from_block = go_block + 1;
                     let to_block = from_block + batch_size - 1;
-                    debug!(
-                        "🔄 [RUST-SYNC] Cold fetch: blocks {} to {} from peers",
-                        from_block, to_block
-                    );
-                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                        &peer_rpc_addresses,
-                        from_block,
-                        to_block,
-                    )
-                    .await
-                    {
-                        Ok(blocks) => blocks,
-                        Err(e) => {
-                            info!("🚀 [DEBUG-SYNC] Fetch from peers failed: {}", e);
-                            Vec::new()
+                    info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
+                    let fetched_blocks = match crate::network::peer_rpc::fetch_blocks_from_peer(&peer_rpc_addresses, from_block, to_block).await {
+                        Ok(blocks) => {
+                            info!("🚀 [SYNC-LOOP-DEBUG] fetch_blocks_from_peer returned {} blocks", blocks.len());
+                            blocks
                         }
+                        Err(e) => {
+                            warn!("❌ [SYNC-LOOP] Fetch blocks failed: {}", e);
+                            return Ok(0);
+                        }
+                    };
+
+                    if fetched_blocks.is_empty() {
+                        warn!("⚠️ [SYNC-LOOP] No blocks from peers (range {}..{})", from_block, to_block);
+                        return Ok(0);
                     }
+
+                    fetched_blocks
                 }
             };
 

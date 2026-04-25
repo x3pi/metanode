@@ -41,8 +41,11 @@ contract CrossChainConfigRegistry {
     //                              STATE VARIABLES
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// @notice Owner của contract
-    address public owner;
+    /// @notice Danh sách owner của contract
+    address[] public ownersList;
+
+    /// @notice Kiểm tra địa chỉ có phải là owner không
+    mapping(address => bool) public isOwner;
 
     /// @notice Chain ID của chain hiện tại (chain deploy contract này)
     uint256 public chainId;
@@ -92,6 +95,10 @@ contract CrossChainConfigRegistry {
     /// @notice Check embassy address đã đăng ký chưa
     mapping(address => bool) public isEmbassyAddress;
 
+    /// @notice Cấu hình load block (0: Từ block 0, 1: Max block, 2: Latest block)
+    /// key: embassyAddress => uint8 mode
+    mapping(address => uint8) public embassyScanMode;
+
     // ══════════════════════════════════════════════════════════════════════════
     //                              EVENTS
     // ══════════════════════════════════════════════════════════════════════════
@@ -99,7 +106,8 @@ contract CrossChainConfigRegistry {
     event EmbassyAdded(bytes publicKey, uint256 timestamp);
     event EmbassyRemoved(bytes publicKey, uint256 timestamp);
     event ChainIdUpdated(uint256 oldChainId, uint256 newChainId);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnerAdded(address indexed newOwner);
+    event OwnerRemoved(address indexed removedOwner);
 
     event ChainRegistered(
         uint256 indexed nationId,
@@ -131,7 +139,7 @@ contract CrossChainConfigRegistry {
     // ══════════════════════════════════════════════════════════════════════════
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner");
+        require(isOwner[msg.sender], "Only owner");
         _;
     }
 
@@ -142,7 +150,55 @@ contract CrossChainConfigRegistry {
     constructor(uint256 _chainId) {
         require(_chainId > 0, "Invalid chainId");
         chainId = _chainId;
-        owner = msg.sender;
+        isOwner[msg.sender] = true;
+        ownersList.push(msg.sender);
+        emit OwnerAdded(msg.sender);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //                              OWNERSHIP MANAGEMENT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Thêm một owner mới
+     * @param _newOwner Địa chỉ owner mới
+     */
+    function addOwner(address _newOwner) external onlyOwner {
+        require(_newOwner != address(0), "Zero address");
+        require(!isOwner[_newOwner], "Already owner");
+        
+        isOwner[_newOwner] = true;
+        ownersList.push(_newOwner);
+        emit OwnerAdded(_newOwner);
+    }
+
+    /**
+     * @notice Xóa một owner hiện tại
+     * @param _owner Địa chỉ owner cần xóa
+     */
+    function removeOwner(address _owner) external onlyOwner {
+        require(isOwner[_owner], "Not an owner");
+        require(ownersList.length > 1, "Cannot remove last owner");
+        
+        isOwner[_owner] = false;
+        
+        for (uint256 i = 0; i < ownersList.length; i++) {
+            if (ownersList[i] == _owner) {
+                ownersList[i] = ownersList[ownersList.length - 1];
+                ownersList.pop();
+                break;
+            }
+        }
+        
+        emit OwnerRemoved(_owner);
+    }
+
+    /**
+     * @notice Lấy danh sách tất cả các owner hiện tại
+     * @return Mảng địa chỉ của các owner
+     */
+    function getOwners() external view returns (address[] memory) {
+        return ownersList;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -310,15 +366,7 @@ contract CrossChainConfigRegistry {
         emit ChainIdUpdated(oldChainId, _newChainId);
     }
 
-    /**
-     * @notice Chuyển quyền sở hữu
-     */
-    function transferOwnership(address _newOwner) external onlyOwner {
-        require(_newOwner != address(0), "Zero address");
-        address oldOwner = owner;
-        owner = _newOwner;
-        emit OwnershipTransferred(oldOwner, _newOwner);
-    }
+
 
     // ══════════════════════════════════════════════════════════════════════════
     //                     SCAN PROGRESS FUNCTIONS
@@ -378,53 +426,15 @@ contract CrossChainConfigRegistry {
     }
 
     /**
-     * @notice Lấy khoảng block đã scan (min, max) trong tất cả embassies cho destination chain
+     * @notice Lấy khoảng block đã scan (min, max) trong tất cả embassies cho destination chain hoặc local chain
      * @dev Dùng khi restart: scan từ minBlock đến maxBlock để đảm bảo không bỏ sót event nào.
-     *      Ví dụ: Embassy-1 scan đến block 500, Embassy-2 đến block 480
-     *      → minBlock=480, maxBlock=500
-     * @param destNationId Nation ID của destination chain cần kiểm tra
+     *      Nếu `destNationId == 0`, lấy khoảng block trên local chain (localScanProgress).
+     *      Nếu `destNationId > 0`, lấy khoảng block trên mạng đích (scanProgress).
+     * @param destNationId Nation ID của destination chain cần kiểm tra (0 cho local chain)
      * @return minBlock Block thấp nhất (0 nếu chưa có embassy nào scan)
      * @return maxBlock Block cao nhất (0 nếu chưa có embassy nào scan)
      */
-    // function getScanBlockRange(
-    //     uint256 destNationId
-    // ) external view returns (uint256 minBlock, uint256 maxBlock) {
-    //     if (embassyKeys.length == 0) return (0, 0);
-
-    //     minBlock = type(uint256).max;
-    //     maxBlock = 0;
-    //     bool found = false;
-
-    //     for (uint256 i = 0; i < embassyKeys.length; i++) {
-    //         address embAddr = embassies[embassyKeys[i]].ethAddress;
-    //         if (!embassies[embassyKeys[i]].isActive) continue;
-    //         bytes32 key = keccak256(abi.encodePacked(embAddr, destNationId));
-    //         uint256 progress = scanProgress[key];
-    //         if (progress > 0) {
-    //             if (progress < minBlock) {
-    //                 minBlock = progress;
-    //             }
-    //             if (progress > maxBlock) {
-    //                 maxBlock = progress;
-    //             }
-    //             found = true;
-    //         }
-    //     }
-
-    //     if (!found) return (0, 0);
-    //     return (minBlock, maxBlock);
-    // }
-
-    /**
-     * @notice Lấy khoảng block local chain đã submit batchSubmit (min, max) trong tất cả embassies
-     * @dev Dùng khi chain restart: scan từ minBlock → maxBlock trên local chain
-     *      để tìm batchSubmit TX type=100 chưa có type=101 → phục hồi vote
-     * @return minBlock Block local thấp nhất (0 nếu chưa có)
-     * @return maxBlock Block local cao nhất (0 nếu chưa có)
-     */
-    function getLocalScanBlockRange()
-        external view returns (uint256 minBlock, uint256 maxBlock)
-    {
+    function getScanBlockRange(uint256 destNationId) external view returns (uint256 minBlock, uint256 maxBlock) {
         if (embassyKeys.length == 0) return (0, 0);
 
         minBlock = type(uint256).max;
@@ -434,7 +444,15 @@ contract CrossChainConfigRegistry {
         for (uint256 i = 0; i < embassyKeys.length; i++) {
             if (!embassies[embassyKeys[i]].isActive) continue;
             address embAddr = embassies[embassyKeys[i]].ethAddress;
-            uint256 progress = localScanProgress[embAddr];
+            
+            uint256 progress;
+            if (destNationId == 0) {
+                progress = localScanProgress[embAddr];
+            } else {
+                bytes32 key = keccak256(abi.encodePacked(embAddr, destNationId));
+                progress = scanProgress[key];
+            }
+            
             if (progress > 0) {
                 if (progress < minBlock) {
                     minBlock = progress;
@@ -532,6 +550,24 @@ contract CrossChainConfigRegistry {
     function isActiveEmbassy(address _ethAddress) external view returns (bool) {
         bytes32 key = addressToEmbassyKey[_ethAddress];
         return key != bytes32(0) && embassies[key].isActive;
+    }
+
+    /**
+     * @notice Cấu hình chế độ quét block cho một đại sứ quán
+     * @param _embassy Địa chỉ đại sứ quán
+     * @param _mode 0: Từ block 0, 1: Max block, 2: Latest block
+     */
+    function setEmbassyScanMode(address _embassy, uint8 _mode) external onlyOwner {
+        require(addressToEmbassyKey[_embassy] != bytes32(0), "Not a registered embassy");
+        require(_mode <= 2, "Invalid mode");
+        embassyScanMode[_embassy] = _mode;
+    }
+
+    /**
+     * @notice Lấy cấu hình chế độ quét block của một đại sứ quán
+     */
+    function getEmbassyScanMode(address _embassy) external view returns (uint8) {
+        return embassyScanMode[_embassy];
     }
 
     /**

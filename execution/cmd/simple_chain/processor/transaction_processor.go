@@ -237,8 +237,6 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	err := tp.processTransactionFromClient(req.conn, tx, req.msgID)
 	if err != nil {
 		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
-	} else {
-		fmt.Printf("⚠️  [TX DEBUG] executeAndAddTx SUCCEEDED for tx %s\n", tx.Hash().Hex())
 	}
 }
 
@@ -284,91 +282,9 @@ func (tp *TransactionProcessor) SendRawTransaction(ctx context.Context, rawTx []
 	return rawTx, nil
 }
 
-// checkConnectionInitialized kiểm tra xem connection đã được init chưa
-// Connection phải được add vào manager thông qua ProcessInitConnection trước khi xử lý giao dịch
-// Có retry logic để đợi một chút nếu connection đang trong quá trình init
-// NOTE: Tăng timeout lên 5s (50x100ms) để tránh race condition với worker pool
-//
-//	khi ProcessInitConnection chưa kịp xử lý
-func (tp *TransactionProcessor) checkConnectionInitialized(conn network.Connection) error {
-	if conn == nil {
-		return fmt.Errorf("connection is nil")
-	}
-
-	// Lấy address từ connection
-	addr := conn.Address()
-	logger.Info("checkConnectionInitialized: address=%s", addr)
-	if addr == (common.Address{}) {
-		// Nếu address chưa có, có thể đang trong quá trình init
-		// Đợi một chút và retry - tăng lên 50x100ms = 5s để đợi ProcessInitConnection worker
-		maxRetries := 50
-		retryDelay := 100 * time.Millisecond
-		for retry := 0; retry < maxRetries; retry++ {
-			time.Sleep(retryDelay)
-			addr = conn.Address()
-			if addr != (common.Address{}) {
-				break // Đã có address
-			}
-			if retry%10 == 9 {
-				logger.Debug("checkConnectionInitialized: waiting for address, retry %d/%d", retry+1, maxRetries)
-			}
-		}
-		if addr == (common.Address{}) {
-			return fmt.Errorf("connection address is empty after %d retries, please send InitConnection first", maxRetries)
-		}
-	}
-
-	// Kiểm tra xem connection đã được add vào manager chưa
-	// Tìm connection trong manager với cùng address và type
-	if tp.env == nil {
-		return fmt.Errorf("transaction processor environment (connections manager) is not available")
-	}
-
-	// Retry logic để đợi connection được add vào manager
-	// Có thể ProcessInitConnection đang được xử lý trong worker pool
-	maxRetries := 50                     // Tăng từ 10 lên 50
-	retryDelay := 100 * time.Millisecond // Tăng từ 50ms lên 100ms
-	const maxTypes = 20                  // MaxConnectionTypes từ pkg/network
-
-	found := false
-	for retry := 0; retry < maxRetries; retry++ {
-		// Tìm connection trong manager với tất cả các types có thể
-		// Vì chúng ta không biết type chính xác, check tất cả các types
-		for typeIdx := 0; typeIdx < maxTypes; typeIdx++ {
-			managedConn := tp.env.ConnectionByTypeAndAddress(typeIdx, addr)
-			if managedConn != nil && managedConn == conn {
-				found = true
-				break
-			}
-		}
-
-		if found {
-			break // Đã tìm thấy, thoát khỏi retry loop
-		}
-
-		// Chưa tìm thấy, đợi một chút và retry
-		if retry < maxRetries-1 {
-			if retry%10 == 9 {
-				logger.Debug(
-					"checkConnectionInitialized: chưa tìm thấy connection trong manager, retry %d/%d addr=%s",
-					retry+1, maxRetries, addr.Hex(),
-				)
-			}
-			time.Sleep(retryDelay)
-		}
-	}
-
-	if !found {
-		return fmt.Errorf(
-			"connection not initialized after %d retries (total wait: %v), please send InitConnection command first (address: %s)",
-			maxRetries,
-			time.Duration(maxRetries)*retryDelay,
-			addr.Hex(),
-		)
-	}
-
-	return nil
-}
+// checkConnectionInitialized — REMOVED (see ProcessTransactionFromClient comments).
+// The spin-wait retry loop (50×100ms=5s) was blocking TX processing goroutines.
+// Connections are now validated by signature/nonce, not connection manager state.
 
 func (tp *TransactionProcessor) ProcessTransactionFromClient(
 	request network.Request,
@@ -405,8 +321,6 @@ func (tp *TransactionProcessor) ProcessTransactionFromClient(
 	// ═══════════════════════════════════════════════════════════════════
 	rawBody := make([]byte, len(request.Message().Body()))
 	copy(rawBody, request.Message().Body())
-	fmt.Printf("⚠️  [TX DEBUG] ProcessTransactionFromClient RECEIVED %d bytes\n", len(rawBody))
-
 	// Enqueue raw bytes to async worker pool — non-blocking
 	select {
 	case tp.injectionQueue <- injectionRequest{conn: request.Connection(), rawBody: rawBody, msgID: request.Message().ID()}:

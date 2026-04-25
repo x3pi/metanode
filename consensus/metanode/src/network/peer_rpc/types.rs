@@ -21,6 +21,9 @@ pub struct PeerInfoResponse {
     pub network_address: String,
     /// Timestamp of response (Unix ms)
     pub timestamp_ms: u64,
+    /// Account StateDB Merkle root hash
+    #[serde(default)]
+    pub state_root: String,
 }
 
 /// Request for /get_blocks endpoint

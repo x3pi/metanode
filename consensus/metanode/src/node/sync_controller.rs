@@ -58,6 +58,8 @@ pub struct SyncController {
     /// Current sync state (atomic for fast reads)
     state: AtomicU8,
 
+    pub coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
+
     /// Mutex to prevent concurrent state changes
     transition_lock: Mutex<()>,
 
@@ -74,11 +76,12 @@ pub struct SyncController {
 
 impl SyncController {
     /// Create a new SyncController
-    pub fn new() -> Self {
+    pub fn new(coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         Self {
             state: AtomicU8::new(SyncState::Disabled as u8),
+            coordination_hub,
             transition_lock: Mutex::new(()),
             handle: Mutex::new(None),
             shutdown_tx,
@@ -112,6 +115,11 @@ impl SyncController {
     #[allow(dead_code)]
     pub fn get_shutdown_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
         self.shutdown_tx.subscribe()
+    }
+
+    /// Triggers a transition to a new consensus phase via the coordination hub
+    pub fn trigger_phase_transition(&self, phase: consensus_core::coordination_hub::NodeConsensusPhase) {
+        self.coordination_hub.set_phase(phase);
     }
 
     /// Enable sync (start sync task)
@@ -233,7 +241,7 @@ impl SyncController {
 
 impl Default for SyncController {
     fn default() -> Self {
-        Self::new()
+        Self::new(consensus_core::coordination_hub::ConsensusCoordinationHub::new())
     }
 }
 
@@ -252,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let controller = SyncController::new();
+        let controller = SyncController::default();
         assert!(controller.is_disabled());
         assert!(!controller.is_enabled());
         assert!(!controller.is_transitioning());
@@ -268,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_shutdown_receiver_initial_value() {
-        let controller = SyncController::new();
+        let controller = SyncController::default();
         let rx = controller.get_shutdown_receiver();
         // Initial shutdown signal should be false
         assert!(!(*rx.borrow()));
@@ -283,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_is_transitioning_states() {
-        let controller = SyncController::new();
+        let controller = SyncController::default();
 
         // Starting state should be transitioning
         controller

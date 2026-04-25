@@ -122,7 +122,7 @@ cmd/tool/validator_test_suite/validator_test_suite
 # Compiled binaries and libraries
 # Compiled binaries (should not be in Git)
 # Compiled metanode binary in scripts (copied for deployment)
-/config.json
+# /config.json
 # Configuration and secrets (SECURITY CRITICAL)
 **/consensus_db/
 **/coverage/
@@ -209,7 +209,7 @@ hybrid-storage-demo/
 **/*.iso
 **/k8s/
 **/*.key
-**/*_key.json
+# **/*_key.json
 **/known_hosts
 # Kubernetes
 **/*.lcov
@@ -227,6 +227,10 @@ hybrid-storage-demo/
 **/LOG*
 # ===== Log files =====
 # Log files
+# Command and strace output logs
+compile_output.txt
+strace_*.txt
+strace_node1.txt
 **/logs/
 # Logs and databases
 # **/lost+found/
@@ -237,13 +241,13 @@ hybrid-storage-demo/
 metanode/bin/
 # Meta Node Blockchain (Go) - .gitignore
 metanode/check.err
-metanode/config/committee.json
-metanode/config/committee_*.json
-metanode/config-copy
-metanode/config/epoch_timestamp.txt
-metanode/config/node_*_network_key.json
-metanode/config/node_*_protocol_key.json
-metanode/config/node_*.toml
+# metanode/config/committee.json
+# metanode/config/committee_*.json
+# metanode/config-copy
+# metanode/config/epoch_timestamp.txt
+# metanode/config/node_*_network_key.json
+# metanode/config/node_*_protocol_key.json
+# metanode/config/node_*.toml
 metanode/config/storage/
 metanode/*.err
 metanode/go-node
@@ -342,9 +346,9 @@ sample/
 **/service-account*.json
 **/*-service.yaml
 !/execution/cmd/simple_chain/processor/block_processor_db_sync.go
-**/simple_chain
+# **/simple_chain (Removed to avoid ignoring the source folder cmd/simple_chain)
 /simple_chain
-simple_chain
+# simple_chain (Removed to avoid ignoring the source folder cmd/simple_chain)
 /simple_chain_bin
 site/
 # ===== Snapshot data directories =====

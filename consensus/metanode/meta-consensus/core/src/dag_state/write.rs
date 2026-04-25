@@ -138,7 +138,7 @@ impl DagState {
     }
 
     // Sets the block as committed in the cache. If the block is set as committed for first time, then true is returned, otherwise false is returned instead.
-    // Method will panic if the block is not found in the cache.
+    // If the block is not found in the cache, it gracefully attempts to load it from the database instead of panicking.
     pub fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
         if let Some(block_info) = self.recent_blocks.get_mut(block_ref) {
             if !block_info.committed {
@@ -147,11 +147,26 @@ impl DagState {
             }
             false
         } else {
-            // GRACEFUL (2026-03-24): After snapshot restore + amnesia recovery,
-            // own-slot conflict blocks are rejected and NOT added to recent_blocks.
-            // The linearizer may still reference them. Return false instead of panic.
+            // Block is not in cache. It might have been evicted from memory (e.g. older than `eviction_round`)
+            // but is still needed for a new commit (e.g. during CommitSyncer catch-up).
+            // Fetch it from DB and cache it to prevent the linearizer from double-committing it.
+            if let Ok(mut blocks) = self.store.read_blocks(&[*block_ref]) {
+                if let Some(Some(block)) = blocks.pop() {
+                    tracing::debug!(
+                        "⚠️ [DAG] set_committed: Block {:?} not in cache, loaded from DB and cached.",
+                        block_ref
+                    );
+                    let mut info = BlockInfo::new(block);
+                    info.committed = true;
+                    self.recent_blocks.insert(*block_ref, info);
+                    return true;
+                }
+            }
+
+            // GRACEFUL: After snapshot restore + amnesia recovery, own-slot conflict blocks
+            // are rejected and NOT added to recent_blocks or DB. Linearizer may still reference them.
             tracing::warn!(
-                "⚠️ [DAG] set_committed: Block {:?} not found in cache (likely own-slot conflict after restore). Treating as not committed.",
+                "⚠️ [DAG] set_committed: Block {:?} not found in cache OR DB (likely own-slot conflict after restore). Treating as not committed.",
                 block_ref
             );
             false
@@ -163,11 +178,11 @@ impl DagState {
         match self.recent_blocks.get(block_ref) {
             Some(info) => info.committed,
             None => {
-                // GRACEFUL (2026-03-24): After snapshot restore + amnesia recovery,
-                // own-slot conflict blocks are rejected and NOT added to recent_blocks.
-                // The linearizer may still reference them. Return false instead of panic.
-                tracing::warn!(
-                    "⚠️ [DAG] is_committed: Block {} not found in cache (likely own-slot conflict after restore). Treating as not committed.",
+                // Block could be evicted or an own-slot conflict.
+                // We return false, allowing the caller (e.g. Linearizer) to fetch it
+                // from DB (via get_blocks) and then `set_committed` will cache it.
+                tracing::debug!(
+                    "⚠️ [DAG] is_committed: Block {} not found in cache. Returning false.",
                     block_ref
                 );
                 false
@@ -455,7 +470,7 @@ impl DagState {
     ///
     /// After each flush, DagState becomes persisted in storage and it expected to recover
     /// all internal states from storage after restarts.
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let _s = self
             .context
             .metrics
@@ -474,8 +489,12 @@ impl DagState {
             && pending_commit_info.is_empty()
             && pending_finalized_commits.is_empty()
         {
-            return;
+            return None;
         }
+
+        let (tx_flush, rx_flush) = tokio::sync::oneshot::channel();
+        let store = self.store.clone();
+        let context = self.context.clone();
 
         debug!(
             "Flushing {} blocks ({}), {} commits ({}), {} commit infos ({}), {} finalized commits ({}) to storage.",
@@ -500,19 +519,21 @@ impl DagState {
                 .map(|(commit_ref, _)| commit_ref.to_string())
                 .join(","),
         );
-        self.store
-            .write(WriteBatch::new(
-                pending_blocks,
-                pending_commits,
-                pending_commit_info,
-                pending_finalized_commits,
-            ))
-            .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
-        self.context
-            .metrics
-            .node_metrics
-            .dag_state_store_write_count
-            .inc();
+        let write_batch = WriteBatch::new(
+            pending_blocks,
+            pending_commits,
+            pending_commit_info,
+            pending_finalized_commits,
+        );
+
+        tokio::task::spawn_blocking(move || {
+            store
+                .write(write_batch)
+                .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
+            context.metrics.node_metrics.dag_state_store_write_count.inc();
+            // Notify waiters that flush is complete
+            let _ = tx_flush.send(());
+        });
 
         // Clean up old cached data. After flushing, all cached blocks are guaranteed to be persisted.
         for (authority_index, _) in self.context.committee.authorities() {
@@ -538,6 +559,8 @@ impl DagState {
                 .map(std::collections::BTreeSet::len)
                 .sum::<usize>() as i64,
         );
+
+        Some(rx_flush)
     }
 
     pub fn recover_last_commit_info(&self) -> Option<(CommitRef, CommitInfo)> {

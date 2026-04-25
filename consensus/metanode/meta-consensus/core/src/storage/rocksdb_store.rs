@@ -24,6 +24,9 @@ use crate::{
     error::{ConsensusError, ConsensusResult},
 };
 
+// Global execution lock to pause RocksDB writes during Go atomic snapshots
+pub static RUST_EXECUTION_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// Persistent storage with RocksDB.
 #[derive(DBMapUtils)]
 #[cfg_attr(tidehunter, tidehunter)]
@@ -159,6 +162,9 @@ impl RocksDBStore {
 impl Store for RocksDBStore {
     fn write(&self, write_batch: WriteBatch) -> ConsensusResult<()> {
         fail_point!("consensus-store-before-write");
+
+        // Wait here if Go is currently copying RocksDB for a snapshot
+        let _guard = RUST_EXECUTION_LOCK.read().expect("Failed to acquire RUST_EXECUTION_LOCK for RocksDB write");
 
         let mut batch = self.blocks.batch();
         for block in write_batch.blocks {

@@ -17,6 +17,8 @@ pub struct CommitVoteMonitor {
     context: Arc<Context>,
     // Highest commit index voted by each authority.
     highest_voted_commits: Mutex<Vec<CommitIndex>>,
+    // Notifier for when quorum index might have advanced
+    pub quorum_advanced_notify: tokio::sync::Notify,
 }
 
 impl CommitVoteMonitor {
@@ -25,16 +27,24 @@ impl CommitVoteMonitor {
         Self {
             context,
             highest_voted_commits,
+            quorum_advanced_notify: tokio::sync::Notify::new(),
         }
     }
 
     /// Keeps track of the highest commit voted by each authority.
     pub(crate) fn observe_block(&self, block: &VerifiedBlock) {
-        let mut highest_voted_commits = self.highest_voted_commits.lock();
-        for vote in block.commit_votes() {
-            if vote.index > highest_voted_commits[block.author()] {
-                highest_voted_commits[block.author()] = vote.index;
+        let mut updated = false;
+        {
+            let mut highest_voted_commits = self.highest_voted_commits.lock();
+            for vote in block.commit_votes() {
+                if vote.index > highest_voted_commits[block.author()] {
+                    highest_voted_commits[block.author()] = vote.index;
+                    updated = true;
+                }
             }
+        }
+        if updated {
+            self.quorum_advanced_notify.notify_waiters();
         }
     }
 

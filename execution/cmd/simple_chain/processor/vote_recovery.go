@@ -6,7 +6,7 @@ package processor
 // File này quét lại các blocks trên local chain để phục hồi votes chưa đủ quorum.
 //
 // Flow:
-// 1. Đọc getLocalScanBlockRange() từ config contract → (minBlock, maxBlock)
+// 1. Đọc getScanBlockRange(0) từ config contract → (minBlock, maxBlock)
 // 2. Scan từng block từ minBlock → maxBlock
 // 3. Dùng TransactionStateDB để load full TX object (giống ProcessGetTransactionsByBlockNumber)
 // 4. Với mỗi TX có toAddress == CROSS_CHAIN_CONTRACT_ADDRESS + isBatchSubmit:
@@ -65,8 +65,8 @@ func TryRecoverVotesOnce(
 			return
 		}
 
-		// Đọc getLocalScanBlockRange từ config contract
-		minBlock, maxBlock, err := fetchLocalScanBlockRange(ccHandler, chainState, dummyTx)
+		// Đọc getScanBlockRange(0) từ config contract (0 = local chain)
+		minBlock, maxBlock, err := fetchScanBlockRange(ccHandler, chainState, dummyTx)
 		if err != nil {
 			logger.Warn("[VoteRecovery] fetchLocalScanBlockRange failed: %v, skip recovery", err)
 			voteRecoveryDone.Store(true)
@@ -216,9 +216,9 @@ func scanAndRecoverVotes(
 	return recoveredVotes, nil
 }
 
-// fetchLocalScanBlockRange gọi getLocalScanBlockRange() trên config contract
+// fetchScanBlockRange gọi getScanBlockRange(0) trên config contract
 // thông qua off-chain call (giống FetchChainId pattern trong cross_chain_config_helper.go).
-func fetchLocalScanBlockRange(
+func fetchScanBlockRange(
 	ccHandler *cross_chain_handler.CrossChainHandler,
 	chainState *blockchain.ChainState,
 	dummyTx types.Transaction,
@@ -233,13 +233,14 @@ func fetchLocalScanBlockRange(
 		return 0, 0, fmt.Errorf("config_contract not set")
 	}
 
-	// Gọi off-chain: getLocalScanBlockRange() → (uint256 minBlock, uint256 maxBlock)
+	// Gọi off-chain: getScanBlockRange(0) → (uint256 minBlock, uint256 maxBlock)
 	result, err := cross_chain_handler.CallConfigView(
 		ccHandler, chainState, dummyTx,
-		"getLocalScanBlockRange",
+		"getScanBlockRange",
+		big.NewInt(0),
 	)
 	if err != nil {
-		return 0, 0, fmt.Errorf("getLocalScanBlockRange call failed: %v", err)
+		return 0, 0, fmt.Errorf("getScanBlockRange(0) call failed: %v", err)
 	}
 
 	// Unpack 2 uint256

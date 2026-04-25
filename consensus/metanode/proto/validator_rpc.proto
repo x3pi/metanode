@@ -232,6 +232,7 @@ message LastBlockNumberResponse {
     uint64 last_block_number = 1;  // Last block number from Go Master DB
     uint64 last_global_exec_index = 2;  // Last processed GlobalExecIndex (includes empty commits)
     bool is_ready = 3;             // True if Master is fully synced/ready
+    bytes last_executed_commit_hash = 4; // NEW: The root hash evaluated at the end of the last sync
 }
 
 // Request message

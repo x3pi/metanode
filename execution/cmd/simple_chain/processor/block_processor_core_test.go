@@ -6,7 +6,6 @@ import (
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // ============================================================================
@@ -121,66 +120,7 @@ func TestSetLastBlock_GetLastBlock_Concurrent(t *testing.T) {
 	wg.Wait()
 }
 
-// ============================================================================
-// TestCheckConnectionInitialized_NilConn
-// ============================================================================
-func TestCheckConnectionInitialized_NilConn(t *testing.T) {
-	tp := &TransactionProcessor{}
-
-	err := tp.checkConnectionInitialized(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nil")
-}
-
-// ============================================================================
-// TestCheckConnectionInitialized_EmptyAddress
-// ============================================================================
-func TestCheckConnectionInitialized_EmptyAddress(t *testing.T) {
-	tp := &TransactionProcessor{}
-
-	// MockConnection with zero address
-	conn := NewMockConnection(e_common.Address{})
-	err := tp.checkConnectionInitialized(conn)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty")
-}
-
-// ============================================================================
-// TestCheckConnectionInitialized_NoConnectionsManager
-// ============================================================================
-func TestCheckConnectionInitialized_NoConnectionsManager(t *testing.T) {
-	tp := &TransactionProcessor{
-		env: &BlockProcessor{
-			// connectionsManager is nil
-		},
-	}
-
-	addr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
-	conn := NewMockConnection(addr)
-
-	err := tp.checkConnectionInitialized(conn)
-	require.Error(t, err)
-	// When connectionsManager is nil, ConnectionByTypeAndAddress returns nil for all types,
-	// so the retry loop exhausts and returns "connection not initialized after N retries..."
-	assert.Contains(t, err.Error(), "not initialized")
-}
-
-// ============================================================================
-// TestCheckConnectionInitialized_ConnectionFoundInManager
-// ============================================================================
-func TestCheckConnectionInitialized_ConnectionFoundInManager(t *testing.T) {
-	addr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
-	conn := NewMockConnection(addr)
-
-	mcm := NewMockConnectionsManager()
-	mcm.AddConnectionForType(0, conn)
-
-	tp := &TransactionProcessor{
-		env: &BlockProcessor{
-			connectionsManager: mcm,
-		},
-	}
-
-	err := tp.checkConnectionInitialized(conn)
-	assert.NoError(t, err, "connection in manager should pass initialization check")
-}
+// NOTE: TestCheckConnectionInitialized_* tests removed.
+// The checkConnectionInitialized function was deleted — it had a 5-second
+// spin-wait retry loop that blocked TX processing goroutines.
+// TX validation is now handled by signature/nonce checks.

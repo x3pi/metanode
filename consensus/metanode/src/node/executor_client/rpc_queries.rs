@@ -14,7 +14,7 @@ use prost::Message;
 
 use tracing::{info, trace, warn};
 
-use super::persistence::persist_last_block_number;
+// use super::persistence::persist_last_block_number;
 use super::proto::{self, GetValidatorsAtBlockRequest, Request, Response, ValidatorInfo};
 use super::ExecutorClient;
 
@@ -221,11 +221,11 @@ impl ExecutorClient {
     }
 
     /// Get last block number AND last global exec index from Go Master
-    /// Returns (last_block_number, last_global_exec_index)
+    /// Returns (last_block_number, last_global_exec_index, is_ready, last_executed_commit_hash)
     /// CRITICAL: last_block_number counts only non-empty commits (actual blocks)
     ///           last_global_exec_index counts ALL commits (including empty ones)
     ///           Use last_global_exec_index for epoch transition SYNC WAIT comparison
-    pub async fn get_last_block_number(&self) -> Result<(u64, u64, bool)> {
+    pub async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32])> {
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -274,12 +274,18 @@ impl ExecutorClient {
                 let last_block_number = res.last_block_number;
                 let last_gei = res.last_global_exec_index;
                 let is_ready = res.is_ready;
+                let mut hash = [0u8; 32];
+                if res.last_executed_commit_hash.len() == 32 {
+                    hash.copy_from_slice(&res.last_executed_commit_hash);
+                } else if !res.last_executed_commit_hash.is_empty() {
+                    warn!("⚠️ [EXECUTOR-REQ] Received invalid last_executed_commit_hash length: {}, expected 32. Using zeroes.", res.last_executed_commit_hash.len());
+                }
                 info!(
-                    "✅ [EXECUTOR-REQ] Received LastBlockNumberResponse: block={}, gei={}, is_ready={}",
-                    last_block_number, last_gei, is_ready
+                    "✅ [EXECUTOR-REQ] Received LastBlockNumberResponse: block={}, gei={}, is_ready={}, hash={:?}",
+                    last_block_number, last_gei, is_ready, hex::encode(hash)
                 );
 
-                Ok((last_block_number, last_gei, is_ready))
+                Ok((last_block_number, last_gei, is_ready, hash))
             }
             Some(proto::response::Payload::Error(error_msg)) => {
                 Err(anyhow::anyhow!("Go returned error: {}", error_msg))
