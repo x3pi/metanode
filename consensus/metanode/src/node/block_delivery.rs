@@ -43,7 +43,7 @@ impl BlockDeliveryManager {
     }
 
     pub async fn run(mut self) {
-        info!("🚚 [BLOCK DELIVERY] Started BlockDeliveryManager loop.");
+        info!("🚚 [STATION 4: DELIVERY] Started BlockDeliveryManager loop. Conveyor belt active.");
         while let Some(msg) = self.receiver.recv().await {
             let commit_index = msg.subdag.commit_ref.index;
             let result = self
@@ -59,12 +59,12 @@ impl BlockDeliveryManager {
             match result {
                 Ok(geis_consumed) => {
                     if let Err(_) = msg.response_tx.send(geis_consumed) {
-                        error!("🚨 [BLOCK DELIVERY] Processor dropped response channel for commit {} before reply could be sent.", commit_index);
+                        error!("🚨 [STATION 4: DELIVERY] Processor dropped response channel for commit {} before reply could be sent.", commit_index);
                     }
                 }
                 Err(e) => {
                     error!(
-                        "🚨 [BLOCK DELIVERY FATAL ERROR] Failed to send commit {} (GEI={}) to Executor: {}",
+                        "🚨 [STATION 4: FATAL ERROR] Failed to send commit {} (GEI={}) to Executor: {}",
                         commit_index, msg.global_exec_index, e
                     );
                     panic!(
@@ -74,6 +74,6 @@ impl BlockDeliveryManager {
                 }
             }
         }
-        info!("🛑 [BLOCK DELIVERY] BlockDeliveryManager closed (channel dropped).");
+        info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager closed (channel dropped).");
     }
 }

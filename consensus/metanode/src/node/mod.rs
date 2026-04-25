@@ -41,6 +41,7 @@ pub mod recovery;
 pub mod rpc_circuit_breaker;
 pub mod rust_sync_node;
 pub mod startup;
+pub mod coordinator;
 pub mod sync;
 pub mod sync_controller;
 pub mod sync_metrics;
@@ -178,6 +179,9 @@ pub struct ConsensusNode {
 
     /// TX recycler for tracking and re-submitting stale TXs
     pub(crate) tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
+
+    /// Central health flag tracking crashes in freely running background loops
+    pub(crate) is_terminally_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // ConsensusNode constructors are in consensus_node.rs

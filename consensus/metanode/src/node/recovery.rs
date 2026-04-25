@@ -13,7 +13,7 @@ pub async fn perform_block_recovery_check(
     go_last_block: u64,
     epoch_base_exec_index: u64,
     current_epoch: u64,
-    storage_path: &std::path::Path,
+    db_path: &std::path::PathBuf,
     node_id: u32,
 ) -> Result<()> {
     if node_id != 0 {
@@ -25,23 +25,7 @@ pub async fn perform_block_recovery_check(
         epoch_base_exec_index
     );
 
-    let db_path = storage_path
-        .join("epochs")
-        .join(format!("epoch_{}", current_epoch))
-        .join("consensus_db");
-    if !db_path.exists() {
-        info!(
-            "ℹ️ [RECOVERY] No DB found at {:?}, skipping recovery.",
-            db_path
-        );
-        return Ok(());
-    }
-
-    let db_path_str = db_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("DB path contains non-UTF-8 characters: {:?}", db_path))?;
-    let recovery_store = Arc::new(RocksDBStore::new(db_path_str));
-
+    // The recovery store is now passed in as an argument to avoid RocksDB lock conflicts.
     // Calculate start commit index
     // global_exec_index = epoch_base + commit_index + cumulative_fragment_offset
     // For recovery, we must reconstruct the fragment offset by counting TXs in each commit
@@ -62,6 +46,14 @@ pub async fn perform_block_recovery_check(
         start_commit_index, start_global
     );
 
+    // Ensure db exists before attempting to read it
+    if !db_path.exists() {
+        info!("✅ [RECOVERY] Local DB path does not exist. No commits to recover.");
+        return Ok(());
+    }
+
+    let recovery_store = RocksDBStore::new(db_path.to_str().unwrap());
+    
     // Scan commits from start_commit_index
     let range = consensus_core::CommitRange::new(start_commit_index..=u32::MAX);
     let commits = recovery_store.scan_commits(range)?;
@@ -119,7 +111,7 @@ pub async fn perform_block_recovery_check(
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
         let subdag = match consensus_core::try_load_committed_subdag_from_store(
-            recovery_store.as_ref(),
+            &recovery_store,
             commit,
             vec![],
         ) {

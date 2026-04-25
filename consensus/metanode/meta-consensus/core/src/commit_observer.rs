@@ -398,7 +398,7 @@ impl CommitObserver {
 
         for commit in committed {
             info!(
-                "Consensus commit {} with leader {} has {} blocks",
+                "🎯 [STATION 2: CORE] Consensus commit {} with leader {} has {} blocks",
                 commit.commit_ref,
                 commit.leader,
                 commit.blocks.len()

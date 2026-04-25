@@ -164,12 +164,14 @@ pub async fn dispatch_commit(
                         "🚨 [FATAL] leader_author_index {} >= committee_size {} after {} retries!",
                         leader_author_index, committee_size, max_retries
                     );
-                    error!("🚨 [FATAL] Committee size mismatch - expected at least {} validators but have {}!",
-                            leader_author_index + 1, committee_size);
-                    anyhow::bail!(
-                            "Committee size mismatch: leader_index {} >= committee_size {} after {} retries for epoch {}.",
-                            leader_author_index, committee_size, max_retries, epoch
-                        );
+                    error!("🚨 [FATAL] Committee size mismatch - this means Narwhal has more validators than Go! Falling back to deterministic sender to prevent cluster Hash divergence.");
+                    // DETERMINISTIC FALLBACK: Ensure all nodes use the same address to generate identical hashes
+                    let fallback_addr = match eth_addresses.iter().find(|a| a.len() == 20) {
+                        Some(valid_addr) => valid_addr.clone(),
+                        None => vec![1; 20] // Never use vec![0; 20] because Go interprets it as common.Address{} and falls back to local!
+                    };
+                    leader_address_opt = Some(fallback_addr);
+                    break;
                 }
 
                 warn!(
@@ -227,7 +229,7 @@ pub async fn dispatch_commit(
             }
 
             // STEP 3: Validate ETH address is valid (20 bytes)
-            let addr = eth_addresses[leader_author_index].clone();
+            let mut addr = eth_addresses[leader_author_index].clone();
             if addr.len() != 20 {
                 // SELF-RECOVERY: Try to refresh for invalid address too
                 drop(epoch_addresses);
@@ -235,13 +237,18 @@ pub async fn dispatch_commit(
                 retry_attempts += 1;
                 if retry_attempts > max_retries {
                     error!(
-                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries!",
+                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Falling back to deterministic sender to prevent cluster Hash divergence.",
                             leader_author_index, addr.len(), max_retries
                         );
-                    anyhow::bail!(
-                            "Invalid ETH address length {} at index {} after {} retries — committee data corrupted.",
-                            addr.len(), leader_author_index, max_retries
-                        );
+                    // DETERMINISTIC FALLBACK: Use the first active 20-byte validator's address if possible
+                    if let Some(valid_addr) = eth_addresses.iter().find(|a| a.len() == 20) {
+                        addr = valid_addr.clone();
+                    } else {
+                        // Hard fallback to deterministic dummy bytes (never 0x0 as Go will fallback to local address)
+                        addr = vec![1; 20]; 
+                    }
+                    leader_address_opt = Some(addr);
+                    break;
                 }
 
                 warn!(

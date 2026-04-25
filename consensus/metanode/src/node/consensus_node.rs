@@ -21,6 +21,7 @@ use consensus_core::{
 use meta_protocol_config::ProtocolConfig;
 use prometheus::Registry;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -62,6 +63,8 @@ struct ConsensusSetup {
     /// Whether DAG storage has prior history. False after snapshot restore (DAG deleted).
     #[allow(dead_code)]
     dag_has_history: bool,
+    /// Critical health flag. Set to true if any background Station crashes.
+    is_terminally_failed: Arc<AtomicBool>,
     commit_consumer_holder: Option<CommitConsumerArgs>,
     transaction_client_proxy: Option<Arc<TransactionClientProxy>>,
     executor_client_for_proc: Arc<ExecutorClient>,
@@ -812,7 +815,7 @@ impl ConsensusNode {
                 last_global_exec_index,
                 epoch_base_exec_index,
                 current_epoch,
-                &config.storage_path,
+                &epoch_db_path,
                 config.node_id as u32,
             )
             .await {
@@ -1048,7 +1051,8 @@ impl ConsensusNode {
             );
         }
 
-        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
+        // Stage 4 Conveyor Belt Buffer: Huge buffer to absorb transaction spikes without halting Core
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
 
         // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
         // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
@@ -1236,14 +1240,19 @@ impl ConsensusNode {
             }
         }
 
+        let is_terminally_failed = Arc::new(AtomicBool::new(false));
+
         let executor_client_for_init = executor_client_for_proc.clone();
+        let _failed_init = is_terminally_failed.clone();
         tokio::spawn(async move {
             executor_client_for_init.initialize_from_go().await;
+            // Note: init is not terminal.
         });
 
-        // Tích hợp BlockDeliveryManager vào Phase khởi động (mới thêm vào)
+        // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();
         let executor_client_for_manager = executor_client_for_proc.clone();
+        let failed_delivery = is_terminally_failed.clone();
         tokio::spawn(async move {
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 executor_client_for_manager,
@@ -1251,6 +1260,8 @@ impl ConsensusNode {
                 peer_addrs,
             );
             manager.run().await;
+            tracing::error!("💀 [COORDINATOR] Critical Component 'BlockDeliveryManager' Crashed!");
+            failed_delivery.store(true, Ordering::SeqCst);
         });
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -1358,9 +1369,14 @@ impl ConsensusNode {
 
         // Spawn background recycler is done in setup_epoch_management where tx_client is accessible
 
+        let failed_processor = is_terminally_failed.clone();
         tokio::spawn(async move {
             if let Err(e) = commit_processor.run().await {
-                tracing::error!("❌ [COMMIT PROCESSOR] Error: {}", e);
+                tracing::error!("❌ [STATION 3: PROCESSOR] Fatal Error: {}", e);
+                failed_processor.store(true, Ordering::SeqCst);
+            } else {
+                tracing::error!("💀 [COORDINATOR] Critical Component 'CommitProcessor' Exited!");
+                failed_processor.store(true, Ordering::SeqCst);
             }
         });
 
@@ -1474,6 +1490,7 @@ impl ConsensusNode {
             clock,
             transaction_verifier,
             tx_recycler,
+            is_terminally_failed,
         })
     }
 
@@ -1600,6 +1617,7 @@ impl ConsensusNode {
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
+            is_terminally_failed: consensus.is_terminally_failed,
         };
 
         // Initialize the global StateTransitionManager
@@ -1658,6 +1676,9 @@ impl ConsensusNode {
     }
 
     pub(crate) fn is_alive(&self) -> bool {
+        if self.is_terminally_failed.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         if let Some(authority) = &self.authority {
             authority.is_alive()
         } else {

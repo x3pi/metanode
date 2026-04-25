@@ -345,7 +345,7 @@ impl CommitProcessor {
                 let mut logged = false;
                 while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
                     if !logged {
-                        info!("⏳ [COMMIT PROCESSOR] Pausing execution - epoch transition in progress...");
+                        info!("⏳ [STATION 3: PROCESSOR] Pausing execution - epoch transition in progress...");
                         logged = true;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -474,7 +474,7 @@ impl CommitProcessor {
                         // FRAGMENTATION: Accumulate extra GEIs consumed by this commit
                         if geis_consumed > 1 {
                             cumulative_fragment_offset += geis_consumed - 1;
-                            info!("🔪 [FRAGMENT-OFFSET] Commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
+                            info!("🔪 [STATION 3: PROCESSOR] Commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
                                 commit_index, geis_consumed, cumulative_fragment_offset);
                             // RS-2: Persist after each change for crash recovery
                             if let Some(ref sp) = storage_path_for_persist {
@@ -516,7 +516,7 @@ impl CommitProcessor {
                                 // We MUST break here! This epoch is over. Any remaining commits in the channel
                                 // belong to the old epoch (empty trailing commits) and must NOT be sent to Go,
                                 // otherwise Go will increment LastGlobalExecIndex and cause a hash mismatch for the new epoch.
-                                info!("🛑 [COMMIT PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
+                                info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
                                 break;
                             }
                         }
@@ -578,7 +578,7 @@ impl CommitProcessor {
                                         }
                                     }
 
-                                    info!("🛑 [COMMIT PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
+                                    info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
                                     should_break = true;
                                     break;
                                 }
@@ -593,9 +593,9 @@ impl CommitProcessor {
                         const MAX_PENDING_COMMITS: usize = 5000;
                         if pending_commits.len() >= MAX_PENDING_COMMITS {
                             warn!(
-                                "🚨 [COMMIT PROCESSOR] pending_commits at capacity ({})! \
+                                "🚨 [STATION 3: PROCESSOR] pending_commits at capacity ({})! \
                                 Dropping out-of-order commit {} (expected {}). \
-                                This indicates severe downstream stall.",
+                                This indicates severe downstream overload at Station 4.",
                                 MAX_PENDING_COMMITS, commit_index, next_expected_index
                             );
                             continue;

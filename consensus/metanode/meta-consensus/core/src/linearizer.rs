@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::ops::Deref;
 
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round};
@@ -126,18 +127,25 @@ impl Linearizer {
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
         // Now linearize the sub-dag starting from the leader block
-        let to_commit = if let Some(commit) = precomputed_commit.as_ref() {
-            let mut blocks = commit.blocks().to_vec();
+        let (to_commit_blocks, timestamp_ms, final_commit) = if let Some(certified_commit) = precomputed_commit.as_ref() {
+            let mut blocks = certified_commit.blocks().to_vec();
             for block in &blocks {
                 dag_state.set_committed(&block.reference());
             }
             crate::commit::sort_sub_dag_blocks(&mut blocks);
-            Some(blocks)
+            (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
         } else {
-            Self::linearize_sub_dag(leader_block.clone(), &mut dag_state)
+            let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+            let ts = Self::calculate_commit_timestamp(
+                &self.context,
+                &mut dag_state,
+                &leader_block,
+                last_commit_timestamp_ms,
+            );
+            (blocks, ts, None)
         };
 
-        let to_commit = match to_commit {
+        let to_commit = match to_commit_blocks {
             Some(blocks) => blocks,
             None => {
                 tracing::info!("⚠️ [LINEARIZER] Missing blocks to linearize sub-dag for leader {:?}. Deferring commit.", leader_block.reference());
@@ -145,39 +153,30 @@ impl Linearizer {
             }
         };
 
-        let timestamp_ms = if let Some(commit) = precomputed_commit.as_ref() {
-            commit.timestamp_ms()
-        } else {
-            Self::calculate_commit_timestamp(
-                &self.context,
-                &mut dag_state,
-                &leader_block,
-                last_commit_timestamp_ms,
-            )
-        };
-
         drop(dag_state);
 
-        // Create the Commit.
-        // Calculate global_exec_index from epoch_base_index + commit_index
-        let commit_index = last_commit_index + 1;
-        let global_exec_index = self.epoch_base_index + commit_index as u64;
+        let commit = if let Some(trusted_commit) = final_commit {
+            trusted_commit
+        } else {
+            let commit_index = last_commit_index + 1;
+            let global_exec_index = self.epoch_base_index + commit_index as u64;
 
-        let commit = Commit::new(
-            commit_index,
-            last_commit_digest,
-            timestamp_ms,
-            leader_block.reference(),
-            to_commit
-                .iter()
-                .map(|block| block.reference())
-                .collect::<Vec<_>>(),
-            global_exec_index,
-        );
-        let serialized = commit
-            .serialize()
-            .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
-        let commit = TrustedCommit::new_trusted(commit, serialized);
+            let commit = Commit::new(
+                commit_index,
+                last_commit_digest,
+                timestamp_ms,
+                leader_block.reference(),
+                to_commit
+                    .iter()
+                    .map(|block| block.reference())
+                    .collect::<Vec<_>>(),
+                global_exec_index,
+            );
+            let serialized = commit
+                .serialize()
+                .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
+            TrustedCommit::new_trusted(commit, serialized)
+        };
 
         // Create the corresponding committed sub dag
         let sub_dag = CommittedSubDag::new(
@@ -185,7 +184,7 @@ impl Linearizer {
             to_commit,
             timestamp_ms,
             commit.reference(),
-            global_exec_index,
+            commit.global_exec_index(),
         );
 
         Some((sub_dag, commit))
