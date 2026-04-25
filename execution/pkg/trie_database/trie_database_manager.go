@@ -176,6 +176,24 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 		case Reverted:
 			trieDB.Discard()
 		default: // Bao gồm cả trạng thái Committed và các trạng thái khác
+			// ═══════════════════════════════════════════════════════════════════
+			// CRITICAL FORK-SAFETY FIX (Apr 2026): Ignore unmodified TrieDatabases.
+			//
+			// Read-only queries (e.g. eth_call) instantiate TrieDatabases in the
+			// manager to perform reads. If we unconditionally update SmartContractState,
+			// the node executing eth_call will generate an EMPTY_TRIE_HASH and mark
+			// the account dirty, causing its state root to diverge from the cluster.
+			// ═══════════════════════════════════════════════════════════════════
+			hasChanges := false
+			trieDB.dirtyData.Range(func(key, value interface{}) bool {
+				hasChanges = true
+				return false // stop iteration
+			})
+			
+			if !hasChanges {
+				continue // Skip unmodified read-only query databases
+			}
+
 			root, err := trieDB.IntermediateRoot()
 			if err != nil {
 				logger.Error("Failed to get IntermediateRoot TrieDatabase", "id", id, "error", err)

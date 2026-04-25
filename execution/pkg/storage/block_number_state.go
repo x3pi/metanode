@@ -23,6 +23,12 @@ var (
 
 	// Callback invoked when a new block is committed (used by SnapshotManager)
 	blockCommitCallback BlockCommitCallback
+
+	// blockchainInitDone is set to 1 after initBlockchain() has fully loaded
+	// the blockchain state (including LevelDB verification). Rust uses this
+	// via is_ready in LastBlockNumberResponse to know the returned block
+	// number is the FINAL value, not a transient metadata.json value.
+	blockchainInitDone uint32
 )
 
 // Update state constants
@@ -94,6 +100,20 @@ func GetLastBlockNumber() uint64 {
 	return atomic.LoadUint64(&lastBlockNumber)
 }
 
+// SetBlockchainInitDone marks blockchain initialization as complete.
+// Call this ONCE after initBlockchain() has finished loading the chain state.
+func SetBlockchainInitDone() {
+	val := atomic.AddUint32(&blockchainInitDone, 1) // Use Add to see if called multiple times
+	logger.Info("✅ [INIT-DEBUG] SetBlockchainInitDone() CALLED! flag=%d (should be 1), lastBlockNumber=%d", val, GetLastBlockNumber())
+}
+
+// IsBlockchainInitDone returns true if blockchain initialization is complete.
+func IsBlockchainInitDone() bool {
+	val := atomic.LoadUint32(&blockchainInitDone)
+	logger.Info("🔍 [INIT-DEBUG] IsBlockchainInitDone() checked: flag=%d, lastBlockNumber=%d", val, GetLastBlockNumber())
+	return val >= 1
+}
+
 // UpdateLastGlobalExecIndex updates the last processed GlobalExecIndex (monotonic)
 // This tracks which Rust consensus commit was last processed by Go Master
 func UpdateLastGlobalExecIndex(index uint64) {
@@ -131,8 +151,21 @@ func GetLastExecutedCommitHash() []byte {
 
 // ForceSetLastBlockNumber sets the block number to an exact value, bypassing
 // the monotonic guard. Used ONLY during snapshot restore correction.
+// CRITICAL FIX: Do NOT allow downgrades — if current block is already higher
+// (e.g. loaded from LevelDB), forcing a lower value causes Rust to re-execute
+// existing blocks and creates a permanent fork.
 func ForceSetLastBlockNumber(blockNumber uint64) {
-	atomic.StoreUint64(&lastBlockNumber, blockNumber)
+	for {
+		current := atomic.LoadUint64(&lastBlockNumber)
+		if blockNumber < current {
+			logger.Warn("🛡️ [SNAPSHOT FIX] REFUSING to downgrade lastBlockNumber %d → %d. LevelDB already has higher block. Keeping %d.", current, blockNumber, current)
+			return
+		}
+		if atomic.CompareAndSwapUint64(&lastBlockNumber, current, blockNumber) {
+			logger.Info("🛡️ [SNAPSHOT FIX] ForceSetLastBlockNumber: %d → %d", current, blockNumber)
+			return
+		}
+	}
 }
 
 // SetBlockCommitCallback đăng ký callback khi block mới commit

@@ -144,9 +144,8 @@ impl ConsensusNode {
         ));
 
         // SNAPSHOT RESTORE FIX: Go Master needs time to load DB after snapshot restore.
-        // Without retry, Rust gets block=0/epoch=0 and initializes consensus at epoch 0,
-        // making it permanently stuck and unable to catch up with the cluster.
-        // Retry up to 30 times (500ms intervals = 15s max) waiting for Go to report block > 0.
+        // Go now has an explicit blockchainInitDone flag. is_ready=true means the block
+        // number is the FINAL authoritative value — no transient metadata.json values.
         let latest_block_number = {
             let max_retries = 30;
             let retry_interval = std::time::Duration::from_millis(500);
@@ -154,19 +153,20 @@ impl ConsensusNode {
 
             for attempt in 1..=max_retries {
                 match executor_client.get_last_block_number().await {
-                    Ok((n, _, _is_ready, _)) => {
+                    Ok((n, _, true, _)) => {
                         block_num = n;
-                        if _is_ready {
-                            info!(
-                                "✅ [STARTUP] Got block number {} from Go (is_ready={}) (attempt {})",
-                                n, _is_ready, attempt
-                            );
-                            break;
-                        } else if attempt < max_retries {
-                            info!(
-                                "⏳ [STARTUP] Go returned block=0 (attempt {}/{}). Go may still be loading DB after snapshot restore. Retrying in {}s...",
-                                attempt, max_retries, retry_interval.as_secs()
-                            );
+                        info!(
+                            "✅ [STARTUP] Got block number {} from Go (is_ready=true) (attempt {})",
+                            n, attempt
+                        );
+                        break;
+                    }
+                    Ok((n, _, false, _)) => {
+                        info!(
+                            "⏳ [STARTUP] Go not ready (block={}) (attempt {}/{}). Waiting for blockchain init...",
+                            n, attempt, max_retries
+                        );
+                        if attempt < max_retries {
                             tokio::time::sleep(retry_interval).await;
                         }
                     }

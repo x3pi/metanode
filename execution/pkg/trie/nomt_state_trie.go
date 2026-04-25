@@ -636,18 +636,30 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	// BatchUpdateWithCachedOldValues), we guarantee deterministic Merkle root
 	// computation regardless of the NOMT database state.
 	// ═══════════════════════════════════════════════════════════════════════
+	var insertCount, updateCount int
 	for _, hexKey := range sortedDirtyKeys {
 		entry := n.dirty[hexKey]
 		if oldVal, ok := n.oldValues[hexKey]; ok && len(oldVal) > 0 {
 			if err := session.RecordRead(entry.keyPath, oldVal); err != nil {
 				logger.Warn("[NomtStateTrie] RecordRead failed for key %s: %v", hexKey[:8], err)
 			}
+			updateCount++
 		} else {
 			// Key did not exist before (new insertion) — record nil
 			if err := session.RecordRead(entry.keyPath, nil); err != nil {
 				logger.Warn("[NomtStateTrie] RecordRead(nil) failed for key %s: %v", hexKey[:8], err)
 			}
+			insertCount++
 		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FORK-DIAG: Log insert vs update ratio. If this differs between master
+	// and sync for the same block, old values are inconsistent → root diverges.
+	// ═══════════════════════════════════════════════════════════════════════
+	if insertCount > 0 || updateCount > 0 {
+		logger.Info("[FORK-DIAG][RECORD-READ] namespace=%s, inserts=%d, updates=%d, total=%d",
+			string(n.namespace), insertCount, updateCount, insertCount+updateCount)
 	}
 
 	// Batch write to the session (single FFI call for all entries)
@@ -702,6 +714,7 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		return n.rootHash, nil, nil, fmt.Errorf("NomtStateTrie Commit: session finish failed: %w", err)
 	}
 
+	oldRoot := n.rootHash
 	n.rootHash = e_common.BytesToHash(newRootBytes[:])
 	n.pendingFinishedSession = fs
 
@@ -719,7 +732,13 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	// Clear active session since it is now consumed
 	n.activeSession = nil
 
-	logger.Debug("[NomtStateTrie] Committed %d entries, new rootHash=%s", dirtyCount, n.rootHash.Hex()[:16])
+	// ═══════════════════════════════════════════════════════════════════════
+	// FORK-DIAG: Log root hash transition for debugging sync vs native divergence.
+	// This is the ONLY place NOMT root hash changes — if roots diverge between
+	// nodes, this log pinpoints the exact commit that caused it.
+	// ═══════════════════════════════════════════════════════════════════════
+	logger.Info("[FORK-DIAG][NOMT-COMMIT] namespace=%s, entries=%d, oldRoot=%s → newRoot=%s",
+		string(n.namespace), dirtyCount, oldRoot.Hex()[:18], n.rootHash.Hex()[:18])
 
 	return n.rootHash, nil, nil, nil
 }
@@ -950,6 +969,13 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					totalKeys, len(groupedByAddr), namespace)
 			} else {
 				// Account, StakeState: single namespace, no address prefix in keys
+				// ═══════════════════════════════════════════════════════════════════
+				// FORK-DIAG: Log handle root BEFORE sync to detect stale NOMT state
+				// ═══════════════════════════════════════════════════════════════════
+				preRoot, _ := handle.Root()
+				logger.Info("[FORK-DIAG][NOMT-SYNC-PRE] namespace=%s, keys=%d, handleRoot=%x",
+					namespace, len(nomtKeys), preRoot[:8])
+
 				trie := NewNomtStateTrie(handle, false, namespace)
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					return fmt.Errorf("failed to apply nomt sync batch: %w", err)
@@ -960,6 +986,11 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 				if err := trie.CommitPayload(); err != nil {
 					return fmt.Errorf("failed to flush nomt sync batch: %w", err)
 				}
+
+				// FORK-DIAG: Log handle root AFTER sync
+				postRoot, _ := handle.Root()
+				logger.Info("[FORK-DIAG][NOMT-SYNC-POST] namespace=%s, keys=%d, handleRoot=%x",
+					namespace, len(nomtKeys), postRoot[:8])
 				logger.Info("🔧 [NOMT-SYNC] Node rebuilt %d keys to NOMT trie for %s", len(nomtKeys), namespace)
 			}
 		}
