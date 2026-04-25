@@ -622,6 +622,34 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		})
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// CRITICAL FORK-SAFETY FIX (Apr 2026): Record old values BEFORE writing.
+	//
+	// NOMT's session.Finish() needs to know the old value at each key position
+	// to correctly update the Merkle tree (update vs. insert). If RecordRead is
+	// NOT called, NOMT reads old values from its internal database. This causes
+	// state root divergence when the database is incomplete — specifically after
+	// crash recovery or peer sync where CommitPayload may not have flushed all
+	// previous blocks' data, or where genesis-only accounts are missing.
+	//
+	// By explicitly recording old values (captured during BatchUpdate or
+	// BatchUpdateWithCachedOldValues), we guarantee deterministic Merkle root
+	// computation regardless of the NOMT database state.
+	// ═══════════════════════════════════════════════════════════════════════
+	for _, hexKey := range sortedDirtyKeys {
+		entry := n.dirty[hexKey]
+		if oldVal, ok := n.oldValues[hexKey]; ok && len(oldVal) > 0 {
+			if err := session.RecordRead(entry.keyPath, oldVal); err != nil {
+				logger.Warn("[NomtStateTrie] RecordRead failed for key %s: %v", hexKey[:8], err)
+			}
+		} else {
+			// Key did not exist before (new insertion) — record nil
+			if err := session.RecordRead(entry.keyPath, nil); err != nil {
+				logger.Warn("[NomtStateTrie] RecordRead(nil) failed for key %s: %v", hexKey[:8], err)
+			}
+		}
+	}
+
 	// Batch write to the session (single FFI call for all entries)
 	if err := session.BatchWrite(nomtKeys, nomtVals); err != nil {
 		session.Abort()

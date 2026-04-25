@@ -55,6 +55,9 @@ struct StorageSetup {
     /// Epoch duration in seconds, loaded from Go via protobuf (from genesis.json)
     epoch_duration_from_go: u64,
     last_executed_commit_hash: [u8; 32],
+    /// Last block number from Go at startup, verified with is_ready=true retry loop.
+    /// Passed to setup_consensus to avoid re-query race where Go returns stale value.
+    latest_block_number: u64,
 }
 
 /// Results from consensus setup phase.
@@ -153,7 +156,7 @@ impl ConsensusNode {
                 match executor_client.get_last_block_number().await {
                     Ok((n, _, _is_ready, _)) => {
                         block_num = n;
-                        if n > 0 || _is_ready {
+                        if _is_ready {
                             info!(
                                 "✅ [STARTUP] Got block number {} from Go (is_ready={}) (attempt {})",
                                 n, _is_ready, attempt
@@ -867,6 +870,7 @@ impl ConsensusNode {
             network_keypair,
             epoch_duration_from_go,
             last_executed_commit_hash,
+            latest_block_number,
         })
     }
 
@@ -881,14 +885,25 @@ impl ConsensusNode {
             return (0, [0; 32]);
         }
 
-        let (local_go_block, _, _go_ready, last_executed_commit_hash) = executor_client
-            .get_last_block_number()
-            .await
-            .unwrap_or((0, 0, false, [0; 32]));
-        let local_go_gei = executor_client
-            .get_last_global_exec_index()
-            .await
-            .unwrap_or(0);
+        let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
+            match executor_client.get_last_block_number().await {
+                Ok((block, gei, true, hash)) => break (block, gei, true, hash),
+                Ok((block, gei, false, _hash)) => {
+                    warn!(
+                        "⏳ [STARTUP] Go Master not ready (block={}, gei={}). Retrying in 1s...",
+                        block, gei
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ [STARTUP] Failed to get last block from Go: {}. Using defaults.",
+                        e
+                    );
+                    break (0, 0, false, [0; 32]);
+                }
+            }
+        };
         let storage_path = &config.storage_path;
 
         let (persisted_index, persisted_commit) =
@@ -1170,13 +1185,48 @@ impl ConsensusNode {
             // Give Go a moment to finish its own initialization
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-            let local_block = match barrier_client.get_last_block_number().await {
-                Ok((block, _gei, _ready, _hash)) => block,
-                Err(e) => {
-                    tracing::warn!("⚠️ [STARTUP-SYNC] Cannot query local block: {}. Skipping barrier.", e);
-                    0
+            // CRITICAL FIX: Use the verified latest_block_number from setup_storage()
+            // instead of re-querying Go. Re-querying with a new ExecutorClient can race
+            // with Go's internal state and return a stale/wrong value (e.g., 40 instead of 51).
+            // This caused re-execution of already-existing blocks → permanent fork.
+            let mut local_block = storage.latest_block_number;
+            tracing::info!(
+                "📊 [STARTUP-SYNC] Barrier using verified block={} from setup_storage()",
+                local_block
+            );
+
+            // Sanity check: re-query Go once. If it reports a HIGHER number, use that
+            // (Go may have processed blocks since setup_storage). If it reports LOWER,
+            // trust the setup_storage value (Go gave us a stale value).
+            match barrier_client.get_last_block_number().await {
+                Ok((requery_block, _gei, true, _hash)) => {
+                    if requery_block > local_block {
+                        tracing::info!(
+                            "📊 [STARTUP-SYNC] Go advanced since setup: {} -> {}. Using higher value.",
+                            local_block, requery_block
+                        );
+                        local_block = requery_block;
+                    } else if requery_block < local_block {
+                        tracing::warn!(
+                            "🚨 [STARTUP-SYNC] Go re-query returned STALE value ({} < {}). \
+                             Ignoring — this prevents re-execution of existing blocks.",
+                            requery_block, local_block
+                        );
+                    }
                 }
-            };
+                Ok((requery_block, _gei, false, _hash)) => {
+                    tracing::warn!(
+                        "⚠️ [STARTUP-SYNC] Go re-query not ready (block={}). Trusting setup_storage value={}.",
+                        requery_block, local_block
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [STARTUP-SYNC] Go re-query failed ({}). Trusting setup_storage value={}.",
+                        e, local_block
+                    );
+                }
+            }
 
             // Find the highest block among peers
             let mut max_peer_block = 0u64;

@@ -1135,8 +1135,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
+		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify 
+		// that the block hash actually exists in our local database. Sometimes PebbleDB 
+		// persists the GEI counter but fails to flush the actual block data.
 		// ═══════════════════════════════════════════════════════════════════════════
+		isFullyExecuted := false
 		if blockGEI > 0 && blockGEI <= currentGEI {
+			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
+				isFullyExecuted = true
+			}
+		}
+
+		if isFullyExecuted {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
 			executedCount++

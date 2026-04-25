@@ -399,12 +399,10 @@ func (db *SmartContractDB) LateBindRoots() error {
 			continue
 		}
 
-		if nomtTrie, isNomt := commitTrie.(*trie.NomtStateTrie); isNomt {
-			if err := nomtTrie.CommitPayload(); err != nil {
-				logger.Error("LateBindRoots: Error committing NOMT payload for address:", address, "error:", err)
-				finalErr = err
-				continue
-			}
+		// Close the cloned trie to prevent NOMT session leaks, since we only needed
+		// the hash from Commit(true) and won't call CommitPayload() here.
+		if closer, ok := commitTrie.(interface{ Close() }); ok {
+			closer.Close()
 		}
 
 		as, asErr := db.accountStateDB.AccountState(address)

@@ -118,19 +118,19 @@ pub async fn dispatch_commit(
 
             // Try to get committee for commit's epoch, with fallback to current or previous epoch
             let eth_addresses = if let Some(addrs) = epoch_addresses.get(&epoch) {
-                addrs
+                addrs.clone()
             } else if epoch > 0 {
                 // Try previous epoch (common during transition)
                 if let Some(addrs) = epoch_addresses.get(&(epoch - 1)) {
                     warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (during transition)",
                             epoch - 1, epoch);
-                    addrs
+                    addrs.clone()
                 } else {
                     // Last resort: use any available epoch
                     if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
                         warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (only available)",
                                 available_epoch, epoch);
-                        addrs
+                        addrs.clone()
                     } else {
                         error!("🚨 [FATAL] No committees available in cache!");
                         anyhow::bail!("No committee data available in cache — cannot determine leader for epoch {}.", epoch);
@@ -143,7 +143,7 @@ pub async fn dispatch_commit(
                         "⚠️ [LEADER] Using epoch {} committee for commit from epoch 0",
                         available_epoch
                     );
-                    addrs
+                    addrs.clone()
                 } else {
                     error!("🚨 [FATAL] No committees available in cache!");
                     anyhow::bail!(
@@ -164,14 +164,8 @@ pub async fn dispatch_commit(
                         "🚨 [FATAL] leader_author_index {} >= committee_size {} after {} retries!",
                         leader_author_index, committee_size, max_retries
                     );
-                    error!("🚨 [FATAL] Committee size mismatch - this means Narwhal has more validators than Go! Falling back to deterministic sender to prevent cluster Hash divergence.");
-                    // DETERMINISTIC FALLBACK: Ensure all nodes use the same address to generate identical hashes
-                    let fallback_addr = match eth_addresses.iter().find(|a| a.len() == 20) {
-                        Some(valid_addr) => valid_addr.clone(),
-                        None => vec![1; 20] // Never use vec![0; 20] because Go interprets it as common.Address{} and falls back to local!
-                    };
-                    leader_address_opt = Some(fallback_addr);
-                    break;
+                    error!("🚨 [FATAL] Committee size mismatch - letting Go handle the deterministic fallback to prevent cluster Hash divergence.");
+                    break None;
                 }
 
                 warn!(
@@ -237,18 +231,10 @@ pub async fn dispatch_commit(
                 retry_attempts += 1;
                 if retry_attempts > max_retries {
                     error!(
-                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Falling back to deterministic sender to prevent cluster Hash divergence.",
+                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Letting Go handle the deterministic fallback to prevent cluster Hash divergence.",
                             leader_author_index, addr.len(), max_retries
                         );
-                    // DETERMINISTIC FALLBACK: Use the first active 20-byte validator's address if possible
-                    if let Some(valid_addr) = eth_addresses.iter().find(|a| a.len() == 20) {
-                        addr = valid_addr.clone();
-                    } else {
-                        // Hard fallback to deterministic dummy bytes (never 0x0 as Go will fallback to local address)
-                        addr = vec![1; 20]; 
-                    }
-                    leader_address_opt = Some(addr);
-                    break;
+                    break None;
                 }
 
                 warn!(
