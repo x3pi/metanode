@@ -625,9 +625,10 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 
 	totalChecks := 0
 	totalMismatches := 0
+	trackedGhosts := make(map[uint64]bool)
 
 	// Run immediately on start
-	if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches) {
+	if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches, trackedGhosts) {
 		fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
 		fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
 		os.Exit(1)
@@ -636,7 +637,7 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 	for {
 		select {
 		case <-ticker.C:
-			if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches) {
+			if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches, trackedGhosts) {
 				fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
 				fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
 				os.Exit(1)
@@ -650,7 +651,7 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 }
 
 // watchOnce returns true if mismatch detected (caller should stop)
-func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks, totalMismatches *int) bool {
+func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks, totalMismatches *int, trackedGhosts map[uint64]bool) bool {
 	*totalChecks++
 	now := time.Now().Format("15:04:05")
 
@@ -732,19 +733,30 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		} else {
 			fmt.Printf(" ✅ hash khớp %d blocks (block %d→%d)\n", matched, from, minBlock)
 		}
-
+		
 		if len(emptyBlocks) > 0 {
 			show := len(emptyBlocks)
-			if show > 10 {
-				show = 10
-			}
+			if show > 10 { show = 10 }
 			fmt.Printf("   👻 Có %d block rỗng/nhảy cóc: %v", len(emptyBlocks), emptyBlocks[:show])
-			if len(emptyBlocks) > 10 {
-				fmt.Printf("...")
-			}
+			if len(emptyBlocks) > 10 { fmt.Printf("...") }
 			fmt.Println()
+			
+			// Lưu vào file (tránh trùng lặp)
+			if trackedGhosts != nil {
+				f, err := os.OpenFile("ghost_blocks.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err == nil {
+					nowStr := time.Now().Format("2006-01-02 15:04:05")
+					for _, b := range emptyBlocks {
+						if !trackedGhosts[b] {
+							fmt.Fprintf(f, "[%s] Ghost block detected: %d\n", nowStr, b)
+							trackedGhosts[b] = true
+						}
+					}
+					f.Close()
+				}
+			}
 		}
-
+		
 		// In hash của block mới nhất (minBlock) từ mỗi node
 		fmt.Printf("   📦 Block %d hashes:\n", minBlock)
 		for _, n := range nodes {

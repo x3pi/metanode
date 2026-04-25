@@ -98,6 +98,11 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
       gas_tracker->add_gas_used(getUnTouchedAddressGasCost());
     }
     ClearProcessingPointers(blockContext.mvmId);
+    
+    // Free memory allocated by Go C.CBytes
+    free(accountQueryData.balance_p);
+    free(accountQueryData.code_p);
+    free(accountQueryData.nonce);
 
     if (isCache) {
       auto state = State::getInstance(addr);
@@ -140,6 +145,11 @@ AccountState MyGlobalState::getUpdate(const Address &addr) {
             MyStorage(addr, blockContext.mvmId, isCache)});
     const auto acc = accounts.find(addr);
     ClearProcessingPointers(blockContext.mvmId);
+
+    // Free memory allocated by Go C.CBytes
+    free(accountQueryData.balance_p);
+    free(accountQueryData.code_p);
+    free(accountQueryData.nonce);
 
     if (isCache) {
       auto state = State::getInstance(addr);
@@ -206,6 +216,11 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
     }
     ClearProcessingPointers(blockContext.mvmId);
 
+    // Free memory allocated by Go C.CBytes
+    free(accountQueryData.balance_p);
+    free(accountQueryData.code_p);
+    free(accountQueryData.nonce);
+
     if (isCache) {
       auto state = State::getInstance(addr);
       state->setBalance(balance);
@@ -241,12 +256,14 @@ void MyGlobalState::set_block_context(const BlockContext &bc) {
 uint256_t MyGlobalState::get_block_hash(int blockNumber) {
   Value_return valueReturn = GetBlockHash(blockNumber);
   uint256_t hash = mvm::bytes_to_uint256(valueReturn.data_p);
+  free(valueReturn.data_p); // Free memory from Go
   return hash;
 }
 
 uint256_t MyGlobalState::get_chain_id() {
   Value_return valueReturn = GetChainId();
   uint256_t chainId = mvm::bytes_to_uint256(valueReturn.data_p);
+  free(valueReturn.data_p); // Free memory from Go
   return chainId;
 }
 

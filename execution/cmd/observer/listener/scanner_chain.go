@@ -51,6 +51,7 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 			continue
 		}
 
+
 		if latestBlock <= lastBlock {
 			// Đã scan hết, chờ block mới
 			if lastBlock > lastUpdateBlock && time.Since(lastUpdateTime) >= time.Minute {
@@ -172,6 +173,7 @@ func (s *CrossChainScanner) scanAndSubmit(
 			}
 			return 0
 		}(), client.GetNodeAddr(), len(allLogs))
+
 
 	hasEvents := false
 	if len(allLogs) > 0 {

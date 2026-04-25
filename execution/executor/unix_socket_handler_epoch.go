@@ -1097,6 +1097,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
+	var hasNewBlocks bool = false
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -1138,7 +1139,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
 		// ═══════════════════════════════════════════════════════════════════════════
 		if blockGEI > 0 && blockGEI <= currentGEI {
-			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
+			logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
 			executedCount++
 			if blockNum > lastExecutedBlock {
@@ -1254,6 +1255,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		executedCount++
 		lastExecutedBlock = blockNum
+		hasNewBlocks = true
 		if blockGEI > lastExecutedGEI {
 			lastExecutedGEI = blockGEI
 		}
@@ -1291,8 +1293,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// RUST CONTROL (Apr 2026 Architectural Fix):
 	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
 	// this EXECUTE command explicitly governs memory state advancement.
+	// CRITICAL FIX: Only update if hasNewBlocks is true. Otherwise, if the batch
+	// contained only deduped (old) blocks, this callback would REWIND the
+	// in-memory bp.lastBlock to an older state, causing "CHAIN BROKEN" errors.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if executedCount > 0 && rh.updateLastBlockCallback != nil {
+	if hasNewBlocks && rh.updateLastBlockCallback != nil {
 		if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
 			if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
 				rh.updateLastBlockCallback(lastBlk)

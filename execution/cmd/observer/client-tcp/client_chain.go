@@ -217,15 +217,6 @@ func (client *Client) ChainGetLogs(
 	addresses []common.Address,
 	topics [][]common.Hash,
 ) (*pb.GetLogsResponse, error) {
-	logger.Info(
-		"[Client][GetLogs] node=%s blockHash=%d from=%s to=%s addresses=%d topics=%d",
-		client.GetNodeAddr(),
-		len(blockHash),
-		fromBlock,
-		toBlock,
-		len(addresses),
-		len(topics),
-	)
 	request := &pb.GetLogsRequest{}
 	if len(blockHash) > 0 {
 		request.BlockHash = blockHash
@@ -271,7 +262,6 @@ func (client *Client) ChainGetLogs(
 	if response.Error != "" {
 		return nil, fmt.Errorf("server error: %s", response.Error)
 	}
-	logger.Info("[Client][GetLogs] node=%s resultLogs=%d", client.GetNodeAddr(), len(response.Logs))
 	return response, nil
 }
 
