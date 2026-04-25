@@ -334,3 +334,39 @@ sequenceDiagram
 > [!CAUTION]  
 > **Hash = 0x00..00 sau restore**: Đây là sentinel value, KHÔNG phải lỗi. Go trả về zero hash vì `LastExecutedCommitHash` chưa tồn tại trong BackupDB (key được tạo bởi feature mới). Hash sẽ tự có giá trị thật sau commit đầu tiên. ANTI-FORK check tự động skip khi hash=0.
 
+---
+
+## 9. Nguyên Tắc Khởi Động An Toàn & Tránh Phân Nhánh (Safe Startup & Fork Avoidance)
+
+Thiết kế khởi động của MetaNode yêu cầu tính **tuần tự và nghiêm ngặt** để đảm bảo quá trình đồng bộ hóa thành công mà không gây ra lỗi tương tranh (race conditions), phân nhánh (fork), hoặc crash hệ thống.
+
+### 9.1. Vấn Đề Khởi Động Quá Sớm
+Nếu các thành phần lõi đồng thuận (như `CommitFinalizer`, `ProposedBlockHandler`, hay `CoreThread`) khởi động ngay lập tức mà **chưa có đủ dữ liệu từ mạng** (sau khi restart hoặc restore từ snapshot):
+- Các thành phần lõi sẽ dùng **trạng thái rỗng (empty state)** hoặc **trạng thái cũ** dẫn đến sai lệch.
+- Việc xử lý song song các luồng sự kiện khi `CommitSyncer` chưa nạp đủ dữ liệu mạng sẽ dẫn đến việc các commit bị đứt gãy (gap). Ví dụ, nếu `CommitFinalizer` nhận được một commit nhưng thiếu commit trước đó (do đang được sync), nó có thể đưa ra lỗi `assertion` gây **chết toàn bộ engine**.
+- Khi một task chết, nó kéo theo sự sụp đổ dây chuyền (cascade crash), khiến cả node sập và rơi vào vòng lặp Auto-Restart liên tục mang theo state hỏng.
+
+### 9.2. Cơ Chế Khởi Động Tuần Tự & Màn Chắn Dữ Liệu
+Để triệt tiêu lỗi thiếu dữ liệu ban đầu, kiến trúc khởi động thiết lập các màn chắn phòng thủ:
+
+1. **Chờ Mốc Phân Ranh Mạng (Wait for Baseline)**:
+   - Hệ thống khởi tạo ở chế độ `Bootstrapping`. P2P Network được kết nối, nhưng `Core` không bắt đầu phát hay chốt khối. `CommitSyncer` là thành phần duy nhất được cấp quyền hành động để đánh giá mức độ đồng bộ của mạng lưới xung quanh.
+
+2. **Khởi Động Thành Phần Theo Lớp (Layered Spawning)**:
+   - **Lớp Dữ Liệu Nền:** Go Master phải chạy trước và hoàn tất quá trình nạp dữ liệu từ `RocksDB / PebbleDB`.
+   - **Lớp Cầu Nối:** Rust FFI và `ExecutorClient` kết nối sang Go, lấy mốc Block cao nhất. Node thử thách liên tục qua số lần `Retries` thay vì panic ngay nếu Go Master chưa kịp tải cấu trúc.
+   - **Lớp Bắt Kịp (Catch-up):** `CommitSyncer` kích hoạt tải dữ liệu thiếu (Gap Fetching). Các bộ xử lý khối mạnh mẽ như `ProposedBlockHandler` sẽ bỏ qua (ignore) các thông điệp mạng nếu trạng thái chưa chỉ định `Healthy`, ngăn ngừa ô nhiễm DAG.
+
+3. **Cơ Chế Bỏ Qua An Toàn & Miễn Nhiễm Gaps (Graceful Skipping)**:
+   - Thay vì kiểm tra trật tự một cách độc đoán dẫn đến thủ tiêu tiến trình (Crash on Assert), các pipeline phía sau như `CommitFinalizer` được nới lỏng thành **Cảnh Báo & Bỏ Qua (Warn & Skip)**.
+   - Khi mạng tải thành từng cụm ngắt quãng hoặc có bước đại nhảy vọt `FORWARD-JUMP`, hệ thống dễ dàng hấp thụ các mảnh dữ liệu nhảy cóc, bảo toàn sự sống cho toàn bộ cỗ máy đồng thuận.
+
+4. **Kích Hoạt Hoàn Toàn (Full Activation)**:
+   - Chỉ khi dữ liệu mạng đã thẩm thấu và bắt kịp (hoặc độ trễ chênh lệch xấp xỉ bằng không), `ConsensusCoordinationHub` mới gạt công tắc đưa `Node` sang mode `Healthy/Active`. 
+   - Từ đây, lá chắn được dỡ bỏ, các luồng sức mạnh như Lắng nghe giao dịch, Đề xuất khối và Biểu quyết đồng thuận mới chính thức bung sức lan tỏa, thiết lập trạng thái Strong Consistency tuyệt đối.
+
+### 9.3. Kiến Trúc Quản Lý Trạng Thái Dùng Chung Tập Trung (Centralized Shared State)
+Trong môi trường đồng thuận đa tiến trình (Multi-threading) và Kiến trúc Hợp nhất (Rust-Go FFI):
+- **Nguyên tắc "Một Nguồn Sự Thật" (Single Source of Truth)**: Nếu hai hay nhiều thành phần dùng chung một thông số trạng thái (Ví dụ: `Global_Execution_Index`, `Epoch`, `is_transitioning`), trạng thái đó **tuyệt đối không được sao chép phân tán**. Nó phải được quản lý tập trung ở **một nơi duy nhất** (như `ConsensusCoordinationHub` hoặc `SharedRwLock`). 
+- **Theo dõi & Cấp quyền (Monitor & Mutate)**: Bất kỳ thành phần nào muốn đọc đều phải trỏ tham chiếu (reference) về Bộ quản lý tập trung. Quyền ghi (mutate) phải được hạn chế nghiêm ngặt thông qua các hàm có khóa vây bảo vệ (Lock Guards / Atomic Operations) để tránh Deadlock và sự bất đồng bộ giữa các luồng.
+- Nhờ có Hub trung tâm, khi trạng thái thay đổi, hệ thống bảo đảm mọi components quan tâm (từ Mạng P2P, Linearizer, đến Go Master) đều nhận cùng một sự thật ở cùng một thời điểm phần nghìn giây.

@@ -15,7 +15,7 @@ use consensus_core::{
     Clock, CommitConsumerArgs, ConsensusAuthority, DefaultSystemTransactionProvider,
 };
 use meta_protocol_config::ProtocolConfig;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -125,7 +125,6 @@ pub struct ConsensusNode {
     pub(crate) storage_path: std::path::PathBuf,
     pub(crate) current_epoch: u64,
     pub(crate) last_global_exec_index: u64,
-    pub(crate) shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
 
     pub(crate) protocol_keypair: consensus_config::ProtocolKeyPair,
     pub(crate) network_keypair: consensus_config::NetworkKeyPair,
@@ -139,7 +138,6 @@ pub struct ConsensusNode {
     #[allow(dead_code)]
     pub(crate) current_registry_id: Option<mysten_metrics::RegistryID>,
     pub(crate) executor_commit_enabled: bool,
-    pub(crate) is_transitioning: Arc<AtomicBool>,
     pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     pub(crate) epoch_transition_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64)>,

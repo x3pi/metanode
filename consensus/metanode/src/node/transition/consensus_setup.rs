@@ -87,13 +87,13 @@ pub(super) async fn setup_validator_consensus(
         )
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
-                node.shared_last_global_exec_index.clone(),
+                node.coordination_hub.get_global_exec_index_ref(),
             ),
         )
-        .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
+        .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
         .with_epoch_info(new_epoch, actual_epoch_base)
         .with_next_expected_index(next_expected_commit_index)
-        .with_is_transitioning(node.is_transitioning.clone())
+        .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
@@ -217,13 +217,13 @@ pub(super) async fn setup_synconly_sync(
         )
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
-                node.shared_last_global_exec_index.clone(),
+                node.coordination_hub.get_global_exec_index_ref(),
             ),
         )
-        .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
+        .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
         .with_epoch_info(new_epoch, actual_epoch_base)
         .with_next_expected_index(next_expected_commit_index)
-        .with_is_transitioning(node.is_transitioning.clone())
+        .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)

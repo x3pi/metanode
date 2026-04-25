@@ -87,9 +87,9 @@ pub async fn transition_to_epoch_from_system_tx(
         node.current_epoch, new_epoch, node.node_mode
     );
 
-    if node.is_transitioning.swap(true, Ordering::SeqCst) {
+    if node.coordination_hub.swap_epoch_transitioning(true) {
         warn!("⚠️ Full epoch transition already in progress, skipping.");
-        node.is_transitioning.store(false, Ordering::SeqCst);
+        node.coordination_hub.set_epoch_transitioning(false);
         return Ok(());
     }
 
@@ -102,7 +102,7 @@ pub async fn transition_to_epoch_from_system_tx(
             }
         }
     }
-    let _guard = Guard(node.is_transitioning.clone());
+    let _guard = Guard(node.coordination_hub.get_is_transitioning_ref());
 
     // =========================================================================
     // STEP 2: Discover committee source + provisional timestamp
@@ -200,10 +200,7 @@ pub async fn transition_to_epoch_from_system_tx(
             synced_global_exec_index, synced_index
         );
     }
-    {
-        let mut g = node.shared_last_global_exec_index.lock().await;
-        *g = effective_synced;
-    }
+    node.coordination_hub.set_initial_global_exec_index(effective_synced).await;
     node.last_global_exec_index = effective_synced;
 
     // Memory cleanup
@@ -414,7 +411,7 @@ pub async fn transition_to_epoch_from_system_tx(
 
     let _ = recover_epoch_pending_transactions(node).await;
 
-    node.is_transitioning.store(false, Ordering::SeqCst);
+    node.coordination_hub.set_epoch_transitioning(false);
     let _ = node.submit_queued_transactions().await;
 
     // VALIDATOR PRIORITY FIX: After SyncOnly setup, re-check committee membership
@@ -473,7 +470,8 @@ async fn stop_authority_and_poll_go(
     committee_source: &crate::node::committee_source::CommitteeSource,
 ) -> Result<u64> {
     let expected_last_block = {
-        let shared_index = node.shared_last_global_exec_index.lock().await;
+        let gei_arc = node.coordination_hub.get_global_exec_index_ref();
+        let shared_index = gei_arc.lock().await;
         *shared_index
     };
     info!(

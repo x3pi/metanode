@@ -316,6 +316,23 @@ impl CommitProcessor {
         let storage_path_for_persist = self.storage_path.clone();
 
         loop {
+            // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
+            // This prevents CommitProcessor from pushing new execution state to Go Master
+            // while Go is busy re-initializing for the next epoch.
+            if let Some(ref is_transitioning) = self.is_transitioning {
+                let mut logged = false;
+                while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
+                    if !logged {
+                        info!("⏳ [COMMIT PROCESSOR] Pausing execution - epoch transition in progress...");
+                        logged = true;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+                if logged {
+                    info!("▶️ [COMMIT PROCESSOR] Resuming execution after epoch transition.");
+                }
+            }
+
             match receiver.recv().await {
                 Some(subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;

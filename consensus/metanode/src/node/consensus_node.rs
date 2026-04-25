@@ -20,7 +20,7 @@ use consensus_core::{
 };
 use meta_protocol_config::ProtocolConfig;
 use prometheus::Registry;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -66,12 +66,10 @@ struct ConsensusSetup {
     transaction_client_proxy: Option<Arc<TransactionClientProxy>>,
     executor_client_for_proc: Arc<ExecutorClient>,
     current_commit_index: Arc<AtomicU32>,
-    is_transitioning: Arc<AtomicBool>,
     pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
     epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64)>,
     epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64)>,
-    shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
     system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     protocol_config: ProtocolConfig,
     parameters: consensus_config::Parameters,
@@ -989,7 +987,7 @@ impl ConsensusNode {
         let (commit_consumer, commit_receiver, mut block_receiver) =
             CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash);
         let current_commit_index = Arc::new(AtomicU32::new(0));
-        let is_transitioning = Arc::new(AtomicBool::new(false));
+        let is_transitioning = coordination_hub.get_is_transitioning_ref();
 
         // Load persisted transaction queue
         let persisted_queue = super::queue::load_transaction_queue_static(&storage.storage_path)
@@ -1022,8 +1020,10 @@ impl ConsensusNode {
                 epoch_tx_sender.clone(),
             );
 
-        let shared_last_global_exec_index =
-            Arc::new(tokio::sync::Mutex::new(storage.epoch_base_exec_index));
+        let shared_last_global_exec_index = coordination_hub.get_global_exec_index_ref();
+        
+        // Initialize GEI in the Hub
+        coordination_hub.set_initial_global_exec_index(storage.epoch_base_exec_index).await;
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
@@ -1464,12 +1464,10 @@ impl ConsensusNode {
             transaction_client_proxy,
             executor_client_for_proc,
             current_commit_index,
-            is_transitioning,
             pending_transactions_queue,
             committed_transaction_hashes,
             epoch_tx_sender,
             epoch_tx_receiver,
-            shared_last_global_exec_index,
             system_transaction_provider,
             protocol_config,
             parameters,
@@ -1568,7 +1566,6 @@ impl ConsensusNode {
             storage_path: storage.storage_path,
             current_epoch: storage.current_epoch,
             last_global_exec_index: storage.last_global_exec_index,
-            shared_last_global_exec_index: consensus.shared_last_global_exec_index,
             protocol_keypair: storage.protocol_keypair,
             network_keypair: storage.network_keypair,
             protocol_config: consensus.protocol_config,
@@ -1580,7 +1577,6 @@ impl ConsensusNode {
             last_transition_hash: None,
             current_registry_id: None,
             executor_commit_enabled: config.executor_commit_enabled,
-            is_transitioning: consensus.is_transitioning,
             pending_transactions_queue: consensus.pending_transactions_queue,
             system_transaction_provider: consensus.system_transaction_provider,
             epoch_transition_sender: consensus.epoch_tx_sender,

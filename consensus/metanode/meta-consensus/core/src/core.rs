@@ -27,7 +27,7 @@ use crate::{
     commit_observer::CommitObserver,
     context::Context,
     dag_state::DagState,
-    error::{ConsensusError, ConsensusResult},
+    error::ConsensusResult,
     leader_schedule::LeaderSchedule,
     round_tracker::PeerRoundTracker,
     system_transaction_provider::SystemTransactionProvider,
