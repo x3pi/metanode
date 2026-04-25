@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	e_common "github.com/ethereum/go-ethereum/common"
@@ -282,7 +283,7 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 	}
 
 	// Track key in knownKeys registry if not skipped
-	if string(n.namespace) != "transaction_state" && string(n.namespace) != "receipts" && string(n.namespace) != "account_state" && string(n.namespace) != "smart_contract_storage" {
+	if string(n.namespace) != "transaction_state" && string(n.namespace) != "receipts" && string(n.namespace) != "account_state" && !strings.HasPrefix(string(n.namespace), "smart_contract_storage") {
 		n.knownKeysMu.Lock()
 		if _, exists := n.knownKeys[hexKey]; !exists {
 			n.knownKeys[hexKey] = keyCopy
@@ -368,7 +369,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || string(n.namespace) == "smart_contract_storage"
+	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || strings.HasPrefix(string(n.namespace), "smart_contract_storage")
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -467,7 +468,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map + inject cached old values
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || string(n.namespace) == "smart_contract_storage"
+	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || strings.HasPrefix(string(n.namespace), "smart_contract_storage")
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -669,7 +670,7 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	}
 
 	// Check if we need to update the knownKeys registry
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || string(n.namespace) == "smart_contract_storage"
+	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state" || strings.HasPrefix(string(n.namespace), "smart_contract_storage")
 
 	if !skipRegistry {
 		n.knownKeysMu.Lock()
@@ -800,15 +801,16 @@ func (n *NomtStateTrie) Copy() StateTrie {
 	n.knownKeysMu.RUnlock()
 
 	return &NomtStateTrie{
-		handle:     n.handle, // shared handle (NOMT is thread-safe for reads)
-		namespace:  n.namespace,
-		dirty:      newDirty,
-		committing: newCommitting,
-		oldValues:  newOldValues,
-		oldLoaded:  newOldLoaded,
-		knownKeys:  newKnownKeys,
-		rootHash:   n.rootHash,
-		isHash:     n.isHash,
+		handle:          n.handle, // shared handle (NOMT is thread-safe for reads)
+		namespace:       n.namespace,
+		dirty:           newDirty,
+		committing:      newCommitting,
+		oldValues:       newOldValues,
+		oldLoaded:       newOldLoaded,
+		knownKeys:       newKnownKeys,
+		registryChanged: n.registryChanged,
+		rootHash:        n.rootHash,
+		isHash:          n.isHash,
 	}
 }
 
