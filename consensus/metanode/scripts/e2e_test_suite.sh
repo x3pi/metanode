@@ -205,10 +205,10 @@ start_tx_pump() {
     # Xóa PID file cũ nếu process đã chết
     rm -f /tmp/tx_sender.pid 2>/dev/null || true
     
-    # Chạy tx_sender binary trực tiếp trong background
-    "$TX_SENDER_DIR/tx_sender" --loop --node "$TX_SENDER_NODE" > /dev/null 2>&1 &
+    # Chạy tx_sender binary trực tiếp trong background và lưu log
+    "$TX_SENDER_DIR/tx_sender" --config "$TX_SENDER_DIR/config.json" --data "$TX_SENDER_DIR/data.json" --loop --node "$TX_SENDER_NODE" > /tmp/tx_sender.log 2>&1 &
     TX_PUMP_PID=$!
-    log "- 🔫 TX Pump started (PID: $TX_PUMP_PID) — đang spam giao dịch để buộc tạo block..."
+    log "- 🔫 TX Pump started (PID: $TX_PUMP_PID) — đang spam giao dịch để buộc tạo block (log: /tmp/tx_sender.log)..."
 }
 
 # Dừng spam TX
@@ -725,7 +725,7 @@ test_consensus_liveness() {
     log ""
 
     # Lấy block hiện tại từ node 0 (reference)
-    local ref_port="${HTTP_PORTS[0]}"
+    local ref_port="${RPC_PORTS[0]}"
     local baseline
     baseline=$(get_block_number "$ref_port")
     if [ "$baseline" = "-1" ]; then
