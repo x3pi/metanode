@@ -70,6 +70,34 @@ impl CommitVoteMonitor {
         }
         GENESIS_COMMIT_INDEX
     }
+
+    /// Seeds the quorum from Go execution state to break the chicken-and-egg
+    /// deadlock where blocks need quorum to be produced, but quorum needs blocks
+    /// to be computed via observe_block().
+    ///
+    /// This is only applied when ALL authority vote slots are at 0 (i.e. no real
+    /// vote data exists yet). Once real blocks arrive with commit_votes, those
+    /// will naturally supersede this seed because observe_block() only advances
+    /// votes forward.
+    ///
+    /// Returns true if seeding was applied, false if skipped (already has votes).
+    pub(crate) fn seed_from_execution_state(&self, commit_index: CommitIndex) -> bool {
+        if commit_index == 0 {
+            return false;
+        }
+        let mut highest_voted_commits = self.highest_voted_commits.lock();
+        // Only seed if ALL slots are at 0 — never overwrite real vote data
+        let all_zero = highest_voted_commits.iter().all(|&v| v == 0);
+        if !all_zero {
+            return false;
+        }
+        for slot in highest_voted_commits.iter_mut() {
+            *slot = commit_index;
+        }
+        drop(highest_voted_commits);
+        self.quorum_advanced_notify.notify_waiters();
+        true
+    }
 }
 
 #[cfg(test)]

@@ -129,6 +129,12 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     last_state_log_at: tokio::time::Instant,
 
+    // --- stall detection ---
+    /// Tracks the last time quorum_commit_index changed.
+    /// Used to detect permanent stalls where quorum stays at 0.
+    last_quorum_change_at: tokio::time::Instant,
+    last_known_quorum: CommitIndex,
+
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
 }
@@ -172,6 +178,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_logged_local_commit_index: 0,
             coordination_hub,
             last_state_log_at: tokio::time::Instant::now(),
+            last_quorum_change_at: tokio::time::Instant::now(),
+            last_known_quorum: 0,
             adaptive_delay_state,
         }
     }
@@ -354,6 +362,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     quorum_commit, next_phase
                 );
                 self.coordination_hub.set_phase(next_phase);
+            } else {
+                // ════════════════════════════════════════════════════════
+                // QUORUM SEED: Go has state at highest_handled but Rust
+                // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
+                // Seed CommitVoteMonitor so quorum becomes > 0, allowing
+                // bootstrap to complete on next tick.
+                // ════════════════════════════════════════════════════════
+                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
+                if seeded {
+                    tracing::warn!(
+                        "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
+                         (commit_index={}) to break bootstrap deadlock. Quorum will resolve on next tick.",
+                        highest_handled_index
+                    );
+                }
             }
         }
     }
@@ -408,6 +431,36 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let local_commit = self.inner.dag_state.read().last_commit_index();
                         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
                         let lag = quorum_commit.saturating_sub(local_commit);
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR: Detect permanent quorum stall and
+                        // auto-recover by re-seeding from Go execution state.
+                        // ════════════════════════════════════════════════════════
+                        if quorum_commit != self.last_known_quorum {
+                            self.last_quorum_change_at = now;
+                            self.last_known_quorum = quorum_commit;
+                        }
+                        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+                        let stall_duration = now.duration_since(self.last_quorum_change_at);
+                        if stall_duration >= Duration::from_secs(30)
+                            && quorum_commit == 0
+                            && highest_handled > 0
+                            && self.coordination_hub.is_healthy()
+                        {
+                            tracing::error!(
+                                "🚨 [STALL-DETECTOR] Quorum stuck at 0 for {:.0}s while Go has block state \
+                                 (highest_handled={}). Re-seeding quorum and transitioning to Bootstrapping.",
+                                stall_duration.as_secs_f64(),
+                                highest_handled
+                            );
+                            let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled);
+                            if seeded {
+                                self.coordination_hub.set_phase(
+                                    crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+                                );
+                                self.last_quorum_change_at = now; // reset to avoid re-triggering immediately
+                            }
+                        }
 
                         info!(
                             "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",

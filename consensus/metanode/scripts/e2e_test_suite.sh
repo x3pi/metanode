@@ -718,5 +718,45 @@ fi
 # ─── Test 5: Post-recovery hash parity ──────────────────────────
 test_hash_parity "Test 5: Hash Parity Check (Post-Recovery)"
 
+# ─── Test 6: Consensus Liveness Check ───────────────────────────
+test_consensus_liveness() {
+    local test_label="Test 6: Consensus Liveness Check"
+    log "## $(date +%H:%M:%S) — $test_label"
+    log ""
+
+    # Lấy block hiện tại từ node 0 (reference)
+    local ref_port="${HTTP_PORTS[0]}"
+    local baseline
+    baseline=$(get_block_number "$ref_port")
+    if [ "$baseline" = "-1" ]; then
+        log "- 🔴 Node 0 không phản hồi — bỏ qua liveness test"
+        record_result "$test_label" "SKIP"
+        return
+    fi
+    log "- Block hiện tại (node 0): $baseline"
+
+    # Bắt đầu spam giao dịch
+    start_tx_pump
+    log "- ⏳ Chờ tối đa 60s để cluster tạo block mới..."
+
+    # Chờ ít nhất 5 block mới trong 60s
+    if wait_for_blocks "$ref_port" "$baseline" 5 60; then
+        local final_block
+        final_block=$(get_block_number "$ref_port")
+        log "- ✅ Cluster vẫn hoạt động: $baseline → $final_block (tăng $((final_block - baseline)) blocks)"
+        stop_tx_pump
+        record_result "$test_label" "PASS"
+    else
+        local final_block
+        final_block=$(get_block_number "$ref_port")
+        log "- 🔴 **CONSENSUS STALL DETECTED!** Block không tăng sau 60s: $baseline → $final_block"
+        log "- 🔴 Đây là lỗi production-critical: cluster mất khả năng tạo block mới."
+        stop_tx_pump
+        record_result "$test_label" "FAIL"
+    fi
+}
+
+test_consensus_liveness
+
 # ─── Báo cáo tổng hợp ──────────────────────────────────────────
 finalize_report
