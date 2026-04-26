@@ -25,13 +25,19 @@ pub(super) async fn setup_validator_consensus(
     committee: consensus_config::Committee,
     config: &NodeConfig,
 ) -> Result<()> {
+    // Use boundary_gei for epoch_base — this is the correct value for NORMAL startup.
+    // For epoch 1 genesis: boundary_gei = 0, so GEI = 0 + commit_index = commit_index.
+    let actual_epoch_base = boundary_gei;
+
     // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
     // can fast-forward baseline and skip re-fetching old commits.
-    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
-        node.last_global_exec_index as u32
+    // MUST use the epoch-relative CommitIndex, not the absolute GEI.
+    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > actual_epoch_base {
+        (node.last_global_exec_index.saturating_sub(actual_epoch_base)) as u32
     } else {
         0
     };
+    
     // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
     // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (commit_consumer, commit_receiver, mut block_receiver) =
@@ -39,10 +45,6 @@ pub(super) async fn setup_validator_consensus(
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
-
-    // Use boundary_gei for epoch_base — this is the correct value for NORMAL startup.
-    // For epoch 1 genesis: boundary_gei = 0, so GEI = 0 + commit_index = commit_index.
-    let actual_epoch_base = boundary_gei;
     let initial_next_expected = node.last_global_exec_index + 1;
     info!(
         "📊 [EXECUTOR INIT] boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}",

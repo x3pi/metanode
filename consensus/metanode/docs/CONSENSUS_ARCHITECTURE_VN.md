@@ -503,12 +503,24 @@ sequenceDiagram
 
 ---
 
-## 9. Epoch Transition Pipeline
+## 9. Epoch Transition Pipeline (Quy Trình Chuyển Đổi Kỷ Nguyên)
 
-### 9.1. Luồng xử lý Epoch Transition
+Quá trình chuyển đổi Kỷ Nguyên (Epoch Transition) là lúc hệ thống thay thế bộ điều phối mạng lưới, cập nhật Validator, và khởi tạo state hệ thống mới. Nó đòi hỏi sự đồng bộ chặt chẽ cả ở Rust Consensus và Go Execution.
+
+### 9.1. Cơ Chế Tiêm Giao Dịch Hệ Thống (System Transaction Injection)
+
+Thay vì cắt Epoch một cách đột ngột dựa trên thời gian, hệ thống sử dụng **Giao Dịch Hệ Thống (System Transaction)** đặc biệt `EndOfEpoch`:
+1. **Theo dõi kích thước Epoch**: Tại `CoreThread`, `EpochChangeProcessor` đếm tổng số commits hoặc nhận tín hiệu từ Smart Contract thay đổi Validator.
+2. **Khởi Trình Giao Dịch**: Khi đến giới hạn, Proposer (Leader) tự động tiêm giao dịch `EndOfEpoch(target_epoch)` vào đầu block của nó thông qua `SystemTransactionProvider`. 
+3. **Cờ Khối Biên (Boundary Block)**: Giao dịch này truyền hình khắp nơi. Khi được Linearized và đẩy qua UDS, CommitProcessor bắt dính giao dịch và ra hiệu cho Go Master biết đây là Khối Biên.
+
+### 9.2. Luồng xử lý Epoch Transition (Chuẩn bị và Chuyển Đổi)
 
 ```
-EndOfEpoch system tx detected in CommitProcessor
+Proposer injects EndOfEpoch SystemTx 
+│
+├─ Go Master: Xử lý State, Flush Database, Trả cờ `ready=true` kèm theo `GEI` đỉnh
+│   └─ Trở thành Boundary Block cho Epoch hiện tại.
 │
 ├─ epoch_transition_callback(new_epoch, boundary_block, global_exec_index)
 │
@@ -519,46 +531,34 @@ EndOfEpoch system tx detected in CommitProcessor
     ├─ STEP 1: Guard (duplicate check, swap_epoch_transitioning(true))
     │   └─ Drop Guard: ensures is_transitioning = false even on panic
     │
-    ├─ STEP 2: Discover committee source
-    │   └─ CommitteeSource::discover(config)
+    ├─ STEP 2: Wait for commit processor flush (Validator only)
+    │   └─ Hàm chờ tiến trình ghi xuất dữ liệu cũ dứt điểm trọn vẹn.
     │
-    ├─ STEP 3: Wait for commit processor flush (Validator only)
-    │   └─ wait_for_commit_processor_completion(target, timeout)
+    ├─ STEP 3: Stop old authority + flush blocks + poll Go GEI
+    │   ├─ Ngừng mạng P2P (`network_manager.stop()`)
+    │   ├─ `poll_go_until_synced` chờ Go Engine phản hồi `LastBlockNumberResponse` chặn ở `Boundary GEI` với `is_ready=true`.
+    │   └─ Đảm bảo Go và Rust hoàn toàn sạch cấu trúc, không còn TX dư thừa.
     │
-    ├─ STEP 4: Stop old authority + flush blocks + poll Go GEI
-    │   ├─ Pre-shutdown flush
-    │   ├─ auth.take() → preserve store in LegacyEpochStoreManager
-    │   ├─ auth.stop()
-    │   ├─ Post-shutdown flush (5 retries × 200ms)
-    │   └─ poll_go_until_synced(30s timeout, ForceCommit every 3s)
+    ├─ STEP 4: Cập nhật Hub State và Go Master
+    │   ├─ `coordination_hub.set_initial_global_exec_index(effective_synced)`
+    │   └─ `executor_client.advance_epoch(...)`: Ra lệnh Go nâng số Epoch.
     │
-    ├─ STEP 5: Update state (epoch, GEI, cleanup)
-    │   └─ coordination_hub.set_initial_global_exec_index(effective_synced)
+    ├─ STEP 5: Khởi Động Lại Consensus (Setup New Baseline)
+    │   ├─ Bật mạng AuthorityNode cấp mới bằng IP List mới.
+    │   └─ Cập nhật `epoch_eth_addresses` từ UDS.
     │
-    ├─ STEP 6: Advance Go epoch
-    │   └─ executor_client.advance_epoch(new_epoch, timestamp, boundary, gei)
-    │
-    ├─ STEP 7: Fetch committee → start components
-    │   ├─ setup_validator_consensus() OR setup_synconly_sync()
-    │   └─ Update epoch_eth_addresses cache (keep 2 max)
-    │
-    ├─ STEP 8: Post-transition
-    │   ├─ wait_for_consensus_ready()
-    │   ├─ recover_epoch_pending_transactions()
-    │   ├─ set_epoch_transitioning(false)
-    │   └─ VALIDATOR PRIORITY: SyncOnly→Validator upgrade if in committee
-    │
-    └─ STEP 9: Verification
-        └─ verify_epoch_consistency()
+    └─ STEP 6: Hậu Chuyển Đổi (Post-transition)
+        ├─ Reset `set_epoch_transitioning(false)`
+        └─ Mạng P2P sẽ tự tìm thấy nhau qua Tonic.
 ```
 
-### 9.2. is_transitioning Safety
+### 9.3. is_transitioning Safety & Hệ Thống Bảo Vệ Bế Tắc (Liveness Guards)
 
-`is_transitioning` flag bảo vệ 2 điểm quan trọng:
+Epoch Transition là thời điểm nhạy cảm dễ sinh **Deadlock**. Các cơ chế bảo vệ mạnh mẽ đã được thêm vào:
 
-1. **CommitProcessor** (`processor.rs:344-356`): Busy-wait 100ms loop khi `is_transitioning = true`. Ngăn push execution state sang Go khi Go đang re-initialize.
-2. **TX Receivers**: Reject incoming transactions khi epoch đang chuyển.
-3. **Drop Guard** (`epoch_transition.rs:97-104`): Struct `Guard` implement `Drop` để đảm bảo flag luôn được reset ngay cả khi function panic.
+1. **CommitProcessor Safety Guard (`processor.rs`)**: `is_transitioning` flag khiến CommitProcessor chạy vòng loop chờ (busy-wait). Để chống trường hợp panic đột ngột do drop guard không chạy, vòng loop này được bảo vệ thêm một Safety Timeout **60 giây**. Nếu kẹt quá 60s, nó sẽ buộc xóa cờ và khôi phục đường ống để hệ thống tránh đình trệ vĩnh viễn.
+2. **Liveness Stall Detector (`commit_syncer.rs`)**: Trong lúc chuyển đổi P2P mạng có thể bị kẹt DAG `local_commit_index`. Nếu hệ thống tưởng mình ở trạng thái "Healthy" nhưng `local_commit` không nhúc nhích trong 60s, detector sẽ ép node nhảy lùi về `Bootstrapping`, ép tái đồng bộ `baseline` và quét lại khối cho Mạng Lưới qua hàm `fetch_blocks` P2P, sửa bế tắc "Mạng Quorum có nhưng không Block nào được duyệt".
+3. **Drop Guard (`epoch_transition.rs`)**: Struct `Guard` implement `Drop` để đảm bảo cờ `is_transitioning` luôn được trả về `false` báo hiệu Node hồi sinh lại ngay cả khi luồng rust đang chạy gặp Lỗi Khẩn Cấp (panic).
 
 ---
 
