@@ -1304,7 +1304,7 @@ impl ConsensusNode {
         let executor_client_for_manager = executor_client_for_proc.clone();
         let failed_delivery = is_terminally_failed.clone();
         tokio::spawn(async move {
-            let mut manager = crate::node::block_delivery::BlockDeliveryManager::new(
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 executor_client_for_manager,
                 delivery_rx,
                 peer_addrs,
