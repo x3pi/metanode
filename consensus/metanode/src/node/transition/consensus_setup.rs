@@ -81,6 +81,8 @@ pub(super) async fn setup_validator_consensus(
         next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
     );
 
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
+
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -97,13 +99,23 @@ pub(super) async fn setup_validator_consensus(
         .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
+        .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
     if let Some(c) = exec_client_proc {
-        processor = processor.with_executor_client(c);
+        processor = processor.with_executor_client(c.clone());
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                c,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
+        });
     }
 
     tokio::spawn(async move {
