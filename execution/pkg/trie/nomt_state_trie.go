@@ -3,6 +3,8 @@ package trie
 import (
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -98,6 +100,7 @@ type nomtDirtyEntry struct {
 var _ StateTrie = (*NomtStateTrie)(nil)
 
 // nomtRegistryKeyPrefix is used to store the keys registry in NOMT.
+// DEPRECATED: Registry is now stored in a separate file, NOT in the NOMT Merkle trie.
 const nomtRegistryKeyPrefix = "__nomt_registry__:"
 
 // addressToKeyPath converts a MetaNode address (20 bytes) to a NOMT KeyPath (32 bytes)
@@ -114,10 +117,96 @@ func addressToKeyPathWithNamespace(namespace, key []byte) [32]byte {
 }
 
 // registryKeyPath returns the NOMT KeyPath for storing the keys registry.
+// DEPRECATED: Only used for backward-compatible loading from old NOMT data.
 func registryKeyPath(namespace []byte) [32]byte {
 	registryKey := []byte(nomtRegistryKeyPrefix)
 	registryKey = append(registryKey, namespace...)
 	return crypto.Keccak256Hash(registryKey)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILE-BASED REGISTRY — Persists knownKeys OUTSIDE the NOMT Merkle trie.
+//
+// The registry was previously stored as a special entry inside the NOMT trie,
+// which caused persistent fork divergence because:
+//  1. registryChanged flag is volatile in-memory state that diverges after restarts
+//  2. Replication wrote registry at a different NOMT key path than native execution
+//  3. Old-value tracking for registry depended on CommitPayload timing
+//
+// By storing the registry in a separate file, it has ZERO impact on the Merkle
+// root computation, completely eliminating these sources of non-determinism.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// registryFilePath returns the filesystem path for storing a namespace's key registry.
+func registryFilePath(handlePath string, namespace string) string {
+	dir := filepath.Dir(handlePath)
+	return filepath.Join(dir, "nomt_registry_"+namespace+".bin")
+}
+
+// loadRegistryFromFile loads the knownKeys registry from a file.
+// Returns an empty map if the file doesn't exist or is corrupt.
+func loadRegistryFromFile(handlePath string, namespace string) map[string][]byte {
+	knownKeys := make(map[string][]byte)
+	filePath := registryFilePath(handlePath, namespace)
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return knownKeys // File not found or unreadable — start fresh
+	}
+
+	offset := 0
+	for offset < len(data) {
+		if offset >= len(data) {
+			break
+		}
+		keyLen := int(data[offset])
+		offset++
+		if offset+keyLen > len(data) {
+			break
+		}
+		origKey := make([]byte, keyLen)
+		copy(origKey, data[offset:offset+keyLen])
+		offset += keyLen
+		hexKey := hex.EncodeToString(origKey)
+		knownKeys[hexKey] = origKey
+	}
+
+	if len(knownKeys) > 0 {
+		logger.Info("[NomtStateTrie] ✅ Loaded %d known keys from registry FILE (namespace=%s)", len(knownKeys), namespace)
+	}
+	return knownKeys
+}
+
+// persistRegistryToFile writes the knownKeys registry to a file.
+// This is called after each Commit to ensure the registry is durable.
+func (n *NomtStateTrie) persistRegistryToFile() {
+	n.knownKeysMu.RLock()
+	defer n.knownKeysMu.RUnlock()
+
+	if len(n.knownKeys) == 0 {
+		return
+	}
+
+	sortedKeys := make([]string, 0, len(n.knownKeys))
+	for hexKey := range n.knownKeys {
+		sortedKeys = append(sortedKeys, hexKey)
+	}
+	sort.Strings(sortedKeys)
+
+	var data []byte
+	for _, hexKey := range sortedKeys {
+		origKey := n.knownKeys[hexKey]
+		if len(origKey) > 255 {
+			continue
+		}
+		data = append(data, byte(len(origKey)))
+		data = append(data, origKey...)
+	}
+
+	filePath := registryFilePath(n.handle.GetPath(), string(n.namespace))
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		logger.Warn("[NomtStateTrie] Failed to persist registry to file %s: %v", filePath, err)
+	}
 }
 
 // NewNomtStateTrie creates a new NomtStateTrie backed by the given NOMT handle.
@@ -130,31 +219,38 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		rootHash = e_common.BytesToHash(rootBytes[:])
 	}
 
-	// Load known keys registry from NOMT
-	knownKeys := make(map[string][]byte)
-	regKey := registryKeyPath([]byte(namespace))
-	regData, found, readErr := handle.Read(regKey)
-	if readErr == nil && found && len(regData) > 0 {
-		// Registry format: each entry is [1-byte keyLen][keyBytes]
-		offset := 0
-		for offset < len(regData) {
-			if offset >= len(regData) {
-				break
+	// ═══════════════════════════════════════════════════════════════════════
+	// FORK-SAFE: Load registry from FILE first, fall back to NOMT for
+	// backward compatibility with databases created before the file-based
+	// registry fix.
+	// ═══════════════════════════════════════════════════════════════════════
+	knownKeys := loadRegistryFromFile(handle.GetPath(), namespace)
+
+	// Backward compatibility: if no file-based registry, try loading from NOMT
+	if len(knownKeys) == 0 {
+		regKey := registryKeyPath([]byte(namespace))
+		regData, found, readErr := handle.Read(regKey)
+		if readErr == nil && found && len(regData) > 0 {
+			offset := 0
+			for offset < len(regData) {
+				if offset >= len(regData) {
+					break
+				}
+				keyLen := int(regData[offset])
+				offset++
+				if offset+keyLen > len(regData) {
+					break
+				}
+				origKey := make([]byte, keyLen)
+				copy(origKey, regData[offset:offset+keyLen])
+				offset += keyLen
+				hexKey := hex.EncodeToString(origKey)
+				knownKeys[hexKey] = origKey
 			}
-			keyLen := int(regData[offset])
-			offset++
-			if offset+keyLen > len(regData) {
-				break
-			}
-			origKey := make([]byte, keyLen)
-			copy(origKey, regData[offset:offset+keyLen])
-			offset += keyLen
-			hexKey := hex.EncodeToString(origKey)
-			knownKeys[hexKey] = origKey
+			logger.Info("[NomtStateTrie] ✅ Migrated %d known keys from NOMT registry to file (namespace=%s)", len(knownKeys), namespace)
+		} else {
+			logger.Info("[NomtStateTrie] ⚠️ No registry found for namespace=%s (fresh start)", namespace)
 		}
-		logger.Info("[NomtStateTrie] ✅ Loaded %d known keys from registry (namespace=%s, regDataLen=%d)", len(knownKeys), namespace, len(regData))
-	} else {
-		logger.Info("[NomtStateTrie] ⚠️ No registry found for namespace=%s (readErr=%v, found=%v, dataLen=%d)", namespace, readErr, found, len(regData))
 	}
 
 	return &NomtStateTrie{
@@ -601,63 +697,10 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// INJECT REGISTRY INTO DIRTY MAP
+	// FORK-SAFE: Registry is NO LONGER injected into the dirty map.
+	// It is persisted to a separate file after Commit, completely outside
+	// the NOMT Merkle trie. This eliminates ALL registry-related fork sources.
 	// ═══════════════════════════════════════════════════════════════════════
-	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
-
-	if !skipRegistry && !n.isReplicationSync {
-		n.knownKeysMu.Lock()
-		if n.registryChanged {
-			sortedRegKeys := make([]string, 0, len(n.knownKeys))
-			for hexKey := range n.knownKeys {
-				sortedRegKeys = append(sortedRegKeys, hexKey)
-			}
-			sort.Strings(sortedRegKeys)
-
-			var regData []byte
-			for _, hexKey := range sortedRegKeys {
-				origKey := n.knownKeys[hexKey]
-				if len(origKey) > 255 {
-					continue
-				}
-				regData = append(regData, byte(len(origKey)))
-				regData = append(regData, origKey...)
-			}
-
-			regKey := registryKeyPath(n.namespace)
-			regHexKey := hex.EncodeToString(regKey[:])
-
-			var oldRegData []byte
-			var loaded bool
-			if commEntry, ok := n.committing[regHexKey]; ok {
-				oldRegData = commEntry.value
-				loaded = true
-			} else {
-				val, found, err := n.handle.Read(regKey)
-				if err == nil {
-					loaded = true
-					if found && len(val) > 0 {
-						oldRegData = val
-					}
-				}
-			}
-
-			if !n.oldLoaded[regHexKey] {
-				if loaded && len(oldRegData) > 0 {
-					n.oldValues[regHexKey] = oldRegData
-				}
-				n.oldLoaded[regHexKey] = true
-			}
-
-			n.dirty[regHexKey] = &nomtDirtyEntry{
-				originalKey: []byte("nomt_registry"),
-				keyPath:     regKey,
-				value:       regData,
-			}
-			n.registryChanged = false
-		}
-		n.knownKeysMu.Unlock()
-	}
 
 	// Build key/value arrays for batch write
 	dirtyCount := len(n.dirty)
@@ -770,6 +813,15 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	// ═══════════════════════════════════════════════════════════════════════
 	logger.Info("[FORK-DIAG][NOMT-COMMIT] namespace=%s, entries=%d, oldRoot=%s → newRoot=%s",
 		string(n.namespace), dirtyCount, oldRoot.Hex()[:18], n.rootHash.Hex()[:18])
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FORK-SAFE: Persist knownKeys to file OUTSIDE the Merkle trie.
+	// Only persist for non-sync commits (sync creates temporary tries).
+	// ═══════════════════════════════════════════════════════════════════════
+	if !n.isReplicationSync && n.registryChanged {
+		n.persistRegistryToFile()
+		n.registryChanged = false
+	}
 
 	return n.rootHash, nil, nil, nil
 }
