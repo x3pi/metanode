@@ -46,8 +46,10 @@ impl TxSocketServer {
 
     pub async fn start(self) -> Result<()> {
         let (ffi_tx_sender, mut ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
-        if crate::ffi::FFI_TX_SENDER.set(ffi_tx_sender).is_err() {
-            warn!("⚠️ [FFI TX SENDER] Already initialized!");
+        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.write() {
+            *sender_guard = Some(ffi_tx_sender);
+        } else {
+            warn!("⚠️ [FFI TX SENDER] Failed to acquire write lock for initialization!");
         }
         info!("🔌 FFI Transaction Receiver started in place of UDS server");
 

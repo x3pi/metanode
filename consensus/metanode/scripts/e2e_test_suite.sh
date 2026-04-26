@@ -745,14 +745,14 @@ test_consensus_liveness() {
         final_block=$(get_block_number "$ref_port")
         log "- ✅ Cluster vẫn hoạt động: $baseline → $final_block (tăng $((final_block - baseline)) blocks)"
         stop_tx_pump
-        record_result "$test_label" "PASS"
+        record_result "$test_label" "true"
     else
         local final_block
         final_block=$(get_block_number "$ref_port")
         log "- 🔴 **CONSENSUS STALL DETECTED!** Block không tăng sau 60s: $baseline → $final_block"
         log "- 🔴 Đây là lỗi production-critical: cluster mất khả năng tạo block mới."
         stop_tx_pump
-        record_result "$test_label" "FAIL"
+        record_result "$test_label" "false"
     fi
 }
 

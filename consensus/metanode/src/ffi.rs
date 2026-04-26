@@ -12,7 +12,7 @@ use tracing::{error, info};
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
 
 // The global channel sender for zero-copy FFI transaction submission
-pub static FFI_TX_SENDER: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>> = OnceLock::new();
+pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = std::sync::RwLock::new(None);
 
 pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
 
@@ -91,7 +91,14 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
 
     let tx_data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
 
-    if let Some(sender) = FFI_TX_SENDER.get() {
+    // Read the current channel sender and clone it locally
+    let sender_opt = if let Ok(guard) = FFI_TX_SENDER.read() {
+        guard.clone()
+    } else {
+        None
+    };
+
+    if let Some(sender) = sender_opt {
         // try_send is non-blocking and synchronous
         match sender.try_send(tx_data) {
             Ok(_) => true,
