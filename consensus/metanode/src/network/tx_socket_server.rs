@@ -265,6 +265,18 @@ impl TxSocketServer {
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
                 // let chunk_len = chunk_vec.len();
                 
+                let epoch_pending_ptr = if let Some(ref node_mutex) = node {
+                    let node_guard = node_mutex.lock().await;
+                    Some(node_guard.epoch_pending_transactions.clone())
+                } else {
+                    None
+                };
+
+                if let Some(epoch_pending_mutex) = epoch_pending_ptr {
+                    let mut epoch_pending = epoch_pending_mutex.lock().await;
+                    epoch_pending.extend(chunk_vec.clone());
+                }
+
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
                 }

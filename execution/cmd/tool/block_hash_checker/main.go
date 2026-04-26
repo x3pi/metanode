@@ -483,6 +483,38 @@ func getLatestBlockNumber(client *http.Client, url string) (uint64, error) {
 	return num, nil
 }
 
+type peerInfoResp struct {
+	Epoch           uint64 `json:"epoch"`
+	GlobalExecIndex uint64 `json:"global_exec_index"`
+	LastBlockNumber uint64 `json:"last_block_number"`
+}
+
+func getPeerInfo(client *http.Client, rpcURL string) (uint64, uint64, error) {
+	// rpcURL looks like http://127.0.0.1:8757
+	peerURL := strings.TrimRight(rpcURL, "/") + "/peer_info"
+	resp, err := client.Get(peerURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return 0, 0, fmt.Errorf("bad status: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var pInfo peerInfoResp
+	if err := json.Unmarshal(data, &pInfo); err != nil {
+		return 0, 0, err
+	}
+
+	return pInfo.GlobalExecIndex, pInfo.Epoch, nil
+}
+
 // ===== Print mismatch detail =====
 
 func printMismatchDetail(m mismatch, nodes []nodeInfo) {
@@ -676,6 +708,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	type nodeBlock struct {
 		name  string
 		block uint64
+		gei   uint64
+		epoch uint64
 		err   error
 	}
 
@@ -685,7 +719,14 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-		results = append(results, nodeBlock{name: n.Name, block: num, err: err})
+		
+		// Query peer info for current epoch and GEI
+		gei, epoch, pErr := getPeerInfo(client, n.URL)
+		if err == nil && pErr != nil {
+			err = pErr
+		}
+
+		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {
 			if num < minBlock {
 				minBlock = num
@@ -703,7 +744,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		if r.err != nil {
 			heightParts = append(heightParts, fmt.Sprintf("%s=ERR", r.name))
 		} else {
-			heightParts = append(heightParts, fmt.Sprintf("%s=%d", r.name, r.block))
+			heightParts = append(heightParts, fmt.Sprintf("%s=%d (gei:%d e:%d)", r.name, r.block, r.gei, r.epoch))
 		}
 	}
 	fmt.Printf("Heights: %s", strings.Join(heightParts, "  "))
