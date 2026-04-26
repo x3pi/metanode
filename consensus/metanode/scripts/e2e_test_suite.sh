@@ -197,14 +197,16 @@ start_tx_pump() {
         return
     fi
     
+    # Build tx_sender nếu chưa có binary
+    if [ ! -x "$TX_SENDER_DIR/tx_sender" ]; then
+        (cd "$TX_SENDER_DIR" && go build -o tx_sender .) || true
+    fi
+    
     # Xóa PID file cũ nếu process đã chết
     rm -f /tmp/tx_sender.pid 2>/dev/null || true
     
-    # Chạy tx_sender --loop trong background, gửi vào node 0
-    (
-        cd "$TX_SENDER_DIR" && \
-        go run . --loop --node "$TX_SENDER_NODE" > /dev/null 2>&1
-    ) &
+    # Chạy tx_sender binary trực tiếp trong background
+    "$TX_SENDER_DIR/tx_sender" --loop --node "$TX_SENDER_NODE" > /dev/null 2>&1 &
     TX_PUMP_PID=$!
     log "- 🔫 TX Pump started (PID: $TX_PUMP_PID) — đang spam giao dịch để buộc tạo block..."
 }
@@ -217,6 +219,7 @@ stop_tx_pump() {
         log "- 🛑 TX Pump stopped (PID: $TX_PUMP_PID)"
         TX_PUMP_PID=""
     fi
+    pkill -f tx_sender 2>/dev/null || true
     rm -f /tmp/tx_sender.pid 2>/dev/null || true
 }
 
@@ -377,10 +380,12 @@ test_scan_fork_warnings() {
         #   - "FORK-GUARD" là tên feature, không phải lỗi
         #   - "FORK-DIAG" là diagnostic log, không phải lỗi thực
         #   - "ANTI-FORK" là tên check, PASS/SKIP cũng match → chỉ lấy FAIL
+        #   - "Created block" là normal proposer log (base64 hashes có thể chứa "fatal")
+        #   - Bare "fatal" matches base64 encoded data → đổi sang "fatal error|fatal:"
         local warnings
         warnings=$(tail -n 10000 "$log_file" 2>/dev/null \
-            | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal)" \
-            | grep -ivE "(FORK-GUARD|FORK-DIAG|anti-fork.*pass|anti-fork.*skip|no panic)" \
+            | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
+            | grep -ivE "(FORK-GUARD|FORK-DIAG|anti-fork.*pass|anti-fork.*skip|no panic|Created block)" \
             | tail -n 10) || true
         
         if [ -n "$warnings" ]; then
@@ -691,6 +696,9 @@ fi
 
 SECONDS=0
 init_report
+
+# ─── Cleanup: Kill stale tx_sender processes từ các lần chạy trước ──
+pkill -f tx_sender 2>/dev/null || true
 
 # ─── Test 1: Hash Parity ────────────────────────────────────────
 test_hash_parity "Test 1: Hash Parity Check (Pre-test Baseline)"
