@@ -223,7 +223,7 @@ pub async fn dispatch_commit(
             }
 
             // STEP 3: Validate ETH address is valid (20 bytes)
-            let mut addr = eth_addresses[leader_author_index].clone();
+            let addr = eth_addresses[leader_author_index].clone();
             if addr.len() != 20 {
                 // SELF-RECOVERY: Try to refresh for invalid address too
                 drop(epoch_addresses);
