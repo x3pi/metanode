@@ -420,8 +420,8 @@ pub(super) async fn handle_synconly_upgrade_wait(
             return Ok(());
         }
 
-        let go_current_block = match fresh_executor_client.get_last_block_number().await {
-            Ok((b, _, _, _)) => b,
+        let (go_current_block, go_current_gei) = match fresh_executor_client.get_last_block_number().await {
+            Ok((b, gei, _, _)) => (b, gei),
             Err(e) => {
                 if attempt.is_multiple_of(20) {
                     warn!(
@@ -429,22 +429,22 @@ pub(super) async fn handle_synconly_upgrade_wait(
                         attempt, e
                     );
                 }
-                0
+                (0, 0)
             }
         };
 
-        if go_current_block >= synced_global_exec_index {
+        if go_current_gei >= synced_global_exec_index {
             info!(
-                "✅ [MODE TRANSITION] Go synced! block {} >= boundary {}. Proceeding to Validator mode. (took {} attempts)",
-                go_current_block, synced_global_exec_index, attempt
+                "✅ [MODE TRANSITION] Go synced! GEI {} >= boundary {}. Proceeding to Validator mode. (took {} attempts)",
+                go_current_gei, synced_global_exec_index, attempt
             );
             break;
         }
 
         if attempt >= max_attempts {
             warn!(
-                "⚠️ [MODE TRANSITION] Timeout after {} attempts (5 min). Go block {} still < boundary {}. Will retry via epoch_monitor.",
-                attempt, go_current_block, synced_global_exec_index
+                "⚠️ [MODE TRANSITION] Timeout after {} attempts (5 min). Go GEI {} still < boundary {}. Will retry via epoch_monitor.",
+                attempt, go_current_gei, synced_global_exec_index
             );
             return Ok(());
         }

@@ -343,10 +343,21 @@ impl CommitProcessor {
             // while Go is busy re-initializing for the next epoch.
             if let Some(ref is_transitioning) = self.is_transitioning {
                 let mut logged = false;
+                let transition_wait_start = tokio::time::Instant::now();
                 while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
                     if !logged {
                         info!("⏳ [STATION 3: PROCESSOR] Pausing execution - epoch transition in progress...");
                         logged = true;
+                    }
+                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
+                    // flag is never cleared (e.g., panic in transition code despite
+                    // Drop guard, or silent task cancellation).
+                    if transition_wait_start.elapsed() > tokio::time::Duration::from_secs(60) {
+                        error!(
+                            "🚨 [PROCESSOR] is_transitioning stuck for 60s! Force-clearing to prevent permanent deadlock."
+                        );
+                        is_transitioning.store(false, std::sync::atomic::Ordering::Release);
+                        break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }

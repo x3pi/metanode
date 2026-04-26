@@ -135,6 +135,13 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     last_quorum_change_at: tokio::time::Instant,
     last_known_quorum: CommitIndex,
 
+    // --- liveness stall detection ---
+    /// Tracks the last time local_commit_index changed.
+    /// Used to detect liveness stalls where ALL nodes stop advancing simultaneously
+    /// (quorum > 0 but frozen). The existing quorum==0 detector misses this case.
+    last_local_commit_change_at: tokio::time::Instant,
+    last_known_local_commit: CommitIndex,
+
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
 }
@@ -180,6 +187,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_state_log_at: tokio::time::Instant::now(),
             last_quorum_change_at: tokio::time::Instant::now(),
             last_known_quorum: 0,
+            last_local_commit_change_at: tokio::time::Instant::now(),
+            last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
         }
     }
@@ -433,8 +442,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let lag = quorum_commit.saturating_sub(local_commit);
 
                         // ════════════════════════════════════════════════════════
-                        // STALL DETECTOR: Detect permanent quorum stall and
+                        // STALL DETECTOR 1: Detect permanent quorum stall and
                         // auto-recover by re-seeding from Go execution state.
+                        // Triggers when quorum is stuck at 0 (bootstrap deadlock).
                         // ════════════════════════════════════════════════════════
                         if quorum_commit != self.last_known_quorum {
                             self.last_quorum_change_at = now;
@@ -460,6 +470,50 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 );
                                 self.last_quorum_change_at = now; // reset to avoid re-triggering immediately
                             }
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 2: Detect liveness stall where ALL nodes
+                        // stop advancing simultaneously (quorum > 0 but frozen).
+                        //
+                        // The quorum==0 detector above misses this case because
+                        // quorum is non-zero (all nodes agreed on the same commit).
+                        // This can happen when:
+                        //   - All nodes' threshold_clock_round stops advancing
+                        //   - Broadcaster/Synchronizer tasks silently exit
+                        //   - Leader timeout fires but can't advance round
+                        //
+                        // Recovery: Temporarily transition to Bootstrapping to
+                        // kick the consensus pipeline. update_state() will
+                        // re-evaluate on the next tick and restore Healthy if
+                        // local_commit == quorum_commit.
+                        // ════════════════════════════════════════════════════════
+                        if local_commit != self.last_known_local_commit {
+                            self.last_local_commit_change_at = now;
+                            self.last_known_local_commit = local_commit;
+                        }
+                        let liveness_stall_duration = now.duration_since(self.last_local_commit_change_at);
+                        if liveness_stall_duration >= Duration::from_secs(60)
+                            && local_commit > 0
+                            && self.coordination_hub.is_healthy()
+                        {
+                            tracing::error!(
+                                "🚨 [LIVENESS-STALL] DAG commit frozen at {} for {:.0}s (quorum={}). \
+                                 All nodes may have stalled simultaneously. \
+                                 Transitioning to Bootstrapping to kick consensus pipeline.",
+                                local_commit,
+                                liveness_stall_duration.as_secs_f64(),
+                                quorum_commit
+                            );
+                            self.coordination_hub.set_phase(
+                                crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+                            );
+                            // Re-seed quorum from local state so bootstrap exit logic works
+                            self.inner.commit_vote_monitor.seed_from_execution_state(
+                                std::cmp::max(highest_handled, local_commit)
+                            );
+                            self.last_local_commit_change_at = now; // reset to avoid rapid re-triggering
+                            self.last_quorum_change_at = now;
                         }
 
                         info!(
