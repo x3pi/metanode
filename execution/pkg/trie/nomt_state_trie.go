@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	e_common "github.com/ethereum/go-ethereum/common"
@@ -77,11 +78,11 @@ type NomtStateTrie struct {
 	// Commit() checks this to return the same hash for the sanity check.
 	pendingCommitHash *e_common.Hash
 
-	// lastCommitBatch stores entries from the last Commit for network replication
 	lastCommitBatch [][2][]byte
 
-	isHash bool
-	mu     sync.RWMutex
+	isHash            bool
+	isReplicationSync bool
+	mu                sync.RWMutex
 
 	// tracks if knownKeys was modified since last commit
 	registryChanged bool
@@ -168,6 +169,17 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		isHash:          isHash,
 		registryChanged: false,
 	}
+}
+
+// SetReplicationSync configures the trie to bypass registry tracking and modifications.
+// This is critical during block synchronization (ApplyNomtReplicationBatches) where
+// the registry keys are replicated directly via bytes, and tracking them dynamically
+// would erroneously include the registry key itself inside the registry list,
+// modifying its layout and causing divergent Merkle Roots.
+func (n *NomtStateTrie) SetReplicationSync(sync bool) {
+	n.mu.Lock()
+	n.isReplicationSync = sync
+	n.mu.Unlock()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -282,7 +294,8 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 	}
 
 	// Track key in knownKeys registry if not skipped
-	if string(n.namespace) != "transaction_state" && string(n.namespace) != "receipts" && string(n.namespace) != "account_state" {
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
+	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Lock()
 		if _, exists := n.knownKeys[hexKey]; !exists {
 			n.knownKeys[hexKey] = keyCopy
@@ -368,12 +381,12 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state"
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if !skipRegistry {
+	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Lock()
 	}
 
@@ -395,7 +408,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 			value:       values[i],
 		}
 
-		if !skipRegistry {
+		if !n.isReplicationSync && !skipRegistry {
 			if _, exists := n.knownKeys[e.hexKey]; !exists {
 				n.knownKeys[e.hexKey] = e.originalKey
 				n.registryChanged = true
@@ -403,7 +416,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 		}
 	}
 
-	if !skipRegistry {
+	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Unlock()
 	}
 
@@ -467,12 +480,12 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map + inject cached old values
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state"
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if !skipRegistry {
+	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Lock()
 	}
 
@@ -492,7 +505,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 			value:       values[i],
 		}
 
-		if !skipRegistry {
+		if !n.isReplicationSync && !skipRegistry {
 			if _, exists := n.knownKeys[e.hexKey]; !exists {
 				n.knownKeys[e.hexKey] = e.originalKey
 				n.registryChanged = true
@@ -500,7 +513,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		}
 	}
 
-	if !skipRegistry {
+	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Unlock()
 	}
 
@@ -587,6 +600,65 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		return n.rootHash, nil, nil, fmt.Errorf("NomtStateTrie: failed to begin session")
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// INJECT REGISTRY INTO DIRTY MAP
+	// ═══════════════════════════════════════════════════════════════════════
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
+
+	if !skipRegistry && !n.isReplicationSync {
+		n.knownKeysMu.Lock()
+		if n.registryChanged {
+			sortedRegKeys := make([]string, 0, len(n.knownKeys))
+			for hexKey := range n.knownKeys {
+				sortedRegKeys = append(sortedRegKeys, hexKey)
+			}
+			sort.Strings(sortedRegKeys)
+
+			var regData []byte
+			for _, hexKey := range sortedRegKeys {
+				origKey := n.knownKeys[hexKey]
+				if len(origKey) > 255 {
+					continue
+				}
+				regData = append(regData, byte(len(origKey)))
+				regData = append(regData, origKey...)
+			}
+
+			regKey := registryKeyPath(n.namespace)
+			regHexKey := hex.EncodeToString(regKey[:])
+
+			var oldRegData []byte
+			var loaded bool
+			if commEntry, ok := n.committing[regHexKey]; ok {
+				oldRegData = commEntry.value
+				loaded = true
+			} else {
+				val, found, err := n.handle.Read(regKey)
+				if err == nil {
+					loaded = true
+					if found && len(val) > 0 {
+						oldRegData = val
+					}
+				}
+			}
+
+			if !n.oldLoaded[regHexKey] {
+				if loaded && len(oldRegData) > 0 {
+					n.oldValues[regHexKey] = oldRegData
+				}
+				n.oldLoaded[regHexKey] = true
+			}
+
+			n.dirty[regHexKey] = &nomtDirtyEntry{
+				originalKey: []byte("nomt_registry"),
+				keyPath:     regKey,
+				value:       regData,
+			}
+			n.registryChanged = false
+		}
+		n.knownKeysMu.Unlock()
+	}
+
 	// Build key/value arrays for batch write
 	dirtyCount := len(n.dirty)
 	nomtKeys := make([][32]byte, 0, dirtyCount)
@@ -667,47 +739,6 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		session.Abort()
 		return n.rootHash, nil, nil, fmt.Errorf("NomtStateTrie Commit: batch write failed: %w", err)
 	}
-
-	// Check if we need to update the knownKeys registry
-	skipRegistry := string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts" || string(n.namespace) == "account_state"
-
-	if !skipRegistry {
-		n.knownKeysMu.Lock()
-
-		if n.registryChanged {
-			// ═══════════════════════════════════════════════════════════════════════
-			// CRITICAL FORK-SAFETY: Sort knownKeys before serializing the registry.
-			// ═══════════════════════════════════════════════════════════════════════
-			sortedRegKeys := make([]string, 0, len(n.knownKeys))
-			for hexKey := range n.knownKeys {
-				sortedRegKeys = append(sortedRegKeys, hexKey)
-			}
-			sort.Strings(sortedRegKeys)
-
-			var regData []byte
-			for _, hexKey := range sortedRegKeys {
-				origKey := n.knownKeys[hexKey]
-				if len(origKey) > 255 {
-					continue // skip keys longer than 255 bytes
-				}
-				regData = append(regData, byte(len(origKey)))
-				regData = append(regData, origKey...)
-			}
-
-			// Write registry to the same session
-			regKey := registryKeyPath(n.namespace)
-			logger.Info("[NomtStateTrie] Writing registry: namespace=%s, regDataLen=%d, regKeyPath=%x, knownKeysCount=%d",
-				string(n.namespace), len(regData), regKey[:8], len(sortedRegKeys))
-			if err := session.Write(regKey, regData); err != nil {
-				logger.Warn("[NomtStateTrie] Failed to persist keys registry: %v", err)
-			}
-
-			// Reset the flag
-			n.registryChanged = false
-		}
-		n.knownKeysMu.Unlock()
-	}
-
 	// Finish the session in-memory — this computes the Merkle root atomically
 	newRootBytes, fs, err := session.Finish(n.handle)
 	if err != nil {
@@ -805,11 +836,12 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		dirty:           newDirty,
 		committing:      newCommitting,
 		oldValues:       newOldValues,
-		oldLoaded:       newOldLoaded,
-		knownKeys:       newKnownKeys,
-		registryChanged: n.registryChanged,
-		rootHash:        n.rootHash,
-		isHash:          n.isHash,
+		oldLoaded:         newOldLoaded,
+		knownKeys:         newKnownKeys,
+		isReplicationSync: n.isReplicationSync,
+		registryChanged:   n.registryChanged,
+		rootHash:          n.rootHash,
+		isHash:            n.isHash,
 	}
 }
 
@@ -955,6 +987,7 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					//   keyPrefix = namespace + "_" + hex.EncodeToString(pg.GetPrefix())
 					keyPrefix := namespace + "_" + addrHex
 					t := NewNomtStateTrie(handle, false, keyPrefix)
+					t.SetReplicationSync(true)
 					if err := t.BatchUpdate(group.keys, group.values); err != nil {
 						return fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
 					}
@@ -978,6 +1011,7 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					namespace, len(nomtKeys), preRoot[:8])
 
 				trie := NewNomtStateTrie(handle, false, namespace)
+				trie.SetReplicationSync(true)
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					return fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}

@@ -255,26 +255,41 @@ func (db *SmartContractDB) CommitAllStorage() error {
 		}
 		t := t_val.(trie.StateTrie)
 
-		// Create a snapshot copy of the trie to allow concurrent reads during the commit I/O.
-		// This prevents holding state-blocking locks (e.g. Verkle/Flat mutexes) while running block commits.
-		commitTrie := t.Copy()
+		var root common.Hash
+		var commitSource trie.StateTrie // the trie instance to collect batch from
 
-		// Commit the trie.
-		// - MPT: does NOT persist internally; returns NodeSet via GetCommitBatch()
-		// - Flat/Verkle: persist internally via async db.BatchPut() through PrefixedStorage
-		root, _, _, err := commitTrie.Commit(true)
-		if err != nil {
-			logger.Error("Error committing storage trie for address:", address)
-			finalErr = err
-			continue
-		}
+		// ═══════════════════════════════════════════════════════════════════════
+		// NOMT FAST PATH: If the trie was already committed by LateBindRoots
+		// (detected by HasUncommittedChanges=false), skip the redundant
+		// Copy→Commit→CommitPayload cycle. The root and replication batch
+		// are already available on the original trie.
+		// ═══════════════════════════════════════════════════════════════════════
+		if nomtTrie, isNomt := t.(*trie.NomtStateTrie); isNomt && !nomtTrie.HasUncommittedChanges() {
+			root = nomtTrie.Hash()
+			commitSource = t
+			// CommitPayload was already called in LateBindRoots — nothing to persist.
+		} else {
+			// Normal path: Create a snapshot copy and commit.
+			// This handles MPT, Flat, Verkle, and NOMT tries that were NOT
+			// processed by LateBindRoots (e.g. read-only tries kept in map).
+			commitTrie := t.Copy()
 
-		if nomtTrie, isNomt := commitTrie.(*trie.NomtStateTrie); isNomt {
-			if err := nomtTrie.CommitPayload(); err != nil {
-				logger.Error("Error committing NOMT payload for address:", address, "error:", err)
+			var err error
+			root, _, _, err = commitTrie.Commit(true)
+			if err != nil {
+				logger.Error("Error committing storage trie for address:", address)
 				finalErr = err
 				continue
 			}
+
+			if nomtTrie, isNomt := commitTrie.(*trie.NomtStateTrie); isNomt {
+				if err := nomtTrie.CommitPayload(); err != nil {
+					logger.Error("Error committing NOMT payload for address:", address, "error:", err)
+					finalErr = err
+					continue
+				}
+			}
+			commitSource = commitTrie
 		}
 
 		// Update account state with new storage root
@@ -287,13 +302,6 @@ func (db *SmartContractDB) CommitAllStorage() error {
 
 		if as.SmartContractState().StorageRoot() != root {
 			if trie.GetStateBackend() == trie.BackendNOMT {
-				// ═══════════════════════════════════════════════════════════════════════
-				// NOMT DEFERRED HASHING FIX:
-				// For NOMT, Hash() does not compute the real root. During tx execution
-				// (updateStateDB), the account state was populated with the old pre-commit
-				// storage root. Now that Commit() has computed the real root, we MUST
-				// late-bind it to the account state before AccountStateDB commits.
-				// ═══════════════════════════════════════════════════════════════════════
 				logger.Debug("[SmartContractDB] NOMT late storage root bind for %s: %s -> %s",
 					address.Hex(), as.SmartContractState().StorageRoot().Hex(), root.Hex())
 				as.SmartContractState().SetStorageRoot(root)
@@ -308,8 +316,8 @@ func (db *SmartContractDB) CommitAllStorage() error {
 			}
 		}
 
-		// Collect commit batch
-		commitBatch := commitTrie.GetCommitBatch()
+		// Collect commit batch from the source that performed the actual commit
+		commitBatch := commitSource.GetCommitBatch()
 
 		if len(commitBatch) > 0 {
 			if backend == trie.BackendMPT {
@@ -323,11 +331,8 @@ func (db *SmartContractDB) CommitAllStorage() error {
 				// For network replication, MPT global nodes are sent as-is.
 				allBatches = append(allBatches, commitBatch...)
 			} else {
-				// Flat/Verkle: already persisted locally through PrefixedStorage inside Commit().
-				// However, the commitBatch returned from GetCommitBatch() lacks the Address prefix
-				// (because inside Flat/Verkle it's just fs:key / vk:key).
-				// We MUST prepend the address to all keys before replication, so Sub nodes
-				// write to the correct isolated namespace.
+				// Flat/Verkle/NOMT: already persisted locally.
+				// The commitBatch lacks the Address prefix — prepend it for replication.
 				for i := range commitBatch {
 					prefixedKey := make([]byte, 20+len(commitBatch[i][0])) // Address is 20 bytes
 					copy(prefixedKey[:20], address.Bytes())
@@ -391,18 +396,55 @@ func (db *SmartContractDB) LateBindRoots() error {
 			continue
 		}
 
-		commitTrie := t.Copy()
-		root, _, _, err := commitTrie.Commit(true)
-		if err != nil {
-			logger.Error("LateBindRoots: Error committing storage trie for address:", address)
-			finalErr = err
-			continue
-		}
-
-		// Close the cloned trie to prevent NOMT session leaks, since we only needed
-		// the hash from Commit(true) and won't call CommitPayload() here.
-		if closer, ok := commitTrie.(interface{ Close() }); ok {
-			closer.Close()
+		// ═══════════════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY FIX (Apr 2026):
+		//
+		// For NOMT: commit the ORIGINAL trie directly and persist immediately.
+		// The previous Copy→Commit→Abort pattern corrupted NOMT's shared handle:
+		//   1. Copy creates a new NomtStateTrie sharing the same NOMT Handle
+		//   2. Commit calls session.Finish(handle) which modifies the handle's
+		//      internal Merkle tree state
+		//   3. Close/Abort calls nomt_finished_session_abort which frees the
+		//      session but does NOT fully revert the handle's Beatree state
+		//   4. The next session on this handle starts from corrupted state
+		//
+		// By committing the original and calling CommitPayload immediately,
+		// the handle always transitions through a clean lifecycle:
+		//   BeginSession → Write → Finish → CommitPayload (persist)
+		// CommitAllStorage then detects the trie is already committed and
+		// skips redundant work.
+		// ═══════════════════════════════════════════════════════════════════════
+		var root common.Hash
+		if _, isNomt := t.(*trie.NomtStateTrie); isNomt {
+			var err error
+			root, _, _, err = t.Commit(true)
+			if err != nil {
+				logger.Error("LateBindRoots: Error committing NOMT storage trie for address:", address)
+				finalErr = err
+				continue
+			}
+			// Persist immediately so the NOMT handle transitions to a clean state
+			// before the next contract's session begins.
+			if nomtTrie, ok := t.(*trie.NomtStateTrie); ok {
+				if err := nomtTrie.CommitPayload(); err != nil {
+					logger.Error("LateBindRoots: Error persisting NOMT payload for address:", address, "error:", err)
+					finalErr = err
+					continue
+				}
+			}
+		} else {
+			// Non-NOMT: safe to use Copy→Commit→Close (no shared mutable handle)
+			commitTrie := t.Copy()
+			var err error
+			root, _, _, err = commitTrie.Commit(true)
+			if err != nil {
+				logger.Error("LateBindRoots: Error committing storage trie for address:", address)
+				finalErr = err
+				continue
+			}
+			if closer, ok := commitTrie.(interface{ Close() }); ok {
+				closer.Close()
+			}
 		}
 
 		as, asErr := db.accountStateDB.AccountState(address)
