@@ -44,6 +44,8 @@ type blockResult struct {
 	StateRoot        string `json:"stateRoot"`
 	TransactionsRoot string `json:"transactionsRoot"`
 	ReceiptsRoot     string `json:"receiptsRoot"`
+	GlobalExecIndex  string `json:"globalExecIndex"`
+	Epoch            string `json:"epoch"`
 }
 
 // ===== Block info (parsed from blockResult) =====
@@ -54,6 +56,8 @@ type blockInfo struct {
 	StateRoot        string
 	TransactionsRoot string
 	ReceiptsRoot     string
+	GlobalExecIndex  string
+	Epoch            string
 	Error            string // non-empty if fetch failed
 }
 
@@ -421,7 +425,18 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		StateRoot:        block.StateRoot,
 		TransactionsRoot: block.TransactionsRoot,
 		ReceiptsRoot:     block.ReceiptsRoot,
+		GlobalExecIndex:  block.GlobalExecIndex,
+		Epoch:            block.Epoch,
 	}, nil
+}
+
+func parseHexStr(hexStr string) uint64 {
+	if hexStr == "" {
+		return 0
+	}
+	var num uint64
+	fmt.Sscanf(hexStr, "0x%x", &num)
+	return num
 }
 
 func getLatestBlockNumber(client *http.Client, url string) (uint64, error) {
@@ -538,7 +553,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			fmt.Printf("   %-12s %s\n", n.Name+":", bi.Error)
 			continue
 		}
-		fmt.Printf("   %-12s hash=%s\n", n.Name+":", bi.Hash)
+		fmt.Printf("   %-12s hash=%s gei=%d epoch=%d\n", n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 		if parentDiff {
 			fmt.Printf("   %-12s parentHash=%s\n", "", bi.ParentHash)
 		}
@@ -578,6 +593,8 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 		header += "," + name + "_stateRoot"
 		header += "," + name + "_txRoot"
 		header += "," + name + "_receiptsRoot"
+		header += "," + name + "_gei"
+		header += "," + name + "_epoch"
 	}
 	fmt.Fprintln(f, header)
 
@@ -591,13 +608,14 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 				if ok {
 					errMsg = bi.Error
 				}
-				line += "," + errMsg + ",,,,"
+				line += "," + errMsg + ",,,,,,"
 			} else {
 				line += "," + bi.Hash
 				line += "," + bi.ParentHash
 				line += "," + bi.StateRoot
 				line += "," + bi.TransactionsRoot
 				line += "," + bi.ReceiptsRoot
+				line += fmt.Sprintf(",%d,%d", parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		fmt.Fprintln(f, line)
@@ -741,7 +759,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			} else if bi.IsError() {
 				fmt.Printf("      %-12s %s\n", n.Name+":", bi.Error)
 			} else {
-				fmt.Printf("      %-12s hash=%s  stateRoot=%s\n", n.Name+":", bi.Hash, bi.StateRoot)
+				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		return false
@@ -780,8 +798,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
 				continue
 			}
-			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s\n",
-				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  gei=%d  epoch=%d\n",
+				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
 		}
 	}
 
