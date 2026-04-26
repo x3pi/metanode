@@ -177,13 +177,12 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
             };
 
             rt.block_on(async {
-                // Persistent registry survives across restart cycles.
-                // Creating a new Registry each loop would orphan previously-registered
-                // global metrics (OnceLock), causing silent metric gaps or panics.
-                let persistent_registry = prometheus::Registry::new();
                 let mut restart_count = 0u32;
 
                 loop {
+                    // Create a fresh Registry each loop to avoid Prometheus AlreadyReg panics
+                    let registry = prometheus::Registry::new();
+
                     let config_path = std::path::PathBuf::from(config_path_str.clone());
                     let mut node_config = match NodeConfig::load(&config_path) {
                         Ok(c) => c,
@@ -216,7 +215,7 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
                     }
 
                     let startup_config = StartupConfig::new(
-                        node_config, persistent_registry.clone(), None
+                        node_config, registry, None
                     );
 
                     let initialized_node = match InitializedNode::initialize(startup_config).await {

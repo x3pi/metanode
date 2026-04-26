@@ -1304,14 +1304,17 @@ impl ConsensusNode {
         let executor_client_for_manager = executor_client_for_proc.clone();
         let failed_delivery = is_terminally_failed.clone();
         tokio::spawn(async move {
-            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+            let mut manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 executor_client_for_manager,
                 delivery_rx,
                 peer_addrs,
             );
+            
+            // Explicitly unused since we no longer mark terminal failure on normal exit
+            let _ = failed_delivery;
+
             manager.run().await;
-            tracing::error!("💀 [COORDINATOR] Critical Component 'BlockDeliveryManager' Crashed!");
-            failed_delivery.store(true, Ordering::SeqCst);
+            tracing::info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager gracefully exited (expected on Epoch Transition).");
         });
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -1425,8 +1428,7 @@ impl ConsensusNode {
                 tracing::error!("❌ [STATION 3: PROCESSOR] Fatal Error: {}", e);
                 failed_processor.store(true, Ordering::SeqCst);
             } else {
-                tracing::error!("💀 [COORDINATOR] Critical Component 'CommitProcessor' Exited!");
-                failed_processor.store(true, Ordering::SeqCst);
+                tracing::info!("🛑 [STATION 3: PROCESSOR] Gracefully Exited (Expected upon EndOfEpoch).");
             }
         });
 
