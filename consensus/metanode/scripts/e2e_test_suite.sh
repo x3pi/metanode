@@ -269,6 +269,7 @@ test_hash_parity() {
     local blocks=()
     local online_count=0
     local min_block=999999999
+    local max_block=0
     
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local port=${RPC_PORTS[$i]}
@@ -280,6 +281,9 @@ test_hash_parity() {
             online_count=$((online_count + 1))
             if [ "$block" -lt "$min_block" ]; then
                 min_block=$block
+            fi
+            if [ "$block" -gt "$max_block" ]; then
+                max_block=$block
             fi
             log "- 🟢 **Node $i**: Block \`$block\` (port $port)"
         else
@@ -294,59 +298,151 @@ test_hash_parity() {
         return
     fi
     
-    # Bước 2: So sánh hash tại min_block (block mà TẤT CẢ node online đều có)
-    local reference_block=$min_block
-    local reference_hex
-    reference_hex=$(printf "0x%x" "$reference_block")
+    # Bước 2: MULTI-BLOCK CHECK — sample up to 5 blocks across the common range
+    # Check: min_block, min_block-1, min_block-2, middle, and a few recent ones
+    local total_mismatches=0
+    local total_null_misses=0
+    local blocks_checked=0
+    local mismatch_details=""
     
-    log "**So sánh hash tại Block #$reference_block** (block thấp nhất chung):"
-    log ""
-    
-    local hashes=()
-    local hash_mismatch=false
-    local first_hash=""
-    
-    for i in $(seq 0 $((NUM_NODES - 1))); do
-        if [ "${blocks[$i]}" = "-1" ]; then
-            hashes+=("offline")
-            continue
-        fi
-        
-        local port=${RPC_PORTS[$i]}
-        local hash
-        hash=$(get_block_hash "$port" "$reference_hex")
-        hashes+=("$hash")
-        
-        if [ "$hash" = "null" ]; then
-            log "- ⚠️ Node $i: Block $reference_block không tồn tại (có thể là empty commit bị drop)"
-            continue
-        fi
-        
-        if [ -z "$first_hash" ]; then
-            first_hash="$hash"
-        fi
-        
-        log "- Node $i: \`$hash\`"
-        
-        if [ -n "$first_hash" ] && [ "$hash" != "$first_hash" ] && [ "$hash" != "null" ]; then
-            hash_mismatch=true
-        fi
-    done
-    log ""
-    
-    if [ "$hash_mismatch" = "true" ]; then
-        log "> 🚨 **PHÁT HIỆN HASH KHÁC NHAU TẠI BLOCK #$reference_block — CÓ THỂ BỊ FORK!**"
-        record_result "$test_label" "false"
-    else
-        log "> ✅ Tất cả node online đều có hash giống nhau tại Block #$reference_block."
-        
-        # Kiểm tra thêm: chênh lệch block giữa các node
-        local max_block=0
-        for b in "${blocks[@]}"; do
-            if [ "$b" != "-1" ] && [ "$b" -gt "$max_block" ]; then
-                max_block=$b
+    # Build list of blocks to check (most recent that all nodes should have)
+    local check_blocks=()
+    if [ "$min_block" -ge 2 ]; then
+        # Check several blocks near the top of the common range
+        for offset in 0 1 2 5 10; do
+            local target=$((min_block - offset))
+            if [ "$target" -ge 1 ]; then
+                check_blocks+=("$target")
             fi
         done
+    elif [ "$min_block" -ge 1 ]; then
+        check_blocks+=("$min_block")
+    fi
+    # Always check block 1 if it exists (earliest common block)
+    if [ "$min_block" -ge 1 ]; then
+        check_blocks+=(1)
+    fi
+    
+    # Deduplicate
+    local unique_blocks=()
+    for b in "${check_blocks[@]}"; do
+        local found=false
+        for ub in "${unique_blocks[@]+"${unique_blocks[@]}"}"; do
+            if [ "$b" = "$ub" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" = "false" ]; then
+            unique_blocks+=("$b")
+        fi
+    done
+    
+    log "**Kiểm tra hash tại ${#unique_blocks[@]} blocks** (range: 1..${min_block}):"
+    log ""
+    
+    for check_block in "${unique_blocks[@]}"; do
+        local check_hex
+        check_hex=$(printf "0x%x" "$check_block")
+        blocks_checked=$((blocks_checked + 1))
+        
+        # Collect hashes and GEIs from all online nodes
+        local node_hashes=()
+        local node_geis=()
+        local null_count=0
+        local first_hash=""
+        local first_gei=""
+        local block_mismatch=false
+        local gei_mismatch=false
+        
+        for i in $(seq 0 $((NUM_NODES - 1))); do
+            if [ "${blocks[$i]}" = "-1" ]; then
+                node_hashes+=("offline")
+                node_geis+=("offline")
+                continue
+            fi
+            
+            local port=${RPC_PORTS[$i]}
+            local result
+            result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$port" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$check_hex\", false],\"id\":1}" 2>/dev/null)
+            
+            local hash
+            hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local gei
+            gei=$(echo "$result" | grep -o '"globalExecIndex":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            
+            if [ -z "$hash" ] || [ "$hash" = "null" ]; then
+                node_hashes+=("null")
+                node_geis+=("null")
+                null_count=$((null_count + 1))
+                continue
+            fi
+            
+            # Convert GEI hex to decimal for readability
+            local gei_dec="?"
+            if [ -n "$gei" ]; then
+                gei_dec=$(printf "%d" "$gei" 2>/dev/null || echo "?")
+            fi
+            
+            node_hashes+=("$hash")
+            node_geis+=("$gei_dec")
+            
+            if [ -z "$first_hash" ]; then
+                first_hash="$hash"
+                first_gei="$gei_dec"
+            else
+                if [ "$hash" != "$first_hash" ]; then
+                    block_mismatch=true
+                fi
+                if [ "$gei_dec" != "$first_gei" ] && [ "$gei_dec" != "?" ] && [ "$first_gei" != "?" ]; then
+                    gei_mismatch=true
+                fi
+            fi
+        done
+        
+        # Note: Nodes that return null might just be catching up or restarting.
+        # We don't treat it as a hard mismatch unless actual hashes conflict.
+        if [ "$null_count" -gt 0 ] && [ "$check_block" -le "$min_block" ]; then
+            total_null_misses=$((total_null_misses + null_count))
+            # DO NOT set block_mismatch=true here, because missing blocks != fork
+        fi
+        
+        if [ "$block_mismatch" = "true" ] || [ "$gei_mismatch" = "true" ]; then
+            total_mismatches=$((total_mismatches + 1))
+            local mismatch_type=""
+            if [ "$block_mismatch" = "true" ]; then mismatch_type="HASH"; fi
+            if [ "$gei_mismatch" = "true" ]; then mismatch_type="${mismatch_type:+$mismatch_type+}GEI"; fi
+            
+            log "⚠️ **Block #$check_block** — $mismatch_type MISMATCH:"
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${node_hashes[$i]}" = "offline" ]; then continue; fi
+                if [ "${node_hashes[$i]}" = "null" ]; then
+                    log "  - Node $i: \`(block không tồn tại - đang sync)\`"
+                else
+                    log "  - Node $i: hash=\`${node_hashes[$i]:0:18}...\` gei=\`${node_geis[$i]}\`"
+                fi
+            done
+            log ""
+        else
+            log "✅ Block #$check_block: hash nhất quán (gei=${first_gei:-?})"
+        fi
+    done
+    
+    log ""
+    
+    # Bước 3: Kết luận
+    if [ "$total_mismatches" -gt 0 ]; then
+        log "> 🚨 **PHÁT HIỆN FORK! $total_mismatches/$blocks_checked blocks bị lệch hash/GEI!**"
+        if [ "$total_null_misses" -gt 0 ]; then
+            log "> 🚨 $total_null_misses trường hợp node trả null cho common block — node bị fork hoặc chain broken."
+        fi
+        record_result "$test_label" "false"
+    else
+        log "> ✅ Tất cả ${blocks_checked} blocks đều nhất quán hash+GEI giữa các node."
+        
+        # Kiểm tra thêm: chênh lệch block giữa các node
         local lag=$((max_block - min_block))
         if [ $lag -gt 10 ]; then
             log "> ⚠️ Chênh lệch block: $lag blocks (max=$max_block, min=$min_block). Một số node đang tụt hậu."

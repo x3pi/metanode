@@ -142,7 +142,9 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				logger.Info("🔄 [EPOCH-BOUNDARY] Epoch %d→%d detected in 0-tx commit (GEI=%d). Creating boundary block.",
 					lastBlockEpoch, epochNum, globalExecIndex)
 				// Don't return — fall through to full processing path below
-				// The full path will create a block with 0 transactions
+				// The full path will create a block with 0 transactions.
+				// CRITICAL FIX: Undo the GEI advance from line 85 so the full path doesn't reject it as a duplicate.
+				*nextExpectedGlobalExecIndex = globalExecIndex
 				goto EPOCH_BOUNDARY_FALLTHROUGH
 			}
 		}
@@ -497,6 +499,7 @@ PROCESS_BLOCK:
 		// Centralized commit (fork-safe: all nodes will do this at the same point)
 		if _, err := bp.chainState.CommitBlockState(lastBlockPending,
 			blockchain.WithPersistToDB(),
+			blockchain.WithCommitMappings(), // CRITICAL FIX: Ensure mapping batches from memory are flushed to DB
 		); err != nil {
 			logger.Error("❌ [FORK-SAFETY] Failed to commit pending empty block #%d: %v", emptyBlockNum, err)
 		} else {
@@ -536,7 +539,7 @@ PROCESS_BLOCK:
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 {
+	if len(allTransactions) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
@@ -625,32 +628,50 @@ PROCESS_BLOCK:
 	// represents the network's authoritative state at that height. Any commit with
 	// a lower GEI is from a replayed DAG with incorrect epoch_base_index.
 	//
-	// This guard only triggers during post-restore catch-up, not during normal
-	// consensus (where GEI always monotonically increases).
+	// EXCEPTION (2026-04-27): After DAG-wipe + restart, Rust starts a new GEI
+	// sequence that is legitimately lower than Go's historical lastBlockGEI.
+	// When rustSessionRestarted is set, this guard is bypassed to allow the new
+	// session's commits through. The flag auto-resets when GEI catches up.
 	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		lastBlockGEI := uint64(0)
 		if lastBlock != nil {
 			lastBlockGEI = lastBlock.Header().GlobalExecIndex()
 		}
+
+		// Auto-reset rustSessionRestarted once GEI catches up to historical level
+		if bp.rustSessionRestarted.Load() && globalExecIndex > lastBlockGEI {
+			logger.Info("✅ [GEI-REGRESSION] Rust session GEI=%d has caught up to lastBlockGEI=%d. Re-enabling regression guard.",
+				globalExecIndex, lastBlockGEI)
+			bp.rustSessionRestarted.Store(false)
+		}
+
 		if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
-			logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
-				"This commit is from a replayed DAG with wrong epoch_base_index — not creating block.",
-				globalExecIndex, lastBlockGEI, *currentBlockNumber)
+			// Check if this is a legitimate new Rust session (not stale replay)
+			if bp.rustSessionRestarted.Load() {
+				logger.Info("🔄 [GEI-REGRESSION] BYPASSED: Rust session restarted. Allowing GEI=%d (≤ lastBlockGEI=%d) — new session commit.",
+					globalExecIndex, lastBlockGEI)
+				// Do NOT skip — fall through to block creation
+			} else {
+				logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
+					"This commit is from a replayed DAG with wrong epoch_base_index — not creating block.",
+					globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
-			// Still update GEI counter so the processor advances past this commit
-			bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				// Still update GEI counter so the processor advances past this commit
+				bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
+				// Check pending blocks
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+				return
 			}
-			return
 		}
 	}
+
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.

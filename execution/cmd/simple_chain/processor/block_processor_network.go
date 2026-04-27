@@ -218,20 +218,18 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		// Rust P2P now handles block sync for SyncOnly nodes via rust_sync_node.rs
 
 		// ═══════════════════════════════════════════════════════════════════
-		// TRANSITION SYNC — ACTIVE STATE ADVANCEMENT
+		// TRANSITION SYNC: Go's internal state may advance during epoch
+		// transitions (SyncBlocksRequest updates DB). Detect if the DB's
+		// lastGEI has advanced beyond our in-memory nextExpected, and
+		// sync up. This prevents stale nextExpected after a DB fast-forward.
 		//
-		// After SYNC-FIRST (or HandleSyncBlocksRequest from Rust), Go's
-		// persisted GEI and block number may have advanced past our local
-		// variables. Re-read from DB and advance to prevent processing
-		// commits that Go already executed, and to keep nextExpected in
-		// sync with the actual DB state.
-		//
-		// Without this, processRustEpochData would still expect GEI=759
-		// after SYNC-FIRST advanced the DB to GEI=1575, causing a massive
-		// gap when consensus sends GEI=2342 and Go tries to process it
-		// with stale nextExpected.
+		// EXCEPTION: When rustSessionRestarted is active, DO NOT re-inflate
+		// nextExpected from storage. The session restart detection has already
+		// reset nextExpected to accept the new Rust DAG's lower GEI sequence.
+		// Re-reading the old lastGEI from storage would undo this reset and
+		// cause all new-session commits to be silently discarded.
 		// ═══════════════════════════════════════════════════════════════════
-		{
+		if !bp.rustSessionRestarted.Load() {
 			actualLastBlockDB := storage.GetLastBlockNumber()
 			bpLastBlock := bp.GetLastBlock()
 			bpLastBlockNum := uint64(0)
@@ -260,11 +258,36 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 			}
 		}
 
-		// 🔍 DIAGNOSTIC: Check if TRANSITION SYNC just advanced past a TX-containing block
-		if incomingTxCount > 0 && incomingGEI < nextExpectedGlobalExecIndex {
-			logger.Info("⚠️  [DIAG-TRANSITION] TRANSITION SYNC advanced past TX block! GEI=%d with %d txs is now OLD (nextExpected=%d)",
-				incomingGEI, incomingTxCount, nextExpectedGlobalExecIndex)
+		// ═══════════════════════════════════════════════════════════════════
+		// RUST SESSION RESTART DETECTION: After DAG-wipe + restart, Rust
+		// sends commits with GEI lower than Go's existing lastGEI. Without
+		// this detection, processSingleEpochData's Case 1 (duplicate/old)
+		// and GEI-REGRESSION-GUARD silently drop ALL transactions, causing
+		// frozen stateRoot → FORK.
+		//
+		// Detection: If incoming GEI is far below nextExpected AND has
+		// transactions, this is a new Rust session (not a stale replay).
+		// Reset nextExpected to accept the new GEI sequence.
+		// ═══════════════════════════════════════════════════════════════════
+		if incomingGEI < nextExpectedGlobalExecIndex && incomingGEI > 0 {
+			geiBackwardGap := nextExpectedGlobalExecIndex - incomingGEI
+			if geiBackwardGap > 50 {
+				// Large backward jump = new Rust session after DAG-wipe
+				logger.Warn("🔄 [RUST-SESSION-RESTART] Detected GEI backward jump: incoming GEI=%d << nextExpected=%d (gap=%d). "+
+					"Rust DAG restarted. Resetting nextExpected to accept new session.",
+					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap)
+				nextExpectedGlobalExecIndex = incomingGEI
+				bp.rustSessionRestarted.Store(true)
+			} else if incomingTxCount > 0 {
+				// Small backward jump with transactions — also likely a new session
+				logger.Warn("⚠️ [RUST-SESSION-RESTART] GEI=%d with %d txs is below nextExpected=%d (gap=%d). "+
+					"Resetting nextExpected for near-gap session restart.",
+					incomingGEI, incomingTxCount, nextExpectedGlobalExecIndex, geiBackwardGap)
+				nextExpectedGlobalExecIndex = incomingGEI
+				bp.rustSessionRestarted.Store(true)
+			}
 		}
+
 
 		// ═══════════════════════════════════════════════════════════════════
 		// BATCH-DRAIN OPTIMIZATION: Process consecutive empty commits in bulk

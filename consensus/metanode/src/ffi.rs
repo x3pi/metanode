@@ -5,17 +5,25 @@ use crate::config::NodeConfig;
 use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::sync::OnceLock;
+use std::sync::{Mutex, Condvar, OnceLock};
 use tracing::{error, info};
 
 // The global callbacks registry configured from Go
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
 
 // The global channel sender for zero-copy FFI transaction submission
-pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = std::sync::RwLock::new(None);
+pub static FFI_TX_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
+// Condvar to block Go's FFI caller until the channel is initialized
+pub static FFI_TX_CONDVAR: Condvar = Condvar::new();
 
 pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
 
+/// Tracks whether pause is active (for auto-resume timeout thread)
+static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Maximum time (in seconds) to hold the pause lock before auto-resuming.
+/// This prevents permanent deadlock if Go never calls metanode_resume_consensus.
+const PAUSE_TIMEOUT_SECS: u64 = 30;
 
 #[repr(C)]
 pub struct GoCallbacks {
@@ -45,6 +53,8 @@ pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
 }
 
 /// Pulse pause to Rust consensus
+/// SAFETY: Includes auto-resume timeout to prevent permanent deadlock if Go
+/// never calls metanode_resume_consensus (e.g., crash during epoch transition).
 #[no_mangle]
 pub extern "C" fn metanode_pause_consensus() {
     info!("⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK...");
@@ -52,13 +62,33 @@ pub extern "C" fn metanode_pause_consensus() {
     unsafe {
         PAUSE_GUARD = Some(std::mem::transmute(guard));
     }
+    PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED.");
+
+    // Spawn watchdog thread: auto-resume after PAUSE_TIMEOUT_SECS if Go never calls resume
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(PAUSE_TIMEOUT_SECS));
+        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            error!(
+                "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s. \
+                 Auto-resuming to prevent permanent deadlock!",
+                PAUSE_TIMEOUT_SECS
+            );
+            // Force-resume by dropping the guard
+            PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                PAUSE_GUARD = None;
+            }
+            info!("▶️ [FFI] metanode_pause_consensus: AUTO-RESUMED after timeout. RocksDB writes RESUMED.");
+        }
+    });
 }
 
 /// Resume Rust consensus
 #[no_mangle]
 pub extern "C" fn metanode_resume_consensus() {
     info!("▶️ [FFI] metanode_resume_consensus called - dropping write lock...");
+    PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
     unsafe {
         PAUSE_GUARD = None;
     }
@@ -91,29 +121,39 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
 
     let tx_data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
 
-    // Read the current channel sender and clone it locally
-    let sender_opt = if let Ok(guard) = FFI_TX_SENDER.read() {
-        guard.clone()
-    } else {
-        None
+    // Wait for the channel to be initialized (blocks Go caller until Rust is ready)
+    let sender = {
+        let mut guard = match FFI_TX_SENDER.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        
+        while guard.is_none() {
+            info!("⏳ [FFI TX FLOW] Waiting for FFI_TX_SENDER to be initialized...");
+            guard = match FFI_TX_CONDVAR.wait(guard) {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+        guard.clone().unwrap()
     };
 
-    if let Some(sender) = sender_opt {
-        // try_send is non-blocking and synchronous
-        match sender.try_send(tx_data) {
-            Ok(_) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Channel is full. Go side will see `false` and automatically sleep/retry.
-                false
-            }
-            Err(_) => {
-                error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed)");
-                false
-            }
+    // try_send is non-blocking and synchronous
+    match sender.try_send(tx_data) {
+        Ok(_) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            // Channel is full. Go side will see `false` and automatically sleep/retry.
+            false
         }
-    } else {
-        error!("❌ [FFI TX FLOW] FFI_TX_SENDER is not initialized but Go tried to send TX");
-        false
+        Err(_) => {
+            error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed due to restart)");
+            
+            // Channel closed. Reset sender to None so the next call blocks on the Condvar until a new channel is registered.
+            if let Ok(mut guard) = FFI_TX_SENDER.lock() {
+                *guard = None;
+            }
+            false
+        }
     }
 }
 

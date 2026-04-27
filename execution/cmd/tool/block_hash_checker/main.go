@@ -720,11 +720,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
 		
-		// Query peer info for current epoch and GEI
-		gei, epoch, pErr := getPeerInfo(client, n.URL)
-		if err == nil && pErr != nil {
-			err = pErr
-		}
+		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
+		gei, epoch, _ := getPeerInfo(client, n.URL)
 
 		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {

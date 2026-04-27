@@ -1208,6 +1208,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if isLastBlock {
 			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
 			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
+			// Without this, synced blocks mapping (block number -> hash) remain in volatile
+			// cache and are lost if the node crashes/restarts before the next normal block.
+			commitOpts = append(commitOpts, blockchain.WithCommitMappings())
+			commitOpts = append(commitOpts, blockchain.WithSaveTxMapping())
 		}
 
 		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {

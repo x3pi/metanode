@@ -286,16 +286,20 @@ pub async fn dispatch_commit(
     // EndOfEpoch commits always pass through for epoch transition safety.
     // ═══════════════════════════════════════════════════════════════════
     if let Some(ref client) = executor_client {
-        // SYNC OPTIMIZATION: Use local cached GEI instead of Go RPC for every commit.
-        // send_committed_subdag has local REPLAY PROTECTION (next_expected_index check)
-        // that catches duplicates without needing Go state per-commit.
-        // Only verify with Go RPC every 200 commits for safety.
+        // CRITICAL FIX (2026-04-26): Only use Go's ACTUAL GEI for dedup, not the
+        // inflated shared_last_global_exec_index.
+        //
+        // BUG: After cold-start sync, shared_last_global_exec_index is set to the
+        // network tip (~2361) but new epoch commits start with GEI=1. The old code
+        // used shared_last_global_exec_index as the fast-path filter between Go RPC
+        // checks, silently skipping ALL new-epoch commits (GEI < 2361).
+        //
+        // FIX: Use 0 as fallback between Go RPC checks. Real deduplication is
+        // handled by send_committed_subdag's REPLAY PROTECTION (next_expected_index).
         let go_current_gei = if commit_index % 200 == 0 {
             client.get_last_global_exec_index().await.unwrap_or(0)
-        } else if let Some(ref shared_gei) = shared_last_global_exec_index {
-            *shared_gei.lock().await
         } else {
-            0
+            0 // Don't filter between Go RPC checks — let REPLAY PROTECTION handle it
         };
         if go_current_gei >= global_exec_index && global_exec_index > 0 {
             let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();

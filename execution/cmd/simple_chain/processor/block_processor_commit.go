@@ -95,19 +95,14 @@ func (bp *BlockProcessor) commitWorker() {
 			mvm.RemoveOldApiInstances()
 		}
 
-		bp.chainState.GetBlockDatabase().SaveLastBlock(job.Block)
-		storage.UpdateLastBlockNumber(blockNum)
-		// Persist blockNumber→hash mapping so eth_getBlockByNumber(number) works on master.
-		// This MUST be called on master in MODE_MULTI because:
-		//   - block_processor_processing.go only runs in single-node mode
-		//   - block_processor_txs.go only runs on sub-nodes
-		// Without this, GetBlockHashByNumber returns false → eth_getBlockByNumber returns null.
-		// blockHash := job.Block.Header().Hash()
-		// if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(blockNum, blockHash); err != nil {
-		// 	logger.Error("commitWorker: SetBlockNumberToHash failed for block #%d: %v", blockNum, err)
-		// } else {
-		// 	logger.Info("🗺️  [MASTER] SetBlockNumberToHash: block #%d → hash=%s", blockNum, blockHash.Hex()[:16]+"...")
-		// }
+		// ══════════════════════════════════════════════════════════════════
+		// CRITICAL FIX: Use centralized CommitBlockState to atomically update ALL
+		// chain state components, including blockNumber→hash and tx→blockNumber mappings.
+		// Without this, eth_getBlockByNumber returns null for organically produced blocks.
+		// ══════════════════════════════════════════════════════════════════
+		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping()); err != nil {
+			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
+		}
 		saveDuration := time.Since(startSave)
 
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.

@@ -405,6 +405,24 @@ impl CommitProcessor {
                         next_expected_index = commit_index;
                     }
 
+                    // --- [DAG-RESET DETECTION] ---
+                    // After a DAG wipe, the new DAG starts from commit 1 but next_expected_index
+                    // may be at the old DAG's last commit (e.g., 939). The old commits will NEVER
+                    // arrive because the DAG was wiped. Detect this and jump DOWN.
+                    // SAFETY: Only trigger for large gaps (>100) to avoid false positives from
+                    // normal out-of-order commits. This is the complement of AUTO-JUMP.
+                    if commit_index < next_expected_index && next_expected_index > 1 {
+                        let gap = next_expected_index - commit_index;
+                        if gap > 100 {
+                            warn!(
+                                "🔄 [DAG-RESET] Detected DAG wipe: received commit {} but expected {}. \
+                                 Gap={} indicates new DAG instance. Resetting next_expected to {}.",
+                                commit_index, next_expected_index, gap, commit_index
+                            );
+                            next_expected_index = commit_index;
+                        }
+                    }
+
                     if commit_index == next_expected_index {
                         // --- [FORK SAFETY v2: CONSENSUS-BASED FORMULA + FRAGMENTATION] ---
                         // global_exec_index = epoch_base_index + commit_index + cumulative_fragment_offset
