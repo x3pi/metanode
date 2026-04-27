@@ -153,7 +153,7 @@ impl ConsensusNode {
 
             for attempt in 1..=max_retries {
                 match executor_client.get_last_block_number().await {
-                    Ok((n, _, true, _)) => {
+                    Ok((n, _, true, _, _)) => {
                         block_num = n;
                         info!(
                             "✅ [STARTUP] Got block number {} from Go (is_ready=true) (attempt {})",
@@ -161,7 +161,7 @@ impl ConsensusNode {
                         );
                         break;
                     }
-                    Ok((n, _, false, _)) => {
+                    Ok((n, _, false, _, _)) => {
                         info!(
                             "⏳ [STARTUP] Go not ready (block={}) (attempt {}/{}). Waiting for blockchain init...",
                             n, attempt, max_retries
@@ -887,8 +887,8 @@ impl ConsensusNode {
 
         let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
             match executor_client.get_last_block_number().await {
-                Ok((block, gei, true, hash)) => break (block, gei, true, hash),
-                Ok((block, gei, false, _hash)) => {
+                Ok((block, gei, true, hash, _)) => break (block, gei, true, hash),
+                Ok((block, gei, false, _hash, _)) => {
                     warn!(
                         "⏳ [STARTUP] Go Master not ready (block={}, gei={}). Retrying in 1s...",
                         block, gei
@@ -1199,7 +1199,7 @@ impl ConsensusNode {
             // (Go may have processed blocks since setup_storage). If it reports LOWER,
             // trust the setup_storage value (Go gave us a stale value).
             match barrier_client.get_last_block_number().await {
-                Ok((requery_block, _gei, true, _hash)) => {
+                Ok((requery_block, _gei, true, _hash, _)) => {
                     if requery_block > local_block {
                         tracing::info!(
                             "📊 [STARTUP-SYNC] Go advanced since setup: {} -> {}. Using higher value.",
@@ -1214,7 +1214,7 @@ impl ConsensusNode {
                         );
                     }
                 }
-                Ok((requery_block, _gei, false, _hash)) => {
+                Ok((requery_block, _gei, false, _hash, _)) => {
                     tracing::warn!(
                         "⚠️ [STARTUP-SYNC] Go re-query not ready (block={}). Trusting setup_storage value={}.",
                         requery_block, local_block
@@ -1269,6 +1269,21 @@ impl ConsensusNode {
                                     "✅ [STARTUP-SYNC] Pre-consensus sync complete: executed {} blocks (last_block={})",
                                     synced, last_block
                                 );
+                                
+                                // CRITICAL FIX: Re-query Go GEI after syncing to update the CommitConsumerMonitor.
+                                // Otherwise, CommitSyncer initializes with stale GEI and thinks it's a genesis start.
+                                if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
+                                    let new_go_replay_after = if new_gei > storage.epoch_base_exec_index {
+                                        (new_gei - storage.epoch_base_exec_index) as u32
+                                    } else {
+                                        0
+                                    };
+                                    commit_consumer.monitor().set_highest_handled_commit(new_go_replay_after);
+                                    tracing::info!(
+                                        "🔄 [STARTUP-SYNC] Re-queried Go: updated go_replay_after to {} (from new_gei={})",
+                                        new_go_replay_after, new_gei
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::error!("❌ [STARTUP-SYNC] Failed to execute fetched blocks: {}", e);

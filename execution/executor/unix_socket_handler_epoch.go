@@ -457,15 +457,27 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 		}
 	}
 
+	var lastEpoch uint64
+	if blockchainInstance != nil && returnBlockNumber > 0 {
+		hash, ok := blockchainInstance.GetBlockHashByNumber(returnBlockNumber)
+		if ok && hash != (common.Hash{}) {
+			block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(hash)
+			if err == nil && block != nil {
+				lastEpoch = block.Header().Epoch()
+			}
+		}
+	}
+
 	response := &pb.LastBlockNumberResponse{
 		LastBlockNumber:        returnBlockNumber,
 		LastGlobalExecIndex:    lastGEI,
 		IsReady:                isReady,
 		LastExecutedCommitHash: storage.GetLastExecutedCommitHash(),
+		LastEpoch:              lastEpoch,
 	}
 
-	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d (counter=%d, validated=%d, is_ready=%v)",
-		returnBlockNumber, lastGEI, counterBlockNumber, validatedBlockNumber, isReady)
+	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d, epoch=%d (counter=%d, validated=%d, is_ready=%v)",
+		returnBlockNumber, lastGEI, lastEpoch, counterBlockNumber, validatedBlockNumber, isReady)
 	return response, nil
 }
 

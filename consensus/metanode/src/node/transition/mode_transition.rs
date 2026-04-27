@@ -421,7 +421,7 @@ pub(super) async fn handle_synconly_upgrade_wait(
         }
 
         let (go_current_block, go_current_gei) = match fresh_executor_client.get_last_block_number().await {
-            Ok((b, gei, _, _)) => (b, gei),
+            Ok((b, gei, _, _, _)) => (b, gei),
             Err(e) => {
                 if attempt.is_multiple_of(20) {
                     warn!(

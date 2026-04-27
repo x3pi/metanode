@@ -645,7 +645,7 @@ impl ExecutorClient {
 
         // Phase 5: Go verification (periodic RPC check)
         if last_idx.is_multiple_of(GO_VERIFICATION_INTERVAL) {
-            if let Ok((go_last_block, _, _, _)) = self.get_last_block_number().await {
+            if let Ok((go_last_block, _, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
                     error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
