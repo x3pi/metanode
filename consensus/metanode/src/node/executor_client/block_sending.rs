@@ -94,33 +94,14 @@ impl ExecutorClient {
         {
             let next_expected = self.next_expected_index.lock().await;
             if global_exec_index < *next_expected {
-                // DAG/EPOCH RESET DETECTION: After DAG-wipe + restart, next_expected_index
-                // is still at the old session's GEI (e.g. 493), but the fresh DAG produces
-                // commits starting from GEI=1. Large backward gaps (>100) indicate a new
-                // DAG instance — reset unconditionally, even for empty commits.
-                // PREVIOUS BUG: Required total_tx_before > 0, which silently discarded
-                // all empty commits after DAG wipe → Node stuck, no blocks produced.
-                let gap = *next_expected - global_exec_index;
-                if gap > 100 {
-                    drop(next_expected);
-                    let mut next_expected_mut = self.next_expected_index.lock().await;
-                    warn!(
-                        "🔄 [REPLAY-RESET] Large gap between expected ({}) and incoming GEI ({}) (gap={}, txs={}). \
-                         Resetting to incoming GEI (new DAG/epoch detected).",
-                        *next_expected_mut, global_exec_index, gap, total_tx_before
+                // Only log periodically or for non-empty blocks to avoid noise during replay
+                if total_tx_before > 0 || global_exec_index.is_multiple_of(1000) {
+                    info!(
+                        "♻️ [REPLAY] Discarding already processed block: global={}, expected={}",
+                        global_exec_index, *next_expected
                     );
-                    *next_expected_mut = global_exec_index;
-                    // Fall through to normal processing
-                } else {
-                    // Only log periodically or for non-empty blocks to avoid noise during replay
-                    if total_tx_before > 0 || global_exec_index.is_multiple_of(1000) {
-                        info!(
-                            "♻️ [REPLAY] Discarding already processed block: global={}, expected={}",
-                            global_exec_index, *next_expected
-                        );
-                    }
-                    return Ok(1);
                 }
+                return Ok(1);
             }
         }
 
@@ -271,14 +252,24 @@ impl ExecutorClient {
         // NORMAL PATH: Commit fits within MAX_TXS_PER_GO_BLOCK
         // ═══════════════════════════════════════════════════════════════
 
+        let has_system_tx = subdag.blocks.iter().any(|b| {
+            b.transactions().iter().any(|tx| {
+                SystemTransaction::from_bytes(tx.data()).is_ok()
+            })
+        });
+
         let block_number = {
             let mut next_bn = self.next_block_number.lock().await;
             let mut last_ep = self.last_processed_epoch.lock().await;
             let is_epoch_boundary = epoch > *last_ep;
+            
+            // Force block generation for EndOfEpoch commit
+            let force_block_creation = is_epoch_boundary || has_system_tx;
+            
             if epoch > *last_ep {
                 *last_ep = epoch;
             }
-            if total_after_dedup > 0 || is_epoch_boundary {
+            if total_after_dedup > 0 || force_block_creation {
                 let bn = *next_bn;
                 *next_bn += 1;
                 bn

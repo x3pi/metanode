@@ -100,8 +100,8 @@ impl ExecutorClient {
 
         // Chunking to prevent hitting 32MB max message length limits on large block payloads
         // Each chunk opens a new FFI call so larger chunks = fewer round trips = faster sync
-        // Execute mode: 25 blocks/chunk ≈ 2.5x throughput vs previous 10
-        let chunk_size: usize = if execute_mode { 25 } else { 50 };
+        // Execute mode: 10 blocks/chunk to prevent Go-side RPC timeouts (state trie updates are heavy)
+        let chunk_size: usize = if execute_mode { 10 } else { 50 };
         let mut total_synced_count = 0u64;
         let mut final_synced_block = 0u64;
 

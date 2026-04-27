@@ -21,10 +21,10 @@ for ((i=1; i<=MAX_RUNS; i++)); do
     # Nếu muốn bỏ qua restart hoàn toàn cả trong test chặn, hãy thêm --skip-destructive
     if ./e2e_test_suite.sh --node "$TARGET_NODE"; then
         echo -e "\n✅ Vòng $i PASSED thành công rực rỡ!"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo -e "\n❌ Vòng $i FAILED!"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         
         # Pull log lỗi nổi bật
         echo "🔍 Đang trích xuất log lỗi của Node $TARGET_NODE..."

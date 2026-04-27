@@ -433,12 +433,27 @@ PROCESS_BLOCK:
 						globalExecIndex, syncedHash.Hex()[:18]+"...")
 
 					// Update in-memory state from the synced block
-					bp.SetLastBlock(syncedBlock)
-					bp.nextBlockNumber.Store(globalExecIndex + 1)
-					if _, err := bp.chainState.CommitBlockState(syncedBlock,
-						blockchain.WithRebuildTries(),
-					); err != nil {
-						logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", globalExecIndex, err)
+					isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
+					if isNomtBackend {
+						bp.SetLastBlock(syncedBlock)
+						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						headerCopy := syncedBlock.Header()
+						bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+						// FORK-SAFETY FIX: NOMT bypasses CommitBlockState during dedup, so we MUST manually
+						// invalidate Go-level memory caches (like loadedAccounts) here. Failure to do so 
+						// causes the next block to read stale pre-sync state, leading to Hash Mismatches!
+						bp.chainState.InvalidateAllState()
+
+						logger.Debug("🔄 [SYNC DEDUP] NOMT: Updated block pointer to %d (tries NOT rebuilt — managed by execution pipeline)", globalExecIndex)
+					} else {
+						bp.SetLastBlock(syncedBlock)
+						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						if _, err := bp.chainState.CommitBlockState(syncedBlock,
+							blockchain.WithRebuildTries(),
+						); err != nil {
+							logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", globalExecIndex, err)
+						}
 					}
 
 					// Advance to next block and check pending

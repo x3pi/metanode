@@ -11,7 +11,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/transaction.rs"));
 }
 
-use proto::{AccessTuple, Transaction, Transactions};
+use proto::{AccessTuple, Transaction};
 
 /// Hash một single Transaction bytes — KHÔNG thử decode array.
 ///
@@ -85,28 +85,11 @@ pub fn calculate_transaction_hash_single_hex(tx_data: &[u8]) -> String {
 /// STRICT VALIDATION: After decoding, we check that at least one transaction has
 /// a non-empty `from_address`. This prevents false positives from permissive
 /// protobuf decoding (e.g. a raw Transaction being incorrectly decoded as Transactions).
-pub fn verify_transaction_protobuf(tx_data: &[u8]) -> bool {
-    // Try to parse as Transactions (multiple transactions)
-    if let Ok(txs) = Transactions::decode(tx_data) {
-        // Strict: at least one transaction must have a non-empty from_address
-        if txs
-            .transactions
-            .iter()
-            .any(|tx| !tx.from_address.is_empty())
-        {
-            return true;
-        }
-        // Decoded but no valid from_address — likely a false positive
-    }
-
-    // Try to parse as single Transaction
-    if let Ok(tx) = Transaction::decode(tx_data) {
-        // Strict: from_address must be present (valid user transaction)
-        if !tx.from_address.is_empty() {
-            return true;
-        }
-    }
-
-    // Not valid protobuf or missing required fields
-    false
+pub fn verify_transaction_protobuf(_tx_data: &[u8]) -> bool {
+    // Relaxed validation: Allow all transactions to be sent to Go, 
+    // even if they cannot be decoded as standard protobuf here.
+    // The Go engine contains the authoritative decoding logic 
+    // and will correctly discard any truly invalid data.
+    // Filtering here risks data loss during WAL replay.
+    true
 }

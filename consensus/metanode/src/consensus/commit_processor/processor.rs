@@ -352,9 +352,10 @@ impl CommitProcessor {
                     // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
                     // flag is never cleared (e.g., panic in transition code despite
                     // Drop guard, or silent task cancellation).
-                    if transition_wait_start.elapsed() > tokio::time::Duration::from_secs(60) {
+                    // Increased to 120s to allow for heavy state trie updates during Go epoch transitions
+                    if transition_wait_start.elapsed() > tokio::time::Duration::from_secs(120) {
                         error!(
-                            "🚨 [PROCESSOR] is_transitioning stuck for 60s! Force-clearing to prevent permanent deadlock."
+                            "🚨 [PROCESSOR] is_transitioning stuck for 120s! Force-clearing to prevent permanent deadlock."
                         );
                         is_transitioning.store(false, std::sync::atomic::Ordering::Release);
                         break;

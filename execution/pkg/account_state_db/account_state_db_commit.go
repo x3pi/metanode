@@ -645,6 +645,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			return true // Skip this account, it wasn't modified
 		}
 
+		// FORK-SAFETY FIX: Update loadedAccounts with the newly mutated state.
+		// Since loadedAccounts is kept across blocks (TPS OPT PHASE 4), failing
+		// to update it causes the NEXT block to read the stale pre-mutation state,
+		// leading to state root divergence when empty blocks drift cache clear schedules.
+		db.loadedAccounts.Store(address, state)
+
 		keysToProcess = append(keysToProcess, dirtyAccountEntry{
 			addr:  address,
 			state: state,

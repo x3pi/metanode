@@ -22,7 +22,7 @@
     ],
     "connection_address": "0.0.0.0:6241",
     "dns_server_address": "0.0.0.0:9084",
-    "meta_node_rpc_address": "127.0.0.1:19004",
+    "meta_node_rpc_address": "127.0.0.1:10104",
     "peer_rpc_port": 19204,
     "version": "0.0.1.0",
     "list_type_service": "SUB-WRITE || MASTER || SUB-READ",

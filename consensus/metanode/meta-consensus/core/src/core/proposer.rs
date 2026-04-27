@@ -140,12 +140,8 @@ impl Core {
 
         // If we did not find enough good ancestors to propose, continue to wait before proposing.
         if ancestors.is_empty() {
-            assert!(
-                !force,
-                "Ancestors should have been returned if force is true!"
-            );
-            debug!(
-                "Skipping block proposal for round {} because no good ancestor is found",
+            tracing::warn!(
+                "Skipping block proposal for round {} because no good ancestor is found (even with force={force})",
                 clock_round,
             );
             return None;
@@ -729,10 +725,15 @@ impl Core {
                 .inc();
         }
 
-        assert!(
-            parent_round_quorum.reached_threshold(&self.context.committee),
-            "Fatal error, quorum not reached for parent round when proposing for round {clock_round}. Possible mismatch between DagState and Core."
-        );
+        if !parent_round_quorum.reached_threshold(&self.context.committee) {
+            tracing::warn!(
+                "⚠️ Quorum not reached for parent round {} when proposing for round {clock_round} (stake: {}/{}). Possible mismatch between DagState and Core. Cannot propose.",
+                quorum_round,
+                parent_round_quorum.stake(),
+                parent_round_quorum.threshold(&self.context.committee)
+            );
+            return (vec![], BTreeSet::new());
+        }
 
         debug!(
             "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",

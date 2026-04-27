@@ -370,6 +370,9 @@ func processGroupsConcurrently(
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
 	}
+	if numWorkers == 0 {
+		numWorkers = 1
+	}
 
 	var nextIdx atomic.Int64
 	var wg sync.WaitGroup

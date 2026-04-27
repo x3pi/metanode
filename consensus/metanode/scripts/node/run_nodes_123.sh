@@ -31,21 +31,7 @@ RUST_SESSION=("" "metanode-1" "metanode-2" "metanode-3")
 GO_MASTER_SOCKET=("" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock")
 RUST_CONFIG=("" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml")
 
-wait_for_socket() {
-    local socket=$1 name=$2 timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        if [ -S "$socket" ]; then
-            echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"
-            return 0
-        fi
-        if [ $(( $(date +%s) - start )) -ge $timeout ]; then
-            echo -e "${YELLOW}  ⚠️ Timeout waiting for $name (${timeout}s)${NC}"
-            return 1
-        fi
-        sleep 1
-    done
-}
+
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
@@ -107,10 +93,7 @@ for id in 1 2 3; do
     sleep 1
 done
 
-# Wait for sockets
-for id in 1 2 3; do
-    wait_for_socket "${GO_MASTER_SOCKET[$id]}" "Go Master $id" 120
-done
+
 
 # Step 4: Start Go Subs 1, 2, 3
 echo -e "${BLUE}📋 Step 4: Start Go Subs 1, 2, 3...${NC}"
@@ -123,14 +106,5 @@ for id in 1 2 3; do
     sleep 1
 done
 
-# Step 5: Start Rust Nodes 1, 2, 3
-echo -e "${BLUE}📋 Step 5: Start Rust Nodes 1, 2, 3...${NC}"
-cd "$METANODE_ROOT"
-for id in 1 2 3; do
-    echo -e "${GREEN}  🚀 Starting Rust Node $id...${NC}"
-    tmux new-session -d -s "${RUST_SESSION[$id]}" -c "$METANODE_ROOT" \
-        "ulimit -n 100000; export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$id]} >> \"$LOG_DIR/node_$id/rust.log\" 2>&1"
-    sleep 1
-done
 
 echo -e "${GREEN}  🎉 NODES 1, 2, 3 STARTED!${NC}"

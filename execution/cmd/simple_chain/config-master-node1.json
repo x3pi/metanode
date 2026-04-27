@@ -96,7 +96,7 @@
     "rust_send_socket_path": "/tmp/executor1.sock",
     "rust_receive_socket_path": "/tmp/rust-go-node1-master.sock",
     "rust_tx_socket_path": "/tmp/metanode-tx-1.sock",
-    "meta_node_rpc_address": "127.0.0.1:10111",
+    "meta_node_rpc_address": "127.0.0.1:10101",
     "peer_rpc_port": 19201,
     "version": "0.0.1.0",
     "list_type_service": "SUB-WRITE || MASTER || SUB-READ",

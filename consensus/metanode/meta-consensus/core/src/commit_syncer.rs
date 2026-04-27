@@ -297,6 +297,22 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
+    fn transition_phase_and_kick(&mut self, next_phase: crate::coordination_hub::NodeConsensusPhase) {
+        let current_phase = self.coordination_hub.get_phase();
+        if current_phase != next_phase {
+            self.coordination_hub.set_phase(next_phase);
+            if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
+                let core_dispatcher = self.inner.core_thread_dispatcher.clone();
+                tokio::spawn(async move {
+                    tracing::info!("🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...");
+                    if let Err(e) = core_dispatcher.new_block(consensus_types::block::Round::MAX, true).await {
+                        tracing::warn!("Failed to kick leader timeout task: {:?}", e);
+                    }
+                });
+            }
+        }
+    }
+
     /// STATE MACHINE: Update sync state based on current metrics
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
@@ -348,7 +364,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             && current_phase != crate::coordination_hub::NodeConsensusPhase::Initializing
             && current_phase != crate::coordination_hub::NodeConsensusPhase::Aligning
         {
-            self.coordination_hub.set_phase(next_phase);
+            self.transition_phase_and_kick(next_phase);
         } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping
             || current_phase == crate::coordination_hub::NodeConsensusPhase::Initializing
         {
@@ -376,7 +392,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                          NOT genesis — DAG wipe detected. Transitioning to {:?}.",
                         quorum_commit, next_phase
                     );
-                    self.coordination_hub.set_phase(next_phase);
+                    self.transition_phase_and_kick(next_phase);
                 } else {
                     let elapsed = self.bootstrap_start_time.elapsed();
                     if elapsed >= Duration::from_secs(15) {
@@ -386,7 +402,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                              Transitioning to {:?} to allow block 1 proposal.",
                             elapsed, next_phase
                         );
-                        self.coordination_hub.set_phase(next_phase);
+                        self.transition_phase_and_kick(next_phase);
                     } else {
                         // Still waiting for quorum — stay in Bootstrapping
                         tracing::trace!(
@@ -402,7 +418,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
                     quorum_commit, next_phase
                 );
-                self.coordination_hub.set_phase(next_phase);
+                self.transition_phase_and_kick(next_phase);
             } else {
                 // ════════════════════════════════════════════════════════
                 // QUORUM SEED: Go has state at highest_handled but Rust
