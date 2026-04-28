@@ -29,14 +29,11 @@ pub(super) async fn setup_validator_consensus(
     // For epoch 1 genesis: boundary_gei = 0, so GEI = 0 + commit_index = commit_index.
     let actual_epoch_base = boundary_gei;
 
-    // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
-    // can fast-forward baseline and skip re-fetching old commits.
-    // MUST use the epoch-relative CommitIndex, not the absolute GEI.
-    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > actual_epoch_base {
-        (node.last_global_exec_index.saturating_sub(actual_epoch_base)) as u32
-    } else {
-        0
-    };
+    // FORK-SAFETY FIX v5: New epoch starts fresh — no commits processed yet.
+    // The epoch boundary sync (stop_authority_and_poll_go) already guaranteed
+    // that all old-epoch commits were flushed to Go before transition.
+    // Fragment offset was also reset. So go_replay_after=0, next_expected=1.
+    let go_replay_after = 0u32;
     
     // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
     // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
@@ -47,7 +44,7 @@ pub(super) async fn setup_validator_consensus(
     );
     let initial_next_expected = node.last_global_exec_index + 1;
     info!(
-        "📊 [EXECUTOR INIT] boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}",
+        "📊 [EXECUTOR INIT] boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}, go_replay_after=0 (new epoch)",
         boundary_gei, node.last_global_exec_index, initial_next_expected
     );
     let exec_client_proc = if node.executor_commit_enabled {
@@ -70,15 +67,10 @@ pub(super) async fn setup_validator_consensus(
 
 
 
-    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
-    // GEI = epoch_base_index + commit_index + fragment_offset
-    // So commit_index = GEI - epoch_base_index - fragment_offset
-    // For simplicity at startup, we use the node's last_global_exec_index + 1 as starting point.
-    // The AUTO-JUMP logic will adjust if there's a mismatch.
-    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    // FORK-SAFETY FIX v5: New epoch always starts from commit 1.
+    let next_expected_commit_index = 1u32;
     info!(
-        "📊 [COMMIT PROCESSOR INIT] next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
-        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+        "📊 [COMMIT PROCESSOR INIT] next_expected_commit_index=1, go_replay_after=0 (new epoch)",
     );
 
     let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
@@ -178,12 +170,11 @@ pub(super) async fn setup_synconly_sync(
 ) -> Result<()> {
     info!("🔄 [EPOCH TRANSITION] SyncOnly mode - setting up CommitProcessor for epoch detection");
 
-    // SNAPSHOT RESTART FIX: SyncOnly also passes Go state for consistency.
-    let go_replay_after_sync = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
-        node.last_global_exec_index as u32
-    } else {
-        0
-    };
+    // Use boundary_gei for epoch_base
+    let actual_epoch_base = boundary_gei;
+
+    // FORK-SAFETY FIX v5: New epoch starts fresh — no commits processed yet.
+    let go_replay_after_sync = 0u32;
     // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
     // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (_commit_consumer, commit_receiver, mut block_receiver) =
@@ -193,11 +184,9 @@ pub(super) async fn setup_synconly_sync(
     );
     let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
-    // Use boundary_gei for epoch_base
-    let actual_epoch_base = boundary_gei;
     let initial_next_expected = node.last_global_exec_index + 1;
     info!(
-        "📊 [EXECUTOR INIT] SyncOnly: boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}",
+        "📊 [EXECUTOR INIT] SyncOnly: boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}, go_replay_after=0 (new epoch)",
         boundary_gei, node.last_global_exec_index, initial_next_expected
     );
     let exec_client_proc = if node.executor_commit_enabled {
@@ -216,11 +205,10 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
-    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
-    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    // FORK-SAFETY FIX v5: New epoch always starts from commit 1.
+    let next_expected_commit_index = 1u32;
     info!(
-        "📊 [COMMIT PROCESSOR INIT] SyncOnly: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
-        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+        "📊 [COMMIT PROCESSOR INIT] SyncOnly: next_expected_commit_index=1, go_replay_after=0 (new epoch)",
     );
 
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)

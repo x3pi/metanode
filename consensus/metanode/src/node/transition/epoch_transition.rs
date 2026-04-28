@@ -323,11 +323,16 @@ pub async fn transition_to_epoch_from_system_tx(
     }
     std::fs::create_dir_all(&db_path)?;
 
-    // Reset fragment offset for the new epoch
+    // Reset fragment offset for the new epoch (both regular and wipe-safe)
     if let Err(e) =
         crate::node::executor_client::persistence::reset_fragment_offset(&node.storage_path).await
     {
         warn!("⚠️ [PERSIST] Failed to reset fragment offset: {}", e);
+    }
+    if let Err(e) =
+        crate::node::executor_client::persistence::reset_fragment_offset_wipe_safe(&node.storage_path).await
+    {
+        warn!("⚠️ [PERSIST] Failed to reset wipe-safe fragment offset: {}", e);
     }
 
     // Fetch committee with unified timestamp

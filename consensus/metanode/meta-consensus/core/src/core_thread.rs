@@ -275,8 +275,20 @@ impl ChannelCoreThreadDispatcher {
                         }
                     }
                     Err(panic_err) => {
-                        std::fs::write("/tmp/core_thread_debug.log", format!("PANIC!: {:?}\n", panic_err)).ok();
-                        println!("🔴 [CORE THREAD] PANIC CAUGHT: {:?}", panic_err);
+                        let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                            Some(s.to_string())
+                        } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                            Some(s.to_string())
+                        } else {
+                            None
+                        };
+                        let backtrace = std::backtrace::Backtrace::force_capture();
+                        let debug_msg = format!(
+                            "PANIC!: MSG: {:?}\nBACKTRACE:\n{}\n",
+                            msg, backtrace
+                        );
+                        std::fs::write("/tmp/core_thread_debug.log", &debug_msg).ok();
+                        println!("🔴 [CORE THREAD] PANIC CAUGHT: {}", debug_msg);
                         std::panic::resume_unwind(panic_err);
                     }
                 }

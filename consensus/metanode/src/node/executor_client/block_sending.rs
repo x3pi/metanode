@@ -624,6 +624,10 @@ impl ExecutorClient {
                         last_idx, e
                     );
                 }
+                // Also persist to wipe-safe location (survives DAG wipes)
+                let _ = super::persistence::persist_last_sent_index_wipe_safe(
+                    storage_path, last_idx, last_commit_index
+                ).await;
             }
 
             // Phase 4.5: Store ExecutableBlock bytes for sync peers

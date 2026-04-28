@@ -981,14 +981,62 @@ impl ConsensusNode {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
         // ═══════════════════════════════════════════════════════════════
-        // SNAPSHOT RESTART FIX: Pass Go's execution progress into Rust.
-        // On snapshot restart, Go has already executed commits up to
-        // last_global_exec_index. CommitSyncer uses this to fast-forward
-        // the DAG baseline and skip re-fetching commits Go has already
-        // processed, preventing both deadlocks and re-execution.
+        // FORK-SAFETY FIX v5: Use persisted commit_index, NOT GEI-derived value.
+        // GEI includes fragment_offset, so (GEI - epoch_base) is HIGHER than actual commit_index.
+        // Using inflated value causes CommitSyncer to PREVENT legitimate commits.
+        //
+        // CRITICAL: When DAG is wiped (snapshot restore), persistence files are also
+        // gone. In that case we MUST set go_replay_after=0 to let the new DAG start
+        // from commit 1. The CommitProcessor's AUTO-JUMP and executor's GEI guard
+        // will handle skipping already-executed commits in Go.
         // ═══════════════════════════════════════════════════════════════
-        let go_replay_after = if config.executor_read_enabled && storage.last_global_exec_index > storage.epoch_base_exec_index {
-            (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
+        // Detect empty DAG (snapshot restore) FIRST - needed for go_replay_after decision
+        let dag_has_history = {
+            let epoch_db = config
+                .storage_path
+                .join("epochs")
+                .join(format!("epoch_{}", storage.current_epoch))
+                .join("consensus_db");
+            epoch_db.exists()
+                && std::fs::read_dir(&epoch_db)
+                    .map(|mut entries| entries.next().is_some())
+                    .unwrap_or(false)
+        };
+
+        let go_replay_after = if config.executor_read_enabled {
+            // Try regular persistence first (best case: normal restart)
+            let persisted = crate::node::executor_client::persistence::load_persisted_last_index(&config.storage_path);
+            match persisted {
+                Some((_gei, commit_index)) if commit_index > 0 => commit_index,
+                _ => {
+                    // Regular persistence missing. Try WIPE-SAFE location (survives DAG wipes).
+                    let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
+                    match wipe_safe {
+                        Some((_gei, commit_index)) if commit_index > 0 => {
+                            info!(
+                                "📊 [FORK-SAFETY] Recovered commit_index={} from wipe-safe persistence (DAG wipe recovery)",
+                                commit_index
+                            );
+                            commit_index
+                        }
+                        _ => {
+                            // No persistence at all. If DAG also empty, this is first start.
+                            if !dag_has_history {
+                                info!(
+                                    "📊 [FORK-SAFETY] DAG empty + no persistence = first start or full reset. \
+                                     Setting go_replay_after=0 (new DAG starts from commit 1)"
+                                );
+                                0
+                            } else if storage.last_global_exec_index > storage.epoch_base_exec_index {
+                                // DAG exists but no persistence file (legacy/first epoch).
+                                (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             0
         };
@@ -1047,17 +1095,7 @@ impl ConsensusNode {
         // Detect empty DAG (snapshot restore) for startup logging and
         // boundary GEI validation.
         // ═══════════════════════════════════════════════════════════════════
-        let dag_has_history = {
-            let epoch_db = config
-                .storage_path
-                .join("epochs")
-                .join(format!("epoch_{}", storage.current_epoch))
-                .join("consensus_db");
-            epoch_db.exists()
-                && std::fs::read_dir(&epoch_db)
-                    .map(|mut entries| entries.next().is_some())
-                    .unwrap_or(false)
-        };
+        // (dag_has_history already computed above)
         if !dag_has_history && storage.is_in_committee && storage.current_epoch > 0 {
             warn!(
                 "⚠️ [FORK-SAFETY] DAG storage empty for epoch {} — snapshot restore detected. \
@@ -1072,14 +1110,14 @@ impl ConsensusNode {
         // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
         // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
         // causing GEI miscalculation and hash divergence between nodes after restart.
-        let next_expected_commit_index = if config.executor_read_enabled {
-            (storage.last_global_exec_index.saturating_sub(storage.epoch_base_exec_index) + 1) as u32
+        let next_expected_commit_index = if config.executor_read_enabled && go_replay_after > 0 {
+            go_replay_after + 1
         } else {
             1
         };
         info!(
-            "📊 [COMMIT PROCESSOR INIT] Startup: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
-            next_expected_commit_index, storage.last_global_exec_index, storage.epoch_base_exec_index
+            "📊 [COMMIT PROCESSOR INIT] Startup: next_expected_commit_index={}, from go_replay_after={}",
+            next_expected_commit_index, go_replay_after
         );
 
         let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
@@ -1279,6 +1317,9 @@ impl ConsensusNode {
                                         0
                                     };
                                     commit_consumer.monitor().set_highest_handled_commit(new_go_replay_after);
+                                    // FORK-SAFETY: Also update shared GEI so CommitProcessor
+                                    // calculates correct cumulative_fragment_offset
+                                    coordination_hub.set_initial_global_exec_index(new_gei).await;
                                     tracing::info!(
                                         "🔄 [STARTUP-SYNC] Re-queried Go: updated go_replay_after to {} (from new_gei={})",
                                         new_go_replay_after, new_gei

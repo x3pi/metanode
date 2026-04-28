@@ -216,6 +216,149 @@ pub fn load_persisted_last_index(storage_path: &Path) -> Option<(u64, u32)> {
     }
 }
 
+/// Get a wipe-safe storage path that survives DAG wipes.
+/// DAG wipe deletes `config/storage/node_{id}/` but this creates
+/// `config/storage/wipe_safe_node_{id}/` as a sibling directory.
+pub fn wipe_safe_path(storage_path: &Path) -> std::path::PathBuf {
+    // storage_path is like: config/storage/node_1
+    // We want: config/storage/wipe_safe_node_1
+    if let Some(parent) = storage_path.parent() {
+        if let Some(dir_name) = storage_path.file_name().and_then(|n| n.to_str()) {
+            return parent.join(format!("wipe_safe_{}", dir_name));
+        }
+    }
+    // Fallback: use storage_path itself
+    storage_path.to_path_buf()
+}
+
+/// Persist fragment_offset to a WIPE-SAFE location.
+/// This survives DAG wipes (which delete storage_path/ but not wipe_safe_*/).
+pub async fn persist_fragment_offset_wipe_safe(storage_path: &Path, offset: u64) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let temp_path = safe_dir.join("fragment_offset.tmp");
+    let final_path = safe_dir.join("fragment_offset.bin");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(&offset.to_le_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    trace!(
+        "💾 [PERSIST-SAFE] Saved fragment_offset={} to {:?}",
+        offset, final_path
+    );
+    Ok(())
+}
+
+/// Load fragment_offset from wipe-safe location.
+/// Falls back to 0 if not found.
+pub fn load_fragment_offset_wipe_safe(storage_path: &Path) -> u64 {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offset.bin");
+
+    if !persist_path.exists() {
+        return 0;
+    }
+
+    match std::fs::read(&persist_path) {
+        Ok(bytes) if bytes.len() == 8 => {
+            let offset = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            info!(
+                "📂 [PERSIST-SAFE] Loaded wipe-safe fragment_offset={} from {:?}",
+                offset, persist_path
+            );
+            offset
+        }
+        Ok(bytes) => {
+            warn!(
+                "⚠️ [PERSIST-SAFE] Corrupted wipe-safe fragment_offset file: {} bytes",
+                bytes.len()
+            );
+            0
+        }
+        Err(e) => {
+            warn!("⚠️ [PERSIST-SAFE] Failed to read wipe-safe fragment_offset: {}", e);
+            0
+        }
+    }
+}
+
+/// Reset wipe-safe fragment offset (e.g., during epoch transition).
+pub async fn reset_fragment_offset_wipe_safe(storage_path: &Path) -> Result<()> {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offset.bin");
+
+    if persist_path.exists() {
+        tokio::fs::remove_file(&persist_path).await?;
+        info!("📂 [PERSIST-SAFE] Reset wipe-safe fragment_offset file for new epoch.");
+    }
+    Ok(())
+}
+
+/// Persist last_sent_index to a WIPE-SAFE location.
+pub async fn persist_last_sent_index_wipe_safe(
+    storage_path: &Path,
+    index: u64,
+    commit_index: u32,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let temp_path = safe_dir.join("last_sent_index.tmp");
+    let final_path = safe_dir.join("last_sent_index.bin");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(&index.to_le_bytes()).await?;
+    file.write_all(&commit_index.to_le_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    trace!(
+        "💾 [PERSIST-SAFE] Saved last_sent_index={}, commit_index={} to {:?}",
+        index, commit_index, final_path
+    );
+    Ok(())
+}
+
+/// Load last_sent_index from wipe-safe location.
+pub fn load_persisted_last_index_wipe_safe(storage_path: &Path) -> Option<(u64, u32)> {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("last_sent_index.bin");
+
+    if !persist_path.exists() {
+        return None;
+    }
+
+    match std::fs::read(&persist_path) {
+        Ok(bytes) if bytes.len() == 12 => {
+            let index = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            let commit = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+            info!(
+                "📂 [PERSIST-SAFE] Loaded wipe-safe last_sent_index={}, commit_index={} from {:?}",
+                index, commit, persist_path
+            );
+            Some((index, commit))
+        }
+        Ok(bytes) if bytes.len() == 8 => {
+            let index = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            warn!("⚠️ [PERSIST-SAFE] Legacy format detected. Defaulting commit_index to 0.");
+            Some((index, 0))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

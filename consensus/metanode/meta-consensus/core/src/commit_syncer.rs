@@ -177,7 +177,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             network_client,
             dag_state,
         });
-        let synced_commit_index = inner.dag_state.read().last_commit_index();
+        let dag_commit = inner.dag_state.read().last_commit_index();
+        let handled_commit = inner.commit_consumer_monitor.highest_handled_commit();
+        // FORK-SAFETY: Use max of DAG commit and Go-handled commit.
+        // After supervisor restart following a DAG wipe + fast-forward,
+        // DAG may report 0 while Go has already processed up to N.
+        let synced_commit_index = dag_commit.max(handled_commit);
         
         CommitSyncer {
             inner,

@@ -294,46 +294,36 @@ impl CommitProcessor {
 
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
-        // FRAGMENTATION: Track cumulative extra GEIs consumed by block fragmentation.
-        // When a large commit (12K+ TXs) is split into N fragments, the offset
-        // accumulates (N-1) extra GEIs. This ensures:
-        //   commit_5 (12K TXs, 3 fragments) → GEI = base+5+0, base+6, base+7 → offset += 2
-        //   commit_6 (normal)               → GEI = base+6+2 = base+8 ← correct!
-        // FORK-SAFETY: All nodes use the same MAX_TXS_PER_GO_BLOCK → identical offsets.
-        // RS-2: Load persisted offset from disk for crash recovery.
-        // If disk is wiped (e.g. snapshot restore), recalculate mathematically:
-        // last_gei = epoch_base + (next_expected_index - 1) + offset
-        let math_offset = if let Some(ref shared_idx) = self.shared_last_global_exec_index {
-            let last_gei = *shared_idx.lock().await;
-            let expected_last_commit_in_epoch = (next_expected_index.saturating_sub(1)) as u64;
-            if last_gei > epoch_base_index + expected_last_commit_in_epoch {
-                last_gei - epoch_base_index - expected_last_commit_in_epoch
+        // ═══════════════════════════════════════════════════════════════
+        // FORK-SAFETY FIX v5: Fragment offset loaded from WIPE-SAFE location first
+        // (survives DAG wipes), then falls back to regular location.
+        // This ensures that after DAG wipe, the accumulated fragment offset
+        // is preserved and GEI calculations remain consistent across all nodes.
+        // ═══════════════════════════════════════════════════════════════
+        let mut cumulative_fragment_offset: u64 = if let Some(ref sp) = self.storage_path {
+            // Try wipe-safe first (survives DAG wipes)
+            let wipe_safe = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
+            if wipe_safe > 0 {
+                info!(
+                    "📂 [FRAGMENT-OFFSET] Recovered wipe-safe offset={} from disk",
+                    wipe_safe
+                );
+                wipe_safe
             } else {
-                0
+                // Fall back to regular location (for normal restarts)
+                let loaded = crate::node::executor_client::persistence::load_fragment_offset(sp);
+                if loaded > 0 {
+                    info!(
+                        "📂 [FRAGMENT-OFFSET] Recovered regular offset={} from disk",
+                        loaded
+                    );
+                    loaded
+                } else {
+                    0
+                }
             }
         } else {
             0
-        };
-
-        let mut cumulative_fragment_offset: u64 = if let Some(ref sp) = self.storage_path {
-            let loaded = crate::node::executor_client::persistence::load_fragment_offset(sp);
-            if loaded == 0 && math_offset > 0 {
-                info!(
-                    "📂 [FRAGMENT-OFFSET] Recovered offset={} mathematically from GEI difference (snapshot restore)",
-                    math_offset
-                );
-                math_offset
-            } else if loaded > 0 {
-                info!(
-                    "📂 [FRAGMENT-OFFSET] Recovered persisted offset={} from disk",
-                    loaded
-                );
-                loaded
-            } else {
-                0
-            }
-        } else {
-            math_offset
         };
         let storage_path_for_persist = self.storage_path.clone();
 
@@ -414,13 +404,22 @@ impl CommitProcessor {
                     // normal out-of-order commits. This is the complement of AUTO-JUMP.
                     if commit_index < next_expected_index && next_expected_index > 1 {
                         let gap = next_expected_index - commit_index;
-                        if gap > 100 {
+                        // FORK-SAFETY: Only allow downward jump if epoch_base_index is 0
+                        // (genuine new epoch). After snapshot restore, epoch_base > 0 and
+                        // a downward jump would cause duplicate GEI calculations.
+                        if gap > 100 && epoch_base_index == 0 {
                             warn!(
                                 "🔄 [DAG-RESET] Detected DAG wipe: received commit {} but expected {}. \
                                  Gap={} indicates new DAG instance. Resetting next_expected to {}.",
                                 commit_index, next_expected_index, gap, commit_index
                             );
                             next_expected_index = commit_index;
+                        } else if gap > 100 {
+                            warn!(
+                                "🚫 [DAG-RESET] BLOCKED downward jump: commit {} < expected {}, gap={}, \
+                                 but epoch_base={} > 0 (snapshot restore). Skipping stale commit.",
+                                commit_index, next_expected_index, gap, epoch_base_index
+                            );
                         }
                     }
 
@@ -509,6 +508,7 @@ impl CommitProcessor {
                             // RS-2: Persist after each change for crash recovery
                             if let Some(ref sp) = storage_path_for_persist {
                                 let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
+                                let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
                             }
                         }
 
@@ -584,6 +584,7 @@ impl CommitProcessor {
                                 // RS-2: Persist after each change for crash recovery
                                 if let Some(ref sp) = storage_path_for_persist {
                                     let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
+                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
                                 }
                             }
 
@@ -747,6 +748,7 @@ impl CommitProcessor {
                                                 cumulative_fragment_offset += geis_consumed - 1;
                                                 if let Some(ref sp) = storage_path_for_persist {
                                                     let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
+                                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
                                                 }
                                             }
 
