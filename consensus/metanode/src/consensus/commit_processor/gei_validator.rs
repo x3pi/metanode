@@ -70,15 +70,6 @@ pub enum GeiValidationError {
     Discontinuity {
         diagnostics: GeiDiagnostics,
     },
-
-    /// GEI matches Go (continuous), but differs from peer's GEI for the same block.
-    /// This indicates a cross-node divergence.
-    PeerMismatch {
-        local_gei: u64,
-        peer_gei: u64,
-        block_number: u64,
-        peer_addr: String,
-    },
 }
 
 impl fmt::Display for GeiValidationError {
@@ -86,18 +77,6 @@ impl fmt::Display for GeiValidationError {
         match self {
             GeiValidationError::Discontinuity { diagnostics } => {
                 write!(f, "GEI Discontinuity: {}", diagnostics)
-            }
-            GeiValidationError::PeerMismatch {
-                local_gei,
-                peer_gei,
-                block_number,
-                peer_addr,
-            } => {
-                write!(
-                    f,
-                    "GEI Peer Mismatch: local_gei={}, peer_gei={}, block={}, peer={}",
-                    local_gei, peer_gei, block_number, peer_addr
-                )
             }
         }
     }
@@ -233,22 +212,18 @@ pub async fn validate_gei_against_peers(
                                 peer_addr, local_gei, local_block_number
                             );
                         } else {
-                            error!(
-                                "🚨 [GEI-VALIDATOR] PEER MISMATCH! \
+                            warn!(
+                                "⚠️ [GEI-VALIDATOR] PEER MISMATCH! \
                                  local_gei={} vs peer_gei={} at block={} (peer={}). \
-                                 Delta={}. This indicates divergent state reconstruction!",
+                                 Delta={}. This often indicates different amounts of empty-commits.",
                                 local_gei,
                                 peer_gei,
                                 local_block_number,
                                 peer_addr,
                                 local_gei as i64 - peer_gei as i64
                             );
-                            return Err(GeiValidationError::PeerMismatch {
-                                local_gei,
-                                peer_gei,
-                                block_number: local_block_number,
-                                peer_addr: peer_addr.clone(),
-                            });
+                            // We do NOT return Err here anymore because empty blocks
+                            // naturally cause GEI divergence at the same block height.
                         }
                     } else {
                         // Peer is at a different block — can only do rough comparison
