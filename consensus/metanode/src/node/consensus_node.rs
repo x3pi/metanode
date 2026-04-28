@@ -1266,28 +1266,55 @@ impl ConsensusNode {
                 }
             }
 
-            // Find the highest block among peers
-            let mut max_peer_block = 0u64;
-            let mut max_peer_gei = 0u64;
-            for peer_addr in &barrier_peers {
-                match crate::network::peer_rpc::query_peer_info(peer_addr).await {
-                    Ok(info) => {
-                        if info.last_block > max_peer_block {
-                            max_peer_block = info.last_block;
-                            max_peer_gei = info.last_global_exec_index;
+            // ═══════════════════════════════════════════════════════════════
+            // FORK-SAFETY FIX (v8): Retry peer sync until gap is closed.
+            //
+            // ROOT CAUSE: Single-shot sync fetches blocks up to the peer's
+            // current block at query time. But while we sync those blocks,
+            // the cluster continues creating more. Example:
+            //   - Query: peer at 231, local at 198 → sync 199-231
+            //   - While syncing, cluster advances to 262
+            //   - Gap: 231 vs 262 → 31 blocks of new commits
+            //   - Node creates blocks 232+ from NEW commits (different content!)
+            //   - Other nodes have blocks 232+ from EARLIER commits
+            //   - Same block number, different content → hash mismatch
+            //
+            // FIX: Loop the sync until gap ≤ 2 blocks (network jitter).
+            // Max 5 retries to prevent infinite loops.
+            // ═══════════════════════════════════════════════════════════════
+            const MAX_SYNC_RETRIES: u32 = 5;
+            const ACCEPTABLE_GAP: u64 = 2;
+
+            for sync_round in 0..MAX_SYNC_RETRIES {
+                // Re-query peers for their latest block
+                let mut max_peer_block = 0u64;
+                let mut max_peer_gei = 0u64;
+                for peer_addr in &barrier_peers {
+                    match crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                        Ok(info) => {
+                            if info.last_block > max_peer_block {
+                                max_peer_block = info.last_block;
+                                max_peer_gei = info.last_global_exec_index;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("⚠️ [STARTUP-SYNC] Peer {} info query failed: {}", peer_addr, e);
                         }
                     }
-                    Err(e) => {
-                        tracing::debug!("⚠️ [STARTUP-SYNC] Peer {} info query failed: {}", peer_addr, e);
-                    }
                 }
-            }
 
-            if max_peer_block > 0 && local_block < max_peer_block {
-                let _gap = max_peer_block - local_block;
+                if max_peer_block == 0 || local_block + ACCEPTABLE_GAP >= max_peer_block {
+                    tracing::info!(
+                        "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}, round={}). Starting consensus...",
+                        local_block, max_peer_block, sync_round
+                    );
+                    break;
+                }
+
+                let gap = max_peer_block - local_block;
                 tracing::warn!(
-                    "🚨 [STARTUP-SYNC] Local state BEHIND network! local_block={}, peer_block={}, peer_gei={}. Triggering pre-consensus sync...",
-                    local_block, max_peer_block, max_peer_gei
+                    "🚨 [STARTUP-SYNC] Round {}: Local state BEHIND network! local_block={}, peer_block={}, gap={}, peer_gei={}. Syncing...",
+                    sync_round, local_block, max_peer_block, gap, max_peer_gei
                 );
 
                 let from_block = local_block + 1;
@@ -1296,7 +1323,8 @@ impl ConsensusNode {
                 match crate::network::peer_rpc::fetch_blocks_from_peer(&barrier_peers, from_block, to_block).await {
                     Ok(blocks) if !blocks.is_empty() => {
                         tracing::info!(
-                            "🔄 [STARTUP-SYNC] Fetched {} blocks ({}-{}). Executing...",
+                            "🔄 [STARTUP-SYNC] Round {}: Fetched {} blocks ({}-{}). Executing...",
+                            sync_round,
                             blocks.len(),
                             blocks.first().map(|b| b.block_number).unwrap_or(0),
                             blocks.last().map(|b| b.block_number).unwrap_or(0)
@@ -1304,21 +1332,15 @@ impl ConsensusNode {
                         match barrier_client.sync_and_execute_blocks(blocks).await {
                             Ok((synced, last_block, _gei)) => {
                                 tracing::info!(
-                                    "✅ [STARTUP-SYNC] Pre-consensus sync complete: executed {} blocks (last_block={})",
-                                    synced, last_block
+                                    "✅ [STARTUP-SYNC] Round {}: Synced {} blocks (last_block={})",
+                                    sync_round, synced, last_block
                                 );
+                                local_block = last_block; // Update for next iteration
                                 
-                                // FORK-SAFETY FIX v5: Re-query Go GEI after syncing to update shared state.
-                                // BUT: Do NOT use GEI-derived value for highest_handled_commit!
-                                // GEI includes fragment_offset, which would inflate the commit index
-                                // and block legitimate new DAG commits in CommitSyncer.
+                                // Re-query Go GEI after syncing to update shared state
                                 if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
-                                    // Update shared GEI for CommitProcessor offset calculation
                                     coordination_hub.set_initial_global_exec_index(new_gei).await;
                                     
-                                    // For highest_handled_commit, try to use persisted commit_index
-                                    // (which was updated during sync_and_execute_blocks).
-                                    // This is the REAL commit count, not inflated by fragment offset.
                                     let new_handled = {
                                         let persisted = crate::node::executor_client::persistence::load_persisted_last_index(&config.storage_path);
                                         match persisted {
@@ -1328,7 +1350,6 @@ impl ConsensusNode {
                                                 match wipe_safe {
                                                     Some((_gei, commit_idx)) if commit_idx > 0 => commit_idx,
                                                     _ => {
-                                                        // Last resort: use go_replay_after that was already correctly computed
                                                         go_replay_after
                                                     }
                                                 }
@@ -1337,28 +1358,30 @@ impl ConsensusNode {
                                     };
                                     commit_consumer.monitor().set_highest_handled_commit(new_handled);
                                     tracing::info!(
-                                        "🔄 [STARTUP-SYNC] Re-queried Go: gei={}, highest_handled_commit={} (from persistence, NOT gei-derived)",
-                                        new_gei, new_handled
+                                        "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}",
+                                        sync_round, new_gei, new_handled
                                     );
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("❌ [STARTUP-SYNC] Failed to execute fetched blocks: {}", e);
+                                tracing::error!("❌ [STARTUP-SYNC] Round {}: Failed to execute fetched blocks: {}", sync_round, e);
+                                break;
                             }
                         }
                     }
                     Ok(_) => {
-                        tracing::warn!("⚠️ [STARTUP-SYNC] Fetched 0 blocks from peers. Cannot sync state.");
+                        tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Fetched 0 blocks from peers. Retrying...", sync_round);
                     }
                     Err(e) => {
-                        tracing::error!("❌ [STARTUP-SYNC] Failed to fetch blocks from peers: {}", e);
+                        tracing::error!("❌ [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}", sync_round, e);
+                        break;
                     }
                 }
-            } else {
-                tracing::info!(
-                    "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}). Starting consensus...",
-                    local_block, max_peer_block
-                );
+
+                // Small delay before retry to let the cluster produce more blocks
+                if sync_round < MAX_SYNC_RETRIES - 1 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
             }
         }
 

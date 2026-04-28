@@ -418,25 +418,31 @@ PROCESS_BLOCK:
 	// SYNC DEDUP GUARD: If sync handler already wrote this block to LevelDB
 	// while we were preparing to create it, skip creation and import the synced block.
 	// This closes the race window between LAZY REFRESH (checked earlier) and now.
+	//
+	// CRITICAL FIX (v7): Use block_number from Rust payload, NOT globalExecIndex.
+	// GEI ≠ block number (GEI includes empty commits and fragments).
+	// Example: GEI=2276 but block_number=303. Comparing GEI against
+	// syncedLastBlock (a block number) NEVER matched, so this guard
+	// never fired during DAG wipe recovery → Node 1 created blocks at
+	// numbers 272-290 with DIFFERENT content → hash mismatch.
 	// ═══════════════════════════════════════════════════════════════════════════
 	{
+		incomingBlockNumber := epochData.GetBlockNumber() // Block number from Rust
 		syncedLastBlock := storage.GetLastBlockNumber()
-		// NOTE: Use globalExecIndex (the block we're about to create), NOT *currentBlockNumber
-		// which hasn't been updated yet at this point and still holds the PREVIOUS block number.
-		if syncedLastBlock >= globalExecIndex && globalExecIndex > 0 {
+		if incomingBlockNumber > 0 && syncedLastBlock >= incomingBlockNumber {
 			// Sync already wrote this block — import it instead of creating a new one
-			syncedHash, hashOk := blockchain.GetBlockChainInstance().GetBlockHashByNumber(globalExecIndex)
+			syncedHash, hashOk := blockchain.GetBlockChainInstance().GetBlockHashByNumber(incomingBlockNumber)
 			if hashOk {
 				syncedBlock, syncErr := bp.chainState.GetBlockDatabase().GetBlockByHash(syncedHash)
 				if syncErr == nil && syncedBlock != nil {
-					logger.Info("🔄 [SYNC DEDUP] Block #%d already in storage from sync (hash=%s), importing instead of creating",
-						globalExecIndex, syncedHash.Hex()[:18]+"...")
+					logger.Info("🔄 [SYNC DEDUP] Block #%d already in storage from sync (hash=%s, GEI=%d), importing instead of creating",
+						incomingBlockNumber, syncedHash.Hex()[:18]+"...", globalExecIndex)
 
 					// Update in-memory state from the synced block
 					isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
 					if isNomtBackend {
 						bp.SetLastBlock(syncedBlock)
-						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						bp.nextBlockNumber.Store(incomingBlockNumber + 1)
 						headerCopy := syncedBlock.Header()
 						bp.chainState.SetcurrentBlockHeader(&headerCopy)
 
@@ -445,14 +451,14 @@ PROCESS_BLOCK:
 						// causes the next block to read stale pre-sync state, leading to Hash Mismatches!
 						bp.chainState.InvalidateAllState()
 
-						logger.Debug("🔄 [SYNC DEDUP] NOMT: Updated block pointer to %d (tries NOT rebuilt — managed by execution pipeline)", globalExecIndex)
+						logger.Debug("🔄 [SYNC DEDUP] NOMT: Updated block pointer to %d (tries NOT rebuilt — managed by execution pipeline)", incomingBlockNumber)
 					} else {
 						bp.SetLastBlock(syncedBlock)
-						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						bp.nextBlockNumber.Store(incomingBlockNumber + 1)
 						if _, err := bp.chainState.CommitBlockState(syncedBlock,
 							blockchain.WithRebuildTries(),
 						); err != nil {
-							logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", globalExecIndex, err)
+							logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", incomingBlockNumber, err)
 						}
 					}
 
@@ -463,7 +469,7 @@ PROCESS_BLOCK:
 						delete(pendingBlocks, *nextExpectedGlobalExecIndex)
 						epochData = pendingBlock
 						globalExecIndex = epochData.GetGlobalExecIndex()
-						*currentBlockNumber = globalExecIndex
+						*currentBlockNumber = epochData.GetBlockNumber()
 						goto PROCESS_BLOCK
 					}
 					return
