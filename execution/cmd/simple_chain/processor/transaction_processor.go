@@ -573,7 +573,7 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) 
 	}
 	_, err := tp.AddTransactionToPool(tx)
 	if err != nil {
-		logger.Error("AddTransactionToPool failed: ", err)
+		logger.Error("AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
 		return output, err
 	}
 	return output, nil

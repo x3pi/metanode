@@ -174,26 +174,26 @@ func (s *CrossChainScanner) ProcessSingleResweep(
 		logger.Warn("🧹 [Resweeper] Batch %x NOT FOUND on node %s (checked blocks %d to %d). Will retry later.",
 			batchId[:4], localConnClient.GetNodeAddr(), fromBlk, latestBlk)
 
-		if data.RetryCount >= maxResubmitAttempts {
-			logger.Warn("🧹 [Resweeper] Batch %x reached max resubmit attempts (%d). Keep scanning only.",
-				batchId[:4], data.RetryCount)
-			return
-		}
+		// if data.RetryCount >= maxResubmitAttempts {
+		// 	logger.Warn("🧹 [Resweeper] Batch %x reached max resubmit attempts (%d). Keep scanning only.",
+		// 		batchId[:4], data.RetryCount)
+		// 	return
+		// }
 
-		txHash, targetIndex, submitErr := s.submitBatch(data.RemoteChain, data.Events, -1)
-		if submitErr != nil {
-			data.LastError = submitErr.Error()
-			logger.Warn("🧹 [Resweeper] Re-submit failed for batch %x at node index=%d: %v. Will retry next scan cycle.",
-				batchId[:4], -1, submitErr)
-			return
-		}
-		data.TxHash = txHash
-		data.TargetIndex = targetIndex
-		data.Timestamp = time.Now()
-		data.RetryCount++
-		data.LastError = ""
+		// txHash, targetIndex, submitErr := s.submitBatch(data.RemoteChain, data.Events, -1)
+		// if submitErr != nil {
+		// 	data.LastError = submitErr.Error()
+		// 	logger.Warn("🧹 [Resweeper] Re-submit failed for batch %x at node index=%d: %v. Will retry next scan cycle.",
+		// 		batchId[:4], -1, submitErr)
+		// 	return
+		// }
+		// data.TxHash = txHash
+		// data.TargetIndex = targetIndex
+		// data.Timestamp = time.Now()
+		// data.RetryCount++
+		// data.LastError = ""
 
-		logger.Info("🧹 [Resweeper] Re-submitted batch %x: retry=%d nodeIndex=%d txHash=%s submitBlock=%d",
-			batchId[:4], data.RetryCount, data.TargetIndex, data.TxHash.Hex(), data.SubmitBlock)
+		// logger.Info("🧹 [Resweeper] Re-submitted batch %x: retry=%d nodeIndex=%d txHash=%s submitBlock=%d",
+		// 	batchId[:4], data.RetryCount, data.TargetIndex, data.TxHash.Hex(), data.SubmitBlock)
 	}
 }

@@ -166,7 +166,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// This replaces the old syncCompletionCallback mechanism with a simpler approach.
 	if time.Since(bp.lastLazyRefreshTime) > 100*time.Millisecond {
 		bp.lastLazyRefreshTime = time.Now()
-		
+
 		storageLastBlockNum := storage.GetLastBlockNumber()
 		bpLastBlock := bp.GetLastBlock()
 		bpLastBlockNum := uint64(0)
@@ -357,13 +357,13 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
-	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex
 	// means Rust intentionally fast-skipped empty commits during catch-up.
 	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-		
+
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
 		actualLastBlockDB := storage.GetLastBlockNumber()
@@ -373,7 +373,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 
 		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 			oldExpected, globalExecIndex, gapSize)
-			
+
 		// Fall through to process the block sequentially
 	}
 

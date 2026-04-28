@@ -145,13 +145,13 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 			}
 
 			if exRs.Exception() == pb.EXCEPTION_ERR_EXECUTION_REVERTED {
-				return nil, fmt.Errorf("transaction Revert"), exRs.Return()
+				return nil, fmt.Errorf("transaction Revert: %v", exRs.Return()), exRs.Return()
 			} else {
 				txError := transaction.MapProtoExceptionToTransactionError(exRs.Exception())
 				if txError != nil {
 					if txError.Description == "none" {
-						logger.Warn("[DEBUG VIRTUAL] Allowed unknown revert (EXCEPTION_NONE) to pass to consensus. hash=%s", tx.Hash().Hex())
-						return tx, nil, exRs.Return()
+						logger.Error("[DEBUG VIRTUAL] Blocked unknown revert (EXCEPTION_NONE) from passing to consensus. hash=%s", tx.Hash().Hex())
+						return nil, fmt.Errorf("transaction revert (EXCEPTION_NONE)"), exRs.Return()
 					}
 					return nil, fmt.Errorf("transaction error: %s", txError.Description), exRs.Return()
 				} else {
