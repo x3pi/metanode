@@ -58,6 +58,8 @@ struct StorageSetup {
     /// Last block number from Go at startup, verified with is_ready=true retry loop.
     /// Passed to setup_consensus to avoid re-query race where Go returns stale value.
     latest_block_number: u64,
+    /// Last handled commit index from Go Authoritative DB (persisted across DAG wipes)
+    last_handled_commit_index: Option<u32>,
 }
 
 /// Results from consensus setup phase.
@@ -739,7 +741,7 @@ impl ConsensusNode {
         }
 
         // EXECUTION INDEX SYNC
-        let (last_global_exec_index, last_executed_commit_hash) = Self::calculate_last_global_exec_index(
+        let (last_global_exec_index, last_executed_commit_hash, last_handled_commit_index) = Self::calculate_last_global_exec_index(
             config,
             &executor_client,
             &best_socket,
@@ -871,6 +873,7 @@ impl ConsensusNode {
             epoch_duration_from_go,
             last_executed_commit_hash,
             latest_block_number,
+            last_handled_commit_index,
         })
     }
 
@@ -880,9 +883,9 @@ impl ConsensusNode {
         executor_client: &Arc<ExecutorClient>,
         best_socket: &str,
         peer_last_block: u64,
-    ) -> (u64, [u8; 32]) {
+    ) -> (u64, [u8; 32], Option<u32>) {
         if !config.executor_read_enabled {
-            return (0, [0; 32]);
+            return (0, [0; 32], None);
         }
 
         let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
@@ -904,6 +907,15 @@ impl ConsensusNode {
                 }
             }
         };
+
+        let last_handled_commit_index = match executor_client.get_last_handled_commit_index().await {
+            Ok((commit_index, _, _, _, _)) => Some(commit_index),
+            Err(e) => {
+                warn!("⚠️ [STARTUP] Failed to get last_handled_commit_index from Go: {}", e);
+                None
+            }
+        };
+
         let storage_path = &config.storage_path;
 
         let (persisted_index, persisted_commit) =
@@ -937,7 +949,7 @@ impl ConsensusNode {
                 warn!("🚨 [STARTUP] STALE CHAIN DETECTED: Local ({}) is ahead of Peer ({})! Forcing resync from Peer.", 
                        local_go_block, peer_last_block);
                 // In recovery we just use the local GEI anyway because Go Master blocks handles actual rollback if needed
-                (local_go_gei, last_executed_commit_hash)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
             } else if local_go_block < peer_last_block.saturating_sub(5) {
                 let lag = peer_last_block - local_go_block;
                 info!(
@@ -945,13 +957,13 @@ impl ConsensusNode {
                     local_go_block, peer_last_block, lag, local_go_block
                 );
                 // Flag as lagging if behind by more than 50 blocks
-                (local_go_gei, last_executed_commit_hash)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
             } else {
                 info!(
                     "✅ [STARTUP] Local and Peer are in sync (LocalBlock={}, PeerBlock={}). Using Local Go GEI: {} as authoritative.",
                     local_go_block, peer_last_block, local_go_gei
                 );
-                (local_go_gei, last_executed_commit_hash)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
             }
         } else {
             if persisted_index > local_go_gei {
@@ -962,7 +974,7 @@ impl ConsensusNode {
                 "📊 [STARTUP] No peer reference, using Local Go Last GEI: {} (Block: {})",
                 local_go_gei, local_go_block
             );
-            (local_go_gei, last_executed_commit_hash)
+            (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
         }
     }
 
@@ -1004,35 +1016,38 @@ impl ConsensusNode {
         };
 
         let go_replay_after = if config.executor_read_enabled {
-            // Try regular persistence first (best case: normal restart)
-            let persisted = crate::node::executor_client::persistence::load_persisted_last_index(&config.storage_path);
-            match persisted {
-                Some((_gei, commit_index)) if commit_index > 0 => commit_index,
-                _ => {
-                    // Regular persistence missing. Try WIPE-SAFE location (survives DAG wipes).
-                    let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
-                    match wipe_safe {
-                        Some((_gei, commit_index)) if commit_index > 0 => {
-                            info!(
-                                "📊 [FORK-SAFETY] Recovered commit_index={} from wipe-safe persistence (DAG wipe recovery)",
-                                commit_index
-                            );
+            if let Some(commit_index) = storage.last_handled_commit_index {
+                info!(
+                    "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
+                    commit_index
+                );
+                commit_index
+            } else {
+                warn!(
+                    "⚠️ [GO-AUTH GEI] LastHandledCommitIndex not available from StorageSetup. \
+                     Falling back to wipe_safe persistence."
+                );
+                // Fall back to persistence if Go RPC failed (e.g. timeout / rare startup race)
+                let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
+                match wipe_safe {
+                    Some((_gei, commit_index)) if commit_index > 0 => {
+                        info!(
+                            "📊 [FORK-SAFETY] Recovered commit_index={} from wipe-safe persistence (fallback)",
                             commit_index
-                        }
-                        _ => {
-                            // No persistence at all. If DAG also empty, this is first start.
-                            if !dag_has_history {
-                                info!(
-                                    "📊 [FORK-SAFETY] DAG empty + no persistence = first start or full reset. \
-                                     Setting go_replay_after=0 (new DAG starts from commit 1)"
-                                );
-                                0
-                            } else if storage.last_global_exec_index > storage.epoch_base_exec_index {
-                                // DAG exists but no persistence file (legacy/first epoch).
-                                (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
-                            } else {
-                                0
-                            }
+                        );
+                        commit_index
+                    }
+                    _ => {
+                        if !dag_has_history {
+                            info!(
+                                "📊 [FORK-SAFETY] DAG empty + no persistence = first start or full reset. \
+                                 Setting go_replay_after=0"
+                            );
+                            0
+                        } else if storage.last_global_exec_index > storage.epoch_base_exec_index {
+                            (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
+                        } else {
+                            0
                         }
                     }
                 }
@@ -1041,8 +1056,8 @@ impl ConsensusNode {
             0
         };
         info!(
-            "📊 [STARTUP] CommitConsumerArgs: go_replay_after={} (from last_global_exec_index={})",
-            go_replay_after, storage.last_global_exec_index
+            "📊 [STARTUP] CommitConsumerArgs: go_replay_after={} (from authoritative Go/fallback)",
+            go_replay_after
         );
         // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
         info!(
