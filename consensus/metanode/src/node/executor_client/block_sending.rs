@@ -144,18 +144,27 @@ impl ExecutorClient {
             if total_after_dedup == 0 {
                 // All TXs were filtered out — send as empty commit
                 let block_number = {
-                    let mut next_bn = self.next_block_number.lock().await;
-                    let mut last_ep = self.last_processed_epoch.lock().await;
-                    let is_epoch_boundary = epoch > *last_ep;
-                    if epoch > *last_ep {
-                        *last_ep = epoch;
-                    }
-                    if is_epoch_boundary {
-                        let bn = *next_bn;
-                        *next_bn += 1;
-                        bn
-                    } else {
+                    let mut next_expected_guard = self.next_expected_index.lock().await;
+                    if global_exec_index < *next_expected_guard {
+                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
                         0
+                    } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
+                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
+                        0
+                    } else {
+                        let mut next_bn = self.next_block_number.lock().await;
+                        let mut last_ep = self.last_processed_epoch.lock().await;
+                        let is_epoch_boundary = epoch > *last_ep;
+                        if epoch > *last_ep {
+                            *last_ep = epoch;
+                        }
+                        if is_epoch_boundary {
+                            let bn = *next_bn;
+                            *next_bn += 1;
+                            bn
+                        } else {
+                            0
+                        }
                     }
                 };
 
@@ -194,18 +203,28 @@ impl ExecutorClient {
                 let fragment_gei = global_exec_index + frag_idx as u64;
 
                 let block_number = {
-                    let mut next_bn = self.next_block_number.lock().await;
-                    let mut last_ep = self.last_processed_epoch.lock().await;
-                    // Fragment with txs > 0 ALWAYS consumes a block number
-                    if epoch > *last_ep {
-                        *last_ep = epoch;
+                    let mut next_expected_guard = self.next_expected_index.lock().await;
+                    if fragment_gei < *next_expected_guard {
+                        // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
+                        0
+                    } else if self.send_buffer.lock().await.contains_key(&fragment_gei) {
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0", fragment_gei);
+                        0
+                    } else {
+                        let mut next_bn = self.next_block_number.lock().await;
+                        let mut last_ep = self.last_processed_epoch.lock().await;
+                        // Fragment with txs > 0 ALWAYS consumes a block number
+                        if epoch > *last_ep {
+                            *last_ep = epoch;
+                        }
+                        // Since fragment total_after_dedup > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
+                        // unless somehow after dedup all fragments have 0 txs, which is handled above.
+                        // So we always allocate a block number.
+                        let bn = *next_bn;
+                        *next_bn += 1;
+                        bn
                     }
-                    // Since fragment total_after_dedup > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
-                    // unless somehow after dedup all fragments have 0 txs, which is handled above.
-                    // So we always allocate a block number.
-                    let bn = *next_bn;
-                    *next_bn += 1;
-                    bn
                 };
 
                 let epoch_data = ExecutableBlock {
@@ -259,22 +278,33 @@ impl ExecutorClient {
         });
 
         let block_number = {
-            let mut next_bn = self.next_block_number.lock().await;
-            let mut last_ep = self.last_processed_epoch.lock().await;
-            let is_epoch_boundary = epoch > *last_ep;
-            
-            // Force block generation for EndOfEpoch commit
-            let force_block_creation = is_epoch_boundary || has_system_tx;
-            
-            if epoch > *last_ep {
-                *last_ep = epoch;
-            }
-            if total_after_dedup > 0 || force_block_creation {
-                let bn = *next_bn;
-                *next_bn += 1;
-                bn
-            } else {
+            let mut next_expected_guard = self.next_expected_index.lock().await;
+            if global_exec_index < *next_expected_guard {
+                // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
+                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
                 0
+            } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
+                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
+                0
+            } else {
+                let mut next_bn = self.next_block_number.lock().await;
+                let mut last_ep = self.last_processed_epoch.lock().await;
+                let is_epoch_boundary = epoch > *last_ep;
+                
+                // Force block generation for EndOfEpoch commit
+                let force_block_creation = is_epoch_boundary || has_system_tx;
+                
+                if epoch > *last_ep {
+                    *last_ep = epoch;
+                }
+                if total_after_dedup > 0 || force_block_creation {
+                    let bn = *next_bn;
+                    *next_bn += 1;
+                    trace!("📊 [BLOCK-NUM] Generating new block_number={} for GEI={}", bn, global_exec_index);
+                    bn
+                } else {
+                    0
+                }
             }
         };
 
@@ -355,18 +385,16 @@ impl ExecutorClient {
 
                 if is_same_commit {
                     warn!("   ✅ Same commit detected (epoch={}, commit_index={}) - skipping duplicate, existing commit in buffer will be sent", epoch, commit_index);
-                    return Ok(());
                 } else {
                     error!("   🚨 DIFFERENT commits with same global_exec_index! This is a BUG!");
                     error!("   🔍 Root cause analysis:");
                     error!("      - Epochs different ({} vs {}): global_exec_index calculation may be wrong", existing_epoch, epoch);
                     error!("      - Commit indexes different ({} vs {}): same global_exec_index calculated for different commits", existing_commit, commit_index);
                     error!("      - This indicates last_global_exec_index was not updated correctly or calculation is wrong");
-                    warn!("   ⚠️  OVERWRITING existing commit with new commit to ensure transactions are executed");
-                    warn!("   ⚠️  This may cause transaction loss in the old commit, but ensures new transactions are executed");
+                    warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
-            buffer.insert(global_exec_index, (epoch_data_bytes, epoch, commit_index));
+            buffer.entry(global_exec_index).or_insert((epoch_data_bytes, epoch, commit_index));
             trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
