@@ -732,52 +732,31 @@ PROCESS_BLOCK:
 	// this block number. If it does, ADOPT the synced block (which is authoritative
 	// from the network majority) and skip local creation.
 	// ═══════════════════════════════════════════════════════════════════════════
-	{
-		existingHash, existsInMap := blockchain.GetBlockChainInstance().GetBlockHashByNumber(*currentBlockNumber)
-		if existsInMap && existingHash != (common.Hash{}) {
-			existingBlock, fetchErr := bp.chainState.GetBlockDatabase().GetBlockByHash(existingHash)
-			if fetchErr == nil && existingBlock != nil {
-				logger.Info("🛡️ [ANTI-INFLATION] Block #%d already exists from P2P sync (hash=%s). Adopting synced block instead of creating new one (gei=%d)",
-					*currentBlockNumber, existingHash.Hex()[:18]+"...", globalExecIndex)
-
-				// Adopt the synced block as our last block
-				bp.SetLastBlock(existingBlock)
-				bp.nextBlockNumber.Store(*currentBlockNumber + 1)
-				headerCopy := existingBlock.Header()
-				bp.chainState.SetcurrentBlockHeader(&headerCopy)
-
-				// FORK-SAFETY (NOMT): Do NOT rebuild tries when NOMT is active.
-				// Same rationale as LAZY REFRESH: rebuilding tries from a P2P-synced
-				// block header mid-execution causes state divergence across nodes.
-				isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
-				if !isNomtBackend {
-					if _, err := bp.chainState.CommitBlockState(existingBlock,
-						blockchain.WithRebuildTries(),
-					); err != nil {
-						logger.Error("🛡️ [ANTI-INFLATION] Failed to rebuild state from synced block #%d: %v", *currentBlockNumber, err)
-					} else {
-						mvm.ClearAllMVMApi()
-						mvm.CallClearAllStateInstances()
-					}
-				}
-				logger.Info("🛡️ [ANTI-INFLATION] ✅ Adopted synced block #%d (nomt=%v, trie_rebuild=%v)", *currentBlockNumber, isNomtBackend, !isNomtBackend)
-
-				// Update GEI tracking
-				bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
-
-				// Advance and check pending blocks
-				*nextExpectedGlobalExecIndex = globalExecIndex + 1
-				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-					epochData = pendingBlock
-					goto PROCESS_SINGLE_EPOCH_DATA_START
-				}
-				return
-			}
-		}
-	}
+	// ═══════════════════════════════════════════════════════════════════════════
+	// ANTI-INFLATION GUARD: DISABLED (Fork-Safety Fix 3)
+	//
+	// This guard adopted P2P-synced blocks and called CommitBlockState(WithRebuildTries()),
+	// which replaces trie state from a P2P block header. This is non-deterministic because:
+	//   1. Different nodes may have different P2P-synced blocks at any given moment
+	//   2. WithRebuildTries() modifies trie state that the execution pipeline depends on
+	// Master nodes don't use P2P sync, so this guard should never fire in normal operation.
+	// If it does fire, it means something is fundamentally broken and should NOT be masked.
+	// ═══════════════════════════════════════════════════════════════════════════
 
 	// FORK-SAFETY: Deduplication and sorting are now handled consistently by Rust in block_sending.rs
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY FIX 2: Invalidate all in-memory state caches before executing.
+	//
+	// The async commit pipeline (CommitPipeline → PersistAsync) for the PREVIOUS
+	// block may leave stale entries in loadedAccounts, SmartContractDB caches, etc.
+	// Even with synchronous DoneChan (Fix 1), CommitBlockState does NOT clear the
+	// in-memory caches — it only persists to DB. If a cached account state object
+	// from Block N-1 is still in loadedAccounts, Block N's ProcessTransactions will
+	// read the cached (pre-commit) version instead of the freshly-committed version.
+	// This invalidation forces all reads to go through the committed trie.
+	// ═══════════════════════════════════════════════════════════════════════════
+	bp.chainState.InvalidateAllState()
 
 	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
 	processTxStart := time.Now()
@@ -871,62 +850,34 @@ PROCESS_BLOCK:
 	// FORK-SAFETY: All nodes that are in-sync produce the same blocks, so they
 	// never trigger this guard. Only nodes catching up after restart trigger it.
 	// ═══════════════════════════════════════════════════════════════════════════
+	// ═══════════════════════════════════════════════════════════════════════════
+	// POST-CREATE FORK GUARD: DISABLED (Fork-Safety Fix 3)
+	//
+	// This guard compared the locally-created block hash with a P2P-synced block
+	// and adopted the P2P version if different, calling CommitBlockState(WithRebuildTries()).
+	// This is a PRIMARY CAUSE of fork because:
+	//   1. It replaces trie state with state from a P2P-synced block header
+	//   2. Different nodes may or may not trigger this guard depending on P2P timing
+	//   3. WithRebuildTries() during active block processing corrupts state determinism
+	// Master nodes should NEVER have P2P-synced blocks at the same height they're creating.
+	// If they do, the root cause is elsewhere and masking it makes debugging harder.
+	//
+	// DIAGNOSTIC: If this block would have triggered the old guard, log it for analysis.
+	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		existingHash, existsInMap := blockchain.GetBlockChainInstance().GetBlockHashByNumber(*currentBlockNumber)
 		if existsInMap && existingHash != (common.Hash{}) {
 			localHash := newBlock.Header().Hash()
 			if localHash != existingHash {
-				// FORK DETECTED: locally-created block differs from P2P-synced version
-				existingBlock, fetchErr := bp.chainState.GetBlockDatabase().GetBlockByHash(existingHash)
-				if fetchErr == nil && existingBlock != nil {
-					logger.Warn("🛡️ [POST-CREATE-FORK-GUARD] Block #%d: local hash=%s ≠ P2P hash=%s. "+
-						"Adopting P2P version (network-authoritative). "+
-						"Local: leader=%s ts=%d GEI=%d | P2P: leader=%s ts=%d GEI=%d",
-						*currentBlockNumber,
-						localHash.Hex()[:18]+"...", existingHash.Hex()[:18]+"...",
-						newBlock.Header().LeaderAddress().Hex(),
-						newBlock.Header().TimeStamp(),
-						newBlock.Header().GlobalExecIndex(),
-						existingBlock.Header().LeaderAddress().Hex(),
-						existingBlock.Header().TimeStamp(),
-						existingBlock.Header().GlobalExecIndex(),
-					)
-
-					// Replace our block with the network's authoritative version
-					bp.SetLastBlock(existingBlock)
-					bp.nextBlockNumber.Store(*currentBlockNumber + 1)
-					headerCopy := existingBlock.Header()
-					bp.chainState.SetcurrentBlockHeader(&headerCopy)
-					
-					// CRITICAL: Update BlockNumber -> Hash mapping so JSON-RPC returns the correct authoritative parent hashes
-					if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(*currentBlockNumber, existingHash); err != nil {
-						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to remap block #%d to P2P hash: %v", *currentBlockNumber, err)
-					}
-
-					// Rebuild state from authoritative block
-					if _, rebuildErr := bp.chainState.CommitBlockState(existingBlock,
-						blockchain.WithRebuildTries(),
-					); rebuildErr != nil {
-						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to rebuild state for block #%d: %v",
-							*currentBlockNumber, rebuildErr)
-					} else {
-						// Clear cached state to prevent stale EVM reads
-						mvm.ClearAllMVMApi()
-						mvm.CallClearAllStateInstances()
-						logger.Info("🛡️ [POST-CREATE-FORK-GUARD] ✅ Adopted P2P block #%d, rebuilt tries, cleared caches",
-							*currentBlockNumber)
-					}
-
-					// Update GEI tracking and continue to next block
-					bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
-					*nextExpectedGlobalExecIndex = globalExecIndex + 1
-					if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-						delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-						epochData = pendingBlock
-						goto PROCESS_SINGLE_EPOCH_DATA_START
-					}
-					return
-				}
+				logger.Warn("🔍 [FORK-DIAG-ONLY] Block #%d: local hash=%s ≠ existing hash=%s. "+
+					"Guard DISABLED — NOT adopting existing block. "+
+					"Local: leader=%s ts=%d GEI=%d",
+					*currentBlockNumber,
+					localHash.Hex()[:18]+"...", existingHash.Hex()[:18]+"...",
+					newBlock.Header().LeaderAddress().Hex(),
+					newBlock.Header().TimeStamp(),
+					newBlock.Header().GlobalExecIndex(),
+				)
 			}
 		}
 	}

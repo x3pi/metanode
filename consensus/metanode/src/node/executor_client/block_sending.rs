@@ -89,6 +89,13 @@ impl ExecutorClient {
                 batch_id, total_tx_before, subdag.blocks.len(), block_details.join(", "));
         }
 
+        // Determine expected fragments early so we can return it if we skip
+        let expected_fragments = if total_tx_before > MAX_TXS_PER_GO_BLOCK {
+            total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK) as u64
+        } else {
+            1
+        };
+
         // REPLAY PROTECTION: Discard blocks that are already processed
         // This is critical when Consensus replays old commits on restart
         {
@@ -101,7 +108,7 @@ impl ExecutorClient {
                         global_exec_index, *next_expected
                     );
                 }
-                return Ok(1);
+                return Ok(expected_fragments);
             }
         }
 
@@ -114,7 +121,7 @@ impl ExecutorClient {
                     "🔄 [DEDUP] Skipping already-sent block from dual-stream: global_exec_index={}",
                     global_exec_index
                 );
-                return Ok(1); // Already sent, skip
+                return Ok(expected_fragments); // Already sent, skip but return correct fragments
             }
             // Don't insert yet - insert only after successful send
         }
@@ -182,22 +189,34 @@ impl ExecutorClient {
                 let mut empty_bytes = Vec::new();
                 epoch_data.encode(&mut empty_bytes)?;
 
-                self.buffer_and_flush(
-                    global_exec_index,
-                    empty_bytes,
-                    epoch,
-                    subdag.commit_ref.index,
-                    0,
-                )
-                .await?;
-                return Ok(1);
+                // If a commit is completely deduplicated, we STILL need to emit 
+                // the deterministic number of fragments (most will be empty).
+                let actual_fragments = total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK);
+                
+                for frag_idx in 0..actual_fragments {
+                    let fragment_gei = global_exec_index + frag_idx as u64;
+                    // Send an empty block for each expected fragment GEI
+                    self.buffer_and_flush(
+                        fragment_gei,
+                        empty_bytes.clone(),
+                        epoch,
+                        subdag.commit_ref.index,
+                        0,
+                    )
+                    .await?;
+                }
+                return Ok(actual_fragments as u64);
             }
 
-            // Recalculate fragments after dedup
-            let actual_fragments = total_after_dedup.div_ceil(MAX_TXS_PER_GO_BLOCK);
+            // CRITICAL FORK-SAFETY v5: Recalculate fragments using total_tx_before 
+            // (from the consensus deterministic subdag) instead of total_after_dedup.
+            // If we use total_after_dedup, a restarted node (empty tx_recycler) will 
+            // fragment differently than a continuous node (populated tx_recycler), 
+            // causing GEI divergence!
+            let actual_fragments = total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK);
 
             for frag_idx in 0..actual_fragments {
-                let start = frag_idx * MAX_TXS_PER_GO_BLOCK;
+                let start = std::cmp::min(frag_idx * MAX_TXS_PER_GO_BLOCK, total_after_dedup);
                 let end = std::cmp::min(start + MAX_TXS_PER_GO_BLOCK, total_after_dedup);
                 let fragment_txs: Vec<TransactionExe> = all_proto_txs[start..end].to_vec();
                 let fragment_gei = global_exec_index + frag_idx as u64;
@@ -214,21 +233,27 @@ impl ExecutorClient {
                     } else {
                         let mut next_bn = self.next_block_number.lock().await;
                         let mut last_ep = self.last_processed_epoch.lock().await;
-                        // Fragment with txs > 0 ALWAYS consumes a block number
-                        if epoch > *last_ep {
+                        
+                        let is_epoch_boundary = epoch > *last_ep;
+                        if is_epoch_boundary {
                             *last_ep = epoch;
                         }
-                        // Since fragment total_after_dedup > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
-                        // unless somehow after dedup all fragments have 0 txs, which is handled above.
-                        // So we always allocate a block number.
-                        let bn = *next_bn;
-                        *next_bn += 1;
-                        bn
+
+                        // We always increment block number for fragments, unless the fragment is 
+                        // entirely empty AND it's not an epoch boundary.
+                        // (Empty fragments can happen if total_after_dedup < total_tx_before)
+                        if fragment_txs.is_empty() && !is_epoch_boundary {
+                            0
+                        } else {
+                            let bn = *next_bn;
+                            *next_bn += 1;
+                            bn
+                        }
                     }
                 };
 
                 let epoch_data = ExecutableBlock {
-                    transactions: fragment_txs,
+                    transactions: fragment_txs.clone(),
                     global_exec_index: fragment_gei,
                     commit_index: subdag.commit_ref.index,
                     epoch,
@@ -297,7 +322,7 @@ impl ExecutorClient {
                 if epoch > *last_ep {
                     *last_ep = epoch;
                 }
-                if total_after_dedup > 0 || force_block_creation {
+                if total_tx_before > 0 || force_block_creation {
                     let bn = *next_bn;
                     *next_bn += 1;
                     trace!("📊 [BLOCK-NUM] Generating new block_number={} for GEI={}", bn, global_exec_index);

@@ -313,12 +313,33 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	mappingBatch = blockchain.GetBlockChainInstance().GetMappingBatch()
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY FIX: Synchronous commit for Rust-driven execution path.
+	//
+	// ROOT CAUSE: When commit was async (DoneChan=nil), Block N+1's
+	// ProcessTransactions could race with Block N's commitWorker:
+	//   - commitWorker: CommitPipeline() → PersistAsync() (modifies trie)
+	//   - processSingleEpochData: ProcessTransactions → AccountState() (reads trie)
+	// Different nodes complete PersistAsync at different times relative to
+	// the next block's read → different IntermediateRoot() → different
+	// AccountStatesRoot → different block hash → FORK.
+	//
+	// FIX: When called from Rust (globalExecIndex > 0), use DoneChan to block
+	// until commitWorker finishes. This serializes execution:
+	//   Block N committed → Block N+1 starts processing.
+	// The legacy GenerateBlock path (globalExecIndex == 0) remains async.
+	// ═══════════════════════════════════════════════════════════════════════════
+	var doneChan chan struct{}
+	if globalExecIndex > 0 {
+		doneChan = make(chan struct{}, 1)
+	}
+
 	job := CommitJob{
 		Block:                     bl,
 		ProcessResults:            &processResults,
 		Receipts:                  receipts,
 		TxDB:                      txDB,
-		DoneChan:                  nil, // ASYNC: No blocking — disk persistence runs concurrently
+		DoneChan:                  doneChan,
 		MappingWg:                 &mappingWg,
 		TrieBatchSnapshot:         trieBatchSnapshot,
 		AccountBatch:              accountBatch,
@@ -330,17 +351,21 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		GlobalExecIndex:           globalExecIndex,
 	}
 
-	// ASYNC COMMIT: Send job to commitWorker without blocking.
-	// The commitWorker handles disk persistence (SaveLastBlock, PrepareBackup, Broadcast)
-	// CONCURRENTLY while the execution loop processes the next block.
-	// This eliminates the 32-second gap caused by waiting for large block commits.
+	// Send job to commitWorker.
 	select {
 	case bp.commitChannel <- job:
-		// Sent successfully — commitWorker will process async
+		// Sent successfully
 	case <-time.After(5 * time.Second):
 		logger.Error("❌ [CRITICAL] commitChannel full for more than 5 seconds! Block #%d could not be sent. Check commitWorker.",
 			currentBlockNumber)
 		bp.commitChannel <- job // Fallback: blocking send
+	}
+
+	// FORK-SAFETY: Wait for commit to complete before returning.
+	// This ensures the trie is fully updated before the next block reads it.
+	if doneChan != nil {
+		<-doneChan
+		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
 
 	// NO MORE BLOCKING: execution loop immediately continues to next block

@@ -308,7 +308,15 @@ pub async fn dispatch_commit(
                     "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit GEI={}.",
                     commit_index, go_current_gei, global_exec_index
                 );
-                return Ok(1);
+                // CRITICAL FORK-SAFETY v5: Do NOT return Ok(1) blindly!
+                // If a commit had 50001 TXs, it consumed 2 GEIs. If we skip it and return 1, 
+                // this node will permanently lose 1 GEI from its cumulative_fragment_offset!
+                let expected_fragments = if total_transactions > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {
+                    total_transactions.div_ceil(crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK) as u64
+                } else {
+                    1
+                };
+                return Ok(expected_fragments);
             } else {
                 info!(
                     "⚠️ [GEI GUARD] Go GEI={} >= commit GEI={}, but commit #{} \
