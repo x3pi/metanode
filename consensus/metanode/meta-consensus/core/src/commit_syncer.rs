@@ -306,7 +306,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 tokio::spawn(async move {
                     tracing::info!("🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...");
                     if let Err(e) = core_dispatcher.new_block(consensus_types::block::Round::MAX, true).await {
-                        tracing::warn!("Failed to kick leader timeout task: {:?}", e);
+                        tracing::warn!("Failed to kick Core thread to resume proposals: {:?}", e);
                     }
                 });
             }

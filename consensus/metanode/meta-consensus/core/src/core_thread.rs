@@ -255,15 +255,29 @@ impl ChannelCoreThreadDispatcher {
 
         let join_handle = spawn_logged_monitored_task!(
             async move {
-                if let Err(err) = core_thread.run().await {
-                    if matches!(err, ConsensusError::Shutdown) {
-                        tracing::warn!(
-                            "🔴 [CORE THREAD] Exiting due to Shutdown. \
-                             This may be intentional (epoch transition / stop()) or caused by \
-                             CommitFinalizer crash. Check for '⚠️ [COMMIT-FINALIZER]' warnings above."
-                        );
-                    } else {
-                        panic!("Fatal error occurred: {err}");
+                use futures::FutureExt;
+                let res = std::panic::AssertUnwindSafe(core_thread.run()).catch_unwind().await;
+                match res {
+                    Ok(inner_res) => {
+                        std::fs::write("/tmp/core_thread_debug.log", format!("inner_res: {:?}\n", inner_res)).ok();
+                        match inner_res {
+                            Ok(()) => {
+                                println!("🟢 [CORE THREAD] Exiting gracefully with Ok(())!");
+                            }
+                            Err(err) => {
+                                println!("🔴 [CORE THREAD] Exiting with error: {:?}", err);
+                                if matches!(err, ConsensusError::Shutdown) {
+                                    tracing::warn!("🔴 [CORE THREAD] Exiting due to Shutdown.");
+                                } else {
+                                    panic!("Fatal error occurred: {err}");
+                                }
+                            }
+                        }
+                    }
+                    Err(panic_err) => {
+                        std::fs::write("/tmp/core_thread_debug.log", format!("PANIC!: {:?}\n", panic_err)).ok();
+                        println!("🔴 [CORE THREAD] PANIC CAUGHT: {:?}", panic_err);
+                        std::panic::resume_unwind(panic_err);
                     }
                 }
             },
