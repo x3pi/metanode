@@ -96,9 +96,9 @@ func BatchSubmit(
 	embassyPubKey []byte,
 	opts *tx_models.TxOptions,
 	batchIdHex string,
-) (common.Hash, error) {
+) (common.Hash, bool, error) {
 	if len(events) == 0 {
-		return common.Hash{}, fmt.Errorf("BatchSubmit: events list is empty")
+		return common.Hash{}, false, fmt.Errorf("BatchSubmit: events list is empty")
 	}
 
 	// Chuyển sang Solidity tuple format
@@ -110,12 +110,12 @@ func BatchSubmit(
 	// ABI pack batchSubmit(EmbassyEvent[] events, bytes embassyPubKey)
 	input, err := cfg.CrossChainAbi.Pack("batchSubmit", solEvents, embassyPubKey)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("BatchSubmit: pack failed: %w", err)
+		return common.Hash{}, false, fmt.Errorf("BatchSubmit: pack failed: %w", err)
 	}
 
-	txHash, nonce, err := tx_helper.SendTransactionFromWallet("batchSubmit", cli, cfg, contract, from, input, opts)
+	txHash, nonce, isQuorum, err := tx_helper.SendTransactionFromWallet("batchSubmit", cli, cfg, contract, from, input, opts)
 	if err != nil {
-		return txHash, fmt.Errorf("BatchSubmit: send failed: %w", err)
+		return txHash, false, fmt.Errorf("BatchSubmit: send failed: %w", err)
 	}
 
 	var firstMsgId, lastMsgId string
@@ -129,8 +129,8 @@ func BatchSubmit(
 		}
 	}
 
-	logger.Info("📤 BatchSubmit [Batch %s] sent to node %s: from=%s, nonce=%d, events=%d, txHash=%s, firstMsgId=%s, lastMsgId=%s", batchIdHex, cli.GetNodeAddr(), from.Hex(), nonce, len(events), txHash.Hex(), firstMsgId, lastMsgId)
-	return txHash, nil
+	logger.Info("📤 BatchSubmit [Batch %s] sent to node %s: from=%s, nonce=%d, events=%d, txHash=%s, firstMsgId=%s, lastMsgId=%s, isQuorum=%v", batchIdHex, cli.GetNodeAddr(), from.Hex(), nonce, len(events), txHash.Hex(), firstMsgId, lastMsgId, isQuorum)
+	return txHash, isQuorum, nil
 }
 
 // CrossChainPacket matches the Solidity struct CrossChainGateway.CrossChainPacket

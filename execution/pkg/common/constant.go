@@ -29,6 +29,10 @@ const (
 	//Wallet Select
 	ACCOUNT_SETTING_ADDRESS_SELECT = "account"
 
+	// Cross-Chain Quorum Code
+	CROSS_CHAIN_QUORUM_REACHED_CODE int64 = 201
+	TX_SUCCESS_CODE                 int64 = 200
+
 	StartFileUpload   = "START_FILE_UPLOAD"
 	FileChunkTransfer = "FILE_CHUNK_TRANSFER"
 	EndFileUploadCmd  = "END_FILE_UPLOAD"
@@ -38,14 +42,6 @@ const (
 
 	// === HẰNG SỐ MỚI ===
 	RequestDirectory = "REQUEST_DIRECTORY"
-
-	// === CROSS-CHAIN TX TYPES ===
-	// Dùng trong proto.Type (field 16) để phân biệt giai đoạn xử lý batchSubmit.
-	// 0 = TX bình thường (standard)
-	// 100 = CC_SIG_ACK: chưa đủ 2/3 embassy vote, master chỉ tăng nonce
-	// 101 = CC_EXECUTE: đủ 2/3 vote, master sẽ execute CrossChainHandler
-	TX_TYPE_CC_SIG_ACK uint64 = 100
-	TX_TYPE_CC_EXECUTE uint64 = 101
 )
 
 var (

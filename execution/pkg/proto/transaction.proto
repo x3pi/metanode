@@ -204,3 +204,10 @@ message GetTransactionByHashResponse {
   TransactionEntry Transaction = 1; // Transaction entry (null nếu không tìm thấy)
   string Error = 2;               // Error message nếu có lỗi
 }
+
+message TransactionSuccess {
+  bytes Hash = 1;
+  int64 Code = 2;
+  string Message = 3;
+  bytes Output = 4;
+}

@@ -537,9 +537,11 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 		needsVirtualExecution = false
 	}
 
+	var successCode int64 = mt_common.TX_SUCCESS_CODE
+
 	if needsVirtualExecution {
 		startVirtual := time.Now()
-		updatedTx, err, output := tp.ProcessSingleTransactionVirtual(tx)
+		updatedTx, err, output, code := tp.ProcessSingleTransactionVirtual(tx)
 		_ = time.Since(startVirtual)
 		if err != nil {
 			logger.Error("ProcessSingleTransactionVirtual failed: ", err)
@@ -547,16 +549,17 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 			return err
 		}
 		tx = updatedTx
+		successCode = code
 	}
-	code, err := tp.AddTransactionToPool(tx)
+	poolCode, err := tp.AddTransactionToPool(tx)
 	if err != nil {
 		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
-		tp.sendTransactionError(conn, tx.Hash(), code, err.Error(), nil, msgID)
+		tp.sendTransactionError(conn, tx.Hash(), poolCode, err.Error(), nil, msgID)
 		return err
 	}
 
-	// Gửi phản hồi thành công với txHash, code 0 và msgID
-	tp.sendTransactionResult(conn, tx.Hash(), msgID)
+	// Gửi phản hồi thành công với txHash, code 201/200 và msgID
+	tp.sendTransactionResult(conn, tx.Hash(), successCode, msgID)
 	return nil
 }
 func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) ([]byte, error) {
@@ -564,7 +567,8 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) 
 	fileAbi, _ := file_handler.GetFileAbi()
 	name, _ := fileAbi.ParseMethodName(tx)
 	if !(tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(tp.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk") {
-		updatedTx, err, output := tp.ProcessSingleTransactionVirtual(tx)
+		updatedTx, err, out, _ := tp.ProcessSingleTransactionVirtual(tx)
+		output = out
 		if err != nil {
 			logger.Error("ProcessSingleTransactionVirtual failed: ", err)
 			return output, err

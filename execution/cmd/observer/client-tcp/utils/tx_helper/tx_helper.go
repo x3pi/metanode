@@ -172,15 +172,15 @@ func SendTransactionFromWallet(
 	from common.Address,
 	input []byte,
 	opts *tx_models.TxOptions,
-) (common.Hash, uint64, error) {
+) (common.Hash, uint64, bool, error) {
 	if cli == nil || cfg == nil {
-		return common.Hash{}, 0, fmt.Errorf("client and config are required")
+		return common.Hash{}, 0, false, fmt.Errorf("client and config are required")
 	}
 	if (contract == common.Address{}) {
-		return common.Hash{}, 0, fmt.Errorf("contract address is required")
+		return common.Hash{}, 0, false, fmt.Errorf("contract address is required")
 	}
 	if (from == common.Address{}) {
-		return common.Hash{}, 0, fmt.Errorf("from address is required")
+		return common.Hash{}, 0, false, fmt.Errorf("from address is required")
 	}
 
 	normalized := NormalizeTxOptions(opts)
@@ -201,10 +201,10 @@ func SendTransactionFromWallet(
 	callData := mt_transaction.NewCallData(input)
 	payload, err := callData.Marshal()
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("failed to marshal calldata for %s: %w", action, err)
+		return common.Hash{}, 0, false, fmt.Errorf("failed to marshal calldata for %s: %w", action, err)
 	}
 
-	txHash, nonce, err := cli.SendTransactionFromWallet(
+	txHash, nonce, isQuorum, err := cli.SendTransactionFromWallet(
 		from,
 		contract,
 		amount,
@@ -215,9 +215,9 @@ func SendTransactionFromWallet(
 		maxTimeUse,
 	)
 	if err != nil {
-		return txHash, nonce, fmt.Errorf("failed to send %s transaction (fire-and-forget): %w", action, err)
+		return txHash, nonce, false, fmt.Errorf("failed to send %s transaction (fire-and-forget): %w", action, err)
 	}
-	return txHash, nonce, nil
+	return txHash, nonce, isQuorum, nil
 }
 
 func ChooseOrDefault(value uint64, fallback uint64) uint64 {

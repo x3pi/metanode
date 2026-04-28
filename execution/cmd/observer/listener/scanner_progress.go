@@ -13,9 +13,9 @@ import (
 // Progress updater — cập nhật lastBlock lên config SMC sau khi batch gửi xong
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, lastBlock uint64) {
+func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, lastBlock uint64, localBlock uint64, isQuorum bool) {
 	select {
-	case s.progressCh <- scanProgressUpdate{chainId: chainId, lastBlock: lastBlock}:
+	case s.progressCh <- scanProgressUpdate{chainId: chainId, lastBlock: lastBlock, localBlock: localBlock, isQuorum: isQuorum}:
 	default:
 		logger.Warn("⚠️  [Scanner] progressCh full, dropping update chainId=%d block=%d", chainId, lastBlock)
 	}
@@ -25,6 +25,7 @@ func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, lastBlock uint
 func (s *CrossChainScanner) runProgressUpdater() {
 	logger.Info("🔄 [Scanner] Progress updater started")
 	pending := make(map[uint64]uint64) // chainId → lastBlock cao nhất
+	pendingQuorums := make(map[uint64]bool)  // chainId → có phải quorum không
 	var maxLocalBlock uint64           // local block cao nhất (nhận từ receipt watcher)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -48,18 +49,21 @@ func (s *CrossChainScanner) runProgressUpdater() {
 		if len(pending) == 0 {
 			logger.Info("[Scanner] Only localBlock=%d to update (no remote scan progress)", maxLocalBlock)
 		}
-		// Gom toàn bộ map → 2 slice [chainIds, lastBlocks]
+		// Gom toàn bộ map → 3 slice [chainIds, lastBlocks, isQuorums]
 		chainIds := make([]uint64, 0, len(pending))
 		lastBlocks := make([]uint64, 0, len(pending))
+		isQuorums := make([]bool, 0, len(pending))
 		for cid, blk := range pending {
 			chainIds = append(chainIds, cid)
 			lastBlocks = append(lastBlocks, blk)
+			isQuorums = append(isQuorums, pendingQuorums[cid])
 		}
 
 		if len(chainIds) > 0 || maxLocalBlock > 0 {
-			s.updateScanProgressBatch(chainIds, lastBlocks, maxLocalBlock)
+			s.updateScanProgressBatch(chainIds, lastBlocks, isQuorums, maxLocalBlock)
 		}
 		pending = make(map[uint64]uint64)
+		pendingQuorums = make(map[uint64]bool)
 		maxLocalBlock = 0
 	}
 	for {
@@ -67,12 +71,14 @@ func (s *CrossChainScanner) runProgressUpdater() {
 		case upd := <-s.progressCh:
 			if upd.lastBlock > pending[upd.chainId] {
 				pending[upd.chainId] = upd.lastBlock
+				pendingQuorums[upd.chainId] = upd.isQuorum
+			} else if upd.lastBlock == pending[upd.chainId] && upd.isQuorum {
+				pendingQuorums[upd.chainId] = true
 			}
-		case localBlock := <-s.localBlockCh:
-			// Nhận block number từ receipt watcher (batchSubmit TX đã confirm)
-			if localBlock > maxLocalBlock {
-				maxLocalBlock = localBlock
-				logger.Info("[Scanner] 📌 Local block updated from receipt: %d", localBlock)
+			
+			if upd.localBlock > maxLocalBlock {
+				maxLocalBlock = upd.localBlock
+				logger.Info("[Scanner] 📌 Local block updated from progress: %d", upd.localBlock)
 			}
 		case <-ticker.C:
 			flush()
@@ -80,10 +86,10 @@ func (s *CrossChainScanner) runProgressUpdater() {
 	}
 }
 
-// updateScanProgressBatch gửi 1 TX batch lên config SMC với toàn bộ chainIds + lastBlocks.
+// updateScanProgressBatch gửi 1 TX batch lên config SMC với toàn bộ chainIds + lastBlocks + isQuorums.
 // Dùng SendTransactionFromWallet với from=embassyAddr (cfg.Address()) → embassy ký TX.
 // on-chain msg.sender = embassy address đã đăng ký → getScanProgress query sẽ trả đúng block.
-func (s *CrossChainScanner) updateScanProgressBatch(chainIds []uint64, lastBlocks []uint64, localBlockNumber uint64) {
+func (s *CrossChainScanner) updateScanProgressBatch(chainIds []uint64, lastBlocks []uint64, isQuorums []bool, localBlockNumber uint64) {
 	configContract := common.HexToAddress(s.cfg.ConfigContract_)
 	if configContract == (common.Address{}) {
 		logger.Warn("[Scanner] config_contract not set, skipping scan progress update")
@@ -102,12 +108,13 @@ func (s *CrossChainScanner) updateScanProgressBatch(chainIds []uint64, lastBlock
 
 	localBlockBig := new(big.Int).SetUint64(localBlockNumber)
 
-	// 1 lần Pack với toàn bộ danh sách chains + blocks + localBlockNumber
+	// 1 lần Pack với toàn bộ danh sách chains + blocks + localBlockNumber + isQuorums
 	calldata, err := s.cfg.ConfigAbi.Pack(
 		"batchUpdateScanProgress",
 		destIds,
 		blksBig,
 		localBlockBig,
+		isQuorums,
 	)
 	if err != nil {
 		logger.Warn("[Scanner] pack batchUpdateScanProgress failed: %v", err)
@@ -143,8 +150,8 @@ func (s *CrossChainScanner) updateScanProgressBatch(chainIds []uint64, lastBlock
 // loadInitialScanProgress đọc block đã scan từ config contract cho embassy hiện tại.
 // Trả về map[nationId]lastBlock để scanner dùng làm điểm bắt đầu khi resume.
 // Nếu config contract chưa set hoặc lỗi → trả về map rỗng (scan từ block 0).
-func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]uint64 {
-	result := make(map[uint64]uint64)
+func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState {
+	result := make(map[uint64]ScanResumeState)
 
 	configContract := common.HexToAddress(s.cfg.ConfigContract_)
 	if configContract == (common.Address{}) {
@@ -178,73 +185,43 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]uint64 {
 	logger.Info("📋 [Scanner] Embassy config ScanMode = %d", scanMode)
 
 	for _, rc := range s.cfg.RemoteChains {
-		logger.Info("CCCCCCCCCCCCCCCCCCCCCCCCCCC %v, rc %v", s.cfg.RemoteChains, rc)
 		nationIdBig := new(big.Int).SetUint64(rc.NationId)
 
-		calldata, err := s.cfg.ConfigAbi.Pack("getScanProgress", embassyAddr, nationIdBig)
-		if err != nil {
-			logger.Warn("⚠️  [Scanner] pack getScanProgress failed for nationId=%d: %v", rc.NationId, err)
-			continue
-		}
-
-		receipt, err := tx_helper.SendReadTransaction(
-			"getScanProgress",
-			defCli,
-			s.cfg,
-			configContract,
-			embassyAddr,
-			calldata,
-			nil,
-		)
-		if err != nil {
-			logger.Warn("⚠️  [Scanner] getScanProgress read failed for nationId=%d: %v", rc.NationId, err)
-			continue
-		}
-
-		returnData := receipt.Return()
-		if len(returnData) == 0 {
-			logger.Info("📋 [Scanner] getScanProgress nationId=%d → 0 (not set)", rc.NationId)
-			continue
-		}
-
-		method, ok := s.cfg.ConfigAbi.Methods["getScanProgress"]
-		if !ok {
-			continue
-		}
-		vals, err := method.Outputs.Unpack(returnData)
-		if err != nil || len(vals) == 0 {
-			continue
-		}
-
-		lastBlock, ok := vals[0].(*big.Int)
-		if !ok || lastBlock == nil {
-			continue
-		}
-
-		blk := lastBlock.Uint64()
-		if blk == 0 {
-			if scanMode == 2 {
-				remoteCli, _ := s.GetActiveRemoteClient(rc.NationId, 0)
-				if remoteCli != nil {
-					latestBlock, err := remoteCli.ChainGetBlockNumber()
-					if err == nil && latestBlock > 0 {
-						result[rc.NationId] = latestBlock
-						logger.Info("📋 [Scanner] Resume nationId=%d from latest block %d (scanMode=2)", rc.NationId, latestBlock)
-						continue
-					} else {
-						logger.Warn("⚠️  [Scanner] Cannot fetch latest block for nationId=%d: %v", rc.NationId, err)
-					}
+		if scanMode == 1 {
+			remoteCli, _ := s.GetActiveRemoteClient(rc.NationId, 0)
+			if remoteCli != nil {
+				latestBlock, err := remoteCli.ChainGetBlockNumber()
+				if err == nil && latestBlock > 0 {
+					result[rc.NationId] = ScanResumeState{RemoteBlock: latestBlock, LocalBlock: 0, NeedCheckExecuted: false}
+					logger.Info("📋 [Scanner] Resume nationId=%d from latest block %d (scanMode=1)", rc.NationId, latestBlock)
+					continue
+				} else {
+					logger.Warn("⚠️  [Scanner] Cannot fetch latest block for nationId=%d: %v", rc.NationId, err)
 				}
-			} else if scanMode == 1 {
-				// Fetch max block from all embassies
-				if maxCalldata, err := s.cfg.ConfigAbi.Pack("getScanBlockRange", nationIdBig); err == nil {
-					if maxReceipt, err := tx_helper.SendReadTransaction("getScanBlockRange", defCli, s.cfg, configContract, embassyAddr, maxCalldata, nil); err == nil {
-						if len(maxReceipt.Return()) > 0 {
-							if method, ok := s.cfg.ConfigAbi.Methods["getScanBlockRange"]; ok {
-								if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 1 {
-									if maxBlk, ok := vals[1].(*big.Int); ok && maxBlk != nil && maxBlk.Uint64() > 0 {
-										result[rc.NationId] = maxBlk.Uint64()
-										logger.Info("📋 [Scanner] Resume nationId=%d from MAX block %d (scanMode=1)", rc.NationId, maxBlk.Uint64())
+			}
+		} else if scanMode == 0 {
+			// Fetch Quorum block (Block Chính) computed dynamically from contract
+			if maxCalldata, err := s.cfg.ConfigAbi.Pack("getNetworkQuorumBlock", nationIdBig); err == nil {
+				if maxReceipt, err := tx_helper.SendReadTransaction("getNetworkQuorumBlock", defCli, s.cfg, configContract, embassyAddr, maxCalldata, nil); err == nil {
+					if len(maxReceipt.Return()) > 0 {
+						if method, ok := s.cfg.ConfigAbi.Methods["getNetworkQuorumBlock"]; ok {
+							if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 0 {
+								var progData struct {
+									RemoteBlock *big.Int `abi:"remoteBlock"`
+									LocalBlock  *big.Int `abi:"localBlock"`
+								}
+								if err := s.cfg.ConfigAbi.UnpackIntoInterface(&progData, "getNetworkQuorumBlock", maxReceipt.Return()); err == nil {
+									rBlk := uint64(0)
+									if progData.RemoteBlock != nil {
+										rBlk = progData.RemoteBlock.Uint64()
+									}
+									lBlk := uint64(0)
+									if progData.LocalBlock != nil {
+										lBlk = progData.LocalBlock.Uint64()
+									}
+									if rBlk > 0 {
+										result[rc.NationId] = ScanResumeState{RemoteBlock: rBlk, LocalBlock: lBlk, NeedCheckExecuted: true}
+										logger.Info("📋 [Scanner] Resume nationId=%d from Single Network Quorum Block %d (localBlock %d) (scanMode=0)", rc.NationId, rBlk, lBlk)
 										continue
 									}
 								}
@@ -253,13 +230,29 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]uint64 {
 					}
 				}
 			}
-			continue
 		}
-		// +1 vì blk là block đã scan xong → tiếp theo là blk+1
-		resumeFrom := blk + 1
-		result[rc.NationId] = resumeFrom
-		logger.Info("📋 [Scanner] Resume nationId=%d from block %d (lastScanned=%d, from config contract)",
-			rc.NationId, resumeFrom, blk)
+	}
+
+	if scanMode != 0 {
+		logger.Info("🔄 [Scanner] Resetting scanMode from %d to 0 for embassy %s", scanMode, embassyAddr.Hex())
+		if resetCalldata, err := s.cfg.ConfigAbi.Pack("setEmbassyScanMode", embassyAddr, uint8(0)); err == nil {
+			_, errTx := tx_helper.SendTransaction(
+				"setEmbassyScanMode",
+				defCli,
+				s.cfg,
+				configContract,
+				embassyAddr,
+				resetCalldata,
+				nil,
+			)
+			if errTx != nil {
+				logger.Warn("⚠️  [Scanner] Failed to reset scanMode to 0: %v", errTx)
+			} else {
+				logger.Info("✅ [Scanner] Successfully reset scanMode to 0")
+			}
+		} else {
+			logger.Warn("⚠️  [Scanner] Failed to pack setEmbassyScanMode: %v", err)
+		}
 	}
 
 	return result

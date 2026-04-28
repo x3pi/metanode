@@ -32,12 +32,15 @@ pub(super) async fn setup_validator_consensus(
     // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
     // can fast-forward baseline and skip re-fetching old commits.
     // MUST use the epoch-relative CommitIndex, not the absolute GEI.
-    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > actual_epoch_base {
-        (node.last_global_exec_index.saturating_sub(actual_epoch_base)) as u32
-    } else {
-        0
-    };
-    
+    let go_replay_after =
+        if node.executor_commit_enabled && node.last_global_exec_index > actual_epoch_base {
+            (node
+                .last_global_exec_index
+                .saturating_sub(actual_epoch_base)) as u32
+        } else {
+            0
+        };
+
     // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
     // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (commit_consumer, commit_receiver, mut block_receiver) =
@@ -68,19 +71,19 @@ pub(super) async fn setup_validator_consensus(
         None
     };
 
-
-
     // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
     // GEI = epoch_base_index + commit_index + fragment_offset
     // So commit_index = GEI - epoch_base_index - fragment_offset
     // For simplicity at startup, we use the node's last_global_exec_index + 1 as starting point.
     // The AUTO-JUMP logic will adjust if there's a mismatch.
-    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    let next_expected_commit_index = (node
+        .last_global_exec_index
+        .saturating_sub(actual_epoch_base)
+        + 1) as u32;
     info!(
         "📊 [COMMIT PROCESSOR INIT] next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
         next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
     );
-
     let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
 
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
@@ -102,18 +105,15 @@ pub(super) async fn setup_validator_consensus(
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
-
+    // 1000
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
     if let Some(c) = exec_client_proc {
         processor = processor.with_executor_client(c.clone());
         let peer_addrs = config.peer_rpc_addresses.clone();
         tokio::spawn(async move {
-            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
-                c,
-                delivery_rx,
-                peer_addrs,
-            );
+            let manager =
+                crate::node::block_delivery::BlockDeliveryManager::new(c, delivery_rx, peer_addrs);
             manager.run().await;
         });
     }
@@ -217,7 +217,10 @@ pub(super) async fn setup_synconly_sync(
     };
 
     // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
-    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    let next_expected_commit_index = (node
+        .last_global_exec_index
+        .saturating_sub(actual_epoch_base)
+        + 1) as u32;
     info!(
         "📊 [COMMIT PROCESSOR INIT] SyncOnly: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
         next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
@@ -249,11 +252,8 @@ pub(super) async fn setup_synconly_sync(
         processor = processor.with_executor_client(c.clone());
         let peer_addrs = config.peer_rpc_addresses.clone();
         tokio::spawn(async move {
-            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
-                c,
-                delivery_rx,
-                peer_addrs,
-            );
+            let manager =
+                crate::node::block_delivery::BlockDeliveryManager::new(c, delivery_rx, peer_addrs);
             manager.run().await;
         });
     }

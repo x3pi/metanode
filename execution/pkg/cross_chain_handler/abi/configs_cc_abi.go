@@ -359,6 +359,11 @@ const CrossChainConfigABI = `[
         "internalType": "uint256",
         "name": "index",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "scanMode",
+        "type": "uint8"
       }
     ],
     "stateMutability": "view",
@@ -451,6 +456,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy[]",
@@ -521,6 +531,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy",
@@ -567,6 +582,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy",

@@ -28,14 +28,15 @@ func (s *CrossChainScanner) runSmartWatcher() {
 	for range ticker.C {
 		s.txHashToWallet.Range(func(key, val any) bool {
 			txHash := key.(common.Hash)
-			walletAddr := val.(common.Address)
+			trackedTx := val.(TrackedTx)
 
 			if _, already := tracking.LoadOrStore(txHash, struct{}{}); already {
 				return true
 			}
 
 			sem <- struct{}{}
-			go func(txHash common.Hash, walletAddr common.Address) {
+			go func(txHash common.Hash, tracked TrackedTx) {
+				walletAddr := tracked.Wallet
 				defer func() {
 					<-sem
 					tracking.Delete(txHash)
@@ -77,15 +78,13 @@ func (s *CrossChainScanner) runSmartWatcher() {
 						s.walletPool.MarkReady(walletAddr)
 						s.txHashToWallet.Delete(txHash)
 
-						// Cập nhật Block cao nhất đã chốt cho embassy
+						// Lấy local block từ receipt
 						blockNumHex := resp.Receipt.GetBlockNumber()
 						if blockNumHex != "" {
 							var bn uint64
 							if _, scanErr := fmt.Sscanf(blockNumHex, "0x%x", &bn); scanErr == nil && bn > 0 {
-								select {
-								case s.localBlockCh <- bn:
-								default:
-								}
+								// LUÔN LUÔN cập nhật tiến độ và localBlock chung 1 channel
+								s.enqueueProgressUpdate(tracked.NationId, tracked.RemoteBlock, bn, tracked.IsQuorum)
 							}
 						}
 
@@ -93,11 +92,10 @@ func (s *CrossChainScanner) runSmartWatcher() {
 							txHash.Hex(), lastNodeIdx, resp.Receipt.Status, walletAddr.Hex())
 						return
 					}
-
 					// Nếu chưa có receipt hoặc lỗi kết nối cụm, chờ rồi thử lại
 					time.Sleep(pollInterval)
 				}
-			}(txHash, walletAddr)
+			}(txHash, trackedTx)
 			return true
 		})
 	}

@@ -747,17 +747,24 @@
 				"type": "uint256"
 			}
 		],
-		"name": "getScanBlockRange",
+		"name": "getNetworkQuorumBlock",
 		"outputs": [
 			{
-				"internalType": "uint256",
-				"name": "minBlock",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "maxBlock",
-				"type": "uint256"
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "remoteBlock",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "localBlock",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CrossChainConfigRegistry.ProgressData",
+				"name": "",
+				"type": "tuple"
 			}
 		],
 		"stateMutability": "view",

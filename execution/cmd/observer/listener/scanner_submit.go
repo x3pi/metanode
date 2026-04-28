@@ -34,12 +34,12 @@ func (s *CrossChainScanner) calculateBatchId(events []cross_chain_contract.Embas
 
 // submitBatch lấy ví từ WalletPool và gọi cross_chain_contract.BatchSubmit (fire-and-forget).
 // Caller lưu txHash → walletAddr vào txHashToWallet map để receiptWatcher gọi MarkReady.
-func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cross_chain_contract.EmbassyEventInput, forceIndex int) (common.Hash, int, error) {
+func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cross_chain_contract.EmbassyEventInput, forceIndex int, blockNum uint64) (common.Hash, int, bool, error) {
 	contractAddr := common.HexToAddress(s.cfg.CrossChainContract_)
 
 	batchIdByte, err := s.calculateBatchId(events)
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("calculateBatchId err: %w", err)
+		return common.Hash{}, 0, false, fmt.Errorf("calculateBatchId err: %w", err)
 	}
 	batchIdHex := fmt.Sprintf("%x", batchIdByte[:4])
 
@@ -61,18 +61,18 @@ func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cros
 	if nonceErr != nil {
 		// Node did not respond to GetNonce -> node is likely dead/unreachable
 		s.walletPool.MarkReady(wallet.Address())
-		return common.Hash{}, actualIndex, fmt.Errorf("failed to fetch nonce from Node[%d] (%s): %w. Node might be dead", actualIndex, selectedClient.GetNodeAddr(), nonceErr)
+		return common.Hash{}, actualIndex, false, fmt.Errorf("failed to fetch nonce from Node[%d] (%s): %w. Node might be dead", actualIndex, selectedClient.GetNodeAddr(), nonceErr)
 	}
 
 	if nodeNonce != expectedNonce {
 		// Node is lagging or hasn't updated its nonce yet!
 		s.walletPool.MarkReady(wallet.Address())
-		return common.Hash{}, actualIndex, fmt.Errorf("node %d (%s) is lagging for wallet %s: expected nonce >= %d, got %d", actualIndex, selectedClient.GetNodeAddr(), wallet.Address().Hex(), expectedNonce, nodeNonce)
+		return common.Hash{}, actualIndex, false, fmt.Errorf("node %d (%s) is lagging for wallet %s: expected nonce >= %d, got %d", actualIndex, selectedClient.GetNodeAddr(), wallet.Address().Hex(), expectedNonce, nodeNonce)
 	}
 
 	logger.Info("📡 [submitBatch] Gửi lên Node[%d] → %s (wallet: %s, checking nonce...)", actualIndex, selectedClient.GetNodeAddr(), wallet.Address().Hex()[:10])
 
-	txHash, err := cross_chain_contract.BatchSubmit(
+	txHash, isQuorum, err := cross_chain_contract.BatchSubmit(
 		selectedClient,
 		s.cfg,
 		contractAddr,
@@ -84,11 +84,11 @@ func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cros
 	)
 	if err != nil {
 		s.walletPool.MarkReady(wallet.Address())
-		return txHash, actualIndex, fmt.Errorf("submitBatch using client[%d]: %w", actualIndex, err)
+		return txHash, actualIndex, isQuorum, fmt.Errorf("submitBatch using client[%d]: %w", actualIndex, err)
 	}
 
 	// Khi BatchSubmit thành công, gán nonce + 1
 	wallet.ExpectedNonce = nodeNonce + 1
-	s.txHashToWallet.Store(txHash, wallet.Address())
-	return txHash, actualIndex, nil
+	s.txHashToWallet.Store(txHash, TrackedTx{Wallet: wallet.Address(), IsQuorum: isQuorum, TargetIndex: actualIndex, NationId: rc.NationId, RemoteBlock: blockNum})
+	return txHash, actualIndex, isQuorum, nil
 }

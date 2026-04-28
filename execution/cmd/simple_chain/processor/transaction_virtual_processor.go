@@ -29,16 +29,16 @@ import (
 // ProcessSingleTransactionVirtual
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte) {
+func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte, int64) {
 	if tx == nil {
-		return nil, fmt.Errorf("transaction cannot be nil"), nil
+		return nil, fmt.Errorf("transaction cannot be nil"), nil, mt_common.TX_SUCCESS_CODE
 	}
 	// tx.SetIsDebug(true)
 	logger.Info("_virtual_ %v", tx)
 	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
 		updatedTx := tx
 		updatedTx.AddRelatedAddress(tx.FromAddress())
-		return updatedTx, nil, nil
+		return updatedTx, nil, nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// ─── CROSS_CHAIN_CONTRACT_ADDRESS (0x1002) ───────────────────────────────
@@ -59,7 +59,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		}
 
 		// ── lockAndBridge / other: chỉ cần from+to ─────────────────────────
-		return updatedTx, nil, nil
+		return updatedTx, nil, nil, mt_common.TX_SUCCESS_CODE
 	}
 	ctx := context.Background()
 	blockTime := uint64(time.Now().Unix())
@@ -77,7 +77,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 	asDuration := time.Since(startAS)
 	logger.Info("[PERF-VIRTUAL] AccountState lookup: %v, hash: %v", asDuration, tx.Hash().Hex())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get sender account state: %w", err), nil
+		return nil, fmt.Errorf("failed to get sender account state: %w", err), nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// ─── 1. Nonce 0 Check ──────────────────────────────────────────────────
@@ -85,7 +85,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 	// If tx.GetNonce() > 0, it may be a valid transaction with a lagging local AccountState (due to async state sync on Sub Nodes),
 	// so we allow it to pass virtual validation and let the Master Node handle strict validation during execution.
 	if as.Nonce() == 0 && tx.GetNonce() == 0 && tx.ToAddress() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		return nil, fmt.Errorf("tx0: invalid or missing contract address"), nil
+		return nil, fmt.Errorf("tx0: invalid or missing contract address"), nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// ─── 2. Determine if EVM execution is needed ──────────────────────────
@@ -140,33 +140,33 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 				// Cố gắng parse revert message từ Return data (đã được encode bởi prepareReturnDataWithExceptionMessage)
 				msg, revertErr := RevertParser(hex.EncodeToString(exRs.Return()))
 				if revertErr == nil && msg != "" {
-					return nil, fmt.Errorf("%s", msg), exRs.Return()
+					return nil, fmt.Errorf("%s", msg), exRs.Return(), mt_common.TX_SUCCESS_CODE
 				}
 			}
 
 			if exRs.Exception() == pb.EXCEPTION_ERR_EXECUTION_REVERTED {
-				return nil, fmt.Errorf("transaction Revert: %v", exRs.Return()), exRs.Return()
+				return nil, fmt.Errorf("transaction Revert: %v", exRs.Return()), exRs.Return(), mt_common.TX_SUCCESS_CODE
 			} else {
 				txError := transaction.MapProtoExceptionToTransactionError(exRs.Exception())
 				if txError != nil {
 					if txError.Description == "none" {
 						logger.Error("[DEBUG VIRTUAL] Blocked unknown revert (EXCEPTION_NONE) from passing to consensus. hash=%s", tx.Hash().Hex())
-						return nil, fmt.Errorf("transaction revert (EXCEPTION_NONE)"), exRs.Return()
+						return nil, fmt.Errorf("transaction revert (EXCEPTION_NONE)"), exRs.Return(), mt_common.TX_SUCCESS_CODE
 					}
-					return nil, fmt.Errorf("transaction error: %s", txError.Description), exRs.Return()
+					return nil, fmt.Errorf("transaction error: %s", txError.Description), exRs.Return(), mt_common.TX_SUCCESS_CODE
 				} else {
-					return nil, fmt.Errorf("transaction error Exception: %d", exRs.Exception()), exRs.Return()
+					return nil, fmt.Errorf("transaction error Exception: %d", exRs.Exception()), exRs.Return(), mt_common.TX_SUCCESS_CODE
 				}
 			}
 		}
 
 		if err != nil {
 			logger.Error("[DEBUG VIRTUAL] Execute err: %v", err)
-			return nil, err, nil
+			return nil, err, nil, mt_common.TX_SUCCESS_CODE
 		}
 		if exRs == nil {
 			logger.Error("[DEBUG VIRTUAL] exRs IS NIL!")
-			return nil, fmt.Errorf("executeTransactionOffChain returned nil"), nil
+			return nil, fmt.Errorf("executeTransactionOffChain returned nil"), nil, mt_common.TX_SUCCESS_CODE
 		}
 
 		// Cập nhật RelatedAddresses
@@ -183,13 +183,13 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		updatedTx.SetReadOnly(!statusUpdate)
 
 		mvm.ClearMVMApi(mvmId)
-		return updatedTx, nil, exRs.Return()
+		return updatedTx, nil, exRs.Return(), mt_common.TX_SUCCESS_CODE
 	}
 
 	// ─── QUICK PATH: No EVM needed ──────────────────────────────────────────
 	tx.AddRelatedAddress(tx.FromAddress())
 	tx.AddRelatedAddress(tx.ToAddress())
-	return tx, nil, nil
+	return tx, nil, nil, mt_common.TX_SUCCESS_CODE
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,7 +215,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	updatedTx types.Transaction,
 	inputData []byte,
-) (types.Transaction, error, []byte) {
+) (types.Transaction, error, []byte, int64) {
 	sender := updatedTx.FromAddress()
 	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
 	acc := GetCCBatchVoteAccumulator()
@@ -227,24 +227,22 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			err := ccHandler.EnsureConfigLoaded(v.chainState, updatedTx)
 			if err != nil {
 				logger.Warn("[VIRTUAL CC batchSubmit] ❌ Gặp lỗi khi load config: %v", err)
-				return nil, fmt.Errorf("batchSubmit: failed to load config: %w", err), nil
+				return nil, fmt.Errorf("batchSubmit: failed to load config: %w", err), nil, mt_common.TX_SUCCESS_CODE
 			}
 		}
-
 		embassies = ccHandler.GetActiveEmbassyInfos()
-
 		// Sync embassy count vào accumulator
 		currentTotal := ccHandler.EmbassyCount()
 		if acc.GetTotalEmbassies() != currentTotal {
 			acc.SetTotalEmbassies(currentTotal)
 		}
 	} else {
-		return nil, fmt.Errorf("batchSubmit: cross chain handler is nil"), nil
+		return nil, fmt.Errorf("batchSubmit: cross chain handler is nil"), nil, mt_common.TX_SUCCESS_CODE
 	}
 	if len(embassies) == 0 {
 		// Config đã load nhưng không có embassy nào active → reject
 		logger.Warn("[VIRTUAL CC batchSubmit] ❌ No active embassies in config, reject TX from %s", sender.Hex())
-		return nil, fmt.Errorf("batchSubmit: no active embassy registered"), nil
+		return nil, fmt.Errorf("batchSubmit: no active embassy registered"), nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// ── 2. Verify nonce TX ────────────────────────────────────────────────
@@ -253,12 +251,12 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	txNonce := updatedTx.GetNonce()
 	as, err := v.chainState.GetAccountStateDB().AccountState(sender)
 	if err != nil {
-		return nil, fmt.Errorf("batchSubmit: cannot get sender account state: %w", err), nil
+		return nil, fmt.Errorf("batchSubmit: cannot get sender account state: %w", err), nil, mt_common.TX_SUCCESS_CODE
 	}
 	if txNonce != as.Nonce() {
 		logger.Warn("[VIRTUAL CC batchSubmit] ❌ Nonce mismatch: tx=%d, account=%d, sender=%s",
 			txNonce, as.Nonce(), sender.Hex())
-		return nil, fmt.Errorf("batchSubmit: invalid nonce tx=%d account=%d", txNonce, as.Nonce()), nil
+		return nil, fmt.Errorf("batchSubmit: invalid nonce tx=%d account=%d", txNonce, as.Nonce()), nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// ── 3. Extract BLS pubkey từ ABI unpack → verify trực tiếp ────────
@@ -267,15 +265,15 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	// Lookup pubkey trong embassy list → verify 1 lần duy nhất (O(1)).
 	batchMethod, methodOk := ccHandler.GetABI().Methods["batchSubmit"]
 	if !methodOk {
-		return nil, fmt.Errorf("batchSubmit: method not found in ABI"), nil
+		return nil, fmt.Errorf("batchSubmit: method not found in ABI"), nil, mt_common.TX_SUCCESS_CODE
 	}
 	batchArgs, unpackErr := batchMethod.Inputs.Unpack(inputData[4:])
 	if unpackErr != nil || len(batchArgs) < 2 {
-		return nil, fmt.Errorf("batchSubmit: ABI unpack failed (need 2 args): %v", unpackErr), nil
+		return nil, fmt.Errorf("batchSubmit: ABI unpack failed (need 2 args): %v", unpackErr), nil, mt_common.TX_SUCCESS_CODE
 	}
 	blsPubKeyBytes, pubKeyOk := batchArgs[1].([]byte)
 	if !pubKeyOk || len(blsPubKeyBytes) == 0 {
-		return nil, fmt.Errorf("batchSubmit: embassyPubKey arg invalid or empty"), nil
+		return nil, fmt.Errorf("batchSubmit: embassyPubKey arg invalid or empty"), nil, mt_common.TX_SUCCESS_CODE
 	}
 
 	// Lookup pubkey trong danh sách embassy registered (so sánh bytes trực tiếp)
@@ -293,7 +291,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	}
 	if verifiedEmbassyAddr == "" {
 		logger.Warn("[VIRTUAL CC batchSubmit] ❌ BLS pubkey from calldata not found in active embassy list: sender=%s", sender.Hex())
-		return nil, fmt.Errorf("batchSubmit: BLS pubkey does not match any active embassy"), nil
+		return nil, fmt.Errorf("batchSubmit: BLS pubkey does not match any active embassy"), nil, mt_common.TX_SUCCESS_CODE
 	}
 	// Verify BLS signature với pubkey đã match (1 lần duy nhất thay vì loop tất cả)
 	txHash := updatedTx.Hash().Bytes()
@@ -301,7 +299,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	if !bls.VerifySign(matchedPubKey, txSign, txHash) {
 		logger.Warn("[VIRTUAL CC batchSubmit] ❌ BLS signature invalid for embassy=%s sender=%s",
 			verifiedEmbassyAddr, sender.Hex())
-		return nil, fmt.Errorf("batchSubmit: BLS signature verification failed for embassy %s", verifiedEmbassyAddr), nil
+		return nil, fmt.Errorf("batchSubmit: BLS signature verification failed for embassy %s", verifiedEmbassyAddr), nil, mt_common.TX_SUCCESS_CODE
 	}
 	// ── 4. Vote KEY = sha256(ABI(events only)) — loại bỏ pubkey ──────────
 	// Re-pack chỉ arg events (args[0]) → tất cả embassy cùng hash vì events giống nhau.
@@ -309,7 +307,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	var key [32]byte
 	if packErr != nil {
 		logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ Failed to re-pack events for vote key: %v, using inputData fallback", packErr)
-		return nil, fmt.Errorf("batchSubmit: failed to re-pack events for vote key: %v", packErr), nil
+		return nil, fmt.Errorf("batchSubmit: failed to re-pack events for vote key: %v", packErr), nil, mt_common.TX_SUCCESS_CODE
 	} else {
 		key = sha256.Sum256(eventsOnlyPacked)
 	}
@@ -319,7 +317,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		// Duplicate vote hoặc đã execute: ReadOnly=true → master tạo receipt ngay, không execute
 		logger.Info("[VIRTUAL CC batchSubmit] ⏭ Skip vote: %v", voteErr)
 		updatedTx.SetReadOnly(true)
-		return updatedTx, nil, []byte(fmt.Sprintf("sig_ack:skip:%s", voteErr.Error()))
+		return updatedTx, nil, []byte(fmt.Sprintf("sig_ack:skip:%s", voteErr.Error())), mt_common.TX_SUCCESS_CODE
 	}
 
 	total := acc.GetTotalEmbassies()
@@ -330,7 +328,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		logger.Info("[VIRTUAL CC batchSubmit] ⏳ SIG_ACK %d/%d (quorum=%d) embassy=%s key=%x",
 			voteCount, total, q, verifiedEmbassyAddr, key[:8])
 		updatedTx.SetReadOnly(true)
-		return updatedTx, nil, []byte(fmt.Sprintf("sig_ack:%d/%d", voteCount, total))
+		return updatedTx, nil, []byte(fmt.Sprintf("sig_ack:%d/%d", voteCount, total)), mt_common.TX_SUCCESS_CODE
 	}
 
 	// ── Đủ quorum lần đầu → EXECUTE ─────────────────────────────────────
@@ -426,5 +424,5 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	logger.Info("🔍 [CC-VIRTUAL-DEBUG] FINAL relatedAddresses for txHash=%s: count=%d, addrs=%v",
 		updatedTx.Hash().Hex()[:16], len(updatedTx.RelatedAddresses()), updatedTx.RelatedAddresses())
 
-	return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
+	return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total)), mt_common.CROSS_CHAIN_QUORUM_REACHED_CODE
 }

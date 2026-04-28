@@ -35,6 +35,7 @@ contract CrossChainConfigRegistry {
         bool    isActive;       // Trạng thái hoạt động
         uint256 registeredAt;   // Thời gian đăng ký
         uint256 index;          // Vị trí trong embassyKeys array
+        uint8   scanMode;       // Cấu hình load block (0: Max block, 1: Latest block)
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -80,14 +81,25 @@ contract CrossChainConfigRegistry {
     //                       SCAN PROGRESS TRACKING
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// @notice Lưu block embassy đã scan đến đâu cho từng sourceChainId
-    /// key: keccak256(embassyAddress, sourceNationId) => lastScannedBlock
-    mapping(bytes32 => uint256) public scanProgress;
+    struct ProgressData {
+        uint256 remoteBlock; // Block đã scan trên remote chain
+        uint256 localBlock;  // Block tương ứng đã confirm trên local chain
+    }
 
-    /// @notice Lưu block cuối cùng trên LOCAL chain mà embassy đã submit batchSubmit thành công
-    /// key: embassyAddress => localBlockNumber
-    /// Dùng để khi chain restart, biết cần scan lại từ block nào trên local chain
-    mapping(address => uint256) public localScanProgress;
+    /// @notice Lưu Mốc Chính Thức đã đạt Quorum TOÀN MẠNG
+    /// @dev Lưu duy nhất 1 mốc cho cả mạng (bỏ embassyAddress)
+    mapping(uint256 => ProgressData) public networkQuorumProgress;
+
+    /// @notice Lưu Block lớn nhất trong lịch sử của từng Embassy để tính Quorum
+    mapping(address => mapping(uint256 => uint256)) public maxHistoryBlock;
+
+    /// @notice Ghi nhớ các block đã được đề xuất là Quorum (ít nhất 1 embassy đánh cờ isQuorum=true)
+    /// @dev destNationId => blockNumber => bool
+    mapping(uint256 => mapping(uint256 => bool)) public isProposedQuorum;
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //                       EMBASSY ADDRESS MAPPING
+    // ══════════════════════════════════════════════════════════════════════════
 
     /// @notice ETH address của từng embassy (tương ứng với embassyList public keys)
     address[] public embassyAddresses;
@@ -95,9 +107,8 @@ contract CrossChainConfigRegistry {
     /// @notice Check embassy address đã đăng ký chưa
     mapping(address => bool) public isEmbassyAddress;
 
-    /// @notice Cấu hình load block (0: Từ block 0, 1: Max block, 2: Latest block)
-    /// key: embassyAddress => uint8 mode
-    mapping(address => uint8) public embassyScanMode;
+    // (Moved to Embassy struct)
+    // mapping(address => uint8) public embassyScanMode;
 
     // ══════════════════════════════════════════════════════════════════════════
     //                              EVENTS
@@ -128,11 +139,6 @@ contract CrossChainConfigRegistry {
         address newGateway
     );
 
-    event ScanProgressUpdated(
-        address indexed ambassador,
-        uint256[] sourceNationIds,
-        uint256[] lastScannedBlocks
-    );
 
     // ══════════════════════════════════════════════════════════════════════════
     //                              MODIFIER
@@ -229,7 +235,8 @@ contract CrossChainConfigRegistry {
             ethAddress:   _ethAddress,
             isActive:     true,
             registeredAt: block.timestamp,
-            index:        embassyKeys.length
+            index:        embassyKeys.length,
+            scanMode:     1
         });
         embassyKeys.push(keyHash);
         addressToEmbassyKey[_ethAddress] = keyHash;
@@ -384,9 +391,11 @@ contract CrossChainConfigRegistry {
     function batchUpdateScanProgress(
         uint256[] calldata destNationIds,
         uint256[] calldata lastScannedBlocks,
-        uint256 localBlockNumber
+        uint256 localBlockNumber,
+        bool[] calldata isQuorums
     ) external {
         require(destNationIds.length == lastScannedBlocks.length, "Length mismatch");
+        require(destNationIds.length == isQuorums.length, "Quorum mismatch");
         require(destNationIds.length > 0 || localBlockNumber > 0, "Empty arrays");
 
         // Embassy phải đã đăng ký mới được update scan progress
@@ -398,74 +407,58 @@ contract CrossChainConfigRegistry {
             uint256 newBlock = lastScannedBlocks[i];
             require(newBlock > 0, "Block must be > 0");
 
-            bytes32 key = keccak256(abi.encodePacked(msg.sender, destNationId));
+            // 1. Luôn lưu lại mốc cao nhất của embassy này (Cache)
+            if (newBlock > maxHistoryBlock[msg.sender][destNationId]) {
+                maxHistoryBlock[msg.sender][destNationId] = newBlock;
+            }
+            // 2. Ghi nhớ nếu có embassy báo cáo block này là Quorum
+            if (isQuorums[i]) {
+                isProposedQuorum[destNationId][newBlock] = true;
+            }
 
-            // Chỉ update nếu block mới cao hơn (không cho phép rollback)
-            if (newBlock > scanProgress[key]) {
-                scanProgress[key] = newBlock;
+            // 3. Nếu block này ĐÃ TỪNG được ai đó đề xuất là Quorum (có thể là trước đây hoặc bây giờ)
+            // thì ta sẽ kiểm tra lại xem ĐÃ ĐỦ QUORUM CHƯA
+            if (isProposedQuorum[destNationId][newBlock]) {
+                // Chỉ xử lý nếu block mới cao hơn Quorum hiện tại (bỏ qua block nhỏ hơn)
+                if (newBlock > networkQuorumProgress[destNationId].remoteBlock) {
+                    uint256 confirmCount = 0;
+                    uint256 activeCount = 0;
+                    
+                    // Quét qua mốc Cache của các Embassy đang active
+                    for (uint256 k = 0; k < embassyKeys.length; k++) {
+                        if (!embassies[embassyKeys[k]].isActive) continue;
+                        activeCount++;
+                        
+                        // Nếu mốc lớn nhất của Node này >= newBlock -> nó ủng hộ block này
+                        if (maxHistoryBlock[embassies[embassyKeys[k]].ethAddress][destNationId] >= newBlock) {
+                            confirmCount++;
+                        }
+                    }
+                    
+                    // Tính Quorum theo đúng công thức: ceil(2N/3) = (N*2 + 2) / 3
+                    uint256 q = (activeCount * 2 + 2) / 3;
+                    
+                    if (confirmCount >= q) {
+                        // Cập nhật mốc GLOBAL của toàn mạng!
+                        networkQuorumProgress[destNationId].remoteBlock = newBlock;
+                        networkQuorumProgress[destNationId].localBlock = localBlockNumber;
+                    }
+                }
             }
         }
-
-        // Cập nhật block cuối cùng trên local chain mà embassy đã submit thành công
-        if (localBlockNumber > 0 && localBlockNumber > localScanProgress[msg.sender]) {
-            localScanProgress[msg.sender] = localBlockNumber;
-        }
-
-        emit ScanProgressUpdated(msg.sender, destNationIds, lastScannedBlocks);
     }
 
     /**
      * @notice Lấy block đã scan của một embassy cho một destination chain
      */
-    function getScanProgress(
-        address embassy,
-        uint256 destNationId
-    ) external view returns (uint256) {
-        bytes32 key = keccak256(abi.encodePacked(embassy, destNationId));
-        return scanProgress[key];
-    }
-
     /**
-     * @notice Lấy khoảng block đã scan (min, max) trong tất cả embassies cho destination chain hoặc local chain
-     * @dev Dùng khi restart: scan từ minBlock đến maxBlock để đảm bảo không bỏ sót event nào.
-     *      Nếu `destNationId == 0`, lấy khoảng block trên local chain (localScanProgress).
-     *      Nếu `destNationId > 0`, lấy khoảng block trên mạng đích (scanProgress).
-     * @param destNationId Nation ID của destination chain cần kiểm tra (0 cho local chain)
-     * @return minBlock Block thấp nhất (0 nếu chưa có embassy nào scan)
-     * @return maxBlock Block cao nhất (0 nếu chưa có embassy nào scan)
+     * @notice Lấy block đã scan duy nhất của toàn mạng cho destination chain
+     * @dev Trả về mốc Quorum đã được xác nhận của mạng lưới
+     * @param destNationId Nation ID của destination chain cần kiểm tra
+     * @return quorumBlock Block đã đạt Quorum (> 50% majority)
      */
-    function getScanBlockRange(uint256 destNationId) external view returns (uint256 minBlock, uint256 maxBlock) {
-        if (embassyKeys.length == 0) return (0, 0);
-
-        minBlock = type(uint256).max;
-        maxBlock = 0;
-        bool found = false;
-
-        for (uint256 i = 0; i < embassyKeys.length; i++) {
-            if (!embassies[embassyKeys[i]].isActive) continue;
-            address embAddr = embassies[embassyKeys[i]].ethAddress;
-            
-            uint256 progress;
-            if (destNationId == 0) {
-                progress = localScanProgress[embAddr];
-            } else {
-                bytes32 key = keccak256(abi.encodePacked(embAddr, destNationId));
-                progress = scanProgress[key];
-            }
-            
-            if (progress > 0) {
-                if (progress < minBlock) {
-                    minBlock = progress;
-                }
-                if (progress > maxBlock) {
-                    maxBlock = progress;
-                }
-                found = true;
-            }
-        }
-
-        if (!found) return (0, 0);
-        return (minBlock, maxBlock);
+    function getNetworkQuorumBlock(uint256 destNationId) external view returns (ProgressData memory) {
+        return networkQuorumProgress[destNationId];
     }
 
     /**
@@ -481,8 +474,7 @@ contract CrossChainConfigRegistry {
         for (uint256 i = 0; i < count; i++) {
             address embAddr = embassies[embassyKeys[i]].ethAddress;
             addresses[i] = embAddr;
-            bytes32 key = keccak256(abi.encodePacked(embAddr, destNationId));
-            blocks[i] = scanProgress[key];
+            blocks[i] = maxHistoryBlock[embAddr][destNationId];
         }
     }
 
@@ -557,17 +549,20 @@ contract CrossChainConfigRegistry {
      * @param _embassy Địa chỉ đại sứ quán
      * @param _mode 0: Từ block 0, 1: Max block, 2: Latest block
      */
-    function setEmbassyScanMode(address _embassy, uint8 _mode) external onlyOwner {
-        require(addressToEmbassyKey[_embassy] != bytes32(0), "Not a registered embassy");
+    function setEmbassyScanMode(address _embassy, uint8 _mode) external {
+        bytes32 key = addressToEmbassyKey[_embassy];
+        require(key != bytes32(0), "Not a registered embassy");
+        require(isOwner[msg.sender] || msg.sender == _embassy, "Only owner or embassy itself");
         require(_mode <= 2, "Invalid mode");
-        embassyScanMode[_embassy] = _mode;
+        embassies[key].scanMode = _mode;
     }
 
     /**
      * @notice Lấy cấu hình chế độ quét block của một đại sứ quán
      */
     function getEmbassyScanMode(address _embassy) external view returns (uint8) {
-        return embassyScanMode[_embassy];
+        bytes32 key = addressToEmbassyKey[_embassy];
+        return embassies[key].scanMode;
     }
 
     /**
@@ -608,4 +603,5 @@ contract CrossChainConfigRegistry {
     ) {
         return (chainId, embassyAddresses.length, registeredChainIds.length);
     }
+
 }
