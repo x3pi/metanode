@@ -187,6 +187,12 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("failed to initialize blockchain: %v", err)
 	}
 
+	// CRITICAL: Mark blockchain initialization as complete. This flag is read by
+	// HandleGetLastBlockNumberRequest to determine is_ready=true. It must ONLY be
+	// set AFTER initBlockchain() has fully loaded and verified the chain state
+	// (including LevelDB → metadata consistency checks).
+	storage.SetBlockchainInitDone()
+
 	if app.config.IsExplorer {
 		dbPath := app.config.ExplorereDbPath
 		explorerSearch, err := explorer.NewExplorerSearchService(dbPath, app.config.ExplorerQueueSize, app.config.ExplorerWorkerCount)

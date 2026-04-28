@@ -1,6 +1,8 @@
 # Kiến Trúc Hệ Thống Đồng Thuận (MetaNode Consensus Architecture)
 
-Tài liệu này mô tả chi tiết cách các thành phần trong lõi đồng thuận (Consensus Core) của MetaNode tương tác với nhau, đặc biệt tập trung vào quá trình đồng thuận khối và tuyến tính hóa (Linearization).
+Tài liệu này mô tả chi tiết cách các thành phần trong lõi đồng thuận (Consensus Core) của MetaNode tương tác với nhau, đặc biệt tập trung vào quá trình đồng thuận khối, tuyến tính hóa (Linearization), pipeline truyền dữ liệu Rust→Go và các cơ chế chống phân nhánh (anti-fork).
+
+**Cập nhật lần cuối:** 2026-04-25
 
 ## 1. Sơ Đồ Kiến Trúc Tổng Quan (Architecture Diagram)
 
@@ -10,10 +12,14 @@ Dưới đây là sơ đồ phối hợp giữa các thành phần chính yếu 
 graph TD
     %% Định nghĩa các node
     Network(("🌐 Mạng P2P\n(Peers)"))
-    CommSyncer["🔄 CommitSyncer\n(Đồng bộ hóa & Catch-up)"]
-    AuthNode["🏢 AuthorityNode\n(Quản lý Vòng Đời Node)"]
+    CommSyncer["🔄 CommitSyncerSupervisor\n(Đồng bộ hóa & Catch-up)\n+ Auto-restart"]
+    AuthNode["🏢 ConsensusNode\n(Quản lý Vòng Đời Node)"]
     
-    subgraph Lõi Đồng Thuận (Consensus Engine)
+    subgraph "Trung Tâm Điều Phối (Coordination Hub)"
+        Hub["🎛️ ConsensusCoordinationHub\n(Phase + GEI + is_transitioning)"]
+    end
+    
+    subgraph "Lõi Đồng Thuận (Consensus Engine)"
         CoreThread["🧵 CoreThread / Dispatcher\n(Kênh Xử Lý Sự Kiện Chính)"]
         Core["🧠 Core\n(Máy Trạng Thái Đồng Thuận)"]
         BlockMgr["📦 BlockManager\n(Xác thực & Quản lý Khối)"]
@@ -22,9 +28,12 @@ graph TD
         Linearizer["📏 Linearizer\n(Tuyến Tính Hóa Giao Dịch)"]
     end
     
-    CommitObserver["👁️ CommitObserver / BlockDelivery\n(Chuyển Giao Khối Cho Go)"]
-    GoExec["⚙️ Máy Ảo Thực Thi (Go Master)"]
+    CommitObserver["👁️ CommitObserver\n(Kiểm tra Anti-Fork Hash)"]
+    CommitProc["⚙️ CommitProcessor\n(Tính GEI, quản lý fragmentation)"]
+    DeliveryMgr["🚚 BlockDeliveryManager\n(Gửi khối sang Go qua UDS)"]
+    GoExec["⚙️ Go Master\n(Máy Ảo Thực Thi EVM)"]
     RocksDB[("💽 RocksDB\n(Lưu trữ Bền Vững)")]
+    LagMon["🛡️ LagMonitor\n(Phát hiện Go tụt hậu)"]
 
     %% Định nghĩa luồng dữ liệu
     Network -- Nhận/Gửi Khối --> AuthNode
@@ -43,14 +52,25 @@ graph TD
     CommitMgr -- Lấy thông tin DAG --> DagState
     
     CommitMgr -- 4. Quyết định Leader --> Linearizer
-    Linearizer -- 5. Tra cứu Lịch sử Cha-Con (Ancestors) --> DagState
+    Linearizer -- 5. Tra cứu Lịch sử Cha-Con --> DagState
     
-    Linearizer -- 6. Khối đã Sắp Xếp (Commits) --> CommitObserver
-    CommitObserver -- 7. Đẩy Dữ Liệu --> GoExec
+    Linearizer -- 6. CommittedSubDag --> CommitObserver
+    CommitObserver -- 7. MPSC Channel --> CommitProc
+    CommitProc -- 8. ValidatedCommit --> DeliveryMgr
+    DeliveryMgr -- 9. UDS FFI --> GoExec
+    
+    CommSyncer -. Đọc/Ghi Phase .-> Hub
+    Core -. Kiểm tra Phase .-> Hub
+    CommitProc -. Cập nhật GEI .-> Hub
+    LagMon -. Giám sát .-> GoExec
+    LagMon -- P2P Recovery --> Network
 ```
 
 > [!NOTE]
 > **CoreThread** giữ vai trò như một phễu duy nhất (Single-threaded MPSC Receiver) tiếp nhận mọi tín hiệu từ mạng và luồng đồng bộ, đảm bảo **Core** không bị lỗi tương tranh (race conditions) khi chỉnh sửa DAG.
+
+> [!IMPORTANT]
+> **ConsensusCoordinationHub** là nơi DUY NHẤT quản lý 3 trạng thái dùng chung: `Phase` (Initializing→Healthy), `GEI` (Global Execution Index), và `is_transitioning` (epoch transition lock). Tất cả components đều đọc từ Hub này thay vì duy trì bản sao riêng.
 
 ---
 
@@ -59,6 +79,7 @@ graph TD
 ### 🌟 1. Core & CoreThread (Trái Tim Hệ Thống)
 - **CoreThread:** Thực chất là một vòng lặp sự kiện bất đồng bộ. Mọi khối mới tóm được từ P2P hoặc từ quá trình tải lại (như từ `CommitSyncer`) đều phải xếp hàng đi qua `CoreThread` trước khi đưa xuống `Core`.
 - **Core:** Chịu trách nhiệm thực thi logic trạng thái. Khi nhận được một khối mới, nó sẽ phối hợp với `BlockManager` và `DagState` để kết nối vào mạng lưới DAG hiện tại.
+- **Should_Propose Guard:** Core kiểm tra `ConsensusCoordinationHub.should_skip_proposal()` — chỉ cho phép propose block khi phase = `Healthy`. Điều này ngăn equivocation sau snapshot restore.
 
 ### 📦 2. BlockManager (Người Gác Cổng)
 Mọi khối giao dịch truyền đến đều tới tay `BlockManager` trước. Nhiệm vụ của nó là:
@@ -69,8 +90,9 @@ Mọi khối giao dịch truyền đến đều tới tay `BlockManager` trướ
 - **DagState** nắm giữ đồ thị vạch hướng không tuần hoàn (Directed Acyclic Graph) đại diện cho toàn bộ các khối.
 - Do việc đọc ghi vào ổ cứng tốn kém, `DagState` duy trì **`recent_blocks`** làm bộ nhớ đệm (Cache). 
 - Nó quản lý các biến quan trọng như `gc_round` (Vòng dọn rác) tính toán cái gì cần giữ ở RAM, cái gì cất xuống `RocksDB`.
+- Hàm `reset_to_network_baseline()` cho phép fast-forward DAG khi snapshot restore (đặt gc_round và synced_commit cao lên để skip các commit cũ).
 
-### ⚖️ 4. CommitManager (Người Bầu ChọnLãnh Đạo)
+### ⚖️ 4. CommitManager (Người Bầu Chọn Lãnh Đạo)
 Khác với các hệ thống Blockchain chuỗi thẳng, MetaNode sử dụng DAG. Tại mỗi vòng (round), `CommitManager` sẽ đánh giá biểu đồ DAG hiện tại để xác định xem ai (Leader) được sự đồng thuận của đa số (Quorum). 
 
 ### 📏 5. Linearizer (Bộ Sắp Xếp Chuỗi Khối)
@@ -81,8 +103,38 @@ Sau khi `CommitManager` xác định được **Khối Lãnh Đạo** (Leader Bl
 4. Sắp xếp lại lịch sử hỗn độn thành 1 mảng tĩnh duy nhất theo Thuật Toán Đồng Thuận Xác Định (Deterministic Order).
 5. Đánh dấu tất cả chúng bằng cờ Commit (`DagState::set_committed`).
 
-### 🔄 6. CommitSyncer (Đội Cấp Cứu)
-Khi `Máy Go` gặp tình trạng chết máy, khởi động lại từ Snapshot cũ, hay kết nối mạng bị rớt dài hạn: `CommitSyncer` sẽ kích hoạt **Chế Độ FastForward catch-up**. Nó đi xin các "Committed Blocks" đã được chốt sổ từ node hàng xóm đem về nhét thẳng vào `CoreThread` để chạy lại đồ thị lịch sử.
+### 🔄 6. CommitSyncer & CommitSyncerSupervisor (Đội Cấp Cứu)
+Khi node gặp sự cố, khởi động lại từ Snapshot cũ, hay kết nối mạng bị rớt dài hạn: `CommitSyncer` sẽ kích hoạt **Chế Độ FastForward catch-up**. Nó đi xin các "Committed Blocks" đã được chốt sổ từ node hàng xóm đem về nhét thẳng vào `CoreThread` để chạy lại đồ thị lịch sử.
+
+- **CommitSyncerSupervisor** bọc bên ngoài CommitSyncer với cơ chế **auto-restart**: nếu CommitSyncer crash hoặc panic, Supervisor tự động tạo instance mới sau backoff (1s → 2s → ... → 10s cap). Điều này ngăn ngừa node phải restart toàn bộ chỉ vì một task đồng bộ gặp lỗi.
+- **patch_baseline_if_needed()**: Sau khi fast-forward DAG, CommitSyncer tự động lấy digest và timestamp thật từ mạng cho synthetic baseline commit, đảm bảo timestamp monotonicity chính xác.
+
+### 🎛️ 7. ConsensusCoordinationHub (Trung Tâm Điều Phối)
+Hub tập trung quản lý **ba trạng thái dùng chung** duy nhất:
+
+| Trạng Thái | Kiểu Dữ Liệu | Nguồn Ghi (Writer) | Nguồn Đọc (Reader) |
+|---|---|---|---|
+| `phase` | `Arc<parking_lot::RwLock<NodeConsensusPhase>>` | CommitSyncer, startup code | Core, CommitSyncer, Proposer |
+| `global_exec_index` | `Arc<tokio::sync::Mutex<u64>>` | CommitProcessor, startup | LagMonitor, epoch transition |
+| `is_transitioning` | `Arc<AtomicBool>` | Epoch transition handler | CommitProcessor, TX receivers |
+
+Phase lifecycle:
+```
+Initializing → Bootstrapping → CatchingUp → Healthy
+                                    ↓
+                               StateSyncing → (restart) → Initializing
+```
+
+### 🚚 8. BlockDeliveryManager (Băng Chuyền Giao Hàng)
+- Nhận `ValidatedCommit` từ CommitProcessor qua MPSC channel (buffer 10,000).
+- Gọi `ExecutorClient.send_committed_subdag()` tuần tự để gửi từng commit sang Go qua UDS.
+- Trả về `geis_consumed` qua oneshot channel để CommitProcessor cập nhật fragment offset.
+- Nếu gửi thất bại → **panic ngay lập tức** (không thể phục hồi — block phải được thực thi).
+
+### 🛡️ 9. LagMonitor (Giám Sát Tụt Hậu)
+- Chạy song song, poll định kỳ so sánh Rust GEI (shared_last_global_exec_index) vs Go GEI/Block.
+- Phát `LagAlert::ModerateLag` hoặc `LagAlert::SevereLag` khi phát hiện Go tụt hậu.
+- Handler trong `consensus_node.rs` tự động kích hoạt **P2P block fetch + execution** để bù đắp khoảng cách.
 
 ---
 
@@ -98,6 +150,9 @@ sequenceDiagram
     participant Lin as Linearizer
     participant DAG as DagState
     participant Obs as CommitObserver
+    participant Proc as CommitProcessor
+    participant Dlv as BlockDeliveryManager
+    participant Go as Go Master
 
     P2P->>Core: Nhận Khối Bầu Cử (Round 10)
     Core->>DAG: Thêm Khối Bầu Cử vào Cây
@@ -115,14 +170,20 @@ sequenceDiagram
     
     note over Lin: Sắp xếp các Khối tổ tiên<br/>theo trật tự Deterministic (Round, Hash)
     
-    loop Dành cho mỗi khối trong Lịch sử vừa sắp xếp
-        Lin->>DAG: Gọi `set_committed(Khối)`
-        DAG-->>Lin: Tạo/Cập nhật Bộ Nhớ Đệm (Cập nhật RAM + Đánh Dấu)
-    end
+    Lin-->>Core: Giao nộp CommittedSubDag
+    Core->>Obs: CommitFinalizer xử lý + gửi MPSC
+    Obs->>Proc: CommittedSubDag qua unbounded channel
     
-    Lin-->>Core: Giao nộp Danh Sách Khối Kèm Thứ Tự (SubDag/Commit)
-    Core->>Obs: Bắn Sự Kiện Block Xong Cây DAG
-    Obs->>GoExec (Máy Ảo): Ra Lệnh Thực Thi Các Giao Dịch
+    alt Empty commit (0 TXs)
+        Proc->>Proc: Fast-skip: update GEI, skip FFI
+    else Non-empty commit  
+        Proc->>Proc: Tính GEI = epoch_base + commit_index + fragment_offset
+        Proc->>Proc: Resolve leader ETH address
+        Proc->>Dlv: ValidatedCommit qua MPSC(10000)
+        Dlv->>Go: UDS FFI: send_committed_subdag()
+        Go-->>Dlv: geis_consumed (fragmentation)
+        Dlv-->>Proc: oneshot response
+    end
 ```
 
 ---
@@ -142,67 +203,379 @@ Với kiến trúc **Async Broadcaster with Deferred Ticket** mới được áp
 
 ## 5. Kiến Trúc Quản Lý Khởi Động & Phục Hồi (Startup & Recovery Lifecycle)
 
-Một thách thức lớn trong thực tế là quản lý vòng đời khởi động lại (Restart/Recovery). Khi node gặp sự cố (cúp điện, crash), **Go Master** và **Rust Consensus** có thể bị lệch pha. Dữ liệu tối thiểu và duy nhất đáng tin cậy lúc này là trạng thái lưu trên ổ cứng của Go: `Last_Executed_Block_Number`, `Last_Executed_Block_Hash` và `Current_Term` (hay GEI - Go Execution Interface).
+### 5.1. Quy Trình Khởi Tạo 4 Pha (4-Phase Constructor)
 
-Để đảm bảo trạng thái thống nhất và **tuyệt đối không gây phân nhánh (fork)** trước khi node thực sự "Ready", MetaNode áp dụng mô hình **Cỗ Máy Trạng Thái Khởi Động (Startup State Machine)** với 6 Giai Đoạn (Phases) nghiêm ngặt do `AuthorityNode` và `CommitObserver` điều phối:
+Toàn bộ quá trình khởi tạo `ConsensusNode` được chia thành **4 pha tuần tự** trong `consensus_node.rs`:
 
-### Mô Hình Các Giai Đoạn Khởi Động
+```mermaid
+graph LR
+    S1["Phase 1<br/>setup_storage()"] --> S2["Phase 2<br/>setup_consensus()"]
+    S2 --> S3["Phase 3<br/>setup_networking()"]
+    S3 --> S4["Phase 4<br/>setup_epoch_management()"]
+    
+    S1 -.- D1["Go handshake<br/>Epoch discovery<br/>Committee verification<br/>GEI calculation<br/>Identity check"]
+    S2 -.- D2["CommitProcessor init<br/>BlockDeliveryManager<br/>STARTUP-SYNC barrier<br/>ConsensusAuthority start"]
+    S3 -.- D3["NTP clock sync<br/>Drift monitor"]
+    S4 -.- D4["Epoch transition handler<br/>Epoch monitor<br/>Fork detection check"]
+```
+
+| Pha | Hàm | File | Chức Năng Chính |
+|-----|------|------|-----------------|
+| 1 | `setup_storage()` | `consensus_node.rs:130-870` | Kết nối Go, lấy epoch/block/GEI, xây committee, xác định identity |
+| 2 | `setup_consensus()` | `consensus_node.rs:960-1494` | Tạo CommitProcessor, BlockDeliveryManager, STARTUP-SYNC; khởi động ConsensusAuthority |
+| 3 | `setup_networking()` | `consensus_node.rs:1500-1522` | Khởi tạo NTP sync, clock drift monitor |
+| 4 | `setup_epoch_management()` | `consensus_node.rs:1529-1676` | Epoch transition handler, unified epoch monitor, fork detection |
+
+### 5.2. STARTUP-SYNC Barrier (Đồng Bộ Trước Consensus)
+
+Trước khi consensus bắt đầu, `setup_consensus()` thực hiện kiểm tra **STARTUP-SYNC**:
+
+```
+if executor_read_enabled:
+    1. Query GO: local_block = get_last_block_number()
+    2. Query PEERS: max_peer_block = max(peer.last_block for peer in peer_rpc_addresses)
+    3. if local_block < max_peer_block:
+        → fetch_blocks_from_peer(local_block+1, max_peer_block)
+        → sync_and_execute_blocks(blocks)  // Go xử lý trước khi consensus chạy
+    4. else: log "Local state in sync"
+```
+
+> [!WARNING]
+> Nếu bỏ qua bước này, node sẽ tham gia consensus với state root cũ → block hash diverge → fork vĩnh viễn.
+
+### 5.3. Mô Hình Các Giai Đoạn Hoạt Động (Phase State Machine)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Phase1_Handshake: Bật Node (Start)
+    [*] --> Initializing: Bật Node (Start)
 
-    Phase1_Handshake --> Phase2_LocalDAG: Go báo cáo (Block N, Hash X, Term T)
-    Phase2_LocalDAG --> Phase3_NetworkCatchup: Nạp xong RocksDB lên RAM
-    Phase3_NetworkCatchup --> Phase3B_StateSyncing: Lag > 50k commits
-    Phase3_NetworkCatchup --> Phase4_Committee: Mạng đồng bộ xong DAG đến nay
-    Phase3B_StateSyncing --> Phase1_Handshake: Snapshot mới từ mạng
-    Phase4_Committee --> Phase5_Alignment: Chốt danh sách Validator
-    Phase5_Alignment --> Phase6_Active: Bơm Block N+1 cho Go
-    Phase6_Active --> [*]: Tham gia Vote/Báo Block mới
+    Initializing --> Bootstrapping: Go handshake + Load DAG
+    
+    Bootstrapping --> Healthy: Genesis (highest_handled=0)
+    Bootstrapping --> CatchingUp: Snapshot restore (quorum > 0)
+    
+    CatchingUp --> Healthy: local >= quorum
+    CatchingUp --> StateSyncing: lag > 50,000 commits
+    
+    StateSyncing --> CatchingUp: Snapshot applied
+    
+    Healthy --> CatchingUp: Network advances past local
+
+    note right of Initializing: Core: NO propose, NO P2P
+    note right of Bootstrapping: Core: NO propose (chống equivocation)
+    note right of CatchingUp: CommitSyncer: 4x batch, turbo poll
+    note right of StateSyncing: P2P download PAUSED
+    note right of Healthy: Full consensus participation
 ```
 
-#### 🤝 Phase 1: Bắt tay Nội Bộ (State Handshake)
-- Khi Rust Consensus khởi động, nó **không kết nối mạng P2P ngay lập tức**.
-- Rust gọi RPC/IPC sang Go Master yêu cầu **Cột mốc mới nhất**: Khối đã chạy cuối cùng (`latest_block`), Mã Hash của nó (`latest_hash`) và Term hiện hành.
+#### Phase Details
 
-#### 💽 Phase 2: Khôi phục DAG Cục bộ (Local DAG Recovery)
-- `DagState` và `BlockManager` đọc cấu trúc mạng lưới DAG từ `RocksDB` cục bộ.
-- Xây dựng lại biểu đồ quan hệ Cha-Con trên RAM lên tới điểm cao nhất có thể trong đĩa cứng.
+| Phase | Propose? | CommitSyncer Interval | Batch Size | Ghi Chú |
+|-------|----------|----------------------|------------|---------|
+| Initializing | ❌ | 1s | Normal | Chờ Go handshake |
+| Bootstrapping | ❌ | 200ms | Normal | DAG loaded, establishing baseline |
+| CatchingUp | ❌ | 150ms | 4x normal | Aggressive sync from peers |
+| StateSyncing | ❌ | 5s | N/A | Chờ state snapshot |
+| Healthy | ✅ | 2s (standby) | Normal | Full consensus |
 
-#### 🌐 Phase 3: Bắt kịp Mạng lưới (Network Catch-up / Sync)
-Tùy thuộc vào mức độ lạc hậu của nút so với mạng mà tiến trình này chia làm 2 nhánh:
+### 5.4. Quy Trình Phase Transition Chi Tiết
 
-- **Nhánh 3A - Đồng bộ DAG Theo Khối (Cùng Epoch hoặc Lệch Ít, VD: 1 Epoch):** 
-  - Nếu nút bị chậm giới hạn trong 1 Epoch hoặc khoảng cách khối không quá lớn, `CommitSyncer` và `Synchronizer` sẽ tải tịnh tiến các khối bị thiếu (Missing Blocks) hoặc **Tải theo cụm (Batch Block Download)** để tốc độ hóa việc vá cây DAG. Nút sẽ dịch chuyển xuyên qua ranh giới Epoch cũ và bắt kịp `Network Tip` một cách an toàn mà vẫn để máy ảo Go đuổi theo tuần tự.
-- **Nhánh 3B - Tụt Hậu Epoch Quá Sâu (Deep Epoch Lag / Fast-Forward Snapshot):** 
-  - Khi node phát hiện `Network_Epoch` đã vượt quá xa mức chịu đựng (VD: Lệch từ 2 Epochs trở lên), việc tải và chạy lại (replay) toàn bộ hàng triệu khối của các Epoch cũ trong `Linearizer` là một thảm họa phi thực tế, dẫn tới chết nghẽn RAM do hết hạn chứng chỉ (cerificate expiration) và thay đổi Committee liên tục.
-  - Lúc này, node tự động ngắt cơ chế quét quét tải khối và chuyển sang **State Sync (Cấy Snapshot)** hoặc **Epoch Fast-Forward**.
-  - Node tải **Biên lai chốt sổ (Certified/Epoch Commit)** của Epoch mới nhất. Sau đó xả rỗng DAG cũ, giao phó Go Master khôi phục trạng thái bằng file Snapshot mạng thay vì chạy lại lịch sử. Quá trình bắt đầu lại từ `Phase 1` với mốc `N` mới do mạng quyết định.
+Mọi chuyển đổi phase do `CommitSyncer::update_state()` quyết định (ngoại trừ Initializing→Bootstrapping do startup code):
 
-- **Nhánh 3C - Tụt Hậu Commit Quá Sâu (Deep Commit Lag / StateSyncing):**
-  - Khi node bị tụt hậu hơn **50,000 commits** so với mạng (tính theo `local_commit < quorum_commit - 50_000`), `CommitSyncer` chuyển sang phase `StateSyncing`.
-  - Trong phase này, P2P batch block download bị tạm dừng hoàn toàn. Node chờ Go Engine khôi phục trạng thái từ Snapshot thay vì tải từng khối lẻ.
-  - `CommitSyncer` không còn lập lịch `try_schedule_once()` cho đến khi phase chuyển về `CatchingUp` hoặc `Healthy`.
+```
+fn update_state():
+    1. if local_commit == 0 && highest_handled > 0:
+        → reset_to_network_baseline(highest_handled)  // Snapshot restore fast-forward
+        → synced_commit_index = highest_handled
+    
+    2. lag = quorum_commit - local_commit
+    
+    3. next_phase = match lag:
+        > 50,000 → StateSyncing
+        > 0      → CatchingUp
+        == 0     → Healthy
+    
+    4. Special cases:
+        - Bootstrapping + Genesis (highest_handled=0) → Healthy immediately
+        - Bootstrapping + Snapshot (highest_handled>0) → Wait for quorum > 0
+```
 
-- **Ghi chú an toàn:** Trong suốt Phase 1->5, Node hoàn toàn ở chế độ `SyncOnly` (Chỉ nghe, Không Đề xuất khối, Không Bỏ phiếu).
+---
 
-#### 🏛️ Phase 4: Xác định Ủy Ban (Committee Determination)
-- Tại ranh giới của Term/Epoch (ngay sau khi tải đủ DAG liên quan đến Term hiện tại), mô-đun `EpochChange` sẽ trích xuất thông tin Stake và xác định danh sách **Committee (Nhóm Ủy ban Validator)** có quyền biểu quyết ở Term này.
+## 6. Quy Tắc Hash Khối (Block Hash Determinism) & Chống Phân Nhánh (Anti-Forking)
 
-#### 📏 Phase 5: Canh lề Trạng thái & Lọc Giao Giao Block (State Alignment & Delivery Filtering)
-Đây là chốt chặn cực kỳ quan trọng để chống Fork giữa Rust và Go:
-1. `Linearizer` bắt đầu quét từ trên xuống dưới DAG đã đồng bộ và tạo ra một cuộn dây chuyền tính trạng (Linearized Chain).
-2. `CommitObserver` đóng vai trò **Người gác cổng**:
-   - Nếu `Linearizer` nhả ra một khối có `Number <= N` (N là khối Go đã báo cáo ở Phase 1): **Bỏ qua (Discard)**. Không đẩy sang Go để tránh chạy lại 2 lần.
-   - **Xác minh Hash Anti-Fork:** Khi `Linearizer` duyệt tới khối thứ `N`, `CommitObserver` TỰ ĐỘNG kiểm tra chéo bằng `last_executed_commit_hash` được truyền qua `CommitConsumerArgs::new(replay_index, processed_index, last_executed_commit_hash)`:
-     - `Hash_Của_Khối_N_Trên_DAG == last_executed_commit_hash (của Go)`.
-     - ❌ *Nếu sai:* Tức là node đã bị rẽ nhánh (Forked/Corrupted RocksDB). Node phải **Panic ngay lập tức** để người quản trị tải lại Snapshot, cấm tuyệt đối việc ghi đè gây nát trạng thái.
-     - ✅ *Nếu đúng:* Trạng thái khớp hoàn hảo.
-   - Trường `commit_hash` trong message `ExecutableBlock` (Protobuf field 9) chứa digest của Rust DAG commit. Go Engine **bắt buộc** lưu trữ hash này và trả lại trong `LastBlockNumberResponse` để phục vụ kiểm tra chéo ở các lần khởi động sau.
-   - Khi đó, khối đầu tiên được đẩy qua kênh MPSC sang cho máy ảo Go sẽ chính xác là khối **`N + 1`**.
+Sự nhất quán của Hash khối trên toàn cụm mạng phụ thuộc hoàn toàn vào tính chất tất định (determinism) của dữ liệu đi vào. Block hash được tính bằng Keccak256 trên protobuf serialize **có chọn lọc** các trường header. Quy tắc quan trọng:
 
-#### ⚡ Phase 6: Chế Độ Tham Gia Tích Cực (Active Mode)
-- Chỉ khi nút Go đã tiếp nhận đủ mọi khối `N+1, N+2...` và báo "Đã bắt kịp hoàn toàn Mạng (Fully Synced)".
-- `AuthorityNode` gạt công tắc trạng thái từ `SyncOnly` sang **`Active`**.
-- Lúc này, Node mới bắt đầu chia sẻ Mempool, đề xuất Block mới (Proposer), và gửi chữ ký biểu quyết. Hệ thống hoàn chỉnh việc hồi sinh an toàn, bảo đảm đồng thuận mạnh mẽ (Strong Consistency).
+- **INCLUDED**: `BlockNumber`, `AccountStatesRoot`, `StakeStatesRoot`, `ReceiptRoot`, `LeaderAddress`, `TimeStamp`, `TransactionsRoot`, `Epoch`
+- **EXCLUDED**: `LastBlockHash` (chống hash chain divergence khi restart), `GlobalExecIndex` (non-deterministic mapping Rust→Go), `AggregateSignature` (set sau khi hash)
+
+> [!IMPORTANT]
+> **`GlobalExecIndex` bị loại khỏi hash** vì GEI là mapping từ Rust commit index → Go block number. Khi node restore/catch-up, cùng một block có thể nhận GEI khác nhau tùy theo thứ tự xử lý commit (synced vs local DAG replay). GEI vẫn được lưu trong header cho monitoring nhưng KHÔNG ảnh hưởng block identity.
+
+### 6.1. Hóa Giải Phân Nhánh Hash (Hash Divergence Resolution)
+**Deterministic Leader Address Fallback** (`executor.rs`):
+
+Khi Rust (Narwhal) có `leader_author_index >= committee_size` (do mismatch giữa Narwhal committee và Go genesis):
+1. Retry refresh epoch_eth_addresses từ Go (tối đa 10 lần × 500ms)
+2. Nếu vẫn out-of-bounds → **Deterministic Fallback**: `eth_addresses.iter().find(|a| a.len() == 20)` — TẤT CẢ nodes chọn cùng một address 20-byte đầu tiên
+3. Nếu không có address hợp lệ → `vec![1; 20]` (KHÔNG BAO GIỜ dùng `vec![0; 20]` vì Go sẽ fallback về local address → divergence)
+
+### 6.2. Anti-Fork Hash Check (CommitObserver)
+Tại `commit_observer.rs::recover_and_send_commits()`:
+
+```rust
+if replay_after_commit_index > 0:
+    go_hash = commit_consumer.last_executed_commit_hash  // [u8; 32] từ Go
+    
+    if go_hash == [0; 32]:
+        → SKIP check (sentinel: snapshot restore hoặc uninitialized)
+    else:
+        local_hash = store.scan_commits(replay_after_commit_index).digest()
+        if local_hash != go_hash:
+            → PANIC! "FORK DETECTED! DAG DB corrupted or network fork"
+        else:
+            → "State consistent" ✅
+```
+
+> [!CAUTION]
+> `last_executed_commit_hash` được truyền qua `CommitConsumerArgs::new(go_replay_after, go_replay_after, commit_hash)` và is REQUIRED cho anti-fork verification. Zero hash (snapshot restore) tự động bypass check an toàn.
+
+### 6.3. POST-CREATE-FORK-GUARD (Go Side)
+Bên trong `block_processor_sync.go` (line ~790-860):
+- Sau khi Go tạo block cục bộ, kiểm tra xem P2P sync đã viết block cùng number với hash KHÁC chưa
+- Nếu hash mismatch: **Adopt P2P version** (network-authoritative)
+  - Replace in-memory state
+  - Remap BlockNumber→Hash trong blockchain index
+  - CommitBlockState + RebuildTries + ClearAllMVMApi
+- Chỉ node đang catching up mới trigger guard này. Node in-sync produce identical blocks → never triggered.
+
+---
+
+## 7. Pipeline Rust→Go (Commit Execution Pipeline)
+
+Đây là phần QUAN TRỌNG NHẤT gây ra hầu hết lỗi stall/fork. Pipeline truyền commit từ Rust consensus sang Go execution:
+
+### 7.1. Luồng dữ liệu chi tiết
+
+```mermaid
+graph LR
+    subgraph Rust
+        CP["CommitProcessor<br/>(tuần tự theo commit_index)"]
+        DC["dispatch_commit()<br/>(phân loại empty/non-empty)"]
+        BDM["BlockDeliveryManager<br/>MPSC(10000)"]
+    end
+    
+    subgraph Go
+        BSD["processSingleEpochData<br/>(xử lý từng commit)"]
+        
+        subgraph "Empty Commit Path"
+            GEI_CH["geiUpdateChan<br/>(buffered channel)"]
+            GEI_W["geiWorker<br/>(coalesce highest GEI)"]
+        end
+        
+        subgraph "Non-Empty Commit Path"
+            TX["Process Transactions"]
+            BLK["Create Block"]
+            FORK["POST-CREATE-FORK-GUARD"]
+        end
+        
+        CC["commitChannel"]
+        CW["commitWorker<br/>(persist to DB)"]
+    end
+    
+    CP --> DC
+    DC -->|"empty: skip FFI"| CP2["Update shared GEI<br/>+ skip_empty_commit"]
+    DC -->|"non-empty"| BDM --> BSD
+    BSD -->|"0 tx"| GEI_CH --> GEI_W --> CC
+    BSD -->|"has tx"| TX --> BLK --> FORK --> CC
+    CC --> CW
+    
+    style DC fill:#ff9,stroke:#f90
+    style GEI_W fill:#f99,stroke:#f00
+    style FORK fill:#f9f,stroke:#f0f
+```
+
+### 7.2. GEI Calculation Formula
+
+```
+global_exec_index = epoch_base_index + commit_index + cumulative_fragment_offset
+```
+
+| Thành Phần | Nguồn Gốc | Tính Chất |
+|---|---|---|
+| `epoch_base_index` | Go epoch boundary data, lưu qua `with_epoch_info()` | Cố định suốt epoch, giống nhau mọi node |
+| `commit_index` | Mysticeti BFT consensus | Giống nhau mọi node |
+| `cumulative_fragment_offset` | Tích lũy từ fragmentation (`MAX_TXS_PER_GO_BLOCK`) | Deterministic: cùng TXs → cùng fragments |
+
+> [!WARNING]
+> **epoch_base_index_override**: CommitProcessor lưu `epoch_base_index` riêng biệt qua `with_epoch_info()`, KHÔNG derive từ `shared_last_global_exec_index` runtime. Lý do: sau cold-start, shared GEI bị update lên network commit (VD: 4364), nhưng epoch base cho epoch 1 phải = 0. Dùng sai base → GEI sai → hash diverge → FORK.
+
+### 7.3. Fragment Offset Crash Recovery
+
+Khi commit lớn (>12K TXs) bị fragment thành N blocks, `cumulative_fragment_offset` tăng thêm (N-1). Nếu node crash giữa chừng:
+
+1. **Disk persistence**: `persist_fragment_offset()` lưu offset sau mỗi thay đổi
+2. **Math recovery**: Nếu persisted = 0 (snapshot restore xóa file):
+   ```
+   math_offset = last_gei - epoch_base - (next_expected_commit - 1)
+   ```
+3. **Startup**: `CommitProcessor::run()` chọn `max(persisted, math)` để khôi phục chính xác
+
+### 7.4. Bất Biến An Toàn (Safety Invariants)
+
+| # | Bất Biến | Cách Bảo Vệ |
+|---|----------|-------------|
+| 1 | Mọi BFT-certified commit PHẢI được thực thi | CATCH-UP FORK GUARD đã bị XÓA — không suppress commit nào |
+| 2 | GEI phải tăng đơn điệu | `storage.UpdateLastGlobalExecIndex()` dùng `atomic.CompareAndSwap` |  
+| 3 | Empty commits không qua FFI | `dispatch_commit()` fast-path: chỉ update shared_gei + executor skip |
+| 4 | Epoch transition chờ Go flush xong | `poll_go_until_synced` + `ForceCommit` mỗi 3s, tolerance ≤5 GEI |
+| 5 | Snapshot restore tạo gap → auto-jump | FORWARD-JUMP: khi ≥10 pending + gap >20, nhảy đến smallest_pending |
+| 6 | Block hash deterministic | GEI và LastBlockHash **KHÔNG** nằm trong hash |
+| 7 | is_transitioning chặn CommitProcessor | Busy-wait loop 100ms trong run() khi epoch đang chuyển |
+| 8 | Fragment offset crash-safe | Persist to disk + math recovery from GEI difference |
+| 9 | Leader address deterministic | Fallback dùng first valid 20-byte address, tránh vec![0;20] |
+
+### 7.5. Điểm Nghẽn Đã Biết & Fix
+
+#### ❌ CATCH-UP FORK GUARD (ĐÃ XÓA)
+- **Trước**: Khi Go lag >10, suppress non-empty commits → `stateRoot` diverge → FORK
+- **Sau**: Tất cả commits qua BFT đều canonical, thực thi vô điều kiện
+
+#### ⏱️ Epoch Transition Stall (ĐÃ FIX) 
+- **Trước**: `poll_go_until_synced` chờ 300s thụ động, Go async pipeline giữ 3 GEI cuối trong buffer
+- **Sau**: Timeout 30s + `ForceCommit` flush Go pipeline + tolerance ≤5 GEI
+
+#### 🚀 Snapshot Restore Gap (ĐÃ FIX)
+- **Trước**: CommitProcessor stuck vĩnh viễn chờ commits không bao giờ đến (DAG đã reset)  
+- **Sau**: FORWARD-JUMP batch drain — phát hiện gap, nhảy đến pending, batch-skip empties
+
+#### ⚠️ Go geiUpdateChan Ordering (GIÁM SÁT)
+- Go dùng **coalescing channel** cho empty commits: chỉ giữ GEI cao nhất
+- Khi channel full, GEI có thể bị drop → Rust poll thấy GEI cũ → stall ngắn
+- **Mitigation**: ForceCommit + tolerance trong poll_go_until_synced
+
+---
+
+## 8. Quy Trình Phục Hồi Snapshot (Snapshot Restore Recovery)
+
+```mermaid
+sequenceDiagram
+    participant Admin as Operator
+    participant Script as restore_node.sh
+    participant Go as Go Master
+    participant Rust as Rust Consensus
+    participant DAG as DagState/RocksDB
+
+    Admin->>Script: ./restore_node.sh 1
+    Script->>Go: Stop node process
+    Script->>Go: Copy snapshot to data dir
+    Script->>DAG: rm -rf rust_consensus (clean DAG)
+    Script->>Go: Restart node
+    
+    Go->>Rust: FFI init: last_block=N, hash=0x00..00 (sentinel)
+    Rust->>DAG: Load empty DAG → 0 commits
+    
+    Note over Rust: CommitObserver: hash=0 → skip ANTI-FORK check
+    Note over Rust: Core::recover: empty DAG → skip assertion
+    Note over Rust: STARTUP-SYNC: fetch missing blocks from peers → execute in Go
+    
+    Rust->>Rust: Connect P2P, start CommitSyncer
+    
+    Note over Rust: CommitSyncer.update_state():<br/>local_commit=0, highest_handled=N<br/>→ reset_to_network_baseline(N)
+    Note over Rust: patch_baseline_if_needed():<br/>Fetch real digest+timestamp from peer
+    
+    Rust->>Rust: CommitSyncer fetches commits from peers
+    Rust->>Rust: CoreThread receives commits starting at index ~5000+
+    
+    Note over Rust: CommitProcessor: expected=1, received=5000+
+    Note over Rust: FORWARD-JUMP: gap=4999 > 20, pending≥10
+    Note over Rust: Jump to 5000, batch-drain empties
+    
+    Rust->>Go: dispatch_commit(non-empty commits)
+    Go->>Go: Process transactions, create blocks
+    Go->>Go: POST-CREATE-FORK-GUARD: adopt P2P blocks if hash mismatch
+    
+    Note over Rust: Node catches up to network tip ✅
+```
+
+> [!CAUTION]  
+> **Hash = 0x00..00 sau restore**: Đây là sentinel value, KHÔNG phải lỗi. Go trả về zero hash vì `LastExecutedCommitHash` chưa tồn tại trong BackupDB (key được tạo bởi feature mới). Hash sẽ tự có giá trị thật sau commit đầu tiên. ANTI-FORK check tự động skip khi hash=0.
+
+---
+
+## 9. Epoch Transition Pipeline (Quy Trình Chuyển Đổi Kỷ Nguyên)
+
+Quá trình chuyển đổi Kỷ Nguyên (Epoch Transition) là lúc hệ thống thay thế bộ điều phối mạng lưới, cập nhật Validator, và khởi tạo state hệ thống mới. Nó đòi hỏi sự đồng bộ chặt chẽ cả ở Rust Consensus và Go Execution.
+
+### 9.1. Cơ Chế Tiêm Giao Dịch Hệ Thống (System Transaction Injection)
+
+Thay vì cắt Epoch một cách đột ngột dựa trên thời gian, hệ thống sử dụng **Giao Dịch Hệ Thống (System Transaction)** đặc biệt `EndOfEpoch`:
+1. **Theo dõi kích thước Epoch**: Tại `CoreThread`, `EpochChangeProcessor` đếm tổng số commits hoặc nhận tín hiệu từ Smart Contract thay đổi Validator.
+2. **Khởi Trình Giao Dịch**: Khi đến giới hạn, Proposer (Leader) tự động tiêm giao dịch `EndOfEpoch(target_epoch)` vào đầu block của nó thông qua `SystemTransactionProvider`. 
+3. **Cờ Khối Biên (Boundary Block)**: Giao dịch này truyền hình khắp nơi. Khi được Linearized và đẩy qua UDS, CommitProcessor bắt dính giao dịch và ra hiệu cho Go Master biết đây là Khối Biên.
+
+### 9.2. Luồng xử lý Epoch Transition (Chuẩn bị và Chuyển Đổi)
+
+```
+Proposer injects EndOfEpoch SystemTx 
+│
+├─ Go Master: Xử lý State, Flush Database, Trả cờ `ready=true` kèm theo `GEI` đỉnh
+│   └─ Trở thành Boundary Block cho Epoch hiện tại.
+│
+├─ epoch_transition_callback(new_epoch, boundary_block, global_exec_index)
+│
+├─ CommitProcessor: HALT processing (break from loop)
+│
+└─ transition_to_epoch_from_system_tx():
+    │
+    ├─ STEP 1: Guard (duplicate check, swap_epoch_transitioning(true))
+    │   └─ Drop Guard: ensures is_transitioning = false even on panic
+    │
+    ├─ STEP 2: Wait for commit processor flush (Validator only)
+    │   └─ Hàm chờ tiến trình ghi xuất dữ liệu cũ dứt điểm trọn vẹn.
+    │
+    ├─ STEP 3: Stop old authority + flush blocks + poll Go GEI
+    │   ├─ Ngừng mạng P2P (`network_manager.stop()`)
+    │   ├─ `poll_go_until_synced` chờ Go Engine phản hồi `LastBlockNumberResponse` chặn ở `Boundary GEI` với `is_ready=true`.
+    │   └─ Đảm bảo Go và Rust hoàn toàn sạch cấu trúc, không còn TX dư thừa.
+    │
+    ├─ STEP 4: Cập nhật Hub State và Go Master
+    │   ├─ `coordination_hub.set_initial_global_exec_index(effective_synced)`
+    │   └─ `executor_client.advance_epoch(...)`: Ra lệnh Go nâng số Epoch.
+    │
+    ├─ STEP 5: Khởi Động Lại Consensus (Setup New Baseline)
+    │   ├─ Bật mạng AuthorityNode cấp mới bằng IP List mới.
+    │   └─ Cập nhật `epoch_eth_addresses` từ UDS.
+    │
+    └─ STEP 6: Hậu Chuyển Đổi (Post-transition)
+        ├─ Reset `set_epoch_transitioning(false)`
+        └─ Mạng P2P sẽ tự tìm thấy nhau qua Tonic.
+```
+
+### 9.3. is_transitioning Safety & Hệ Thống Bảo Vệ Bế Tắc (Liveness Guards)
+
+Epoch Transition là thời điểm nhạy cảm dễ sinh **Deadlock**. Các cơ chế bảo vệ mạnh mẽ đã được thêm vào:
+
+1. **CommitProcessor Safety Guard (`processor.rs`)**: `is_transitioning` flag khiến CommitProcessor chạy vòng loop chờ (busy-wait). Để chống trường hợp panic đột ngột do drop guard không chạy, vòng loop này được bảo vệ thêm một Safety Timeout **60 giây**. Nếu kẹt quá 60s, nó sẽ buộc xóa cờ và khôi phục đường ống để hệ thống tránh đình trệ vĩnh viễn.
+2. **Liveness Stall Detector (`commit_syncer.rs`)**: Trong lúc chuyển đổi P2P mạng có thể bị kẹt DAG `local_commit_index`. Nếu hệ thống tưởng mình ở trạng thái "Healthy" nhưng `local_commit` không nhúc nhích trong 60s, detector sẽ ép node nhảy lùi về `Bootstrapping`, ép tái đồng bộ `baseline` và quét lại khối cho Mạng Lưới qua hàm `fetch_blocks` P2P, sửa bế tắc "Mạng Quorum có nhưng không Block nào được duyệt".
+3. **Drop Guard (`epoch_transition.rs`)**: Struct `Guard` implement `Drop` để đảm bảo cờ `is_transitioning` luôn được trả về `false` báo hiệu Node hồi sinh lại ngay cả khi luồng rust đang chạy gặp Lỗi Khẩn Cấp (panic).
+
+---
+
+## 10. Nguyên Tắc Kiến Trúc (Architectural Principles)
+
+### 10.1. Quản Lý Trạng Thái Dùng Chung Tập Trung (Centralized Shared State)
+Trong môi trường đồng thuận đa tiến trình (Multi-threading) và Kiến trúc Hợp nhất (Rust-Go FFI):
+- **Nguyên tắc "Một Nguồn Sự Thật" (Single Source of Truth)**: Nếu hai hay nhiều thành phần dùng chung một thông số trạng thái (Ví dụ: `Global_Execution_Index`, `Epoch`, `is_transitioning`), trạng thái đó **tuyệt đối không được sao chép phân tán**. Nó phải được quản lý tập trung ở **một nơi duy nhất** (như `ConsensusCoordinationHub`). 
+- **Theo dõi & Cấp quyền (Monitor & Mutate)**: Bất kỳ thành phần nào muốn đọc đều phải trỏ tham chiếu (reference) về Bộ quản lý tập trung. Quyền ghi (mutate) phải được hạn chế nghiêm ngặt thông qua các hàm có khóa vây bảo vệ (Lock Guards / Atomic Operations) để tránh Deadlock.
+- Nhờ có Hub trung tâm, khi trạng thái thay đổi, hệ thống bảo đảm mọi components quan tâm đều nhận cùng một sự thật.
+
+### 10.2. Khởi Động Tuần Tự & Chống Equivocation
+1. **Chờ Mốc Phân Ranh Mạng**: Hệ thống khởi tạo ở chế độ `Bootstrapping`. P2P Network được kết nối, nhưng `Core` không propose blocks. `CommitSyncer` là thành phần duy nhất hoạt động để đánh giá mức độ đồng bộ.
+2. **STARTUP-SYNC Barrier**: Trước khi consensus bắt đầu, fetch missing blocks từ peers và execute trong Go để đảm bảo state parity.
+3. **Kích Hoạt Hoàn Toàn**: Chỉ khi `ConsensusCoordinationHub` chuyển sang `Healthy`, Core mới được phép propose.
+
+### 10.3. Fault Isolation
+- **CommitSyncerSupervisor**: Auto-restart CommitSyncer khi crash (exponential backoff 1s → 10s)
+- **CommitFinalizer auto-restart**: CommitObserver tự rebuild CommitFinalizer khi channel closed
+- **is_terminally_failed**: AtomicBool flag — nếu BlockDeliveryManager hoặc CommitProcessor chết, node tự đánh dấu failed để orchestrator có thể restart.

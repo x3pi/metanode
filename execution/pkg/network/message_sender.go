@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -77,8 +78,21 @@ func (s *MessageSender) SendMessage2(
 		Body: body,
 	}
 
-	// Gửi message đã được gói đúng cách
-	return connection.SendMessage(NewMessage(messageProto))
+	// Gửi message đã được gói đúng cách với cơ chế retry
+	msg := NewMessage(messageProto)
+	var errS error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		errS = connection.SendMessage(msg)
+		if errS == nil {
+			return nil
+		}
+		logger.Warn("SendMessage2: Gửi lệnh '%s' thất bại lần %d: %v. Đang thử lại...", command, i+1, errS)
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	logger.Error("SendMessage2: Gửi lệnh '%s' thất bại sau %d lần thử: %v", command, maxRetries, errS)
+	return errS
 }
 
 // SendBytes gửi một mảng byte thô qua một kết nối cụ thể.
@@ -234,6 +248,18 @@ func SendBytes(
 	}
 
 	message := generateMessage(connection.Address(), command, bytes, version)
-	errS := connection.SendMessage(message)
+	
+	var errS error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		errS = connection.SendMessage(message)
+		if errS == nil {
+			return nil
+		}
+		logger.Warn("SendBytes (utility): Gửi lệnh '%s' thất bại lần %d: %v. Đang thử lại...", command, i+1, errS)
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	logger.Error("SendBytes (utility): Gửi lệnh '%s' thất bại sau %d lần thử: %v", command, maxRetries, errS)
 	return errS
 }

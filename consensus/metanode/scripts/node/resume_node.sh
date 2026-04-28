@@ -40,26 +40,7 @@ EXECUTOR_SOCKET=("/tmp/executor0.sock" "/tmp/executor1.sock" "/tmp/executor2.soc
 
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
-# ─── Helper ──────────────────────────────────────────────────
-wait_for_socket() {
-    local socket=$1
-    local name=$2
-    local timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        if [ -S "$socket" ]; then
-            local elapsed=$(( $(date +%s) - start ))
-            echo -e "${GREEN}  ✅ $name ready (${elapsed}s)${NC}"
-            return 0
-        fi
-        local elapsed=$(( $(date +%s) - start ))
-        if [ $elapsed -ge $timeout ]; then
-            echo -e "${YELLOW}  ⚠️ Timeout waiting for $name (${timeout}s)${NC}"
-            return 1
-        fi
-        sleep 1
-    done
-}
+
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
@@ -129,20 +110,7 @@ tmux new-session -d -s "${GO_SUB_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
 
 echo -e "${GREEN}  🚀 Go Sub started (${GO_SUB_SESSION[$NODE_ID]})${NC}"
 
-# ─── Step 6: Wait for Go Master socket ──────────────────────
-echo -e "${BLUE}📋 Step 5: Waiting for Go Master socket...${NC}"
-wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 120
 
-# ─── Step 7: Start Rust Metanode ─────────────────────────────
-echo -e "${BLUE}📋 Step 6: Start Rust Metanode...${NC}"
-cd "$METANODE_ROOT"
-
-tmux new-session -d -s "${RUST_SESSION[$NODE_ID]}" -c "$METANODE_ROOT" \
-    "export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/rust.log\" 2>&1"
-
-echo -e "${GREEN}  🚀 Rust Metanode started (${RUST_SESSION[$NODE_ID]})${NC}"
-
-sleep 3
 
 # ─── Summary ─────────────────────────────────────────────────
 echo ""
@@ -153,7 +121,6 @@ echo ""
 echo -e "${GREEN}  📊 tmux sessions:${NC}"
 echo "    Go Master: tmux attach -t ${GO_MASTER_SESSION[$NODE_ID]}"
 echo "    Go Sub:    tmux attach -t ${GO_SUB_SESSION[$NODE_ID]}"
-echo "    Rust:      tmux attach -t ${RUST_SESSION[$NODE_ID]}"
 echo ""
 echo -e "${GREEN}  📁 Logs: $LOG_DIR/node_$NODE_ID/${NC}"
 echo ""

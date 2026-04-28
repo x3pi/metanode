@@ -46,21 +46,7 @@ RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
 GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
-wait_for_socket() {
-    local socket=$1 name=$2 timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        if [ -S "$socket" ]; then
-            echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"
-            return 0
-        fi
-        if [ $(( $(date +%s) - start )) -ge $timeout ]; then
-            echo -e "${RED}  ❌ Timeout waiting for $name (${timeout}s)${NC}"
-            return 1
-        fi
-        sleep 1
-    done
-}
+
 
 find_reference_node() {
     for i in 0 1 2 3 4; do
@@ -168,7 +154,7 @@ echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng Node $NODE_ID...${NC}"
 "$SCRIPT_DIR/stop_node.sh" "$NODE_ID" 2>/dev/null || true
 
-for sess in "go-master-${NODE_ID}" "metanode-${NODE_ID}"; do
+for sess in "go-master-${NODE_ID}"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
         tmux send-keys -t "$sess" C-c 2>/dev/null || true
         sleep 2
@@ -302,19 +288,14 @@ tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
     "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
 echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
-echo -e "${CYAN}  [5b] Waiting for Go Master socket...${NC}"
-wait_for_socket "${GO_MASTER_SOCKET[$NODE_ID]}" "Go Master $NODE_ID" 600
+
 
 echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10
 GO_BLOCK=$(grep -a "last_committed_block=" "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | sed -n 's/.*last_committed_block=\([0-9]*\).*/\1/p') || true
 if [ -n "$GO_BLOCK" ]; then echo -e "${GREEN}    ✅ Go Master nhận snapshot — block=$GO_BLOCK${NC}"; fi
 
-echo -e "${CYAN}  [5d] Rust Metanode...${NC}"
-cd "$METANODE_ROOT"
-tmux new-session -d -s "${RUST_SESSION[$NODE_ID]}" -c "$METANODE_ROOT" \
-    "export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/rust.log\" 2>&1"
-echo -e "${GREEN}    🚀 Rust Metanode started (${RUST_SESSION[$NODE_ID]})${NC}"
+
 
 # Step 6: Sync Monitor
 echo ""
@@ -422,6 +403,4 @@ echo -e "${GREEN}═════════════════════
 echo ""
 echo -e "  ${BLUE}tmux sessions:${NC}"
 echo "    Go Master: tmux attach -t go-master-${NODE_ID}"
-echo "    Rust:      tmux attach -t metanode-${NODE_ID}"
-echo "    tail -f $LOG_DIR/node_$NODE_ID/rust.log"
 echo ""

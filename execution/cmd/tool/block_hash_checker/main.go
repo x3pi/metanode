@@ -44,6 +44,8 @@ type blockResult struct {
 	StateRoot        string `json:"stateRoot"`
 	TransactionsRoot string `json:"transactionsRoot"`
 	ReceiptsRoot     string `json:"receiptsRoot"`
+	GlobalExecIndex  string `json:"globalExecIndex"`
+	Epoch            string `json:"epoch"`
 }
 
 // ===== Block info (parsed from blockResult) =====
@@ -54,6 +56,8 @@ type blockInfo struct {
 	StateRoot        string
 	TransactionsRoot string
 	ReceiptsRoot     string
+	GlobalExecIndex  string
+	Epoch            string
 	Error            string // non-empty if fetch failed
 }
 
@@ -421,7 +425,18 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		StateRoot:        block.StateRoot,
 		TransactionsRoot: block.TransactionsRoot,
 		ReceiptsRoot:     block.ReceiptsRoot,
+		GlobalExecIndex:  block.GlobalExecIndex,
+		Epoch:            block.Epoch,
 	}, nil
+}
+
+func parseHexStr(hexStr string) uint64 {
+	if hexStr == "" {
+		return 0
+	}
+	var num uint64
+	fmt.Sscanf(hexStr, "0x%x", &num)
+	return num
 }
 
 func getLatestBlockNumber(client *http.Client, url string) (uint64, error) {
@@ -466,6 +481,38 @@ func getLatestBlockNumber(client *http.Client, url string) (uint64, error) {
 	var num uint64
 	fmt.Sscanf(hexStr, "0x%x", &num)
 	return num, nil
+}
+
+type peerInfoResp struct {
+	Epoch           uint64 `json:"epoch"`
+	GlobalExecIndex uint64 `json:"global_exec_index"`
+	LastBlockNumber uint64 `json:"last_block_number"`
+}
+
+func getPeerInfo(client *http.Client, rpcURL string) (uint64, uint64, error) {
+	// rpcURL looks like http://127.0.0.1:8757
+	peerURL := strings.TrimRight(rpcURL, "/") + "/peer_info"
+	resp, err := client.Get(peerURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return 0, 0, fmt.Errorf("bad status: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var pInfo peerInfoResp
+	if err := json.Unmarshal(data, &pInfo); err != nil {
+		return 0, 0, err
+	}
+
+	return pInfo.GlobalExecIndex, pInfo.Epoch, nil
 }
 
 // ===== Print mismatch detail =====
@@ -538,7 +585,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			fmt.Printf("   %-12s %s\n", n.Name+":", bi.Error)
 			continue
 		}
-		fmt.Printf("   %-12s hash=%s\n", n.Name+":", bi.Hash)
+		fmt.Printf("   %-12s hash=%s gei=%d epoch=%d\n", n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 		if parentDiff {
 			fmt.Printf("   %-12s parentHash=%s\n", "", bi.ParentHash)
 		}
@@ -578,6 +625,8 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 		header += "," + name + "_stateRoot"
 		header += "," + name + "_txRoot"
 		header += "," + name + "_receiptsRoot"
+		header += "," + name + "_gei"
+		header += "," + name + "_epoch"
 	}
 	fmt.Fprintln(f, header)
 
@@ -591,13 +640,14 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 				if ok {
 					errMsg = bi.Error
 				}
-				line += "," + errMsg + ",,,,"
+				line += "," + errMsg + ",,,,,,"
 			} else {
 				line += "," + bi.Hash
 				line += "," + bi.ParentHash
 				line += "," + bi.StateRoot
 				line += "," + bi.TransactionsRoot
 				line += "," + bi.ReceiptsRoot
+				line += fmt.Sprintf(",%d,%d", parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		fmt.Fprintln(f, line)
@@ -659,6 +709,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	type nodeBlock struct {
 		name  string
 		block uint64
+		gei   uint64
+		epoch uint64
 		err   error
 	}
 
@@ -668,7 +720,11 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-		results = append(results, nodeBlock{name: n.Name, block: num, err: err})
+		
+		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
+		gei, epoch, _ := getPeerInfo(client, n.URL)
+
+		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {
 			if num < minBlock {
 				minBlock = num
@@ -686,7 +742,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		if r.err != nil {
 			heightParts = append(heightParts, fmt.Sprintf("%s=ERR", r.name))
 		} else {
-			heightParts = append(heightParts, fmt.Sprintf("%s=%d", r.name, r.block))
+			heightParts = append(heightParts, fmt.Sprintf("%s=%d (gei:%d e:%d)", r.name, r.block, r.gei, r.epoch))
 		}
 	}
 	fmt.Printf("Heights: %s", strings.Join(heightParts, "  "))
@@ -766,7 +822,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			} else if bi.IsError() {
 				fmt.Printf("      %-12s %s\n", n.Name+":", bi.Error)
 			} else {
-				fmt.Printf("      %-12s hash=%s  stateRoot=%s\n", n.Name+":", bi.Hash, bi.StateRoot)
+				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		return false
@@ -805,8 +861,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
 				continue
 			}
-			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s\n",
-				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  gei=%d  epoch=%d\n",
+				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
 		}
 	}
 

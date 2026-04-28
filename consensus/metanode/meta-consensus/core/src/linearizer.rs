@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::ops::Deref;
 
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round};
@@ -70,7 +71,7 @@ pub struct Linearizer {
     /// Leaders waiting to be committed - deferred because not all blocks were available.
     /// FORK PREVENTION: We only commit when ALL blocks for a round are present.
     /// This list is processed first on each handle_commit call.
-    deferred_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)>,
+    deferred_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)>,
 }
 
 impl Linearizer {
@@ -95,7 +96,7 @@ impl Linearizer {
     fn try_collect_sub_dag_and_commit(
         &mut self,
         leader_block: VerifiedBlock,
-        precomputed_timestamp_ms: Option<BlockTimestampMs>,
+        precomputed_commit: Option<crate::commit::CertifiedCommit>,
     ) -> Option<(CommittedSubDag, TrustedCommit)> {
         let _s = self
             .context
@@ -126,39 +127,56 @@ impl Linearizer {
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
         // Now linearize the sub-dag starting from the leader block
-        let to_commit = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
-
-        let timestamp_ms = precomputed_timestamp_ms.unwrap_or_else(|| {
-            Self::calculate_commit_timestamp(
+        let (to_commit_blocks, timestamp_ms, final_commit) = if let Some(certified_commit) = precomputed_commit.as_ref() {
+            let mut blocks = certified_commit.blocks().to_vec();
+            for block in &blocks {
+                dag_state.set_committed(&block.reference());
+            }
+            crate::commit::sort_sub_dag_blocks(&mut blocks);
+            (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
+        } else {
+            let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+            let ts = Self::calculate_commit_timestamp(
                 &self.context,
                 &mut dag_state,
                 &leader_block,
                 last_commit_timestamp_ms,
-            )
-        });
+            );
+            (blocks, ts, None)
+        };
+
+        let to_commit = match to_commit_blocks {
+            Some(blocks) => blocks,
+            None => {
+                tracing::info!("⚠️ [LINEARIZER] Missing blocks to linearize sub-dag for leader {:?}. Deferring commit.", leader_block.reference());
+                return None;
+            }
+        };
 
         drop(dag_state);
 
-        // Create the Commit.
-        // Calculate global_exec_index from epoch_base_index + commit_index
-        let commit_index = last_commit_index + 1;
-        let global_exec_index = self.epoch_base_index + commit_index as u64;
+        let commit = if let Some(trusted_commit) = final_commit {
+            trusted_commit
+        } else {
+            let commit_index = last_commit_index + 1;
+            let global_exec_index = self.epoch_base_index + commit_index as u64;
 
-        let commit = Commit::new(
-            commit_index,
-            last_commit_digest,
-            timestamp_ms,
-            leader_block.reference(),
-            to_commit
-                .iter()
-                .map(|block| block.reference())
-                .collect::<Vec<_>>(),
-            global_exec_index,
-        );
-        let serialized = commit
-            .serialize()
-            .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
-        let commit = TrustedCommit::new_trusted(commit, serialized);
+            let commit = Commit::new(
+                commit_index,
+                last_commit_digest,
+                timestamp_ms,
+                leader_block.reference(),
+                to_commit
+                    .iter()
+                    .map(|block| block.reference())
+                    .collect::<Vec<_>>(),
+                global_exec_index,
+            );
+            let serialized = commit
+                .serialize()
+                .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
+            TrustedCommit::new_trusted(commit, serialized)
+        };
 
         // Create the corresponding committed sub dag
         let sub_dag = CommittedSubDag::new(
@@ -166,7 +184,7 @@ impl Linearizer {
             to_commit,
             timestamp_ms,
             commit.reference(),
-            global_exec_index,
+            commit.global_exec_index(),
         );
 
         Some((sub_dag, commit))
@@ -226,71 +244,64 @@ impl Linearizer {
     pub(crate) fn linearize_sub_dag(
         leader_block: VerifiedBlock,
         dag_state: &mut impl BlockStoreAPI,
-    ) -> Vec<VerifiedBlock> {
-        // The GC round here is calculated based on the last committed round of the leader block. The algorithm will attempt to
-        // commit blocks up to this GC round. Once this commit has been processed and written to DagState, then gc round will update
-        // and on the processing of the next commit we'll have it already updated, so no need to do any gc_round recalculations here.
-        // We just use whatever is currently in DagState.
+    ) -> Option<Vec<VerifiedBlock>> {
+        // The GC round here is calculated based on the last committed round of the leader block.
         let gc_round: Round = dag_state.gc_round();
         let leader_block_ref = leader_block.reference();
-        let _leader_round = leader_block.round();
-        let mut buffer = vec![leader_block];
+        let mut buffer = vec![leader_block.clone()];
         let mut to_commit = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(leader_block_ref);
 
-        // Perform the recursion without stopping at the highest round round that has been committed per authority. Instead it will
-        // allow to commit blocks that are lower than the highest committed round for an authority but higher than gc_round.
-        if !dag_state.set_committed(&leader_block_ref) {
+        if dag_state.is_committed(&leader_block_ref) {
             tracing::warn!(
-                "⚠️ [LINEARIZER] Leader block with reference {:?} attempted to be committed twice or is missing. \
-                 Tolerating graceful skip (likely recovering from cold-start or conflicting snapshot boundaries).",
+                "⚠️ [LINEARIZER] Leader block with reference {:?} was already committed.",
                 leader_block_ref
             );
-            return vec![]; // Skip processing if it's already committed
+            return Some(vec![]);
         }
-
-        // NOTE: We intentionally do NOT commit all blocks at the leader round.
-        // Different nodes may have different blocks at a round (due to network timing).
-        // To ensure determinism, we ONLY commit what the leader references (its ancestors).
-        // All nodes receive the same leader block, so they will commit the same blocks.
 
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
 
-            let ancestors: Vec<VerifiedBlock> = dag_state
-                .get_blocks(
-                    &x.ancestors()
-                        .iter()
-                        .copied()
-                        .filter(|ancestor| {
-                            ancestor.round > gc_round && !dag_state.is_committed(ancestor)
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .into_iter()
-                .filter_map(|ancestor_opt| {
-                    // During commit sync, some ancestor blocks might not be in dag_state yet.
-                    // Skip them gracefully instead of panicking.
-                    if ancestor_opt.is_none() {
-                        tracing::warn!(
-                            "⚠️ [LINEARIZER] Missing uncommitted ancestor block during linearization - will be synced later"
-                        );
-                    }
-                    ancestor_opt
+            let uncommitted_ancestors: Vec<BlockRef> = x.ancestors()
+                .iter()
+                .copied()
+                .filter(|ancestor| {
+                    ancestor.round > gc_round && !dag_state.is_committed(ancestor)
                 })
                 .collect();
-
-            for ancestor in ancestors {
-                buffer.push(ancestor.clone());
-                assert!(
-                    dag_state.set_committed(&ancestor.reference()),
-                    "Block with reference {:?} attempted to be committed twice",
-                    ancestor.reference()
-                );
+                
+            let ancestor_blocks = dag_state.get_blocks(&uncommitted_ancestors);
+            
+            for (idx, ancestor_opt) in ancestor_blocks.into_iter().enumerate() {
+                match ancestor_opt {
+                    Some(ancestor) => {
+                        if visited.insert(ancestor.reference()) {
+                            buffer.push(ancestor);
+                        }
+                    },
+                    None => {
+                        let missing_ref = uncommitted_ancestors[idx];
+                        tracing::warn!(
+                            "⚠️ [LINEARIZER] FORK PREVENTION: Missing uncommitted ancestor block {:?} during linearization! \
+                             Aborting sub-dag collection to prevent state divergence. Will retry when block arrives.", missing_ref
+                        );
+                        return None;
+                    }
+                }
             }
         }
-
-        // The above code should have not yielded any blocks that are <= gc_round, but just to make sure that we'll never
-        // commit anything that should be garbage collected we attempt to prune here as well.
+        
+        // NOW that we successfully collected ALL blocks, we can safely commit them!
+        for block in &to_commit {
+            assert!(
+                dag_state.set_committed(&block.reference()),
+                "Block with reference {:?} attempted to be committed twice",
+                block.reference()
+            );
+        }
+        
         assert!(
             to_commit.iter().all(|block| block.round() > gc_round),
             "No blocks <= {gc_round} should be committed. Leader round {}, blocks {to_commit:?}.",
@@ -300,7 +311,7 @@ impl Linearizer {
         // Sort the blocks of the sub-dag blocks
         sort_sub_dag_blocks(&mut to_commit);
 
-        to_commit
+        Some(to_commit)
     }
 
     // This function should be called whenever a new commit is observed. This will
@@ -319,13 +330,13 @@ impl Linearizer {
 
         // Combine deferred leaders with new leaders, maintaining order.
         // Deferred leaders are tried first (they are older and waiting longer).
-        let mut all_leaders: Vec<(VerifiedBlock, Option<BlockTimestampMs>)> =
+        let mut all_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)> =
             std::mem::take(&mut self.deferred_leaders);
         let had_deferred = !all_leaders.is_empty();
 
         let new_leaders_with_ts = committed_leaders.into_iter().enumerate().map(|(i, leader)| {
-            let ts = precomputed_commits.as_ref().map(|commits| commits[i].timestamp_ms());
-            (leader, ts)
+            let commit = precomputed_commits.as_ref().map(|commits| commits[i].clone());
+            (leader, commit)
         });
         all_leaders.extend(new_leaders_with_ts);
 
@@ -357,7 +368,7 @@ impl Linearizer {
 
         while let Some((leader_block, precomputed_ts)) = leaders_iter.next() {
             // Try to collect the sub-dag. Returns None if blocks are missing.
-            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts) {
+            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts.clone()) {
                 Some((sub_dag, commit)) => {
                     // Success! All blocks were available.
                     self.update_blocks_pruned_metric(&sub_dag);

@@ -225,18 +225,17 @@ func InitNomtDB(dbPath string, commitConcurrency, pageCacheMB, leafCacheMB int) 
 
 // CloseNomtDB closes all NOMT database handles.
 // CloseNomtDB properly closes all active NOMT databases.
+// CRITICAL: Must call handle.Close() to flush pending data via nomt_close FFI.
 func CloseNomtDB() {
 	globalNomtHandlesMu.Lock()
 	defer globalNomtHandlesMu.Unlock()
 	
 	for namespace, handle := range globalNomtHandles {
-		logger.Debug("[TRIE] Cleaning up NOMT handle for namespace: %s", namespace)
-		// Usually handle.Close() would be called here if FFI exported it.
-		// For now we just dereference. The Rust side should clean up when dropped
-		// or explicitly implement a close method if needed.
-		_ = handle
+		logger.Info("[TRIE] Closing NOMT handle for namespace: %s", namespace)
+		handle.Close() // Properly flush and close via FFI nomt_close()
 	}
 	globalNomtHandles = make(map[string]*nomt_ffi.Handle)
+	logger.Info("[TRIE] All NOMT handles closed")
 }
 
 // GetOrInitNomtHandle retrieves the handle for a namespace, lazily initializing it using global config if it doesn't exist.

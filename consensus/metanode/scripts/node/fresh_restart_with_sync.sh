@@ -51,16 +51,7 @@ RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "con
 
 ulimit -n 100000 || true
 
-# ─── Helper ──────────────────────────────────────────────────
-wait_for_socket() {
-    local socket=$1 name=$2 timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        [ -S "$socket" ] && { echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"; return 0; }
-        [ $(( $(date +%s) - start )) -ge $timeout ] && { echo -e "${RED}  ❌ Timeout waiting for $name${NC}"; return 1; }
-        sleep 1
-    done
-}
+
 
 START_TIME=$(date +%s)
 echo ""
@@ -203,10 +194,7 @@ for i in "${!ALL_NODES[@]}"; do
     sleep 2
 done
 
-# Wait for Go Master sockets
-for i in "${!ALL_NODES[@]}"; do
-    wait_for_socket "${GO_MASTER_SOCKET[$i]}" "Go Master ${ALL_NODES[$i]}" 120
-done
+
 
 # Start Go Subs — wait extra time for master to flush genesis state trie to disk
 sleep 5  # ← Master cần flush genesis AccountStatesRoot trước khi sub đọc
@@ -225,24 +213,7 @@ for i in "${!ALL_NODES[@]}"; do
 done
 sleep 8  # ← Chờ sub nodes ổn định và sync block đầu từ master
 
-# ==============================================================================
-# STEP 5: START RUST METANODES (all 5 nodes)
-# ==============================================================================
-echo -e "${BLUE}[5/5] 🦀 Starting Rust metanodes (nodes 0-4)...${NC}"
-cd "$METANODE_ROOT"
 
-for i in "${!ALL_NODES[@]}"; do
-    id=${ALL_NODES[$i]}
-    if [ "$id" -eq 4 ]; then
-        echo -e "  🚀 Rust Node $id ${CYAN}(SyncOnly)${NC}..."
-    else
-        echo -e "  🚀 Rust Node $id..."
-    fi
-    tmux new-session -d -s "${RUST_SESSION[$i]}" -c "$METANODE_ROOT" \
-        "ulimit -n 100000; export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$i]} >> \"$LOG_DIR/node_$id/rust.log\" 2>&1"
-    sleep 1
-done
-sleep 3
 
 # ==============================================================================
 # DONE
@@ -256,11 +227,11 @@ echo ""
 echo -e "  ${BLUE}Validator Nodes (0-3):${NC}"
 for i in "${!VALIDATOR_NODES[@]}"; do
     id=${VALIDATOR_NODES[$i]}
-    echo "    Node $id: tmux attach -t metanode-$id | go-master-$id | go-sub-$id"
+    echo "    Node $id: tmux attach -t go-master-$id | go-sub-$id"
 done
 echo ""
 echo -e "  ${CYAN}SyncOnly Node (4):${NC}"
-echo "    Node 4: tmux attach -t metanode-4 | go-master-4 | go-sub-4"
+echo "    Node 4: tmux attach -t go-master-4 | go-sub-4"
 echo ""
 echo -e "  ${BLUE}Logs:${NC}    $LOG_DIR/node_N/"
 echo -e "  ${BLUE}Status:${NC}  tmux ls"

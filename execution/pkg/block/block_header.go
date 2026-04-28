@@ -121,7 +121,8 @@ func (b *BlockHeader) Hash() common.Hash {
 	// lastBlockHash is still stored in the header for chain linking,
 	// but does NOT affect the block identity hash.
 	// NOTE: GlobalExecIndex IS included — it acts as a fork-detection canary.
-	// If GEI diverges between nodes, hash mismatch alerts to a problem.
+	// If GEI diverges between nodes, hash mismatch alerts to a problem
+	// that MUST be fixed at the source (Rust commit ordering), not hidden.
 	pbHeader := &pb.BlockHeader{
 		// NOTE: LastBlockHash deliberately EXCLUDED from hash
 		BlockNumber:       b.blockNumber,

@@ -32,26 +32,7 @@ DATA="node${NODE_ID}"
 
 GO_MASTER_SOCKET="/tmp/rust-go-node${NODE_ID}-master.sock"
 
-# Helper
-wait_for_socket() {
-    local socket=$1
-    local name=$2
-    local timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        if [ -S "$socket" ]; then
-            local elapsed=$(( $(date +%s) - start ))
-            echo -e "${GREEN}  ✅ $name ready (${elapsed}s)${NC}"
-            return 0
-        fi
-        local elapsed=$(( $(date +%s) - start ))
-        if [ $elapsed -ge $timeout ]; then
-            echo -e "${YELLOW}  ⚠️ Timeout waiting for $name (${timeout}s)${NC}"
-            return 1
-        fi
-        sleep 1
-    done
-}
+
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
@@ -91,16 +72,7 @@ export XAPIAN_BASE_PATH="$XAPIAN_SUB"
 nohup ./simple_chain -config="$GO_SUB_CONFIG" > "$LOG_DIR/node_$NODE_ID/go-sub-stdout.log" 2>&1 &
 echo -e "${GREEN}  🚀 Go Sub started (nohup)${NC}"
 
-echo -e "${BLUE}📋 Step 5: Waiting for Go Master socket...${NC}"
-wait_for_socket "$GO_MASTER_SOCKET" "Go Master $NODE_ID" 120
 
-echo -e "${BLUE}📋 Step 6: Start Rust Metanode...${NC}"
-cd "$METANODE_ROOT"
-export RUST_LOG=info,consensus_core=debug
-export DB_WRITE_BUFFER_SIZE_MB=256
-export DB_WAL_SIZE_MB=256
-nohup $BINARY start --config "$RUST_CONFIG" > "$LOG_DIR/node_$NODE_ID/rust.log" 2>&1 &
-echo -e "${GREEN}  🚀 Rust Metanode started (nohup)${NC}"
 
 sleep 3
 echo ""

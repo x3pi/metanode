@@ -98,7 +98,7 @@ impl LagMonitor {
                 .executor_client
                 .get_last_block_number()
                 .await
-                .map(|(n, _, _, _)| n)
+                .map(|(n, _, _, _, _)| n)
                 .unwrap_or(0);
 
             // 3. Calculate metrics

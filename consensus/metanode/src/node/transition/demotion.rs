@@ -6,7 +6,7 @@
 use crate::config::NodeConfig;
 use crate::node::{ConsensusNode, NodeMode};
 use anyhow::Result;
-use std::sync::atomic::Ordering;
+
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -34,9 +34,9 @@ pub async fn demote_to_synconly_and_catchup(
     config: &NodeConfig,
 ) -> Result<()> {
     // Guard against concurrent transitions
-    if node.is_transitioning.swap(true, Ordering::SeqCst) {
+    if node.coordination_hub.swap_epoch_transitioning(true) {
         warn!("⚠️ Demotion already in progress, skipping.");
-        node.is_transitioning.store(false, Ordering::SeqCst);
+        node.coordination_hub.set_epoch_transitioning(false);
         return Ok(());
     }
 
@@ -67,7 +67,7 @@ pub async fn demote_to_synconly_and_catchup(
         loop {
             attempt += 1;
             match executor_client.get_last_block_number().await {
-                Ok((b, _, _, _)) => {
+                Ok((b, _, _, _, _)) => {
                     if b >= expected_last_block {
                         info!(
                             "✅ [DEMOTION] Go reached block {} (expected: {}) after {} polls",
@@ -132,7 +132,7 @@ pub async fn demote_to_synconly_and_catchup(
         node.epoch_monitor_handle = Some(handle);
     }
 
-    node.is_transitioning.store(false, Ordering::SeqCst);
+    node.coordination_hub.set_epoch_transitioning(false);
 
     info!(
         "✅ [CROSS-EPOCH DEMOTION] Successfully demoted to SyncOnly at epoch {}",

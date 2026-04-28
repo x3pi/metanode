@@ -408,28 +408,16 @@ func (vmP *VmProcessor) updateStateDB(
 		if span != nil { // GUARD
 			span.AddEvent("MarkedTrieDBAsReverted", map[string]interface{}{"mvmId": mvmId.Hex()})
 		}
+		// 🔒 [STATE-LEAK-FIX] Master node's C++ cache (isCache=true) retains state updates 
+		// even if the transaction ultimately throws an exception mid-execution.
+		// We MUST ONLY clear the specific mvmId instance to prevent global wipe data races
+		// during parallel group execution.
+		mvm.ClearMVMApi(mvmId)
 
-		// We MUST clear ALL instances because relatedAddresses does NOT include self-accesses.
-		// Example: A calls B. A throws. C++ cache has B's state from A's call.
-		// If we only clear B, C++ still holds stale data for A.
-		mvm.CallClearAllStateInstances()
-
-		amount := transaction.Amount()
-		if amount.Cmp(big.NewInt(0)) > 0 {
-			fromAddr := transaction.FromAddress()
-			toAddr := transaction.ToAddress()
-			if span != nil { // GUARD
-				span.AddEvent("RevertingTransactionAmount", map[string]interface{}{
-					"amount": amount.String(),
-					"from":   fromAddr.Hex(),
-					"to":     toAddr.Hex(),
-				})
-				span.SetAttribute("revertedAmountFrom", fromAddr.Hex())
-				span.SetAttribute("revertedAmountTo", toAddr.Hex())
-			}
-			vmP.chainState.GetAccountStateDB().AddPendingBalance(fromAddr, amount)
-			vmP.chainState.GetAccountStateDB().SubTotalBalance(toAddr, amount)
-		}
+		// NOTE: We DO NOT manually refund transaction.Amount() here.
+		// `processSingleGroup` no longer pre-deducts the balance in Go prior to execution.
+		// Refunding the reverted amount artificially inflates the sender's balance and leads
+		// to an immediate StateRoot fork. Leave the Go state unchanged for reverted transactions.
 		if span != nil { // GUARD before return
 			span.SetAttribute("hasChanges", false)
 			span.SetAttribute("changesSummary", changesSummary)

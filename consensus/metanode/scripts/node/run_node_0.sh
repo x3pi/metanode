@@ -32,21 +32,7 @@ RUST_SESSION="metanode-0"
 GO_MASTER_SOCKET="/tmp/rust-go-node0-master.sock"
 RUST_CONFIG="config/node_0.toml"
 
-wait_for_socket() {
-    local socket=$1 name=$2 timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        if [ -S "$socket" ]; then
-            echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"
-            return 0
-        fi
-        if [ $(( $(date +%s) - start )) -ge $timeout ]; then
-            echo -e "${YELLOW}  ⚠️ Timeout waiting for $name (${timeout}s)${NC}"
-            return 1
-        fi
-        sleep 1
-    done
-}
+
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
@@ -100,7 +86,6 @@ PPROF_ARG="--pprof-addr=localhost:6060"
 tmux new-session -d -s "$GO_MASTER_SESSION" -c "$GO_SIMPLE_ROOT" \
     "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=$GO_MASTER_CONFIG $PPROF_ARG >> \"$LOG_DIR/node_0/go-master-stdout.log\" 2>&1"
 
-wait_for_socket "$GO_MASTER_SOCKET" "Go Master 0" 120
 
 # Step 5: Start Go Sub 0
 echo -e "${BLUE}📋 Step 5: Start Go Sub 0...${NC}"
@@ -108,10 +93,6 @@ XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
 tmux new-session -d -s "$GO_SUB_SESSION" -c "$GO_SIMPLE_ROOT" \
     "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=$GO_SUB_CONFIG >> \"$LOG_DIR/node_0/go-sub-stdout.log\" 2>&1"
 
-# Step 6: Start Rust Node 0
-echo -e "${BLUE}📋 Step 6: Start Rust Node 0...${NC}"
-cd "$METANODE_ROOT"
-tmux new-session -d -s "$RUST_SESSION" -c "$METANODE_ROOT" \
-    "ulimit -n 100000; export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config $RUST_CONFIG >> \"$LOG_DIR/node_0/rust.log\" 2>&1"
+
 
 echo -e "${GREEN}  🎉 NODE 0 STARTED!${NC}"

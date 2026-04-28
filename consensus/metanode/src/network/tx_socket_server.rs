@@ -46,10 +46,13 @@ impl TxSocketServer {
 
     pub async fn start(self) -> Result<()> {
         let (ffi_tx_sender, mut ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
-        if crate::ffi::FFI_TX_SENDER.set(ffi_tx_sender).is_err() {
-            warn!("⚠️ [FFI TX SENDER] Already initialized!");
+        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.lock() {
+            *sender_guard = Some(ffi_tx_sender);
+            crate::ffi::FFI_TX_CONDVAR.notify_all();
+            info!("🔌 FFI Transaction Receiver initialized and Condvar notified");
+        } else {
+            warn!("⚠️ [FFI TX SENDER] Failed to acquire lock for initialization!");
         }
-        info!("🔌 FFI Transaction Receiver started in place of UDS server");
 
         let client = self.transaction_client;
         let node = self.node;
@@ -263,6 +266,18 @@ impl TxSocketServer {
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
                 // let chunk_len = chunk_vec.len();
                 
+                let epoch_pending_ptr = if let Some(ref node_mutex) = node {
+                    let node_guard = node_mutex.lock().await;
+                    Some(node_guard.epoch_pending_transactions.clone())
+                } else {
+                    None
+                };
+
+                if let Some(epoch_pending_mutex) = epoch_pending_ptr {
+                    let mut epoch_pending = epoch_pending_mutex.lock().await;
+                    epoch_pending.extend(chunk_vec.clone());
+                }
+
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
                 }

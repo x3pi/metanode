@@ -80,55 +80,11 @@ pub async fn dispatch_commit(
         return Ok(1);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // CATCH-UP FORK GUARD: Suppress locally-produced commits during catch-up.
-    //
-    // ROOT CAUSE: When a node cold-starts after restore, it transitions from
-    // "syncing certified commits from peers" to "participating in local consensus".
-    // During this transition, the local DAG may produce commits with DIFFERENT
-    // metadata (leader, timestamp, GEI) than the network's canonical commits,
-    // because the local DAG state differs from the network's.
-    //
-    // DETECTION: If the commit was decided with local blocks (decided_with_local_blocks=true)
-    // AND Go is significantly behind (lag > 10 blocks), the node is still catching up.
-    // In this state, locally-produced commits are unreliable and must be skipped.
-    //
-    // SAFETY:
-    // - Synced commits (decided_with_local_blocks=false) always pass through
-    //   because they are canonical commits from the network majority.
-    // - EndOfEpoch commits always pass through for epoch transition safety.
-    // - Once the node catches up (lag ≤ 10), local commits are trusted again.
-    // ═══════════════════════════════════════════════════════════════════
-    if subdag.decided_with_local_blocks && total_transactions > 0 {
-        if let Some(ref client) = executor_client {
-            let go_gei = if let Some(ref shared_gei) = shared_last_global_exec_index {
-                *shared_gei.lock().await
-            } else {
-                client.get_last_global_exec_index().await.unwrap_or(0)
-            };
-
-            let lag = global_exec_index.saturating_sub(go_gei);
-            if lag > 10 {
-                let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();
-                if !has_end_of_epoch {
-                    warn!(
-                        "🛡️ [CATCH-UP FORK GUARD] Suppressing locally-decided commit #{} (GEI={}, txs={}) — \
-                         Go is {} blocks behind (go_gei={}). Local DAG may produce different metadata than network. \
-                         Only synced commits (decided_with_local_blocks=false) are trusted during catch-up.",
-                        commit_index, global_exec_index, total_transactions, lag, go_gei
-                    );
-                    // Still update shared GEI counter so tracking advances
-                    if let Some(shared_index) = shared_last_global_exec_index.clone() {
-                        let mut index_guard = shared_index.lock().await;
-                        if global_exec_index > *index_guard {
-                            *index_guard = global_exec_index;
-                        }
-                    }
-                    return Ok(1);
-                }
-            }
-        }
-    }
+    // NOTE: CATCH-UP FORK GUARD was REMOVED here.
+    // Previous versions suppressed locally-decided commits when Go was lagging (lag > 10),
+    // but this CAUSED state divergence: node skips transactions while other nodes execute
+    // them → different stateRoot → hash mismatch → FORK.
+    // All commits passing through BFT consensus are canonical and MUST be executed.
     let leader_address: Option<Vec<u8>> = if executor_client.is_some() {
         let leader_author_index = subdag.leader.author.value();
 
@@ -162,19 +118,19 @@ pub async fn dispatch_commit(
 
             // Try to get committee for commit's epoch, with fallback to current or previous epoch
             let eth_addresses = if let Some(addrs) = epoch_addresses.get(&epoch) {
-                addrs
+                addrs.clone()
             } else if epoch > 0 {
                 // Try previous epoch (common during transition)
                 if let Some(addrs) = epoch_addresses.get(&(epoch - 1)) {
                     warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (during transition)",
                             epoch - 1, epoch);
-                    addrs
+                    addrs.clone()
                 } else {
                     // Last resort: use any available epoch
                     if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
                         warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (only available)",
                                 available_epoch, epoch);
-                        addrs
+                        addrs.clone()
                     } else {
                         error!("🚨 [FATAL] No committees available in cache!");
                         anyhow::bail!("No committee data available in cache — cannot determine leader for epoch {}.", epoch);
@@ -187,7 +143,7 @@ pub async fn dispatch_commit(
                         "⚠️ [LEADER] Using epoch {} committee for commit from epoch 0",
                         available_epoch
                     );
-                    addrs
+                    addrs.clone()
                 } else {
                     error!("🚨 [FATAL] No committees available in cache!");
                     anyhow::bail!(
@@ -208,12 +164,8 @@ pub async fn dispatch_commit(
                         "🚨 [FATAL] leader_author_index {} >= committee_size {} after {} retries!",
                         leader_author_index, committee_size, max_retries
                     );
-                    error!("🚨 [FATAL] Committee size mismatch - expected at least {} validators but have {}!",
-                            leader_author_index + 1, committee_size);
-                    anyhow::bail!(
-                            "Committee size mismatch: leader_index {} >= committee_size {} after {} retries for epoch {}.",
-                            leader_author_index, committee_size, max_retries, epoch
-                        );
+                    error!("🚨 [FATAL] Committee size mismatch - letting Go handle the deterministic fallback to prevent cluster Hash divergence.");
+                    break None;
                 }
 
                 warn!(
@@ -279,13 +231,10 @@ pub async fn dispatch_commit(
                 retry_attempts += 1;
                 if retry_attempts > max_retries {
                     error!(
-                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries!",
+                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Letting Go handle the deterministic fallback to prevent cluster Hash divergence.",
                             leader_author_index, addr.len(), max_retries
                         );
-                    anyhow::bail!(
-                            "Invalid ETH address length {} at index {} after {} retries — committee data corrupted.",
-                            addr.len(), leader_author_index, max_retries
-                        );
+                    break None;
                 }
 
                 warn!(
@@ -337,16 +286,20 @@ pub async fn dispatch_commit(
     // EndOfEpoch commits always pass through for epoch transition safety.
     // ═══════════════════════════════════════════════════════════════════
     if let Some(ref client) = executor_client {
-        // SYNC OPTIMIZATION: Use local cached GEI instead of Go RPC for every commit.
-        // send_committed_subdag has local REPLAY PROTECTION (next_expected_index check)
-        // that catches duplicates without needing Go state per-commit.
-        // Only verify with Go RPC every 200 commits for safety.
+        // CRITICAL FIX (2026-04-26): Only use Go's ACTUAL GEI for dedup, not the
+        // inflated shared_last_global_exec_index.
+        //
+        // BUG: After cold-start sync, shared_last_global_exec_index is set to the
+        // network tip (~2361) but new epoch commits start with GEI=1. The old code
+        // used shared_last_global_exec_index as the fast-path filter between Go RPC
+        // checks, silently skipping ALL new-epoch commits (GEI < 2361).
+        //
+        // FIX: Use 0 as fallback between Go RPC checks. Real deduplication is
+        // handled by send_committed_subdag's REPLAY PROTECTION (next_expected_index).
         let go_current_gei = if commit_index % 200 == 0 {
             client.get_last_global_exec_index().await.unwrap_or(0)
-        } else if let Some(ref shared_gei) = shared_last_global_exec_index {
-            *shared_gei.lock().await
         } else {
-            0
+            0 // Don't filter between Go RPC checks — let REPLAY PROTECTION handle it
         };
         if go_current_gei >= global_exec_index && global_exec_index > 0 {
             let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();

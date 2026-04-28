@@ -55,17 +55,62 @@ pub enum NodeConsensusPhase {
     Healthy,
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// Centralized state machine for coordinating node phase transitions.
 #[derive(Clone)]
 pub struct ConsensusCoordinationHub {
     phase: Arc<RwLock<NodeConsensusPhase>>,
+    
+    /// Global flag indicating if the epoch is currently transitioning.
+    /// Mutated during Start/End of epoch transition.
+    /// Read by TX Receivers (UDS) to reject transactions, and by Executors to pause execution.
+    is_transitioning: Arc<AtomicBool>,
+
+    /// The highest Global Execution Index (GEI) that Go has executed or skipped.
+    /// Mutated by CommitProcessor (skip) and CommitObserver (execution).
+    /// Read by Peer P2P Sync to inform peers of local catch-up progress.
+    global_exec_index: Arc<tokio::sync::Mutex<u64>>,
 }
 
 impl ConsensusCoordinationHub {
     pub fn new() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
+            is_transitioning: Arc::new(AtomicBool::new(false)),
+            global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
         }
+    }
+
+    /// Set initial GEI value (e.g., loaded from DB or network boundary)
+    pub async fn set_initial_global_exec_index(&self, gei: u64) {
+        let mut lock = self.global_exec_index.lock().await;
+        *lock = gei;
+    }
+
+    /// Retrieve the shared reference to the Global Execution Index
+    pub fn get_global_exec_index_ref(&self) -> Arc<tokio::sync::Mutex<u64>> {
+        self.global_exec_index.clone()
+    }
+
+    /// Retrieve the shared reference to the transition flag
+    pub fn get_is_transitioning_ref(&self) -> Arc<AtomicBool> {
+        self.is_transitioning.clone()
+    }
+
+    /// Check if epoch is transitioning
+    pub fn is_epoch_transitioning(&self) -> bool {
+        self.is_transitioning.load(Ordering::Acquire)
+    }
+
+    /// Set epoch transitioning flag
+    pub fn set_epoch_transitioning(&self, is_transitioning: bool) {
+        self.is_transitioning.store(is_transitioning, Ordering::Release);
+    }
+    
+    /// Atomically swap the epoch transitioning flag and return the old value
+    pub fn swap_epoch_transitioning(&self, is_transitioning: bool) -> bool {
+        self.is_transitioning.swap(is_transitioning, Ordering::SeqCst)
     }
 
     /// Retrieve the current consensus phase.

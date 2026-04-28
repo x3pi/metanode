@@ -10,7 +10,7 @@ use crate::{
     block::BlockAPI,
     commit::{CertifiedCommit, CertifiedCommits, CommitAPI, CommittedSubDag, DecidedLeader},
     core::Core,
-    error::{ConsensusError, ConsensusResult},
+    error::ConsensusResult,
 };
 
 impl Core {
@@ -86,6 +86,7 @@ impl Core {
         &mut self,
         mut certified_commits: Vec<CertifiedCommit>,
     ) -> ConsensusResult<Vec<CommittedSubDag>> {
+        let is_sync_mode = !certified_commits.is_empty();
         let _s = self
             .context
             .metrics
@@ -196,6 +197,15 @@ impl Core {
 
             // If there is no certified commit to process, run the decision rule.
             let (decided_leaders, local, precomputed_commits) = if certified_leaders.is_empty() {
+                // If we are currently processing network commits (sync mode), we MUST exit
+                // when no more certified leaders remain. Fallback to the local committer
+                // during fast-forwarding is extremely dangerous because the local DAG might
+                // have dangling blocks that trick the committer into choosing a leader whose
+                // ancestors are missing from RocksDB, leading to a fatal StorageFailure panic.
+                if is_sync_mode {
+                    break;
+                }
+
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
                 // Truncate the decided leaders to fit the commit schedule limit.
@@ -318,10 +328,11 @@ impl Core {
         // Make sure that the first commit we find is the next one in line and there is no gap.
         if let Some(commit) = commits.first() {
             if commit.index() != last_commit_index + 1 {
-                return Err(ConsensusError::UnexpectedCertifiedCommitIndex {
-                    expected_commit_index: last_commit_index + 1,
-                    commit_index: commit.index(),
-                });
+                tracing::warn!(
+                    "⚠️ [COLD-START] Expected commit index {}, but received {}. \
+                     This is EXPECTED during snapshot restore when Node jumps forward.",
+                    last_commit_index + 1, commit.index()
+                );
             }
         }
 

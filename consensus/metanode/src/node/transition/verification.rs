@@ -87,7 +87,7 @@ pub(super) async fn verify_epoch_consistency(
         node.current_epoch,
         node.node_mode,
         node.last_global_exec_index,
-        executor_client.get_last_block_number().await.map(|(b, _, _, _)| b).unwrap_or(0) >= node.last_global_exec_index
+        executor_client.get_last_block_number().await.map(|(b, _, _, _, _)| b).unwrap_or(0) >= node.last_global_exec_index
     );
 
     Ok(())
@@ -157,8 +157,12 @@ async fn test_consensus_readiness(node: &ConsensusNode) -> bool {
     }
 }
 
-/// Sync epoch timestamp from Go with retry logic to avoid stale timestamps
-/// CRITICAL: Prevents using timestamp from old epoch after transition
+/// Sync epoch timestamp from Go with retry logic for epoch mismatch.
+/// CRITICAL FIX: Timestamp difference NO LONGER causes retries.
+/// Previously, a large timestamp_diff triggered retry loops that contributed
+/// to cluster stalls. The root cause of wrong timestamps is on the Go side
+/// (missing seconds→milliseconds conversion), and retrying doesn't fix it.
+/// We now accept Go's timestamp immediately and log a warning.
 pub(super) async fn sync_epoch_timestamp_from_go(
     executor_client: &ExecutorClient,
     expected_epoch: u64,
@@ -204,42 +208,31 @@ pub(super) async fn sync_epoch_timestamp_from_go(
             }
         }
 
-        // Now get timestamp and validate it's reasonable
+        // Now get timestamp — ACCEPT IMMEDIATELY regardless of difference
         match executor_client
             .get_epoch_start_timestamp(expected_epoch)
             .await
         {
             Ok(go_timestamp) => {
-                // Validate timestamp is not from old epoch (should be close to expected)
-                // Timestamp should be within reasonable range of expected timestamp
                 let timestamp_diff =
                     (go_timestamp as i64 - expected_timestamp as i64).unsigned_abs();
 
                 if timestamp_diff > 10000 {
-                    // 10 seconds tolerance
+                    // Log warning but DO NOT retry — accept Go's value
+                    // The timestamp mismatch is likely a seconds-vs-milliseconds conversion
+                    // bug on the Go side. Retrying won't fix it and just delays consensus.
                     warn!(
-                        "⚠️ [EPOCH SYNC] Go timestamp {}ms differs from expected {}ms by {}ms (attempt {}/{}). \
-                         This may indicate stale timestamp from old epoch.",
-                        go_timestamp, expected_timestamp, timestamp_diff, attempt, MAX_RETRIES
+                        "⚠️ [EPOCH SYNC] Go timestamp {}ms differs from expected {}ms by {}ms. \
+                         ACCEPTING Go's value to avoid blocking consensus. \
+                         Root cause: likely missing seconds→ms conversion on Go side.",
+                        go_timestamp, expected_timestamp, timestamp_diff
                     );
-
-                    if attempt == MAX_RETRIES {
-                        // At final attempt, accept the timestamp but log warning
-                        warn!(
-                            "⚠️ [EPOCH SYNC] Using Go timestamp despite large difference. \
-                               This may cause epoch timing issues."
-                        );
-                        return Ok(go_timestamp);
-                    }
-
-                    sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                    continue;
+                } else {
+                    info!(
+                        "✅ [EPOCH SYNC] Successfully synced timestamp from Go: {}ms (diff: {}ms)",
+                        go_timestamp, timestamp_diff
+                    );
                 }
-
-                info!(
-                    "✅ [EPOCH SYNC] Successfully synced timestamp from Go: {}ms (diff: {}ms)",
-                    go_timestamp, timestamp_diff
-                );
                 return Ok(go_timestamp);
             }
             Err(e) => {

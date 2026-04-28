@@ -571,14 +571,31 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 		}
 
 		// STEP 1: Calculate boundary block
-		// The boundary block is the LAST block of the previous epoch
-		// When syncing, this is storage.GetLastBlockNumber() - 1 (block before current)
-		lastBlockNum := storage.GetLastBlockNumber()
-		var boundaryBlock uint64
-		if lastBlockNum > 0 {
-			boundaryBlock = lastBlockNum - 1
-		} else {
-			boundaryBlock = 0
+		// ══════════════════════════════════════════════════════════════════
+		// CRITICAL FIX (April 2026): Find the exact boundary block deterministically.
+		// Depending on where this function is called (before or after block is saved),
+		// lastBlockNum could be the newly written block, or the previous one.
+		// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
+		// ══════════════════════════════════════════════════════════════════
+		searchBlock := storage.GetLastBlockNumber()
+		var boundaryBlock uint64 = 0
+		
+		for searchBlock > 0 {
+			hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
+			if !ok {
+				searchBlock--
+				continue
+			}
+			blockData, err := cs.GetBlockDatabase().GetBlockByHash(hash)
+			if err != nil {
+				searchBlock--
+				continue
+			}
+			if blockData.Header().Epoch() < blockEpoch {
+				boundaryBlock = searchBlock
+				break
+			}
+			searchBlock--
 		}
 
 		// STEP 2: MUST read boundary block - NO FALLBACK ALLOWED

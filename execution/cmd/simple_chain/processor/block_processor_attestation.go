@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -319,15 +320,31 @@ func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error
 	}
 	header := *headerPtr
 
-	// Only compare if we have reached this block
-	if header.BlockNumber() < peerAtt.BlockNumber {
+	// Try to get the proper state roots for the peer's block
+	var localAccountRoot, localStakeRoot common.Hash
+	
+	if header.BlockNumber() == peerAtt.BlockNumber {
+		localAccountRoot = header.AccountStatesRoot()
+		localStakeRoot = header.StakeStatesRoot()
+	} else if header.BlockNumber() > peerAtt.BlockNumber {
+		// Use blockchain package to get the hash for the past block
+		// Note: ensure "github.com/meta-node-blockchain/meta-node/pkg/blockchain" is imported
+		blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(peerAtt.BlockNumber)
+		if !ok {
+			return nil
+		}
+		pastBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
+		if err != nil || pastBlock == nil {
+			return nil
+		}
+		localAccountRoot = pastBlock.Header().AccountStatesRoot()
+		localStakeRoot = pastBlock.Header().StakeStatesRoot()
+	} else {
 		logger.Debug("📋 [ATTESTATION] Skipping quorum check: local block=%d < peer block=%d",
 			header.BlockNumber(), peerAtt.BlockNumber)
 		return nil
 	}
 
-	localAccountRoot := header.AccountStatesRoot()
-	localStakeRoot := header.StakeStatesRoot()
 	localHash := ComputeAttestationHash(peerAtt.BlockNumber, localAccountRoot, localStakeRoot)
 
 	// Quick mismatch check — log immediately
@@ -375,6 +392,7 @@ func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error
 			go func() {
 				time.Sleep(3 * time.Second)
 				logger.Error("🛑 [FORK HALT] Node halting NOW due to state fork at block #%d", peerAtt.BlockNumber)
+				logger.SyncFileLog()
 				os.Exit(1)
 			}()
 		}

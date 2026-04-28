@@ -30,7 +30,8 @@ pub trait TExecutorClient: Send + Sync {
         &self,
         block_number: u64,
     ) -> Result<(Vec<ValidatorInfo>, u64, u64)>;
-    async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32])>;
+    /// Use get_last_global_exec_index for GEI comparison.
+    async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32], u64)>;
     async fn get_last_global_exec_index(&self) -> Result<u64>;
 
     // 4. RPC Epoch Queries
@@ -122,7 +123,7 @@ impl TExecutorClient for ExecutorClient {
     ) -> Result<(Vec<ValidatorInfo>, u64, u64)> {
         ExecutorClient::get_validators_at_block(self, block_number).await
     }
-    async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32])> {
+    async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32], u64)> {
         ExecutorClient::get_last_block_number(self).await
     }
     async fn get_last_global_exec_index(&self) -> Result<u64> {

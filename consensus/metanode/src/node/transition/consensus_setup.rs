@@ -25,13 +25,19 @@ pub(super) async fn setup_validator_consensus(
     committee: consensus_config::Committee,
     config: &NodeConfig,
 ) -> Result<()> {
+    // Use boundary_gei for epoch_base — this is the correct value for NORMAL startup.
+    // For epoch 1 genesis: boundary_gei = 0, so GEI = 0 + commit_index = commit_index.
+    let actual_epoch_base = boundary_gei;
+
     // SNAPSHOT RESTART FIX: Pass Go's execution progress so CommitSyncer
     // can fast-forward baseline and skip re-fetching old commits.
-    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > 0 {
-        node.last_global_exec_index as u32
+    // MUST use the epoch-relative CommitIndex, not the absolute GEI.
+    let go_replay_after = if node.executor_commit_enabled && node.last_global_exec_index > actual_epoch_base {
+        (node.last_global_exec_index.saturating_sub(actual_epoch_base)) as u32
     } else {
         0
     };
+    
     // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
     // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
     let (commit_consumer, commit_receiver, mut block_receiver) =
@@ -39,10 +45,6 @@ pub(super) async fn setup_validator_consensus(
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
-
-    // Use boundary_gei for epoch_base — this is the correct value for NORMAL startup.
-    // For epoch 1 genesis: boundary_gei = 0, so GEI = 0 + commit_index = commit_index.
-    let actual_epoch_base = boundary_gei;
     let initial_next_expected = node.last_global_exec_index + 1;
     info!(
         "📊 [EXECUTOR INIT] boundary_gei={}, node.last_global_exec_index={}, initial_next_expected={}",
@@ -68,6 +70,19 @@ pub(super) async fn setup_validator_consensus(
 
 
 
+    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
+    // GEI = epoch_base_index + commit_index + fragment_offset
+    // So commit_index = GEI - epoch_base_index - fragment_offset
+    // For simplicity at startup, we use the node's last_global_exec_index + 1 as starting point.
+    // The AUTO-JUMP logic will adjust if there's a mismatch.
+    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    info!(
+        "📊 [COMMIT PROCESSOR INIT] next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+    );
+
+    let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
+
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -76,20 +91,31 @@ pub(super) async fn setup_validator_consensus(
         )
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
-                node.shared_last_global_exec_index.clone(),
+                node.coordination_hub.get_global_exec_index_ref(),
             ),
         )
-        .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
+        .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
         .with_epoch_info(new_epoch, actual_epoch_base)
-        .with_is_transitioning(node.is_transitioning.clone())
+        .with_next_expected_index(next_expected_commit_index)
+        .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
+        .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
     if let Some(c) = exec_client_proc {
-        processor = processor.with_executor_client(c);
+        processor = processor.with_executor_client(c.clone());
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                c,
+                delivery_rx,
+                peer_addrs,
+            );
+            manager.run().await;
+        });
     }
 
     tokio::spawn(async move {
@@ -190,6 +216,13 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
+    // CRITICAL FORK-SAFETY: Convert last_global_exec_index to commit_index for next_expected.
+    let next_expected_commit_index = (node.last_global_exec_index.saturating_sub(actual_epoch_base) + 1) as u32;
+    info!(
+        "📊 [COMMIT PROCESSOR INIT] SyncOnly: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+        next_expected_commit_index, node.last_global_exec_index, actual_epoch_base
+    );
+
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
@@ -198,16 +231,16 @@ pub(super) async fn setup_synconly_sync(
         )
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
-                node.shared_last_global_exec_index.clone(),
+                node.coordination_hub.get_global_exec_index_ref(),
             ),
         )
-        .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
+        .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
         .with_epoch_info(new_epoch, actual_epoch_base)
-        .with_is_transitioning(node.is_transitioning.clone())
+        .with_next_expected_index(next_expected_commit_index)
+        .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-
         .with_storage_path(node.storage_path.clone());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());

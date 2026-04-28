@@ -33,9 +33,9 @@ pub async fn transition_mode_only(
     config: &NodeConfig,
 ) -> Result<()> {
     // Guard against concurrent transitions
-    if node.is_transitioning.swap(true, Ordering::SeqCst) {
+    if node.coordination_hub.swap_epoch_transitioning(true) {
         warn!("⚠️ Mode transition already in progress, skipping.");
-        node.is_transitioning.store(false, Ordering::SeqCst);
+        node.coordination_hub.set_epoch_transitioning(false);
         return Ok(());
     }
 
@@ -47,7 +47,7 @@ pub async fn transition_mode_only(
             }
         }
     }
-    let _guard = Guard(node.is_transitioning.clone());
+    let _guard = Guard(node.coordination_hub.get_is_transitioning_ref());
 
     info!(
         "🔄 [MODE TRANSITION] Starting SyncOnly → Validator for epoch {} (no DB recreation)",
@@ -198,11 +198,8 @@ pub async fn transition_mode_only(
     // Update epoch state
     node.current_epoch = epoch;
     node.last_global_exec_index = synced_global_exec_index;
-    {
-        let mut g = node.shared_last_global_exec_index.lock().await;
-        *g = synced_global_exec_index;
-    }
-    // Note: shared_last_global_exec_index is Arc<Mutex<u64>>, updated via commit_processor
+    node.coordination_hub.set_initial_global_exec_index(synced_global_exec_index).await;
+    // Note: global_exec_index is Arc<Mutex<u64>>, updated via commit_processor
     node.current_commit_index.store(0, Ordering::SeqCst);
 
     // =============================================================================
@@ -267,12 +264,12 @@ pub async fn transition_mode_only(
         )
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
-                node.shared_last_global_exec_index.clone(),
+                node.coordination_hub.get_global_exec_index_ref(),
             ),
         )
-        .with_shared_last_global_exec_index(node.shared_last_global_exec_index.clone())
+        .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
         .with_epoch_info(epoch, epoch_base_gei_from_go)
-        .with_is_transitioning(node.is_transitioning.clone())
+        .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb);
@@ -423,8 +420,8 @@ pub(super) async fn handle_synconly_upgrade_wait(
             return Ok(());
         }
 
-        let go_current_block = match fresh_executor_client.get_last_block_number().await {
-            Ok((b, _, _, _)) => b,
+        let (go_current_block, go_current_gei) = match fresh_executor_client.get_last_block_number().await {
+            Ok((b, gei, _, _, _)) => (b, gei),
             Err(e) => {
                 if attempt.is_multiple_of(20) {
                     warn!(
@@ -432,22 +429,22 @@ pub(super) async fn handle_synconly_upgrade_wait(
                         attempt, e
                     );
                 }
-                0
+                (0, 0)
             }
         };
 
-        if go_current_block >= synced_global_exec_index {
+        if go_current_gei >= synced_global_exec_index {
             info!(
-                "✅ [MODE TRANSITION] Go synced! block {} >= boundary {}. Proceeding to Validator mode. (took {} attempts)",
-                go_current_block, synced_global_exec_index, attempt
+                "✅ [MODE TRANSITION] Go synced! GEI {} >= boundary {}. Proceeding to Validator mode. (took {} attempts)",
+                go_current_gei, synced_global_exec_index, attempt
             );
             break;
         }
 
         if attempt >= max_attempts {
             warn!(
-                "⚠️ [MODE TRANSITION] Timeout after {} attempts (5 min). Go block {} still < boundary {}. Will retry via epoch_monitor.",
-                attempt, go_current_block, synced_global_exec_index
+                "⚠️ [MODE TRANSITION] Timeout after {} attempts (5 min). Go GEI {} still < boundary {}. Will retry via epoch_monitor.",
+                attempt, go_current_gei, synced_global_exec_index
             );
             return Ok(());
         }

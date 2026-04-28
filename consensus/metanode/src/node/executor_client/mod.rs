@@ -338,9 +338,10 @@ impl ExecutorClient {
         // Query Go Master for last_block_number and last_global_exec_index directly
         let last_go_state_opt = loop {
             match self.get_last_block_number().await {
-                Ok((bn, gei, is_ready, _)) => {
-                    if is_ready {
-                        break Some((bn, gei));
+                Ok((go_block_number, go_gei, go_is_ready, _go_hash, go_last_epoch)) => {
+                    if go_is_ready {
+                        info!("📊 [INIT] Connected to Go Master. Last block={}, GEI={}, Epoch={}", go_block_number, go_gei, go_last_epoch);
+                        break Some((go_block_number, go_gei, go_last_epoch));
                     } else {
                         warn!("⏳ [INIT] Go Master is connected but not fully ready (DB loading). Retrying in 1s...");
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -366,7 +367,7 @@ impl ExecutorClient {
                         };
 
                         if let (Some(bn), Some(gei)) = (fallback_bn, fallback_gei) {
-                            break Some((bn, gei));
+                            break Some((bn, gei, 0)); // Fallback epoch = 0
                         } else {
                             break None;
                         }
@@ -377,7 +378,7 @@ impl ExecutorClient {
             }
         };
 
-        if let Some((last_block_number, last_global_exec_index)) = last_go_state_opt {
+        if let Some((last_block_number, last_global_exec_index, last_epoch)) = last_go_state_opt {
             let go_next_expected = last_global_exec_index + 1;
             let current_next_expected = {
                 let next_expected_guard = self.next_expected_index.lock().await;
@@ -391,6 +392,16 @@ impl ExecutorClient {
                 info!(
                     "📊 [INIT] Initialized next_block_number to {}",
                     *next_bn_guard
+                );
+            }
+
+            // Initialize last_processed_epoch
+            {
+                let mut last_ep_guard = self.last_processed_epoch.lock().await;
+                *last_ep_guard = last_epoch;
+                info!(
+                    "📊 [INIT] Initialized last_processed_epoch to {}",
+                    *last_ep_guard
                 );
             }
 
@@ -437,7 +448,7 @@ impl ExecutorClient {
             "✅ [READY] Rust executor: go_connection={}, next_expected={}, go_last_block={}",
             go_conn_status,
             final_next_expected,
-            last_go_state_opt.map_or("unknown".to_string(), |(_, n)| n.to_string())
+            last_go_state_opt.map_or("unknown".to_string(), |(_, n, _)| n.to_string())
         );
     }
 

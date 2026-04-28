@@ -101,6 +101,15 @@ go run main.go --register-bls
 go run main.go --config config_testnet.json --data data_spam.json --api-url http://node.meta:8757
 ```
 
+**Gửi khối lượng giao dịch lên các Node khác trong mạng lưới (Local Cluster):**
+Mặc định tool gửi vào cấu hình của file config (như Node 0). Mỗi Node cục bộ trong cluster mở một port Socket cũng như HTTP RPC khác biệt để nhận kết nối tx_sender. Bạn truyền thông số cấu hình đó vào cờ `--node` và `--api-url`:
+
+- **Node 0**: `go run main.go --node 127.0.0.1:4201 --api-url http://127.0.0.1:8757`
+- **Node 1**: `go run main.go --node 127.0.0.1:6201 --api-url http://127.0.0.1:10747`
+- **Node 2**: `go run main.go --node 127.0.0.1:6211 --api-url http://127.0.0.1:10749`
+- **Node 3**: `go run main.go --node 127.0.0.1:6221 --api-url http://127.0.0.1:10750`
+- **Node 4**: `go run main.go --node 127.0.0.1:6241 --api-url http://127.0.0.1:10748`
+
 ---
 
 ## 6. Xử lý lỗi thường gặp (Troubleshooting)
