@@ -562,7 +562,7 @@ func autoAddEmbassyKeys(
 			"to":   contractAddr.Hex(),
 			"data": "0x" + hex.EncodeToString(isOwnerData),
 		}, "latest")
-
+	
 	if callErr != nil {
 		fmt.Printf("   ⚠️  isOwner() eth_call error: %v\n", callErr)
 	} else {
