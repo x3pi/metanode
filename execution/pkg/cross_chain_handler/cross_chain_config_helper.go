@@ -210,6 +210,7 @@ func FetchAllEmbassies(
 		IsActive     bool           `abi:"isActive"`
 		RegisteredAt *big.Int       `abi:"registeredAt"`
 		Index        *big.Int       `abi:"index"`
+		ScanMode     uint8          `abi:"scanMode"`
 	}
 
 	// results[0] sẽ là []embassyTuple sau khi ABI unpack tuple[]
@@ -225,6 +226,7 @@ func FetchAllEmbassies(
 		IsActive     bool           `json:"isActive"`
 		RegisteredAt *big.Int       `json:"registeredAt"`
 		Index        *big.Int       `json:"index"`
+		ScanMode     uint8          `json:"scanMode"`
 	}
 
 	if err := json.Unmarshal(b, &embassiesRaw); err != nil {

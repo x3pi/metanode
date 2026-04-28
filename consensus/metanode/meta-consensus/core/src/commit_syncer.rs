@@ -129,8 +129,28 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
     last_state_log_at: tokio::time::Instant,
 
+    // --- stall detection ---
+    /// Tracks the last time quorum_commit_index changed.
+    /// Used to detect permanent stalls where quorum stays at 0.
+    last_quorum_change_at: tokio::time::Instant,
+    last_known_quorum: CommitIndex,
+
+    // --- liveness stall detection ---
+    /// Tracks the last time local_commit_index changed.
+    /// Used to detect liveness stalls where ALL nodes stop advancing simultaneously
+    /// (quorum > 0 but frozen). The existing quorum==0 detector misses this case.
+    last_local_commit_change_at: tokio::time::Instant,
+    last_known_local_commit: CommitIndex,
+
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+
+    // --- bootstrap timing ---
+    /// Timestamp when Bootstrapping phase started.
+    /// Used to implement a timeout before assuming genuine genesis (highest_handled=0).
+    /// After DAG wipe, the CommitConsumerMonitor might not be properly aligned,
+    /// causing false genesis detection. Waiting allows quorum data to arrive.
+    bootstrap_start_time: tokio::time::Instant,
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -172,7 +192,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_logged_local_commit_index: 0,
             coordination_hub,
             last_state_log_at: tokio::time::Instant::now(),
+            last_quorum_change_at: tokio::time::Instant::now(),
+            last_known_quorum: 0,
+            last_local_commit_change_at: tokio::time::Instant::now(),
+            last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
+            bootstrap_start_time: tokio::time::Instant::now(),
         }
     }
 
@@ -272,6 +297,22 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
+    fn transition_phase_and_kick(&mut self, next_phase: crate::coordination_hub::NodeConsensusPhase) {
+        let current_phase = self.coordination_hub.get_phase();
+        if current_phase != next_phase {
+            self.coordination_hub.set_phase(next_phase);
+            if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
+                let core_dispatcher = self.inner.core_thread_dispatcher.clone();
+                tokio::spawn(async move {
+                    tracing::info!("🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...");
+                    if let Err(e) = core_dispatcher.new_block(consensus_types::block::Round::MAX, true).await {
+                        tracing::warn!("Failed to kick Core thread to resume proposals: {:?}", e);
+                    }
+                });
+            }
+        }
+    }
+
     /// STATE MACHINE: Update sync state based on current metrics
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
@@ -323,37 +364,76 @@ impl<C: NetworkClient> CommitSyncer<C> {
             && current_phase != crate::coordination_hub::NodeConsensusPhase::Initializing
             && current_phase != crate::coordination_hub::NodeConsensusPhase::Aligning
         {
-            self.coordination_hub.set_phase(next_phase);
+            self.transition_phase_and_kick(next_phase);
         } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping
             || current_phase == crate::coordination_hub::NodeConsensusPhase::Initializing
         {
             // ════════════════════════════════════════════════════════════════
             // BOOTSTRAPPING EXIT LOGIC — two distinct scenarios:
             //
-            // 1. GENESIS START (highest_handled == 0):
+            // 1. GENESIS START (highest_handled == 0, no quorum after timeout):
             //    Go has no state, DAG is empty. Node MUST propose block 1 to
-            //    bootstrap consensus. → Immediately transition to Healthy.
+            //    bootstrap consensus. → Transition to Healthy after timeout.
             //
             // 2. SNAPSHOT RESTART (highest_handled > 0):
             //    Go has state at index N, DAG was wiped. Must wait for
             //    CommitSyncer to fast-forward baseline, then detect quorum
             //    before allowing proposals. → Only exit when quorum > 0.
+            //
+            // FORK-SAFETY: highest_handled == 0 could mean either genuine
+            // genesis OR a CommitConsumerMonitor alignment failure after DAG
+            // wipe. Wait up to 15s for quorum before assuming genesis.
             // ════════════════════════════════════════════════════════════════
             if highest_handled_index == 0 {
-                // Genesis: no Go state → exit Bootstrapping immediately
-                tracing::info!(
-                    "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0). \
-                     Transitioning to {:?} to allow block 1 proposal.",
-                    next_phase
-                );
-                self.coordination_hub.set_phase(next_phase);
+                if quorum_commit > 0 {
+                    // NOT genesis — quorum exists, fast-forward and catch up
+                    tracing::info!(
+                        "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
+                         NOT genesis — DAG wipe detected. Transitioning to {:?}.",
+                        quorum_commit, next_phase
+                    );
+                    self.transition_phase_and_kick(next_phase);
+                } else {
+                    let elapsed = self.bootstrap_start_time.elapsed();
+                    if elapsed >= Duration::from_secs(15) {
+                        // Timeout: No quorum after 15s → treat as genuine genesis
+                        tracing::info!(
+                            "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after {:?}). \
+                             Transitioning to {:?} to allow block 1 proposal.",
+                            elapsed, next_phase
+                        );
+                        self.transition_phase_and_kick(next_phase);
+                    } else {
+                        // Still waiting for quorum — stay in Bootstrapping
+                        tracing::trace!(
+                            "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for quorum \
+                             ({:.1}s elapsed, 15s timeout)...",
+                            elapsed.as_secs_f64()
+                        );
+                    }
+                }
             } else if quorum_commit > 0 {
                 // Snapshot restart: Go has state, wait for quorum detection
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
                     quorum_commit, next_phase
                 );
-                self.coordination_hub.set_phase(next_phase);
+                self.transition_phase_and_kick(next_phase);
+            } else {
+                // ════════════════════════════════════════════════════════
+                // QUORUM SEED: Go has state at highest_handled but Rust
+                // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
+                // Seed CommitVoteMonitor so quorum becomes > 0, allowing
+                // bootstrap to complete on next tick.
+                // ════════════════════════════════════════════════════════
+                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
+                if seeded {
+                    tracing::warn!(
+                        "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
+                         (commit_index={}) to break bootstrap deadlock. Quorum will resolve on next tick.",
+                        highest_handled_index
+                    );
+                }
             }
         }
     }
@@ -408,6 +488,81 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let local_commit = self.inner.dag_state.read().last_commit_index();
                         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
                         let lag = quorum_commit.saturating_sub(local_commit);
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 1: Detect permanent quorum stall and
+                        // auto-recover by re-seeding from Go execution state.
+                        // Triggers when quorum is stuck at 0 (bootstrap deadlock).
+                        // ════════════════════════════════════════════════════════
+                        if quorum_commit != self.last_known_quorum {
+                            self.last_quorum_change_at = now;
+                            self.last_known_quorum = quorum_commit;
+                        }
+                        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+                        let stall_duration = now.duration_since(self.last_quorum_change_at);
+                        if stall_duration >= Duration::from_secs(30)
+                            && quorum_commit == 0
+                            && highest_handled > 0
+                            && self.coordination_hub.is_healthy()
+                        {
+                            tracing::error!(
+                                "🚨 [STALL-DETECTOR] Quorum stuck at 0 for {:.0}s while Go has block state \
+                                 (highest_handled={}). Re-seeding quorum and transitioning to Bootstrapping.",
+                                stall_duration.as_secs_f64(),
+                                highest_handled
+                            );
+                            let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled);
+                            if seeded {
+                                self.coordination_hub.set_phase(
+                                    crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+                                );
+                                self.last_quorum_change_at = now; // reset to avoid re-triggering immediately
+                            }
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 2: Detect liveness stall where ALL nodes
+                        // stop advancing simultaneously (quorum > 0 but frozen).
+                        //
+                        // The quorum==0 detector above misses this case because
+                        // quorum is non-zero (all nodes agreed on the same commit).
+                        // This can happen when:
+                        //   - All nodes' threshold_clock_round stops advancing
+                        //   - Broadcaster/Synchronizer tasks silently exit
+                        //   - Leader timeout fires but can't advance round
+                        //
+                        // Recovery: Temporarily transition to Bootstrapping to
+                        // kick the consensus pipeline. update_state() will
+                        // re-evaluate on the next tick and restore Healthy if
+                        // local_commit == quorum_commit.
+                        // ════════════════════════════════════════════════════════
+                        if local_commit != self.last_known_local_commit {
+                            self.last_local_commit_change_at = now;
+                            self.last_known_local_commit = local_commit;
+                        }
+                        let liveness_stall_duration = now.duration_since(self.last_local_commit_change_at);
+                        if liveness_stall_duration >= Duration::from_secs(60)
+                            && local_commit > 0
+                            && self.coordination_hub.is_healthy()
+                        {
+                            tracing::error!(
+                                "🚨 [LIVENESS-STALL] DAG commit frozen at {} for {:.0}s (quorum={}). \
+                                 All nodes may have stalled simultaneously. \
+                                 Transitioning to Bootstrapping to kick consensus pipeline.",
+                                local_commit,
+                                liveness_stall_duration.as_secs_f64(),
+                                quorum_commit
+                            );
+                            self.coordination_hub.set_phase(
+                                crate::coordination_hub::NodeConsensusPhase::Bootstrapping
+                            );
+                            // Re-seed quorum from local state so bootstrap exit logic works
+                            self.inner.commit_vote_monitor.seed_from_execution_state(
+                                std::cmp::max(highest_handled, local_commit)
+                            );
+                            self.last_local_commit_change_at = now; // reset to avoid rapid re-triggering
+                            self.last_quorum_change_at = now;
+                        }
 
                         info!(
                             "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",
@@ -508,10 +663,31 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // Go execution progress, regardless of phase. Using only
         // highest_handled_index during CatchingUp caused synced to lag behind
         // local_commit, creating permanent gaps with fetched ranges.
-        self.synced_commit_index = self
-            .synced_commit_index
-            .max(local_commit_index)
-            .max(highest_handled_index);
+        // Track synced commits: ALWAYS use the max of local DAG commit and
+        // Go execution progress... EXCEPT when we detect a large unbridgeable gap
+        // between the Go engine (highest_handled_index) and the local DAG
+        // (local_commit_index). A large gap (e.g. > 10) indicates a restart
+        // where the DAG recovered its state from disk, but Core will NOT re-emit
+        // the past commits. In this case, we MUST fetch them from peers to bridge
+        // the Go engine.
+        let local_handled_gap = local_commit_index.saturating_sub(highest_handled_index);
+        self.synced_commit_index = if local_handled_gap > 10 && self.highest_scheduled_index.unwrap_or(0) < local_commit_index {
+            // Unbridgeable DAG gap detected! Focus on catching up Go Master.
+            // Force synced_commit_index down to highest_handled_index (or highest scheduled)
+            // to ensure we fetch the missing commits from the network.
+            highest_handled_index.max(self.highest_scheduled_index.unwrap_or(0))
+        } else {
+            // Normal operation: use local_commit_index to prevent redundant peer fetches.
+            self.synced_commit_index.max(local_commit_index).max(highest_handled_index)
+        };
+
+        // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
+        if let Some(scheduled) = self.highest_scheduled_index {
+            if scheduled > self.synced_commit_index && local_handled_gap > 10 {
+                self.highest_scheduled_index = Some(self.synced_commit_index);
+            }
+        }
+
 
         let unhandled_commits_threshold = self.unhandled_commits_threshold();
         // Throttle noisy logs:
@@ -779,14 +955,24 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // ═══════════════════════════════════════════════════════════════════════
         {
             let local_commit = self.inner.dag_state.read().last_commit_index();
+            let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+            let local_handled_gap = local_commit.saturating_sub(highest_handled);
+
             if local_commit > self.synced_commit_index {
-                tracing::info!(
-                    "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
-                    self.synced_commit_index,
-                    local_commit,
-                    self.coordination_hub.get_phase()
-                );
-                self.synced_commit_index = local_commit;
+                if local_handled_gap > 10 {
+                    tracing::info!(
+                        "[COMMIT-SYNCER] PREVENTING synced_commit_index jump {} → {} because we are intentionally bridging a {} block gap for Go Master.",
+                        self.synced_commit_index, local_commit, local_handled_gap
+                    );
+                } else {
+                    tracing::info!(
+                        "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
+                        self.synced_commit_index,
+                        local_commit,
+                        self.coordination_hub.get_phase()
+                    );
+                    self.synced_commit_index = local_commit;
+                }
             }
         }
         info!(

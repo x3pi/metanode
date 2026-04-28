@@ -138,6 +138,7 @@ cmd/tool/validator_test_suite/validator_test_suite
 # Debug and profiling files
 # **/debug.log
 # ===== Debug/scratch scripts =====
+**/debug_report_*.md
 /demo
 # ===== Demo / hybrid =====
 demo/receiver/incoming_chunks

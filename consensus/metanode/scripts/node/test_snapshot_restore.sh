@@ -128,6 +128,8 @@ wget -c -r -np -nH --cut-dirs=2 \
 
 echo ""
 echo -e "${GREEN}  ✅ Download complete${NC}"
+echo -e "     📦 Snapshot name: ${BOLD}$SNAP_NAME${NC}"
+echo -e "     📂 Download dir:  ${BOLD}$DOWNLOAD_DIR${NC}"
 
 # ── Step 5: Map snapshot dirs to correct Go Master layout ──
 echo ""

@@ -177,31 +177,6 @@ const CrossChainConfigABI = `[
     "type": "event"
   },
   {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "ambassador",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256[]",
-        "name": "sourceNationIds",
-        "type": "uint256[]"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256[]",
-        "name": "lastScannedBlocks",
-        "type": "uint256[]"
-      }
-    ],
-    "name": "ScanProgressUpdated",
-    "type": "event"
-  },
-  {
     "inputs": [
       {
         "internalType": "bytes",
@@ -267,6 +242,11 @@ const CrossChainConfigABI = `[
         "internalType": "uint256",
         "name": "localBlockNumber",
         "type": "uint256"
+      },
+      {
+        "internalType": "bool[]",
+        "name": "isQuorums",
+        "type": "bool[]"
       }
     ],
     "name": "batchUpdateScanProgress",
@@ -359,6 +339,11 @@ const CrossChainConfigABI = `[
         "internalType": "uint256",
         "name": "index",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "scanMode",
+        "type": "uint8"
       }
     ],
     "stateMutability": "view",
@@ -403,25 +388,6 @@ const CrossChainConfigABI = `[
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "embassyScanMode",
-    "outputs": [
-      {
-        "internalType": "uint8",
-        "name": "",
-        "type": "uint8"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "getAllEmbassies",
     "outputs": [
@@ -451,6 +417,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy[]",
@@ -521,6 +492,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy",
@@ -567,6 +543,11 @@ const CrossChainConfigABI = `[
             "internalType": "uint256",
             "name": "index",
             "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "scanMode",
+            "type": "uint8"
           }
         ],
         "internalType": "struct CrossChainConfigRegistry.Embassy",
@@ -623,6 +604,37 @@ const CrossChainConfigABI = `[
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "destNationId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getNetworkQuorumBlock",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "remoteBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "localBlock",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct CrossChainConfigRegistry.ProgressData",
+        "name": "",
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -744,54 +756,6 @@ const CrossChainConfigABI = `[
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "destNationId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getScanBlockRange",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "minBlock",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "maxBlock",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "embassy",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "destNationId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getScanProgress",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "_ethAddress",
         "type": "address"
@@ -852,6 +816,30 @@ const CrossChainConfigABI = `[
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "isProposedQuorum",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "name": "isRegistered",
@@ -871,13 +859,42 @@ const CrossChainConfigABI = `[
         "internalType": "address",
         "name": "",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
-    "name": "localScanProgress",
+    "name": "maxHistoryBlock",
     "outputs": [
       {
         "internalType": "uint256",
         "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "networkQuorumProgress",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "remoteBlock",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "localBlock",
         "type": "uint256"
       }
     ],
@@ -1018,25 +1035,6 @@ const CrossChainConfigABI = `[
     "name": "removeOwner",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "name": "scanProgress",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

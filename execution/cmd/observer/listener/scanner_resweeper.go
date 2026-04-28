@@ -62,7 +62,6 @@ func (s *CrossChainScanner) runResweeper() {
 
 				s.ProcessSingleResweep(ctx, k, v, messageReceivedTopic, outboundResultTopic, contractAddr)
 			}(key, value)
-
 			return true
 		})
 	}
@@ -122,8 +121,8 @@ func (s *CrossChainScanner) ProcessSingleResweep(
 
 	// Quét từ block lúc submit (SubmitBlock) trừ đi 50 block để tránh miss
 	fromBlk := data.SubmitBlock
-	if fromBlk > 50 {
-		fromBlk -= 50
+	if fromBlk > 200 {
+		fromBlk -= 200
 	} else {
 		fromBlk = 1
 	}

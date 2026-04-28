@@ -291,6 +291,8 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	// the C++ EVM remains unaware and keeps stale nonces/balances in its memory cache.
 	// Clearing it forces the next EVM transaction to fetch fresh state from Go DB,
 	// preventing 'nonce mismatch' rejections and stateRoot divergence.
+	mvm.ClearAllMVMApi()
+	mvm.ClearAllProtectedMVMApi()
 	mvm.CallClearAllStateInstances()
 	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 

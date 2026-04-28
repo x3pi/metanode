@@ -142,7 +142,9 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				logger.Info("🔄 [EPOCH-BOUNDARY] Epoch %d→%d detected in 0-tx commit (GEI=%d). Creating boundary block.",
 					lastBlockEpoch, epochNum, globalExecIndex)
 				// Don't return — fall through to full processing path below
-				// The full path will create a block with 0 transactions
+				// The full path will create a block with 0 transactions.
+				// CRITICAL FIX: Undo the GEI advance from line 85 so the full path doesn't reject it as a duplicate.
+				*nextExpectedGlobalExecIndex = globalExecIndex
 				goto EPOCH_BOUNDARY_FALLTHROUGH
 			}
 		}
@@ -166,7 +168,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// This replaces the old syncCompletionCallback mechanism with a simpler approach.
 	if time.Since(bp.lastLazyRefreshTime) > 100*time.Millisecond {
 		bp.lastLazyRefreshTime = time.Now()
-		
+
 		storageLastBlockNum := storage.GetLastBlockNumber()
 		bpLastBlock := bp.GetLastBlock()
 		bpLastBlockNum := uint64(0)
@@ -193,39 +195,60 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 					// blocks in LevelDB but NOMT state stayed at snapshot point.
 					// Advancing bp.lastBlock caused new blocks to use stale trie.
 					// ═══════════════════════════════════════════════════════════════
-					currentTrieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
-					targetStateRoot := freshBlock.Header().AccountStatesRoot()
+					isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
 
-					isNomtMismatchAllowed := trie.GetStateBackend() == trie.BackendNOMT
-
-					if !isNomtMismatchAllowed && currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
-						logger.Warn("🛡️ [LAZY REFRESH] State mismatch! trie_root=%s ≠ target block #%d stateRoot=%s. "+
-							"NOT advancing (P2P-synced blocks not executed by NOMT — snapshot restore?). "+
-							"Staying at block #%d until Rust sends commits for sequential execution.",
-							currentTrieRoot.Hex()[:18]+"...", storageLastBlockNum, targetStateRoot.Hex()[:18]+"...", bpLastBlockNum)
-					} else {
+					if isNomtBackend {
+						// ═══════════════════════════════════════════════════════════════
+						// FORK-SAFETY (NOMT): Only update block pointer + header.
+						// DO NOT call CommitBlockState(WithRebuildTries()) here!
+						//
+						// WithRebuildTries() replaces AccountStateDB, StakeStateDB, and
+						// SmartContractDB entirely from the P2P-synced block's header roots.
+						// If this fires while processSingleEpochData is actively processing
+						// commits from Rust, it causes a state divergence:
+						// - Some nodes rebuild tries at commit N → get stateRoot X
+						// - Other nodes rebuild tries at commit M → get stateRoot Y
+						// → 3-vs-2 fork split
+						//
+						// NOMT state is managed exclusively by the execution pipeline
+						// (ProcessTransactions → NOMT commits). Header-driven trie
+						// rebuilds are only valid for non-NOMT (MPT) backends.
+						// ═══════════════════════════════════════════════════════════════
 						bp.SetLastBlock(freshBlock)
 						newNextBlock := storageLastBlockNum + 1
 						bp.nextBlockNumber.Store(newNextBlock)
+						headerCopy := freshBlock.Header()
+						bp.chainState.SetcurrentBlockHeader(&headerCopy)
+						logger.Debug("🔄 [LAZY REFRESH] NOMT: Updated block pointer %d → %d (tries NOT rebuilt — managed by execution pipeline)",
+							bpLastBlockNum, storageLastBlockNum)
+					} else {
+						// Non-NOMT (MPT) backend: Check state root match before advancing
+						currentTrieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
+						targetStateRoot := freshBlock.Header().AccountStatesRoot()
 
-						// Centralized state update: header + mappings + counter + tries
-						if _, err := bp.chainState.CommitBlockState(freshBlock,
-							blockchain.WithRebuildTries(),
-						); err != nil {
-							logger.Error("🔄 [LAZY REFRESH] Failed to rebuild state from fresh block #%d: %v",
-								storageLastBlockNum, err)
+						if currentTrieRoot != targetStateRoot && currentTrieRoot != (common.Hash{}) && targetStateRoot != (common.Hash{}) {
+							logger.Warn("🛡️ [LAZY REFRESH] State mismatch! trie_root=%s ≠ target block #%d stateRoot=%s. "+
+								"NOT advancing (P2P-synced blocks not executed — snapshot restore?). "+
+								"Staying at block #%d until Rust sends commits for sequential execution.",
+								currentTrieRoot.Hex()[:18]+"...", storageLastBlockNum, targetStateRoot.Hex()[:18]+"...", bpLastBlockNum)
 						} else {
-							logger.Debug("🔄 [LAZY REFRESH] ✅ Updated stale state: %d → %d (header + tries + mappings refreshed)",
-								bpLastBlockNum, storageLastBlockNum)
+							bp.SetLastBlock(freshBlock)
+							newNextBlock := storageLastBlockNum + 1
+							bp.nextBlockNumber.Store(newNextBlock)
 
-							// CRITICAL (Feb 2026): Clear ALL cached state after sync→validator transition.
-							// Two cache layers must be cleared:
-							// 1. Go-side MVMApi instances (prevent stale accountStateDb references)
-							// 2. C++ State::instances (prevent EVM from using stale nonce/balance
-							//    from its internal concurrent_hash_map instead of calling GlobalStateGet)
-							mvm.ClearAllMVMApi()
-							mvm.CallClearAllStateInstances()
-							logger.Debug("🔄 [LAZY REFRESH] 🗑️ Cleared Go MVMApi cache + C++ State instances (EVM will re-read fresh state)")
+							// Centralized state update: header + mappings + counter + tries
+							if _, err := bp.chainState.CommitBlockState(freshBlock,
+								blockchain.WithRebuildTries(),
+							); err != nil {
+								logger.Error("🔄 [LAZY REFRESH] Failed to rebuild state from fresh block #%d: %v",
+									storageLastBlockNum, err)
+							} else {
+								logger.Debug("🔄 [LAZY REFRESH] ✅ Updated stale state: %d → %d (header + tries + mappings refreshed)",
+									bpLastBlockNum, storageLastBlockNum)
+								mvm.ClearAllMVMApi()
+								mvm.CallClearAllStateInstances()
+								logger.Debug("🔄 [LAZY REFRESH] 🗑️ Cleared Go MVMApi cache + C++ State instances (EVM will re-read fresh state)")
+							}
 						}
 					}
 				}
@@ -254,18 +277,27 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 					if err == nil && freshBlock != nil {
 						bp.SetLastBlock(freshBlock)
 						bp.nextBlockNumber.Store(storageLastBlockNum + 1)
-						if _, err := bp.chainState.CommitBlockState(freshBlock,
-							blockchain.WithRebuildTries(),
-						); err != nil {
-							logger.Error("🛡️ [HASH-MISMATCH-GUARD] Failed to rebuild state for block #%d: %v",
-								storageLastBlockNum, err)
-						} else {
-							mvm.ClearAllMVMApi()
-							mvm.CallClearAllStateInstances()
-							logger.Warn("🛡️ [HASH-MISMATCH-GUARD] Block #%d hash mismatch detected! "+
-								"bp.lastBlock=%s, storage=%s. Refreshed to P2P-synced authoritative version.",
-								storageLastBlockNum, bpHash.Hex()[:18]+"...", storageHash.Hex()[:18]+"...")
+						headerCopy := freshBlock.Header()
+						bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+						// FORK-SAFETY (NOMT): Do NOT rebuild tries when NOMT is active.
+						// Same rationale as LAZY REFRESH above: rebuilding tries from
+						// a P2P-synced block header mid-execution causes state divergence.
+						isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
+						if !isNomtBackend {
+							if _, err := bp.chainState.CommitBlockState(freshBlock,
+								blockchain.WithRebuildTries(),
+							); err != nil {
+								logger.Error("🛡️ [HASH-MISMATCH-GUARD] Failed to rebuild state for block #%d: %v",
+									storageLastBlockNum, err)
+							} else {
+								mvm.ClearAllMVMApi()
+								mvm.CallClearAllStateInstances()
+							}
 						}
+						logger.Warn("🛡️ [HASH-MISMATCH-GUARD] Block #%d hash mismatch detected! "+
+							"bp.lastBlock=%s, storage=%s. Refreshed to P2P-synced authoritative version (nomt=%v).",
+							storageLastBlockNum, bpHash.Hex()[:18]+"...", storageHash.Hex()[:18]+"...", isNomtBackend)
 					}
 				}
 			}
@@ -357,13 +389,13 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
-	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex
 	// means Rust intentionally fast-skipped empty commits during catch-up.
 	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-		
+
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
 		actualLastBlockDB := storage.GetLastBlockNumber()
@@ -373,7 +405,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 
 		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 			oldExpected, globalExecIndex, gapSize)
-			
+
 		// Fall through to process the block sequentially
 	}
 
@@ -401,12 +433,27 @@ PROCESS_BLOCK:
 						globalExecIndex, syncedHash.Hex()[:18]+"...")
 
 					// Update in-memory state from the synced block
-					bp.SetLastBlock(syncedBlock)
-					bp.nextBlockNumber.Store(globalExecIndex + 1)
-					if _, err := bp.chainState.CommitBlockState(syncedBlock,
-						blockchain.WithRebuildTries(),
-					); err != nil {
-						logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", globalExecIndex, err)
+					isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
+					if isNomtBackend {
+						bp.SetLastBlock(syncedBlock)
+						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						headerCopy := syncedBlock.Header()
+						bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+						// FORK-SAFETY FIX: NOMT bypasses CommitBlockState during dedup, so we MUST manually
+						// invalidate Go-level memory caches (like loadedAccounts) here. Failure to do so 
+						// causes the next block to read stale pre-sync state, leading to Hash Mismatches!
+						bp.chainState.InvalidateAllState()
+
+						logger.Debug("🔄 [SYNC DEDUP] NOMT: Updated block pointer to %d (tries NOT rebuilt — managed by execution pipeline)", globalExecIndex)
+					} else {
+						bp.SetLastBlock(syncedBlock)
+						bp.nextBlockNumber.Store(globalExecIndex + 1)
+						if _, err := bp.chainState.CommitBlockState(syncedBlock,
+							blockchain.WithRebuildTries(),
+						); err != nil {
+							logger.Error("🔄 [SYNC DEDUP] Failed to rebuild state for synced block #%d: %v", globalExecIndex, err)
+						}
 					}
 
 					// Advance to next block and check pending
@@ -497,6 +544,7 @@ PROCESS_BLOCK:
 		// Centralized commit (fork-safe: all nodes will do this at the same point)
 		if _, err := bp.chainState.CommitBlockState(lastBlockPending,
 			blockchain.WithPersistToDB(),
+			blockchain.WithCommitMappings(), // CRITICAL FIX: Ensure mapping batches from memory are flushed to DB
 		); err != nil {
 			logger.Error("❌ [FORK-SAFETY] Failed to commit pending empty block #%d: %v", emptyBlockNum, err)
 		} else {
@@ -536,7 +584,7 @@ PROCESS_BLOCK:
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 {
+	if len(allTransactions) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
@@ -625,32 +673,50 @@ PROCESS_BLOCK:
 	// represents the network's authoritative state at that height. Any commit with
 	// a lower GEI is from a replayed DAG with incorrect epoch_base_index.
 	//
-	// This guard only triggers during post-restore catch-up, not during normal
-	// consensus (where GEI always monotonically increases).
+	// EXCEPTION (2026-04-27): After DAG-wipe + restart, Rust starts a new GEI
+	// sequence that is legitimately lower than Go's historical lastBlockGEI.
+	// When rustSessionRestarted is set, this guard is bypassed to allow the new
+	// session's commits through. The flag auto-resets when GEI catches up.
 	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		lastBlockGEI := uint64(0)
 		if lastBlock != nil {
 			lastBlockGEI = lastBlock.Header().GlobalExecIndex()
 		}
+
+		// Auto-reset rustSessionRestarted once GEI catches up to historical level
+		if bp.rustSessionRestarted.Load() && globalExecIndex > lastBlockGEI {
+			logger.Info("✅ [GEI-REGRESSION] Rust session GEI=%d has caught up to lastBlockGEI=%d. Re-enabling regression guard.",
+				globalExecIndex, lastBlockGEI)
+			bp.rustSessionRestarted.Store(false)
+		}
+
 		if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
-			logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
-				"This commit is from a replayed DAG with wrong epoch_base_index — not creating block.",
-				globalExecIndex, lastBlockGEI, *currentBlockNumber)
+			// Check if this is a legitimate new Rust session (not stale replay)
+			if bp.rustSessionRestarted.Load() {
+				logger.Info("🔄 [GEI-REGRESSION] BYPASSED: Rust session restarted. Allowing GEI=%d (≤ lastBlockGEI=%d) — new session commit.",
+					globalExecIndex, lastBlockGEI)
+				// Do NOT skip — fall through to block creation
+			} else {
+				logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
+					"This commit is from a replayed DAG with wrong epoch_base_index — not creating block.",
+					globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
-			// Still update GEI counter so the processor advances past this commit
-			bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				// Still update GEI counter so the processor advances past this commit
+				bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
+				// Check pending blocks
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+				return
 			}
-			return
 		}
 	}
+
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.
@@ -680,17 +746,21 @@ PROCESS_BLOCK:
 				headerCopy := existingBlock.Header()
 				bp.chainState.SetcurrentBlockHeader(&headerCopy)
 
-				// Rebuild tries from synced block to ensure state consistency
-				if _, err := bp.chainState.CommitBlockState(existingBlock,
-					blockchain.WithRebuildTries(),
-				); err != nil {
-					logger.Error("🛡️ [ANTI-INFLATION] Failed to rebuild state from synced block #%d: %v", *currentBlockNumber, err)
-				} else {
-					// Clear cached state to prevent stale EVM reads
-					mvm.ClearAllMVMApi()
-					mvm.CallClearAllStateInstances()
-					logger.Info("🛡️ [ANTI-INFLATION] ✅ Adopted synced block #%d, rebuilt tries, cleared caches", *currentBlockNumber)
+				// FORK-SAFETY (NOMT): Do NOT rebuild tries when NOMT is active.
+				// Same rationale as LAZY REFRESH: rebuilding tries from a P2P-synced
+				// block header mid-execution causes state divergence across nodes.
+				isNomtBackend := trie.GetStateBackend() == trie.BackendNOMT
+				if !isNomtBackend {
+					if _, err := bp.chainState.CommitBlockState(existingBlock,
+						blockchain.WithRebuildTries(),
+					); err != nil {
+						logger.Error("🛡️ [ANTI-INFLATION] Failed to rebuild state from synced block #%d: %v", *currentBlockNumber, err)
+					} else {
+						mvm.ClearAllMVMApi()
+						mvm.CallClearAllStateInstances()
+					}
 				}
+				logger.Info("🛡️ [ANTI-INFLATION] ✅ Adopted synced block #%d (nomt=%v, trie_rebuild=%v)", *currentBlockNumber, isNomtBackend, !isNomtBackend)
 
 				// Update GEI tracking
 				bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
@@ -768,21 +838,22 @@ PROCESS_BLOCK:
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// PHASE 1 DIAGNOSTIC: Log all 9 hash-input fields for fork forensics.
-	// When a fork is detected by block_hash_checker, compare these logs between
-	// nodes to identify EXACTLY which field(s) diverged.
+	// PHASE 1 DIAGNOSTIC: Log hash-input fields for fork forensics.
+	// Hash INCLUDES: BlockNumber, AccountStatesRoot, StakeStatesRoot, ReceiptRoot,
+	//                LeaderAddress, TimeStamp, TransactionsRoot, Epoch, GlobalExecIndex
+	// Hash EXCLUDES: LastBlockHash, AggregateSignature
 	// ═══════════════════════════════════════════════════════════════════════════
-	logger.Info("🔍 [FORK-DIAG] Block #%d hash=%s | leader=%s | ts=%d | GEI=%d | epoch=%d | stateRoot=%s | stakeRoot=%s | rcptRoot=%s | txRoot=%s",
+	logger.Info("🔍 [FORK-DIAG] Block #%d hash=%s | leader=%s | ts=%d | epoch=%d | stateRoot=%s | stakeRoot=%s | rcptRoot=%s | txRoot=%s | GEI=%d",
 		newBlock.Header().BlockNumber(),
 		newBlock.Header().Hash().Hex(),
 		newBlock.Header().LeaderAddress().Hex(),
 		newBlock.Header().TimeStamp(),
-		newBlock.Header().GlobalExecIndex(),
 		newBlock.Header().Epoch(),
 		newBlock.Header().AccountStatesRoot().Hex(),
 		newBlock.Header().StakeStatesRoot().Hex(),
 		newBlock.Header().ReceiptRoot().Hex(),
 		newBlock.Header().TransactionsRoot().Hex(),
+		newBlock.Header().GlobalExecIndex(),
 	)
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -826,6 +897,11 @@ PROCESS_BLOCK:
 					bp.nextBlockNumber.Store(*currentBlockNumber + 1)
 					headerCopy := existingBlock.Header()
 					bp.chainState.SetcurrentBlockHeader(&headerCopy)
+					
+					// CRITICAL: Update BlockNumber -> Hash mapping so JSON-RPC returns the correct authoritative parent hashes
+					if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(*currentBlockNumber, existingHash); err != nil {
+						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to remap block #%d to P2P hash: %v", *currentBlockNumber, err)
+					}
 
 					// Rebuild state from authoritative block
 					if _, rebuildErr := bp.chainState.CommitBlockState(existingBlock,

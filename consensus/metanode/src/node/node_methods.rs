@@ -8,7 +8,7 @@
 use anyhow::Result;
 use consensus_config::Committee;
 use consensus_core::ReconfigState;
-use std::sync::atomic::Ordering;
+
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -44,7 +44,7 @@ impl ConsensusNode {
                 ),
             );
         }
-        if self.is_transitioning.load(Ordering::SeqCst) {
+        if self.coordination_hub.is_epoch_transitioning() {
             return (false, true, "Epoch transition in progress".to_string());
         }
         if !self.should_accept_tx().await {
@@ -422,7 +422,7 @@ impl Drop for ConsensusNode {
             self.current_epoch,
             self.node_mode,
             self.authority.is_some(),
-            self.is_transitioning.load(Ordering::SeqCst)
+            self.coordination_hub.is_epoch_transitioning()
         );
 
         // Capture backtrace to identify the source of the drop

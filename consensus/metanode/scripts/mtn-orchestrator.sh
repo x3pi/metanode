@@ -351,6 +351,9 @@ cmd_start() {
         (cd "$RUST_DIR" && cargo +nightly build --release) || exit 1
     fi
     if $build_go; then
+        log_info "🛠  Đang build Protobuf cho Go (simple_chain)..."
+        (cd "$BASE_DIR/execution/pkg/proto" && export PATH="$HOME/go/bin:${GOPATH:-$HOME/go}/bin:$PATH" && ./protoc.sh) || exit 1
+        
         log_info "🛠  Đang build Go (simple_chain)..."
         # Dùng trình biên dịch tận dụng số luồng tối đa, bỏ cờ '-a' để dùng Build Cache (~2s thay vì 3 phút)
         (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && CGO_ENABLED=1 go build -p $(nproc) -o simple_chain .) || exit 1

@@ -196,11 +196,18 @@ func (v *TxVirtualExecutor) sendTransactionError(conn network.Connection, txHash
 	}
 }
 
-// sendTransactionResult gửi phản hồi thành công qua command TransactionError với txHash và msgID.
-// Body chỉ chứa txHash bytes (không wrap trong TransactionHashWithError).
-// msgID được đặt trong header để client có thể match response với request.
-func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHash common.Hash, msgID string) {
-	if v.messageSender == nil {
+// sendTransactionResult gửi phản hồi thành công qua command TransactionSuccess với txHash, code và msgID.
+func (tp *TransactionProcessor) sendTransactionResult(conn network.Connection, txHash common.Hash, code int64, msgID string) {
+	if conn == nil {
+		return
+	}
+
+	body, err := proto.Marshal(&pb.TransactionSuccess{
+		Hash: txHash.Bytes(),
+		Code: code,
+	})
+	if err != nil {
+		logger.Error("sendTransactionResult: marshal error: %v", err)
 		return
 	}
 
@@ -209,7 +216,7 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 			Command: command.TransactionSuccess,
 			ID:      msgID,
 		},
-		Body: txHash.Bytes(),
+		Body: body,
 	})
 	conn.SendMessage(respMsg)
 }

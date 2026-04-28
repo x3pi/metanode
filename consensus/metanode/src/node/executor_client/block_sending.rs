@@ -120,6 +120,17 @@ impl ExecutorClient {
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // PRE-PROCESS TRANSACTIONS: Filter (SystemTx, Invalid) and Dedup
+        // ═══════════════════════════════════════════════════════════════
+        let mut all_proto_txs = Vec::new();
+        let mut total_after_dedup = 0;
+        
+        if total_tx_before > 0 {
+            all_proto_txs = self.build_sorted_transactions(subdag)?;
+            total_after_dedup = all_proto_txs.len();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // BLOCK FRAGMENTATION: If commit has more TXs than MAX_TXS_PER_GO_BLOCK,
         // split into N smaller ExecutableBlock payloads.
         // CRITICAL FORK-SAFETY: All nodes use the same threshold and same
@@ -130,35 +141,47 @@ impl ExecutorClient {
             info!("🔪 [FRAGMENT] Splitting large commit: {} TXs → {} fragments of ≤{} TXs each (global_exec_index={}, commit_index={}, epoch={})",
                 total_tx_before, num_fragments, MAX_TXS_PER_GO_BLOCK, global_exec_index, subdag.commit_ref.index, epoch);
 
-            // Build the full sorted+deduped transaction list first
-            let all_proto_txs = self.build_sorted_transactions(subdag)?;
-            let total_after_dedup = all_proto_txs.len();
-
             if total_after_dedup == 0 {
                 // All TXs were filtered out — send as empty commit
                 let block_number = {
-                    let mut next_bn = self.next_block_number.lock().await;
-                    let mut last_ep = self.last_processed_epoch.lock().await;
-                    let is_epoch_boundary = epoch > *last_ep;
-                    if epoch > *last_ep {
-                        *last_ep = epoch;
-                    }
-                    if is_epoch_boundary {
-                        let bn = *next_bn;
-                        *next_bn += 1;
-                        bn
-                    } else {
+                    let next_expected_guard = self.next_expected_index.lock().await;
+                    if global_exec_index < *next_expected_guard {
+                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
                         0
+                    } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
+                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
+                        0
+                    } else {
+                        let mut next_bn = self.next_block_number.lock().await;
+                        let mut last_ep = self.last_processed_epoch.lock().await;
+                        let is_epoch_boundary = epoch > *last_ep;
+                        if epoch > *last_ep {
+                            *last_ep = epoch;
+                        }
+                        if is_epoch_boundary {
+                            let bn = *next_bn;
+                            *next_bn += 1;
+                            bn
+                        } else {
+                            0
+                        }
                     }
                 };
 
-                let empty_bytes = self.convert_to_protobuf_empty(
-                    subdag,
-                    epoch,
+                let epoch_data = ExecutableBlock {
+                    transactions: vec![],
                     global_exec_index,
-                    leader_address,
+                    commit_index: subdag.commit_ref.index,
+                    epoch,
+                    commit_timestamp_ms: subdag.timestamp_ms,
+                    leader_author_index: subdag.leader.author.value() as u32,
+                    leader_address: leader_address.clone().unwrap_or_default(),
                     block_number,
-                )?;
+                    commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+                };
+                let mut empty_bytes = Vec::new();
+                epoch_data.encode(&mut empty_bytes)?;
+
                 self.buffer_and_flush(
                     global_exec_index,
                     empty_bytes,
@@ -180,18 +203,28 @@ impl ExecutorClient {
                 let fragment_gei = global_exec_index + frag_idx as u64;
 
                 let block_number = {
-                    let mut next_bn = self.next_block_number.lock().await;
-                    let mut last_ep = self.last_processed_epoch.lock().await;
-                    // Fragment with txs > 0 ALWAYS consumes a block number
-                    if epoch > *last_ep {
-                        *last_ep = epoch;
+                    let next_expected_guard = self.next_expected_index.lock().await;
+                    if fragment_gei < *next_expected_guard {
+                        // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
+                        0
+                    } else if self.send_buffer.lock().await.contains_key(&fragment_gei) {
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0", fragment_gei);
+                        0
+                    } else {
+                        let mut next_bn = self.next_block_number.lock().await;
+                        let mut last_ep = self.last_processed_epoch.lock().await;
+                        // Fragment with txs > 0 ALWAYS consumes a block number
+                        if epoch > *last_ep {
+                            *last_ep = epoch;
+                        }
+                        // Since fragment total_after_dedup > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
+                        // unless somehow after dedup all fragments have 0 txs, which is handled above.
+                        // So we always allocate a block number.
+                        let bn = *next_bn;
+                        *next_bn += 1;
+                        bn
                     }
-                    // Since fragment total_tx_before > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
-                    // unless somehow after dedup all fragments have 0 txs, which is handled above.
-                    // So we always allocate a block number.
-                    let bn = *next_bn;
-                    *next_bn += 1;
-                    bn
                 };
 
                 let epoch_data = ExecutableBlock {
@@ -238,54 +271,65 @@ impl ExecutorClient {
         // NORMAL PATH: Commit fits within MAX_TXS_PER_GO_BLOCK
         // ═══════════════════════════════════════════════════════════════
 
+        let has_system_tx = subdag.blocks.iter().any(|b| {
+            b.transactions().iter().any(|tx| {
+                SystemTransaction::from_bytes(tx.data()).is_ok()
+            })
+        });
+
         let block_number = {
-            let mut next_bn = self.next_block_number.lock().await;
-            let mut last_ep = self.last_processed_epoch.lock().await;
-            let is_epoch_boundary = epoch > *last_ep;
-            if epoch > *last_ep {
-                *last_ep = epoch;
-            }
-            if total_tx_before > 0 || is_epoch_boundary {
-                let bn = *next_bn;
-                *next_bn += 1;
-                bn
-            } else {
+            let next_expected_guard = self.next_expected_index.lock().await;
+            if global_exec_index < *next_expected_guard {
+                // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
+                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
                 0
+            } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
+                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
+                0
+            } else {
+                let mut next_bn = self.next_block_number.lock().await;
+                let mut last_ep = self.last_processed_epoch.lock().await;
+                let is_epoch_boundary = epoch > *last_ep;
+                
+                // Force block generation for EndOfEpoch commit
+                let force_block_creation = is_epoch_boundary || has_system_tx;
+                
+                if epoch > *last_ep {
+                    *last_ep = epoch;
+                }
+                if total_after_dedup > 0 || force_block_creation {
+                    let bn = *next_bn;
+                    *next_bn += 1;
+                    trace!("📊 [BLOCK-NUM] Generating new block_number={} for GEI={}", bn, global_exec_index);
+                    bn
+                } else {
+                    0
+                }
             }
         };
 
-        // Convert CommittedSubDag to protobuf CommittedEpochData
-        // OPTIMIZATION: For empty commits (0 transactions), use fast-path that bypasses
-        // the expensive per-tx hash/filter/sort logic in convert_to_protobuf
-        let epoch_data_bytes = if total_tx_before == 0 {
-            self.convert_to_protobuf_empty(
-                subdag,
-                epoch,
-                global_exec_index,
-                leader_address,
-                block_number,
-            )?
-        } else {
-            trace!("🔍 [DIAG] Using FULL convert_to_protobuf path for global_exec_index={} (total_tx_before={})",
-                global_exec_index, total_tx_before);
-            self.convert_to_protobuf(
-                subdag,
-                epoch,
-                global_exec_index,
-                leader_address,
-                block_number,
-            )?
+        // Construct ExecutableBlock directly using pre-processed transactions
+        let epoch_data = ExecutableBlock {
+            transactions: all_proto_txs,
+            global_exec_index,
+            commit_index: subdag.commit_ref.index,
+            epoch,
+            commit_timestamp_ms: subdag.timestamp_ms,
+            leader_author_index: subdag.leader.author.value() as u32,
+            leader_address: leader_address.unwrap_or_default(),
+            block_number,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
         };
 
-        // Count total transactions after conversion (should match before)
-        let total_tx: usize = total_tx_before;
+        let mut epoch_data_bytes = Vec::new();
+        epoch_data.encode(&mut epoch_data_bytes)?;
 
         self.buffer_and_flush(
             global_exec_index,
             epoch_data_bytes,
             epoch,
             subdag.commit_ref.index,
-            total_tx,
+            total_after_dedup,
         )
         .await?;
 
@@ -341,18 +385,16 @@ impl ExecutorClient {
 
                 if is_same_commit {
                     warn!("   ✅ Same commit detected (epoch={}, commit_index={}) - skipping duplicate, existing commit in buffer will be sent", epoch, commit_index);
-                    return Ok(());
                 } else {
                     error!("   🚨 DIFFERENT commits with same global_exec_index! This is a BUG!");
                     error!("   🔍 Root cause analysis:");
                     error!("      - Epochs different ({} vs {}): global_exec_index calculation may be wrong", existing_epoch, epoch);
                     error!("      - Commit indexes different ({} vs {}): same global_exec_index calculated for different commits", existing_commit, commit_index);
                     error!("      - This indicates last_global_exec_index was not updated correctly or calculation is wrong");
-                    warn!("   ⚠️  OVERWRITING existing commit with new commit to ensure transactions are executed");
-                    warn!("   ⚠️  This may cause transaction loss in the old commit, but ensures new transactions are executed");
+                    warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
-            buffer.insert(global_exec_index, (epoch_data_bytes, epoch, commit_index));
+            buffer.entry(global_exec_index).or_insert((epoch_data_bytes, epoch, commit_index));
             trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
@@ -622,7 +664,7 @@ impl ExecutorClient {
 
         // Phase 5: Go verification (periodic RPC check)
         if last_idx.is_multiple_of(GO_VERIFICATION_INTERVAL) {
-            if let Ok((go_last_block, _, _, _)) = self.get_last_block_number().await {
+            if let Ok((go_last_block, _, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
                     error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
@@ -708,10 +750,22 @@ impl ExecutorClient {
             return Ok(()); // Silently skip if not enabled
         }
 
-        // Convert to protobuf bytes
-        let epoch_data_bytes =
-            self.convert_to_protobuf(subdag, epoch, global_exec_index, leader_address, 0)?;
+        let all_proto_txs = self.build_sorted_transactions(subdag)?;
 
+        let epoch_data = ExecutableBlock {
+            transactions: all_proto_txs,
+            global_exec_index,
+            commit_index: subdag.commit_ref.index,
+            epoch,
+            commit_timestamp_ms: subdag.timestamp_ms,
+            leader_author_index: subdag.leader.author.value() as u32,
+            leader_address: leader_address.unwrap_or_default(),
+            block_number: 0,
+            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+        };
+
+        let mut epoch_data_bytes = Vec::new();
+        epoch_data.encode(&mut epoch_data_bytes)?;
         info!("📤 [SYNC-DIRECT] Sending block directly: global_exec_index={}, epoch={}, size={} bytes",
             global_exec_index, epoch, epoch_data_bytes.len());
 
@@ -767,166 +821,6 @@ impl ExecutorClient {
         }
     }
 
-    fn convert_to_protobuf_empty(
-        &self,
-        subdag: &CommittedSubDag,
-        epoch: u64,
-        global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
-        block_number: u64,
-    ) -> Result<Vec<u8>> {
-        let epoch_data = ExecutableBlock {
-            transactions: Vec::new(),
-            global_exec_index,
-            commit_index: subdag.commit_ref.index,
-            epoch,
-            commit_timestamp_ms: subdag.timestamp_ms,
-            leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
-            block_number,
-            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-        };
-
-        let mut buf = Vec::new();
-        epoch_data.encode(&mut buf)?;
-        Ok(buf)
-    }
-
-    /// Convert CommittedSubDag to protobuf CommittedEpochData bytes
-    /// Uses generated protobuf code to ensure correct encoding
-    ///
-    /// IMPORTANT: Transaction data is passed through unchanged from Go sub → Rust consensus → Go master
-    /// We verify data integrity by checking transaction hash at each step
-    ///
-    /// CRITICAL FORK-SAFETY: global_exec_index and commit_index ensure deterministic execution order
-    /// All nodes must execute blocks with the same global_exec_index in the same order
-    fn convert_to_protobuf(
-        &self,
-        subdag: &CommittedSubDag,
-        epoch: u64,
-        global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
-        block_number: u64,
-    ) -> Result<Vec<u8>> {
-        // Extract all transactions with hash for deterministic deduplication and sorting
-        // CRITICAL FORK-SAFETY: Deduplicate and sort transactions by hash to ensure all nodes send same order
-        let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new(); // (tx_data_ref, tx_hash)
-        let mut skipped_count = 0;
-        let mut system_tx_skipped = 0;
-        let mut protobuf_invalid_skipped = 0;
-
-        for (block_idx, block) in subdag.blocks.iter().enumerate() {
-            let total_tx_in_block = block.transactions().len();
-            info!("🔍 [DIAG] convert_to_protobuf: block[{}] has {} transactions, global_exec_index={}",
-                block_idx, total_tx_in_block, global_exec_index);
-            for (tx_idx, tx) in block.transactions().iter().enumerate() {
-                // Get transaction data (raw bytes) - Go needs transaction data, not digest
-                let tx_data = tx.data();
-                // tx.data() là single Transaction bytes từ DAG — không cần heuristic
-                use crate::types::tx_hash::calculate_transaction_hash_single;
-                let tx_hash = calculate_transaction_hash_single(tx_data);
-                let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
-
-                info!(
-                    "🔍 [DIAG] TX[{}/{}]: hash={}..., size={} bytes",
-                    tx_idx,
-                    total_tx_in_block,
-                    tx_hash_hex,
-                    tx_data.len()
-                );
-
-                // 🔍 FILTER: Check if this is a SystemTransaction (BCS format) - skip if so
-                if SystemTransaction::from_bytes(tx_data).is_ok() {
-                    info!("⚠️ [SYSTEM TX FILTER] Skipping SystemTransaction (BCS format) in block {} tx {}: hash={}..., size={} bytes",
-                        block_idx, tx_idx, tx_hash_hex, tx_data.len());
-                    skipped_count += 1;
-                    system_tx_skipped += 1;
-                    continue;
-                }
-
-                // Verify transaction data is valid protobuf before sending to Go
-                use crate::types::tx_hash::verify_transaction_protobuf;
-                if !verify_transaction_protobuf(tx_data) {
-                    info!("⚠️ [TX FILTER] Non-user transaction REJECTED by verify_transaction_protobuf (hash={}..., size={} bytes, global_exec_index={}, commit_index={}). First 32 bytes: {:?}", 
-                        tx_hash_hex, tx_data.len(), global_exec_index, subdag.commit_ref.index,
-                        &tx_data[..tx_data.len().min(32)]);
-                    skipped_count += 1;
-                    protobuf_invalid_skipped += 1;
-                    continue;
-                }
-
-                info!(
-                    "✅ [DIAG] TX[{}/{}] PASSED all filters: hash={}..., size={} bytes",
-                    tx_idx,
-                    total_tx_in_block,
-                    tx_hash_hex,
-                    tx_data.len()
-                );
-                all_transactions_with_hash.push((tx_data, tx_hash));
-            }
-        }
-
-        info!("🔍 [DIAG] convert_to_protobuf SUMMARY: global_exec_index={}, total_input={}, passed={}, system_tx_skipped={}, protobuf_invalid_skipped={}",
-            global_exec_index, skipped_count + all_transactions_with_hash.len(), all_transactions_with_hash.len(),
-            system_tx_skipped, protobuf_invalid_skipped);
-
-        // CRITICAL FORK-SAFETY: Deduplicate and Sort transactions by hash (deterministic ordering)
-        // Step 1: Dedup by txHash — keep first occurrence
-        let original_len = all_transactions_with_hash.len();
-        let mut unique_txs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (tx_data, tx_hash) in all_transactions_with_hash {
-            if seen.insert(tx_hash.clone()) {
-                unique_txs.push((tx_data, tx_hash));
-            }
-        }
-        if unique_txs.len() < original_len {
-            trace!(
-                "🔍 [FORK-SAFETY] Deduped transactions: {} → {} unique",
-                original_len,
-                unique_txs.len()
-            );
-        }
-
-        // Step 2: Sort by txHash for deterministic ordering across all nodes
-        unique_txs.sort_by(|(_, hash_a), (_, hash_b)| hash_a.cmp(hash_b));
-
-        // Convert to TransactionExe messages after sorting
-        let mut transactions = Vec::with_capacity(unique_txs.len());
-        for (tx_data_ref, tx_hash) in unique_txs.iter() {
-            let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
-            trace!("📋 [FORK-SAFETY] Sorted transaction: hash={}", tx_hash_hex);
-
-            let tx_exe = TransactionExe {
-                digest: tx_data_ref.to_vec(),
-                worker_id: 0,
-            };
-            transactions.push(tx_exe);
-        }
-
-        // Create ExecutableBlock message using generated protobuf code
-        let epoch_data = ExecutableBlock {
-            transactions,
-            global_exec_index,
-            commit_index: subdag.commit_ref.index,
-            epoch,
-            commit_timestamp_ms: subdag.timestamp_ms,
-            leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
-            block_number,
-            commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-        };
-
-        // Encode to protobuf bytes using prost::Message::encode
-        let mut buf = Vec::new();
-        epoch_data.encode(&mut buf)?;
-
-        let total_tx_encoded = epoch_data.transactions.len();
-        info!("📦 [TX INTEGRITY] Encoded ExecutableBlock: global_exec_index={}, commit_index={}, epoch={}, total_tx={}, total_size={} bytes (using protobuf encoding)", 
-            global_exec_index, subdag.commit_ref.index, epoch, total_tx_encoded, buf.len());
-
-        Ok(buf)
-    }
 
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///

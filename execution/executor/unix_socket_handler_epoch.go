@@ -415,33 +415,24 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	counterBlockNumber := storage.GetLastBlockNumber()
 	logger.Debug("🔍 [INIT] Block counter from storage: %d", counterBlockNumber)
 
-	// CRITICAL FIX: Validate that block hash actually exists!
-	// Counter can be advanced before block data is stored (especially during epoch transitions).
-	// We need to find the highest block number that has actual data.
+	// CRITICAL FIX: With blockchainInitDone, the counter is AUTHORITATIVE.
+	// initBlockchain() loads the actual last block from DB, then updates the counter,
+	// then sets blockchainInitDone. The backwards-validation loop below was causing
+	// false negatives because BlockChain.Commit() only runs for state-changing blocks;
+	// empty commits set SetBlockNumberToHash in dirty cache but never Commit() to DB.
+	// After restart, GetBlockHashByNumber can't find those mappings and decrements
+	// to the last state-changing block — a STALE value that causes Rust to re-execute
+	// existing blocks → permanent fork.
 	validatedBlockNumber := counterBlockNumber
 
 	// Guard against nil blockchain instance (during early startup or tests)
 	blockchainInstance := blockchain.GetBlockChainInstance()
-	if blockchainInstance != nil {
-		for validatedBlockNumber > 0 {
-			_, ok := blockchainInstance.GetBlockHashByNumber(validatedBlockNumber)
-			if ok {
-				break // Found a block with valid hash
-			}
-			logger.Warn("⚠️ [INIT] Block %d has no hash data, checking %d", validatedBlockNumber, validatedBlockNumber-1)
-			validatedBlockNumber--
-		}
-	} else {
-		logger.Warn("⚠️ [INIT] Blockchain instance is nil, skipping block hash validation")
+	if blockchainInstance == nil {
+		logger.Warn("⚠️ [INIT] Blockchain instance is nil during GetLastBlockNumber request")
 		validatedBlockNumber = 0
 	}
 
-	if validatedBlockNumber != counterBlockNumber {
-		logger.Warn("⚠️ [INIT] Block counter=%d but validated block=%d (counter ahead of actual data)",
-			counterBlockNumber, validatedBlockNumber)
-	}
-
-	// FIX: Return the actual block number from Go's DB, not the LastGlobalExecIndex.
+	// FIX: Return the actual block number from Go's counter, not the LastGlobalExecIndex.
 	// This ensures that `catchup` block syncer does not loop infinitely trying to fetch
 	// empty blocks that were skipped by Go Master.
 	returnBlockNumber := validatedBlockNumber
@@ -453,11 +444,28 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	lastGEI := storage.GetLastGlobalExecIndex()
 
 	// FIX 4: Determine if Go Master is fully ready.
-	// It's ready if the blockchain instance is initialized and database loading completes.
-	isReady := true
-	if blockchainInstance == nil {
-		isReady = false
-		logger.Warn("⚠️ [INIT] Go Master Blockchain instance is nil (DB not fully loaded yet).")
+	// CRITICAL: Use the explicit blockchainInitDone flag instead of just checking
+	// blockchainInstance != nil. The instance can exist while the block number is
+	// still being loaded from metadata.json → LevelDB. Only report ready=true
+	// AFTER initBlockchain() has fully verified and loaded the chain state.
+	isReady := storage.IsBlockchainInitDone()
+	if !isReady {
+		if blockchainInstance == nil {
+			logger.Warn("⚠️ [INIT] Go Master not ready: blockchain instance is nil.")
+		} else {
+			logger.Warn("⚠️ [INIT] Go Master not ready: blockchain init still in progress (block=%d).", returnBlockNumber)
+		}
+	}
+
+	var lastEpoch uint64
+	if blockchainInstance != nil && returnBlockNumber > 0 {
+		hash, ok := blockchainInstance.GetBlockHashByNumber(returnBlockNumber)
+		if ok && hash != (common.Hash{}) {
+			block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(hash)
+			if err == nil && block != nil {
+				lastEpoch = block.Header().Epoch()
+			}
+		}
 	}
 
 	response := &pb.LastBlockNumberResponse{
@@ -465,10 +473,11 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 		LastGlobalExecIndex:    lastGEI,
 		IsReady:                isReady,
 		LastExecutedCommitHash: storage.GetLastExecutedCommitHash(),
+		LastEpoch:              lastEpoch,
 	}
 
-	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d (counter=%d, validated=%d, is_ready=%v)",
-		returnBlockNumber, lastGEI, counterBlockNumber, validatedBlockNumber, isReady)
+	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d, epoch=%d (counter=%d, validated=%d, is_ready=%v)",
+		returnBlockNumber, lastGEI, lastEpoch, counterBlockNumber, validatedBlockNumber, isReady)
 	return response, nil
 }
 
@@ -1107,6 +1116,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	defer func() {
 		rh.chainState.InvalidateAllState()
 		mvm.ClearAllMVMApi()
+		mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
 		mvm.CallClearAllStateInstances()
 		logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
 	}()
@@ -1136,9 +1146,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
+		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify 
+		// that the block hash actually exists in our local database. Sometimes PebbleDB 
+		// persists the GEI counter but fails to flush the actual block data.
 		// ═══════════════════════════════════════════════════════════════════════════
+		isFullyExecuted := false
 		if blockGEI > 0 && blockGEI <= currentGEI {
-			logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
+			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
+				isFullyExecuted = true
+			}
+		}
+
+		if isFullyExecuted {
+			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
 			executedCount++
 			if blockNum > lastExecutedBlock {
@@ -1201,6 +1221,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if isLastBlock {
 			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
 			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
+			// Without this, synced blocks mapping (block number -> hash) remain in volatile
+			// cache and are lost if the node crashes/restarts before the next normal block.
+			commitOpts = append(commitOpts, blockchain.WithCommitMappings())
+			commitOpts = append(commitOpts, blockchain.WithSaveTxMapping())
 		}
 
 		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
@@ -1228,8 +1253,15 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				}
 				logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
 			} else {
-				// For NOMT, we just log that the batch was applied.
-				logger.Info("✅ [STATE VERIFY] Batch DB applied for NOMT: block=#%d, localRoot=%s", blockNum, rh.chainState.GetAccountStateDB().Trie().Hash().Hex()[:18]+"...")
+				// ═══════════════════════════════════════════════════════════════
+				// FORK-DIAG (Apr 2026): Log NOMT handle roots for ALL namespaces
+				// to enable side-by-side comparison with master node logs.
+				// Each NOMT handle has an independent Merkle root that MUST match
+				// across all nodes for consensus to hold.
+				// ═══════════════════════════════════════════════════════════════
+				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+				logger.Info("[FORK-DIAG][SYNC-VERIFY] NOMT batch applied: block=#%d, accountRoot=%s",
+					blockNum, localRoot.Hex()[:18]+"...")
 			}
 		}
 
@@ -1317,6 +1349,17 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Completed: executed %d/%d blocks, last_block=#%d, last_gei=%d",
 		executedCount, blockCount, lastExecutedBlock, lastExecutedGEI)
+
+	// CRITICAL FIX (Apr 2026): When blocks are synced directly into the database without 
+	// executing EVM transactions, the C++ MVM's internal state and Go-side MVMApi caches 
+	// become stale. If we don't forcefully clear ALL of them (including protected ones), 
+	// the very next native block execution will read stale data, mutating local state 
+	// incorrectly and causing a hard fork.
+	rh.chainState.InvalidateAllState()
+	mvm.ClearAllMVMApi()
+	mvm.ClearAllProtectedMVMApi()
+	mvm.CallClearAllStateInstances()
+	logger.Info("🧹 [SNAPSHOT-RESUME] Actively cleared all C++ MVM and Go-side caches after block sync")
 
 	return &pb.SyncBlocksResponse{
 		SyncedCount:     executedCount,

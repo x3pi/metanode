@@ -20,7 +20,8 @@ use consensus_core::{
 };
 use meta_protocol_config::ProtocolConfig;
 use prometheus::Registry;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -54,6 +55,9 @@ struct StorageSetup {
     /// Epoch duration in seconds, loaded from Go via protobuf (from genesis.json)
     epoch_duration_from_go: u64,
     last_executed_commit_hash: [u8; 32],
+    /// Last block number from Go at startup, verified with is_ready=true retry loop.
+    /// Passed to setup_consensus to avoid re-query race where Go returns stale value.
+    latest_block_number: u64,
 }
 
 /// Results from consensus setup phase.
@@ -62,16 +66,16 @@ struct ConsensusSetup {
     /// Whether DAG storage has prior history. False after snapshot restore (DAG deleted).
     #[allow(dead_code)]
     dag_has_history: bool,
+    /// Critical health flag. Set to true if any background Station crashes.
+    is_terminally_failed: Arc<AtomicBool>,
     commit_consumer_holder: Option<CommitConsumerArgs>,
     transaction_client_proxy: Option<Arc<TransactionClientProxy>>,
     executor_client_for_proc: Arc<ExecutorClient>,
     current_commit_index: Arc<AtomicU32>,
-    is_transitioning: Arc<AtomicBool>,
     pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
     epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64)>,
     epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64)>,
-    shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
     system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     protocol_config: ProtocolConfig,
     parameters: consensus_config::Parameters,
@@ -140,9 +144,8 @@ impl ConsensusNode {
         ));
 
         // SNAPSHOT RESTORE FIX: Go Master needs time to load DB after snapshot restore.
-        // Without retry, Rust gets block=0/epoch=0 and initializes consensus at epoch 0,
-        // making it permanently stuck and unable to catch up with the cluster.
-        // Retry up to 30 times (500ms intervals = 15s max) waiting for Go to report block > 0.
+        // Go now has an explicit blockchainInitDone flag. is_ready=true means the block
+        // number is the FINAL authoritative value — no transient metadata.json values.
         let latest_block_number = {
             let max_retries = 30;
             let retry_interval = std::time::Duration::from_millis(500);
@@ -150,19 +153,20 @@ impl ConsensusNode {
 
             for attempt in 1..=max_retries {
                 match executor_client.get_last_block_number().await {
-                    Ok((n, _, _is_ready, _)) => {
+                    Ok((n, _, true, _, _)) => {
                         block_num = n;
-                        if n > 0 || _is_ready {
-                            info!(
-                                "✅ [STARTUP] Got block number {} from Go (is_ready={}) (attempt {})",
-                                n, _is_ready, attempt
-                            );
-                            break;
-                        } else if attempt < max_retries {
-                            info!(
-                                "⏳ [STARTUP] Go returned block=0 (attempt {}/{}). Go may still be loading DB after snapshot restore. Retrying in {}s...",
-                                attempt, max_retries, retry_interval.as_secs()
-                            );
+                        info!(
+                            "✅ [STARTUP] Got block number {} from Go (is_ready=true) (attempt {})",
+                            n, attempt
+                        );
+                        break;
+                    }
+                    Ok((n, _, false, _, _)) => {
+                        info!(
+                            "⏳ [STARTUP] Go not ready (block={}) (attempt {}/{}). Waiting for blockchain init...",
+                            n, attempt, max_retries
+                        );
+                        if attempt < max_retries {
                             tokio::time::sleep(retry_interval).await;
                         }
                     }
@@ -814,7 +818,7 @@ impl ConsensusNode {
                 last_global_exec_index,
                 epoch_base_exec_index,
                 current_epoch,
-                &config.storage_path,
+                &epoch_db_path,
                 config.node_id as u32,
             )
             .await {
@@ -866,6 +870,7 @@ impl ConsensusNode {
             network_keypair,
             epoch_duration_from_go,
             last_executed_commit_hash,
+            latest_block_number,
         })
     }
 
@@ -880,14 +885,25 @@ impl ConsensusNode {
             return (0, [0; 32]);
         }
 
-        let (local_go_block, _, _go_ready, last_executed_commit_hash) = executor_client
-            .get_last_block_number()
-            .await
-            .unwrap_or((0, 0, false, [0; 32]));
-        let local_go_gei = executor_client
-            .get_last_global_exec_index()
-            .await
-            .unwrap_or(0);
+        let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
+            match executor_client.get_last_block_number().await {
+                Ok((block, gei, true, hash, _)) => break (block, gei, true, hash),
+                Ok((block, gei, false, _hash, _)) => {
+                    warn!(
+                        "⏳ [STARTUP] Go Master not ready (block={}, gei={}). Retrying in 1s...",
+                        block, gei
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ [STARTUP] Failed to get last block from Go: {}. Using defaults.",
+                        e
+                    );
+                    break (0, 0, false, [0; 32]);
+                }
+            }
+        };
         let storage_path = &config.storage_path;
 
         let (persisted_index, persisted_commit) =
@@ -989,7 +1005,7 @@ impl ConsensusNode {
         let (commit_consumer, commit_receiver, mut block_receiver) =
             CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash);
         let current_commit_index = Arc::new(AtomicU32::new(0));
-        let is_transitioning = Arc::new(AtomicBool::new(false));
+        let is_transitioning = coordination_hub.get_is_transitioning_ref();
 
         // Load persisted transaction queue
         let persisted_queue = super::queue::load_transaction_queue_static(&storage.storage_path)
@@ -1022,8 +1038,10 @@ impl ConsensusNode {
                 epoch_tx_sender.clone(),
             );
 
-        let shared_last_global_exec_index =
-            Arc::new(tokio::sync::Mutex::new(storage.epoch_base_exec_index));
+        let shared_last_global_exec_index = coordination_hub.get_global_exec_index_ref();
+        
+        // Initialize GEI in the Hub
+        coordination_hub.set_initial_global_exec_index(storage.epoch_base_exec_index).await;
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
@@ -1048,7 +1066,21 @@ impl ConsensusNode {
             );
         }
 
-        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
+        // Stage 4 Conveyor Belt Buffer: Huge buffer to absorb transaction spikes without halting Core
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
+
+        // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
+        // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
+        // causing GEI miscalculation and hash divergence between nodes after restart.
+        let next_expected_commit_index = if config.executor_read_enabled {
+            (storage.last_global_exec_index.saturating_sub(storage.epoch_base_exec_index) + 1) as u32
+        } else {
+            1
+        };
+        info!(
+            "📊 [COMMIT PROCESSOR INIT] Startup: next_expected_commit_index={}, last_global_exec_index={}, epoch_base={}",
+            next_expected_commit_index, storage.last_global_exec_index, storage.epoch_base_exec_index
+        );
 
         let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
             commit_receiver,
@@ -1078,6 +1110,7 @@ impl ConsensusNode {
         })
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
         .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
+        .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(is_transitioning.clone())
         .with_pending_transactions_queue(pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_transition_callback)
@@ -1132,21 +1165,171 @@ impl ConsensusNode {
             ))
         };
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STARTUP STATE SYNC BARRIER (2026-04-24)
+        //
+        // When a node restarts from a stale snapshot (or genesis) while the network
+        // has advanced, its local Go state is behind peers. If we start consensus
+        // immediately, the node will produce/verify blocks with a divergent state
+        // root because its GEI and account state lag behind. This causes a PERMANENT
+        // fork (hash mismatch on every block).
+        //
+        // Fix: Query peers for their latest block. If local Go is behind by more
+        // than a small threshold, fetch missing blocks via P2P and execute them
+        // through Go BEFORE allowing consensus to start.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            let barrier_client = executor_client_for_proc.clone();
+            let barrier_peers = config.peer_rpc_addresses.clone();
+
+            // Give Go a moment to finish its own initialization
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // CRITICAL FIX: Use the verified latest_block_number from setup_storage()
+            // instead of re-querying Go. Re-querying with a new ExecutorClient can race
+            // with Go's internal state and return a stale/wrong value (e.g., 40 instead of 51).
+            // This caused re-execution of already-existing blocks → permanent fork.
+            let mut local_block = storage.latest_block_number;
+            tracing::info!(
+                "📊 [STARTUP-SYNC] Barrier using verified block={} from setup_storage()",
+                local_block
+            );
+
+            // Sanity check: re-query Go once. If it reports a HIGHER number, use that
+            // (Go may have processed blocks since setup_storage). If it reports LOWER,
+            // trust the setup_storage value (Go gave us a stale value).
+            match barrier_client.get_last_block_number().await {
+                Ok((requery_block, _gei, true, _hash, _)) => {
+                    if requery_block > local_block {
+                        tracing::info!(
+                            "📊 [STARTUP-SYNC] Go advanced since setup: {} -> {}. Using higher value.",
+                            local_block, requery_block
+                        );
+                        local_block = requery_block;
+                    } else if requery_block < local_block {
+                        tracing::warn!(
+                            "🚨 [STARTUP-SYNC] Go re-query returned STALE value ({} < {}). \
+                             Ignoring — this prevents re-execution of existing blocks.",
+                            requery_block, local_block
+                        );
+                    }
+                }
+                Ok((requery_block, _gei, false, _hash, _)) => {
+                    tracing::warn!(
+                        "⚠️ [STARTUP-SYNC] Go re-query not ready (block={}). Trusting setup_storage value={}.",
+                        requery_block, local_block
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [STARTUP-SYNC] Go re-query failed ({}). Trusting setup_storage value={}.",
+                        e, local_block
+                    );
+                }
+            }
+
+            // Find the highest block among peers
+            let mut max_peer_block = 0u64;
+            let mut max_peer_gei = 0u64;
+            for peer_addr in &barrier_peers {
+                match crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                    Ok(info) => {
+                        if info.last_block > max_peer_block {
+                            max_peer_block = info.last_block;
+                            max_peer_gei = info.last_global_exec_index;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("⚠️ [STARTUP-SYNC] Peer {} info query failed: {}", peer_addr, e);
+                    }
+                }
+            }
+
+            if max_peer_block > 0 && local_block < max_peer_block {
+                let _gap = max_peer_block - local_block;
+                tracing::warn!(
+                    "🚨 [STARTUP-SYNC] Local state BEHIND network! local_block={}, peer_block={}, peer_gei={}. Triggering pre-consensus sync...",
+                    local_block, max_peer_block, max_peer_gei
+                );
+
+                let from_block = local_block + 1;
+                let to_block = max_peer_block;
+
+                match crate::network::peer_rpc::fetch_blocks_from_peer(&barrier_peers, from_block, to_block).await {
+                    Ok(blocks) if !blocks.is_empty() => {
+                        tracing::info!(
+                            "🔄 [STARTUP-SYNC] Fetched {} blocks ({}-{}). Executing...",
+                            blocks.len(),
+                            blocks.first().map(|b| b.block_number).unwrap_or(0),
+                            blocks.last().map(|b| b.block_number).unwrap_or(0)
+                        );
+                        match barrier_client.sync_and_execute_blocks(blocks).await {
+                            Ok((synced, last_block, _gei)) => {
+                                tracing::info!(
+                                    "✅ [STARTUP-SYNC] Pre-consensus sync complete: executed {} blocks (last_block={})",
+                                    synced, last_block
+                                );
+                                
+                                // CRITICAL FIX: Re-query Go GEI after syncing to update the CommitConsumerMonitor.
+                                // Otherwise, CommitSyncer initializes with stale GEI and thinks it's a genesis start.
+                                if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
+                                    let new_go_replay_after = if new_gei > storage.epoch_base_exec_index {
+                                        (new_gei - storage.epoch_base_exec_index) as u32
+                                    } else {
+                                        0
+                                    };
+                                    commit_consumer.monitor().set_highest_handled_commit(new_go_replay_after);
+                                    tracing::info!(
+                                        "🔄 [STARTUP-SYNC] Re-queried Go: updated go_replay_after to {} (from new_gei={})",
+                                        new_go_replay_after, new_gei
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ [STARTUP-SYNC] Failed to execute fetched blocks: {}", e);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!("⚠️ [STARTUP-SYNC] Fetched 0 blocks from peers. Cannot sync state.");
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ [STARTUP-SYNC] Failed to fetch blocks from peers: {}", e);
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}). Starting consensus...",
+                    local_block, max_peer_block
+                );
+            }
+        }
+
+        let is_terminally_failed = Arc::new(AtomicBool::new(false));
+
         let executor_client_for_init = executor_client_for_proc.clone();
+        let _failed_init = is_terminally_failed.clone();
         tokio::spawn(async move {
             executor_client_for_init.initialize_from_go().await;
+            // Note: init is not terminal.
         });
 
-        // Tích hợp BlockDeliveryManager vào Phase khởi động (mới thêm vào)
+        // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();
         let executor_client_for_manager = executor_client_for_proc.clone();
+        let failed_delivery = is_terminally_failed.clone();
         tokio::spawn(async move {
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 executor_client_for_manager,
                 delivery_rx,
                 peer_addrs,
             );
+            
+            // Explicitly unused since we no longer mark terminal failure on normal exit
+            let _ = failed_delivery;
+
             manager.run().await;
+            tracing::info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager gracefully exited (expected on Epoch Transition).");
         });
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -1254,9 +1437,13 @@ impl ConsensusNode {
 
         // Spawn background recycler is done in setup_epoch_management where tx_client is accessible
 
+        let failed_processor = is_terminally_failed.clone();
         tokio::spawn(async move {
             if let Err(e) = commit_processor.run().await {
-                tracing::error!("❌ [COMMIT PROCESSOR] Error: {}", e);
+                tracing::error!("❌ [STATION 3: PROCESSOR] Fatal Error: {}", e);
+                failed_processor.store(true, Ordering::SeqCst);
+            } else {
+                tracing::info!("🛑 [STATION 3: PROCESSOR] Gracefully Exited (Expected upon EndOfEpoch).");
             }
         });
 
@@ -1304,8 +1491,19 @@ impl ConsensusNode {
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
 
+        // CRITICAL: Transition from Initializing → Bootstrapping BEFORE starting authority.
+        // This ensures Core::recover() sees should_skip_proposal()=true, preventing
+        // assertion panics when the DAG is empty after snapshot restore.
+        // CommitSyncer will later transition Bootstrapping → CatchingUp/Healthy.
+        if start_as_validator {
+            coordination_hub.set_phase(
+                consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
+            );
+        }
+
         let (authority, commit_consumer_holder) = if start_as_validator {
-            info!("🚀 Starting consensus authority node immediately (in-sync confirmed)...");
+            info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
+
             (
                 Some(
                     ConsensusAuthority::start(
@@ -1349,18 +1547,17 @@ impl ConsensusNode {
             transaction_client_proxy,
             executor_client_for_proc,
             current_commit_index,
-            is_transitioning,
             pending_transactions_queue,
             committed_transaction_hashes,
             epoch_tx_sender,
             epoch_tx_receiver,
-            shared_last_global_exec_index,
             system_transaction_provider,
             protocol_config,
             parameters,
             clock,
             transaction_verifier,
             tx_recycler,
+            is_terminally_failed,
         })
     }
 
@@ -1453,7 +1650,6 @@ impl ConsensusNode {
             storage_path: storage.storage_path,
             current_epoch: storage.current_epoch,
             last_global_exec_index: storage.last_global_exec_index,
-            shared_last_global_exec_index: consensus.shared_last_global_exec_index,
             protocol_keypair: storage.protocol_keypair,
             network_keypair: storage.network_keypair,
             protocol_config: consensus.protocol_config,
@@ -1465,7 +1661,6 @@ impl ConsensusNode {
             last_transition_hash: None,
             current_registry_id: None,
             executor_commit_enabled: config.executor_commit_enabled,
-            is_transitioning: consensus.is_transitioning,
             pending_transactions_queue: consensus.pending_transactions_queue,
             system_transaction_provider: consensus.system_transaction_provider,
             epoch_transition_sender: consensus.epoch_tx_sender,
@@ -1489,6 +1684,7 @@ impl ConsensusNode {
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
+            is_terminally_failed: consensus.is_terminally_failed,
         };
 
         // Initialize the global StateTransitionManager
@@ -1547,6 +1743,9 @@ impl ConsensusNode {
     }
 
     pub(crate) fn is_alive(&self) -> bool {
+        if self.is_terminally_failed.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         if let Some(authority) = &self.authority {
             authority.is_alive()
         } else {

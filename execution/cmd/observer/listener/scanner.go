@@ -24,10 +24,27 @@ type PendingBatchData struct {
 	LastError   string      // Lưu lỗi gần nhất khi resubmit thất bại
 }
 
+// TrackedTx dùng để theo dõi giao dịch và trạng thái quorum
+type TrackedTx struct {
+	Wallet      common.Address
+	IsQuorum    bool
+	TargetIndex int // Lưu lại client index đã gửi để reset
+	NationId    uint64
+	RemoteBlock uint64
+}
+
 // scanProgressUpdate là yêu cầu cập nhật lastBlock lên config SMC sau khi gửi batch thành công
 type scanProgressUpdate struct {
-	chainId   uint64
-	lastBlock uint64
+	chainId    uint64
+	lastBlock  uint64
+	localBlock uint64
+	isQuorum   bool
+}
+
+type ScanResumeState struct {
+	RemoteBlock       uint64
+	LocalBlock        uint64
+	NeedCheckExecuted bool
 }
 
 type CrossChainScanner struct {
@@ -38,8 +55,6 @@ type CrossChainScanner struct {
 	scanInterval time.Duration
 	// Chan nhận yêu cầu cập nhật lastBlock — goroutine riêng xử lý tuần tự để tránh nonce conflict
 	progressCh chan scanProgressUpdate
-	// localBlockCh: nhận block number từ receipt watcher khi batchSubmit TX được confirm trên local chain
-	localBlockCh   chan uint64
 	txHashToWallet sync.Map
 	pendingBatches sync.Map                        // map[[32]byte]*PendingBatchData
 	batchFoundAt   sync.Map                        // map[[32]byte]uint64: batchId -> blockNumber where GetLogs found
@@ -183,7 +198,6 @@ func (s *CrossChainScanner) Start() {
 	}
 
 	// Receipt watcher: Bộ theo dõi thông minh tự đảo Node khi lỗi
-	s.localBlockCh = make(chan uint64, 100)
 	go s.runSmartWatcher()
 
 	// Progress updater: cập nhật lastBlock lên config SMC (tuần tự, tránh nonce conflict)
@@ -200,8 +214,9 @@ func (s *CrossChainScanner) Start() {
 	for _, rc := range s.cfg.RemoteChains {
 		rc := rc // capture loop variable
 		connAddr := rc.ConnectionAddress
-		logger.Info("🚀 [Scanner] Starting scan goroutine: %s (nationId=%d, addr=%s, resumeBlock=%d)",
-			rc.Name, rc.NationId, connAddr, initialProgress[rc.NationId])
-		go s.runChainScanner(rc, connAddr, initialProgress[rc.NationId])
+		resumeState := initialProgress[rc.NationId]
+		logger.Info("🚀 [Scanner] Starting scan goroutine: %s (nationId=%d, addr=%s, resumeBlock=%d, needCheckExecuted=%v)",
+			rc.Name, rc.NationId, connAddr, resumeState.RemoteBlock, resumeState.NeedCheckExecuted)
+		go s.runChainScanner(rc, connAddr, resumeState)
 	}
 }

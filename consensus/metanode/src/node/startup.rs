@@ -122,7 +122,7 @@ impl InitializedNode {
             let (is_transitioning_for_uds, _pending_tx_queue, _storage_path) = {
                 let node_guard = node.lock().await;
                 (
-                    node_guard.is_transitioning.clone(),
+                    node_guard.coordination_hub.get_is_transitioning_ref(),
                     node_guard.pending_transactions_queue.clone(),
                     node_guard.storage_path.clone(),
                 )
@@ -191,7 +191,7 @@ impl InitializedNode {
                     let node_guard = node.lock().await;
                     (
                         node_guard.executor_client.clone(),
-                        Some(node_guard.shared_last_global_exec_index.clone()),
+                        Some(node_guard.coordination_hub.get_global_exec_index_ref()),
                     )
                 };
                 if let Some(exc) = executor_client_for_peer {

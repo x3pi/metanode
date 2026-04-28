@@ -163,6 +163,13 @@ type BlockProcessor struct {
 
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
+
+	// FORK-SAFETY: Track Rust FFI session GEI baseline.
+	// After DAG-wipe + restart, Rust sends commits with GEIs lower than Go's existing
+	// lastBlockGEI. The GEI-REGRESSION-GUARD must be bypassed for these legitimate
+	// new-session commits. Set to true when a GEI backward jump is detected in
+	// processRustEpochData (new Rust session), reset when GEI catches up.
+	rustSessionRestarted atomic.Bool
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)

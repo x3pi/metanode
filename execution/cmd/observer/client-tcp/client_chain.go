@@ -277,15 +277,15 @@ func (client *Client) SendTransactionFromWallet(
 	maxGas uint64,
 	maxGasPrice uint64,
 	maxTimeUse uint64,
-) (common.Hash, uint64, error) {
+) (common.Hash, uint64, bool, error) {
 	if client.clientContext == nil || client.clientContext.ConnectionsManager == nil {
-		return common.Hash{}, 0, fmt.Errorf("client not ready")
+		return common.Hash{}, 0, false, fmt.Errorf("client not ready")
 	}
 
 	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 	if parentConn == nil || !parentConn.IsConnect() {
 		if err := client.ReconnectToParent(); err != nil {
-			return common.Hash{}, 0, err
+			return common.Hash{}, 0, false, err
 		}
 		parentConn = client.clientContext.ConnectionsManager.ParentConnection()
 	}
@@ -293,7 +293,7 @@ func (client *Client) SendTransactionFromWallet(
 	// Lấy nonce từ chain (dùng ID matching, không dùng shared nonce channel)
 	nonce, err := client.ChainGetNonce(fromAddress)
 	if err != nil {
-		return common.Hash{}, 0, fmt.Errorf("get nonce failed: %w", err)
+		return common.Hash{}, 0, false, fmt.Errorf("get nonce failed: %w", err)
 	}
 	bRelatedAddresses := make([][]byte, len(relatedAddress))
 	for i, v := range relatedAddress {
@@ -319,13 +319,13 @@ func (client *Client) SendTransactionFromWallet(
 
 	bTransaction, err := tx.Marshal()
 	if err != nil {
-		return tx.Hash(), nonce, fmt.Errorf("marshal tx failed: %w", err)
+		return tx.Hash(), nonce, false, fmt.Errorf("marshal tx failed: %w", err)
 	}
 
 	// Gửi qua sendChainRequest kèm header ID → nhận TransactionSuccess / TransactionError
 	respMsg, err := client.sendChainRequest(command.SendTransaction, bTransaction, 120*time.Second)
 	if err != nil {
-		return tx.Hash(), nonce, fmt.Errorf("send tx failed: %w", err)
+		return tx.Hash(), nonce, false, fmt.Errorf("send tx failed: %w", err)
 	}
 
 	if respMsg.Command() == command.TransactionError {
@@ -334,14 +334,22 @@ func (client *Client) SendTransactionFromWallet(
 			desc := txErr.Description
 			logger.Error("❌ SendTransactionFromWallet: tx rejected code=%d desc=%q txHash=%s nonce=%d from=%s to=%s",
 				txErr.Code, desc, tx.Hash().Hex(), nonce, fromAddress.Hex(), toAddress.Hex())
-			return tx.Hash(), nonce, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, desc)
+			return tx.Hash(), nonce, false, fmt.Errorf("tx rejected (code=%d): %s", txErr.Code, desc)
 		} else {
 			logger.Warn("❌ SendTransactionFromWallet: received TransactionError but failed to parse: %v", parseErr)
-			return tx.Hash(), nonce, fmt.Errorf("tx rejected but failed to parse error details")
+			return tx.Hash(), nonce, false, fmt.Errorf("tx rejected but failed to parse error details")
+		}
+	} else if respMsg.Command() == command.TransactionSuccess {
+		txRes := &pb.TransactionSuccess{}
+		if parseErr := proto.Unmarshal(respMsg.Body(), txRes); parseErr == nil {
+			if txRes.Code == 201 && txRes.Message == "crosschain" {
+				logger.Info("✅ SendTransactionFromWallet: quorum reached! txHash=%s", tx.Hash().Hex())
+				return tx.Hash(), nonce, true, nil
+			}
 		}
 	}
 	logger.Info("✅ SendTransactionFromWallet: txHash=%s nonce=%d from=%s", tx.Hash().Hex(), nonce, fromAddress.Hex())
-	return tx.Hash(), nonce, nil
+	return tx.Hash(), nonce, false, nil
 }
 
 // parseBlockNumberFromReceiptResponse parse GetTransactionReceiptResponse proto,

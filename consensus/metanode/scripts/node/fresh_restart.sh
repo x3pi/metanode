@@ -46,16 +46,7 @@ RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "con
 
 ulimit -n 100000 || true
 
-# ─── Helper ──────────────────────────────────────────────────
-wait_for_socket() {
-    local socket=$1 name=$2 timeout=${3:-120}
-    local start=$(date +%s)
-    while true; do
-        [ -S "$socket" ] && { echo -e "${GREEN}  ✅ $name ready ($(( $(date +%s) - start ))s)${NC}"; return 0; }
-        [ $(( $(date +%s) - start )) -ge $timeout ] && { echo -e "${RED}  ❌ Timeout waiting for $name${NC}"; return 1; }
-        sleep 1
-    done
-}
+
 
 START_TIME=$(date +%s)
 echo ""
@@ -189,10 +180,7 @@ for i in "${!NODES[@]}"; do
     sleep 2
 done
 
-# Wait for Go Master sockets
-for i in "${!NODES[@]}"; do
-    wait_for_socket "${GO_MASTER_SOCKET[$i]}" "Go Master ${NODES[$i]}" 120
-done
+
 
 # Start Go Subs
 for i in "${!NODES[@]}"; do
@@ -206,20 +194,6 @@ for i in "${!NODES[@]}"; do
 done
 sleep 3
 
-# ==============================================================================
-# STEP 5: START RUST METANODES
-# ==============================================================================
-echo -e "${BLUE}[5/5] 🦀 Starting Rust metanodes...${NC}"
-cd "$METANODE_ROOT"
-
-for i in "${!NODES[@]}"; do
-    id=${NODES[$i]}
-    echo -e "  🚀 Rust Node $id..."
-    tmux new-session -d -s "${RUST_SESSION[$i]}" -c "$METANODE_ROOT" \
-        "ulimit -n 100000; export RUST_LOG=info,consensus_core=debug; export DB_WRITE_BUFFER_SIZE_MB=256; export DB_WAL_SIZE_MB=256; $BINARY start --config ${RUST_CONFIG[$i]} >> \"$LOG_DIR/node_$id/rust.log\" 2>&1"
-    sleep 1
-done
-sleep 3
 
 # ==============================================================================
 # DONE
@@ -233,7 +207,7 @@ echo ""
 echo -e "  ${BLUE}Nodes:${NC}"
 for i in "${!NODES[@]}"; do
     id=${NODES[$i]}
-    echo "    Node $id: tmux attach -t metanode-$id | go-master-$id | go-sub-$id"
+    echo "    Node $id: tmux attach -t go-master-$id | go-sub-$id"
 done
 echo ""
 echo -e "  ${BLUE}Logs:${NC}    $LOG_DIR/node_N/"

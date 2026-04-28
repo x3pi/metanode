@@ -221,11 +221,11 @@ impl ExecutorClient {
     }
 
     /// Get last block number AND last global exec index from Go Master
-    /// Returns (last_block_number, last_global_exec_index, is_ready, last_executed_commit_hash)
+    /// Returns (last_block_number, last_global_exec_index, is_ready, last_executed_commit_hash, last_epoch)
     /// CRITICAL: last_block_number counts only non-empty commits (actual blocks)
     ///           last_global_exec_index counts ALL commits (including empty ones)
     ///           Use last_global_exec_index for epoch transition SYNC WAIT comparison
-    pub async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32])> {
+    pub async fn get_last_block_number(&self) -> Result<(u64, u64, bool, [u8; 32], u64)> {
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -270,22 +270,22 @@ impl ExecutorClient {
             Some(proto::response::Payload::NotifyEpochChangeResponse(_)) => {
                 Err(anyhow::anyhow!("Unexpected NotifyEpochChangeResponse"))
             }
-            Some(proto::response::Payload::LastBlockNumberResponse(res)) => {
-                let last_block_number = res.last_block_number;
-                let last_gei = res.last_global_exec_index;
-                let is_ready = res.is_ready;
+            Some(proto::response::Payload::LastBlockNumberResponse(r)) => {
+                info!("✅ [EXECUTOR-REQ] Received LastBlockNumber: {}, GEI: {}, Epoch: {}, IsReady: {}", 
+                    r.last_block_number, r.last_global_exec_index, r.last_epoch, r.is_ready);
                 let mut hash = [0u8; 32];
-                if res.last_executed_commit_hash.len() == 32 {
-                    hash.copy_from_slice(&res.last_executed_commit_hash);
-                } else if !res.last_executed_commit_hash.is_empty() {
-                    warn!("⚠️ [EXECUTOR-REQ] Received invalid last_executed_commit_hash length: {}, expected 32. Using zeroes.", res.last_executed_commit_hash.len());
+                if r.last_executed_commit_hash.len() == 32 {
+                    hash.copy_from_slice(&r.last_executed_commit_hash);
+                } else if !r.last_executed_commit_hash.is_empty() {
+                    warn!("⚠️ [EXECUTOR-REQ] Received invalid last_executed_commit_hash length: {}, expected 32. Using zeroes.", r.last_executed_commit_hash.len());
                 }
-                info!(
-                    "✅ [EXECUTOR-REQ] Received LastBlockNumberResponse: block={}, gei={}, is_ready={}, hash={:?}",
-                    last_block_number, last_gei, is_ready, hex::encode(hash)
-                );
-
-                Ok((last_block_number, last_gei, is_ready, hash))
+                Ok((
+                    r.last_block_number,
+                    r.last_global_exec_index,
+                    r.is_ready,
+                    hash,
+                    r.last_epoch,
+                ))
             }
             Some(proto::response::Payload::Error(error_msg)) => {
                 Err(anyhow::anyhow!("Go returned error: {}", error_msg))

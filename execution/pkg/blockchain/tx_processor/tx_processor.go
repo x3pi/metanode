@@ -370,6 +370,9 @@ func processGroupsConcurrently(
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
 	}
+	if numWorkers == 0 {
+		numWorkers = 1
+	}
 
 	var nextIdx atomic.Int64
 	var wg sync.WaitGroup
@@ -878,7 +881,11 @@ func processSingleGroup(
 			failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
 			continue
 		}
-		logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
+		if exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED {
+			logger.Error("[TX_PROCESSOR] executeTransactionWithMvmId executed but reverted for tx %s: status=%s exception=%s", tx.Hash().Hex(), exRs.ReceiptStatus().String(), exRs.Exception().String())
+		} else {
+			logger.Info("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
+		}
 		rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
 		chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 		chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())

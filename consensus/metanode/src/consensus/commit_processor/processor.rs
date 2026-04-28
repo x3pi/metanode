@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 // [Added] Import Duration
 // [Added] Import sleep for retry mechanism
-use tracing::{info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::consensus::checkpoint::calculate_global_exec_index;
 use crate::consensus::tx_recycler::TxRecycler;
@@ -140,6 +140,15 @@ impl CommitProcessor {
         // CRITICAL: Do NOT derive epoch_base_index from shared_last_global_exec_index at runtime,
         // because cold-start updates it to the network commit (causing wrong GEI → hash divergence).
         self.epoch_base_index_override = Some(last_global_exec_index);
+        self
+    }
+
+    /// Set the next expected commit index for ordered processing.
+    /// CRITICAL: Must be called during initialization to match the node's actual progress
+    /// after restart. If not set, CommitProcessor starts at 1, causing AUTO-JUMP behavior
+    /// that can lead to GEI miscalculation and fork.
+    pub fn with_next_expected_index(mut self, next_expected: u32) -> Self {
+        self.next_expected_index = next_expected;
         self
     }
 
@@ -292,21 +301,72 @@ impl CommitProcessor {
         //   commit_6 (normal)               → GEI = base+6+2 = base+8 ← correct!
         // FORK-SAFETY: All nodes use the same MAX_TXS_PER_GO_BLOCK → identical offsets.
         // RS-2: Load persisted offset from disk for crash recovery.
+        // If disk is wiped (e.g. snapshot restore), recalculate mathematically:
+        // last_gei = epoch_base + (next_expected_index - 1) + offset
+        let math_offset = if let Some(ref shared_idx) = self.shared_last_global_exec_index {
+            let last_gei = *shared_idx.lock().await;
+            let expected_last_commit_in_epoch = (next_expected_index.saturating_sub(1)) as u64;
+            if last_gei > epoch_base_index + expected_last_commit_in_epoch {
+                last_gei - epoch_base_index - expected_last_commit_in_epoch
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         let mut cumulative_fragment_offset: u64 = if let Some(ref sp) = self.storage_path {
             let loaded = crate::node::executor_client::persistence::load_fragment_offset(sp);
-            if loaded > 0 {
+            if loaded == 0 && math_offset > 0 {
+                info!(
+                    "📂 [FRAGMENT-OFFSET] Recovered offset={} mathematically from GEI difference (snapshot restore)",
+                    math_offset
+                );
+                math_offset
+            } else if loaded > 0 {
                 info!(
                     "📂 [FRAGMENT-OFFSET] Recovered persisted offset={} from disk",
                     loaded
                 );
+                loaded
+            } else {
+                0
             }
-            loaded
         } else {
-            0
+            math_offset
         };
         let storage_path_for_persist = self.storage_path.clone();
 
         loop {
+            // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
+            // This prevents CommitProcessor from pushing new execution state to Go Master
+            // while Go is busy re-initializing for the next epoch.
+            if let Some(ref is_transitioning) = self.is_transitioning {
+                let mut logged = false;
+                let transition_wait_start = tokio::time::Instant::now();
+                while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
+                    if !logged {
+                        info!("⏳ [STATION 3: PROCESSOR] Pausing execution - epoch transition in progress...");
+                        logged = true;
+                    }
+                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
+                    // flag is never cleared (e.g., panic in transition code despite
+                    // Drop guard, or silent task cancellation).
+                    // Increased to 120s to allow for heavy state trie updates during Go epoch transitions
+                    if transition_wait_start.elapsed() > tokio::time::Duration::from_secs(120) {
+                        error!(
+                            "🚨 [PROCESSOR] is_transitioning stuck for 120s! Force-clearing to prevent permanent deadlock."
+                        );
+                        is_transitioning.store(false, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+                if logged {
+                    info!("▶️ [COMMIT PROCESSOR] Resuming execution after epoch transition.");
+                }
+            }
+
             match receiver.recv().await {
                 Some(subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;
@@ -344,6 +404,24 @@ impl CommitProcessor {
                     if next_expected_index == 1 && commit_index > 1 {
                         warn!("🚀 [AUTO-JUMP] Initial commit {} > expected 1. Auto-jumping to match stream.", commit_index);
                         next_expected_index = commit_index;
+                    }
+
+                    // --- [DAG-RESET DETECTION] ---
+                    // After a DAG wipe, the new DAG starts from commit 1 but next_expected_index
+                    // may be at the old DAG's last commit (e.g., 939). The old commits will NEVER
+                    // arrive because the DAG was wiped. Detect this and jump DOWN.
+                    // SAFETY: Only trigger for large gaps (>100) to avoid false positives from
+                    // normal out-of-order commits. This is the complement of AUTO-JUMP.
+                    if commit_index < next_expected_index && next_expected_index > 1 {
+                        let gap = next_expected_index - commit_index;
+                        if gap > 100 {
+                            warn!(
+                                "🔄 [DAG-RESET] Detected DAG wipe: received commit {} but expected {}. \
+                                 Gap={} indicates new DAG instance. Resetting next_expected to {}.",
+                                commit_index, next_expected_index, gap, commit_index
+                            );
+                            next_expected_index = commit_index;
+                        }
                     }
 
                     if commit_index == next_expected_index {
@@ -426,7 +504,7 @@ impl CommitProcessor {
                         // FRAGMENTATION: Accumulate extra GEIs consumed by this commit
                         if geis_consumed > 1 {
                             cumulative_fragment_offset += geis_consumed - 1;
-                            info!("🔪 [FRAGMENT-OFFSET] Commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
+                            info!("🔪 [STATION 3: PROCESSOR] Commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
                                 commit_index, geis_consumed, cumulative_fragment_offset);
                             // RS-2: Persist after each change for crash recovery
                             if let Some(ref sp) = storage_path_for_persist {
@@ -468,7 +546,7 @@ impl CommitProcessor {
                                 // We MUST break here! This epoch is over. Any remaining commits in the channel
                                 // belong to the old epoch (empty trailing commits) and must NOT be sent to Go,
                                 // otherwise Go will increment LastGlobalExecIndex and cause a hash mismatch for the new epoch.
-                                info!("🛑 [COMMIT PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
+                                info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
                                 break;
                             }
                         }
@@ -530,7 +608,7 @@ impl CommitProcessor {
                                         }
                                     }
 
-                                    info!("🛑 [COMMIT PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
+                                    info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
                                     should_break = true;
                                     break;
                                 }
@@ -545,9 +623,9 @@ impl CommitProcessor {
                         const MAX_PENDING_COMMITS: usize = 5000;
                         if pending_commits.len() >= MAX_PENDING_COMMITS {
                             warn!(
-                                "🚨 [COMMIT PROCESSOR] pending_commits at capacity ({})! \
+                                "🚨 [STATION 3: PROCESSOR] pending_commits at capacity ({})! \
                                 Dropping out-of-order commit {} (expected {}). \
-                                This indicates severe downstream stall.",
+                                This indicates severe downstream overload at Station 4.",
                                 MAX_PENDING_COMMITS, commit_index, next_expected_index
                             );
                             continue;
@@ -557,6 +635,169 @@ impl CommitProcessor {
                             commit_index, next_expected_index, pending_commits.len()
                         );
                         pending_commits.insert(commit_index, subdag);
+
+                        // ═══════════════════════════════════════════════════════════════
+                        // SNAPSHOT RESTORE FORWARD-JUMP (Batch-Optimized)
+                        // After snapshot restore, the DAG fast-forwards past the
+                        // CommitProcessor's expected index, creating an unbridgeable gap.
+                        // Commits between next_expected and the DAG's current position
+                        // will NEVER arrive — they were never produced by this DAG instance.
+                        //
+                        // Detection: If we have ≥50 pending commits AND the gap between
+                        // next_expected and the smallest pending commit is >100, jump to
+                        // the smallest pending to drain the queue.
+                        //
+                        // OPTIMIZATION: Empty commits (no TXs, ~90%+ during catch-up) are
+                        // batch-skipped in bulk — single GEI update + executor advance,
+                        // avoiding 1000x individual dispatch_commit() calls.
+                        //
+                        // FORK-SAFETY: The GEI formula uses epoch_base + commit_index.
+                        // After jumping, commit_index is correct (from consensus), so
+                        // GEI calculation remains deterministic across all nodes.
+                        // ═══════════════════════════════════════════════════════════════
+                        const FORWARD_JUMP_PENDING_THRESHOLD: usize = 10;
+                        const FORWARD_JUMP_GAP_THRESHOLD: u32 = 20;
+                        if pending_commits.len() >= FORWARD_JUMP_PENDING_THRESHOLD {
+                            if let Some(&smallest_pending) = pending_commits.keys().next() {
+                                let gap = smallest_pending.saturating_sub(next_expected_index);
+                                if gap > FORWARD_JUMP_GAP_THRESHOLD {
+                                    warn!(
+                                        "🚀 [FORWARD-JUMP] Unbridgeable gap detected! \
+                                         expected={}, smallest_pending={}, gap={}, pending_count={}. \
+                                         Jumping to {} to drain queue (snapshot restore recovery).",
+                                        next_expected_index, smallest_pending, gap,
+                                        pending_commits.len(), smallest_pending
+                                    );
+
+                                    next_expected_index = smallest_pending;
+
+                                    // ═════════════════════════════════════════════════
+                                    // BATCH DRAIN: Process pending commits with fast-
+                                    // path for empty commits (no TXs, no system TX).
+                                    // ═════════════════════════════════════════════════
+                                    let mut batch_empty_count: u64 = 0;
+                                    let mut batch_nonempty_count: u64 = 0;
+                                    let drain_start = std::time::Instant::now();
+
+                                    while let Some(pending) = pending_commits.remove(&next_expected_index) {
+                                        let pending_commit_index = next_expected_index;
+                                        let global_exec_index = calculate_global_exec_index(
+                                            current_epoch,
+                                            pending_commit_index as u64 + cumulative_fragment_offset,
+                                            epoch_base_index,
+                                        );
+
+                                        // Check if this commit has any transactions
+                                        let total_txs: usize = pending.blocks
+                                            .iter()
+                                            .map(|b| b.transactions().len())
+                                            .sum();
+                                        let has_system_tx = pending.extract_end_of_epoch_transaction().is_some();
+
+                                        if total_txs == 0 && !has_system_tx {
+                                            // ── BATCH FAST-SKIP: Empty commit ──
+                                            // Don't call dispatch_commit() — just advance indices.
+                                            // We'll do a single bulk GEI update after the loop.
+                                            batch_empty_count += 1;
+
+                                            if let Some(ref cb) = commit_index_callback {
+                                                cb(pending_commit_index);
+                                            }
+                                        } else {
+                                            // ── NON-EMPTY: Must go through full dispatch ──
+                                            // First, flush any accumulated empty skips to executor
+                                            if batch_empty_count > 0 {
+                                                // Update shared GEI to the last empty commit's index
+                                                let prev_gei = calculate_global_exec_index(
+                                                    current_epoch,
+                                                    (pending_commit_index - 1) as u64 + cumulative_fragment_offset,
+                                                    epoch_base_index,
+                                                );
+                                                if let Some(ref shared_idx) = self.shared_last_global_exec_index {
+                                                    let mut idx_guard = shared_idx.lock().await;
+                                                    if prev_gei > *idx_guard {
+                                                        *idx_guard = prev_gei;
+                                                    }
+                                                }
+                                                if let Some(ref client) = executor_client {
+                                                    client.skip_empty_commit(prev_gei).await;
+                                                }
+                                                info!(
+                                                    "⏭️ [FORWARD-JUMP] Batch-skipped {} empty commits (GEI up to {})",
+                                                    batch_empty_count, prev_gei
+                                                );
+                                                batch_empty_count = 0;
+                                            }
+
+                                            batch_nonempty_count += 1;
+                                            let geis_consumed = super::executor::dispatch_commit(
+                                                &pending,
+                                                global_exec_index,
+                                                current_epoch,
+                                                executor_client.clone(),
+                                                delivery_sender.clone(),
+                                                pending_transactions_queue.clone(),
+                                                self.epoch_eth_addresses.clone(),
+                                                self.tx_recycler.clone(),
+                                                self.shared_last_global_exec_index.clone(),
+                                            )
+                                            .await?;
+
+                                            if geis_consumed > 1 {
+                                                cumulative_fragment_offset += geis_consumed - 1;
+                                                if let Some(ref sp) = storage_path_for_persist {
+                                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
+                                                }
+                                            }
+
+                                            if let Some(ref cb) = commit_index_callback {
+                                                cb(pending_commit_index);
+                                            }
+                                            if let Some(ref cb) = self.global_exec_index_callback {
+                                                cb(global_exec_index + geis_consumed - 1);
+                                            }
+                                        }
+
+                                        next_expected_index += 1;
+                                    }
+
+                                    // Flush remaining empty commits after loop
+                                    if batch_empty_count > 0 {
+                                        let last_gei = calculate_global_exec_index(
+                                            current_epoch,
+                                            (next_expected_index - 1) as u64 + cumulative_fragment_offset,
+                                            epoch_base_index,
+                                        );
+                                        if let Some(ref shared_idx) = self.shared_last_global_exec_index {
+                                            let mut idx_guard = shared_idx.lock().await;
+                                            if last_gei > *idx_guard {
+                                                *idx_guard = last_gei;
+                                            }
+                                        }
+                                        if let Some(ref client) = executor_client {
+                                            client.skip_empty_commit(last_gei).await;
+                                        }
+                                        if let Some(ref cb) = self.global_exec_index_callback {
+                                            cb(last_gei);
+                                        }
+                                    }
+
+                                    let drain_elapsed = drain_start.elapsed();
+                                    // NOTE: batch_empty_count may have been reset to 0
+                                    // inside the loop (when flushing before non-empty),
+                                    // so use the final flush count for accurate reporting.
+                                    let total_drained = batch_empty_count + batch_nonempty_count;
+                                    info!(
+                                        "✅ [FORWARD-JUMP] Drain complete in {:?}. \
+                                         total_drained={}, nonempty_processed={}, \
+                                         next_expected={}, remaining_pending={}",
+                                        drain_elapsed, total_drained,
+                                        batch_nonempty_count,
+                                        next_expected_index, pending_commits.len()
+                                    );
+                                }
+                            }
+                        }
                     } else {
                         warn!(
                             "Received commit with index {} which is less than expected {}",
