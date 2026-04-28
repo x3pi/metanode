@@ -624,7 +624,12 @@ impl ExecutorClient {
                         last_idx, e
                     );
                 }
-                // Also persist to wipe-safe location (survives DAG wipes)
+            }
+            // Wipe-safe persist more frequently (every 10 commits) because this is
+            // the critical recovery path for DAG wipe scenarios. Regular persist
+            // uses PERSIST_INTERVAL=100 which is too coarse for recovery accuracy.
+            const WIPE_SAFE_PERSIST_INTERVAL: u64 = 10;
+            if last_idx.is_multiple_of(WIPE_SAFE_PERSIST_INTERVAL) || batch_size > 1 {
                 let _ = super::persistence::persist_last_sent_index_wipe_safe(
                     storage_path, last_idx, last_commit_index
                 ).await;

@@ -1308,21 +1308,37 @@ impl ConsensusNode {
                                     synced, last_block
                                 );
                                 
-                                // CRITICAL FIX: Re-query Go GEI after syncing to update the CommitConsumerMonitor.
-                                // Otherwise, CommitSyncer initializes with stale GEI and thinks it's a genesis start.
+                                // FORK-SAFETY FIX v5: Re-query Go GEI after syncing to update shared state.
+                                // BUT: Do NOT use GEI-derived value for highest_handled_commit!
+                                // GEI includes fragment_offset, which would inflate the commit index
+                                // and block legitimate new DAG commits in CommitSyncer.
                                 if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
-                                    let new_go_replay_after = if new_gei > storage.epoch_base_exec_index {
-                                        (new_gei - storage.epoch_base_exec_index) as u32
-                                    } else {
-                                        0
-                                    };
-                                    commit_consumer.monitor().set_highest_handled_commit(new_go_replay_after);
-                                    // FORK-SAFETY: Also update shared GEI so CommitProcessor
-                                    // calculates correct cumulative_fragment_offset
+                                    // Update shared GEI for CommitProcessor offset calculation
                                     coordination_hub.set_initial_global_exec_index(new_gei).await;
+                                    
+                                    // For highest_handled_commit, try to use persisted commit_index
+                                    // (which was updated during sync_and_execute_blocks).
+                                    // This is the REAL commit count, not inflated by fragment offset.
+                                    let new_handled = {
+                                        let persisted = crate::node::executor_client::persistence::load_persisted_last_index(&config.storage_path);
+                                        match persisted {
+                                            Some((_gei, commit_idx)) if commit_idx > 0 => commit_idx,
+                                            _ => {
+                                                let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
+                                                match wipe_safe {
+                                                    Some((_gei, commit_idx)) if commit_idx > 0 => commit_idx,
+                                                    _ => {
+                                                        // Last resort: use go_replay_after that was already correctly computed
+                                                        go_replay_after
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    };
+                                    commit_consumer.monitor().set_highest_handled_commit(new_handled);
                                     tracing::info!(
-                                        "🔄 [STARTUP-SYNC] Re-queried Go: updated go_replay_after to {} (from new_gei={})",
-                                        new_go_replay_after, new_gei
+                                        "🔄 [STARTUP-SYNC] Re-queried Go: gei={}, highest_handled_commit={} (from persistence, NOT gei-derived)",
+                                        new_gei, new_handled
                                     );
                                 }
                             }
@@ -1348,12 +1364,23 @@ impl ConsensusNode {
 
         let is_terminally_failed = Arc::new(AtomicBool::new(false));
 
-        let executor_client_for_init = executor_client_for_proc.clone();
-        let _failed_init = is_terminally_failed.clone();
-        tokio::spawn(async move {
-            executor_client_for_init.initialize_from_go().await;
-            // Note: init is not terminal.
-        });
+        // FORK-SAFETY FIX v5: initialize_from_go() MUST be SYNCHRONOUS.
+        // Previously this was spawned as tokio::spawn (async), creating a race
+        // condition: the CommitProcessor could start processing replayed commits
+        // BEFORE initialize_from_go() updated next_expected_index and next_block_number.
+        //
+        // After DAG wipe + startup sync, Go's state moves to GEI=1807 but the
+        // executor client still has next_expected=1662 (pre-sync value). Without
+        // synchronous init, old commits with GEI >= 1662 pass the replay guard
+        // and produce DUPLICATE blocks on Go → GEI divergence → fork.
+        //
+        // This call is fast (<1ms, local UDS socket to Go) so blocking is safe.
+        if let Some(ref client) = executor_client_for_proc {
+            client.initialize_from_go().await;
+            tracing::info!(
+                "✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)"
+            );
+        }
 
         // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();

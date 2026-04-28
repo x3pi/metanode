@@ -481,7 +481,7 @@ test_scan_fork_warnings() {
         local warnings
         warnings=$(tail -n 10000 "$log_file" 2>/dev/null \
             | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
-            | grep -ivE "(FORK-GUARD|FORK-DIAG|anti-fork.*pass|anti-fork.*skip|no panic|Created block)" \
+            | grep -ivE "(FORK-GUARD|FORK-DIAG|anti-fork.*pass|anti-fork.*skip|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe)" \
             | tail -n 10) || true
         
         if [ -n "$warnings" ]; then

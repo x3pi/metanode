@@ -392,6 +392,7 @@ cmd_start() {
         log_step "Xóa Rust storage..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
             rm -rf "$RUST_DIR/config/storage/node_${i}"
+            rm -rf "$RUST_DIR/config/storage/wipe_safe_node_${i}"
         done
         log_step "Xóa Go data và snapshots..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
@@ -409,15 +410,13 @@ cmd_start() {
         log_info "✅ Dọn sạch hoàn tất"
     fi
 
-    # ─── CRASH SAFETY (Mar 2026): Xóa Rust executor_state trước khi start ──
-    # executor_state/last_sent_index.bin lưu GEI đã gửi cho Go. Sau nhiều epochs,
-    # DAG GC xóa commits cũ. Nếu restart, Rust dựa vào local_go_gei để resume.
-    # Xóa file này an toàn vì Rust luôn query Go để lấy GEI hiện tại.
-    log_step "Xóa Rust executor_state (tránh recovery gap)..."
-    for i in $(seq 0 $((NUM_NODES - 1))); do
-        if [ "$i" = "$exclude_node" ]; then continue; fi
-        rm -rf "$RUST_DIR/config/storage/node_${i}/executor_state"
-    done
+    # ─── NOTE (Apr 2026): executor_state is now PRESERVED across restarts ──
+    # Fork-safety v5 uses persisted commit_index + fragment_offset for correct
+    # recovery after restart and DAG wipe. Deleting executor_state would cause
+    # the node to lose fragment_offset, leading to GEI divergence (fork).
+    # Wipe-safe persistence (config/storage/wipe_safe_node_*/executor_state/)
+    # provides an additional safety net for DAG wipe recovery.
+    # Only --fresh start deletes everything (handled above at line 392-395).
 
     # ─── PHASE 1: Go Master (nhúng Rust FFI) ────────────────────
     log_phase "PHASE 1/1: Khởi động Go Master + Rust FFI (${NUM_NODES} node)"
@@ -678,8 +677,8 @@ cmd_start_node() {
     cleanup_socket "$(get_master_sock $node_id)"
     cleanup_socket "$(get_tx_sock $node_id)"
 
-    # Xóa Rust executor_state (tránh recovery gap)
-    rm -rf "$RUST_DIR/config/storage/node_${node_id}/executor_state"
+    # NOTE (Apr 2026): executor_state is PRESERVED for fork-safety v5.
+    # Only --fresh deletes executor_state. Normal restart preserves it.
 
     # Khởi động Go Master (Rust FFI tự động khởi chạy bên trong)
     start_go_master "$node_id"
