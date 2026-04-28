@@ -295,35 +295,52 @@ impl CommitProcessor {
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
         // ═══════════════════════════════════════════════════════════════
-        // FORK-SAFETY FIX v5: Fragment offset loaded from WIPE-SAFE location first
-        // (survives DAG wipes), then falls back to regular location.
-        // This ensures that after DAG wipe, the accumulated fragment offset
-        // is preserved and GEI calculations remain consistent across all nodes.
+        // FORK-SAFETY FIX v8: Compute fragment_offset from Go's GEI.
+        //
+        // PROBLEM: Loading fragment_offset from disk is unreliable after
+        // restart. The offset was accumulated during a previous session and
+        // may not match what other nodes have at the current commit_index.
+        // Example: node restarts at commit 300 with stale offset=134.
+        // GEI = epoch_base + 300 + 134 = inflated by 134 vs other nodes.
+        //
+        // FIX: Compute offset = go_gei - epoch_base - last_commit_index
+        // This derives the offset from Go's authoritative GEI state,
+        // which was verified by all nodes before the restart.
+        //
+        // After fresh start (go_gei=0): offset = 0 ✅
+        // After restart (go_gei=1468, epoch_base=1034, last_commit=300):
+        //   offset = 1468 - 1034 - 300 = 134 ✅ (matches other nodes)
+        // After DAG wipe (go_gei=1334, epoch_base=1034, last_commit=300):
+        //   offset = 1334 - 1034 - 300 = 0 ✅ (fresh start)
         // ═══════════════════════════════════════════════════════════════
-        let mut cumulative_fragment_offset: u64 = if let Some(ref sp) = self.storage_path {
-            // Try wipe-safe first (survives DAG wipes)
-            let wipe_safe = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
-            if wipe_safe > 0 {
-                info!(
-                    "📂 [FRAGMENT-OFFSET] Recovered wipe-safe offset={} from disk",
-                    wipe_safe
-                );
-                wipe_safe
+        let mut cumulative_fragment_offset: u64 = {
+            let go_gei = if let Some(ref shared_index) = self.shared_last_global_exec_index {
+                let index_guard = shared_index.lock().await;
+                *index_guard
+            } else if let Some(ref callback) = self.get_last_global_exec_index {
+                callback()
             } else {
-                // Fall back to regular location (for normal restarts)
-                let loaded = crate::node::executor_client::persistence::load_fragment_offset(sp);
-                if loaded > 0 {
+                0
+            };
+
+            let last_commit = if next_expected_index > 1 {
+                (next_expected_index - 1) as u64
+            } else {
+                0
+            };
+
+            if go_gei > 0 && epoch_base_index <= go_gei && last_commit > 0 {
+                let computed = go_gei.saturating_sub(epoch_base_index).saturating_sub(last_commit);
+                if computed > 0 {
                     info!(
-                        "📂 [FRAGMENT-OFFSET] Recovered regular offset={} from disk",
-                        loaded
+                        "📊 [FRAGMENT-OFFSET] Computed from Go GEI: offset={} (go_gei={}, epoch_base={}, last_commit={})",
+                        computed, go_gei, epoch_base_index, last_commit
                     );
-                    loaded
-                } else {
-                    0
                 }
+                computed
+            } else {
+                0
             }
-        } else {
-            0
         };
         let storage_path_for_persist = self.storage_path.clone();
 
