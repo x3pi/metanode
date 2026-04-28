@@ -1375,12 +1375,10 @@ impl ConsensusNode {
         // and produce DUPLICATE blocks on Go → GEI divergence → fork.
         //
         // This call is fast (<1ms, local UDS socket to Go) so blocking is safe.
-        if let Some(ref client) = executor_client_for_proc {
-            client.initialize_from_go().await;
-            tracing::info!(
-                "✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)"
-            );
-        }
+        executor_client_for_proc.initialize_from_go().await;
+        tracing::info!(
+            "✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)"
+        );
 
         // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();
