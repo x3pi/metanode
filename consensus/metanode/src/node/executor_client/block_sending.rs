@@ -144,7 +144,7 @@ impl ExecutorClient {
             if total_after_dedup == 0 {
                 // All TXs were filtered out — send as empty commit
                 let block_number = {
-                    let mut next_expected_guard = self.next_expected_index.lock().await;
+                    let next_expected_guard = self.next_expected_index.lock().await;
                     if global_exec_index < *next_expected_guard {
                         trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
                         0
@@ -203,7 +203,7 @@ impl ExecutorClient {
                 let fragment_gei = global_exec_index + frag_idx as u64;
 
                 let block_number = {
-                    let mut next_expected_guard = self.next_expected_index.lock().await;
+                    let next_expected_guard = self.next_expected_index.lock().await;
                     if fragment_gei < *next_expected_guard {
                         // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
                         trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
@@ -278,7 +278,7 @@ impl ExecutorClient {
         });
 
         let block_number = {
-            let mut next_expected_guard = self.next_expected_index.lock().await;
+            let next_expected_guard = self.next_expected_index.lock().await;
             if global_exec_index < *next_expected_guard {
                 // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
                 trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
