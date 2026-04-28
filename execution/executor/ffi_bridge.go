@@ -53,10 +53,24 @@ import (
 var defaultRequestHandler *RequestHandler
 var defaultListenerBlockQueue chan *pb.ExecutableBlock
 
+// AuthoritativeBlockRequest wraps a block + response channel for synchronous GEI assignment.
+// When is_authoritative_gei=true, the block processor sends back the assigned GEI via ResponseCh.
+type AuthoritativeBlockRequest struct {
+	Block      *pb.ExecutableBlock
+	ResponseCh chan *pb.ExecuteBlockResponse
+}
+
+// Global channel for authoritative mode block requests (synchronous).
+// When nil, falls back to legacy fire-and-forget mode.
+var defaultAuthoritativeBlockQueue chan *AuthoritativeBlockRequest
+
 // InitFFIBridge is called from main application startup
 func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler, blockQueue chan *pb.ExecutableBlock) error {
 	defaultRequestHandler = reqHandler
 	defaultListenerBlockQueue = blockQueue
+
+	// Initialize authoritative block queue (buffered to prevent deadlock during burst)
+	defaultAuthoritativeBlockQueue = make(chan *AuthoritativeBlockRequest, 1000)
 
 	// Register the global Go functions for Rust to call us
 	C.register_callbacks_to_rust()
@@ -75,6 +89,12 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	return nil
 }
 
+// GetAuthoritativeBlockQueue returns the channel for authoritative mode block processing.
+// The block processor (processRustEpochData) reads from this channel when authoritative mode is enabled.
+func GetAuthoritativeBlockQueue() <-chan *AuthoritativeBlockRequest {
+	return defaultAuthoritativeBlockQueue
+}
+
 //export cgo_execute_block
 func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 	data := C.GoBytes(unsafe.Pointer(payload), C.int(length))
@@ -86,9 +106,47 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		return C.bool(false)
 	}
 
-	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d", subDag.GetBlockNumber())
+	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d, authoritative=%v",
+		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
-	// Dispatch to the listener's channel exactly like unix socket did
+	// ═══════════════════════════════════════════════════════════════════
+	// GO-AUTHORITATIVE GEI: Synchronous mode
+	// When is_authoritative_gei=true, Go assigns GEI internally.
+	// We dispatch via AuthoritativeBlockRequest and WAIT for the response.
+	// This is synchronous (blocking) but safe because CommitProcessor
+	// already serializes commits (one at a time).
+	// ═══════════════════════════════════════════════════════════════════
+	if subDag.GetIsAuthoritativeGei() && defaultAuthoritativeBlockQueue != nil {
+		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
+		req := &AuthoritativeBlockRequest{
+			Block:      &subDag,
+			ResponseCh: responseCh,
+		}
+
+		// Send request (blocking if queue is full — natural backpressure)
+		defaultAuthoritativeBlockQueue <- req
+
+		// Wait for response with timeout
+		select {
+		case resp := <-responseCh:
+			if resp != nil && resp.Success {
+				logger.Debug("[FFI Bridge] Authoritative GEI assigned: actual_gei=%d, geis_consumed=%d",
+					resp.ActualGei, resp.GeisConsumed)
+				return C.bool(true)
+			}
+			if resp != nil {
+				logger.Error("[FFI Bridge] Authoritative block processing failed: %s", resp.Error)
+			}
+			return C.bool(false)
+		case <-time.After(300 * time.Second):
+			logger.Error("[FFI Bridge] Authoritative block processing timed out (300s)")
+			return C.bool(false)
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════
+	// LEGACY MODE: Fire-and-forget (original behavior)
+	// ═══════════════════════════════════════════════════════════════════
 	if defaultListenerBlockQueue != nil {
 		// Blocking send, exactly as listener.go
 		defaultListenerBlockQueue <- &subDag

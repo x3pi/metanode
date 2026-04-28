@@ -295,54 +295,43 @@ impl CommitProcessor {
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
         // ═══════════════════════════════════════════════════════════════
-        // FORK-SAFETY FIX v8: Compute fragment_offset from Go's GEI.
-        //
-        // PROBLEM: Loading fragment_offset from disk is unreliable after
-        // restart. The offset was accumulated during a previous session and
-        // may not match what other nodes have at the current commit_index.
-        // Example: node restarts at commit 300 with stale offset=134.
-        // GEI = epoch_base + 300 + 134 = inflated by 134 vs other nodes.
-        //
-        // FIX: Compute offset = go_gei - epoch_base - last_commit_index
-        // This derives the offset from Go's authoritative GEI state,
-        // which was verified by all nodes before the restart.
-        //
-        // After fresh start (go_gei=0): offset = 0 ✅
-        // After restart (go_gei=1468, epoch_base=1034, last_commit=300):
-        //   offset = 1468 - 1034 - 300 = 134 ✅ (matches other nodes)
-        // After DAG wipe (go_gei=1334, epoch_base=1034, last_commit=300):
-        //   offset = 1334 - 1034 - 300 = 0 ✅ (fresh start)
-        // ═══════════════════════════════════════════════════════════════
+        // FORK-SAFETY FIX v8.4: Correct handling of fragment_offset during Restarts & Wipes.
+        // If we restart normally (next_expected_index > 1), we MUST load the accumulated
+        // offset from disk so we don't start from 0.
+        // If we suffer a DAG Wipe, next_expected_index is reset to 1. In this case, we MUST
+        // start with offset = 0, because the CommitSyncer will replay ALL commits from 1,
+        // and as they are skipped by block_sending.rs, they will return expected_fragments
+        // and NATURALLY RECONSTRUCT the offset. If we loaded the old wipe-safe offset here,
+        // we would double-count all fragments!
         let mut cumulative_fragment_offset: u64 = {
-            let go_gei = if let Some(ref shared_index) = self.shared_last_global_exec_index {
-                let index_guard = shared_index.lock().await;
-                *index_guard
-            } else if let Some(ref callback) = self.get_last_global_exec_index {
-                callback()
-            } else {
+            if next_expected_index <= 1 {
+                info!("📊 [FRAGMENT-OFFSET] Starting from 0 because next_expected_index <= 1 (DAG Wipe or Fresh Start). Offset will be reconstructed during replay.");
                 0
-            };
-
-            let last_commit = if next_expected_index > 1 {
-                (next_expected_index - 1) as u64
             } else {
-                0
-            };
-
-            if go_gei > 0 && epoch_base_index <= go_gei && last_commit > 0 {
-                let computed = go_gei.saturating_sub(epoch_base_index).saturating_sub(last_commit);
-                if computed > 0 {
-                    info!(
-                        "📊 [FRAGMENT-OFFSET] Computed from Go GEI: offset={} (go_gei={}, epoch_base={}, last_commit={})",
-                        computed, go_gei, epoch_base_index, last_commit
-                    );
-                }
-                computed
-            } else {
-                0
+                let offset = if let Some(ref sp) = self.storage_path {
+                    let mut disk_offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
+                    if disk_offset == 0 {
+                        disk_offset = crate::node::executor_client::persistence::load_fragment_offset(sp);
+                    }
+                    disk_offset
+                } else {
+                    0
+                };
+                info!("📊 [FRAGMENT-OFFSET] Loaded from disk: {}", offset);
+                offset
             }
         };
         let storage_path_for_persist = self.storage_path.clone();
+
+        // ═══════════════════════════════════════════════════════════════
+        // GEI VALIDATION LAYER (2026-04-28)
+        // Tracks state for fork-prevention validation. After recovery
+        // (restart/DAG wipe), we skip validation for the first N commits
+        // because CommitSyncer replays old commits that Go already has.
+        // ═══════════════════════════════════════════════════════════════
+        let mut commits_since_start: u64 = 0;
+        const RECOVERY_GRACE_PERIOD: u64 = 10; // Skip validation for first 10 commits after start
+        let mut last_validated_gei: u64 = 0; // Track last GEI we successfully validated
 
         loop {
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
@@ -474,6 +463,42 @@ impl CommitProcessor {
                             .map(|b| b.transactions().len())
                             .sum::<usize>();
 
+                        // ═══════════════════════════════════════════════════════
+                        // GEI VALIDATION: Check GEI continuity BEFORE execution
+                        // ═══════════════════════════════════════════════════════
+                        commits_since_start += 1;
+                        let is_recovery_period = commits_since_start <= RECOVERY_GRACE_PERIOD;
+                        let validation_go_gei = if let Some(ref client) = executor_client {
+                            // Use cached last_validated_gei for speed; refresh from Go periodically
+                            if last_validated_gei == 0 || commits_since_start % 100 == 0 {
+                                client.get_last_global_exec_index().await.unwrap_or(last_validated_gei)
+                            } else {
+                                last_validated_gei
+                            }
+                        } else {
+                            0
+                        };
+
+                        if let Err(e) = super::gei_validator::validate_gei_continuity(
+                            global_exec_index,
+                            validation_go_gei,
+                            current_epoch,
+                            epoch_base_index,
+                            commit_index,
+                            cumulative_fragment_offset,
+                            is_recovery_period,
+                        ) {
+                            tracing::error!(
+                                "🚨 [FORK-PREVENTED] GEI validation FAILED for commit #{}: {}. \
+                                 Skipping execution to prevent fork. The cluster will continue \
+                                 operating — investigate the diagnostic dump above.",
+                                commit_index, e
+                            );
+                            // Don't execute this commit — advance the index and continue
+                            next_expected_index += 1;
+                            continue;
+                        }
+
                         // CRITICAL FIX: Process commit FIRST before triggering epoch transition
                         // This ensures Go receives the EndOfEpoch commit before Rust starts transition
                         let geis_consumed = super::executor::dispatch_commit(
@@ -488,6 +513,9 @@ impl CommitProcessor {
                             self.shared_last_global_exec_index.clone(),
                         )
                         .await?;
+
+                        // Update last validated GEI after successful execution
+                        last_validated_gei = global_exec_index + geis_consumed - 1;
 
                         // ♻️ TX RECYCLER: Confirm committed TXs so they aren't re-submitted
                         if let Some(ref recycler) = self.tx_recycler {

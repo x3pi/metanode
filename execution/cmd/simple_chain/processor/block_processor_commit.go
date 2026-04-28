@@ -30,6 +30,7 @@ func (bp *BlockProcessor) commitWorker() {
 		if job.Block == nil {
 			if job.GlobalExecIndex > 0 {
 				bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
+				bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
@@ -110,6 +111,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// preventing the Rust consensus from skipping un-saved blocks after a restart.
 		if job.GlobalExecIndex > 0 {
 			bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
+			bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
 		}
 
 		logger.Debug("[PERF] Block Commit phase 1 (Save DB): %v, block: %v", saveDuration, blockNum)

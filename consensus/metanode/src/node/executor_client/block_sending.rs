@@ -148,66 +148,6 @@ impl ExecutorClient {
             info!("🔪 [FRAGMENT] Splitting large commit: {} TXs → {} fragments of ≤{} TXs each (global_exec_index={}, commit_index={}, epoch={})",
                 total_tx_before, num_fragments, MAX_TXS_PER_GO_BLOCK, global_exec_index, subdag.commit_ref.index, epoch);
 
-            if total_after_dedup == 0 {
-                // All TXs were filtered out — send as empty commit
-                let block_number = {
-                    let next_expected_guard = self.next_expected_index.lock().await;
-                    if global_exec_index < *next_expected_guard {
-                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
-                        0
-                    } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
-                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
-                        0
-                    } else {
-                        let mut next_bn = self.next_block_number.lock().await;
-                        let mut last_ep = self.last_processed_epoch.lock().await;
-                        let is_epoch_boundary = epoch > *last_ep;
-                        if epoch > *last_ep {
-                            *last_ep = epoch;
-                        }
-                        if is_epoch_boundary {
-                            let bn = *next_bn;
-                            *next_bn += 1;
-                            bn
-                        } else {
-                            0
-                        }
-                    }
-                };
-
-                let epoch_data = ExecutableBlock {
-                    transactions: vec![],
-                    global_exec_index,
-                    commit_index: subdag.commit_ref.index,
-                    epoch,
-                    commit_timestamp_ms: subdag.timestamp_ms,
-                    leader_author_index: subdag.leader.author.value() as u32,
-                    leader_address: leader_address.clone().unwrap_or_default(),
-                    block_number,
-                    commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-                };
-                let mut empty_bytes = Vec::new();
-                epoch_data.encode(&mut empty_bytes)?;
-
-                // If a commit is completely deduplicated, we STILL need to emit 
-                // the deterministic number of fragments (most will be empty).
-                let actual_fragments = total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK);
-                
-                for frag_idx in 0..actual_fragments {
-                    let fragment_gei = global_exec_index + frag_idx as u64;
-                    // Send an empty block for each expected fragment GEI
-                    self.buffer_and_flush(
-                        fragment_gei,
-                        empty_bytes.clone(),
-                        epoch,
-                        subdag.commit_ref.index,
-                        0,
-                    )
-                    .await?;
-                }
-                return Ok(actual_fragments as u64);
-            }
-
             // CRITICAL FORK-SAFETY v5: Recalculate fragments using total_tx_before 
             // (from the consensus deterministic subdag) instead of total_after_dedup.
             // If we use total_after_dedup, a restarted node (empty tx_recycler) will 
@@ -239,16 +179,13 @@ impl ExecutorClient {
                             *last_ep = epoch;
                         }
 
-                        // We always increment block number for fragments, unless the fragment is 
-                        // entirely empty AND it's not an epoch boundary.
-                        // (Empty fragments can happen if total_after_dedup < total_tx_before)
-                        if fragment_txs.is_empty() && !is_epoch_boundary {
-                            0
-                        } else {
-                            let bn = *next_bn;
-                            *next_bn += 1;
-                            bn
-                        }
+                        // We ALWAYS increment block number for fragments to ensure block numbers 
+                        // stay perfectly synchronized between continuous nodes (whose TxRecycler 
+                        // may deduplicate many TXs making the fragment empty) and restarted nodes 
+                        // (whose empty TxRecycler will allow TXs through).
+                        let bn = *next_bn;
+                        *next_bn += 1;
+                        bn
                     }
                 };
 
@@ -262,6 +199,8 @@ impl ExecutorClient {
                     leader_address: leader_address.clone().unwrap_or_default(),
                     block_number,
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+                    // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
+                    is_authoritative_gei: true,
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -344,6 +283,8 @@ impl ExecutorClient {
             leader_address: leader_address.unwrap_or_default(),
             block_number,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
+            is_authoritative_gei: true,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -796,6 +737,8 @@ impl ExecutorClient {
             leader_address: leader_address.unwrap_or_default(),
             block_number: 0,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
+            is_authoritative_gei: true,
         };
 
         let mut epoch_data_bytes = Vec::new();

@@ -33,6 +33,53 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	globalExecIndex := epochData.GetGlobalExecIndex()
 	commitIndex := epochData.GetCommitIndex()
 
+	if epochData.GetIsAuthoritativeGei() {
+		geiAuth := GetGEIAuthority()
+		if !geiAuth.IsEnabled() {
+			geiAuth.Enable()
+		}
+
+		// Compute the next GEI from Go's persisted state
+		lastPersistedGEI := storage.GetLastGlobalExecIndex()
+		if lastPersistedGEI >= *nextExpectedGlobalExecIndex && lastPersistedGEI > 0 {
+			// Go's storage is ahead — sync in-memory state
+			*nextExpectedGlobalExecIndex = lastPersistedGEI + 1
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// CRITICAL RECOVERY JUMP: If Rust sends a GEI > Go's expected GEI, it means
+		// Rust has bridged a gap (e.g. from DAG wipe restore or fast-skip of empties).
+		// Since Go's Authorized mode enforces strict mono-sequence, if we don't adopt 
+		// the gap, Go will reassign the incoming block with the old STALE GEI, 
+		// permanently lagging behind Rust and causing Livelock 6 on Epoch Transitions.
+		// ═══════════════════════════════════════════════════════════════════════════
+		incomingGEI := epochData.GetGlobalExecIndex()
+		if incomingGEI > *nextExpectedGlobalExecIndex {
+			gap := incomingGEI - *nextExpectedGlobalExecIndex
+			logger.Warn("🔗 [GO-AUTH GEI] Jump detected: Rust GEI=%d > Go expected=%d (gap=%d). Adopting Rust's GEI baseline.",
+				incomingGEI, *nextExpectedGlobalExecIndex, gap)
+			
+			*nextExpectedGlobalExecIndex = incomingGEI
+			
+			// Also sync block counter if storage is ahead
+			actualLastBlockDB := storage.GetLastBlockNumber()
+			if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
+				*currentBlockNumber = actualLastBlockDB
+			}
+		}
+
+		// Assign the authoritative GEI
+		authoritativeGEI := *nextExpectedGlobalExecIndex
+		geiAuth.AdvanceGEITo(authoritativeGEI)
+		geiAuth.RecordCommitIndex(commitIndex)
+
+		logger.Debug("🔑 [GO-AUTH GEI] Override: rust_gei=%d → go_gei=%d (commit_index=%d)",
+			globalExecIndex, authoritativeGEI, commitIndex)
+
+		// Override the GEI used for processing
+		globalExecIndex = authoritativeGEI
+	}
+
 	// Use commitIndex to avoid unused variable warning
 	_ = commitIndex
 
@@ -815,7 +862,7 @@ PROCESS_BLOCK:
 	// CC-1: Construct standard batch_id for end-to-end tracing
 	batchID := fmt.Sprintf("E%dC%dG%d", epochNum, commitIndex, globalExecIndex)
 
-	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, leaderAddr)
+	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
 
 	blockHash := newBlock.Header().Hash().Hex()

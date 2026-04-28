@@ -208,6 +208,19 @@ func (app *App) initBlockchain() error {
 			}
 		}
 
+		// ─── Initialize LastHandledCommitIndex from BackupDb ──────────
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
+			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
+				if parsedIdx, err := utils.BytesToUint32(commitIdxBytes); err == nil {
+					storage.UpdateLastHandledCommitIndex(parsedIdx)
+					logger.Info("✅ [STARTUP] Loaded LastHandledCommitIndex from BackupDb: %d", parsedIdx)
+				}
+			} else {
+				storage.UpdateLastHandledCommitIndex(0)
+				logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb)")
+			}
+		}
+
 		// ─── Startup State Sync Logging ────────────────────────────────
 		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s",
 			app.startLastBlock.Header().BlockNumber(),

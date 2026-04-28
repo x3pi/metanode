@@ -144,7 +144,7 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 				}
 			}()
 
-			newBlock := bp.createBlockFromResults(result, blockNum, 0, false, id, 0, 0)
+			newBlock := bp.createBlockFromResults(result, blockNum, 0, false, id, 0, 0, 0)
 			select {
 			case bp.createdBlocksChan <- newBlock:
 				// Block sent successfully

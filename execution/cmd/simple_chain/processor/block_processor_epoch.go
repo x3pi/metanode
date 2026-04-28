@@ -18,6 +18,22 @@ func (bp *BlockProcessor) updateAndPersistLastGlobalExecIndex(index uint64) {
 	}
 }
 
+// updateAndPersistLastHandledCommitIndex updates the commit_index in memory and persists it
+func (bp *BlockProcessor) updateAndPersistLastHandledCommitIndex(index uint32) {
+	if index == 0 {
+		return
+	}
+	storage.UpdateLastHandledCommitIndex(index)
+	geiAuthority := GetGEIAuthority()
+	if geiAuthority != nil {
+		geiAuthority.RecordCommitIndex(index)
+	}
+	value := utils.Uint32ToBytes(index)
+	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+		bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), value)
+	}
+}
+
 // updateAndPersistLastExecutedCommitHash updates the commit hash in memory and persists it
 func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
 	if len(hash) == 0 {

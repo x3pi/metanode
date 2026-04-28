@@ -1514,3 +1514,34 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 	}
 	return nil
 }
+
+// ============================================================================
+// GO-AUTHORITATIVE GEI: Recovery RPC
+// ============================================================================
+
+// HandleGetLastHandledCommitIndexRequest returns Go's current execution state
+// so Rust can resume from the correct point after restart.
+// This replaces the fragile fragment_offset reconstruction logic.
+func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.GetLastHandledCommitIndexRequest) (*pb.GetLastHandledCommitIndexResponse, error) {
+	lastGEI := storage.GetLastGlobalExecIndex()
+	lastBlockNumber := storage.GetLastBlockNumber()
+	currentEpoch := rh.chainState.GetCurrentEpoch()
+
+	// Determine if Go is in authoritative GEI mode
+	// For now, check if GEIAuthority singleton exists and is enabled
+	// (it's in processor package, so we check existence at RPC level)
+	isAuthoritative := false // Will be set to true when fully migrated
+
+	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_gei=%d, last_block=%d, epoch=%d, authoritative=%v",
+		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative)
+
+	response := &pb.GetLastHandledCommitIndexResponse{
+		LastCommitIndex: storage.GetLastHandledCommitIndex(),
+		LastGei:         lastGEI,
+		LastBlockNumber: lastBlockNumber,
+		Epoch:           currentEpoch,
+		IsAuthoritative: isAuthoritative,
+	}
+
+	return response, nil
+}

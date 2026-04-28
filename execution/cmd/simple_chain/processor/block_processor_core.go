@@ -72,6 +72,7 @@ type CommitJob struct {
 
 	// Snapshot Fix: Track the rust consensus commit index
 	GlobalExecIndex uint64
+	CommitIndex     uint32
 
 	// Crash-Safety Fix: Synchronously prepared backup data so it can be written to disk
 	// before we unblock Rust via DoneChan.

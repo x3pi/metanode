@@ -21,6 +21,21 @@ func Uint64ToBytes(value uint64) []byte {
 	return bytes
 }
 
+// Uint32ToBytes converts a uint32 to a byte array.
+func Uint32ToBytes(value uint32) []byte {
+	bytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(bytes, value)
+	return bytes
+}
+
+// BytesToUint32 converts a byte array to a uint32.
+func BytesToUint32(bytes []byte) (uint32, error) {
+	if len(bytes) != 4 {
+		return 0, fmt.Errorf("byte array must be 4 bytes long")
+	}
+	return binary.BigEndian.Uint32(bytes), nil
+}
+
 // BytesToUint64 converts a byte array to a uint64.
 func BytesToUint64(bytes []byte) (uint64, error) {
 	if len(bytes) != 8 {

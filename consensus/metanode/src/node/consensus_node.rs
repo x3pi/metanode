@@ -1403,6 +1403,49 @@ impl ConsensusNode {
             "✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)"
         );
 
+        // ═══════════════════════════════════════════════════════════════════
+        // GEI CROSS-CHECK: Verify local GEI matches peers after startup sync.
+        // This catches post-recovery GEI divergence BEFORE consensus starts,
+        // providing early diagnostic warning instead of silent fork.
+        // ═══════════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            match executor_client_for_proc.get_last_block_number().await {
+                Ok((local_block, local_gei, true, _hash, _epoch)) => {
+                    tracing::info!(
+                        "🔍 [GEI-CROSSCHECK] Post-startup state: block={}, gei={}",
+                        local_block, local_gei
+                    );
+                    match crate::consensus::commit_processor::gei_validator::validate_gei_against_peers(
+                        local_gei,
+                        local_block,
+                        &config.peer_rpc_addresses,
+                    ).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                "✅ [GEI-CROSSCHECK] Post-startup GEI validation passed (gei={}, block={})",
+                                local_gei, local_block
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "🚨 [GEI-CROSSCHECK] Post-startup GEI mismatch detected: {}. \
+                                 This means local state reconstruction produced a different GEI \
+                                 than the cluster. Fork is likely if this is not resolved. \
+                                 Continuing startup but monitor closely.",
+                                e
+                            );
+                        }
+                    }
+                }
+                Ok((_, _, false, _, _)) => {
+                    tracing::warn!("⚠️ [GEI-CROSSCHECK] Go not ready for post-startup cross-check. Skipping.");
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ [GEI-CROSSCHECK] Failed to query Go for post-startup cross-check: {}. Skipping.", e);
+                }
+            }
+        }
+
         // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();
         let executor_client_for_manager = executor_client_for_proc.clone();

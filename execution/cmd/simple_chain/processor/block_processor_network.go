@@ -183,8 +183,30 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	// MEMORY FIX: Create FileLogger once (not per-epoch-data) to avoid leaking os.File handles
 	epochFileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("runSocketExecutor_" + ".log"))
 
-	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan (batch-drain enabled)...")
-	for epochData := range dataChan {
+	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (batch-drain enabled)...")
+	authQueue := executor.GetAuthoritativeBlockQueue()
+
+PROCESS_LOOP:
+	for {
+		var epochData *pb.ExecutableBlock
+		var authRespCh chan<- *pb.ExecuteBlockResponse
+
+		select {
+		case req, ok := <-authQueue:
+			if !ok {
+				logger.Warn("Authoritative queue closed")
+				break PROCESS_LOOP
+			}
+			epochData = req.Block
+			authRespCh = req.ResponseCh
+		case data, ok := <-dataChan:
+			if !ok {
+				logger.Info("Data channel closed")
+				break PROCESS_LOOP
+			}
+			epochData = data
+		}
+
 		// Self-monitoring queue and processing rate
 		bp.processedBlockCount++
 		if bp.processedBlockCount%100 == 0 {
@@ -297,10 +319,12 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		// This gives 100-10000x speedup during catch-up sync.
 		// FORK-SAFETY: Only empty commits are batched. Any commit with TXs
 		// goes through the full processing path unchanged.
+		// BATCH-DRAIN OPTIMIZATION is skipped for authoritative commits (they require responses)
 		// ═══════════════════════════════════════════════════════════════════
-		if bp.isEmptyCommit(epochData) && epochData.GetGlobalExecIndex() == nextExpectedGlobalExecIndex {
+		if authRespCh == nil && bp.isEmptyCommit(epochData) && epochData.GetGlobalExecIndex() == nextExpectedGlobalExecIndex {
 			batchCount := uint64(1)
 			highestGEI := epochData.GetGlobalExecIndex()
+			highestCommitIndex := epochData.GetCommitIndex()
 
 			// Check epoch from commit
 			lastEpochNum := epochData.GetEpoch()
@@ -327,6 +351,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 					if bp.isEmptyCommit(next) && nextGEI == highestGEI+1 {
 						// Consecutive empty commit — absorb into batch
 						highestGEI = nextGEI
+						highestCommitIndex = next.GetCommitIndex()
 						batchCount++
 						// Track epoch from latest commit
 						nextEpoch := next.GetEpoch()
@@ -348,6 +373,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 						draining = false
 						// Process the batch first
 						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+						bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash()) // update hash from the last empty commit
 						nextExpectedGlobalExecIndex = highestGEI + 1
 						if lastEpochNum > 0 {
@@ -376,6 +402,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 
 			// Persist only the final GEI (1 DB write for entire batch)
 			bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+			bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 			nextExpectedGlobalExecIndex = highestGEI + 1
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
@@ -394,13 +421,25 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 			}
 		BATCH_DONE:
 			continue
-		}
+		} else {
+			// Non-empty commit, authoritative, or non-sequential — full processing path
+			logger.Info("📥 [PROCESSOR] Read block from channel: global_exec_index=%d, auth=%v", epochData.GetGlobalExecIndex(), authRespCh != nil)
+			bp.ExecutionMutex.RLock()
+			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
+			bp.ExecutionMutex.RUnlock()
 
-		// Non-empty commit or non-sequential — full processing path
-		logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", epochData.GetGlobalExecIndex())
-		bp.ExecutionMutex.RLock()
-		bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
-		bp.ExecutionMutex.RUnlock()
+			// GO-AUTHORITATIVE GEI: Send Response
+			if authRespCh != nil {
+				// The GEI authority has already advanced nextExpectedGlobalExecIndex inside processSingleEpochData
+				assignedGei := nextExpectedGlobalExecIndex - 1
+				authRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true,
+					ActualGei:    assignedGei,
+					BlockNumber:  currentBlockNumber,
+					GeisConsumed: 1,
+				}
+			}
+		}
 	}
 
 	// Channel has been closed - can happen when:

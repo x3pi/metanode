@@ -43,4 +43,25 @@ message ExecutableBlock {
     // CRITICAL FORK-SAFETY: Rust DAG commit digest
     // Go MUST store this hash and return it in LastBlockNumberResponse for anti-fork checks
     bytes commit_hash = 9;
+    // GO-AUTHORITATIVE GEI: When true, Go ignores global_exec_index (field 2) and
+    // computes its own authoritative GEI internally. Rust sends commit_index + txs,
+    // Go assigns the actual GEI and returns it via ExecuteBlockResponse.
+    // Migration flag: false = legacy mode (Rust computes GEI), true = Go-authoritative.
+    bool is_authoritative_gei = 10;
+}
+
+// Response from Go after processing an ExecutableBlock.
+// Used in Go-Authoritative GEI mode (is_authoritative_gei = true).
+// Go assigns the actual GEI and returns it to Rust for tracking.
+message ExecuteBlockResponse {
+    // The authoritative GEI assigned by Go for this commit
+    uint64 actual_gei = 1;
+    // Number of GEI slots consumed (1 for normal, N for fragmented commits)
+    uint64 geis_consumed = 2;
+    // The actual block number assigned by Go (0 for empty commits)
+    uint64 block_number = 3;
+    // Whether execution succeeded
+    bool success = 4;
+    // Error message if !success
+    string error = 5;
 }

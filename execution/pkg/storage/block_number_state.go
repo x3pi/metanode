@@ -20,6 +20,7 @@ var (
 	incrementingCounter       uint64 // Only this variable needed; no separate mutex or file constant required
 	lastGlobalExecIndex       uint64 // Maps Go block number → Rust consensus commit index
 	lastExecutedCommitHash    []byte // Rust DAG commit digest
+	lastHandledCommitIndex    uint32 // Rust consensus commit index
 
 	// Callback invoked when a new block is committed (used by SnapshotManager)
 	blockCommitCallback BlockCommitCallback
@@ -138,6 +139,26 @@ func GetLastGlobalExecIndex() uint64 {
 // was inflated by P2P-synced blocks that were never executed by NOMT.
 func ForceSetLastGlobalExecIndex(index uint64) {
 	atomic.StoreUint64(&lastGlobalExecIndex, index)
+}
+
+func UpdateLastHandledCommitIndex(index uint32) {
+	for {
+		current := atomic.LoadUint32(&lastHandledCommitIndex)
+		if index <= current {
+			return // Don't go backwards
+		}
+		if atomic.CompareAndSwapUint32(&lastHandledCommitIndex, current, index) {
+			return
+		}
+	}
+}
+
+func GetLastHandledCommitIndex() uint32 {
+	return atomic.LoadUint32(&lastHandledCommitIndex)
+}
+
+func ForceSetLastHandledCommitIndex(index uint32) {
+	atomic.StoreUint32(&lastHandledCommitIndex, index)
 }
 
 func UpdateLastExecutedCommitHash(hash []byte) {

@@ -61,7 +61,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 				// Check max size limit to avoid memory leak
 				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
 					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
-					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 					accumulatedResults = nil
 					currentBlockNumber++
 				}
@@ -74,7 +74,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 		// Phase 2: Check if we should flush or wait
 		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
 			// Enough TXs accumulated — flush immediately
-			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 			accumulatedResults = nil
 			currentBlockNumber++
 			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
@@ -91,7 +91,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 				accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
 			case <-bp.forceCommitChan:
 				// Event-driven flush — create block with whatever we have immediately
-				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 				accumulatedResults = nil
 				currentBlockNumber++
 				logger.Info("Created block #%d with %d txs (event-driven flush)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
@@ -151,7 +151,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 // produce identical block hashes. Pass 0 for backward compatibility (will use time.Now()).
 // CRITICAL FORK-SAFETY: leaderAddressOverride (optional, variadic) allows passing leader address
 // from Rust consensus. If not provided, falls back to bp.validatorAddress (for local processing).
-func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, leaderAddressOverride ...common.Address) *block.Block {
+func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, leaderAddressOverride ...common.Address) *block.Block {
 	overallStart := time.Now()
 
 	tracer := tracing.GetTracer()
@@ -349,6 +349,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		MappingBatch:              mappingBatch,
 		StakeBatch:                stakeBatch,
 		GlobalExecIndex:           globalExecIndex,
+		CommitIndex:               commitIndex,
 	}
 
 	// Send job to commitWorker.

@@ -144,6 +144,21 @@ message ForceCommitResponse {
     string message = 2;
 }
 
+// GO-AUTHORITATIVE GEI: Recovery query for Rust to ask Go
+// "What is the last commit you successfully processed?"
+// This replaces the fragile fragment_offset reconstruction during restart/recovery.
+message GetLastHandledCommitIndexRequest {
+    // Empty — returns current state
+}
+
+message GetLastHandledCommitIndexResponse {
+    uint32 last_commit_index = 1;    // Last commit_index from Rust that Go processed
+    uint64 last_gei = 2;             // Last GEI assigned by Go
+    uint64 last_block_number = 3;    // Last block number in Go DB
+    uint64 epoch = 4;                // Current epoch in Go
+    bool is_authoritative = 5;       // True if Go is in authoritative GEI mode
+}
+
 // ============================================================================
 // SYNCONLY BLOCK SYNC APIs
 // These APIs enable SyncOnly nodes to fetch and sync blocks from peers
@@ -262,6 +277,7 @@ message Request {
         GetBlocksRangeRequest get_blocks_range_request = 21;  // SYNC: Get blocks by range
         SyncBlocksRequest sync_blocks_request = 22;  // SYNC: Push blocks for local sync
         ForceCommitRequest force_commit_request = 30; // NEW: Event-driven forced commit
+        GetLastHandledCommitIndexRequest get_last_handled_commit_index_request = 31; // GO-AUTH GEI: Recovery
     }
 }
 
@@ -285,6 +301,7 @@ message Response {
         GetBlocksRangeResponse get_blocks_range_response = 21;  // SYNC: Get blocks response
         SyncBlocksResponse sync_blocks_response = 22;  // SYNC: Sync blocks response
         ForceCommitResponse force_commit_response = 30; // NEW: Event-driven forced commit response
+        GetLastHandledCommitIndexResponse get_last_handled_commit_index_response = 31; // GO-AUTH GEI: Recovery
     }
 }
 
