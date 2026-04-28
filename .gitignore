@@ -422,3 +422,4 @@ venv/
 .vscode/
 **/*.xz
 **/*.zip
+execution/cmd/observer/listener/metanode.code-workspace
