@@ -60,6 +60,8 @@ struct StorageSetup {
     latest_block_number: u64,
     /// Last handled commit index from Go Authoritative DB (persisted across DAG wipes)
     last_handled_commit_index: Option<u32>,
+    /// The recovered fragment offset calculated dynamically from Go Authoritative GEI
+    recovered_fragment_offset: Option<u64>,
 }
 
 /// Results from consensus setup phase.
@@ -858,6 +860,19 @@ impl ConsensusNode {
 
         std::fs::create_dir_all(&config.storage_path)?;
 
+        // FORK-SAFETY RECOVERY: Load exact fragment offset from wipe-safe persistence.
+        // We cannot calculate this mathematically from Go's `last_global_exec_index`
+        // because if a node crashed mid-commit, Go's GEI will include the fragments 
+        // from the incomplete commit, artificially inflating the base offset.
+        let recovered_fragment_offset = if config.executor_read_enabled {
+            let offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(
+                std::path::Path::new(&config.storage_path),
+            );
+            Some(offset)
+        } else {
+            None
+        };
+
         Ok(StorageSetup {
             current_epoch,
             epoch_timestamp_ms,
@@ -874,6 +889,7 @@ impl ConsensusNode {
             last_executed_commit_hash,
             latest_block_number,
             last_handled_commit_index,
+            recovered_fragment_offset,
         })
     }
 
@@ -1175,7 +1191,8 @@ impl ConsensusNode {
             );
             Arc::new(tokio::sync::RwLock::new(map))
         })
-        .with_storage_path(config.storage_path.clone());
+        .with_storage_path(config.storage_path.clone())
+        .with_recovered_fragment_offset(storage.recovered_fragment_offset);
 
         // ExecutorClient for commit processing
         let initial_next_expected = if config.executor_read_enabled {

@@ -61,6 +61,9 @@ pub struct CommitProcessor {
 
     /// RS-2: Storage path for persisting cumulative_fragment_offset
     storage_path: Option<std::path::PathBuf>,
+    /// Recovered fragment offset calculated during Go Authoritative GEI recovery.
+    /// If Some, it overrides loading from disk.
+    recovered_fragment_offset: Option<u64>,
     /// Channel sender for emitting lag alerts
     lag_alert_sender: Option<
         tokio::sync::mpsc::UnboundedSender<
@@ -91,6 +94,7 @@ impl CommitProcessor {
             )),
             tx_recycler: None,
             storage_path: None,
+            recovered_fragment_offset: None,
             lag_alert_sender: None,
 
         }
@@ -227,6 +231,12 @@ impl CommitProcessor {
         self
     }
 
+    /// Set recovered fragment offset dynamically calculated at startup
+    pub fn with_recovered_fragment_offset(mut self, offset: Option<u64>) -> Self {
+        self.recovered_fragment_offset = offset;
+        self
+    }
+
     /// Set a sender for lag alerts
     pub fn with_lag_alert_sender(
         mut self,
@@ -307,6 +317,9 @@ impl CommitProcessor {
             if next_expected_index <= 1 {
                 info!("📊 [FRAGMENT-OFFSET] Starting from 0 because next_expected_index <= 1 (DAG Wipe or Fresh Start). Offset will be reconstructed during replay.");
                 0
+            } else if let Some(recovered) = self.recovered_fragment_offset {
+                info!("📊 [FRAGMENT-OFFSET] Go Authoritative Recovery Mode: Using recovered_fragment_offset = {} (next_expected_index={})", recovered, next_expected_index);
+                recovered
             } else {
                 let offset = if let Some(ref sp) = self.storage_path {
                     let mut disk_offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);

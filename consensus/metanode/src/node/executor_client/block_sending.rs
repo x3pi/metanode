@@ -189,10 +189,23 @@ impl ExecutorClient {
                     }
                 };
 
+                let subdag_commit_idx = subdag.commit_ref.index;
+                let is_last_frag = frag_idx == actual_fragments - 1;
+                
+                // CRITICAL FORK-SAFETY v6: Do not update Go's last_handled_commit_index until
+                // the FINAL fragment of a commit is executed. If a node crashes mid-commit,
+                // Go will stay at C-1, forcing the node to safely replay the entire commit C
+                // on restart, using executor_client's next_expected_index to skip already-executed fragments.
+                let commit_index_for_go = if is_last_frag {
+                    subdag_commit_idx
+                } else {
+                    subdag_commit_idx.saturating_sub(1)
+                };
+
                 let epoch_data = ExecutableBlock {
                     transactions: fragment_txs.clone(),
                     global_exec_index: fragment_gei,
-                    commit_index: subdag.commit_ref.index,
+                    commit_index: commit_index_for_go,
                     epoch,
                     commit_timestamp_ms: subdag.timestamp_ms,
                     leader_author_index: subdag.leader.author.value() as u32,
