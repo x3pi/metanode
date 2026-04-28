@@ -11,7 +11,6 @@ use std::sync::Arc;
 // [Added] Import sleep for retry mechanism
 use tracing::{error, info, trace, warn};
 
-use crate::consensus::checkpoint::calculate_global_exec_index;
 use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
@@ -28,10 +27,8 @@ pub struct CommitProcessor {
     global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     /// Current epoch (for deterministic global_exec_index calculation)
     current_epoch: u64,
-    /// Epoch base index: GEI at the START of current epoch (from Go epoch boundary).
-    /// CRITICAL: This must be the epoch boundary value, NOT the current shared_last_global_exec_index.
-    /// After cold start, shared_last_global_exec_index gets set to network commit (e.g., 4364)
-    /// but epoch_base_index for epoch 1 must be 0.
+    /// [PHASE-A DEPRECATED] epoch_base_index_override is no longer used for GEI computation.
+    /// Go is the Single Writer for GEI. Kept for `with_epoch_info()` API compatibility.
     epoch_base_index_override: Option<u64>,
     /// Callback to get current last global execution index
     get_last_global_exec_index: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
@@ -59,10 +56,10 @@ pub struct CommitProcessor {
     tx_recycler: Option<Arc<TxRecycler>>,
 
 
-    /// RS-2: Storage path for persisting cumulative_fragment_offset
+    /// RS-2: Storage path for persistence
     storage_path: Option<std::path::PathBuf>,
-    /// Recovered fragment offset calculated during Go Authoritative GEI recovery.
-    /// If Some, it overrides loading from disk.
+    /// [PHASE-A DEPRECATED] recovered_fragment_offset is no longer used.
+    /// Go is the Single Writer for GEI — Rust doesn't need to track fragment offsets.
     recovered_fragment_offset: Option<u64>,
     /// Channel sender for emitting lag alerts
     lag_alert_sender: Option<
@@ -137,12 +134,12 @@ impl CommitProcessor {
         self
     }
 
-    /// Set epoch and last_global_exec_index for deterministic global_exec_index calculation
+    /// Set epoch and last_global_exec_index.
+    /// [PHASE-A] epoch_base_index_override is kept for API compatibility but
+    /// is only used as a Rust-side hint for buffer ordering. Go exclusively
+    /// controls actual GEI assignment.
     pub fn with_epoch_info(mut self, epoch: u64, last_global_exec_index: u64) -> Self {
         self.current_epoch = epoch;
-        // Store the epoch boundary GEI explicitly. This is the CORRECT value for GEI calculations.
-        // CRITICAL: Do NOT derive epoch_base_index from shared_last_global_exec_index at runtime,
-        // because cold-start updates it to the network commit (causing wrong GEI → hash divergence).
         self.epoch_base_index_override = Some(last_global_exec_index);
         self
     }
@@ -260,25 +257,20 @@ impl CommitProcessor {
         let pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
 
-        // --- [FORK SAFETY FIX v3] ---
-        // CRITICAL: epoch_base_index must be the GEI at the START of current epoch.
-        // USE the value passed via with_epoch_info(), NOT shared_last_global_exec_index.
-        // After cold-start restore, shared_last_global_exec_index gets updated to the
-        // network commit (e.g., 4364), but the epoch boundary for epoch 1 is 0.
-        // Using the wrong base causes: GEI = 4364 + commit_index (WRONG)
-        // instead of: GEI = 0 + commit_index (CORRECT) → hash divergence!
-        let epoch_base_index = if let Some(override_val) = self.epoch_base_index_override {
-            override_val
-        } else if let Some(ref shared_index) = self.shared_last_global_exec_index {
-            let index_guard = shared_index.lock().await;
-            *index_guard
-        } else if let Some(ref callback) = self.get_last_global_exec_index {
-            callback()
-        } else {
-            0
-        };
-        info!("🚀 [COMMIT PROCESSOR] Started processing commits for epoch {} (epoch_base_index={}, next_expected_index={}, override={:?})",
-            current_epoch, epoch_base_index, next_expected_index, self.epoch_base_index_override);
+        // ═══════════════════════════════════════════════════════════════
+        // PHASE-A: GO IS THE SINGLE WRITER FOR GEI
+        //
+        // epoch_base_index is now only used as a Rust-side hint for buffer
+        // ordering in ExecutorClient. Go exclusively computes and persists
+        // the actual GEI via GEIAuthority.
+        //
+        // This eliminates the root cause of all fork bugs: Rust used to
+        // compute GEI from 3 fragile sources (epoch_base, commit_index,
+        // fragment_offset) that could diverge across nodes after restarts.
+        // ═══════════════════════════════════════════════════════════════
+        let epoch_base_index = self.epoch_base_index_override.unwrap_or(0);
+        info!("🚀 [COMMIT PROCESSOR] PHASE-A: Go-Authoritative GEI mode. epoch={}, epoch_base_hint={}, next_expected_index={}",
+            current_epoch, epoch_base_index, next_expected_index);
 
         let mut last_heartbeat_commit = 0u32;
         let mut last_heartbeat_time = std::time::Instant::now();
@@ -305,46 +297,39 @@ impl CommitProcessor {
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
         // ═══════════════════════════════════════════════════════════════
-        // FORK-SAFETY FIX v8.4: Correct handling of fragment_offset during Restarts & Wipes.
-        // If we restart normally (next_expected_index > 1), we MUST load the accumulated
-        // offset from disk so we don't start from 0.
-        // If we suffer a DAG Wipe, next_expected_index is reset to 1. In this case, we MUST
-        // start with offset = 0, because the CommitSyncer will replay ALL commits from 1,
-        // and as they are skipped by block_sending.rs, they will return expected_fragments
-        // and NATURALLY RECONSTRUCT the offset. If we loaded the old wipe-safe offset here,
-        // we would double-count all fragments!
-        let mut cumulative_fragment_offset: u64 = {
-            if next_expected_index <= 1 {
-                info!("📊 [FRAGMENT-OFFSET] Starting from 0 because next_expected_index <= 1 (DAG Wipe or Fresh Start). Offset will be reconstructed during replay.");
-                0
-            } else if let Some(recovered) = self.recovered_fragment_offset {
-                info!("📊 [FRAGMENT-OFFSET] Go Authoritative Recovery Mode: Using recovered_fragment_offset = {} (next_expected_index={})", recovered, next_expected_index);
-                recovered
-            } else {
-                let offset = if let Some(ref sp) = self.storage_path {
-                    let mut disk_offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
-                    if disk_offset == 0 {
-                        disk_offset = crate::node::executor_client::persistence::load_fragment_offset(sp);
-                    }
-                    disk_offset
-                } else {
-                    0
-                };
-                info!("📊 [FRAGMENT-OFFSET] Loaded from disk: {}", offset);
-                offset
+        // PHASE-A: cumulative_fragment_offset ELIMINATED
+        //
+        // Previously, Rust tracked a cumulative_fragment_offset to compute
+        // GEI = epoch_base + commit_index + fragment_offset. This was the
+        // #1 source of fork bugs because:
+        //   - fragment_offset required persistence across restarts
+        //   - DAG wipe reset it, causing GEI drift
+        //   - Different replay paths produced different offsets
+        //
+        // Now: Go handles fragmentation internally. When a commit has N
+        // fragments, Go assigns N consecutive GEIs atomically. Rust only
+        // needs to know "how many GEI slots did this commit consume" to
+        // compute the hint for the NEXT commit's buffer key.
+        //
+        // The hint formula: hint_gei = epoch_base + commit_index + hint_offset
+        // This is NOT authoritative — Go overrides it. But it keeps the
+        // sequential buffer correctly ordered.
+        // ═══════════════════════════════════════════════════════════════
+        let mut hint_fragment_offset: u64 = 0;
+        // For backward compat, load from disk if available (used only as hint)
+        if next_expected_index > 1 {
+            if let Some(recovered) = self.recovered_fragment_offset {
+                hint_fragment_offset = recovered;
+            } else if let Some(ref sp) = self.storage_path {
+                let mut disk_offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
+                if disk_offset == 0 {
+                    disk_offset = crate::node::executor_client::persistence::load_fragment_offset(sp);
+                }
+                hint_fragment_offset = disk_offset;
             }
-        };
-        let storage_path_for_persist = self.storage_path.clone();
-
-        // ═══════════════════════════════════════════════════════════════
-        // GEI VALIDATION LAYER (2026-04-28)
-        // Tracks state for fork-prevention validation. After recovery
-        // (restart/DAG wipe), we skip validation for the first N commits
-        // because CommitSyncer replays old commits that Go already has.
-        // ═══════════════════════════════════════════════════════════════
-        let mut commits_since_start: u64 = 0;
-        const RECOVERY_GRACE_PERIOD: u64 = 10; // Skip validation for first 10 commits after start
-        let mut last_validated_gei: u64 = 0; // Track last GEI we successfully validated
+        }
+        info!("📊 [PHASE-A] hint_fragment_offset={} (for buffer ordering only, Go is authoritative)", hint_fragment_offset);
+        let _storage_path_for_persist = self.storage_path.clone();
 
         loop {
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
@@ -409,7 +394,6 @@ impl CommitProcessor {
                     // --- [AUTO-JUMP ON STARTUP] ---
                     // If this is the VERY FIRST commit we receive after restart, and it is > expected,
                     // we assume we are resuming from a higher commit index (provided by reliable Consensus Core).
-                    // This avoids reading DB for initial index (which User disallowed).
                     if next_expected_index == 1 && commit_index > 1 {
                         warn!("🚀 [AUTO-JUMP] Initial commit {} > expected 1. Auto-jumping to match stream.", commit_index);
                         next_expected_index = commit_index;
@@ -417,57 +401,45 @@ impl CommitProcessor {
 
                     // --- [DAG-RESET DETECTION] ---
                     // After a DAG wipe, the new DAG starts from commit 1 but next_expected_index
-                    // may be at the old DAG's last commit (e.g., 939). The old commits will NEVER
-                    // arrive because the DAG was wiped. Detect this and jump DOWN.
-                    // SAFETY: Only trigger for large gaps (>100) to avoid false positives from
-                    // normal out-of-order commits. This is the complement of AUTO-JUMP.
+                    // may be at the old DAG's last commit (e.g., 939). Detect this and jump DOWN.
+                    // PHASE-A: Simplified — no epoch_base check needed since Go handles GEI.
                     if commit_index < next_expected_index && next_expected_index > 1 {
                         let gap = next_expected_index - commit_index;
-                        // FORK-SAFETY: Only allow downward jump if epoch_base_index is 0
-                        // (genuine new epoch). After snapshot restore, epoch_base > 0 and
-                        // a downward jump would cause duplicate GEI calculations.
-                        if gap > 100 && epoch_base_index == 0 {
+                        if gap > 100 {
                             warn!(
                                 "🔄 [DAG-RESET] Detected DAG wipe: received commit {} but expected {}. \
                                  Gap={} indicates new DAG instance. Resetting next_expected to {}.",
                                 commit_index, next_expected_index, gap, commit_index
                             );
                             next_expected_index = commit_index;
-                        } else if gap > 100 {
-                            warn!(
-                                "🚫 [DAG-RESET] BLOCKED downward jump: commit {} < expected {}, gap={}, \
-                                 but epoch_base={} > 0 (snapshot restore). Skipping stale commit.",
-                                commit_index, next_expected_index, gap, epoch_base_index
-                            );
+                            // PHASE-A: Reset hint offset too (Go handles actual GEI)
+                            hint_fragment_offset = 0;
                         }
                     }
 
                     if commit_index == next_expected_index {
-                        // --- [FORK SAFETY v2: CONSENSUS-BASED FORMULA + FRAGMENTATION] ---
-                        // global_exec_index = epoch_base_index + commit_index + cumulative_fragment_offset
-                        // - epoch_base_index: Fixed at epoch start, same for all nodes
-                        // - commit_index: From Mysticeti consensus, same for all nodes
-                        // - cumulative_fragment_offset: Deterministic offset from previous fragmentations
-                        // Result: Deterministic across all nodes, even with fragmentation!
-                        let global_exec_index = calculate_global_exec_index(
-                            current_epoch,
-                            commit_index as u64 + cumulative_fragment_offset,
-                            epoch_base_index,
-                        );
+                        // ═══════════════════════════════════════════════════════
+                        // PHASE-A: GO-AUTHORITATIVE GEI
+                        //
+                        // Rust computes a HINT GEI for buffer ordering only.
+                        // Go overrides this via is_authoritative_gei=true and
+                        // assigns the actual GEI atomically.
+                        //
+                        // hint_gei = epoch_base + commit_index + hint_offset
+                        // This keeps the sequential buffer correctly ordered
+                        // even though Go may assign a different actual GEI.
+                        // ═══════════════════════════════════════════════════════
+                        let hint_gei = epoch_base_index + commit_index as u64 + hint_fragment_offset;
 
                         // CC-1: Unified batch_id for end-to-end tracing (Rust → Go)
                         let batch_id =
-                            format!("E{}C{}G{}", current_epoch, commit_index, global_exec_index);
+                            format!("E{}C{}G{}", current_epoch, commit_index, hint_gei);
 
                         trace!(
-                            "[batch_id={}] 📊 Calculated: epoch_base={}, fragment_offset={}",
+                            "[batch_id={}] 📊 PHASE-A hint: epoch_base={}, hint_offset={}",
                             batch_id,
                             epoch_base_index,
-                            cumulative_fragment_offset
-                        );
-                        trace!(
-                            "epoch_base_index for epoch {} is set to {}",
-                            current_epoch, epoch_base_index
+                            hint_fragment_offset
                         );
 
                         let total_txs_in_commit = subdag
@@ -476,57 +448,15 @@ impl CommitProcessor {
                             .map(|b| b.transactions().len())
                             .sum::<usize>();
 
-                        // ═══════════════════════════════════════════════════════
-                        // GEI VALIDATION: Check GEI continuity BEFORE execution
-                        // ═══════════════════════════════════════════════════════
-                        commits_since_start += 1;
-                        let is_recovery_period = commits_since_start <= RECOVERY_GRACE_PERIOD;
-                        let validation_go_gei = if let Some(ref client) = executor_client {
-                            // Use cached last_validated_gei for speed; refresh from Go periodically
-                            if last_validated_gei == 0 || commits_since_start % 100 == 0 {
-                                client.get_last_global_exec_index().await.unwrap_or(last_validated_gei)
-                            } else {
-                                last_validated_gei
-                            }
-                        } else {
-                            0
-                        };
+                        // PHASE-A: GEI validation removed.
+                        // Go is the Single Writer — it validates internally.
+                        // Rust-side validation was the #2 source of false-positive
+                        // fork-prevention that dropped legitimate commits.
 
-                        // REPLAY-MODE GUARD: Skip GEI validation when this commit is behind
-                        // Go's current state. These commits will be discarded by REPLAY PROTECTION
-                        // in send_committed_subdag (which correctly returns expected_fragments),
-                        // ensuring cumulative_fragment_offset is still updated for fragmented commits.
-                        // Validating replay commits here would skip them entirely — causing fragmented
-                        // commits to lose their geis_consumed update → permanent GEI divergence.
-                        let is_replay_commit = validation_go_gei > 0 && global_exec_index <= validation_go_gei;
-
-                        if !is_replay_commit {
-                            if let Err(e) = super::gei_validator::validate_gei_continuity(
-                                global_exec_index,
-                                validation_go_gei,
-                                current_epoch,
-                                epoch_base_index,
-                                commit_index,
-                                cumulative_fragment_offset,
-                                is_recovery_period,
-                            ) {
-                                tracing::error!(
-                                    "🚨 [FORK-PREVENTED] GEI validation FAILED for commit #{}: {}. \
-                                     Skipping execution to prevent fork. The cluster will continue \
-                                     operating — investigate the diagnostic dump above.",
-                                    commit_index, e
-                                );
-                                // Don't execute this commit — advance the index and continue
-                                next_expected_index += 1;
-                                continue;
-                            }
-                        }
-
-                        // CRITICAL FIX: Process commit FIRST before triggering epoch transition
-                        // This ensures Go receives the EndOfEpoch commit before Rust starts transition
+                        // Process commit — Go assigns the authoritative GEI
                         let geis_consumed = super::executor::dispatch_commit(
                             &subdag,
-                            global_exec_index,
+                            hint_gei,
                             current_epoch,
                             executor_client.clone(),
                             delivery_sender.clone(),
@@ -536,9 +466,6 @@ impl CommitProcessor {
                             self.shared_last_global_exec_index.clone(),
                         )
                         .await?;
-
-                        // Update last validated GEI after successful execution
-                        last_validated_gei = global_exec_index + geis_consumed - 1;
 
                         // ♻️ TX RECYCLER: Confirm committed TXs so they aren't re-submitted
                         if let Some(ref recycler) = self.tx_recycler {
@@ -554,30 +481,23 @@ impl CommitProcessor {
                             }
                         }
 
-                        // NOTE: epoch_base_index is NOT updated after each commit.
-                        // It remains constant throughout the epoch.
-                        // The shared_last_global_exec_index is updated for monitoring/visibility only.
-
-                        // FRAGMENTATION: Update callback with the LAST GEI of the fragment range
-                        let last_gei = global_exec_index + geis_consumed - 1;
+                        // PHASE-A: Update hint_gei for callbacks and monitoring.
+                        // Note: this is a HINT, not the authoritative value.
+                        let last_hint_gei = hint_gei + geis_consumed - 1;
                         if let Some(ref callback) = self.global_exec_index_callback {
-                            callback(last_gei);
+                            callback(last_hint_gei);
                         }
 
                         if let Some(ref callback) = commit_index_callback {
                             callback(commit_index);
                         }
 
-                        // FRAGMENTATION: Accumulate extra GEIs consumed by this commit
+                        // PHASE-A: Update hint fragment offset for next commit's buffer key.
+                        // This is NOT persisted authoritatively — it's just a buffer ordering hint.
                         if geis_consumed > 1 {
-                            cumulative_fragment_offset += geis_consumed - 1;
-                            info!("🔪 [STATION 3: PROCESSOR] Commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
-                                commit_index, geis_consumed, cumulative_fragment_offset);
-                            // RS-2: Persist after each change for crash recovery
-                            if let Some(ref sp) = storage_path_for_persist {
-                                let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
-                                let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
-                            }
+                            hint_fragment_offset += geis_consumed - 1;
+                            info!("🔪 [PHASE-A] Commit {} consumed {} GEIs, hint_fragment_offset now {}",
+                                commit_index, geis_consumed, hint_fragment_offset);
                         }
 
                         next_expected_index += 1;
@@ -596,8 +516,8 @@ impl CommitProcessor {
 
                                 if let Some(ref callback) = epoch_transition_callback {
                                     info!(
-                                        "🚀 [EPOCH TRANSITION] Triggering epoch transition AFTER commit sent to Go: commit_index={}, new_epoch={}, global_exec_index={}",
-                                        commit_index, new_epoch, global_exec_index
+                                        "🚀 [EPOCH TRANSITION] Triggering epoch transition AFTER commit sent to Go: commit_index={}, new_epoch={}, hint_gei={}",
+                                        commit_index, new_epoch, hint_gei
                                     );
 
                                     // CHANGED: Pass boundary_block instead of timestamp_ms
@@ -605,7 +525,7 @@ impl CommitProcessor {
                                     if let Err(e) = callback(
                                         new_epoch,
                                         boundary_block, // boundary_block (was timestamp_ms)
-                                        global_exec_index, // actual global_exec_index from commit
+                                        hint_gei, // PHASE-A: hint GEI (Go is authoritative)
                                     ) {
                                         warn!("❌ Failed to trigger epoch transition from system transaction: {}", e);
                                     }
@@ -624,16 +544,12 @@ impl CommitProcessor {
                         while let Some(pending) = pending_commits.remove(&next_expected_index) {
                             let pending_commit_index = next_expected_index;
 
-                            // Use epoch_base_index + fragment offset for pending commits (same formula)
-                            let global_exec_index = calculate_global_exec_index(
-                                current_epoch,
-                                pending_commit_index as u64 + cumulative_fragment_offset,
-                                epoch_base_index,
-                            );
+                            // PHASE-A: Hint GEI for pending commits
+                            let pending_hint_gei = epoch_base_index + pending_commit_index as u64 + hint_fragment_offset;
 
                             let pending_geis = super::executor::dispatch_commit(
                                 &pending,
-                                global_exec_index,
+                                pending_hint_gei,
                                 current_epoch,
                                 executor_client.clone(),
                                 delivery_sender.clone(),
@@ -644,16 +560,11 @@ impl CommitProcessor {
                             )
                             .await?;
 
-                            // FRAGMENTATION: Accumulate extra GEIs from pending commits
+                            // PHASE-A: Update hint offset for fragmentation
                             if pending_geis > 1 {
-                                cumulative_fragment_offset += pending_geis - 1;
-                                info!("🔪 [FRAGMENT-OFFSET] Pending commit {} consumed {} GEIs, cumulative_fragment_offset now {}",
-                                    pending_commit_index, pending_geis, cumulative_fragment_offset);
-                                // RS-2: Persist after each change for crash recovery
-                                if let Some(ref sp) = storage_path_for_persist {
-                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
-                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
-                                }
+                                hint_fragment_offset += pending_geis - 1;
+                                info!("🔪 [PHASE-A] Pending commit {} consumed {} GEIs, hint_fragment_offset now {}",
+                                    pending_commit_index, pending_geis, hint_fragment_offset);
                             }
 
                             if let Some(ref callback) = commit_index_callback {
@@ -671,7 +582,7 @@ impl CommitProcessor {
                                 {
                                     if let Some(ref callback) = epoch_transition_callback {
                                         if let Err(e) =
-                                            callback(new_epoch, boundary_block, global_exec_index)
+                                            callback(new_epoch, boundary_block, pending_hint_gei)
                                         {
                                             warn!("❌ Failed to trigger epoch transition from pending system transaction: {}", e);
                                         }
@@ -743,6 +654,7 @@ impl CommitProcessor {
                                     // ═════════════════════════════════════════════════
                                     // BATCH DRAIN: Process pending commits with fast-
                                     // path for empty commits (no TXs, no system TX).
+                                    // PHASE-A: Same logic, using hint GEI.
                                     // ═════════════════════════════════════════════════
                                     let mut batch_empty_count: u64 = 0;
                                     let mut batch_nonempty_count: u64 = 0;
@@ -750,11 +662,7 @@ impl CommitProcessor {
 
                                     while let Some(pending) = pending_commits.remove(&next_expected_index) {
                                         let pending_commit_index = next_expected_index;
-                                        let global_exec_index = calculate_global_exec_index(
-                                            current_epoch,
-                                            pending_commit_index as u64 + cumulative_fragment_offset,
-                                            epoch_base_index,
-                                        );
+                                        let pending_hint_gei = epoch_base_index + pending_commit_index as u64 + hint_fragment_offset;
 
                                         // Check if this commit has any transactions
                                         let total_txs: usize = pending.blocks
@@ -765,8 +673,6 @@ impl CommitProcessor {
 
                                         if total_txs == 0 && !has_system_tx {
                                             // ── BATCH FAST-SKIP: Empty commit ──
-                                            // Don't call dispatch_commit() — just advance indices.
-                                            // We'll do a single bulk GEI update after the loop.
                                             batch_empty_count += 1;
 
                                             if let Some(ref cb) = commit_index_callback {
@@ -774,26 +680,20 @@ impl CommitProcessor {
                                             }
                                         } else {
                                             // ── NON-EMPTY: Must go through full dispatch ──
-                                            // First, flush any accumulated empty skips to executor
                                             if batch_empty_count > 0 {
-                                                // Update shared GEI to the last empty commit's index
-                                                let prev_gei = calculate_global_exec_index(
-                                                    current_epoch,
-                                                    (pending_commit_index - 1) as u64 + cumulative_fragment_offset,
-                                                    epoch_base_index,
-                                                );
+                                                let prev_hint = epoch_base_index + (pending_commit_index - 1) as u64 + hint_fragment_offset;
                                                 if let Some(ref shared_idx) = self.shared_last_global_exec_index {
                                                     let mut idx_guard = shared_idx.lock().await;
-                                                    if prev_gei > *idx_guard {
-                                                        *idx_guard = prev_gei;
+                                                    if prev_hint > *idx_guard {
+                                                        *idx_guard = prev_hint;
                                                     }
                                                 }
                                                 if let Some(ref client) = executor_client {
-                                                    client.skip_empty_commit(prev_gei).await;
+                                                    client.skip_empty_commit(prev_hint).await;
                                                 }
                                                 info!(
-                                                    "⏭️ [FORWARD-JUMP] Batch-skipped {} empty commits (GEI up to {})",
-                                                    batch_empty_count, prev_gei
+                                                    "⏭️ [FORWARD-JUMP] Batch-skipped {} empty commits (hint_gei up to {})",
+                                                    batch_empty_count, prev_hint
                                                 );
                                                 batch_empty_count = 0;
                                             }
@@ -801,7 +701,7 @@ impl CommitProcessor {
                                             batch_nonempty_count += 1;
                                             let geis_consumed = super::executor::dispatch_commit(
                                                 &pending,
-                                                global_exec_index,
+                                                pending_hint_gei,
                                                 current_epoch,
                                                 executor_client.clone(),
                                                 delivery_sender.clone(),
@@ -813,18 +713,14 @@ impl CommitProcessor {
                                             .await?;
 
                                             if geis_consumed > 1 {
-                                                cumulative_fragment_offset += geis_consumed - 1;
-                                                if let Some(ref sp) = storage_path_for_persist {
-                                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset(sp, cumulative_fragment_offset).await;
-                                                    let _ = crate::node::executor_client::persistence::persist_fragment_offset_wipe_safe(sp, cumulative_fragment_offset).await;
-                                                }
+                                                hint_fragment_offset += geis_consumed - 1;
                                             }
 
                                             if let Some(ref cb) = commit_index_callback {
                                                 cb(pending_commit_index);
                                             }
                                             if let Some(ref cb) = self.global_exec_index_callback {
-                                                cb(global_exec_index + geis_consumed - 1);
+                                                cb(pending_hint_gei + geis_consumed - 1);
                                             }
                                         }
 
@@ -833,29 +729,22 @@ impl CommitProcessor {
 
                                     // Flush remaining empty commits after loop
                                     if batch_empty_count > 0 {
-                                        let last_gei = calculate_global_exec_index(
-                                            current_epoch,
-                                            (next_expected_index - 1) as u64 + cumulative_fragment_offset,
-                                            epoch_base_index,
-                                        );
+                                        let last_hint = epoch_base_index + (next_expected_index - 1) as u64 + hint_fragment_offset;
                                         if let Some(ref shared_idx) = self.shared_last_global_exec_index {
                                             let mut idx_guard = shared_idx.lock().await;
-                                            if last_gei > *idx_guard {
-                                                *idx_guard = last_gei;
+                                            if last_hint > *idx_guard {
+                                                *idx_guard = last_hint;
                                             }
                                         }
                                         if let Some(ref client) = executor_client {
-                                            client.skip_empty_commit(last_gei).await;
+                                            client.skip_empty_commit(last_hint).await;
                                         }
                                         if let Some(ref cb) = self.global_exec_index_callback {
-                                            cb(last_gei);
+                                            cb(last_hint);
                                         }
                                     }
 
                                     let drain_elapsed = drain_start.elapsed();
-                                    // NOTE: batch_empty_count may have been reset to 0
-                                    // inside the loop (when flushing before non-empty),
-                                    // so use the final flush count for accurate reporting.
                                     let total_drained = batch_empty_count + batch_nonempty_count;
                                     info!(
                                         "✅ [FORWARD-JUMP] Drain complete in {:?}. \
