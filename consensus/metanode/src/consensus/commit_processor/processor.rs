@@ -492,24 +492,34 @@ impl CommitProcessor {
                             0
                         };
 
-                        if let Err(e) = super::gei_validator::validate_gei_continuity(
-                            global_exec_index,
-                            validation_go_gei,
-                            current_epoch,
-                            epoch_base_index,
-                            commit_index,
-                            cumulative_fragment_offset,
-                            is_recovery_period,
-                        ) {
-                            tracing::error!(
-                                "🚨 [FORK-PREVENTED] GEI validation FAILED for commit #{}: {}. \
-                                 Skipping execution to prevent fork. The cluster will continue \
-                                 operating — investigate the diagnostic dump above.",
-                                commit_index, e
-                            );
-                            // Don't execute this commit — advance the index and continue
-                            next_expected_index += 1;
-                            continue;
+                        // REPLAY-MODE GUARD: Skip GEI validation when this commit is behind
+                        // Go's current state. These commits will be discarded by REPLAY PROTECTION
+                        // in send_committed_subdag (which correctly returns expected_fragments),
+                        // ensuring cumulative_fragment_offset is still updated for fragmented commits.
+                        // Validating replay commits here would skip them entirely — causing fragmented
+                        // commits to lose their geis_consumed update → permanent GEI divergence.
+                        let is_replay_commit = validation_go_gei > 0 && global_exec_index <= validation_go_gei;
+
+                        if !is_replay_commit {
+                            if let Err(e) = super::gei_validator::validate_gei_continuity(
+                                global_exec_index,
+                                validation_go_gei,
+                                current_epoch,
+                                epoch_base_index,
+                                commit_index,
+                                cumulative_fragment_offset,
+                                is_recovery_period,
+                            ) {
+                                tracing::error!(
+                                    "🚨 [FORK-PREVENTED] GEI validation FAILED for commit #{}: {}. \
+                                     Skipping execution to prevent fork. The cluster will continue \
+                                     operating — investigate the diagnostic dump above.",
+                                    commit_index, e
+                                );
+                                // Don't execute this commit — advance the index and continue
+                                next_expected_index += 1;
+                                continue;
+                            }
                         }
 
                         // CRITICAL FIX: Process commit FIRST before triggering epoch transition
