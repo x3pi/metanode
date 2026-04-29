@@ -298,7 +298,72 @@ pub async fn reset_fragment_offset_wipe_safe(storage_path: &Path) -> Result<()> 
         tokio::fs::remove_file(&persist_path).await?;
         info!("📂 [PERSIST-SAFE] Reset wipe-safe fragment_offset file for new epoch.");
     }
+    
+    // Also reset the JSON map
+    let json_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offsets.json");
+    if json_path.exists() {
+        tokio::fs::remove_file(&json_path).await?;
+        info!("📂 [PERSIST-SAFE] Reset wipe-safe fragment_offsets JSON file for new epoch.");
+    }
     Ok(())
+}
+
+/// Persist the exact fragment offset for the CURRENT commit index.
+/// Keeps the last 100 entries to prevent unbounded growth while surviving multiple crashes.
+pub async fn persist_recent_fragment_offsets_wipe_safe(
+    storage_path: &Path,
+    commit_index: u32,
+    offset: u64,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    use tokio::io::AsyncWriteExt;
+
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let final_path = safe_dir.join("fragment_offsets.json");
+    let temp_path = safe_dir.join("fragment_offsets.tmp");
+
+    let mut map: BTreeMap<u32, u64> = BTreeMap::new();
+    if final_path.exists() {
+        if let Ok(contents) = tokio::fs::read_to_string(&final_path).await {
+            if let Ok(parsed) = serde_json::from_str(&contents) {
+                map = parsed;
+            }
+        }
+    }
+
+    map.insert(commit_index, offset);
+
+    // Prune old entries to keep bounded size
+    while map.len() > 100 {
+        if let Some(first_key) = map.keys().next().copied() {
+            map.remove(&first_key);
+        }
+    }
+
+    let json = serde_json::to_string(&map)?;
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(json.as_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    Ok(())
+}
+
+/// Load the map of recent precise fragment offsets from disk.
+pub fn load_recent_fragment_offsets_wipe_safe(storage_path: &Path) -> std::collections::BTreeMap<u32, u64> {
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    let final_path = safe_dir.join("fragment_offsets.json");
+
+    if let Ok(contents) = std::fs::read_to_string(&final_path) {
+        if let Ok(parsed) = serde_json::from_str(&contents) {
+            return parsed;
+        }
+    }
+    std::collections::BTreeMap::new()
 }
 
 /// Persist last_sent_index to a WIPE-SAFE location.

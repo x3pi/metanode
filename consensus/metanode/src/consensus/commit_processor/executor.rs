@@ -67,17 +67,14 @@ pub async fn dispatch_commit(
             }
         }
 
-        // Advance executor_client's next_expected_index so non-empty commits
-        // don't trigger gap detection when they arrive later
-        if let Some(ref client) = executor_client {
-            client.skip_empty_commit(global_exec_index).await;
-        }
+        // Advance executor_client's next_expected_index is NO LONGER NEEDED.
+        // next_expected_index tracks GEI, and empty commits don't advance GEI.
 
         tracing::trace!(
             "⏭️ [FAST-SKIP] Empty commit #{} (GEI={}) skipped — no FFI call needed",
             commit_index, global_exec_index
         );
-        return Ok(1);
+        return Ok(0); // GEI DOES NOT ADVANCE FOR EMPTY COMMITS! This ensures mathematical determinism based purely on transactions.
     }
 
     // NOTE: CATCH-UP FORK GUARD was REMOVED here.

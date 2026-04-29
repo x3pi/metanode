@@ -247,17 +247,13 @@ impl CommitProcessor {
         // ═══════════════════════════════════════════════════════════════
         // PHASE-A: GO IS THE SINGLE WRITER FOR GEI
         //
-        // epoch_base_index is now only used as a Rust-side hint for buffer
+        // current_hint_gei is only used as a Rust-side hint for buffer
         // ordering in ExecutorClient. Go exclusively computes and persists
         // the actual GEI via GEIAuthority.
-        //
-        // This eliminates the root cause of all fork bugs: Rust used to
-        // compute GEI from 3 fragile sources (epoch_base, commit_index,
-        // fragment_offset) that could diverge across nodes after restarts.
         // ═══════════════════════════════════════════════════════════════
-        let mut epoch_base_index = self.epoch_base_index_override.unwrap_or(0);
-        info!("🚀 [COMMIT PROCESSOR] PHASE-A: Go-Authoritative GEI mode. epoch={}, epoch_base_hint={}, next_expected_index={}",
-            current_epoch, epoch_base_index, next_expected_index);
+        let mut current_hint_gei: u64 = self.epoch_base_index_override.unwrap_or(0);
+        info!("🚀 [COMMIT PROCESSOR] PHASE-A: True Deterministic GEI mode. epoch={}, initial_hint_gei={}, next_expected_index={}",
+            current_epoch, current_hint_gei, next_expected_index);
 
         let mut last_heartbeat_commit = 0u32;
         let mut last_heartbeat_time = std::time::Instant::now();
@@ -283,39 +279,22 @@ impl CommitProcessor {
 
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
-        // ═══════════════════════════════════════════════════════════════
-        // PHASE-A: cumulative_fragment_offset ELIMINATED
-        //
-        // Previously, Rust tracked a cumulative_fragment_offset to compute
-        // GEI = epoch_base + commit_index + fragment_offset. This was the
-        // #1 source of fork bugs because:
-        //   - fragment_offset required persistence across restarts
-        //   - DAG wipe reset it, causing GEI drift
-        //   - Different replay paths produced different offsets
-        //
-        // Now: Go handles fragmentation internally. When a commit has N
-        // fragments, Go assigns N consecutive GEIs atomically. Rust only
-        // needs to know "how many GEI slots did this commit consume" to
-        // compute the hint for the NEXT commit's buffer key.
-        //
-        // The hint formula: hint_gei = epoch_base + commit_index + hint_offset
-        // This is NOT authoritative — Go overrides it. But it keeps the
-        // sequential buffer correctly ordered.
-        // ═══════════════════════════════════════════════════════════════
-        let mut hint_fragment_offset: u64 = 0;
-        // For backward compat, load from disk if available (used only as hint)
+        // Load the exact hint GEI for the current commit from persistence
         if next_expected_index > 1 {
-            if let Some(recovered) = self.recovered_fragment_offset {
-                hint_fragment_offset = recovered;
-            } else if let Some(ref sp) = self.storage_path {
-                let mut disk_offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(sp);
-                if disk_offset == 0 {
-                    disk_offset = crate::node::executor_client::persistence::load_fragment_offset(sp);
+            if let Some(ref sp) = self.storage_path {
+                let map = crate::node::executor_client::persistence::load_recent_fragment_offsets_wipe_safe(sp);
+                if let Some(gei) = map.get(&next_expected_index) {
+                    current_hint_gei = *gei;
+                    info!("📂 [PERSIST] Loaded precise current_hint_gei={} for next commit={} from JSON", gei, next_expected_index);
+                } else if let Some(ref client) = executor_client {
+                    if let Ok((_, go_gei, _, _, _, _)) = client.get_last_handled_commit_index().await {
+                        info!("⚠️ [PERSIST] Precise hint GEI not found in JSON for {}. Initializing from Go's last_gei={}", next_expected_index, go_gei);
+                        current_hint_gei = go_gei;
+                    }
                 }
-                hint_fragment_offset = disk_offset;
             }
         }
-        info!("📊 [PHASE-A] hint_fragment_offset={} (for buffer ordering only, Go is authoritative)", hint_fragment_offset);
+        info!("📊 [PHASE-A] current_hint_gei={} (strictly incremented by transaction commits)", current_hint_gei);
         let _storage_path_for_persist = self.storage_path.clone();
 
         loop {
@@ -389,7 +368,6 @@ impl CommitProcessor {
                     // --- [DAG-RESET DETECTION] ---
                     // After a DAG wipe, the new DAG starts from commit 1 but next_expected_index
                     // may be at the old DAG's last commit (e.g., 939). Detect this and jump DOWN.
-                    // PHASE-A: Simplified — no epoch_base check needed since Go handles GEI.
                     if commit_index < next_expected_index && next_expected_index > 1 {
                         let gap = next_expected_index - commit_index;
                         if gap > 100 {
@@ -399,33 +377,20 @@ impl CommitProcessor {
                                 commit_index, next_expected_index, gap, commit_index
                             );
                             next_expected_index = commit_index;
-                            // PHASE-A: Reset hint offset too (Go handles actual GEI)
-                            hint_fragment_offset = 0;
 
-                            // FIX (2026-04-29): Query Go for the current GEI to produce
-                            // accurate hint values. Without this, hint_gei uses the stale
-                            // epoch_base_index from the pre-wipe session, producing hints
-                            // far below Go's actual GEI, triggering false-positive
-                            // RUST-SESSION-RESTART detection in Go.
+                            // Reset current_hint_gei to Go's last_gei
                             if let Some(ref client) = executor_client {
                                 if let Ok((_, go_gei, _, _, _, go_last_block_ts)) = client.get_last_handled_commit_index().await {
-                                        
-                                    // If the commit's timestamp is OLDER than or EQUAL TO Go's last executed block,
-                                    // it MUST be an old commit synced from the network (Single Node Restart).
-                                    // Since Go's timestamp comes directly from Rust's subdag.timestamp_ms,
-                                    // this comparison is 100% deterministic without any need for clock skew buffers.
                                     if subdag.timestamp_ms <= go_last_block_ts {
-                                        tracing::warn!("⏳ [DAG-RESET] Commit {} timestamp ({}) is OLDER than Go's last block ({}). Syncing old DAG. Not shifting epoch_base.", 
+                                        tracing::warn!("⏳ [DAG-RESET] Commit {} timestamp ({}) is OLDER than Go's last block ({}). Syncing old DAG.", 
                                             commit_index, subdag.timestamp_ms, go_last_block_ts);
                                     } else {
-                                        // This is a fresh commit! The cluster actually restarted.
-                                        let new_base = (go_gei + 1).saturating_sub(commit_index as u64);
-                                        tracing::warn!("🔄 [DAG-RESET] True cluster restart detected (fresh commit > go_ts). Updated epoch_base_index hint: {} → {} (Go GEI={}, commit={})",
-                                            epoch_base_index, new_base, go_gei, commit_index);
-                                        epoch_base_index = new_base;
+                                        tracing::warn!("🔄 [DAG-RESET] True cluster restart detected (fresh commit > go_ts). Updated current_hint_gei: {} → {} (Go GEI={})",
+                                            current_hint_gei, go_gei, go_gei);
+                                        current_hint_gei = go_gei;
                                     }
                                 } else {
-                                    tracing::warn!("⚠️ [DAG-RESET] Failed to query Go GEI — using stale epoch_base_index={}", epoch_base_index);
+                                    tracing::warn!("⚠️ [DAG-RESET] Failed to query Go GEI — using stale current_hint_gei={}", current_hint_gei);
                                 }
                             }
                         }
@@ -433,27 +398,21 @@ impl CommitProcessor {
 
                     if commit_index == next_expected_index {
                         // ═══════════════════════════════════════════════════════
-                        // PHASE-A: GO-AUTHORITATIVE GEI
+                        // TRUE DETERMINISTIC GEI
                         //
-                        // Rust computes a HINT GEI for buffer ordering only.
-                        // Go overrides this via is_authoritative_gei=true and
-                        // assigns the actual GEI atomically.
-                        //
-                        // hint_gei = epoch_base + commit_index + hint_offset
-                        // This keeps the sequential buffer correctly ordered
-                        // even though Go may assign a different actual GEI.
+                        // hint_gei perfectly mirrors Go's transaction-based GEI.
+                        // It does not increment for empty commits.
                         // ═══════════════════════════════════════════════════════
-                        let hint_gei = epoch_base_index + commit_index as u64 + hint_fragment_offset;
+                        let hint_gei = current_hint_gei + 1;
 
                         // CC-1: Unified batch_id for end-to-end tracing (Rust → Go)
                         let batch_id =
                             format!("E{}C{}G{}", current_epoch, commit_index, hint_gei);
 
                         trace!(
-                            "[batch_id={}] 📊 PHASE-A hint: epoch_base={}, hint_offset={}",
+                            "[batch_id={}] 📊 TRUE DETERMINISTIC GEI: current_hint_gei={}",
                             batch_id,
-                            epoch_base_index,
-                            hint_fragment_offset
+                            current_hint_gei
                         );
 
                         let total_txs_in_commit = subdag
@@ -466,6 +425,16 @@ impl CommitProcessor {
                         // Go is the Single Writer — it validates internally.
                         // Rust-side validation was the #2 source of false-positive
                         // fork-prevention that dropped legitimate commits.
+
+                        if let Some(ref storage_path) = _storage_path_for_persist {
+                            if let Err(e) = crate::node::executor_client::persistence::persist_recent_fragment_offsets_wipe_safe(
+                                storage_path,
+                                commit_index,
+                                current_hint_gei,
+                            ).await {
+                                tracing::error!("Failed to save recent fragment offsets: {}", e);
+                            }
+                        }
 
                         // Process commit — Go assigns the authoritative GEI
                         let geis_consumed = super::executor::dispatch_commit(
@@ -506,12 +475,12 @@ impl CommitProcessor {
                             callback(commit_index);
                         }
 
-                        // PHASE-A: Update hint fragment offset for next commit's buffer key.
-                        // This is NOT persisted authoritatively — it's just a buffer ordering hint.
-                        if geis_consumed > 1 {
-                            hint_fragment_offset += geis_consumed - 1;
-                            info!("🔪 [PHASE-A] Commit {} consumed {} GEIs, hint_fragment_offset now {}",
-                                commit_index, geis_consumed, hint_fragment_offset);
+                        // UPDATE current_hint_gei
+                        // It increments strictly by the number of GEIs actually consumed (0 for empty commits).
+                        current_hint_gei += geis_consumed;
+                        if geis_consumed > 0 {
+                            info!("🔪 [GEI] Commit {} consumed {} GEIs, current_hint_gei now {}",
+                                commit_index, geis_consumed, current_hint_gei);
                         }
 
                         next_expected_index += 1;
@@ -558,8 +527,8 @@ impl CommitProcessor {
                         while let Some(pending) = pending_commits.remove(&next_expected_index) {
                             let pending_commit_index = next_expected_index;
 
-                            // PHASE-A: Hint GEI for pending commits
-                            let pending_hint_gei = epoch_base_index + pending_commit_index as u64 + hint_fragment_offset;
+                            // Hint GEI for pending commits
+                            let pending_hint_gei = current_hint_gei + 1;
 
                             let pending_geis = super::executor::dispatch_commit(
                                 &pending,
@@ -574,11 +543,11 @@ impl CommitProcessor {
                             )
                             .await?;
 
-                            // PHASE-A: Update hint offset for fragmentation
-                            if pending_geis > 1 {
-                                hint_fragment_offset += pending_geis - 1;
-                                info!("🔪 [PHASE-A] Pending commit {} consumed {} GEIs, hint_fragment_offset now {}",
-                                    pending_commit_index, pending_geis, hint_fragment_offset);
+                            // UPDATE current_hint_gei for pending
+                            current_hint_gei += pending_geis;
+                            if pending_geis > 0 {
+                                info!("🔪 [GEI] Pending commit {} consumed {} GEIs, current_hint_gei now {}",
+                                    pending_commit_index, pending_geis, current_hint_gei);
                             }
 
                             if let Some(ref callback) = commit_index_callback {
@@ -676,7 +645,7 @@ impl CommitProcessor {
 
                                     while let Some(pending) = pending_commits.remove(&next_expected_index) {
                                         let pending_commit_index = next_expected_index;
-                                        let pending_hint_gei = epoch_base_index + pending_commit_index as u64 + hint_fragment_offset;
+                                        let pending_hint_gei = current_hint_gei + 1;
 
                                         // Check if this commit has any transactions
                                         let total_txs: usize = pending.blocks
@@ -695,16 +664,14 @@ impl CommitProcessor {
                                         } else {
                                             // ── NON-EMPTY: Must go through full dispatch ──
                                             if batch_empty_count > 0 {
-                                                let prev_hint = epoch_base_index + (pending_commit_index - 1) as u64 + hint_fragment_offset;
+                                                let prev_hint = current_hint_gei;
                                                 if let Some(ref shared_idx) = self.shared_last_global_exec_index {
                                                     let mut idx_guard = shared_idx.lock().await;
                                                     if prev_hint > *idx_guard {
                                                         *idx_guard = prev_hint;
                                                     }
                                                 }
-                                                if let Some(ref client) = executor_client {
-                                                    client.skip_empty_commit(prev_hint).await;
-                                                }
+                                                // skip_empty_commit is NO LONGER NEEDED as GEI doesn't advance.
                                                 info!(
                                                     "⏭️ [FORWARD-JUMP] Batch-skipped {} empty commits (hint_gei up to {})",
                                                     batch_empty_count, prev_hint
@@ -726,9 +693,7 @@ impl CommitProcessor {
                                             )
                                             .await?;
 
-                                            if geis_consumed > 1 {
-                                                hint_fragment_offset += geis_consumed - 1;
-                                            }
+                                            current_hint_gei += geis_consumed;
 
                                             if let Some(ref cb) = commit_index_callback {
                                                 cb(pending_commit_index);
@@ -743,16 +708,14 @@ impl CommitProcessor {
 
                                     // Flush remaining empty commits after loop
                                     if batch_empty_count > 0 {
-                                        let last_hint = epoch_base_index + (next_expected_index - 1) as u64 + hint_fragment_offset;
+                                        let last_hint = current_hint_gei;
                                         if let Some(ref shared_idx) = self.shared_last_global_exec_index {
                                             let mut idx_guard = shared_idx.lock().await;
                                             if last_hint > *idx_guard {
                                                 *idx_guard = last_hint;
                                             }
                                         }
-                                        if let Some(ref client) = executor_client {
-                                            client.skip_empty_commit(last_hint).await;
-                                        }
+                                        // skip_empty_commit is NO LONGER NEEDED as GEI doesn't advance.
                                         if let Some(ref cb) = self.global_exec_index_callback {
                                             cb(last_hint);
                                         }
