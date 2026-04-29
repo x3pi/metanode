@@ -1,5 +1,5 @@
 {
- "rpc_urls": [
+	"rpc_urls": [
 		"http://192.168.1.233:8757",
 		"http://192.168.1.233:10747",
 		"http://192.168.1.233:10749",
@@ -8,8 +8,8 @@
 	"type": "get_logs",
 	"timeout_seconds": 10,
 	"params": {
-		"from_block": "83",
-		"to_block": "83",
+		"from_block": "21",
+		"to_block": "21",
 		"address": "0x00000000000000000000000000000000B429C0B2",
 		"topics": [
 			[

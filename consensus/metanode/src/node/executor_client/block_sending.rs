@@ -85,7 +85,7 @@ impl ExecutorClient {
                     )
                 })
                 .collect();
-            trace!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
+            info!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
                 batch_id, total_tx_before, subdag.blocks.len(), block_details.join(", "));
         }
 
@@ -124,7 +124,7 @@ impl ExecutorClient {
         // ═══════════════════════════════════════════════════════════════
         let mut all_proto_txs = Vec::new();
         let mut total_after_dedup = 0;
-        
+
         if total_tx_before > 0 {
             all_proto_txs = self.build_sorted_transactions(subdag)?;
             total_after_dedup = all_proto_txs.len();
@@ -148,7 +148,12 @@ impl ExecutorClient {
                     if global_exec_index < *next_expected_guard {
                         trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
                         0
-                    } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
+                    } else if self
+                        .send_buffer
+                        .lock()
+                        .await
+                        .contains_key(&global_exec_index)
+                    {
                         trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
                         0
                     } else {
@@ -206,10 +211,16 @@ impl ExecutorClient {
                     let next_expected_guard = self.next_expected_index.lock().await;
                     if fragment_gei < *next_expected_guard {
                         // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
-                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
+                        trace!(
+                            "⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0",
+                            fragment_gei
+                        );
                         0
                     } else if self.send_buffer.lock().await.contains_key(&fragment_gei) {
-                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0", fragment_gei);
+                        trace!(
+                            "⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0",
+                            fragment_gei
+                        );
                         0
                     } else {
                         let mut next_bn = self.next_block_number.lock().await;
@@ -272,9 +283,9 @@ impl ExecutorClient {
         // ═══════════════════════════════════════════════════════════════
 
         let has_system_tx = subdag.blocks.iter().any(|b| {
-            b.transactions().iter().any(|tx| {
-                SystemTransaction::from_bytes(tx.data()).is_ok()
-            })
+            b.transactions()
+                .iter()
+                .any(|tx| SystemTransaction::from_bytes(tx.data()).is_ok())
         });
 
         let block_number = {
@@ -283,24 +294,37 @@ impl ExecutorClient {
                 // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
                 trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
                 0
-            } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
-                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
+            } else if self
+                .send_buffer
+                .lock()
+                .await
+                .contains_key(&global_exec_index)
+            {
+                trace!(
+                    "⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0",
+                    global_exec_index
+                );
                 0
             } else {
                 let mut next_bn = self.next_block_number.lock().await;
                 let mut last_ep = self.last_processed_epoch.lock().await;
                 let is_epoch_boundary = epoch > *last_ep;
-                
+
                 // Force block generation for EndOfEpoch commit
                 let force_block_creation = is_epoch_boundary || has_system_tx;
-                
+
                 if epoch > *last_ep {
                     *last_ep = epoch;
                 }
+
                 if total_after_dedup > 0 || force_block_creation {
                     let bn = *next_bn;
                     *next_bn += 1;
-                    trace!("📊 [BLOCK-NUM] Generating new block_number={} for GEI={}", bn, global_exec_index);
+                    trace!(
+                        "📊 [BLOCK-NUM] Generating new block_number={} for GEI={}",
+                        bn,
+                        global_exec_index
+                    );
                     bn
                 } else {
                     0
@@ -394,7 +418,9 @@ impl ExecutorClient {
                     warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
-            buffer.entry(global_exec_index).or_insert((epoch_data_bytes, epoch, commit_index));
+            buffer
+                .entry(global_exec_index)
+                .or_insert((epoch_data_bytes, epoch, commit_index));
             trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
@@ -820,7 +846,6 @@ impl ExecutorClient {
             Err(anyhow::anyhow!("FFI execute_block not registered"))
         }
     }
-
 
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///

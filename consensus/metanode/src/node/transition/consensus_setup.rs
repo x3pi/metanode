@@ -105,7 +105,7 @@ pub(super) async fn setup_validator_consensus(
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
-    // 1000
+
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
 
     if let Some(c) = exec_client_proc {

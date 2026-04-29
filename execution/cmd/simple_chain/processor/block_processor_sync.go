@@ -485,16 +485,16 @@ PROCESS_BLOCK:
 	// Empty commits don't change state, so creating blocks for them wastes CPU/IO
 	// All nodes receive the same commits from Rust → all skip the same empties → no fork
 	// EXCEPTION: If this empty commit triggers an epoch transition, we MUST create an empty boundary block!
-	isEpochBoundary := false
+	// Phát hiện mốc chuyển Epoch để log ra màn hình (Rust đã lo phần quyết định tạo block bằng cách gửi BlockNumber > 0)
 	if lastBlock != nil && epochNum > lastBlock.Header().Epoch() {
-		isEpochBoundary = true
 		logger.Info("🔄 [EPOCH-BOUNDARY] Processing empty commit at GEI=%d as boundary block for epoch %d→%d",
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
-	// Bỏ SKIP-EMPTY để đảm bảo Go tạo ra block rỗng, giữ liền mạch số thứ tự block cho Scanner
-	if false && len(epochData.Transactions) == 0 && !isEpochBoundary {
-		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
+	// Dựa hoàn toàn vào tín hiệu từ Rust: Nếu Rust gửi BlockNumber = 0, đó là block rỗng dư âm -> Bỏ qua.
+	// Nếu Rust gửi BlockNumber > 0 (kể cả khi rỗng như ở mốc Epoch), tiến hành tạo block!
+	if epochData.GetBlockNumber() == 0 {
+		logger.Info("⏭️  [SKIP-EMPTY] Skipping filler commit (BlockNumber=0): global_exec_index=%d", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
 		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
@@ -578,16 +578,20 @@ PROCESS_BLOCK:
 		// Fallback: try unmarshal as Transactions message (backward compatibility)
 		transactions, err := transaction.UnmarshalTransactions(ms.Digest)
 		if err != nil {
-			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes)", txIdx, err, len(ms.Digest))
+			if len(ms.Digest) == 64 {
+				logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes, hex=%x)", txIdx, err, len(ms.Digest), ms.Digest)
+			} else {
+				logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes)", txIdx, err, len(ms.Digest))
+			}
 			continue
 		}
 		allTransactions = append(allTransactions, transactions...)
 		totalTxsFromRust += len(transactions)
 	}
 
-	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 && !isEpochBoundary {
-		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
+	// Dựa hoàn toàn vào tín hiệu từ Rust: Nếu BlockNumber = 0 thì Drop. Nếu > 0 thì phải xử lý!
+	if epochData.GetBlockNumber() == 0 {
+		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: BlockNumber is 0 (filler commit): global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks

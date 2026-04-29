@@ -33,6 +33,12 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 		logger.Info("🔄 [Scanner][%s] Scan loop started from block 0", rc.Name)
 	}
 
+	// Nếu cần check lại block hiện tại (vì block bị đứt gánh giữa chừng chưa xử lý xong),
+	// ta phải lùi lastBlock lại 1 để vòng lặp `for blockNum := lastBlock + 1` bắt đầu quét từ đúng block bị đứt đó.
+	if needCheckExecuted && lastBlock > 0 {
+		lastBlock--
+	}
+
 	var client *client_tcp.Client
 	lastUpdateTime := time.Now()
 	nodeIdx := 0
@@ -99,7 +105,6 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 				continue
 			}
 			if hasEvents {
-				needCheckExecuted = false // Chỉ cần check lô đầu tiên, nếu có batch mới thì ngắt cờ
 				lastUpdateTime = time.Now()
 				break
 			}
@@ -203,7 +208,7 @@ func (s *CrossChainScanner) scanAndSubmit(
 		events := s.buildEmbassyEvents(rc, allLogs, messageSentTopic, messageReceivedTopic)
 		if len(events) > 0 {
 			hasEvents = true
-			
+
 			allExecuted := true
 
 			for i := 0; i < len(events); i += MaxBatchSize {
@@ -299,6 +304,8 @@ func (s *CrossChainScanner) scanAndSubmit(
 						logger.Info("⏩ [Scanner][%s] Batch from block %d (chunk %d-%d) ALREADY EXECUTED on local chain (eventKind=%d, msgId=%x...). Skipping submit.",
 							rc.Name, blockNum, i, end, eventKind, msgId[:8])
 						isBatchExecuted = true
+					} else {
+						needCheckExecuted = false
 					}
 				}
 
@@ -346,11 +353,13 @@ func (s *CrossChainScanner) scanAndSubmit(
 					time.Sleep(1 * time.Second)
 				}
 			}
-			
+
 			if allExecuted {
 				return false, true, nil
 			}
 		}
+	} else {
+		needCheckExecuted = false
 	}
 	return hasEvents, false, nil
 }

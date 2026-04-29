@@ -96,7 +96,7 @@ func (s *CrossChainScanner) updateScanProgressBatch(chainIds []uint64, lastBlock
 		logger.Warn("[Scanner] config_contract not set, skipping scan progress update")
 		return
 	}
-	logger.Info("[Scanner] batchUpdateScanProgress: chainIds=%v, lastBlocks=%v, localBlock=%d", chainIds, lastBlocks, localBlockNumber)
+	logger.Info("[Scanner] batchUpdateScanProgress: chainIds=%v, lastBlocks=%v, isQuorums=%v, localBlock=%d", chainIds, lastBlocks, isQuorums, localBlockNumber)
 	// ABI uint256[] yêu cầu []*big.Int, không phải []uint64
 	destIds := make([]*big.Int, len(chainIds))
 	blksBig := make([]*big.Int, len(lastBlocks))
