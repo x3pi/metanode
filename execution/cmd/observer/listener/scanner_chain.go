@@ -14,6 +14,8 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
+const MaxBatchSize = 50
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scan loop cho 1 remote chain
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,7 +57,6 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 		}
 
 		if latestBlock <= lastBlock {
-			// Đã scan hết, chờ block mới
 			isEmpty := true
 			s.pendingBatches.Range(func(key, value interface{}) bool {
 				isEmpty = false
@@ -87,7 +88,6 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 
 		// Scan từng block một từ lastBlock+1 đến latestBlock
 		for blockNum := lastBlock + 1; blockNum <= latestBlock; blockNum++ {
-
 			hasEvents, isExecuted, errScan := s.scanAndSubmit(rc, client, blockNum, needCheckExecuted, localBlock)
 			if errScan != nil {
 				// GetLogs thất bại — dừng, thử lại block này ở vòng ngoài
@@ -202,90 +202,112 @@ func (s *CrossChainScanner) scanAndSubmit(
 	if len(allLogs) > 0 {
 		events := s.buildEmbassyEvents(rc, allLogs, messageSentTopic, messageReceivedTopic)
 		if len(events) > 0 {
-			// -----------------------------------------------------
-			// CHECK NẾU ĐÃ ĐƯỢC XỬ LÝ (RESUME STATE)
-			// -----------------------------------------------------
-			if needCheckExecuted && localBlock > 0 {
-				eventKind := events[0].EventKind
-				var checkTopic common.Hash
-				if eventKind == cross_chain_contract.EventKindInbound {
-					checkTopic = messageReceivedTopic
-				} else {
-					checkTopic = outboundResultTopic
-				}
-
-				msgId := events[0].Packet.MessageId
-				if eventKind == cross_chain_contract.EventKindConfirmation {
-					msgId = events[0].Confirmation.MessageId
-				}
-
-				// Quét log từ localBlock - 2000 đến localBlock + 1000 để tìm msgId này
-				fromBlk := uint64(0)
-				if localBlock > 2000 {
-					fromBlk = localBlock - 2000
-				}
-				toBlk := localBlock + 1000
-				// Xây dựng topic array tuỳ theo eventKind
-				var topics [][]common.Hash
-				if eventKind == cross_chain_contract.EventKindInbound {
-					topics = [][]common.Hash{
-						{checkTopic},
-						{},      // Topic 1: sourceNationId
-						{},      // Topic 2: destNationId
-						{msgId}, // Topic 3: msgId
-					}
-				} else {
-					topics = [][]common.Hash{
-						{checkTopic},
-						{msgId}, // Topic 1: msgId
-					}
-				}
-
-				totalLocalClients := len(s.localClients)
-				if totalLocalClients == 0 {
-					totalLocalClients = 1
-				}
-
-				var logResp *pb.GetLogsResponse
-				var errLog error
-				success := false
-
-				for attempt := 0; attempt < totalLocalClients; attempt++ {
-					localCli, _ := s.GetActiveClient(attempt)
-					if localCli != nil {
-						logResp, errLog = localCli.ChainGetLogs(nil, hexutil.EncodeUint64(fromBlk), hexutil.EncodeUint64(toBlk), []common.Address{contractAddr}, topics)
-						if errLog == nil {
-							success = true
-							break
-						}
-						logger.Warn("⚠️  [Scanner][%s] ChainGetLogs execution check failed on attempt %d: %v", rc.Name, attempt+1, errLog)
-					} else {
-						errLog = fmt.Errorf("no active local client available")
-					}
-					time.Sleep(500 * time.Millisecond)
-				}
-
-				if !success {
-					logger.Error("❌ [Scanner][%s] ChainGetLogs for execution check COMPLETELY FAILED after %d attempts: %v", rc.Name, totalLocalClients, errLog)
-					return false, false, fmt.Errorf("ChainGetLogs for execution check failed after %d attempts: %w", totalLocalClients, errLog)
-				}
-
-				if logResp != nil && len(logResp.Logs) > 0 {
-					logger.Info("⏩ [Scanner][%s] Batch from block %d ALREADY EXECUTED on local chain (eventKind=%d, msgId=%x...). Skipping submit.",
-						rc.Name, blockNum, eventKind, msgId[:8])
-					return false, true, nil
-				}
-			}
-
 			hasEvents = true
-			// Chia events thành chunks nhỏ (maxBatchSize) để tránh TX quá lớn
-			const maxBatchSize = 50
-			for i := 0; i < len(events); i += maxBatchSize {
-				end := i + maxBatchSize
+			
+			allExecuted := true
+
+			for i := 0; i < len(events); i += MaxBatchSize {
+				end := i + MaxBatchSize
 				if end > len(events) {
 					end = len(events)
 				}
 				chunk := events[i:end]
+
+				isBatchExecuted := false
+
+				// -----------------------------------------------------
+				// CHECK NẾU ĐÃ ĐƯỢC XỬ LÝ (RESUME STATE)
+				// -----------------------------------------------------
+				if needCheckExecuted && localBlock > 0 {
+					eventKind := chunk[0].EventKind
+					var checkTopic common.Hash
+					if eventKind == cross_chain_contract.EventKindInbound {
+						checkTopic = messageReceivedTopic
+					} else {
+						checkTopic = outboundResultTopic
+					}
+
+					msgId := chunk[0].Packet.MessageId
+					if eventKind == cross_chain_contract.EventKindConfirmation {
+						msgId = chunk[0].Confirmation.MessageId
+					}
+
+					// Quét log từ localBlock - 2000 đến block mới nhất để tìm msgId này
+					fromBlk := uint64(0)
+					if localBlock > 2000 {
+						fromBlk = localBlock - 2000
+					}
+					// Xây dựng topic array tuỳ theo eventKind
+					var topics [][]common.Hash
+					if eventKind == cross_chain_contract.EventKindInbound {
+						topics = [][]common.Hash{
+							{checkTopic},
+							{},      // Topic 1: sourceNationId
+							{},      // Topic 2: destNationId
+							{msgId}, // Topic 3: msgId
+						}
+					} else {
+						topics = [][]common.Hash{
+							{checkTopic},
+							{msgId}, // Topic 1: msgId
+						}
+					}
+
+					totalLocalClients := len(s.localClients)
+					if totalLocalClients == 0 {
+						totalLocalClients = 1
+					}
+
+					var logResp *pb.GetLogsResponse
+					var errLog error
+					success := false
+
+					for attempt := 0; attempt < totalLocalClients; attempt++ {
+						localCli, _ := s.GetActiveClient(attempt)
+						if localCli != nil {
+							currLocalBlk, errBlk := localCli.ChainGetBlockNumber()
+							if errBlk != nil {
+								logger.Warn("⚠️  [Scanner][%s] Cannot get latest block for check: %v", rc.Name, errBlk)
+								time.Sleep(500 * time.Millisecond)
+								continue
+							}
+
+							toBlk := currLocalBlk
+							if currLocalBlk > localBlock+1000 {
+								toBlk = localBlock + 1000
+							}
+							toBlkStr := hexutil.EncodeUint64(toBlk)
+
+							logResp, errLog = localCli.ChainGetLogs(nil, hexutil.EncodeUint64(fromBlk), toBlkStr, []common.Address{contractAddr}, topics)
+							if errLog == nil {
+								success = true
+								break
+							}
+							logger.Warn("⚠️  [Scanner][%s] ChainGetLogs execution check failed on attempt %d: %v", rc.Name, attempt+1, errLog)
+						} else {
+							errLog = fmt.Errorf("no active local client available")
+						}
+						time.Sleep(500 * time.Millisecond)
+					}
+
+					if !success {
+						logger.Error("❌ [Scanner][%s] ChainGetLogs for execution check COMPLETELY FAILED after %d attempts: %v", rc.Name, totalLocalClients, errLog)
+						return false, false, fmt.Errorf("ChainGetLogs for execution check failed after %d attempts: %w", totalLocalClients, errLog)
+					}
+
+					if logResp != nil && len(logResp.Logs) > 0 {
+						logger.Info("⏩ [Scanner][%s] Batch from block %d (chunk %d-%d) ALREADY EXECUTED on local chain (eventKind=%d, msgId=%x...). Skipping submit.",
+							rc.Name, blockNum, i, end, eventKind, msgId[:8])
+						isBatchExecuted = true
+					}
+				}
+
+				if isBatchExecuted {
+					continue
+				}
+
+				allExecuted = false
+				needCheckExecuted = false // Tìm thấy batch chưa xử lý -> ngắt cờ cho các batch sau
 
 				var txHash common.Hash
 				var err error
@@ -324,7 +346,10 @@ func (s *CrossChainScanner) scanAndSubmit(
 					time.Sleep(1 * time.Second)
 				}
 			}
-			// Đã submit thành công tất cả các chunk cho block này
+			
+			if allExecuted {
+				return false, true, nil
+			}
 		}
 	}
 	return hasEvents, false, nil

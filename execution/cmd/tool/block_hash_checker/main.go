@@ -721,8 +721,15 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
 		
-		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
-		gei, epoch, _ := getPeerInfo(client, n.URL)
+		var gei, epoch uint64
+		if err == nil {
+			// Lấy gei và epoch từ chính block mới nhất thông qua eth_getBlockByNumber
+			bi, errBi := getBlockInfo(client, n.URL, num)
+			if errBi == nil {
+				gei = parseHexStr(bi.GlobalExecIndex)
+				epoch = parseHexStr(bi.Epoch)
+			}
+		}
 
 		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {
@@ -835,11 +842,11 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	// Build alert content for both console and file
 	var alertBuf strings.Builder
-	alertBuf.WriteString(fmt.Sprintf("╔══════════════════════════════════════════════════════════════════╗\n"))
+	alertBuf.WriteString("╔══════════════════════════════════════════════════════════════════╗\n")
 	alertBuf.WriteString(fmt.Sprintf("║  🚨 HASH MISMATCH DETECTED — %s                      ║\n", time.Now().Format("2006-01-02 15:04:05")))
-	alertBuf.WriteString(fmt.Sprintf("╚══════════════════════════════════════════════════════════════════╝\n"))
+	alertBuf.WriteString("╚══════════════════════════════════════════════════════════════════╝\n")
 	alertBuf.WriteString(fmt.Sprintf("\nCheck #%d | Blocks checked: %d→%d | Mismatches: %d\n", *totalChecks, from, minBlock, len(mismatches)))
-	alertBuf.WriteString(fmt.Sprintf("\nNode Heights:\n"))
+	alertBuf.WriteString("\nNode Heights:\n")
 	for _, r := range results {
 		if r.err != nil {
 			alertBuf.WriteString(fmt.Sprintf("  %-12s ERR: %v\n", r.name+":", r.err))
@@ -847,7 +854,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			alertBuf.WriteString(fmt.Sprintf("  %-12s block=%d\n", r.name+":", r.block))
 		}
 	}
-	alertBuf.WriteString(fmt.Sprintf("\n─── Mismatch Details ───\n"))
+	alertBuf.WriteString("\n─── Mismatch Details ───\n")
 
 	for _, m := range mismatches {
 		alertBuf.WriteString(fmt.Sprintf("\n⚠️  Block %d:\n", m.BlockNumber))
@@ -866,7 +873,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		}
 	}
 
-	alertBuf.WriteString(fmt.Sprintf("\n─── Summary ───\n"))
+	alertBuf.WriteString("\n─── Summary ───\n")
 	alertBuf.WriteString(fmt.Sprintf("Total mismatches: %d\n", *totalMismatches))
 	alertBuf.WriteString(fmt.Sprintf("Detected at: %s\n", time.Now().Format("2006-01-02 15:04:05.000")))
 
