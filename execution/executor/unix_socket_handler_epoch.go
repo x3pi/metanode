@@ -1267,18 +1267,30 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 3: REBUILD NOMT TRIES — this is the KEY difference from store-only mode.
-		// CommitBlockState(WithRebuildTries) reloads the trie from the state that was
-		// just written to LevelDB by applyBackupDbBatches. After this call, NOMT's
-		// persistent root matches the block's stateRoot.
-		// OPTIMIZATION: Only rebuild trie and verify root on the LAST block of the batch!
+		// STEP 3: REBUILD TRIES (conditionally) — sync memory state with DB.
+		//
+		// CRITICAL FIX (Apr 2026): On NOMT backend, WithRebuildTries() MUST NOT
+		// be used here. NOMT keeps ONLY the latest state root. When this handler
+		// runs concurrently with consensus execution (e.g., via LAG-RECOVERY or
+		// STARTUP-SYNC), calling UpdateStateForNewHeader() overwrites the current
+		// NOMT trie root with the P2P-synced block's root. Since NOMT cannot look
+		// up historical state, this irreversibly corrupts the trie — subsequent
+		// consensus blocks are created from the wrong state root, causing a fork.
+		//
+		// On MPT/legacy backends, WithRebuildTries() is safe because they maintain
+		// a full historical trie in LevelDB.
 		// ═══════════════════════════════════════════════════════════════════════════
 		var commitOpts []blockchain.CommitOption
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
 		if isLastBlock {
-			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
-			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			// Only rebuild tries on non-NOMT backends where historical state is available
+			if trie.GetStateBackend() != trie.BackendNOMT {
+				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			} else {
+				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
+					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie.", blockNum)
+			}
 			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
 			// Without this, synced blocks mapping (block number -> hash) remain in volatile
 			// cache and are lost if the node crashes/restarts before the next normal block.
