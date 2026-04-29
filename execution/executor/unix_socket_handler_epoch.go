@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
@@ -281,6 +282,20 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	// correct knownKeys and reads current state (which is the only state
 	// available in NOMT anyway).
 	// ═══════════════════════════════════════════════════════════════════════
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT CACHE FIX: Check if we have cached validators for this block!
+	// ═══════════════════════════════════════════════════════════════════════
+	validatorCacheKey := crypto.Keccak256([]byte(fmt.Sprintf("epoch_validators_at_block_%d", blockNumber)))
+	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
+		if cachedData, err := blockStorage.Get(validatorCacheKey); err == nil && len(cachedData) > 0 {
+			cachedList := &pb.ValidatorInfoList{}
+			if err := json.Unmarshal(cachedData, cachedList); err == nil {
+				logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache (Crucial for NOMT)", blockNumber)
+				return cachedList, nil
+			}
+		}
+	}
+
 	var validators []state.ValidatorState
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
@@ -419,6 +434,17 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	}
 	validatorInfoList.EpochTimestampMs = epochTimestampMs
 	validatorInfoList.LastGlobalExecIndex = lastGlobalExecIndex
+
+	// Cache the validators to storage
+	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
+		if serializedData, err := json.Marshal(validatorInfoList); err == nil {
+			if err := blockStorage.Put(validatorCacheKey, serializedData); err != nil {
+				logger.Warn("⚠️ [EPOCH] Failed to cache validators to storage: %v", err)
+			} else {
+				logger.Debug("💾 [EPOCH] Cached historical validators for block %d to storage", blockNumber)
+			}
+		}
+	}
 
 	// CRITICAL FOR SNAPSHOT: Confirm block commitment to DB
 	logger.Info("✅ [SNAPSHOT] Returning validators at block %d (COMMITTED TO DB): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=%d, last_committed_block=%d",
