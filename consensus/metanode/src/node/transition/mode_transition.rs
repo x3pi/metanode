@@ -98,24 +98,21 @@ pub async fn transition_mode_only(
     // and use Go's authoritative value instead. This ensures ALL nodes use the same
     // timestamp even if EndOfEpoch SystemTx had different precision.
     // =============================================================================
-    let (committee, go_authoritative_timestamp) = committee_source
+    let (committee, go_authoritative_timestamp, eth_addresses) = committee_source
         .fetch_committee_with_timestamp(&config.executor_send_socket_path, epoch)
         .await?;
 
-    // Update epoch_eth_addresses cache with new epoch's committee
+    // Update epoch_eth_addresses cache with new epoch's committee atomically
     // CRITICAL: This is needed for leader address resolution in CommitProcessor
-    if let Err(e) = committee_source
-        .fetch_and_update_epoch_eth_addresses(
-            &config.executor_send_socket_path,
-            epoch,
-            &node.epoch_eth_addresses,
-        )
-        .await
     {
-        warn!(
-            "⚠️ [MODE TRANSITION] Failed to update epoch_eth_addresses: {}",
-            e
-        );
+        let mut cache = node.epoch_eth_addresses.write().await;
+        cache.insert(epoch, eth_addresses);
+        
+        // Keep only last 2 epochs to prevent unbounded growth
+        if cache.len() > 2 {
+            let min_keep = epoch.saturating_sub(1);
+            cache.retain(|&e, _| e >= min_keep);
+        }
     }
 
     info!(

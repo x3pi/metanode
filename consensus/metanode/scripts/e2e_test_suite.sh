@@ -349,6 +349,11 @@ test_hash_parity() {
         # Collect hashes and GEIs from all online nodes
         local node_hashes=()
         local node_geis=()
+        local node_timestamps=()
+        local node_state_roots=()
+        local node_leader_addrs=()
+        local node_parent_hashes=()
+        local node_stake_roots=()
         local null_count=0
         local first_hash=""
         local first_gei=""
@@ -359,6 +364,11 @@ test_hash_parity() {
             if [ "${blocks[$i]}" = "-1" ]; then
                 node_hashes+=("offline")
                 node_geis+=("offline")
+                node_timestamps+=("offline")
+                node_state_roots+=("offline")
+                node_leader_addrs+=("offline")
+                node_parent_hashes+=("offline")
+                node_stake_roots+=("offline")
                 continue
             fi
             
@@ -372,10 +382,25 @@ test_hash_parity() {
             hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
             local gei
             gei=$(echo "$result" | grep -o '"globalExecIndex":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local timestamp
+            timestamp=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local state_root
+            state_root=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local leader_address
+            leader_address=$(echo "$result" | grep -o '"leaderAddress":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local parent_hash
+            parent_hash=$(echo "$result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local stake_root
+            stake_root=$(echo "$result" | grep -o '"stakeStatesRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
             
             if [ -z "$hash" ] || [ "$hash" = "null" ]; then
                 node_hashes+=("null")
                 node_geis+=("null")
+                node_timestamps+=("null")
+                node_state_roots+=("null")
+                node_leader_addrs+=("null")
+                node_parent_hashes+=("null")
+                node_stake_roots+=("null")
                 null_count=$((null_count + 1))
                 continue
             fi
@@ -388,6 +413,16 @@ test_hash_parity() {
             
             node_hashes+=("$hash")
             node_geis+=("$gei_dec")
+            
+            local ts_dec="?"
+            if [ -n "$timestamp" ]; then
+                ts_dec=$(printf "%d" "$timestamp" 2>/dev/null || echo "?")
+            fi
+            node_timestamps+=("$ts_dec")
+            node_state_roots+=("$state_root")
+            node_leader_addrs+=("$leader_address")
+            node_parent_hashes+=("$parent_hash")
+            node_stake_roots+=("$stake_root")
             
             if [ -z "$first_hash" ]; then
                 first_hash="$hash"
@@ -422,6 +457,8 @@ test_hash_parity() {
                     log "  - Node $i: \`(block không tồn tại - đang sync)\`"
                 else
                     log "  - Node $i: hash=\`${node_hashes[$i]:0:18}...\` gei=\`${node_geis[$i]}\`"
+                    log "             state=\`${node_state_roots[$i]:0:18}...\` stake=\`${node_stake_roots[$i]:0:18}...\`"
+                    log "             leader=\`${node_leader_addrs[$i]:0:14}...\` ts=\`${node_timestamps[$i]}\`"
                 fi
             done
             log ""

@@ -30,8 +30,6 @@ pub struct CommitProcessor {
     /// [PHASE-A DEPRECATED] epoch_base_index_override is no longer used for GEI computation.
     /// Go is the Single Writer for GEI. Kept for `with_epoch_info()` API compatibility.
     epoch_base_index_override: Option<u64>,
-    /// Callback to get current last global execution index
-    get_last_global_exec_index: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     /// Shared last global exec index for direct updates
     shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
     /// Optional executor client to send blocks to Go executor
@@ -77,7 +75,6 @@ impl CommitProcessor {
             pending_commits: BTreeMap::new(),
             commit_index_callback: None,
             global_exec_index_callback: None,
-            get_last_global_exec_index: None,
             shared_last_global_exec_index: None,
             current_epoch: 0,
             epoch_base_index_override: None,
@@ -112,16 +109,6 @@ impl CommitProcessor {
         F: Fn(u64) + Send + Sync + 'static,
     {
         self.global_exec_index_callback = Some(Arc::new(callback));
-        self
-    }
-
-    /// Set callback to get current last global execution index
-    pub fn with_get_last_global_exec_index<F>(self, _callback: F) -> Self
-    where
-        F: Fn() -> u64 + Send + Sync + 'static,
-    {
-        // Currently not used, but kept for future extensibility
-        // CRITICAL: We now read directly from shared_last_global_exec_index instead of callback
         self
     }
 
@@ -268,7 +255,7 @@ impl CommitProcessor {
         // compute GEI from 3 fragile sources (epoch_base, commit_index,
         // fragment_offset) that could diverge across nodes after restarts.
         // ═══════════════════════════════════════════════════════════════
-        let epoch_base_index = self.epoch_base_index_override.unwrap_or(0);
+        let mut epoch_base_index = self.epoch_base_index_override.unwrap_or(0);
         info!("🚀 [COMMIT PROCESSOR] PHASE-A: Go-Authoritative GEI mode. epoch={}, epoch_base_hint={}, next_expected_index={}",
             current_epoch, epoch_base_index, next_expected_index);
 
@@ -414,6 +401,25 @@ impl CommitProcessor {
                             next_expected_index = commit_index;
                             // PHASE-A: Reset hint offset too (Go handles actual GEI)
                             hint_fragment_offset = 0;
+
+                            // FIX (2026-04-29): Query Go for the current GEI to produce
+                            // accurate hint values. Without this, hint_gei uses the stale
+                            // epoch_base_index from the pre-wipe session, producing hints
+                            // far below Go's actual GEI, triggering false-positive
+                            // RUST-SESSION-RESTART detection in Go.
+                            if let Some(ref client) = executor_client {
+                                if let Ok(go_gei) = client.get_last_global_exec_index().await {
+                                    // Hint formula: hint_gei = epoch_base + commit_index + offset
+                                    // We want hint_gei ≈ go_gei + 1 for the first new commit
+                                    // So: epoch_base = (go_gei + 1) - commit_index - 0
+                                    let new_base = (go_gei + 1).saturating_sub(commit_index as u64);
+                                    warn!("🔄 [DAG-RESET] Updated epoch_base_index hint: {} → {} (Go GEI={}, commit={})",
+                                        epoch_base_index, new_base, go_gei, commit_index);
+                                    epoch_base_index = new_base;
+                                } else {
+                                    warn!("⚠️ [DAG-RESET] Failed to query Go GEI — using stale epoch_base_index={}", epoch_base_index);
+                                }
+                            }
                         }
                     }
 

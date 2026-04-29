@@ -182,12 +182,12 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	case *pb.Request_SyncBlocksRequest:
 		// EXECUTE mode
 		blockCount := len(req.SyncBlocksRequest.GetBlocks())
-		rpcTimeout = time.Duration(blockCount*3+30) * time.Second
-		if rpcTimeout < 60*time.Second {
-			rpcTimeout = 60 * time.Second // minimum 60s
+		rpcTimeout = time.Duration(blockCount*10+120) * time.Second
+		if rpcTimeout < 180*time.Second {
+			rpcTimeout = 180 * time.Second // minimum 180s
 		}
-		if rpcTimeout > 600*time.Second {
-			rpcTimeout = 600 * time.Second // maximum 10 minutes
+		if rpcTimeout > 1200*time.Second {
+			rpcTimeout = 1200 * time.Second // maximum 20 minutes
 		}
 	case *pb.Request_WaitForSyncToBlockRequest:
 		rpcTimeout = 60 * time.Second // polling-based, up to 30s internally + margin

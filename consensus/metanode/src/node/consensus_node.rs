@@ -1165,18 +1165,6 @@ impl ConsensusNode {
                 shared_last_global_exec_index.clone(),
             ),
         )
-        .with_get_last_global_exec_index({
-            let shared_index = shared_last_global_exec_index.clone();
-            move || {
-                if let Ok(_rt) = tokio::runtime::Handle::try_current() {
-                    warn!("⚠️ get_last_global_exec_index called from async context, returning 0.");
-                    0
-                } else {
-                    let shared_index_clone = shared_index.clone();
-                    futures::executor::block_on(async { *shared_index_clone.lock().await })
-                }
-            }
-        })
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
         .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
         .with_next_expected_index(next_expected_commit_index)

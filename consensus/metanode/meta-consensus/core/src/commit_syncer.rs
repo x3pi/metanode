@@ -966,7 +966,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             if local_commit > self.synced_commit_index {
                 if local_handled_gap > 10 {
                     tracing::info!(
-                        "[COMMIT-SYNCER] PREVENTING synced_commit_index jump {} → {} because we are intentionally bridging a {} block gap for Go Master.",
+                        "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} despite handled gap {} \
+                         (Go Master will catch up via batch-drain, CommitProcessor handles ordering)",
                         self.synced_commit_index, local_commit, local_handled_gap
                     );
                 } else {
@@ -976,8 +977,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         local_commit,
                         self.coordination_hub.get_phase()
                     );
-                    self.synced_commit_index = local_commit;
                 }
+                self.synced_commit_index = local_commit;
             }
         }
         info!(

@@ -340,7 +340,7 @@ pub async fn transition_to_epoch_from_system_tx(
         "📋 [COMMITTEE] Fetching for epoch {} from {}",
         new_epoch, committee_source.socket_path
     );
-    let (committee, epoch_timestamp_to_use) = committee_source
+    let (committee, epoch_timestamp_to_use, eth_addresses) = committee_source
         .fetch_committee_with_timestamp(&config.executor_send_socket_path, new_epoch)
         .await?;
 
@@ -355,24 +355,15 @@ pub async fn transition_to_epoch_from_system_tx(
 
     let committee_for_priority_check = committee.clone();
 
-    // Update epoch_eth_addresses cache
-    if let Err(e) = committee_source
-        .fetch_and_update_epoch_eth_addresses(
-            &config.executor_send_socket_path,
-            new_epoch,
-            &node.epoch_eth_addresses,
-        )
-        .await
+    // Update epoch_eth_addresses cache atomically
     {
-        warn!("⚠️ [TRANSITION] Failed to update epoch_eth_addresses: {}", e);
-    }
-
-    // Prune old epochs from epoch_eth_addresses (keep 2 max)
-    {
-        let mut addrs = node.epoch_eth_addresses.write().await;
-        if addrs.len() > 2 {
+        let mut cache = node.epoch_eth_addresses.write().await;
+        cache.insert(new_epoch, eth_addresses);
+        
+        // Keep only last 2 epochs to prevent unbounded growth
+        if cache.len() > 2 {
             let min_keep = new_epoch.saturating_sub(1);
-            addrs.retain(|&epoch, _| epoch >= min_keep);
+            cache.retain(|&epoch, _| epoch >= min_keep);
         }
     }
 

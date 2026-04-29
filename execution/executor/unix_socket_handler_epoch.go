@@ -1111,13 +1111,15 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	currentGEI := storage.GetLastGlobalExecIndex()
 
 	// R7: Crash-guard for Cache Invalidation
-	// Guarantee cache is invalidated on exit, even if batch is interrupted or fails
+	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {
-		rh.chainState.InvalidateAllState()
-		mvm.ClearAllMVMApi()
-		mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
-		mvm.CallClearAllStateInstances()
-		logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+		if executedCount > 0 {
+			rh.chainState.InvalidateAllState()
+			mvm.ClearAllMVMApi()
+			mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
+			mvm.CallClearAllStateInstances()
+			logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+		}
 	}()
 
 	for i, blockData := range blocks {
@@ -1345,16 +1347,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Completed: executed %d/%d blocks, last_block=#%d, last_gei=%d",
 		executedCount, blockCount, lastExecutedBlock, lastExecutedGEI)
 
-	// CRITICAL FIX (Apr 2026): When blocks are synced directly into the database without 
-	// executing EVM transactions, the C++ MVM's internal state and Go-side MVMApi caches 
-	// become stale. If we don't forcefully clear ALL of them (including protected ones), 
-	// the very next native block execution will read stale data, mutating local state 
-	// incorrectly and causing a hard fork.
-	rh.chainState.InvalidateAllState()
-	mvm.ClearAllMVMApi()
-	mvm.ClearAllProtectedMVMApi()
-	mvm.CallClearAllStateInstances()
-	logger.Info("🧹 [SNAPSHOT-RESUME] Actively cleared all C++ MVM and Go-side caches after block sync")
+	// Cache invalidation is handled by the defer block at the start of the function
 
 	return &pb.SyncBlocksResponse{
 		SyncedCount:     executedCount,

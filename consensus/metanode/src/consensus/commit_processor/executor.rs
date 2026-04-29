@@ -116,40 +116,22 @@ pub async fn dispatch_commit(
                 continue;
             }
 
-            // Try to get committee for commit's epoch, with fallback to current or previous epoch
+            // Try to get committee for commit's epoch
             let eth_addresses = if let Some(addrs) = epoch_addresses.get(&epoch) {
                 addrs.clone()
-            } else if epoch > 0 {
-                // Try previous epoch (common during transition)
-                if let Some(addrs) = epoch_addresses.get(&(epoch - 1)) {
-                    warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (during transition)",
-                            epoch - 1, epoch);
-                    addrs.clone()
-                } else {
-                    // Last resort: use any available epoch
-                    if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
-                        warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (only available)",
-                                available_epoch, epoch);
-                        addrs.clone()
-                    } else {
-                        error!("🚨 [FATAL] No committees available in cache!");
-                        anyhow::bail!("No committee data available in cache — cannot determine leader for epoch {}.", epoch);
-                    }
-                }
             } else {
-                // epoch == 0 but not found - use any available
-                if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
-                    warn!(
-                        "⚠️ [LEADER] Using epoch {} committee for commit from epoch 0",
-                        available_epoch
-                    );
-                    addrs.clone()
-                } else {
-                    error!("🚨 [FATAL] No committees available in cache!");
-                    anyhow::bail!(
-                        "No committee data available in cache (epoch 0) — cannot determine leader."
-                    );
+                drop(epoch_addresses); // Release lock before retry
+                retry_attempts += 1;
+                if retry_attempts > max_retries {
+                    error!("🚨 [FATAL] No committee available for epoch {} after {} retries!", epoch, max_retries);
+                    anyhow::bail!("No committee data available in cache for epoch {} — cannot determine leader. Node requires restart.", epoch);
                 }
+                warn!(
+                    "⏳ [LEADER] epoch_eth_addresses missing epoch {}, waiting... retry {}/{}",
+                    epoch, retry_attempts, max_retries
+                );
+                sleep(Duration::from_millis(200)).await;
+                continue;
             };
 
             // STEP 2: Validate leader index is in range

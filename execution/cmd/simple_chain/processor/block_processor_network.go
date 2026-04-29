@@ -282,31 +282,33 @@ PROCESS_LOOP:
 
 		// ═══════════════════════════════════════════════════════════════════
 		// RUST SESSION RESTART DETECTION: After DAG-wipe + restart, Rust
-		// sends commits with GEI lower than Go's existing lastGEI. Without
-		// this detection, processSingleEpochData's Case 1 (duplicate/old)
-		// and GEI-REGRESSION-GUARD silently drop ALL transactions, causing
-		// frozen stateRoot → FORK.
+		// sends commits with GEI (hint) lower than Go's existing lastGEI.
 		//
-		// Detection: If incoming GEI is far below nextExpected AND has
-		// transactions, this is a new Rust session (not a stale replay).
-		// Reset nextExpected to accept the new GEI sequence.
+		// FIX (2026-04-29): Go is the AUTHORITATIVE GEI source. We must
+		// NEVER reset nextExpectedGlobalExecIndex based on Rust's hint GEI.
+		// The is_authoritative_gei path in processSingleEpochData assigns
+		// the correct GEI regardless of what Rust sends as the hint.
+		//
+		// Previously, resetting nextExpected = incomingGEI caused a permanent
+		// GEI offset (~16-23) between this node and the cluster because the
+		// incoming GEI is a Rust hint (epoch_base + commit_index), not the
+		// actual authoritative GEI.
+		//
+		// We only set rustSessionRestarted=true to bypass the GEI-REGRESSION
+		// guard, which would otherwise drop legitimate new-session commits.
 		// ═══════════════════════════════════════════════════════════════════
 		if incomingGEI < nextExpectedGlobalExecIndex && incomingGEI > 0 {
 			geiBackwardGap := nextExpectedGlobalExecIndex - incomingGEI
-			if geiBackwardGap > 50 {
-				// Large backward jump = new Rust session after DAG-wipe
-				logger.Warn("🔄 [RUST-SESSION-RESTART] Detected GEI backward jump: incoming GEI=%d << nextExpected=%d (gap=%d). "+
-					"Rust DAG restarted. Resetting nextExpected to accept new session.",
-					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap)
-				nextExpectedGlobalExecIndex = incomingGEI
-				bp.rustSessionRestarted.Store(true)
-			} else if incomingTxCount > 0 {
-				// Small backward jump with transactions — also likely a new session
-				logger.Warn("⚠️ [RUST-SESSION-RESTART] GEI=%d with %d txs is below nextExpected=%d (gap=%d). "+
-					"Resetting nextExpected for near-gap session restart.",
-					incomingGEI, incomingTxCount, nextExpectedGlobalExecIndex, geiBackwardGap)
-				nextExpectedGlobalExecIndex = incomingGEI
-				bp.rustSessionRestarted.Store(true)
+			if geiBackwardGap > 50 || incomingTxCount > 0 {
+				// Rust session restart detected — mark flag but do NOT reset nextExpected.
+				// Go is the authoritative GEI source and must continue from its own counter.
+				if !bp.rustSessionRestarted.Load() {
+					logger.Warn("🔄 [RUST-SESSION-RESTART] Detected: incoming GEI=%d << nextExpected=%d (gap=%d). "+
+						"Marking session restart. Go will continue authoritative GEI from %d (NOT resetting to Rust hint).",
+						incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, nextExpectedGlobalExecIndex)
+					bp.rustSessionRestarted.Store(true)
+				}
+				// DO NOT reset nextExpectedGlobalExecIndex — Go is authoritative.
 			}
 		}
 
@@ -372,10 +374,27 @@ PROCESS_LOOP:
 						// then handle this commit normally below
 						draining = false
 						// Process the batch first
-						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+						// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
+						// use the same atomic counter. Previously used Rust's hint GEI
+						// directly, which could diverge from GEIAuthority's counter.
+						geiAuth := GetGEIAuthority()
+						if geiAuth.IsEnabled() {
+							for i := uint64(0); i < batchCount; i++ {
+								geiAuth.AssignGEI()
+							}
+							actualGEI := geiAuth.GetLastAssignedGEI()
+							bp.updateAndPersistLastGlobalExecIndex(actualGEI)
+							nextExpectedGlobalExecIndex = actualGEI + 1
+							if actualGEI != highestGEI {
+								logger.Info("🔑 [BATCH-DRAIN-AUTH] GEI corrected: rust_hint=%d → go_auth=%d (batch=%d)",
+									highestGEI, actualGEI, batchCount)
+							}
+						} else {
+							bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+							nextExpectedGlobalExecIndex = highestGEI + 1
+						}
 						bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
-						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash()) // update hash from the last empty commit
-						nextExpectedGlobalExecIndex = highestGEI + 1
+						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
 							bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
 						}
@@ -401,9 +420,27 @@ PROCESS_LOOP:
 			drainTimeout.Stop()
 
 			// Persist only the final GEI (1 DB write for entire batch)
-			bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
+			// use the same atomic counter, preventing +1 offset divergence.
+			{
+				geiAuth := GetGEIAuthority()
+				if geiAuth.IsEnabled() {
+					for i := uint64(0); i < batchCount; i++ {
+						geiAuth.AssignGEI()
+					}
+					actualGEI := geiAuth.GetLastAssignedGEI()
+					bp.updateAndPersistLastGlobalExecIndex(actualGEI)
+					nextExpectedGlobalExecIndex = actualGEI + 1
+					if actualGEI != highestGEI {
+						logger.Info("🔑 [BATCH-DRAIN-AUTH] GEI corrected: rust_hint=%d → go_auth=%d (batch=%d)",
+							highestGEI, actualGEI, batchCount)
+					}
+				} else {
+					bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+					nextExpectedGlobalExecIndex = highestGEI + 1
+				}
+			}
 			bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
-			nextExpectedGlobalExecIndex = highestGEI + 1
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
 			}

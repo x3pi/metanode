@@ -46,6 +46,9 @@ type blockResult struct {
 	ReceiptsRoot     string `json:"receiptsRoot"`
 	GlobalExecIndex  string `json:"globalExecIndex"`
 	Epoch            string `json:"epoch"`
+	TimeStamp        string `json:"timestamp"`
+	StakeStatesRoot  string `json:"stakeStatesRoot"`
+	LeaderAddress    string `json:"leaderAddress"`
 }
 
 // ===== Block info (parsed from blockResult) =====
@@ -58,6 +61,9 @@ type blockInfo struct {
 	ReceiptsRoot     string
 	GlobalExecIndex  string
 	Epoch            string
+	TimeStamp        string
+	StakeStatesRoot  string
+	LeaderAddress    string
 	Error            string // non-empty if fetch failed
 }
 
@@ -306,14 +312,15 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			continue
 		}
 
-		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot across all valid nodes
+		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot, etc. across all valid nodes
 		hasMismatch := false
 		ref := validBlocks[0]
 		for i := 1; i < len(validBlocks); i++ {
 			b := validBlocks[i]
 			if b.Hash != ref.Hash || b.ParentHash != ref.ParentHash ||
 				b.StateRoot != ref.StateRoot || b.TransactionsRoot != ref.TransactionsRoot ||
-				b.ReceiptsRoot != ref.ReceiptsRoot {
+				b.ReceiptsRoot != ref.ReceiptsRoot || b.TimeStamp != ref.TimeStamp ||
+				b.StakeStatesRoot != ref.StakeStatesRoot || b.LeaderAddress != ref.LeaderAddress {
 				hasMismatch = true
 				break
 			}
@@ -427,6 +434,9 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		ReceiptsRoot:     block.ReceiptsRoot,
 		GlobalExecIndex:  block.GlobalExecIndex,
 		Epoch:            block.Epoch,
+		TimeStamp:        block.TimeStamp,
+		StakeStatesRoot:  block.StakeStatesRoot,
+		LeaderAddress:    block.LeaderAddress,
 	}, nil
 }
 
@@ -532,7 +542,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	}
 
 	// Determine which fields differ
-	hashDiff, parentDiff, stateDiff, txDiff, rcpDiff := false, false, false, false, false
+	hashDiff, parentDiff, stateDiff, txDiff, rcpDiff, timeDiff, stakeDiff, leaderDiff := false, false, false, false, false, false, false, false
 	if len(validBlocks) >= 2 {
 		ref := validBlocks[0]
 		for _, b := range validBlocks[1:] {
@@ -550,6 +560,15 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			}
 			if b.ReceiptsRoot != ref.ReceiptsRoot {
 				rcpDiff = true
+			}
+			if b.TimeStamp != ref.TimeStamp {
+				timeDiff = true
+			}
+			if b.StakeStatesRoot != ref.StakeStatesRoot {
+				stakeDiff = true
+			}
+			if b.LeaderAddress != ref.LeaderAddress {
+				leaderDiff = true
 			}
 		}
 	}
@@ -570,6 +589,15 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	}
 	if rcpDiff {
 		diffs = append(diffs, "receiptsRoot")
+	}
+	if timeDiff {
+		diffs = append(diffs, "timestamp")
+	}
+	if stakeDiff {
+		diffs = append(diffs, "stakeStatesRoot")
+	}
+	if leaderDiff {
+		diffs = append(diffs, "leaderAddress")
 	}
 	if len(diffs) > 0 {
 		fmt.Printf("   ⚠\ufe0f  Fields differ: %s\n", strings.Join(diffs, ", "))
@@ -597,6 +625,15 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 		}
 		if rcpDiff {
 			fmt.Printf("   %-12s receiptsRoot=%s\n", "", bi.ReceiptsRoot)
+		}
+		if timeDiff {
+			fmt.Printf("   %-12s timestamp=%s\n", "", bi.TimeStamp)
+		}
+		if stakeDiff {
+			fmt.Printf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot)
+		}
+		if leaderDiff {
+			fmt.Printf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress)
 		}
 	}
 	fmt.Println()
@@ -627,6 +664,9 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 		header += "," + name + "_receiptsRoot"
 		header += "," + name + "_gei"
 		header += "," + name + "_epoch"
+		header += "," + name + "_timestamp"
+		header += "," + name + "_stakeStatesRoot"
+		header += "," + name + "_leaderAddress"
 	}
 	fmt.Fprintln(f, header)
 
@@ -648,6 +688,9 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 				line += "," + bi.TransactionsRoot
 				line += "," + bi.ReceiptsRoot
 				line += fmt.Sprintf(",%d,%d", parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
+				line += "," + bi.TimeStamp
+				line += "," + bi.StakeStatesRoot
+				line += "," + bi.LeaderAddress
 			}
 		}
 		fmt.Fprintln(f, line)
@@ -797,7 +840,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			} else if bi.IsError() {
 				fmt.Printf("      %-12s %s\n", n.Name+":", bi.Error)
 			} else {
-				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
+				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d  timestamp=%s  leaderAddress=%s\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch), bi.TimeStamp, bi.LeaderAddress)
 			}
 		}
 		return false
@@ -836,8 +879,19 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
 				continue
 			}
-			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  gei=%d  epoch=%d\n",
-				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
+			// Format the basic info
+			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  gei=%d  epoch=%d\n",
+				n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
+			
+			// Always print parentHash and stateRoot in watch mode to maintain previous format
+			alertBuf.WriteString(fmt.Sprintf("   %-12s parentHash=%s\n", "", bi.ParentHash))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s stateRoot=%s\n", "", bi.StateRoot))
+			
+			// Print new fields so we can see what differs
+			alertBuf.WriteString(fmt.Sprintf("   %-12s timestamp=%s\n", "", bi.TimeStamp))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress))
+			alertBuf.WriteString("\n")
 		}
 	}
 
