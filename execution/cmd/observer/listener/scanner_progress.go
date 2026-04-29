@@ -1,6 +1,7 @@
 package listener
 
 import (
+	"encoding/json"
 	"math/big"
 	"time"
 
@@ -204,14 +205,14 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 
 		if scanMode == 1 {
 			for {
-				defCli, _ := s.GetActiveClient(0)
-				if defCli == nil {
+				remoteCli, _ := s.GetActiveRemoteClient(rc.NationId, 0)
+				if remoteCli == nil {
 					logger.Warn("⚠️  [Scanner] fetch latest block: no active client available, retrying...")
 					time.Sleep(2 * time.Second)
 					continue
 				}
 
-				latestBlock, err := defCli.ChainGetBlockNumber()
+				latestBlock, err := remoteCli.ChainGetBlockNumber()
 				if err == nil && latestBlock > 0 {
 					result[rc.NationId] = ScanResumeState{RemoteBlock: latestBlock, LocalBlock: 0, NeedCheckExecuted: false}
 					logger.Info("📋 [Scanner] Resume nationId=%d from latest block %d (scanMode=1)", rc.NationId, latestBlock)
@@ -250,11 +251,16 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 				if len(maxReceipt.Return()) > 0 {
 					if method, ok := s.cfg.ConfigAbi.Methods["getNetworkQuorumBlock"]; ok {
 						if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 0 {
-							var progData struct {
-								RemoteBlock *big.Int `abi:"remoteBlock"`
-								LocalBlock  *big.Int `abi:"localBlock"`
+							bz, errMarshal := json.Marshal(vals[0])
+							if errMarshal != nil {
+								logger.Warn("⚠️  [Scanner] json.Marshal getNetworkQuorumBlock failed: %v", errMarshal)
+								break
 							}
-							if err := s.cfg.ConfigAbi.UnpackIntoInterface(&progData, "getNetworkQuorumBlock", maxReceipt.Return()); err == nil {
+							var progData struct {
+								RemoteBlock *big.Int `json:"remoteBlock"`
+								LocalBlock  *big.Int `json:"localBlock"`
+							}
+							if err := json.Unmarshal(bz, &progData); err == nil {
 								rBlk := uint64(0)
 								if progData.RemoteBlock != nil {
 									rBlk = progData.RemoteBlock.Uint64()
@@ -263,12 +269,10 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 								if progData.LocalBlock != nil {
 									lBlk = progData.LocalBlock.Uint64()
 								}
-								if rBlk > 0 {
-									result[rc.NationId] = ScanResumeState{RemoteBlock: rBlk, LocalBlock: lBlk, NeedCheckExecuted: true}
-									logger.Info("📋 [Scanner] Resume nationId=%d from Single Network Quorum Block %d (localBlock %d) (scanMode=0)", rc.NationId, rBlk, lBlk)
-								}
+								result[rc.NationId] = ScanResumeState{RemoteBlock: rBlk, LocalBlock: lBlk, NeedCheckExecuted: true}
+								logger.Info("📋 [Scanner] Resume nationId=%d from Single Network Quorum Block %d (localBlock %d) (scanMode=0)", rc.NationId, rBlk, lBlk)
 							} else {
-								logger.Warn("⚠️  [Scanner] UnpackIntoInterface getNetworkQuorumBlock failed: %v", err)
+								logger.Warn("⚠️  [Scanner] json.Unmarshal getNetworkQuorumBlock failed: %v", err)
 							}
 						} else {
 							if err != nil {

@@ -720,9 +720,16 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-		
-		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
-		gei, epoch, _ := getPeerInfo(client, n.URL)
+
+		var gei, epoch uint64
+		if err == nil {
+			// Lấy gei và epoch từ chính block mới nhất thông qua eth_getBlockByNumber
+			bi, errBi := getBlockInfo(client, n.URL, num)
+			if errBi == nil {
+				gei = parseHexStr(bi.GlobalExecIndex)
+				epoch = parseHexStr(bi.Epoch)
+			}
+		}
 
 		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {
@@ -789,14 +796,18 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		} else {
 			fmt.Printf(" ✅ hash khớp %d blocks (block %d→%d)\n", matched, from, minBlock)
 		}
-		
+
 		if len(emptyBlocks) > 0 {
 			show := len(emptyBlocks)
-			if show > 10 { show = 10 }
+			if show > 10 {
+				show = 10
+			}
 			fmt.Printf("   👻 Có %d block rỗng/nhảy cóc: %v", len(emptyBlocks), emptyBlocks[:show])
-			if len(emptyBlocks) > 10 { fmt.Printf("...") }
+			if len(emptyBlocks) > 10 {
+				fmt.Printf("...")
+			}
 			fmt.Println()
-			
+
 			// Lưu vào file (tránh trùng lặp)
 			if trackedGhosts != nil {
 				f, err := os.OpenFile("ghost_blocks.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -812,7 +823,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				}
 			}
 		}
-		
+
 		// In hash của block mới nhất (minBlock) từ mỗi node
 		fmt.Printf("   📦 Block %d hashes:\n", minBlock)
 		for _, n := range nodes {

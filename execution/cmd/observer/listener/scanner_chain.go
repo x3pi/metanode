@@ -55,7 +55,6 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 		}
 
 		if latestBlock <= lastBlock {
-			// Đã scan hết, chờ block mới
 			isEmpty := true
 			s.pendingBatches.Range(func(key, value interface{}) bool {
 				isEmpty = false
@@ -87,7 +86,6 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 
 		// Scan từng block một từ lastBlock+1 đến latestBlock
 		for blockNum := lastBlock + 1; blockNum <= latestBlock; blockNum++ {
-
 			hasEvents, isExecuted, errScan := s.scanAndSubmit(rc, client, blockNum, needCheckExecuted, localBlock)
 			if errScan != nil {
 				// GetLogs thất bại — dừng, thử lại block này ở vòng ngoài
