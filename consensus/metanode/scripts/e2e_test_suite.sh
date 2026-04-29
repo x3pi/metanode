@@ -458,9 +458,35 @@ test_hash_parity() {
                 else
                     log "  - Node $i: hash=\`${node_hashes[$i]:0:18}...\` gei=\`${node_geis[$i]}\`"
                     log "             state=\`${node_state_roots[$i]:0:18}...\` stake=\`${node_stake_roots[$i]:0:18}...\`"
-                    log "             leader=\`${node_leader_addrs[$i]:0:14}...\` ts=\`${node_timestamps[$i]}\`"
+                    log "             leader=\`${node_leader_addrs[$i]:0:14}...\` ts=\`${node_timestamps[$i]}\` parent=\`${node_parent_hashes[$i]:0:18}...\`"
                 fi
             done
+            
+            local mismatched_fields=""
+            local valid_node=-1
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${node_hashes[$i]}" != "offline" ] && [ "${node_hashes[$i]}" != "null" ]; then
+                    if [ "$valid_node" = "-1" ]; then
+                        valid_node=$i
+                    else
+                        if [ "${node_hashes[$i]}" != "${node_hashes[$valid_node]}" ]; then
+                            if [ "${node_geis[$i]}" != "${node_geis[$valid_node]}" ]; then mismatched_fields="$mismatched_fields GEI"; fi
+                            if [ "${node_timestamps[$i]}" != "${node_timestamps[$valid_node]}" ]; then mismatched_fields="$mismatched_fields TIMESTAMP"; fi
+                            if [ "${node_state_roots[$i]}" != "${node_state_roots[$valid_node]}" ]; then mismatched_fields="$mismatched_fields STATE_ROOT"; fi
+                            if [ "${node_leader_addrs[$i]}" != "${node_leader_addrs[$valid_node]}" ]; then mismatched_fields="$mismatched_fields LEADER_ADDR"; fi
+                            if [ "${node_parent_hashes[$i]}" != "${node_parent_hashes[$valid_node]}" ]; then mismatched_fields="$mismatched_fields PARENT_HASH"; fi
+                            if [ "${node_stake_roots[$i]}" != "${node_stake_roots[$valid_node]}" ]; then mismatched_fields="$mismatched_fields STAKE_ROOT"; fi
+                        fi
+                    fi
+                fi
+            done
+            if [ -n "$mismatched_fields" ]; then
+                local unique_fields=$(echo $mismatched_fields | tr ' ' '\n' | sort | uniq | tr '\n' ' ')
+                log "  🔍 TRƯỜNG BỊ LỆCH (Nguyên nhân khác hash): **$unique_fields**"
+            elif [ "$block_mismatch" = "true" ]; then
+                log "  🔍 TRƯỜNG BỊ LỆCH: **TRANSACTIONS / RECEIPTS / UNKNOWN** (Các trường metadata giống hệt nhau)"
+            fi
+            
             log ""
         else
             log "✅ Block #$check_block: hash nhất quán (gei=${first_gei:-?})"
