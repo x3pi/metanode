@@ -119,94 +119,115 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	logger.Debug("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
 	if !ok {
 		if blockNumber == 0 {
-			// Block 0 doesn't exist yet — Go Master may not have initialized genesis block
-			// In this case, get validators from current state (genesis)
-			logger.Warn("Block 0 not found, getting validators from current state (genesis fallback)")
-			// Fallback: get validators from current state instead of block 0
-			logger.Debug("🔍 [EPOCH] Getting validators from stake state DB...")
-			validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
-			if err != nil {
-				logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
-				return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
-			}
-
-			logger.Debug("🔍 [EPOCH] Found %d total validators in state (before filtering)", len(validators))
-
-			if len(validators) == 0 {
-				logger.Warn("🔍 [EPOCH] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
-			} else {
-				// Log details of each validator found
-				for i, val := range validators {
-					stake := val.TotalStakedAmount()
-					logger.Debug("🔍 [EPOCH] Validator[%d] from DB: address=%s, name=%s, stake=%s, jailed=%v, p2p=%s",
-						i, val.Address().Hex(), val.Name(), stake.String(), val.IsJailed(), val.P2PAddress())
-				}
-			}
-
-			// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-			// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-			// Go must use the SAME string comparison to produce identical ordering
-			sort.Slice(validators, func(i, j int) bool {
-				return validators[i].AuthorityKey() < validators[j].AuthorityKey()
-			})
-
+			// CRITICAL FORK-SAFETY FIX: NEVER use current state for epoch 0 boundary!
+			// If a node restarts midway through the chain, its "current state" might have
+			// NEW validators or changed stakes, causing its epoch 0 committee to diverge
+			// from nodes that ran continuously from genesis.
+			// We MUST use the genesis validators directly from genesis.json.
+			logger.Warn("Block 0 not found, getting validators from genesis.json to ensure fork-safe deterministic committee")
+			
 			validatorInfoList := &pb.ValidatorInfoList{}
-			skippedJailed := 0
-			validatorsWithMinStake := 0
-			for _, dbValidator := range validators {
-				if dbValidator.IsJailed() {
-					skippedJailed++
-					logger.Debug("Skipping jailed validator: %s", dbValidator.Address().Hex())
-					continue
-				}
-				totalStake := dbValidator.TotalStakedAmount()
-
-				// CRITICAL FIX: For genesis (block 0), include validators even if they have no stake yet
-				// This allows Rust to start up and create committee from genesis validators
-				// Validators will get stake through delegation later
-				var stakeNormalized *big.Int
-				if totalStake == nil || totalStake.Sign() <= 0 {
-					// Genesis validators may not have stake yet - use minimum stake of 1000000
-					logger.Info("Genesis validator %s has no stake yet, using minimum stake of 1000000", dbValidator.Address().Hex())
-					stakeNormalized = big.NewInt(1000000)
-					validatorsWithMinStake++
+			var genesisValidators []*pb.Validator
+			
+			if rh.genesisPath != "" {
+				if genesisData, err := config.LoadGenesisData(rh.genesisPath); err == nil {
+					genesisValidators = genesisData.Validators
+					logger.Info("✅ [EPOCH] Loaded %d genesis validators directly from %s for deterministic epoch 0 committee", len(genesisValidators), rh.genesisPath)
 				} else {
-					const precision = 1_000_000_000_000_000_000
-					stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(precision))
-					if stakeNormalized.Sign() <= 0 {
-						stakeNormalized = big.NewInt(1)
-						validatorsWithMinStake++
+					logger.Error("🚨 [FORK-SAFETY] Could not load genesis.json: %v. This may cause consensus fork if validators changed since genesis!", err)
+				}
+			} else {
+				logger.Error("🚨 [FORK-SAFETY] No genesis path configured! This may cause consensus fork if validators changed since genesis!")
+			}
+
+			if len(genesisValidators) > 0 {
+				validatorsWithMinStake := 0
+				for _, genVal := range genesisValidators {
+					// Use 1000000 as deterministic starting stake (since genesis validators start with no stake)
+					stakeNormalized := big.NewInt(1000000)
+					validatorsWithMinStake++
+					
+					val := &pb.ValidatorInfo{
+						Address:                    genVal.Address,
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               genVal.AuthorityKey,
+						ProtocolKey:                genVal.ProtocolKey,
+						NetworkKey:                 genVal.NetworkKey,
+						Name:                       genVal.Name,
+						Description:                genVal.Description,
+						Website:                    genVal.Website,
+						Image:                      genVal.Image,
+						CommissionRate:             genVal.CommissionRate,
+						MinSelfDelegation:          "0",
+						AccumulatedRewardsPerShare: "0",
+						P2PAddress:                 genVal.P2PAddress,
 					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 				}
 
-				// CRITICAL: Use separate protocol_key and network_key for committee.json compatibility
-				protocolKey := dbValidator.ProtocolKey()
-				networkKey := dbValidator.NetworkKey()
-				val := &pb.ValidatorInfo{
-					Address:                    dbValidator.Address().Hex(), // FIXED: Ethereum wallet address
-					Stake:                      stakeNormalized.String(),
-					AuthorityKey:               dbValidator.AuthorityKey(),
-					ProtocolKey:                protocolKey, // Protocol key (Ed25519) - compatible with committee.json
-					NetworkKey:                 networkKey,  // Network key (Ed25519) - compatible with committee.json
-					Name:                       dbValidator.Name(),
-					Description:                dbValidator.Description(),
-					Website:                    dbValidator.Website(),
-					Image:                      dbValidator.Image(),
-					CommissionRate:             dbValidator.CommissionRate(),
-					MinSelfDelegation:          dbValidator.MinSelfDelegation().String(),
-					AccumulatedRewardsPerShare: dbValidator.AccumulatedRewardsPerShare().String(),
-					P2PAddress:                 dbValidator.P2PAddress(), // NEW: P2P address for committee
+				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
+				sort.Slice(validatorInfoList.Validators, func(i, j int) bool {
+					return validatorInfoList.Validators[i].AuthorityKey < validatorInfoList.Validators[j].AuthorityKey
+				})
+
+				for i, val := range validatorInfoList.Validators {
+					authKeyPreview := val.AuthorityKey
+					if len(authKeyPreview) > 50 {
+						authKeyPreview = authKeyPreview[:50] + "..."
+					}
+					logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] Genesis ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s",
+						i, val.Address, val.Stake, val.Name, authKeyPreview)
+				}
+			} else {
+				// Fallback to current state ONLY if genesis.json is missing (should not happen in prod)
+				logger.Warn("⚠️ [EPOCH] Using current StakeStateDB as fallback for genesis committee. This is NOT fork-safe!")
+				validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
+				if err != nil {
+					logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
+					return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
 				}
 
-				// CRITICAL: Log ValidatorInfo exactly as Rust will receive it
-				authKeyPreview := val.AuthorityKey
-				if len(authKeyPreview) > 50 {
-					authKeyPreview = authKeyPreview[:50] + "..."
+				if len(validators) == 0 {
+					logger.Warn("🔍 [EPOCH] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
 				}
-				logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s, p2p_address='%s'",
-					len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey, val.P2PAddress)
 
-				validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				// Sort
+				sort.Slice(validators, func(i, j int) bool {
+					return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+				})
+
+				for _, dbValidator := range validators {
+					if dbValidator.IsJailed() {
+						continue
+					}
+					totalStake := dbValidator.TotalStakedAmount()
+					var stakeNormalized *big.Int
+					if totalStake == nil || totalStake.Sign() <= 0 {
+						stakeNormalized = big.NewInt(1000000)
+					} else {
+						const precision = 1_000_000_000_000_000_000
+						stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(precision))
+						if stakeNormalized.Sign() <= 0 {
+							stakeNormalized = big.NewInt(1)
+						}
+					}
+					val := &pb.ValidatorInfo{
+						Address:                    dbValidator.Address().Hex(),
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               dbValidator.AuthorityKey(),
+						ProtocolKey:                dbValidator.ProtocolKey(),
+						NetworkKey:                 dbValidator.NetworkKey(),
+						Name:                       dbValidator.Name(),
+						Description:                dbValidator.Description(),
+						Website:                    dbValidator.Website(),
+						Image:                      dbValidator.Image(),
+						CommissionRate:             dbValidator.CommissionRate(),
+						MinSelfDelegation:          dbValidator.MinSelfDelegation().String(),
+						AccumulatedRewardsPerShare: dbValidator.AccumulatedRewardsPerShare().String(),
+						P2PAddress:                 dbValidator.P2PAddress(),
+					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				}
 			}
 
 			// Set epoch_timestamp_ms and last_global_exec_index for genesis
@@ -231,8 +252,8 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			}
 			validatorInfoList.LastGlobalExecIndex = 0 // Genesis block
 
-			logger.Debug("🔍 [EPOCH] Returning validators from current state (genesis fallback): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=0",
-				len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake, validatorInfoList.EpochTimestampMs)
+			logger.Debug("🔍 [EPOCH] Returning validators from genesis.json (genesis fallback): count=%d, epoch_timestamp_ms=%d, last_global_exec_index=0",
+				len(validatorInfoList.Validators), validatorInfoList.EpochTimestampMs)
 
 			if len(validatorInfoList.Validators) == 0 {
 				logger.Warn("⚠️  No validators found in state! This may indicate:")
