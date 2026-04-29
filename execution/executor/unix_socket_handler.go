@@ -23,6 +23,7 @@ type RequestHandler struct {
 	forceCommitCallback func()                                                                 // Callback to trigger ForceCommit in BlockProcessor
 	updateLastBlockCallback func(blk types.Block)                                              // Callback to let Rust explicitly update Go memory state
 	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
+	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte)                                   // Callback to advance GEI asynchronously
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -57,6 +58,11 @@ func (rh *RequestHandler) SetUpdateLastBlockCallback(cb func(blk types.Block)) {
 // SetBroadcastCallback allows RequestHandler to trigger block broadcast during execute mode sync
 func (rh *RequestHandler) SetBroadcastCallback(cb func(blk *block.Block, backupData []byte, blockNum uint64, txCount int)) {
 	rh.broadcastCallback = cb
+}
+
+// SetPushAsyncGEIUpdateCallback allows RequestHandler to asynchronously advance GEI for empty commits
+func (rh *RequestHandler) SetPushAsyncGEIUpdateCallback(cb func(gei uint64, hash []byte)) {
+	rh.pushAsyncGEIUpdateCallback = cb
 }
 
 

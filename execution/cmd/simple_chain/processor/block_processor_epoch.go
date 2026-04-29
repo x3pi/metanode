@@ -75,10 +75,10 @@ func (bp *BlockProcessor) geiWorker() {
 	}
 }
 
-// pushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
+// PushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
 // This ensures that the global_exec_index is persisted to DB *strictly after*
 // any pending blocks with transactions. Prevents GEI from racing ahead of lost async blocks.
-func (bp *BlockProcessor) pushAsyncGEIUpdate(index uint64, hash []byte) {
+func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte) {
 	if index == 0 {
 		return
 	}

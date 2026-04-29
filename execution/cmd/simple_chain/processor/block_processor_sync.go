@@ -141,7 +141,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		}
 
 		// Sequential empty commit — update GEI and advance
-		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 		// ═══════════════════════════════════════════════════════════════
@@ -392,7 +392,7 @@ PROCESS_BLOCK:
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
-		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 		if globalExecIndex > 0 {
@@ -483,7 +483,7 @@ PROCESS_BLOCK:
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
-		bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 		if globalExecIndex > 0 {
@@ -541,7 +541,7 @@ PROCESS_BLOCK:
 				*currentBlockNumber, actualLastBlockDB, globalExecIndex)
 
 			// Still update GEI counter so the processor advances past this commit
-			bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 			*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 			// Check pending blocks
@@ -600,7 +600,7 @@ PROCESS_BLOCK:
 					globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
 				// Still update GEI counter so the processor advances past this commit
-				bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 				// Check pending blocks
@@ -780,7 +780,7 @@ PROCESS_BLOCK:
 	}
 
 	// Update GlobalExecIndex tracking (persistent)
-	bp.pushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+	bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
 
 	logger.Debug("Lastblock header: %v", newBlock.Header())
 	logger.Debug("Transactions in block: %d TXs", len(newBlock.Transactions()))

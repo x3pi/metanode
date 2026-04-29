@@ -649,6 +649,16 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 		return nil, fmt.Errorf("could not advance epoch to %d: %w", request.NewEpoch, err)
 	}
 
+	// CRITICAL FIX: Push an async GEI update so that Go's LastGlobalExecIndex
+	// actually advances to the boundary GEI. This prevents Go from staying at
+	// the last executed block's GEI when empty commits are fast-skipped by Rust.
+	// We also synchronously update the atomic variable to prevent a data race where
+	// processRustEpochData reads the old GEI before the async persist completes.
+	storage.UpdateLastGlobalExecIndex(request.BoundaryGei)
+	if rh.pushAsyncGEIUpdateCallback != nil {
+		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil)
+	}
+
 	logger.Info("✅ Successfully advanced Go state epoch",
 		"new_epoch", request.NewEpoch,
 		"timestamp_ms", timestampMs,

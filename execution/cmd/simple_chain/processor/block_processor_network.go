@@ -54,6 +54,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 		logger.Info("🔄 [RUST CONTROL] Rust explicitly advanced Go Master memory to block #%d", blk.Header().BlockNumber())
 	})
 
+	// Inject PushAsyncGEIUpdate callback to prevent empty commit stalls
+	reqHandler.SetPushAsyncGEIUpdateCallback(bp.PushAsyncGEIUpdate)
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
