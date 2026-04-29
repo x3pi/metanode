@@ -44,7 +44,8 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
-	if totalTxsQuick == 0 {
+	// Bỏ FAST-PATH skip block rỗng để tạo đầy đủ block theo yêu cầu giữ liền mạch block number
+	if false && totalTxsQuick == 0 {
 		// ORDERING: Must still validate sequential order
 		if globalExecIndex < *nextExpectedGlobalExecIndex {
 			// Old/duplicate — skip silently
@@ -441,7 +442,7 @@ PROCESS_BLOCK:
 						bp.chainState.SetcurrentBlockHeader(&headerCopy)
 
 						// FORK-SAFETY FIX: NOMT bypasses CommitBlockState during dedup, so we MUST manually
-						// invalidate Go-level memory caches (like loadedAccounts) here. Failure to do so 
+						// invalidate Go-level memory caches (like loadedAccounts) here. Failure to do so
 						// causes the next block to read stale pre-sync state, leading to Hash Mismatches!
 						bp.chainState.InvalidateAllState()
 
@@ -491,7 +492,8 @@ PROCESS_BLOCK:
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
-	if len(epochData.Transactions) == 0 && !isEpochBoundary {
+	// Bỏ SKIP-EMPTY để đảm bảo Go tạo ra block rỗng, giữ liền mạch số thứ tự block cho Scanner
+	if false && len(epochData.Transactions) == 0 && !isEpochBoundary {
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
@@ -717,7 +719,6 @@ PROCESS_BLOCK:
 		}
 	}
 
-
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.
 	//
@@ -897,7 +898,7 @@ PROCESS_BLOCK:
 					bp.nextBlockNumber.Store(*currentBlockNumber + 1)
 					headerCopy := existingBlock.Header()
 					bp.chainState.SetcurrentBlockHeader(&headerCopy)
-					
+
 					// CRITICAL: Update BlockNumber -> Hash mapping so JSON-RPC returns the correct authoritative parent hashes
 					if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(*currentBlockNumber, existingHash); err != nil {
 						logger.Error("🛡️ [POST-CREATE-FORK-GUARD] Failed to remap block #%d to P2P hash: %v", *currentBlockNumber, err)

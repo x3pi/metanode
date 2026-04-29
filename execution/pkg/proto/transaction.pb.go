@@ -1753,19 +1753,40 @@ func (x *GetTransactionByHashResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// TransactionSuccess
+// Deprecated: Use GetTransactionByHashResponse.ProtoReflect.Descriptor instead.
+func (*GetTransactionByHashResponse) Descriptor() ([]byte, []int) {
+	return file_transaction_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *GetTransactionByHashResponse) GetTransaction() *TransactionEntry {
+	if x != nil {
+		return x.Transaction
+	}
+	return nil
+}
+
+func (x *GetTransactionByHashResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 type TransactionSuccess struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Hash          []byte                 `protobuf:"bytes,1,opt,name=Hash,proto3" json:"Hash,omitempty"`               
-	Code          int64                  `protobuf:"varint,2,opt,name=Code,proto3" json:"Code,omitempty"`              
-	Message       string                 `protobuf:"bytes,3,opt,name=Message,proto3" json:"Message,omitempty"` 
-	Output        []byte                 `protobuf:"bytes,4,opt,name=Output,proto3" json:"Output,omitempty"`           
+	Hash          []byte                 `protobuf:"bytes,1,opt,name=Hash,proto3" json:"Hash,omitempty"`
+	Code          int64                  `protobuf:"varint,2,opt,name=Code,proto3" json:"Code,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=Message,proto3" json:"Message,omitempty"`
+	Output        []byte                 `protobuf:"bytes,4,opt,name=Output,proto3" json:"Output,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TransactionSuccess) Reset() {
 	*x = TransactionSuccess{}
+	mi := &file_transaction_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *TransactionSuccess) String() string {
@@ -1775,11 +1796,20 @@ func (x *TransactionSuccess) String() string {
 func (*TransactionSuccess) ProtoMessage() {}
 
 func (x *TransactionSuccess) ProtoReflect() protoreflect.Message {
+	mi := &file_transaction_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
 		return ms
 	}
-	return nil
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionSuccess.ProtoReflect.Descriptor instead.
+func (*TransactionSuccess) Descriptor() ([]byte, []int) {
+	return file_transaction_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *TransactionSuccess) GetHash() []byte {
@@ -1808,25 +1838,6 @@ func (x *TransactionSuccess) GetOutput() []byte {
 		return x.Output
 	}
 	return nil
-}
-
-// Deprecated: Use GetTransactionByHashResponse.ProtoReflect.Descriptor instead.
-func (*GetTransactionByHashResponse) Descriptor() ([]byte, []int) {
-	return file_transaction_proto_rawDescGZIP(), []int{22}
-}
-
-func (x *GetTransactionByHashResponse) GetTransaction() *TransactionEntry {
-	if x != nil {
-		return x.Transaction
-	}
-	return nil
-}
-
-func (x *GetTransactionByHashResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
 }
 
 var File_transaction_proto protoreflect.FileDescriptor
@@ -1970,7 +1981,12 @@ const file_transaction_proto_rawDesc = "" +
 	"\tGasFeeCap\x18\x12 \x01(\fR\tGasFeeCap\"u\n" +
 	"\x1cGetTransactionByHashResponse\x12?\n" +
 	"\vTransaction\x18\x01 \x01(\v2\x1d.transaction.TransactionEntryR\vTransaction\x12\x14\n" +
-	"\x05Error\x18\x02 \x01(\tR\x05Error*\xf4\x01\n" +
+	"\x05Error\x18\x02 \x01(\tR\x05Error\"n\n" +
+	"\x12TransactionSuccess\x12\x12\n" +
+	"\x04Hash\x18\x01 \x01(\fR\x04Hash\x12\x12\n" +
+	"\x04Code\x18\x02 \x01(\x03R\x04Code\x12\x18\n" +
+	"\aMessage\x18\x03 \x01(\tR\aMessage\x12\x16\n" +
+	"\x06Output\x18\x04 \x01(\fR\x06Output*\xf4\x01\n" +
 	"\x06ACTION\x12\t\n" +
 	"\x05EMPTY\x10\x00\x12\t\n" +
 	"\x05STAKE\x10\x01\x12\v\n" +
@@ -2006,7 +2022,7 @@ func file_transaction_proto_rawDescGZIP() []byte {
 }
 
 var file_transaction_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_transaction_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_transaction_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_transaction_proto_goTypes = []any{
 	(ACTION)(0),                          // 0: transaction.ACTION
 	(FEE_TYPE)(0),                        // 1: transaction.FEE_TYPE
@@ -2033,12 +2049,13 @@ var file_transaction_proto_goTypes = []any{
 	(*GetTransactionByHashRequest)(nil),  // 22: transaction.GetTransactionByHashRequest
 	(*TransactionEntry)(nil),             // 23: transaction.TransactionEntry
 	(*GetTransactionByHashResponse)(nil), // 24: transaction.GetTransactionByHashResponse
-	nil,                                  // 25: transaction.MassTransferData.MapAddressAmountEntry
+	(*TransactionSuccess)(nil),           // 25: transaction.TransactionSuccess
+	nil,                                  // 26: transaction.MassTransferData.MapAddressAmountEntry
 }
 var file_transaction_proto_depIdxs = []int32{
 	3,  // 0: transaction.Transaction.AccessList:type_name -> transaction.AccessTuple
 	3,  // 1: transaction.TransactionHashData.AccessList:type_name -> transaction.AccessTuple
-	25, // 2: transaction.MassTransferData.MapAddressAmount:type_name -> transaction.MassTransferData.MapAddressAmountEntry
+	26, // 2: transaction.MassTransferData.MapAddressAmount:type_name -> transaction.MassTransferData.MapAddressAmountEntry
 	2,  // 3: transaction.Transactions.Transactions:type_name -> transaction.Transaction
 	2,  // 4: transaction.TransactionWithDeviceKey.Transaction:type_name -> transaction.Transaction
 	2,  // 5: transaction.TransactionsWithBlockNumber.Transactions:type_name -> transaction.Transaction
@@ -2064,7 +2081,7 @@ func file_transaction_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transaction_proto_rawDesc), len(file_transaction_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
