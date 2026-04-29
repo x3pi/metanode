@@ -24,9 +24,9 @@ func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, lastBlock uint
 // cần xem lại update khi pending =0 là k update cái nào hết
 func (s *CrossChainScanner) runProgressUpdater() {
 	logger.Info("🔄 [Scanner] Progress updater started")
-	pending := make(map[uint64]uint64) // chainId → lastBlock cao nhất
-	pendingQuorums := make(map[uint64]bool)  // chainId → có phải quorum không
-	var maxLocalBlock uint64           // local block cao nhất (nhận từ receipt watcher)
+	pending := make(map[uint64]uint64)      // chainId → lastBlock cao nhất
+	pendingQuorums := make(map[uint64]bool) // chainId → có phải quorum không
+	var maxLocalBlock uint64                // local block cao nhất (nhận từ receipt watcher)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	flush := func() {
@@ -75,7 +75,7 @@ func (s *CrossChainScanner) runProgressUpdater() {
 			} else if upd.lastBlock == pending[upd.chainId] && upd.isQuorum {
 				pendingQuorums[upd.chainId] = true
 			}
-			
+
 			if upd.localBlock > maxLocalBlock {
 				maxLocalBlock = upd.localBlock
 				logger.Info("[Scanner] 📌 Local block updated from progress: %d", upd.localBlock)
@@ -161,26 +161,41 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 
 	embassyAddr := common.HexToAddress(s.cfg.ParentAddress)
 
-	defCli, _ := s.GetActiveClient(0)
-	if defCli == nil {
-		logger.Warn("⚠️  [Scanner] getScanProgress failed: no active client available")
-		return result
-	}
-
 	// Lấy cấu hình scanMode của embassy từ contract
 	scanMode := uint8(0)
-	if modeCalldata, err := s.cfg.ConfigAbi.Pack("getEmbassyScanMode", embassyAddr); err == nil {
-		if receipt, err := tx_helper.SendReadTransaction("getEmbassyScanMode", defCli, s.cfg, configContract, embassyAddr, modeCalldata, nil); err == nil {
-			if len(receipt.Return()) > 0 {
-				if method, ok := s.cfg.ConfigAbi.Methods["getEmbassyScanMode"]; ok {
-					if vals, err := method.Outputs.Unpack(receipt.Return()); err == nil && len(vals) > 0 {
-						if modeVal, ok := vals[0].(uint8); ok {
-							scanMode = modeVal
-						}
+	for {
+		defCli, _ := s.GetActiveClient(0)
+		if defCli == nil {
+			logger.Warn("⚠️  [Scanner] getEmbassyScanMode: no active client available, retrying...")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		modeCalldata, err := s.cfg.ConfigAbi.Pack("getEmbassyScanMode", embassyAddr)
+		if err != nil {
+			logger.Warn("⚠️  [Scanner] Pack getEmbassyScanMode failed: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		receipt, err := tx_helper.SendReadTransaction("getEmbassyScanMode", defCli, s.cfg, configContract, embassyAddr, modeCalldata, nil)
+		if err != nil {
+			logger.Warn("⚠️  [Scanner] SendReadTransaction getEmbassyScanMode failed: %v, retrying...", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if len(receipt.Return()) > 0 {
+			if method, ok := s.cfg.ConfigAbi.Methods["getEmbassyScanMode"]; ok {
+				if vals, err := method.Outputs.Unpack(receipt.Return()); err == nil && len(vals) > 0 {
+					if modeVal, ok := vals[0].(uint8); ok {
+						scanMode = modeVal
 					}
+				} else {
+					logger.Warn("⚠️  [Scanner] Unpack getEmbassyScanMode failed: %v", err)
 				}
 			}
 		}
+		break
 	}
 	logger.Info("📋 [Scanner] Embassy config ScanMode = %d", scanMode)
 
@@ -188,54 +203,102 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 		nationIdBig := new(big.Int).SetUint64(rc.NationId)
 
 		if scanMode == 1 {
-			remoteCli, _ := s.GetActiveRemoteClient(rc.NationId, 0)
-			if remoteCli != nil {
-				latestBlock, err := remoteCli.ChainGetBlockNumber()
+			for {
+				defCli, _ := s.GetActiveClient(0)
+				if defCli == nil {
+					logger.Warn("⚠️  [Scanner] fetch latest block: no active client available, retrying...")
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				latestBlock, err := defCli.ChainGetBlockNumber()
 				if err == nil && latestBlock > 0 {
 					result[rc.NationId] = ScanResumeState{RemoteBlock: latestBlock, LocalBlock: 0, NeedCheckExecuted: false}
 					logger.Info("📋 [Scanner] Resume nationId=%d from latest block %d (scanMode=1)", rc.NationId, latestBlock)
-					continue
+					break
 				} else {
-					logger.Warn("⚠️  [Scanner] Cannot fetch latest block for nationId=%d: %v", rc.NationId, err)
+					logger.Warn("⚠️  [Scanner] Cannot fetch latest block for nationId=%d: %v, retrying...", rc.NationId, err)
+					time.Sleep(2 * time.Second)
+					continue
 				}
 			}
+			continue
 		} else if scanMode == 0 {
 			// Fetch Quorum block (Block Chính) computed dynamically from contract
-			if maxCalldata, err := s.cfg.ConfigAbi.Pack("getNetworkQuorumBlock", nationIdBig); err == nil {
-				if maxReceipt, err := tx_helper.SendReadTransaction("getNetworkQuorumBlock", defCli, s.cfg, configContract, embassyAddr, maxCalldata, nil); err == nil {
-					if len(maxReceipt.Return()) > 0 {
-						if method, ok := s.cfg.ConfigAbi.Methods["getNetworkQuorumBlock"]; ok {
-							if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 0 {
-								var progData struct {
-									RemoteBlock *big.Int `abi:"remoteBlock"`
-									LocalBlock  *big.Int `abi:"localBlock"`
+			for {
+				defCli, _ := s.GetActiveClient(0)
+				if defCli == nil {
+					logger.Warn("⚠️  [Scanner] getNetworkQuorumBlock: no active client available, retrying...")
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				maxCalldata, err := s.cfg.ConfigAbi.Pack("getNetworkQuorumBlock", nationIdBig)
+				if err != nil {
+					logger.Warn("⚠️  [Scanner] Pack getNetworkQuorumBlock failed: %v", err)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				maxReceipt, err := tx_helper.SendReadTransaction("getNetworkQuorumBlock", defCli, s.cfg, configContract, embassyAddr, maxCalldata, nil)
+				if err != nil {
+					logger.Warn("⚠️  [Scanner] SendReadTransaction getNetworkQuorumBlock failed: %v, retrying...", err)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				if len(maxReceipt.Return()) > 0 {
+					if method, ok := s.cfg.ConfigAbi.Methods["getNetworkQuorumBlock"]; ok {
+						if vals, err := method.Outputs.Unpack(maxReceipt.Return()); err == nil && len(vals) > 0 {
+							var progData struct {
+								RemoteBlock *big.Int `abi:"remoteBlock"`
+								LocalBlock  *big.Int `abi:"localBlock"`
+							}
+							if err := s.cfg.ConfigAbi.UnpackIntoInterface(&progData, "getNetworkQuorumBlock", maxReceipt.Return()); err == nil {
+								rBlk := uint64(0)
+								if progData.RemoteBlock != nil {
+									rBlk = progData.RemoteBlock.Uint64()
 								}
-								if err := s.cfg.ConfigAbi.UnpackIntoInterface(&progData, "getNetworkQuorumBlock", maxReceipt.Return()); err == nil {
-									rBlk := uint64(0)
-									if progData.RemoteBlock != nil {
-										rBlk = progData.RemoteBlock.Uint64()
-									}
-									lBlk := uint64(0)
-									if progData.LocalBlock != nil {
-										lBlk = progData.LocalBlock.Uint64()
-									}
-									if rBlk > 0 {
-										result[rc.NationId] = ScanResumeState{RemoteBlock: rBlk, LocalBlock: lBlk, NeedCheckExecuted: true}
-										logger.Info("📋 [Scanner] Resume nationId=%d from Single Network Quorum Block %d (localBlock %d) (scanMode=0)", rc.NationId, rBlk, lBlk)
-										continue
-									}
+								lBlk := uint64(0)
+								if progData.LocalBlock != nil {
+									lBlk = progData.LocalBlock.Uint64()
 								}
+								if rBlk > 0 {
+									result[rc.NationId] = ScanResumeState{RemoteBlock: rBlk, LocalBlock: lBlk, NeedCheckExecuted: true}
+									logger.Info("📋 [Scanner] Resume nationId=%d from Single Network Quorum Block %d (localBlock %d) (scanMode=0)", rc.NationId, rBlk, lBlk)
+								}
+							} else {
+								logger.Warn("⚠️  [Scanner] UnpackIntoInterface getNetworkQuorumBlock failed: %v", err)
+							}
+						} else {
+							if err != nil {
+								logger.Warn("⚠️  [Scanner] Outputs.Unpack getNetworkQuorumBlock failed: %v", err)
 							}
 						}
 					}
 				}
+				break
 			}
 		}
 	}
 
 	if scanMode != 0 {
 		logger.Info("🔄 [Scanner] Resetting scanMode from %d to 0 for embassy %s", scanMode, embassyAddr.Hex())
-		if resetCalldata, err := s.cfg.ConfigAbi.Pack("setEmbassyScanMode", embassyAddr, uint8(0)); err == nil {
+		for {
+			defCli, _ := s.GetActiveClient(0)
+			if defCli == nil {
+				logger.Warn("⚠️  [Scanner] setEmbassyScanMode: no active client available, retrying...")
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			resetCalldata, err := s.cfg.ConfigAbi.Pack("setEmbassyScanMode", embassyAddr, uint8(0))
+			if err != nil {
+				logger.Warn("⚠️  [Scanner] Failed to pack setEmbassyScanMode: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
 			_, errTx := tx_helper.SendTransaction(
 				"setEmbassyScanMode",
 				defCli,
@@ -246,12 +309,12 @@ func (s *CrossChainScanner) loadInitialScanProgress() map[uint64]ScanResumeState
 				nil,
 			)
 			if errTx != nil {
-				logger.Warn("⚠️  [Scanner] Failed to reset scanMode to 0: %v", errTx)
-			} else {
-				logger.Info("✅ [Scanner] Successfully reset scanMode to 0")
+				logger.Warn("⚠️  [Scanner] Failed to reset scanMode to 0: %v, retrying...", errTx)
+				time.Sleep(2 * time.Second)
+				continue
 			}
-		} else {
-			logger.Warn("⚠️  [Scanner] Failed to pack setEmbassyScanMode: %v", err)
+			logger.Info("✅ [Scanner] Successfully reset scanMode to 0")
+			break
 		}
 	}
 

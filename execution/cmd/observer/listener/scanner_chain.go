@@ -101,6 +101,7 @@ func (s *CrossChainScanner) runChainScanner(rc tcp_config.RemoteChain, connAddr 
 			if hasEvents {
 				needCheckExecuted = false // Chỉ cần check lô đầu tiên, nếu có batch mới thì ngắt cờ
 				lastUpdateTime = time.Now()
+				break
 			}
 		}
 	}
