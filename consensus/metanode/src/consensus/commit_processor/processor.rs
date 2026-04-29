@@ -408,16 +408,24 @@ impl CommitProcessor {
                             // far below Go's actual GEI, triggering false-positive
                             // RUST-SESSION-RESTART detection in Go.
                             if let Some(ref client) = executor_client {
-                                if let Ok(go_gei) = client.get_last_global_exec_index().await {
-                                    // Hint formula: hint_gei = epoch_base + commit_index + offset
-                                    // We want hint_gei ≈ go_gei + 1 for the first new commit
-                                    // So: epoch_base = (go_gei + 1) - commit_index - 0
-                                    let new_base = (go_gei + 1).saturating_sub(commit_index as u64);
-                                    warn!("🔄 [DAG-RESET] Updated epoch_base_index hint: {} → {} (Go GEI={}, commit={})",
-                                        epoch_base_index, new_base, go_gei, commit_index);
-                                    epoch_base_index = new_base;
+                                if let Ok((_, go_gei, _, _, _, go_last_block_ts)) = client.get_last_handled_commit_index().await {
+                                        
+                                    // If the commit's timestamp is OLDER than or EQUAL TO Go's last executed block,
+                                    // it MUST be an old commit synced from the network (Single Node Restart).
+                                    // Since Go's timestamp comes directly from Rust's subdag.timestamp_ms,
+                                    // this comparison is 100% deterministic without any need for clock skew buffers.
+                                    if subdag.timestamp_ms <= go_last_block_ts {
+                                        tracing::warn!("⏳ [DAG-RESET] Commit {} timestamp ({}) is OLDER than Go's last block ({}). Syncing old DAG. Not shifting epoch_base.", 
+                                            commit_index, subdag.timestamp_ms, go_last_block_ts);
+                                    } else {
+                                        // This is a fresh commit! The cluster actually restarted.
+                                        let new_base = (go_gei + 1).saturating_sub(commit_index as u64);
+                                        tracing::warn!("🔄 [DAG-RESET] True cluster restart detected (fresh commit > go_ts). Updated epoch_base_index hint: {} → {} (Go GEI={}, commit={})",
+                                            epoch_base_index, new_base, go_gei, commit_index);
+                                        epoch_base_index = new_base;
+                                    }
                                 } else {
-                                    warn!("⚠️ [DAG-RESET] Failed to query Go GEI — using stale epoch_base_index={}", epoch_base_index);
+                                    tracing::warn!("⚠️ [DAG-RESET] Failed to query Go GEI — using stale epoch_base_index={}", epoch_base_index);
                                 }
                             }
                         }

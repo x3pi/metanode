@@ -170,6 +170,7 @@ message GetLastHandledCommitIndexResponse {
     uint64 last_block_number = 3;    // Last block number in Go DB
     uint64 epoch = 4;                // Current epoch in Go
     bool is_authoritative = 5;       // True if Go is in authoritative GEI mode
+    uint64 last_block_timestamp_ms = 6; // Timestamp of the last executed block
 }
 
 // ============================================================================

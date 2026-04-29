@@ -248,41 +248,18 @@ impl ExecutorClient {
         // NORMAL PATH: Commit fits within MAX_TXS_PER_GO_BLOCK
         // ═══════════════════════════════════════════════════════════════
 
-        let has_system_tx = subdag.blocks.iter().any(|b| {
+        let _has_system_tx = subdag.blocks.iter().any(|b| {
             b.transactions().iter().any(|tx| {
                 SystemTransaction::from_bytes(tx.data()).is_ok()
             })
         });
 
         let block_number = {
-            let next_expected_guard = self.next_expected_index.lock().await;
-            if global_exec_index < *next_expected_guard {
-                // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
-                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
-                0
-            } else if self.send_buffer.lock().await.contains_key(&global_exec_index) {
-                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
-                0
-            } else {
-                let mut next_bn = self.next_block_number.lock().await;
-                let mut last_ep = self.last_processed_epoch.lock().await;
-                let is_epoch_boundary = epoch > *last_ep;
-                
-                // Force block generation for EndOfEpoch commit
-                let force_block_creation = is_epoch_boundary || has_system_tx;
-                
-                if epoch > *last_ep {
-                    *last_ep = epoch;
-                }
-                if total_tx_before > 0 || force_block_creation {
-                    let bn = *next_bn;
-                    *next_bn += 1;
-                    trace!("📊 [BLOCK-NUM] Generating new block_number={} for GEI={}", bn, global_exec_index);
-                    bn
-                } else {
-                    0
-                }
+            let mut last_ep = self.last_processed_epoch.lock().await;
+            if epoch > *last_ep {
+                *last_ep = epoch;
             }
+            0 // Go assigns block numbers directly
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions

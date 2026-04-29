@@ -409,8 +409,8 @@ impl ExecutorClient {
     /// Query Go's last handled commit state for recovery after restart.
     /// This replaces the fragile fragment_offset reconstruction logic.
     ///
-    /// Returns (last_commit_index, last_gei, last_block_number, epoch, is_authoritative)
-    pub async fn get_last_handled_commit_index(&self) -> Result<(u32, u64, u64, u64, bool)> {
+    /// Returns (last_commit_index, last_gei, last_block_number, epoch, is_authoritative, last_block_timestamp_ms)
+    pub async fn get_last_handled_commit_index(&self) -> Result<(u32, u64, u64, u64, bool, u64)> {
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -438,8 +438,8 @@ impl ExecutorClient {
         match response.payload {
             Some(proto::response::Payload::GetLastHandledCommitIndexResponse(res)) => {
                 info!(
-                    "🔑 [GO-AUTH GEI] Recovery state received: last_commit={}, last_gei={}, block={}, epoch={}, authoritative={}",
-                    res.last_commit_index, res.last_gei, res.last_block_number, res.epoch, res.is_authoritative
+                    "🔑 [GO-AUTH GEI] Recovery state received: last_commit={}, last_gei={}, block={}, epoch={}, authoritative={}, timestamp={}",
+                    res.last_commit_index, res.last_gei, res.last_block_number, res.epoch, res.is_authoritative, res.last_block_timestamp_ms
                 );
                 Ok((
                     res.last_commit_index,
@@ -447,6 +447,7 @@ impl ExecutorClient {
                     res.last_block_number,
                     res.epoch,
                     res.is_authoritative,
+                    res.last_block_timestamp_ms,
                 ))
             }
             Some(proto::response::Payload::Error(error_msg)) => {

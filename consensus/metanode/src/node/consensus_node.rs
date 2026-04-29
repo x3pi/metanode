@@ -925,7 +925,7 @@ impl ConsensusNode {
         };
 
         let last_handled_commit_index = match executor_client.get_last_handled_commit_index().await {
-            Ok((commit_index, _, _, _, _)) => Some(commit_index),
+            Ok((commit_index, _, _, _, _, _)) => Some(commit_index),
             Err(e) => {
                 warn!("⚠️ [STARTUP] Failed to get last_handled_commit_index from Go: {}", e);
                 None
@@ -1513,8 +1513,8 @@ impl ConsensusNode {
 
         commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
 
-        let lag_executor_client = executor_client_for_proc.clone();
-        let lag_peer_addresses = config.peer_rpc_addresses.clone();
+        let _lag_executor_client = executor_client_for_proc.clone();
+        let _lag_peer_addresses = config.peer_rpc_addresses.clone();
 
         tokio::spawn(async move {
             while let Some(alert) = lag_alert_receiver.recv().await {
@@ -1537,46 +1537,7 @@ impl ConsensusNode {
                         tracing::error!("🚨 [LAG-MONITOR] SEVERE: Go is {} blocks behind Rust! (rust={}, go_gei={}, go_block={}, rate={:.1} blk/s).",
                             gap, rust_gei, go_gei, go_block_number, go_rate);
 
-                        if lag_peer_addresses.is_empty() {
-                            tracing::warn!("⚠️ [LAG-RECOVERY] No peer_rpc_addresses configured! Cannot fetch missing blocks from P2P.");
-                            continue;
-                        }
-
-                        // Use go_block_number (actual block index in Go DB) rather than GEI.
-                        // We safely ask for blocks up to go_block_number + gap (Go peer caps nicely to its own max).
-                        let missing_from = go_block_number + 1;
-                        let missing_to = go_block_number + gap;
-                        tracing::info!("🔄 [LAG-RECOVERY] Triggering P2P block fetch: blocks {} -> {} (assuming worst-case dense gap)", missing_from, missing_to);
-
-                        match crate::network::peer_rpc::fetch_blocks_from_peer(
-                            &lag_peer_addresses,
-                            missing_from,
-                            missing_to,
-                        )
-                        .await
-                        {
-                            Ok(blocks) => {
-                                if blocks.is_empty() {
-                                    tracing::warn!(
-                                        "⚠️ [LAG-RECOVERY] Fetched 0 blocks from peers."
-                                    );
-                                } else {
-                                    tracing::info!("✅ [LAG-RECOVERY] Fetched {} blocks. Sending to Go for execution...", blocks.len());
-                                    match lag_executor_client.sync_and_execute_blocks(blocks).await
-                                    {
-                                        Ok((synced, last_block, _gei)) => {
-                                            tracing::info!("✅ [LAG-RECOVERY] Successfully executed {} P2P blocks (last_block={})", synced, last_block);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("❌ [LAG-RECOVERY] Failed to execute blocks via UDS: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ [LAG-RECOVERY] P2P block fetch failed: {}", e);
-                            }
-                        }
+                        tracing::warn!("⚠️ [LAG-RECOVERY] P2P block import is DISABLED for Master nodes. Allowing Go to catch up naturally via BATCH-DRAIN to maintain consensus parity.");
                     }
                     crate::consensus::commit_processor::lag_monitor::LagAlert::Recovered {
                         ..

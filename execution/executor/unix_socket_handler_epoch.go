@@ -656,7 +656,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	// processRustEpochData reads the old GEI before the async persist completes.
 	storage.UpdateLastGlobalExecIndex(request.BoundaryGei)
 	if rh.pushAsyncGEIUpdateCallback != nil {
-		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil)
+		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil, uint32(request.BoundaryBlock))
 	}
 
 	logger.Info("✅ Successfully advanced Go state epoch",
@@ -1594,8 +1594,19 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 	// (it's in processor package, so we check existence at RPC level)
 	isAuthoritative := false // Will be set to true when fully migrated
 
-	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_gei=%d, last_block=%d, epoch=%d, authoritative=%v",
-		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative)
+	var lastBlockTimestampMs uint64 = 0
+	if lastBlockNumber > 0 {
+		blockchainInstance := blockchain.GetBlockChainInstance()
+		if blockchainInstance != nil {
+			lastBlock := blockchainInstance.GetLastBlock()
+			if lastBlock != nil {
+				lastBlockTimestampMs = lastBlock.Header().TimeStamp() * 1000
+			}
+		}
+	}
+
+	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_gei=%d, last_block=%d, epoch=%d, authoritative=%v, ts=%d",
+		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
 
 	response := &pb.GetLastHandledCommitIndexResponse{
 		LastCommitIndex: storage.GetLastHandledCommitIndex(),
@@ -1603,6 +1614,7 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		LastBlockNumber: lastBlockNumber,
 		Epoch:           currentEpoch,
 		IsAuthoritative: isAuthoritative,
+		LastBlockTimestampMs: lastBlockTimestampMs,
 	}
 
 	return response, nil

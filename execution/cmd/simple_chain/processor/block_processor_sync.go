@@ -141,7 +141,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		}
 
 		// Sequential empty commit — update GEI and advance
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 		// ═══════════════════════════════════════════════════════════════
@@ -326,10 +326,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
-		actualLastBlockDB := storage.GetLastBlockNumber()
-		if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
-			*currentBlockNumber = actualLastBlockDB
-		}
+
 
 		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 			oldExpected, globalExecIndex, gapSize)
@@ -392,7 +389,7 @@ PROCESS_BLOCK:
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 		if globalExecIndex > 0 {
@@ -483,7 +480,7 @@ PROCESS_BLOCK:
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 		if globalExecIndex > 0 {
@@ -523,36 +520,13 @@ PROCESS_BLOCK:
 		len(allTransactions), *currentBlockNumber)
 
 	// NOW assign sequential block number (AFTER zero-tx check, so only non-empty commits get a number)
-	// CRITICAL FIX: We completely shift the block number sequence tracking to Rust.
-	// Rust sends explicit `block_number` via ExecutableBlock, removing any risk of
-	// local sequence inflation between Go Nodes.
-	*currentBlockNumber = epochData.GetBlockNumber()
-	logger.Debug("📊 [BLOCK-NUM] Assigning block #%d directly from Rust payload for global_exec_index=%d (txs=%d)",
+	// CRITICAL FIX: Make block number assignment Go-authoritative to ensure determinism.
+	// We no longer rely on Rust's block_number, which can diverge between nodes if
+	// transaction deduplication causes some commits to be empty on one node but not another.
+	*currentBlockNumber++
+	logger.Debug("📊 [BLOCK-NUM] Assigning sequential block #%d directly in Go for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// BLOCK NUMBER REGRESSION GUARD: Prevent executing old blocks from DAG replay.
-	// ═══════════════════════════════════════════════════════════════════════════
-	{
-		actualLastBlockDB := storage.GetLastBlockNumber()
-		if actualLastBlockDB > 0 && *currentBlockNumber <= actualLastBlockDB {
-			logger.Warn("🛡️ [BLOCK-NUM-REGRESSION] Skipping stale block: incoming block_number=%d ≤ last block DB=%d (GEI=%d). "+
-				"This commit is from a replayed DAG or lag — not executing.",
-				*currentBlockNumber, actualLastBlockDB, globalExecIndex)
-
-			// Still update GEI counter so the processor advances past this commit
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
-
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
-			}
-			return
-		}
-	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
@@ -600,7 +574,7 @@ PROCESS_BLOCK:
 					globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
 				// Still update GEI counter so the processor advances past this commit
-				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 				// Check pending blocks
@@ -780,7 +754,7 @@ PROCESS_BLOCK:
 	}
 
 	// Update GlobalExecIndex tracking (persistent)
-	bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash())
+	bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
 	logger.Debug("Lastblock header: %v", newBlock.Header())
 	logger.Debug("Transactions in block: %d TXs", len(newBlock.Transactions()))

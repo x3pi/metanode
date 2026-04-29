@@ -255,31 +255,16 @@ PROCESS_LOOP:
 		// cause all new-session commits to be silently discarded.
 		// ═══════════════════════════════════════════════════════════════════
 		if !bp.rustSessionRestarted.Load() {
-			actualLastBlockDB := storage.GetLastBlockNumber()
-			bpLastBlock := bp.GetLastBlock()
-			bpLastBlockNum := uint64(0)
-			if bpLastBlock != nil {
-				bpLastBlockNum = bpLastBlock.Header().BlockNumber()
-			}
-
 			actualLastGEI := storage.GetLastGlobalExecIndex()
 
 			// CRITICAL FIX: Actually advance local state when DB is ahead
 			if actualLastGEI > 0 && actualLastGEI >= nextExpectedGlobalExecIndex {
 				oldNextExpected := nextExpectedGlobalExecIndex
 				nextExpectedGlobalExecIndex = actualLastGEI + 1
-				if actualLastBlockDB > currentBlockNumber {
-					currentBlockNumber = actualLastBlockDB
-				}
 				if oldNextExpected != nextExpectedGlobalExecIndex {
-					logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d, block %d → %d (SYNC-FIRST or SyncBlocksRequest advanced DB)",
-						oldNextExpected, nextExpectedGlobalExecIndex, bpLastBlockNum, currentBlockNumber)
+					logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d",
+						oldNextExpected, nextExpectedGlobalExecIndex)
 				}
-			} else if actualLastBlockDB > 0 && actualLastBlockDB > bpLastBlockNum {
-				// Block advanced but GEI didn't — unlikely but handle gracefully
-				currentBlockNumber = actualLastBlockDB
-				logger.Debug("🔍 [TRANSITION SYNC] DB block #%d > in-memory block #%d. Updated currentBlockNumber.",
-					actualLastBlockDB, bpLastBlockNum)
 			}
 		}
 
