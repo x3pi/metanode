@@ -43,6 +43,8 @@ type BlockHeader interface {
 	Epoch() uint64
 	GlobalExecIndex() uint64
 	SetGlobalExecIndex(uint64)
+	CommitIndex() uint64
+	SetCommitIndex(uint64)
 }
 
 type ConfirmedBlockData interface {

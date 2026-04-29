@@ -22,6 +22,7 @@ type BlockHeader struct {
 	transactionsRoot   common.Hash
 	epoch              uint64 // Bổ sung epoch field
 	globalExecIndex    uint64 // Maps Go block number → Rust consensus commit index
+	commitIndex        uint64 // Rust consensus commit index
 }
 
 func NewBlockHeader(
@@ -102,6 +103,14 @@ func (b *BlockHeader) SetGlobalExecIndex(gei uint64) {
 	b.globalExecIndex = gei
 }
 
+func (b *BlockHeader) CommitIndex() uint64 {
+	return b.commitIndex
+}
+
+func (b *BlockHeader) SetCommitIndex(index uint64) {
+	b.commitIndex = index
+}
+
 func (b *BlockHeader) Marshal() ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(b.Proto())
 }
@@ -151,6 +160,7 @@ func (b *BlockHeader) Proto() *pb.BlockHeader {
 		TransactionsRoot:  b.transactionsRoot.Bytes(),
 		Epoch:             b.epoch,
 		GlobalExecIndex:   b.globalExecIndex,
+		CommitIndex:       b.commitIndex,
 	}
 }
 
@@ -166,6 +176,7 @@ func (b *BlockHeader) FromProto(pbBlockHeader *pb.BlockHeader) {
 	b.transactionsRoot = common.BytesToHash(pbBlockHeader.TransactionsRoot)
 	b.epoch = pbBlockHeader.Epoch
 	b.globalExecIndex = pbBlockHeader.GlobalExecIndex
+	b.commitIndex = pbBlockHeader.CommitIndex
 }
 
 func (b *BlockHeader) SetAccountStatesRoot(hash common.Hash) {

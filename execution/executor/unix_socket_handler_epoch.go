@@ -1237,6 +1237,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			currentGEI = blockGEI
 		}
 
+		// CRITICAL FIX: Restore lastHandledCommitIndex from the synced block!
+		// This prevents Go from double-executing these commits when Rust resumes consensus.
+		if header.CommitIndex() > 0 {
+			commitIdx32 := uint32(header.CommitIndex())
+			if commitIdx32 > storage.GetLastHandledCommitIndex() {
+				storage.UpdateLastHandledCommitIndex(commitIdx32)
+				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d from synced block #%d", commitIdx32, blockNum)
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.

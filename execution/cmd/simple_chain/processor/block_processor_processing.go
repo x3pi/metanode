@@ -247,6 +247,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if globalExecIndex > 0 {
 		bl.Header().SetGlobalExecIndex(globalExecIndex)
 	}
+	
+	// CRITICAL FIX: Set CommitIndex on the block so it is serialized and transmitted to Sub nodes.
+	if commitIndex > 0 {
+		bl.Header().SetCommitIndex(uint64(commitIndex))
+	}
 
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
