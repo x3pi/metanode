@@ -60,8 +60,6 @@ struct StorageSetup {
     latest_block_number: u64,
     /// Last handled commit index from Go Authoritative DB (persisted across DAG wipes)
     last_handled_commit_index: Option<u32>,
-    /// The recovered fragment offset calculated dynamically from Go Authoritative GEI
-    recovered_fragment_offset: Option<u64>,
 }
 
 /// Results from consensus setup phase.
@@ -860,18 +858,7 @@ impl ConsensusNode {
 
         std::fs::create_dir_all(&config.storage_path)?;
 
-        // FORK-SAFETY RECOVERY: Load exact fragment offset from wipe-safe persistence.
-        // We cannot calculate this mathematically from Go's `last_global_exec_index`
-        // because if a node crashed mid-commit, Go's GEI will include the fragments 
-        // from the incomplete commit, artificially inflating the base offset.
-        let recovered_fragment_offset = if config.executor_read_enabled {
-            let offset = crate::node::executor_client::persistence::load_fragment_offset_wipe_safe(
-                std::path::Path::new(&config.storage_path),
-            );
-            Some(offset)
-        } else {
-            None
-        };
+        // PHASE-B: recovered_fragment_offset removed — Go assigns GEI exclusively.
 
         Ok(StorageSetup {
             current_epoch,
@@ -889,7 +876,6 @@ impl ConsensusNode {
             last_executed_commit_hash,
             latest_block_number,
             last_handled_commit_index,
-            recovered_fragment_offset,
         })
     }
 
@@ -1168,6 +1154,7 @@ impl ConsensusNode {
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
         .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
         .with_next_expected_index(next_expected_commit_index)
+        .with_go_last_commit_index(go_replay_after as u32)
         .with_is_transitioning(is_transitioning.clone())
         .with_pending_transactions_queue(pending_transactions_queue.clone())
         .with_epoch_transition_callback(epoch_transition_callback)
@@ -1180,7 +1167,7 @@ impl ConsensusNode {
             Arc::new(tokio::sync::RwLock::new(map))
         })
         .with_storage_path(config.storage_path.clone())
-        .with_recovered_fragment_offset(storage.recovered_fragment_offset);
+        ;
 
         // ExecutorClient for commit processing
         let initial_next_expected = if config.executor_read_enabled {

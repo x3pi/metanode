@@ -50,7 +50,9 @@ func GetGEIAuthority() *GEIAuthority {
 		// Initialize from persistent storage
 		lastGEI := storage.GetLastGlobalExecIndex()
 		geiAuthority.lastAssignedGEI.Store(lastGEI)
-		logger.Info("🔑 [GEI-AUTHORITY] Initialized: lastGEI=%d, mode=AUTHORITATIVE", lastGEI)
+		lastCommit := storage.GetLastHandledCommitIndex()
+		geiAuthority.lastHandledCommitIndex.Store(lastCommit)
+		logger.Info("🔑 [GEI-AUTHORITY] Initialized: lastGEI=%d, lastCommit=%d, mode=AUTHORITATIVE", lastGEI, lastCommit)
 	})
 	return geiAuthority
 }
@@ -126,6 +128,14 @@ func (ga *GEIAuthority) RecordCommitIndex(commitIndex uint32) {
 	ga.lastHandledCommitIndex.Store(commitIndex)
 }
 
+// ResetCommitIndex forces the commit index back to 0.
+// Used exclusively during epoch transitions to prevent deduplication
+// from incorrectly skipping commits in the new epoch.
+func (ga *GEIAuthority) ResetCommitIndex() {
+	ga.lastHandledCommitIndex.Store(0)
+	logger.Info("🔑 [GEI-AUTHORITY] Reset lastHandledCommitIndex to 0 for new epoch")
+}
+
 // GetLastAssignedGEI returns the last GEI that was assigned.
 func (ga *GEIAuthority) GetLastAssignedGEI() uint64 {
 	return ga.lastAssignedGEI.Load()
@@ -143,3 +153,4 @@ func (ga *GEIAuthority) PersistState() {
 	gei := ga.lastAssignedGEI.Load()
 	storage.UpdateLastGlobalExecIndex(gei)
 }
+

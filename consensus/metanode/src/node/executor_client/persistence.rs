@@ -92,11 +92,9 @@ pub async fn read_last_block_number(storage_path: &Path) -> Result<u64> {
     Ok(u64::from_le_bytes(buf))
 }
 
-/// RS-2: Persist cumulative_fragment_offset to disk for crash recovery.
-/// During block fragmentation (commits with >MAX_TXS_PER_GO_BLOCK TXs), the offset
-/// accumulates extra GEIs. If a node crashes mid-epoch, this offset MUST be recovered
-/// to compute correct GEIs — otherwise the node diverges (fork).
-/// Uses atomic write (temp + rename) for corruption safety.
+/// PHASE-B DEPRECATED: Fragment offset tracking is no longer used.
+/// Go assigns GEI exclusively via GEIAuthority.
+#[allow(dead_code)]
 pub async fn persist_fragment_offset(storage_path: &Path, offset: u64) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let persist_dir = storage_path.join("executor_state");
@@ -117,8 +115,7 @@ pub async fn persist_fragment_offset(storage_path: &Path, offset: u64) -> Result
     Ok(())
 }
 
-/// Reset/Delete persisted fragment offset from disk.
-/// Call this during epoch transitions to prevent carrying over the offset into the new epoch.
+#[allow(dead_code)]
 pub async fn reset_fragment_offset(storage_path: &Path) -> Result<()> {
     let persist_path = storage_path
         .join("executor_state")
@@ -131,8 +128,7 @@ pub async fn reset_fragment_offset(storage_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// RS-2: Load persisted fragment offset from disk.
-/// Returns 0 if file doesn't exist (first start or clean epoch).
+#[allow(dead_code)]
 pub fn load_fragment_offset(storage_path: &Path) -> u64 {
     let persist_path = storage_path
         .join("executor_state")
@@ -231,8 +227,7 @@ pub fn wipe_safe_path(storage_path: &Path) -> std::path::PathBuf {
     storage_path.to_path_buf()
 }
 
-/// Persist fragment_offset to a WIPE-SAFE location.
-/// This survives DAG wipes (which delete storage_path/ but not wipe_safe_*/).
+#[allow(dead_code)]
 pub async fn persist_fragment_offset_wipe_safe(storage_path: &Path, offset: u64) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let safe_dir = wipe_safe_path(storage_path).join("executor_state");
@@ -252,8 +247,7 @@ pub async fn persist_fragment_offset_wipe_safe(storage_path: &Path, offset: u64)
     Ok(())
 }
 
-/// Load fragment_offset from wipe-safe location.
-/// Falls back to 0 if not found.
+#[allow(dead_code)]
 pub fn load_fragment_offset_wipe_safe(storage_path: &Path) -> u64 {
     let persist_path = wipe_safe_path(storage_path)
         .join("executor_state")
@@ -288,7 +282,7 @@ pub fn load_fragment_offset_wipe_safe(storage_path: &Path) -> u64 {
     }
 }
 
-/// Reset wipe-safe fragment offset (e.g., during epoch transition).
+#[allow(dead_code)]
 pub async fn reset_fragment_offset_wipe_safe(storage_path: &Path) -> Result<()> {
     let persist_path = wipe_safe_path(storage_path)
         .join("executor_state")
@@ -310,8 +304,7 @@ pub async fn reset_fragment_offset_wipe_safe(storage_path: &Path) -> Result<()> 
     Ok(())
 }
 
-/// Persist the exact fragment offset for the CURRENT commit index.
-/// Keeps the last 100 entries to prevent unbounded growth while surviving multiple crashes.
+#[allow(dead_code)]
 pub async fn persist_recent_fragment_offsets_wipe_safe(
     storage_path: &Path,
     commit_index: u32,
@@ -353,7 +346,7 @@ pub async fn persist_recent_fragment_offsets_wipe_safe(
     Ok(())
 }
 
-/// Load the map of recent precise fragment offsets from disk.
+#[allow(dead_code)]
 pub fn load_recent_fragment_offsets_wipe_safe(storage_path: &Path) -> std::collections::BTreeMap<u32, u64> {
     let safe_dir = wipe_safe_path(storage_path).join("executor_state");
     let final_path = safe_dir.join("fragment_offsets.json");

@@ -14,6 +14,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -30,6 +31,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	logger.Debug("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d", epochData.GetGlobalExecIndex())
 	globalExecIndex := epochData.GetGlobalExecIndex()
 	commitIndex := epochData.GetCommitIndex()
+	epochNum := epochData.GetEpoch()
 
 	if epochData.GetIsAuthoritativeGei() {
 		geiAuth := GetGEIAuthority()
@@ -45,23 +47,65 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// GO-AUTHORITATIVE GEI: Do NOT adopt Rust's hint GEI as the baseline.
+		// GO-AUTHORITATIVE GEI (PHASE-B): Go assigns GEI exclusively.
 		//
-		// FIX (2026-04-29): In authoritative mode, Go's nextExpected is the source
-		// of truth. Rust's incomingGEI is a HINT (epoch_base + commit_index +
-		// hint_fragment_offset) that may be higher or lower than Go's counter.
-		// Previously, adopting it caused a permanent GEI offset after DAG wipe.
+		// PHASE-B: Rust sends global_exec_index=0 for ALL commits — it does NOT
+		// track GEI. Go MUST auto-assign the next sequential GEI.
 		//
-		// Go assigns GEIs sequentially from its own persisted counter. The hint
-		// only affects buffer ordering in Rust's ExecutorClient, which Go ignores.
+		// When incomingGEI=0: This is the PHASE-B protocol. Go assigns next GEI.
+		// When incomingGEI>0: Legacy/transition mode. Go still assigns its own GEI
+		//   but uses incoming as a hint for diagnostics.
 		// ═══════════════════════════════════════════════════════════════════════════
 		incomingGEI := epochData.GetGlobalExecIndex()
-		
-		if incomingGEI < *nextExpectedGlobalExecIndex {
-			// CRITICAL FIX: This is an old commit (e.g., Rust replaying commits 
-			// that Go already synced via P2P and loaded into nextExpected).
-			// Do NOT override the GEI. Preserve the incoming hint so the replay 
-			// guard further down (`if globalExecIndex < nextExpected`) correctly skips it.
+
+		if incomingGEI == 0 {
+			commitIndex := epochData.GetCommitIndex()
+			epochNum := epochData.GetEpoch()
+
+			currentEpoch := uint64(0)
+			lastBlock := bp.GetLastBlock()
+			if lastBlock != nil {
+				currentEpoch = lastBlock.Header().Epoch()
+			}
+			lastHandledCommit := geiAuth.GetLastHandledCommitIndex()
+
+			// ═════════════════════════════════════════════════════════════════════
+			// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
+			// ═════════════════════════════════════════════════════════════════════
+			// Rust resets its commit_index to 1 at the start of a new epoch.
+			// Go MUST mirror this reset, otherwise it will incorrectly skip
+			// valid commits from the new epoch (because their low commit_indices 
+			// appear older than the high commit_indices of the previous epoch).
+			if epochNum > currentEpoch && lastBlock != nil {
+				logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex.", currentEpoch, epochNum)
+				geiAuth.ResetCommitIndex()
+				storage.UpdateLastHandledCommitIndex(0)
+				if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+					bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
+				}
+				lastHandledCommit = 0
+			}
+
+			if epochNum < currentEpoch {
+				logger.Debug("⏭️ [GO-AUTH GEI PHASE-B] Old commit detected (epoch %d < current %d). Skipping.", epochNum, currentEpoch)
+				return
+			}
+			if epochNum == currentEpoch && commitIndex <= lastHandledCommit {
+				logger.Debug("⏭️ [GO-AUTH GEI PHASE-B] Old commit detected (epoch %d, commit %d <= last %d). Skipping.", epochNum, commitIndex, lastHandledCommit)
+				return
+			}
+
+			authoritativeGEI := *nextExpectedGlobalExecIndex
+			geiAuth.AdvanceGEITo(authoritativeGEI)
+			geiAuth.RecordCommitIndex(commitIndex)
+
+			logger.Debug("🔑 [GO-AUTH GEI PHASE-B] Auto-assign: go_gei=%d (commit_index=%d, rust sent 0)",
+				authoritativeGEI, commitIndex)
+
+			globalExecIndex = authoritativeGEI
+		} else if incomingGEI < *nextExpectedGlobalExecIndex {
+			// Legacy mode: Rust sent a non-zero hint that's behind Go's counter.
+			// This is an old/duplicate commit — preserve hint to trigger replay guard.
 			logger.Debug("🔑 [GO-AUTH GEI] Old commit detected (hint=%d < expected=%d). Preserving hint to trigger replay guard.", 
 				incomingGEI, *nextExpectedGlobalExecIndex)
 			// globalExecIndex remains == incomingGEI
@@ -71,9 +115,8 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				logger.Info("🔑 [GO-AUTH GEI] Rust hint=%d > Go expected=%d (gap=%d). "+
 					"Go stays authoritative — will assign GEI=%d.",
 					incomingGEI, *nextExpectedGlobalExecIndex, gap, *nextExpectedGlobalExecIndex)
-				// DO NOT modify nextExpectedGlobalExecIndex — Go is authoritative.
 
-				// Still sync block counter if storage is ahead (this is safe — block number is independent of GEI)
+				// Still sync block counter if storage is ahead
 				actualLastBlockDB := storage.GetLastBlockNumber()
 				if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
 					*currentBlockNumber = actualLastBlockDB
@@ -159,7 +202,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// ═══════════════════════════════════════════════════════════════
 
 		// EPOCH AUTO-ADVANCE: Check epoch from block data (cheap — only field access)
-		epochNum := epochData.GetEpoch()
+		epochNum = epochData.GetEpoch()
 		if epochNum > 0 {
 			commitTimestampMs := epochData.GetCommitTimestampMs()
 			bp.chainState.CheckAndUpdateEpochFromBlock(epochNum, commitTimestampMs)
@@ -245,7 +288,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	}
 
 	// Get epoch from first block if available
-	epochNum := epochData.GetEpoch()
+	epochNum = epochData.GetEpoch()
 
 	// 🔍 DIAGNOSTIC: Detect epoch transition by comparing with last block and chain state
 	lastBlock := bp.GetLastBlock()

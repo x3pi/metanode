@@ -98,7 +98,9 @@ impl ExecutorClient {
 
         // REPLAY PROTECTION: Discard blocks that are already processed
         // This is critical when Consensus replays old commits on restart
-        {
+        // PHASE-B: When global_exec_index=0, Rust doesn't track GEI — skip this guard.
+        // Go handles dedup internally via is_authoritative_gei + GEIAuthority.
+        if global_exec_index > 0 {
             let next_expected = self.next_expected_index.lock().await;
             if global_exec_index < *next_expected {
                 // Only log periodically or for non-empty blocks to avoid noise during replay
@@ -113,8 +115,8 @@ impl ExecutorClient {
         }
 
         // DUAL-STREAM DEDUP: Prevent duplicate sends from Consensus and Sync streams
-        // This is critical for BlockCoordinator integration
-        {
+        // PHASE-B: Skip when global_exec_index=0 — all commits would hash to 0.
+        if global_exec_index > 0 {
             let sent = self.sent_indices.lock().await;
             if sent.contains(&global_exec_index) {
                 info!(
@@ -302,6 +304,39 @@ impl ExecutorClient {
         commit_index: u32,
         total_tx: usize,
     ) -> Result<()> {
+        // ═══════════════════════════════════════════════════════════════
+        // PHASE-B DIRECT SEND: When global_exec_index=0, Rust doesn't
+        // track GEI. The GEI-keyed buffer is incompatible (all commits
+        // would get key=0, causing overwrites). CommitProcessor already
+        // ensures sequential ordering, so bypass buffer and send directly.
+        // ═══════════════════════════════════════════════════════════════
+        if global_exec_index == 0 {
+            // Ensure connection
+            if let Err(e) = self.connect().await {
+                warn!("⚠️  Executor connection failed: {}", e);
+                return Ok(());
+            }
+
+            if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                let success = c_fn(epoch_data_bytes.as_ptr(), epoch_data_bytes.len());
+                if success {
+                    self.record_send_success().await;
+                    trace!(
+                        "✅ [PHASE-B DIRECT] Sent commit_index={} to Go FFI (epoch={}, tx={})",
+                        commit_index, epoch, total_tx
+                    );
+                } else {
+                    warn!("⚠️  [PHASE-B DIRECT] FFI execute_block failed for commit_index={}", commit_index);
+                    self.record_send_failure().await;
+                }
+            } else {
+                warn!("⚠️  [PHASE-B DIRECT] FFI execute_block not registered");
+                self.record_send_failure().await;
+            }
+            return Ok(());
+        }
+
+        // LEGACY PATH: GEI-based buffer (for non-PHASE-B or transition)
         // SEQUENTIAL BUFFERING: Add to buffer and try to send in order
         {
             let mut buffer = self.send_buffer.lock().await;
