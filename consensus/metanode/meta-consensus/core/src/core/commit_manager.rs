@@ -218,6 +218,21 @@ impl Core {
                     break;
                 }
 
+                // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`
+                // before running the local committer. If `CommitSyncer` executed a cold-start
+                // fast-forward (`reset_to_network_baseline`), `Core`'s in-memory `last_decided_leader`
+                // will be stuck at Genesis. This ensures the local committer resumes from the correct
+                // post-sync network boundary instead of rebuilding history and causing a metadata fork.
+                let dag_last_decided = self.dag_state.read().last_commit_leader();
+                if self.last_decided_leader.round < dag_last_decided.round {
+                    tracing::info!(
+                        "🔄 [SYNC] Core fast-forwarding last_decided_leader from {:?} to {:?} to match DagState baseline. This prevents local committer from rebuilding ancient history.",
+                        self.last_decided_leader,
+                        dag_last_decided
+                    );
+                    self.last_decided_leader = dag_last_decided;
+                }
+
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
                 // Truncate the decided leaders to fit the commit schedule limit.
