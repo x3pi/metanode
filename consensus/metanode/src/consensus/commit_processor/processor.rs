@@ -19,7 +19,7 @@ use crate::node::executor_client::ExecutorClient;
 /// Commit processor that ensures commits are executed in order
 pub struct CommitProcessor {
     receiver: UnboundedReceiver<CommittedSubDag>,
-    next_expected_index: u32, // CommitIndex is u32
+    pub next_expected_index: u32, // CommitIndex is u32
     pending_commits: BTreeMap<u32, CommittedSubDag>,
     /// The last commit index that Go has already processed. Used to fast-forward replay.
     pub go_last_commit_index: u32,
@@ -240,7 +240,7 @@ impl CommitProcessor {
         let delivery_sender = self.delivery_sender;
         let pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
-        let go_last_commit_index = self.go_last_commit_index;
+        let mut go_last_commit_index = self.go_last_commit_index;
 
         // ═══════════════════════════════════════════════════════════════
         // PHASE-B: GO IS THE SOLE AUTHORITY FOR GEI
@@ -359,6 +359,22 @@ impl CommitProcessor {
 
                             // PHASE-B: No hint_gei to reset. Go assigns GEI authoritatively.
                             tracing::info!("🔄 [DAG-RESET] Rust does not track GEI — Go will assign authoritatively.");
+
+                            // CRITICAL: Also reset go_last_commit_index when DAG-RESET is detected.
+                            // The old value is a cross-epoch cumulative index (e.g., 293) but the
+                            // new epoch's DAG produces per-epoch commit indices (1, 2, 3...).
+                            // Without this reset, ALL new epoch commits would be incorrectly
+                            // fast-forwarded (e.g., commit 1 <= 293 → skip), causing Go to never
+                            // process those commits. STARTUP-SYNC blocks would then have "extra" GEI
+                            // that CommitProcessor never created counterparts for → GEI divergence.
+                            if go_last_commit_index > 0 {
+                                warn!(
+                                    "🔄 [DAG-RESET] Resetting go_last_commit_index from {} to 0 \
+                                     (new epoch DAG uses per-epoch commit indices)",
+                                    go_last_commit_index
+                                );
+                                go_last_commit_index = 0;
+                            }
                         }
                     }
 
@@ -396,7 +412,7 @@ impl CommitProcessor {
 
                         // Process commit — Go assigns the authoritative GEI
                         // global_exec_index=0: Go ignores this when is_authoritative_gei=true
-                        let geis_consumed = super::executor::dispatch_commit(
+                        let _geis_consumed = super::executor::dispatch_commit(
                             &subdag,
                             0, // PHASE-B: No hint GEI. Go assigns via GEIAuthority.
                             current_epoch,

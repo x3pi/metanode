@@ -66,6 +66,17 @@ impl CommitConsumerArgs {
     pub fn monitor(&self) -> Arc<CommitConsumerMonitor> {
         self.monitor.clone()
     }
+
+    /// Update the replay_after_commit_index after STARTUP-SYNC completes.
+    /// This ensures that authority_node.rs uses the post-sync value (from Go RPC)
+    /// instead of the stale pre-sync value when computing `effective_handled`.
+    /// Without this, the max(go_handled, dag_handled) in authority_node.rs can
+    /// override our post-sync highest_handled_commit with a lower value from
+    /// the surviving RocksDB DAG state.
+    pub fn update_replay_after_commit_index(&mut self, new_index: CommitIndex) {
+        self.replay_after_commit_index = new_index;
+        self.consumer_last_processed_commit_index = new_index;
+    }
 }
 
 /// Helps monitor the progress of the consensus commit handler (consumer).

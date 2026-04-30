@@ -1067,7 +1067,7 @@ impl ConsensusNode {
             hex::encode(storage.last_executed_commit_hash)
         );
 
-        let (commit_consumer, commit_receiver, mut block_receiver) =
+        let (mut commit_consumer, commit_receiver, mut block_receiver) =
             CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash);
         let current_commit_index = Arc::new(AtomicU32::new(0));
         let is_transitioning = coordination_hub.get_is_transitioning_ref();
@@ -1291,6 +1291,7 @@ impl ConsensusNode {
             // ═══════════════════════════════════════════════════════════════
             const MAX_SYNC_RETRIES: u32 = 5;
             const ACCEPTABLE_GAP: u64 = 2;
+            let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
             for sync_round in 0..MAX_SYNC_RETRIES {
                 // Re-query peers for their latest block
@@ -1342,31 +1343,54 @@ impl ConsensusNode {
                                     "✅ [STARTUP-SYNC] Round {}: Synced {} blocks (last_block={})",
                                     sync_round, synced, last_block
                                 );
+                                total_synced_blocks += synced;
                                 local_block = last_block; // Update for next iteration
                                 
                                 // Re-query Go GEI after syncing to update shared state
                                 if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
                                     coordination_hub.set_initial_global_exec_index(new_gei).await;
                                     
-                                    let new_handled = {
-                                        let persisted = crate::node::executor_client::persistence::load_persisted_last_index(&config.storage_path);
-                                        match persisted {
-                                            Some((_gei, commit_idx)) if commit_idx > 0 => commit_idx,
-                                            _ => {
-                                                let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
-                                                match wipe_safe {
-                                                    Some((_gei, commit_idx)) if commit_idx > 0 => commit_idx,
-                                                    _ => {
-                                                        go_replay_after
-                                                    }
-                                                }
-                                            }
+                                    // CRITICAL FIX: Query Go DIRECTLY for the updated lastHandledCommitIndex
+                                    // instead of reading stale Rust persistence files.
+                                    //
+                                    // ROOT CAUSE of fork: After STARTUP-SYNC syncs blocks to Go, Go's
+                                    // lastHandledCommitIndex is updated (from the synced block headers).
+                                    // But the OLD code read from Rust persistence files, which still had
+                                    // the pre-sync stale value. This caused CommitSyncer to replay commits
+                                    // that Go already processed → duplicate blocks → fork.
+                                    let new_handled = match barrier_client.get_last_handled_commit_index().await {
+                                        Ok((commit_idx, _, _, _, _, _)) if commit_idx > 0 => {
+                                            tracing::info!(
+                                                "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync)",
+                                                commit_idx
+                                            );
+                                            commit_idx
+                                        }
+                                        Ok(_) => {
+                                            tracing::warn!(
+                                                "⚠️ [STARTUP-SYNC] Go returned lastHandledCommitIndex=0 after sync. Using go_replay_after={}",
+                                                go_replay_after
+                                            );
+                                            go_replay_after
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "⚠️ [STARTUP-SYNC] Failed to query Go for lastHandledCommitIndex: {}. Falling back to go_replay_after={}",
+                                                e, go_replay_after
+                                            );
+                                            go_replay_after
                                         }
                                     };
                                     commit_consumer.monitor().set_highest_handled_commit(new_handled);
+                                    // CRITICAL: Also update commit_consumer's replay_after_commit_index
+                                    // so that authority_node.rs uses the post-sync value when computing
+                                    // max(go_handled, dag_handled). Without this, authority_node.rs
+                                    // would use the stale pre-sync go_replay_after value and the
+                                    // surviving RocksDB DAG's commit count could override our fix.
+                                    commit_consumer.update_replay_after_commit_index(new_handled);
                                     tracing::info!(
-                                        "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}",
-                                        sync_round, new_gei, new_handled
+                                        "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}, replay_after_updated={}",
+                                        sync_round, new_gei, new_handled, new_handled
                                     );
                                 }
                             }
@@ -1389,6 +1413,51 @@ impl ConsensusNode {
                 if sync_round < MAX_SYNC_RETRIES - 1 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // CRITICAL FIX: Update CommitProcessor to skip commits whose blocks
+            // were already imported by STARTUP-SYNC.
+            //
+            // ROOT CAUSE: STARTUP-SYNC imports N blocks from peers to Go via
+            // HandleSyncBlocksRequest, which advances Go's LastGlobalExecIndex.
+            // Then CommitProcessor dispatches the SAME commits from the DAG,
+            // causing Go to create DUPLICATE blocks with new GEI values.
+            // The synced blocks occupy GEI slots 313-329, and CommitProcessor's
+            // blocks start from 330 — but the cluster's blocks at the same
+            // positions have GEI 313-326. Delta = N (synced blocks).
+            //
+            // FIX: Advance go_last_commit_index by the number of synced blocks.
+            // Since DAG baseline was injected at go_replay_after, the local DAG's
+            // first N commits (go_replay_after+1 through go_replay_after+N)
+            // correspond to the N synced blocks. CommitProcessor will fast-forward
+            // these and only dispatch commits for NEW blocks.
+            // ═══════════════════════════════════════════════════════════════
+            let mut final_handled_commit = commit_processor.go_last_commit_index;
+            if total_synced_blocks > 0 {
+                // We must query Go one last time to get the exact commit_index
+                // that corresponds to the synced blocks. Adding total_synced_blocks
+                // is mathematically incorrect because there are empty consensus commits.
+                match executor_client_for_proc.get_last_handled_commit_index().await {
+                    Ok(final_go_state) => {
+                        final_handled_commit = final_go_state.0;
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ [STARTUP-SYNC] Failed to get final handled commit index from Go: {}", e);
+                    }
+                }
+
+                let new_go_last = final_handled_commit;
+                let new_next_expected = new_go_last + 1;
+                tracing::warn!(
+                    "🔧 [STARTUP-SYNC] Advancing CommitProcessor: go_last_commit_index {} → {}, \
+                     next_expected {} → {} (synced {} blocks during STARTUP-SYNC)",
+                    commit_processor.go_last_commit_index, new_go_last,
+                    commit_processor.next_expected_index, new_next_expected,
+                    total_synced_blocks
+                );
+                commit_processor.go_last_commit_index = new_go_last;
+                commit_processor.next_expected_index = new_next_expected;
             }
         }
 

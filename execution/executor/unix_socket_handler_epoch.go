@@ -1599,10 +1599,8 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 	lastBlockNumber := storage.GetLastBlockNumber()
 	currentEpoch := rh.chainState.GetCurrentEpoch()
 
-	// Determine if Go is in authoritative GEI mode
-	// For now, check if GEIAuthority singleton exists and is enabled
-	// (it's in processor package, so we check existence at RPC level)
-	isAuthoritative := false // Will be set to true when fully migrated
+	// Go is the authoritative source for lastHandledCommitIndex
+	isAuthoritative := true
 
 	var lastBlockTimestampMs uint64 = 0
 	if lastBlockNumber > 0 {

@@ -206,6 +206,18 @@ impl Core {
                     break;
                 }
 
+                // CRITICAL FORK-SAFETY FIX:
+                // Do not run local committer if the node is not in Healthy phase (e.g. CatchingUp).
+                // We MUST rely on CommitSyncer to provide canonical network commits to
+                // ensure bit-perfect metadata (timestamp, leader) parity with the cluster.
+                if self.coordination_hub.should_skip_proposal() {
+                    tracing::debug!(
+                        "⏭️ [SYNC] Skipping local committer because node phase is {:?}. Waiting for CommitSyncer.",
+                        self.coordination_hub.get_phase()
+                    );
+                    break;
+                }
+
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
                 // Truncate the decided leaders to fit the commit schedule limit.

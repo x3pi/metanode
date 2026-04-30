@@ -261,6 +261,16 @@ PROCESS_LOOP:
 			if actualLastGEI > 0 && actualLastGEI >= nextExpectedGlobalExecIndex {
 				oldNextExpected := nextExpectedGlobalExecIndex
 				nextExpectedGlobalExecIndex = actualLastGEI + 1
+				
+				// WE MUST ALSO ADVANCE currentBlockNumber !!!
+				actualLastBlockDB := storage.GetLastBlockNumber()
+				if actualLastBlockDB > 0 && actualLastBlockDB > currentBlockNumber {
+					oldBlockNumber := currentBlockNumber
+					currentBlockNumber = actualLastBlockDB
+					logger.Info("🔄 [TRANSITION SYNC] Advanced block number from DB: %d → %d",
+						oldBlockNumber, currentBlockNumber)
+				}
+
 				if oldNextExpected != nextExpectedGlobalExecIndex {
 					logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d",
 						oldNextExpected, nextExpectedGlobalExecIndex)
