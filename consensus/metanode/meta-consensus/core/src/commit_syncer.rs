@@ -649,6 +649,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         let quorum_commit_index = self.inner.commit_vote_monitor.quorum_commit_index();
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
+        
+        // Update CoordinationHub so Core can read it to prevent divergent local commits
+        self.coordination_hub.update_quorum_commit_index(quorum_commit_index);
+
         let metrics = &self.inner.context.metrics.node_metrics;
         metrics
             .commit_sync_quorum_index

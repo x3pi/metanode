@@ -218,6 +218,22 @@ impl Core {
                     break;
                 }
 
+                // DAG SPARSENESS PREVENTION:
+                // Even if the phase is Healthy (e.g., lag <= 10), if we are missing ANY network commits,
+                // we MUST NOT evaluate the local committer!
+                // Local evaluation on a recently fast-forwarded (sparse) DAG will produce a truncated
+                // sub-dag with missing historical blocks, resulting in a divergent Timestamp and State Root!
+                let local_commit_index = self.dag_state.read().last_commit_index();
+                let quorum_commit_index = self.coordination_hub.get_quorum_commit_index();
+                if local_commit_index < quorum_commit_index {
+                    tracing::info!(
+                        "⏳ [ANTI-FORK] Local commit ({}) < Quorum commit ({}). Skipping local committer to prevent sparse DAG evaluation. Waiting for CertifiedCommits from CommitSyncer.",
+                        local_commit_index,
+                        quorum_commit_index
+                    );
+                    break;
+                }
+
                 // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`
                 // before running the local committer. If `CommitSyncer` executed a cold-start
                 // fast-forward (`reset_to_network_baseline`), `Core`'s in-memory `last_decided_leader`
