@@ -60,6 +60,8 @@ struct StorageSetup {
     latest_block_number: u64,
     /// Last handled commit index from Go Authoritative DB (persisted across DAG wipes)
     last_handled_commit_index: Option<u32>,
+    /// Last block timestamp from Go Authoritative DB (used to recover DAG timestamp after wipe)
+    last_block_timestamp_ms: u64,
 }
 
 /// Results from consensus setup phase.
@@ -741,7 +743,7 @@ impl ConsensusNode {
         }
 
         // EXECUTION INDEX SYNC
-        let (last_global_exec_index, last_executed_commit_hash, last_handled_commit_index) = Self::calculate_last_global_exec_index(
+        let (last_global_exec_index, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms) = Self::calculate_last_global_exec_index(
             config,
             &executor_client,
             &best_socket,
@@ -876,6 +878,7 @@ impl ConsensusNode {
             last_executed_commit_hash,
             latest_block_number,
             last_handled_commit_index,
+            last_block_timestamp_ms,
         })
     }
 
@@ -885,9 +888,9 @@ impl ConsensusNode {
         executor_client: &Arc<ExecutorClient>,
         best_socket: &str,
         peer_last_block: u64,
-    ) -> (u64, [u8; 32], Option<u32>) {
+    ) -> (u64, [u8; 32], Option<u32>, u64) {
         if !config.executor_read_enabled {
-            return (0, [0; 32], None);
+            return (0, [0; 32], None, 0);
         }
 
         let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
@@ -910,11 +913,11 @@ impl ConsensusNode {
             }
         };
 
-        let last_handled_commit_index = match executor_client.get_last_handled_commit_index().await {
-            Ok((commit_index, _, _, _, _, _)) => Some(commit_index),
+        let (last_handled_commit_index, last_block_timestamp_ms) = match executor_client.get_last_handled_commit_index().await {
+            Ok((commit_index, _, _, _, _, ts)) => (Some(commit_index), ts),
             Err(e) => {
                 warn!("⚠️ [STARTUP] Failed to get last_handled_commit_index from Go: {}", e);
-                None
+                (None, 0)
             }
         };
 
@@ -951,7 +954,7 @@ impl ConsensusNode {
                 warn!("🚨 [STARTUP] STALE CHAIN DETECTED: Local ({}) is ahead of Peer ({})! Forcing resync from Peer.", 
                        local_go_block, peer_last_block);
                 // In recovery we just use the local GEI anyway because Go Master blocks handles actual rollback if needed
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else if local_go_block < peer_last_block.saturating_sub(5) {
                 let lag = peer_last_block - local_go_block;
                 info!(
@@ -959,13 +962,13 @@ impl ConsensusNode {
                     local_go_block, peer_last_block, lag, local_go_block
                 );
                 // Flag as lagging if behind by more than 50 blocks
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else {
                 info!(
                     "✅ [STARTUP] Local and Peer are in sync (LocalBlock={}, PeerBlock={}). Using Local Go GEI: {} as authoritative.",
                     local_go_block, peer_last_block, local_go_gei
                 );
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
+                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             }
         } else {
             if persisted_index > local_go_gei {
@@ -976,7 +979,7 @@ impl ConsensusNode {
                 "📊 [STARTUP] No peer reference, using Local Go Last GEI: {} (Block: {})",
                 local_go_gei, local_go_block
             );
-            (local_go_gei, last_executed_commit_hash, last_handled_commit_index)
+            (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
         }
     }
 
@@ -1068,7 +1071,7 @@ impl ConsensusNode {
         );
 
         let (mut commit_consumer, commit_receiver, mut block_receiver) =
-            CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash);
+            CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash, storage.last_block_timestamp_ms);
         let current_commit_index = Arc::new(AtomicU32::new(0));
         let is_transitioning = coordination_hub.get_is_transitioning_ref();
 
@@ -1359,11 +1362,12 @@ impl ConsensusNode {
                                     // the pre-sync stale value. This caused CommitSyncer to replay commits
                                     // that Go already processed → duplicate blocks → fork.
                                     let new_handled = match barrier_client.get_last_handled_commit_index().await {
-                                        Ok((commit_idx, _, _, _, _, _)) if commit_idx > 0 => {
+                                        Ok((commit_idx, _, _, _, _, last_ts)) if commit_idx > 0 => {
                                             tracing::info!(
-                                                "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync)",
-                                                commit_idx
+                                                "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync), ts={}",
+                                                commit_idx, last_ts
                                             );
+                                            commit_consumer.update_last_block_timestamp_ms(last_ts);
                                             commit_idx
                                         }
                                         Ok(_) => {

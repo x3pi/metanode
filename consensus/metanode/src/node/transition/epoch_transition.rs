@@ -202,6 +202,7 @@ pub async fn transition_to_epoch_from_system_tx(
     // Update state
     node.current_epoch = new_epoch;
     node.current_commit_index.store(0, Ordering::SeqCst);
+    node.coordination_hub.reset_quorum_commit_index(0);
 
     let effective_synced = std::cmp::max(synced_index, synced_global_exec_index);
     if effective_synced > synced_index {

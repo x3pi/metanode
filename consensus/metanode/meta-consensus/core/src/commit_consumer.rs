@@ -22,6 +22,9 @@ pub struct CommitConsumerArgs {
     pub(crate) consumer_last_processed_commit_index: CommitIndex,
     /// The hash of the last executed commit from Go Master state, used to perform anti-fork check at startup.
     pub(crate) last_executed_commit_hash: [u8; 32],
+    
+    /// The timestamp of the last executed block from Go Master state, used for recovery.
+    pub(crate) last_block_timestamp_ms: u64,
 
     /// A channel to output the committed sub dags.
     pub(crate) commit_sender: UnboundedSender<CommittedSubDag>,
@@ -37,6 +40,7 @@ impl CommitConsumerArgs {
         replay_after_commit_index: CommitIndex,
         consumer_last_processed_commit_index: CommitIndex,
         last_executed_commit_hash: [u8; 32],
+        last_block_timestamp_ms: u64,
     ) -> (
         Self,
         UnboundedReceiver<CommittedSubDag>,
@@ -54,6 +58,7 @@ impl CommitConsumerArgs {
                 replay_after_commit_index,
                 consumer_last_processed_commit_index,
                 last_executed_commit_hash,
+                last_block_timestamp_ms,
                 commit_sender,
                 block_sender,
                 monitor,
@@ -76,6 +81,10 @@ impl CommitConsumerArgs {
     pub fn update_replay_after_commit_index(&mut self, new_index: CommitIndex) {
         self.replay_after_commit_index = new_index;
         self.consumer_last_processed_commit_index = new_index;
+    }
+
+    pub fn update_last_block_timestamp_ms(&mut self, timestamp: u64) {
+        self.last_block_timestamp_ms = timestamp;
     }
 }
 

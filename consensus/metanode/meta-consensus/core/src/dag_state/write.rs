@@ -417,8 +417,13 @@ impl DagState {
     pub fn last_commit_timestamp_ms(&self) -> consensus_types::block::BlockTimestampMs {
         match &self.last_commit {
             Some(commit) => commit.timestamp_ms(),
-            None => 0,
+            None => self.fallback_last_commit_timestamp_ms,
         }
+    }
+
+    /// Sets the fallback timestamp when last_commit is None
+    pub fn set_last_commit_timestamp_ms(&mut self, timestamp_ms: u64) {
+        self.fallback_last_commit_timestamp_ms = timestamp_ms;
     }
 
     /// Leader slot of the last commit.

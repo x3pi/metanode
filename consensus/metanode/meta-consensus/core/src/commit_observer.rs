@@ -465,7 +465,7 @@ mod tests {
         )));
         let last_processed_commit_index = 0;
         let (commit_consumer, mut commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32]);
+            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32], 0);
         let (blocks_sender, _blocks_receiver) = unbounded_channel("consensus_block_output");
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
@@ -625,7 +625,7 @@ mod tests {
         );
         let last_processed_commit_index = 0;
         let (commit_consumer, mut commit_receiver, _transaction_receiver) =
-            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32]);
+            CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32], 0);
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
             dag_state.clone(),
@@ -734,6 +734,7 @@ mod tests {
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
                     [0; 32],
+                    0,
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -784,6 +785,7 @@ mod tests {
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
                     [0; 32],
+                    0,
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -813,6 +815,7 @@ mod tests {
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
                     [0; 32],
+                    0,
                 );
             let _observer = CommitObserver::new(
                 context.clone(),
@@ -862,6 +865,7 @@ mod tests {
                     replay_after_commit_index,
                     consumer_last_processed_commit_index,
                     [0; 32],
+                    0,
                 );
             let _observer = CommitObserver::new(
                 context.clone(),

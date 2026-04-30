@@ -313,7 +313,8 @@ where
             "consensus db_path must be valid UTF-8 — check Parameters::db_path configuration",
         );
         let store = Arc::new(RocksDBStore::new(store_path));
-        let dag_state = DagState::new(context.clone(), store.clone());
+        let mut dag_state = DagState::new(context.clone(), store.clone());
+        dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
 
         // CRITICAL FIX: Align the CommitConsumerMonitor with the GREATER of:
         // 1. DAG state's last_commit_index (persisted Rust consensus progress)
@@ -624,7 +625,7 @@ mod tests {
         let protocol_keypair = keypairs[own_index].1.clone();
         let network_keypair = keypairs[own_index].0.clone();
 
-        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0, [0; 32]);
+        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
 
         let authority = ConsensusAuthority::start(
             network_type,
@@ -1012,7 +1013,7 @@ mod tests {
         let protocol_keypair = keypairs[index].1.clone();
         let network_keypair = keypairs[index].0.clone();
 
-        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
 
         let authority = ConsensusAuthority::start(
             network_type,

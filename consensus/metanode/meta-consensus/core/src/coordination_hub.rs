@@ -126,6 +126,11 @@ impl ConsensusCoordinationHub {
         }
     }
 
+    /// Reset the highest quorum commit index observed (used during epoch transition)
+    pub fn reset_quorum_commit_index(&self, index: u32) {
+        self.quorum_commit_index.store(index, Ordering::Relaxed);
+    }
+
     /// Retrieve the highest quorum commit index
     pub fn get_quorum_commit_index(&self) -> u32 {
         self.quorum_commit_index.load(Ordering::Relaxed)

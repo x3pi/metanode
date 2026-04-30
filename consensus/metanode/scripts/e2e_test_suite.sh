@@ -501,6 +501,66 @@ test_hash_parity() {
         if [ "$total_null_misses" -gt 0 ]; then
             log "> 🚨 $total_null_misses trường hợp node trả null cho common block — node bị fork hoặc chain broken."
         fi
+        
+        log ""
+        log "🔍 Đang thực hiện Binary Search để tìm BLOCK ĐẦU TIÊN bị lệch (range: 1..$min_block)..."
+        local low=1
+        local high=$min_block
+        local first_mismatch_block=-1
+        
+        while [ "$low" -le "$high" ]; do
+            local mid=$(( (low + high) / 2 ))
+            local mid_hex=$(printf "0x%x" "$mid")
+            
+            local has_mismatch=false
+            local ref_hash=""
+            
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${blocks[$i]}" = "-1" ]; then continue; fi
+                local port=${RPC_PORTS[$i]}
+                local result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$port" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$mid_hex\", false],\"id\":1}" 2>/dev/null)
+                local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                
+                if [ -z "$hash" ] || [ "$hash" = "null" ]; then continue; fi
+                
+                if [ -z "$ref_hash" ]; then
+                    ref_hash="$hash"
+                elif [ "$hash" != "$ref_hash" ]; then
+                    has_mismatch=true
+                    break
+                fi
+            done
+            
+            if [ "$has_mismatch" = "true" ]; then
+                first_mismatch_block=$mid
+                high=$((mid - 1))
+            else
+                low=$((mid + 1))
+            fi
+        done
+        
+        if [ "$first_mismatch_block" != "-1" ]; then
+            log "🎯 **BLOCK ĐẦU TIÊN BỊ LỆCH CHÍNH XÁC LÀ: #$first_mismatch_block**"
+            log "Chi tiết block #$first_mismatch_block:"
+            local fm_hex=$(printf "0x%x" "$first_mismatch_block")
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${blocks[$i]}" = "-1" ]; then continue; fi
+                local port=${RPC_PORTS[$i]}
+                local result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$port" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fm_hex\", false],\"id\":1}" 2>/dev/null)
+                local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local gei=$(echo "$result" | grep -o '"globalExecIndex":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local ts=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local st=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                if [ -n "$hash" ] && [ "$hash" != "null" ]; then
+                    local gei_dec="?"
+                    if [ -n "$gei" ]; then gei_dec=$(printf "%d" "$gei" 2>/dev/null || echo "?"); fi
+                    local ts_dec="?"
+                    if [ -n "$ts" ]; then ts_dec=$(printf "%d" "$ts" 2>/dev/null || echo "?"); fi
+                    log "  - Node $i: hash=\`${hash:0:18}...\` gei=\`${gei_dec}\` ts=\`${ts_dec}\` state=\`${st:0:18}...\`"
+                fi
+            done
+        fi
+        
         record_result "$test_label" "false"
     else
         log "> ✅ Tất cả ${blocks_checked} blocks đều nhất quán hash+GEI giữa các node."

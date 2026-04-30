@@ -102,6 +102,9 @@ pub struct DagState {
 
     // The number of cached rounds
     pub(crate) cached_rounds: Round,
+
+    // Fallback timestamp for when last_commit is None (e.g., after DAG wipe)
+    pub(crate) fallback_last_commit_timestamp_ms: u64,
 }
 
 impl DagState {
@@ -251,6 +254,7 @@ impl DagState {
             store: store.clone(),
             cached_rounds,
             evicted_rounds: vec![0; num_authorities],
+            fallback_last_commit_timestamp_ms: 0,
         };
 
         for (authority_index, _) in context.committee.authorities() {

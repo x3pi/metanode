@@ -208,17 +208,32 @@ func (app *App) initBlockchain() error {
 			}
 		}
 
-		// ─── Initialize LastHandledCommitIndex from BackupDb ──────────
+		// ─── Initialize LastHandledCommitIndex ──────────
+		headerCommitIndex := uint32(app.startLastBlock.Header().CommitIndex())
+		
+		var backupCommitIndex uint32 = 0
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
 			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
 				if parsedIdx, err := utils.BytesToUint32(commitIdxBytes); err == nil {
-					storage.UpdateLastHandledCommitIndex(parsedIdx)
-					logger.Info("✅ [STARTUP] Loaded LastHandledCommitIndex from BackupDb: %d", parsedIdx)
+					backupCommitIndex = parsedIdx
 				}
-			} else {
-				storage.UpdateLastHandledCommitIndex(0)
-				logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb)")
 			}
+		}
+
+		targetCommitIndex := headerCommitIndex
+		if backupCommitIndex > headerCommitIndex {
+			targetCommitIndex = backupCommitIndex
+			logger.Info("✅ [STARTUP] BackupDb CommitIndex (%d) is higher than block header CommitIndex (%d). Using BackupDb value.", backupCommitIndex, headerCommitIndex)
+		} else if headerCommitIndex > 0 {
+			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
+		} else {
+			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb or header)")
+		}
+
+		if targetCommitIndex > 0 {
+			storage.UpdateLastHandledCommitIndex(targetCommitIndex)
+		} else {
+			storage.UpdateLastHandledCommitIndex(0)
 		}
 
 		// ─── Startup State Sync Logging ────────────────────────────────

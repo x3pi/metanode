@@ -357,6 +357,8 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		return
 	}
 
+
+
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
@@ -382,6 +384,23 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	logger.Debug("✅ [FORK-SAFETY] Processing sequential block global_exec_index=%d", globalExecIndex)
 
 PROCESS_BLOCK:
+	// ═══════════════════════════════════════════════════════════════════════════
+	// NOMT RE-EXECUTION GUARD: Prevent EVM execution of already-committed blocks
+	// If the DB already contains this block number (or higher), we must NEVER
+	// pass it to the EVM. Doing so with NOMT corrupts the trie state because
+	// NOMT only stores the latest state, not historic state roots.
+	// ═══════════════════════════════════════════════════════════════════════════
+	// The NEXT block to be created will be *currentBlockNumber + 1 (assigned at line ~585).
+	// Compare that against the DB — if the DB already has it, this is a re-execution.
+	nextBlockToCreate := *currentBlockNumber + 1
+	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
+		if len(epochData.Transactions) > 0 {
+			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d). "+
+				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber())
+			return
+		}
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// SYNC DEDUP GUARD: DISABLED (FORK-SAFETY FIX 2026-04-29)
 	//
