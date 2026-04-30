@@ -139,17 +139,28 @@ impl LeaderSchedule {
     }
 
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {
+        let is_reputation_swaps_disabled = std::env::var("DISABLE_REPUTATION_SWAPS").is_ok()
+            || std::env::var("SINGLE_NODE_DEBUG").is_ok();
+            
         cfg_if::cfg_if! {
             // TODO: we need to differentiate the leader strategy in tests, so for
             // some type of testing (ex sim tests) we can use the staked approach.
             if #[cfg(test)] {
                 let leader = AuthorityIndex::new_for_test((round + leader_offset) % self.context.committee.size() as u32);
-                let table = self.leader_swap_table.read();
-                table.swap(leader, round, leader_offset).unwrap_or(leader)
+                if is_reputation_swaps_disabled {
+                    leader
+                } else {
+                    let table = self.leader_swap_table.read();
+                    table.swap(leader, round, leader_offset).unwrap_or(leader)
+                }
             } else {
                 let leader = self.elect_leader_stake_based(round, leader_offset);
-                let table = self.leader_swap_table.read();
-                table.swap(leader, round, leader_offset).unwrap_or(leader)
+                if is_reputation_swaps_disabled {
+                    leader
+                } else {
+                    let table = self.leader_swap_table.read();
+                    table.swap(leader, round, leader_offset).unwrap_or(leader)
+                }
             }
         }
     }
