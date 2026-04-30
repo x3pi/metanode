@@ -249,6 +249,51 @@ impl Core {
                     self.last_decided_leader = dag_last_decided;
                 }
 
+                // DAG DENSITY CHECK (ANTI-FORK):
+                // After CommitSyncer catch-up, the DAG only contains blocks from committed
+                // sub-dags. P2P block subscription hasn't had time to populate blocks from
+                // all authorities at recent rounds. If we run the local committer now,
+                // calculate_commit_timestamp() will compute median_timestamp_by_stake from
+                // an incomplete set of parent blocks, producing a different timestamp than
+                // other nodes (observed as 1-2 second drift causing hash divergence).
+                //
+                // We check: at the highest accepted round, do we have blocks from at least
+                // a quorum of authorities? If not, the DAG is too sparse for safe local commits.
+                {
+                    let dag_state = self.dag_state.read();
+                    let highest_round = dag_state.highest_accepted_round();
+                    let committee_size = self.context.committee.size();
+                    // 2f+1 count-based quorum (not stake-based)
+                    let quorum_count = committee_size * 2 / 3 + 1;
+
+                    // Check how many distinct authorities have blocks in the range
+                    // [last_decided_leader.round+1, highest_round]. We need at least
+                    // quorum coverage at the rounds where leaders will be evaluated.
+                    // The committer evaluates leaders up to highest_accepted_round - 2,
+                    // so check that round for density.
+                    let check_round = if highest_round > 2 { highest_round - 2 } else { highest_round };
+                    if check_round > dag_state.last_commit_round() {
+                        let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(check_round);
+                        let distinct_authors: std::collections::HashSet<_> = blocks_at_round
+                            .iter()
+                            .map(|b| b.author())
+                            .collect();
+
+                        if distinct_authors.len() < quorum_count {
+                            tracing::info!(
+                                "⏳ [ANTI-FORK] Sparse DAG at round {}: {}/{} authorities have blocks \
+                                 (need {} for quorum). Skipping local committer to prevent timestamp \
+                                 divergence. Waiting for P2P block subscription to populate DAG.",
+                                check_round,
+                                distinct_authors.len(),
+                                committee_size,
+                                quorum_count,
+                            );
+                            break;
+                        }
+                    }
+                }
+
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
                 // Truncate the decided leaders to fit the commit schedule limit.

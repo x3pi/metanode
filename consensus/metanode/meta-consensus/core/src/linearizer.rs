@@ -207,21 +207,36 @@ impl Linearizer {
                 .filter(|block_ref| block_ref.round == leader_block.round() - 1)
                 .cloned()
                 .collect::<Vec<_>>();
+            let expected_count = block_refs.len();
             // Get the blocks from dag state - filter out any missing blocks gracefully.
             // During commit sync, some ancestor blocks might not be in dag_state yet.
             // This prevents panic during epoch transitions when syncing from peers.
-            let blocks = dag_state
+            let mut missing_count = 0usize;
+            let blocks: Vec<_> = dag_state
                 .get_blocks(&block_refs)
                 .into_iter()
                 .filter_map(|block_opt| {
                     if block_opt.is_none() {
-                        tracing::warn!(
-                            "⚠️ [LINEARIZER] Missing ancestor block during commit timestamp calculation - this may happen during commit sync"
-                        );
+                        missing_count += 1;
                     }
                     block_opt
-                });
-            median_timestamp_by_stake(context, blocks).unwrap_or_else(|e| {
+                })
+                .collect();
+            if missing_count > 0 {
+                // ANTI-FORK DIAGNOSTIC: Missing parent blocks cause
+                // median_timestamp_by_stake to compute a different median than
+                // nodes with the full set, resulting in timestamp divergence.
+                tracing::warn!(
+                    "⚠️ [LINEARIZER] Missing {}/{} ancestor blocks for leader {:?} at round {} \
+                     during commit timestamp calculation. This WILL cause timestamp divergence \
+                     if the local committer is producing this commit!",
+                    missing_count,
+                    expected_count,
+                    leader_block.reference(),
+                    leader_block.round(),
+                );
+            }
+            median_timestamp_by_stake(context, blocks.into_iter()).unwrap_or_else(|e| {
                 // DEFENSIVE FIX: During commit sync, ALL ancestor blocks may be missing if
                 // genesis blocks don't match between nodes (due to validator ordering differences
                 // during epoch transitions). Instead of panicking, use the leader block's own
