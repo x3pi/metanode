@@ -339,8 +339,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
             );
             
             // Fast-forward DAG state to match Go Execution Engine's progress
-            // We use highest_handled_index as the base target round for GC dropping
-            self.inner.dag_state.write().reset_to_network_baseline(highest_handled_index as u32, highest_handled_index, crate::commit::CommitDigest::MIN, 0);
+            // We use 0 as the target round for GC dropping to avoid accidentally skipping blocks
+            // because commit_index is much higher than round in multi-leader setups. The round 
+            // will naturally catch up as new commits are processed.
+            self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled_index, crate::commit::CommitDigest::MIN, 0);
             self.synced_commit_index = highest_handled_index;
             
             // Update local_commit for the phase evaluation below!
