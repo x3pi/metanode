@@ -285,21 +285,33 @@ impl Core {
                         break;
                     }
 
-                    // Check 2: Block density at first uncommitted round
-                    let first_uncommitted = last_commit_round + 1;
-                    let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(first_uncommitted);
-                    let distinct_authors: std::collections::HashSet<_> = blocks_at_round
-                        .iter()
-                        .map(|b| b.author())
-                        .collect();
+                    // Check 2: Block density across ALL uncommitted rounds up to highest_round - 1.
+                    // We don't check `highest_round` itself because it might just be starting and
+                    // legitimately have < quorum blocks, which would stall the committer unnecessarily.
+                    // But all intermediate rounds must be dense to ensure safe leader evaluation.
+                    let mut sparse_round = None;
+                    let mut sparse_authors_count = 0;
+                    for r in (last_commit_round + 1)..highest_round {
+                        let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(r);
+                        let distinct_authors: std::collections::HashSet<_> = blocks_at_round
+                            .iter()
+                            .map(|b| b.author())
+                            .collect();
 
-                    if distinct_authors.len() < quorum_count {
+                        if distinct_authors.len() < quorum_count {
+                            sparse_round = Some(r);
+                            sparse_authors_count = distinct_authors.len();
+                            break;
+                        }
+                    }
+
+                    if let Some(r) = sparse_round {
                         tracing::info!(
                             "⏳ [ANTI-FORK] Sparse DAG at round {}: {}/{} authorities have blocks \
                              (need {} for quorum). Skipping local committer to prevent leader \
                              election divergence. Waiting for P2P block subscription to populate DAG.",
-                            first_uncommitted,
-                            distinct_authors.len(),
+                            r,
+                            sparse_authors_count,
                             committee_size,
                             quorum_count,
                         );
