@@ -583,74 +583,44 @@ impl CommitProcessor {
                                     next_expected_index = smallest_pending;
 
                                     // ═════════════════════════════════════════════════
-                                    // BATCH DRAIN: Process pending commits with fast-
-                                    // path for empty commits (no TXs, no system TX).
+                                    // BATCH DRAIN: Process pending commits sequentially.
+                                    // NOTE: We MUST NOT skip empty commits here, because
+                                    // Go relies on receiving every commit to deterministically
+                                    // increment its Global Execution Index (GEI).
                                     // PHASE-A: Same logic, using hint GEI.
                                     // ═════════════════════════════════════════════════
-                                    let mut batch_empty_count: u64 = 0;
-                                    let mut batch_nonempty_count: u64 = 0;
                                     let drain_start = std::time::Instant::now();
+                                    let mut total_drained: u64 = 0;
 
                                     while let Some(pending) = pending_commits.remove(&next_expected_index) {
                                         let pending_commit_index = next_expected_index;
 
-                                        let total_txs: usize = pending.blocks
-                                            .iter()
-                                            .map(|b| b.transactions().len())
-                                            .sum();
-                                        let has_system_tx = pending.extract_end_of_epoch_transaction().is_some();
+                                        let _geis_consumed = super::executor::dispatch_commit(
+                                            &pending,
+                                            0, // PHASE-B: Go assigns GEI
+                                            current_epoch,
+                                            executor_client.clone(),
+                                            delivery_sender.clone(),
+                                            pending_transactions_queue.clone(),
+                                            self.epoch_eth_addresses.clone(),
+                                            self.tx_recycler.clone(),
+                                            self.shared_last_global_exec_index.clone(),
+                                        )
+                                        .await?;
 
-                                        if total_txs == 0 && !has_system_tx {
-                                            batch_empty_count += 1;
-                                            if let Some(ref cb) = commit_index_callback {
-                                                cb(pending_commit_index);
-                                            }
-                                        } else {
-                                            if batch_empty_count > 0 {
-                                                info!(
-                                                    "⏭️ [FORWARD-JUMP] Batch-skipped {} empty commits",
-                                                    batch_empty_count
-                                                );
-                                                batch_empty_count = 0;
-                                            }
-
-                                            batch_nonempty_count += 1;
-                                            let _geis_consumed = super::executor::dispatch_commit(
-                                                &pending,
-                                                0, // PHASE-B: Go assigns GEI
-                                                current_epoch,
-                                                executor_client.clone(),
-                                                delivery_sender.clone(),
-                                                pending_transactions_queue.clone(),
-                                                self.epoch_eth_addresses.clone(),
-                                                self.tx_recycler.clone(),
-                                                self.shared_last_global_exec_index.clone(),
-                                            )
-                                            .await?;
-
-                                            if let Some(ref cb) = commit_index_callback {
-                                                cb(pending_commit_index);
-                                            }
+                                        if let Some(ref cb) = commit_index_callback {
+                                            cb(pending_commit_index);
                                         }
 
+                                        total_drained += 1;
                                         next_expected_index += 1;
                                     }
 
-                                    if batch_empty_count > 0 {
-                                        info!(
-                                            "⏭️ [FORWARD-JUMP] Final batch-skipped {} empty commits",
-                                            batch_empty_count
-                                        );
-                                    }
-
                                     let drain_elapsed = drain_start.elapsed();
-                                    let total_drained = batch_empty_count + batch_nonempty_count;
                                     info!(
                                         "✅ [FORWARD-JUMP] Drain complete in {:?}. \
-                                         total_drained={}, nonempty_processed={}, \
-                                         next_expected={}, remaining_pending={}",
+                                         total_drained={}, next_expected={}, remaining_pending={}",
                                         drain_elapsed, total_drained,
-                                        batch_nonempty_count,
                                         next_expected_index, pending_commits.len()
                                     );
                                 }

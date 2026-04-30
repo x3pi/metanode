@@ -431,12 +431,6 @@ impl DagState {
         real_digest: crate::commit::CommitDigest,
         timestamp_ms: consensus_types::block::BlockTimestampMs,
     ) {
-        if self.last_commit.is_some() && self.last_commit_digest() != crate::commit::CommitDigest::MIN {
-            // Protect against accidentally resetting an active DAG
-            tracing::warn!("DAG network baseline reset aborted: DAG is already active.");
-            return;
-        }
-
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);
         

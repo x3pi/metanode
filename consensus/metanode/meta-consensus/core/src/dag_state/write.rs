@@ -175,6 +175,12 @@ impl DagState {
 
     /// Returns true if the block is committed. Only valid for blocks above the GC round.
     pub fn is_committed(&self, block_ref: &BlockRef) -> bool {
+        // FAST PATH: If the block's round is <= the last committed round for its author,
+        // it must have been committed (or is older than the network baseline).
+        if block_ref.round <= self.last_committed_rounds[block_ref.author] {
+            return true;
+        }
+
         match self.recent_blocks.get(block_ref) {
             Some(info) => info.committed,
             None => {

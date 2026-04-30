@@ -849,44 +849,50 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// after a Node fast-forwards its DAG from an empty state to match Go's catchup sync progress.
     async fn patch_baseline_if_needed(&mut self) {
         if self.synced_commit_index == 0 { return; }
-        if self.inner.dag_state.read().last_commit_digest() != crate::commit::CommitDigest::MIN { return; }
+        
+        let last_commit_index = self.inner.dag_state.read().last_commit_index();
+        if self.synced_commit_index <= last_commit_index { return; }
         
         let prev_index = self.synced_commit_index;
         tracing::info!("🔗 Fetching network digest and timestamp for baseline commit #{}", prev_index);
         
-        let mut target_authorities = self.inner.context.committee.authorities()
-            .filter_map(|(i, _)| if i != self.inner.context.own_index { Some(i) } else { None })
-            .collect::<Vec<_>>();
+        loop {
+            let mut target_authorities = self.inner.context.committee.authorities()
+                .filter_map(|(i, _)| if i != self.inner.context.own_index { Some(i) } else { None })
+                .collect::<Vec<_>>();
+                
+            use rand::seq::SliceRandom;
+            target_authorities.shuffle(&mut rand::thread_rng());
             
-        use rand::seq::SliceRandom;
-        target_authorities.shuffle(&mut rand::thread_rng());
-        
-        let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
-        
-        for authority in target_authorities {
-            if let Ok(Ok((serialized_commits, _))) = tokio::time::timeout(
-                Duration::from_secs(5),
-                self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
-            ).await {
-                if let Some(serialized) = serialized_commits.first() {
-                    if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
-                        use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
-                        let timestamp_ms = commit.timestamp_ms(); 
-                        let digest = crate::commit::TrustedCommit::compute_digest(serialized);
-                        
-                        self.inner.dag_state.write().reset_to_network_baseline(
-                            prev_index as u32,
-                            prev_index,
-                            digest,
-                            timestamp_ms
-                        );
-                        tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={})", prev_index, digest, timestamp_ms);
-                        return;
+            let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
+            
+            for authority in target_authorities {
+                if let Ok(Ok((serialized_commits, _))) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
+                ).await {
+                    if let Some(serialized) = serialized_commits.first() {
+                        if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
+                            use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
+                            let timestamp_ms = commit.timestamp_ms(); 
+                            let leader_round = commit.leader().round;
+                            let digest = crate::commit::TrustedCommit::compute_digest(serialized);
+                            
+                            self.inner.dag_state.write().reset_to_network_baseline(
+                                leader_round,
+                                prev_index,
+                                digest,
+                                timestamp_ms
+                            );
+                            tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={}, leader_round={})", prev_index, digest, timestamp_ms, leader_round);
+                            return;
+                        }
                     }
                 }
             }
+            tracing::warn!("⚠️ Failed to fetch baseline digest for commit #{}. Retrying in 2 seconds...", prev_index);
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        tracing::warn!("⚠️ Failed to fetch baseline digest for commit #{}", prev_index);
     }
 
     /// Processes fetched commits and sends them to Core.
