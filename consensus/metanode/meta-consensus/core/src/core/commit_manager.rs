@@ -253,44 +253,57 @@ impl Core {
                 // After CommitSyncer catch-up, the DAG only contains blocks from committed
                 // sub-dags. P2P block subscription hasn't had time to populate blocks from
                 // all authorities at recent rounds. If we run the local committer now,
-                // calculate_commit_timestamp() will compute median_timestamp_by_stake from
-                // an incomplete set of parent blocks, producing a different timestamp than
-                // other nodes (observed as 1-2 second drift causing hash divergence).
+                // try_decide() will evaluate votes on a sparse DAG and may elect different
+                // leaders than other nodes, and calculate_commit_timestamp() will compute
+                // a different median, producing timestamp divergence (observed as 2s drift).
                 //
-                // We check: at the highest accepted round, do we have blocks from at least
-                // a quorum of authorities? If not, the DAG is too sparse for safe local commits.
+                // Two checks:
+                // 1. PIPELINE DEPTH: Require at least 4 uncommitted rounds above last_commit_round.
+                //    The committer needs blocks at R, R+1, R+2 to decide a leader at R.
+                //    Having >=4 uncommitted rounds ensures sufficient data for decisions.
+                // 2. BLOCK DENSITY: At the first uncommitted round, check that at least a
+                //    quorum of authorities have blocks. This ensures P2P has populated the DAG.
                 {
                     let dag_state = self.dag_state.read();
+                    let last_commit_round = dag_state.last_commit_round();
                     let highest_round = dag_state.highest_accepted_round();
                     let committee_size = self.context.committee.size();
                     // 2f+1 count-based quorum (not stake-based)
                     let quorum_count = committee_size * 2 / 3 + 1;
 
-                    // Check how many distinct authorities have blocks in the range
-                    // [last_decided_leader.round+1, highest_round]. We need at least
-                    // quorum coverage at the rounds where leaders will be evaluated.
-                    // The committer evaluates leaders up to highest_accepted_round - 2,
-                    // so check that round for density.
-                    let check_round = if highest_round > 2 { highest_round - 2 } else { highest_round };
-                    if check_round > dag_state.last_commit_round() {
-                        let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(check_round);
-                        let distinct_authors: std::collections::HashSet<_> = blocks_at_round
-                            .iter()
-                            .map(|b| b.author())
-                            .collect();
+                    // Check 1: Pipeline depth — need at least 4 uncommitted rounds
+                    let uncommitted_depth = highest_round.saturating_sub(last_commit_round);
+                    if uncommitted_depth < 4 {
+                        tracing::info!(
+                            "⏳ [ANTI-FORK] Insufficient pipeline depth: only {} uncommitted rounds \
+                             (last_commit_round={}, highest_round={}, need >=4). \
+                             Waiting for more P2P blocks before running local committer.",
+                            uncommitted_depth,
+                            last_commit_round,
+                            highest_round,
+                        );
+                        break;
+                    }
 
-                        if distinct_authors.len() < quorum_count {
-                            tracing::info!(
-                                "⏳ [ANTI-FORK] Sparse DAG at round {}: {}/{} authorities have blocks \
-                                 (need {} for quorum). Skipping local committer to prevent timestamp \
-                                 divergence. Waiting for P2P block subscription to populate DAG.",
-                                check_round,
-                                distinct_authors.len(),
-                                committee_size,
-                                quorum_count,
-                            );
-                            break;
-                        }
+                    // Check 2: Block density at first uncommitted round
+                    let first_uncommitted = last_commit_round + 1;
+                    let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(first_uncommitted);
+                    let distinct_authors: std::collections::HashSet<_> = blocks_at_round
+                        .iter()
+                        .map(|b| b.author())
+                        .collect();
+
+                    if distinct_authors.len() < quorum_count {
+                        tracing::info!(
+                            "⏳ [ANTI-FORK] Sparse DAG at round {}: {}/{} authorities have blocks \
+                             (need {} for quorum). Skipping local committer to prevent leader \
+                             election divergence. Waiting for P2P block subscription to populate DAG.",
+                            first_uncommitted,
+                            distinct_authors.len(),
+                            committee_size,
+                            quorum_count,
+                        );
+                        break;
                     }
                 }
 
