@@ -59,19 +59,8 @@ pub async fn dispatch_commit(
     //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
     if total_transactions == 0 && !has_system_tx {
-        // Update shared GEI counter
-        if let Some(shared_index) = shared_last_global_exec_index.clone() {
-            let mut index_guard = shared_index.lock().await;
-            if global_exec_index > *index_guard {
-                *index_guard = global_exec_index;
-            }
-        }
-
-        // Advance executor_client's next_expected_index is NO LONGER NEEDED.
-        // next_expected_index tracks GEI, and empty commits don't advance GEI.
-
         tracing::trace!(
-            "⏭️ [FAST-SKIP] Empty commit #{} (GEI={}) skipped — no FFI call needed",
+            "⏭️ [FAST-SKIP] Empty commit #{} (GEI expected={}) skipped — no transactions",
             commit_index, global_exec_index
         );
         return Ok(0); // GEI DOES NOT ADVANCE FOR EMPTY COMMITS! This ensures mathematical determinism based purely on transactions.
@@ -82,12 +71,10 @@ pub async fn dispatch_commit(
     // but this CAUSED state divergence: node skips transactions while other nodes execute
     // them → different stateRoot → hash mismatch → FORK.
     // All commits passing through BFT consensus are canonical and MUST be executed.
-    let leader_address: Option<Vec<u8>> = if executor_client.is_some() {
+    let leader_address: Vec<u8> = if executor_client.is_some() {
         let leader_author_index = subdag.leader.author.value();
 
         // STEP 1: Validate committee data exists (with retry for startup race condition)
-        let mut retry_attempts = 0;
-        let max_retries = 10; // 10 * 200ms = 2 seconds max wait
 
         let resolved_address = loop {
             let epoch_addresses = validator_eth_addresses.read().await;
@@ -95,20 +82,7 @@ pub async fn dispatch_commit(
             // Check if committee HashMap is loaded
             if epoch_addresses.is_empty() {
                 drop(epoch_addresses);
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!("🚨 [FATAL] epoch_eth_addresses STILL EMPTY after {} retries! Committee not loaded.", max_retries);
-                    error!("🚨 [FATAL] Cannot process commit #{} (global_exec_index={}) without valid committee data!", 
-                            commit_index, global_exec_index);
-                    anyhow::bail!(
-                            "Committee data empty after {} retries — cannot process commit #{} (GEI={}). Node requires restart.",
-                            max_retries, commit_index, global_exec_index
-                        );
-                }
-                warn!(
-                    "⏳ [LEADER] epoch_eth_addresses empty, waiting for committee... retry {}/{}",
-                    retry_attempts, max_retries
-                );
+                warn!("⏳ [LEADER] epoch_eth_addresses empty, waiting for committee...");
                 sleep(Duration::from_millis(200)).await;
                 continue;
             }
@@ -118,14 +92,9 @@ pub async fn dispatch_commit(
                 addrs.clone()
             } else {
                 drop(epoch_addresses); // Release lock before retry
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!("🚨 [FATAL] No committee available for epoch {} after {} retries!", epoch, max_retries);
-                    anyhow::bail!("No committee data available in cache for epoch {} — cannot determine leader. Node requires restart.", epoch);
-                }
                 warn!(
-                    "⏳ [LEADER] epoch_eth_addresses missing epoch {}, waiting... retry {}/{}",
-                    epoch, retry_attempts, max_retries
+                    "⏳ [LEADER] epoch_eth_addresses missing epoch {}, waiting...",
+                    epoch
                 );
                 sleep(Duration::from_millis(200)).await;
                 continue;
@@ -137,19 +106,9 @@ pub async fn dispatch_commit(
                 // SELF-RECOVERY: Instead of panic, try to refresh the cache
                 drop(epoch_addresses); // Release lock before refresh
 
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!(
-                        "🚨 [FATAL] leader_author_index {} >= committee_size {} after {} retries!",
-                        leader_author_index, committee_size, max_retries
-                    );
-                    error!("🚨 [FATAL] Committee size mismatch - letting Go handle the deterministic fallback to prevent cluster Hash divergence.");
-                    break None;
-                }
-
                 warn!(
-                        "⚠️ [LEADER] leader_index {} >= committee_size {} for epoch {}. Refreshing cache... retry {}/{}",
-                        leader_author_index, committee_size, epoch, retry_attempts, max_retries
+                        "⚠️ [LEADER] leader_index {} >= committee_size {} for epoch {}. Refreshing cache...",
+                        leader_author_index, committee_size, epoch
                     );
 
                 // Try to refresh epoch_eth_addresses from Go
@@ -207,18 +166,9 @@ pub async fn dispatch_commit(
                 // SELF-RECOVERY: Try to refresh for invalid address too
                 drop(epoch_addresses);
 
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!(
-                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Letting Go handle the deterministic fallback to prevent cluster Hash divergence.",
-                            leader_author_index, addr.len(), max_retries
-                        );
-                    break None;
-                }
-
                 warn!(
-                        "⚠️ [LEADER] Invalid eth_address length at index {}. Refreshing cache... retry {}/{}",
-                        leader_author_index, retry_attempts, max_retries
+                        "⚠️ [LEADER] Invalid eth_address length at index {}. Refreshing cache...",
+                        leader_author_index
                     );
                 sleep(Duration::from_millis(500)).await;
                 continue;
@@ -234,12 +184,12 @@ pub async fn dispatch_commit(
                     hex::encode(&addr)
                 );
             }
-            break Some(addr);
+            break addr;
         };
 
         resolved_address
     } else {
-        None // No executor client = no need for leader address
+        Vec::new() // No executor client = no need for leader address
     };
 
     if total_transactions > 0 || has_system_tx {

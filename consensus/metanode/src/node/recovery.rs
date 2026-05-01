@@ -146,7 +146,7 @@ pub async fn perform_block_recovery_check(
         // Send to executor — send_committed_subdag handles fragmentation internally
         // and returns the actual number of GEIs consumed
         let actual_geis = executor_client
-            .send_committed_subdag(&subdag, current_epoch, next_required_global, None)
+            .send_committed_subdag(&subdag, current_epoch, next_required_global, Vec::new())
             .await?;
 
         // Advance expected index by the number of GEIs consumed (not always 1!)

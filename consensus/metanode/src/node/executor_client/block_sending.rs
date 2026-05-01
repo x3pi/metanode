@@ -52,7 +52,7 @@ impl ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<u64> {
         if !self.is_enabled() {
             return Ok(1); // Silently skip if not enabled
@@ -211,11 +211,11 @@ impl ExecutorClient {
                     epoch,
                     commit_timestamp_ms: subdag.timestamp_ms,
                     leader_author_index: subdag.leader.author.value() as u32,
-                    leader_address: leader_address.clone().unwrap_or_default(),
+                    leader_address: leader_address.clone(),
                     block_number,
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-                    // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
-                    is_authoritative_gei: true,
+                    // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
+                    is_authoritative_gei: false,
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -257,11 +257,14 @@ impl ExecutorClient {
         });
 
         let block_number = {
+            let mut next_bn = self.next_block_number.lock().await;
             let mut last_ep = self.last_processed_epoch.lock().await;
             if epoch > *last_ep {
                 *last_ep = epoch;
             }
-            0 // Go assigns block numbers directly
+            let bn = *next_bn;
+            *next_bn += 1;
+            bn
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
@@ -272,11 +275,11 @@ impl ExecutorClient {
             epoch,
             commit_timestamp_ms: subdag.timestamp_ms,
             leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
+            leader_address,
             block_number,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-            // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
-            is_authoritative_gei: true,
+            // GO-AUTHORITATIVE GEI: Disabled. Rust is the absolute authority for GEI.
+            is_authoritative_gei: false,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -744,7 +747,7 @@ impl ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<()> {
         if !self.is_enabled() {
             return Ok(()); // Silently skip if not enabled
@@ -759,11 +762,11 @@ impl ExecutorClient {
             epoch,
             commit_timestamp_ms: subdag.timestamp_ms,
             leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
+            leader_address,
             block_number: 0,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-            // GO-AUTHORITATIVE GEI: Tell Go to compute GEI internally
-            is_authoritative_gei: true,
+            // GO-AUTHORITATIVE GEI: Disabled
+            is_authoritative_gei: false,
         };
 
         let mut epoch_data_bytes = Vec::new();

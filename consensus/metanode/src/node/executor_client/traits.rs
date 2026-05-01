@@ -60,7 +60,7 @@ pub trait TExecutorClient: Send + Sync {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<u64>;
     async fn flush_buffer(&self) -> Result<()>;
     async fn send_committed_subdag_direct(
@@ -68,7 +68,7 @@ pub trait TExecutorClient: Send + Sync {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<()>;
 
     // 6. Block Sync
@@ -171,7 +171,7 @@ impl TExecutorClient for ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<u64> {
         ExecutorClient::send_committed_subdag(
             self,
@@ -190,7 +190,7 @@ impl TExecutorClient for ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<()> {
         ExecutorClient::send_committed_subdag_direct(
             self,

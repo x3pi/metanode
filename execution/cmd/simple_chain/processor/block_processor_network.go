@@ -375,22 +375,8 @@ PROCESS_LOOP:
 						// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 						// use the same atomic counter. Previously used Rust's hint GEI
 						// directly, which could diverge from GEIAuthority's counter.
-						geiAuth := GetGEIAuthority()
-						if geiAuth.IsEnabled() {
-							for i := uint64(0); i < batchCount; i++ {
-								geiAuth.AssignGEI()
-							}
-							actualGEI := geiAuth.GetLastAssignedGEI()
-							bp.updateAndPersistLastGlobalExecIndex(actualGEI)
-							nextExpectedGlobalExecIndex = actualGEI + 1
-							if actualGEI != highestGEI {
-								logger.Info("🔑 [BATCH-DRAIN-AUTH] GEI corrected: rust_hint=%d → go_auth=%d (batch=%d)",
-									highestGEI, actualGEI, batchCount)
-							}
-						} else {
-							bp.updateAndPersistLastGlobalExecIndex(highestGEI)
-							nextExpectedGlobalExecIndex = highestGEI + 1
-						}
+						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+						nextExpectedGlobalExecIndex = highestGEI + 1
 						bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
@@ -420,24 +406,8 @@ PROCESS_LOOP:
 			// Persist only the final GEI (1 DB write for entire batch)
 			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 			// use the same atomic counter, preventing +1 offset divergence.
-			{
-				geiAuth := GetGEIAuthority()
-				if geiAuth.IsEnabled() {
-					for i := uint64(0); i < batchCount; i++ {
-						geiAuth.AssignGEI()
-					}
-					actualGEI := geiAuth.GetLastAssignedGEI()
-					bp.updateAndPersistLastGlobalExecIndex(actualGEI)
-					nextExpectedGlobalExecIndex = actualGEI + 1
-					if actualGEI != highestGEI {
-						logger.Info("🔑 [BATCH-DRAIN-AUTH] GEI corrected: rust_hint=%d → go_auth=%d (batch=%d)",
-							highestGEI, actualGEI, batchCount)
-					}
-				} else {
-					bp.updateAndPersistLastGlobalExecIndex(highestGEI)
-					nextExpectedGlobalExecIndex = highestGEI + 1
-				}
-			}
+			bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+			nextExpectedGlobalExecIndex = highestGEI + 1
 			bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)

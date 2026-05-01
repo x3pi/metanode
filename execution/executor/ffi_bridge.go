@@ -110,13 +110,12 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
 	// ═══════════════════════════════════════════════════════════════════
-	// GO-AUTHORITATIVE GEI: Synchronous mode
-	// When is_authoritative_gei=true, Go assigns GEI internally.
+	// SYNCHRONOUS MODE (Enforced for ALL blocks)
 	// We dispatch via AuthoritativeBlockRequest and WAIT for the response.
 	// This is synchronous (blocking) but safe because CommitProcessor
 	// already serializes commits (one at a time).
 	// ═══════════════════════════════════════════════════════════════════
-	if subDag.GetIsAuthoritativeGei() && defaultAuthoritativeBlockQueue != nil {
+	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
 		req := &AuthoritativeBlockRequest{
 			Block:      &subDag,

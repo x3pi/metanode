@@ -47,15 +47,17 @@ func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
 
 // geiWorker processes coalesced GEI updates, sending only the latest to commitChannel
 func (bp *BlockProcessor) geiWorker() {
-	for index := range bp.geiUpdateChan {
-		latest := index
+	for update := range bp.geiUpdateChan {
+		latestGEI := update.GlobalExecIndex
+		latestCommit := update.CommitIndex
 		drained := 0
 	DRAIN_LOOP:
 		for {
 			select {
-			case n := <-bp.geiUpdateChan:
-				if n > latest {
-					latest = n
+			case u := <-bp.geiUpdateChan:
+				if u.GlobalExecIndex > latestGEI {
+					latestGEI = u.GlobalExecIndex
+					latestCommit = u.CommitIndex
 				}
 				drained++
 			default:
@@ -65,7 +67,8 @@ func (bp *BlockProcessor) geiWorker() {
 
 		job := CommitJob{
 			Block:           nil,
-			GlobalExecIndex: latest,
+			GlobalExecIndex: latestGEI,
+			CommitIndex:     latestCommit,
 		}
 		select {
 		case bp.commitChannel <- job:
@@ -90,9 +93,14 @@ func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIn
 		geiAuth.AdvanceGEITo(index)
 	}
 	bp.updateAndPersistLastExecutedCommitHash(hash)
-	bp.updateAndPersistLastHandledCommitIndex(commitIndex)
+	
+	update := AsyncGEIUpdate{
+		GlobalExecIndex: index,
+		CommitIndex:     commitIndex,
+	}
+
 	select {
-	case bp.geiUpdateChan <- index:
+	case bp.geiUpdateChan <- update:
 		// Sent successfully
 	default:
 		// Queue full, replace oldest item
@@ -101,7 +109,7 @@ func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIn
 		default:
 		}
 		select {
-		case bp.geiUpdateChan <- index:
+		case bp.geiUpdateChan <- update:
 		default:
 		}
 	}

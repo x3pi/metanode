@@ -137,7 +137,7 @@ fn test_epoch_transition_sender() {
     let (node, mut rx) = make_test_sync_node(1, 100, 50);
 
     // Send an epoch transition signal (mirrors real code)
-    let _ = node.epoch_transition_sender.send((2, 1234567890, 5000));
+    let _ = node.epoch_transition_sender.send((2, 1234567890, 5000, 100));
 
     // Verify receiver gets the correct data
     let received = rx.try_recv();

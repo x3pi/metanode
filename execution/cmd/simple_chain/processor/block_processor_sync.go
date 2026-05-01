@@ -33,108 +33,44 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	commitIndex := epochData.GetCommitIndex()
 	epochNum := epochData.GetEpoch()
 
-	if epochData.GetIsAuthoritativeGei() {
+	// Compute the next GEI from Go's persisted state
+	lastPersistedGEI := storage.GetLastGlobalExecIndex()
+	if lastPersistedGEI >= *nextExpectedGlobalExecIndex && lastPersistedGEI > 0 {
+		// Go's storage is ahead — sync in-memory state
+		*nextExpectedGlobalExecIndex = lastPersistedGEI + 1
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// RUST-AUTHORITATIVE GEI: Go completely trusts Rust's global_exec_index.
+	// Go passively executes the block and persists the incomingGEI.
+	// ═══════════════════════════════════════════════════════════════════════════
+	incomingGEI := epochData.GetGlobalExecIndex()
+	globalExecIndex = incomingGEI
+	commitIndex = epochData.GetCommitIndex()
+	epochNum = epochData.GetEpoch()
+
+	currentEpoch := uint64(0)
+	lastBlock := bp.GetLastBlock()
+	if lastBlock != nil {
+		currentEpoch = lastBlock.Header().Epoch()
+	}
+
+	// ═════════════════════════════════════════════════════════════════════
+	// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
+	// ═════════════════════════════════════════════════════════════════════
+	if epochNum > currentEpoch && lastBlock != nil {
+		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex.", currentEpoch, epochNum)
 		geiAuth := GetGEIAuthority()
-		if !geiAuth.IsEnabled() {
-			geiAuth.Enable()
-		}
-
-		// Compute the next GEI from Go's persisted state
-		lastPersistedGEI := storage.GetLastGlobalExecIndex()
-		if lastPersistedGEI >= *nextExpectedGlobalExecIndex && lastPersistedGEI > 0 {
-			// Go's storage is ahead — sync in-memory state
-			*nextExpectedGlobalExecIndex = lastPersistedGEI + 1
-		}
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// GO-AUTHORITATIVE GEI (PHASE-B): Go assigns GEI exclusively.
-		//
-		// PHASE-B: Rust sends global_exec_index=0 for ALL commits — it does NOT
-		// track GEI. Go MUST auto-assign the next sequential GEI.
-		//
-		// When incomingGEI=0: This is the PHASE-B protocol. Go assigns next GEI.
-		// When incomingGEI>0: Legacy/transition mode. Go still assigns its own GEI
-		//   but uses incoming as a hint for diagnostics.
-		// ═══════════════════════════════════════════════════════════════════════════
-		incomingGEI := epochData.GetGlobalExecIndex()
-
-		if incomingGEI == 0 {
-			commitIndex := epochData.GetCommitIndex()
-			epochNum := epochData.GetEpoch()
-
-			currentEpoch := uint64(0)
-			lastBlock := bp.GetLastBlock()
-			if lastBlock != nil {
-				currentEpoch = lastBlock.Header().Epoch()
-			}
-			lastHandledCommit := geiAuth.GetLastHandledCommitIndex()
-
-			// ═════════════════════════════════════════════════════════════════════
-			// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
-			// ═════════════════════════════════════════════════════════════════════
-			// Rust resets its commit_index to 1 at the start of a new epoch.
-			// Go MUST mirror this reset, otherwise it will incorrectly skip
-			// valid commits from the new epoch (because their low commit_indices 
-			// appear older than the high commit_indices of the previous epoch).
-			if epochNum > currentEpoch && lastBlock != nil {
-				logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex.", currentEpoch, epochNum)
-				geiAuth.ResetCommitIndex()
-				storage.UpdateLastHandledCommitIndex(0)
-				if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
-					bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
-				}
-				lastHandledCommit = 0
-			}
-
-			if epochNum < currentEpoch {
-				logger.Debug("⏭️ [GO-AUTH GEI PHASE-B] Old commit detected (epoch %d < current %d). Skipping.", epochNum, currentEpoch)
-				return
-			}
-			if epochNum == currentEpoch && commitIndex <= lastHandledCommit {
-				logger.Debug("⏭️ [GO-AUTH GEI PHASE-B] Old commit detected (epoch %d, commit %d <= last %d). Skipping.", epochNum, commitIndex, lastHandledCommit)
-				return
-			}
-
-			authoritativeGEI := *nextExpectedGlobalExecIndex
-			geiAuth.AdvanceGEITo(authoritativeGEI)
-			geiAuth.RecordCommitIndex(commitIndex)
-
-			logger.Debug("🔑 [GO-AUTH GEI PHASE-B] Auto-assign: go_gei=%d (commit_index=%d, rust sent 0)",
-				authoritativeGEI, commitIndex)
-
-			globalExecIndex = authoritativeGEI
-		} else if incomingGEI < *nextExpectedGlobalExecIndex {
-			// Legacy mode: Rust sent a non-zero hint that's behind Go's counter.
-			// This is an old/duplicate commit — preserve hint to trigger replay guard.
-			logger.Debug("🔑 [GO-AUTH GEI] Old commit detected (hint=%d < expected=%d). Preserving hint to trigger replay guard.", 
-				incomingGEI, *nextExpectedGlobalExecIndex)
-			// globalExecIndex remains == incomingGEI
-		} else {
-			if incomingGEI > *nextExpectedGlobalExecIndex {
-				gap := incomingGEI - *nextExpectedGlobalExecIndex
-				logger.Info("🔑 [GO-AUTH GEI] Rust hint=%d > Go expected=%d (gap=%d). "+
-					"Go stays authoritative — will assign GEI=%d.",
-					incomingGEI, *nextExpectedGlobalExecIndex, gap, *nextExpectedGlobalExecIndex)
-
-				// Still sync block counter if storage is ahead
-				actualLastBlockDB := storage.GetLastBlockNumber()
-				if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
-					*currentBlockNumber = actualLastBlockDB
-				}
-			}
-
-			// Assign the authoritative GEI
-			authoritativeGEI := *nextExpectedGlobalExecIndex
-			geiAuth.AdvanceGEITo(authoritativeGEI)
-			geiAuth.RecordCommitIndex(commitIndex)
-
-			logger.Debug("🔑 [GO-AUTH GEI] Override: rust_gei=%d → go_gei=%d (commit_index=%d)",
-				globalExecIndex, authoritativeGEI, commitIndex)
-
-			// Override the GEI used for processing
-			globalExecIndex = authoritativeGEI
+		geiAuth.ResetCommitIndex()
+		storage.UpdateLastHandledCommitIndex(0)
+		if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
 		}
 	}
+
+	// Record the commit index to persist progress
+	geiAuth := GetGEIAuthority()
+	geiAuth.RecordCommitIndex(commitIndex)
 
 	// Use commitIndex to avoid unused variable warning
 	_ = commitIndex
@@ -291,7 +227,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	epochNum = epochData.GetEpoch()
 
 	// 🔍 DIAGNOSTIC: Detect epoch transition by comparing with last block and chain state
-	lastBlock := bp.GetLastBlock()
+	lastBlock = bp.GetLastBlock()
 	lastBlockEpoch := uint64(0)
 	lastBlockNumber := uint64(0)
 
@@ -581,12 +517,16 @@ PROCESS_BLOCK:
 	logger.Debug("⚙️  [TX FLOW] Processing %d transactions (from ExecutableBlock) for Go block #%d",
 		len(allTransactions), *currentBlockNumber)
 
-	// NOW assign sequential block number (AFTER zero-tx check, so only non-empty commits get a number)
-	// CRITICAL FIX: Make block number assignment Go-authoritative to ensure determinism.
-	// We no longer rely on Rust's block_number, which can diverge between nodes if
-	// transaction deduplication causes some commits to be empty on one node but not another.
-	*currentBlockNumber++
-	logger.Debug("📊 [BLOCK-NUM] Assigning sequential block #%d directly in Go for global_exec_index=%d (txs=%d)",
+	// RUST IS AUTHORITATIVE: Use the block_number exactly as provided by Rust.
+	// We no longer assign sequential block numbers internally in Go.
+	if epochData.GetBlockNumber() > 0 {
+		*currentBlockNumber = epochData.GetBlockNumber()
+	} else {
+		// Fallback for genesis / phase-b if needed
+		*currentBlockNumber++
+	}
+	
+	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
 
 

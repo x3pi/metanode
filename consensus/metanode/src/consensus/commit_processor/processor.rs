@@ -44,7 +44,7 @@ pub struct CommitProcessor {
     /// Optional callback to handle EndOfEpoch system transactions
     /// Called immediately when an EndOfEpoch system transaction is detected in a committed sub-dag
     /// Uses commit finalization approach (like Sui) - no buffer needed as commits are processed sequentially
-    epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64) -> Result<()> + Send + Sync>>, // CHANGED: u32 -> u64
+    epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
     /// Multi-epoch committee cache: ETH addresses keyed by epoch
     /// Supports looking up leaders from previous epochs during transitions
     /// RS-1: Uses RwLock instead of Mutex — reads (every commit) don't block each other,
@@ -171,7 +171,7 @@ impl CommitProcessor {
     /// Set callback to handle EndOfEpoch system transactions
     pub fn with_epoch_transition_callback<F>(mut self, callback: F) -> Self
     where
-        F: Fn(u64, u64, u64) -> Result<()> + Send + Sync + 'static, // CHANGED: u32 -> u64
+        F: Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync + 'static,
     {
         self.epoch_transition_callback = Some(Arc::new(callback));
         self
@@ -379,11 +379,15 @@ impl CommitProcessor {
                             batch_id, total_txs_in_commit
                         );
 
-                        // Process commit — Go assigns the authoritative GEI
-                        // global_exec_index=0: Go ignores this when is_authoritative_gei=true
-                        let _geis_consumed = super::executor::dispatch_commit(
+                        let gei = {
+                            let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                            *gei_guard + 1
+                        };
+
+                        // Process commit — send accurate GEI to Go
+                        let geis_consumed = super::executor::dispatch_commit(
                             &subdag,
-                            0, // PHASE-B: No hint GEI. Go assigns via GEIAuthority.
+                            gei, 
                             current_epoch,
                             executor_client.clone(),
                             delivery_sender.clone(),
@@ -393,6 +397,12 @@ impl CommitProcessor {
                             self.shared_last_global_exec_index.clone(),
                         )
                         .await?;
+
+                        // Accumulate exact number of fragments consumed by this commit
+                        {
+                            let mut gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                            *gei_guard += geis_consumed;
+                        }
 
                         // ♻️ TX RECYCLER: Confirm committed TXs
                         if let Some(ref recycler) = self.tx_recycler {
@@ -432,10 +442,15 @@ impl CommitProcessor {
                                         commit_index, new_epoch
                                     );
 
+                                    let current_gei = {
+                                        let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                        *gei_guard
+                                    };
                                     if let Err(e) = callback(
                                         new_epoch,
+                                        subdag.timestamp_ms,
                                         boundary_block,
-                                        0, // PHASE-B: Go assigns GEI authoritatively
+                                        current_gei,
                                     ) {
                                         warn!("❌ Failed to trigger epoch transition from system transaction: {}", e);
                                     }
@@ -454,9 +469,14 @@ impl CommitProcessor {
                         while let Some(pending) = pending_commits.remove(&next_expected_index) {
                             let pending_commit_index = next_expected_index;
 
-                            let _pending_geis = super::executor::dispatch_commit(
+                            let pending_gei = {
+                                let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                *gei_guard + 1
+                            };
+
+                            let geis_consumed = super::executor::dispatch_commit(
                                 &pending,
-                                0, // PHASE-B: Go assigns GEI
+                                pending_gei, 
                                 current_epoch,
                                 executor_client.clone(),
                                 delivery_sender.clone(),
@@ -466,6 +486,11 @@ impl CommitProcessor {
                                 self.shared_last_global_exec_index.clone(),
                             )
                             .await?;
+
+                            {
+                                let mut gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                *gei_guard += geis_consumed;
+                            }
 
                             if let Some(ref callback) = commit_index_callback {
                                 callback(pending_commit_index);
@@ -480,9 +505,13 @@ impl CommitProcessor {
                                 if let Some((new_epoch, boundary_block)) =
                                     system_tx.as_end_of_epoch()
                                 {
+                                    let current_gei = {
+                                        let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                        *gei_guard
+                                    };
                                     if let Some(ref callback) = epoch_transition_callback {
                                         if let Err(e) =
-                                            callback(new_epoch, boundary_block, 0)
+                                            callback(new_epoch, pending.timestamp_ms, boundary_block, current_gei)
                                         {
                                             warn!("❌ Failed to trigger epoch transition from pending system transaction: {}", e);
                                         }

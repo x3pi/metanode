@@ -78,8 +78,8 @@ struct ConsensusSetup {
     current_commit_index: Arc<AtomicU32>,
     pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
-    epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64)>,
-    epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64)>,
+    epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
+    epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64, u64)>,
     system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     protocol_config: ProtocolConfig,
     parameters: consensus_config::Parameters,
@@ -1100,7 +1100,7 @@ impl ConsensusNode {
         let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
 
         let (epoch_tx_sender, epoch_tx_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<(u64, u64, u64)>();
+            tokio::sync::mpsc::unbounded_channel::<(u64, u64, u64, u64)>();
         let epoch_transition_callback =
             crate::consensus::commit_callbacks::create_epoch_transition_callback(
                 epoch_tx_sender.clone(),

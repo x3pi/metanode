@@ -19,7 +19,7 @@ pub struct ValidatedCommit {
     pub subdag: CommittedSubDag,
     pub global_exec_index: u64,
     pub epoch: u64,
-    pub leader_address: Option<Vec<u8>>,
+    pub leader_address: Vec<u8>,
     /// Channel for the Delivery Manager to reply with the number of GEIs consumed
     /// by this commit (e.g. fragmentation offset).
     pub response_tx: tokio::sync::oneshot::Sender<u64>,

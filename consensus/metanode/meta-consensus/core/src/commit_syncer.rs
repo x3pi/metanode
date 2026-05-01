@@ -322,7 +322,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
-        let mut local_commit = self.inner.dag_state.read().last_commit_index();
+        let local_commit = self.inner.dag_state.read().last_commit_index();
 
         // ════════════════════════════════════════════════════════════════════════
         // SNAPSHOT RESTORE FAST-FORWARD
@@ -344,19 +344,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // will naturally catch up as new commits are processed.
             self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled_index, crate::commit::CommitDigest::MIN, 0);
             self.synced_commit_index = highest_handled_index;
-            
-            // Update local_commit for the phase evaluation below!
-            local_commit = highest_handled_index;
         }
 
         let current_phase = self.coordination_hub.get_phase();
 
-        // Phase is determined by DAG consensus progress, NOT Go execution speed.
-        // local_commit = how far the DAG has committed
-        // quorum_commit = network consensus progress
-        // highest_handled_index = Go execution progress (independent of consensus)
-        let is_behind = local_commit < quorum_commit;
-        let lag = quorum_commit.saturating_sub(local_commit);
+        // Phase is determined by how far the CommitSyncer has synced with the network,
+        // rather than the physical local_commit. During snapshot restore, local_commit
+        // stays at 0 until the next commit triggers a fast-forward, but synced_commit_index
+        // is eagerly advanced. Using synced_commit_index prevents an infinite CatchingUp deadlock.
+        let is_behind = self.synced_commit_index < quorum_commit;
+        let lag = quorum_commit.saturating_sub(self.synced_commit_index);
 
         let next_phase = if lag > 50_000 {
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
@@ -402,8 +399,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     self.transition_phase_and_kick(next_phase);
                 } else {
                     let elapsed = self.bootstrap_start_time.elapsed();
-                    if elapsed >= Duration::from_secs(15) {
-                        // Timeout: No quorum after 15s → treat as genuine genesis
+                    if elapsed >= Duration::from_secs(5) {
+                        // Timeout: No quorum after 5s → treat as genuine genesis
                         tracing::info!(
                             "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after {:?}). \
                              Transitioning to {:?} to allow block 1 proposal.",
@@ -414,7 +411,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // Still waiting for quorum — stay in Bootstrapping
                         tracing::trace!(
                             "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for quorum \
-                             ({:.1}s elapsed, 15s timeout)...",
+                             ({:.1}s elapsed, 5s timeout)...",
                             elapsed.as_secs_f64()
                         );
                     }
@@ -569,6 +566,42 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             );
                             self.last_local_commit_change_at = now; // reset to avoid rapid re-triggering
                             self.last_quorum_change_at = now;
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 3: All-zero deadlock after bootstrap.
+                        //
+                        // After DAG wipe + epoch transition + Supervisor restart,
+                        // ALL nodes can end up in Healthy with local_commit=0,
+                        // quorum=0. Neither Detector 1 (needs highest_handled>0)
+                        // nor Detector 2 (needs local_commit>0) fires.
+                        // The bootstrap timeout assumed genesis and transitioned
+                        // to Healthy, but the one-shot kick failed to achieve
+                        // quorum. No node proposes → permanent stall.
+                        //
+                        // Recovery: periodically kick Core to force proposals.
+                        // Once any proposal achieves quorum, normal consensus
+                        // resumes and this detector stops firing.
+                        // ════════════════════════════════════════════════════════
+                        if local_commit == 0
+                            && quorum_commit == 0
+                            && self.coordination_hub.is_healthy()
+                            && liveness_stall_duration >= Duration::from_secs(30)
+                        {
+                            tracing::error!(
+                                "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, phase=Healthy). \
+                                 Kicking Core to force block proposal.",
+                                liveness_stall_duration.as_secs_f64()
+                            );
+                            let core_dispatcher = self.inner.core_thread_dispatcher.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = core_dispatcher.new_block(
+                                    consensus_types::block::Round::MAX, true
+                                ).await {
+                                    tracing::warn!("Failed to kick Core for zero-deadlock recovery: {:?}", e);
+                                }
+                            });
+                            self.last_local_commit_change_at = now; // prevent rapid re-triggers
                         }
 
                         info!(

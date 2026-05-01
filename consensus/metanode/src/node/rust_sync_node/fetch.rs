@@ -788,12 +788,12 @@ impl RustSyncNode {
                             block_num, current_epoch, epoch
                         );
 
-                        if let Ok((_e, timestamp, boundary, _, _, _)) =
+                        if let Ok((_e, timestamp, boundary, _, _, gei)) =
                             self.executor_client.get_epoch_boundary_data(epoch).await
                         {
                             let _ = self
                                 .epoch_transition_sender
-                                .send((epoch, timestamp, boundary));
+                                .send((epoch, timestamp, boundary, gei));
                             self.current_epoch
                                 .store(epoch, std::sync::atomic::Ordering::SeqCst);
                         }

@@ -40,7 +40,7 @@ use super::verification::{
 pub async fn transition_to_epoch_from_system_tx(
     node: &mut ConsensusNode,
     new_epoch: u64,
-    _boundary_timestamp_ms: u64,
+    boundary_timestamp_ms: u64,
     boundary_block: u64,
     synced_global_exec_index: u64,
     config: &NodeConfig,
@@ -119,21 +119,13 @@ pub async fn transition_to_epoch_from_system_tx(
     let executor_client =
         committee_source.create_executor_client(&config.executor_send_socket_path);
 
-    // FORK-SAFETY: Derive timestamp from Go (authoritative source)
-    // CRITICAL FIX: Despite the name, `boundary_timestamp_ms` actually contains a
-    // BOUNDARY BLOCK NUMBER from the system transaction (see processor.rs:534-538).
-    // Using a block number (e.g., 1067) as a timestamp caused epoch_start_timestamp_ms=1067
-    // → massive timestamp mismatch → epoch sync retry loops → cluster death.
-    //
-    // SOLUTION: Always set provisional_timestamp=0 and let Go's AdvanceEpochRequest handler
-    // derive the real timestamp from the boundary block header (it already has this logic).
-    // The actual epoch timestamp will be fetched later in STEP 9 via verify_epoch_consistency().
-    let boundary_block_from_system_tx = boundary_block;
-    let provisional_timestamp: u64 = 0;
+    // SINGLE SOURCE OF TRUTH: Rust provides the exact timestamp of the commit that contained
+    // the EndOfEpoch system transaction. Go MUST NOT use time.Now() or header fallback.
+    let provisional_timestamp = boundary_timestamp_ms;
     info!(
-        "ℹ️ [EPOCH TRANSITION] Sending timestamp_ms=0 to Go for epoch {}. \
-         Go will derive from boundary block {} header.",
-        new_epoch, boundary_block_from_system_tx
+        "ℹ️ [EPOCH TRANSITION] Sending exact timestamp_ms={} to Go for epoch {}. \
+         Go MUST use this timestamp as authoritative.",
+        provisional_timestamp, new_epoch
     );
 
     node.system_transaction_provider

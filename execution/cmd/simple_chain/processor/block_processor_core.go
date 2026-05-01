@@ -89,6 +89,12 @@ type PersistJob struct {
 	DoneSignal    chan struct{}
 }
 
+// AsyncGEIUpdate bundles GEI and CommitIndex updates together to ensure they are persisted atomically
+type AsyncGEIUpdate struct {
+	GlobalExecIndex uint64
+	CommitIndex     uint32
+}
+
 
 
 // BlockProcessor handles block processing operations
@@ -152,7 +158,7 @@ type BlockProcessor struct {
 	// Backup DB Coalescing
 	backupDbChannel chan CommitJob
 	// GEI Coalescing
-	geiUpdateChan chan uint64
+	geiUpdateChan chan AsyncGEIUpdate
     
 	forceCommitChan chan struct{}
 
@@ -305,7 +311,7 @@ func NewBlockProcessor(
 		// Pipeline commit: async persistence channel
 		persistChannel: make(chan PersistJob, 100),
 		backupDbChannel: make(chan CommitJob, 1),
-		geiUpdateChan: make(chan uint64, 1),
+		geiUpdateChan: make(chan AsyncGEIUpdate, 1),
 
 		forceCommitChan:  make(chan struct{}, 8),
 		lastRateCheckTime: time.Now(),

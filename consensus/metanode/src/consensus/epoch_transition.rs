@@ -9,16 +9,16 @@ use crate::config::NodeConfig;
 /// Starts the epoch transition handler task
 /// This task processes epoch transition requests from system transactions
 pub fn start_epoch_transition_handler(
-    mut receiver: UnboundedReceiver<(u64, u64, u64)>, // CHANGED: u32 -> u64 for global_exec_index
+    mut receiver: UnboundedReceiver<(u64, u64, u64, u64)>,
     config: NodeConfig,
 ) {
     tokio::spawn(async move {
-        while let Some((new_epoch, boundary_timestamp_ms, synced_global_exec_index)) =
+        while let Some((new_epoch, boundary_timestamp_ms, boundary_block, synced_global_exec_index)) =
             receiver.recv().await
         {
             info!(
-                "🚀 [EPOCH TRANSITION HANDLER] Processing transition request (source=system_tx): epoch={}, boundary_timestamp_ms={}, synced_global_exec_index={}",
-                new_epoch, boundary_timestamp_ms, synced_global_exec_index
+                "🚀 [EPOCH TRANSITION HANDLER] Processing transition request (source=system_tx): epoch={}, boundary_timestamp_ms={}, boundary_block={}, synced_global_exec_index={}",
+                new_epoch, boundary_timestamp_ms, boundary_block, synced_global_exec_index
             );
 
             // Check with EpochTransitionManager before proceeding
@@ -102,8 +102,8 @@ pub fn start_epoch_transition_handler(
                 if let Err(e) = node_guard
                     .transition_to_epoch_from_system_tx(
                         new_epoch,
-                        0, // provisional epoch timestamp (unknown here)
-                        boundary_timestamp_ms, // boundary_timestamp_ms ACTUALLY contains the boundary_block
+                        boundary_timestamp_ms,
+                        boundary_block,
                         synced_global_exec_index,
                         &config,
                     )

@@ -162,7 +162,7 @@ impl RustSyncNode {
                         if leader_author_index < addrs.len() {
                             let addr = &addrs[leader_author_index];
                             if addr.len() == 20 {
-                                break Some(addr.clone()); // SUCCESS
+                                break addr.clone(); // SUCCESS
                             } else {
                                 error!(
                                     "🚨 [FATAL] Invalid address length {} for index {}",
@@ -356,6 +356,7 @@ impl RustSyncNode {
                         trans.epoch,
                         trans.timestamp_ms,
                         trans.boundary_block,
+                        trans.boundary_gei,
                     )) {
                         warn!(
                             "⚠️ [DEFERRED EPOCH] Failed to send epoch transition signal: {}",
