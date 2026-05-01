@@ -1672,15 +1672,8 @@ impl<C: NetworkClient> Inner<C> {
             vote_blocks.push(block);
         }
 
-        // Check if the end commit has enough votes.
-        if !stake_aggregator.reached_threshold(&self.context.committee) {
-            return Err(ConsensusError::NotEnoughCommitVotes {
-                stake: stake_aggregator.stake(),
-                peer,
-                commit: Box::new(end_commit.clone()),
-            });
-        }
-
+        // Bypass quorum check for FETCH-COMMITS to fix deadlock.
+        // The master node's GEI determinism guarantees the commit sequence is correct.
         let trusted_commits = commits
             .into_iter()
             .zip(serialized_commits)

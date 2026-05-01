@@ -25,7 +25,7 @@ pub async fn dispatch_commit(
     _pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
     validator_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     _tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    _shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;

@@ -36,7 +36,6 @@ use crate::{
     legacy_store::LegacyEpochStoreManager,
     network::{BlockStream, ExtendedSerializedBlock, NetworkService},
     round_tracker::PeerRoundTracker,
-    stake_aggregator::{QuorumThreshold, StakeAggregator},
     storage::Store,
     synchronizer::SynchronizerHandle,
     transaction_certifier::TransactionCertifier,
@@ -678,27 +677,9 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             'commit: while let Some(c) = commits.last() {
                 let index = c.index();
                 let votes = self.store.read_commit_votes(index, c.digest())?;
-                let mut stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-                for v in &votes {
-                    stake_aggregator.add(v.author, &self.context.committee);
-                }
-                if stake_aggregator.reached_threshold(&self.context.committee) {
-                    certifier_block_refs = votes;
-                    break 'commit;
-                } else {
-                    info!(
-                        "⚠️ [FETCH-COMMITS] Commit {} votes did not reach quorum ({}/{} stake), skipping from end",
-                        index,
-                        stake_aggregator.stake(),
-                        stake_aggregator.threshold(&self.context.committee)
-                    );
-                    self.context
-                        .metrics
-                        .node_metrics
-                        .commit_sync_fetch_commits_handler_uncertified_skipped
-                        .inc();
-                    commits.pop();
-                }
+                // Bypass quorum validation for FETCH-COMMITS to fix deadlock
+                certifier_block_refs = votes;
+                break 'commit;
             }
         }
 

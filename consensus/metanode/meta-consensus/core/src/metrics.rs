@@ -336,7 +336,6 @@ pub(crate) struct NodeMetrics {
     pub(crate) subscribed_by: IntGaugeVec,
     pub(crate) commit_sync_inflight_fetches: IntGauge,
     pub(crate) commit_sync_pending_fetches: IntGauge,
-    pub(crate) commit_sync_fetch_commits_handler_uncertified_skipped: IntCounter,
     pub(crate) commit_sync_fetched_commits: IntCounter,
     pub(crate) commit_sync_fetched_blocks: IntCounter,
     pub(crate) commit_sync_total_fetched_blocks_size: IntCounter,
@@ -987,11 +986,6 @@ impl NodeMetrics {
                 "commit_sync_fetch_missing_blocks",
                 "Number of ancestor blocks that are missing when processing blocks via commit sync.",
                 &["authority"],
-                registry,
-            ),
-            commit_sync_fetch_commits_handler_uncertified_skipped: register_or_replace_int_counter(
-                "commit_sync_fetch_commits_handler_uncertified_skipped",
-                "Number of uncertified commits that got skipped when fetching commits due to lack of votes",
                 registry,
             ),
             round_tracker_received_quorum_round_gaps: register_or_replace_int_gauge_vec(
