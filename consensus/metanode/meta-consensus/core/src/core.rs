@@ -104,6 +104,13 @@ pub(crate) struct Core {
     pub(crate) system_transaction_provider: Option<Arc<dyn SystemTransactionProvider>>,
     /// System phase coordination
     pub(crate) coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+    /// COLD-START GUARD: When > 0, the local committer is blocked.
+    /// Set to last_commit_index after a cold-start fast-forward (DAG wipe + restore).
+    /// Cleared after the first CertifiedCommit batch is successfully processed,
+    /// which guarantees the DAG has been populated with network-verified blocks.
+    /// This prevents the local committer from evaluating a sparse DAG and producing
+    /// commits with divergent timestamps and leader addresses.
+    pub(crate) cold_start_baseline_commit: u32,
 }
 
 impl Core {
@@ -183,6 +190,7 @@ impl Core {
             adaptive_delay_state,
             system_transaction_provider,
             coordination_hub,
+            cold_start_baseline_commit: 0,
         }
         .recover()
         .expect("Core::recover() failed")

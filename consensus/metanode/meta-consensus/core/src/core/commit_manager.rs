@@ -62,6 +62,20 @@ impl Core {
                     subdags.len(),
                     new_commit_index
                 );
+
+                // COLD-START GUARD: Clear after successfully processing CertifiedCommits.
+                // The DAG is now populated with network-verified blocks, so the local
+                // committer can safely resume evaluating new rounds.
+                if self.cold_start_baseline_commit > 0 && !subdags.is_empty() {
+                    tracing::info!(
+                        "✅ [COLD-START-GUARD] Deactivated. Processed {} CertifiedCommit subdags. \
+                         Local committer unblocked (was baseline={}, now={}).",
+                        subdags.len(),
+                        self.cold_start_baseline_commit,
+                        new_commit_index
+                    );
+                    self.cold_start_baseline_commit = 0;
+                }
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
@@ -248,6 +262,15 @@ impl Core {
                     );
                     self.last_decided_leader = dag_last_decided;
 
+                    // COLD-START GUARD: Mark that we just fast-forwarded.
+                    // The local committer MUST NOT run until CertifiedCommits populate the DAG.
+                    let baseline = self.dag_state.read().last_commit_index();
+                    self.cold_start_baseline_commit = baseline;
+                    tracing::info!(
+                        "🛡️ [COLD-START-GUARD] Activated at commit index {}. Local committer blocked until CertifiedCommits arrive.",
+                        baseline
+                    );
+
                     // CRITICAL FIX: Restore LeaderSchedule from the baseline if available
                     if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
                         tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
@@ -276,6 +299,19 @@ impl Core {
                 // The (local_commit_index < quorum_commit_index) guard triggers, the node fetches
                 // the CertifiedCommit, processes it, and last_decided_leader is updated safely
                 // to the exact network-agreed round. Then local consensus resumes normally!
+
+                // COLD-START GUARD: Block local committer after DAG wipe + fast-forward.
+                // The DAG is sparse (missing ancestor blocks) so local commit evaluation
+                // would produce divergent timestamps and leader addresses.
+                // Only CertifiedCommits (network-verified) are safe to process.
+                if self.cold_start_baseline_commit > 0 {
+                    tracing::info!(
+                        "🛡️ [COLD-START-GUARD] Blocking local committer (baseline={}). \
+                         Waiting for CertifiedCommits to populate DAG.",
+                        self.cold_start_baseline_commit
+                    );
+                    break;
+                }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);

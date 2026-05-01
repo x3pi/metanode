@@ -136,6 +136,30 @@ impl Linearizer {
             (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
         } else {
             let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+
+            // DEFENSE-IN-DEPTH: For locally-decided commits, verify that ALL ancestor
+            // blocks needed for timestamp calculation are present in the DAG.
+            // If any are missing (sparse DAG after fast-forward), we MUST defer this
+            // commit to prevent producing a divergent timestamp.
+            let parent_refs = leader_block
+                .ancestors()
+                .iter()
+                .filter(|block_ref| block_ref.round == leader_block.round() - 1)
+                .cloned()
+                .collect::<Vec<_>>();
+            let parent_blocks = dag_state.get_blocks(&parent_refs);
+            let missing = parent_blocks.iter().filter(|b| b.is_none()).count();
+            if missing > 0 {
+                tracing::warn!(
+                    "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
+                     {}/{} ancestor blocks missing. Deferring to prevent timestamp divergence.",
+                    leader_block.reference(),
+                    missing,
+                    parent_refs.len()
+                );
+                return None;
+            }
+
             let ts = Self::calculate_commit_timestamp(
                 &self.context,
                 &mut dag_state,

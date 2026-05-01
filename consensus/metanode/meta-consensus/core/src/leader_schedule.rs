@@ -52,9 +52,19 @@ impl LeaderSchedule {
         &self,
         context: Arc<Context>,
         last_commit_index: CommitIndex,
-        scores: crate::leader_scoring::ReputationScores,
+        scores: Vec<(AuthorityIndex, u64)>,
     ) {
-        let table = LeaderSwapTable::new(context, last_commit_index, scores);
+        // Convert (AuthorityIndex, u64) pairs to ReputationScores struct
+        let num_authorities = context.committee.size();
+        let mut scores_per_authority = vec![0u64; num_authorities];
+        for (authority, score) in &scores {
+            scores_per_authority[authority.value()] = *score;
+        }
+        let reputation_scores = crate::leader_scoring::ReputationScores::new(
+            crate::commit::CommitRange::new(1..=last_commit_index),
+            scores_per_authority,
+        );
+        let table = LeaderSwapTable::new(context, last_commit_index, reputation_scores);
         self.update_leader_swap_table(table);
     }
 
