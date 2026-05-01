@@ -1415,11 +1415,33 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
 	// this EXECUTE command explicitly governs memory state advancement.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if executedCount > 0 && rh.updateLastBlockCallback != nil {
-		if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
-			if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
-				rh.updateLastBlockCallback(lastBlk)
+	if executedCount > 0 {
+		if rh.updateLastBlockCallback != nil {
+			if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
+				if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
+					rh.updateLastBlockCallback(lastBlk)
+				}
 			}
+		}
+
+		// CRITICAL FIX: Push an async GEI update so that Go's Authoritative GEI 
+		// counter advances. Without this, GEIAuthority stays at the pre-sync value 
+		// (e.g. 76) while the database advances to 113. When consensus resumes, 
+		// it would assign 77 to the next block instead of 114, causing a fork.
+		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
+			// Find the last commit index to sync that as well
+			var lastCommitIdx uint32 = 0
+			if len(blocks) > 0 {
+				lastBlockBytes := blocks[len(blocks)-1].GetRawBlockBytes()
+				if len(lastBlockBytes) > 0 {
+					lastBlk := &block.Block{}
+					if err := lastBlk.Unmarshal(lastBlockBytes); err == nil {
+						lastCommitIdx = uint32(lastBlk.Header().CommitIndex())
+					}
+				}
+			}
+			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx)
+			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d)", lastExecutedGEI, lastCommitIdx)
 		}
 	}
 

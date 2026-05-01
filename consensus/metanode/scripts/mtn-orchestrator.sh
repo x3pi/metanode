@@ -372,7 +372,7 @@ cmd_start() {
         session_exists "go-master-${i}" && existing=$((existing + 1))
         session_exists "metanode-${i}" && existing=$((existing + 1))
     done
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
     if [ $existing -gt 0 ] || [ $orphans -gt 0 ]; then
         log_warn "Phát hiện $existing session + $orphans orphan process đang chạy!"
         if ! $fresh; then
@@ -429,7 +429,7 @@ cmd_start() {
             sleep "$NODE_DELAY"
         fi
         # Health check: verify process is alive after startup
-        local hc_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1)
+        local hc_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         if [ -z "$hc_pid" ]; then
             log_warn "⚠️  Node ${i} process died during startup! Check logs: $LOG_BASE/node_${i}/go-master-stdout.log"
             # Retry once
@@ -511,13 +511,13 @@ cmd_stop() {
     echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
     # Tự động kill orphan process (thay vì chỉ cảnh báo)
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
     if [ $orphans -gt 0 ]; then
         log_warn "⚠️  Phát hiện ${orphans} Go orphan process — đang kill..."
         pkill -TERM -f "simple_chain.*config-" 2>/dev/null || true
         sleep 3
         # Force kill nếu vẫn còn
-        local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+        local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
         if [ $remaining -gt 0 ]; then
             log_warn "⚠️  Vẫn còn ${remaining} orphan → SIGKILL"
             pkill -KILL -f "simple_chain.*config-" 2>/dev/null || true
@@ -570,7 +570,7 @@ cmd_status() {
 
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local master_status="${RED}❌ DOWN${NC}"
-        local real_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1)
+        local real_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         
         if [ -n "$real_pid" ]; then
             alive_nodes=$((alive_nodes + 1))
@@ -578,7 +578,7 @@ cmd_status() {
             local height_hex=$(curl -s --max-time 1 -X POST http://127.0.0.1:${rpc_port} \
                 -H "Content-Type: application/json" \
                 -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
-                | grep -oP '"result":"(0x[0-9a-fA-F]+)"' | cut -d'"' -f4)
+                | grep -oP '"result":"(0x[0-9a-fA-F]+)"' | cut -d'"' -f4 || true)
             
             local height_dec=""
             if [ -n "$height_hex" ]; then
