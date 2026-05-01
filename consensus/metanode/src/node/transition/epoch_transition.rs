@@ -40,7 +40,7 @@ use super::verification::{
 pub async fn transition_to_epoch_from_system_tx(
     node: &mut ConsensusNode,
     new_epoch: u64,
-    boundary_timestamp_ms: u64,
+    _boundary_timestamp_ms: u64,
     boundary_block: u64,
     synced_global_exec_index: u64,
     config: &NodeConfig,
@@ -128,33 +128,13 @@ pub async fn transition_to_epoch_from_system_tx(
     // SOLUTION: Always set provisional_timestamp=0 and let Go's AdvanceEpochRequest handler
     // derive the real timestamp from the boundary block header (it already has this logic).
     // The actual epoch timestamp will be fetched later in STEP 9 via verify_epoch_consistency().
-    let boundary_block_from_system_tx = boundary_timestamp_ms; // Rename for clarity
-    let provisional_timestamp: u64 = {
-        // Try to get timestamp from Go boundary data for the previous epoch
-        let prev_epoch = new_epoch.saturating_sub(1);
-        match executor_client
-            .get_epoch_boundary_data(prev_epoch)
-            .await
-        {
-            Ok((_epoch, stored_ts, _boundary, _, _, _)) if stored_ts > 1000000000 => {
-                // Sanity check: real timestamps are > 1 billion ms (year ~2001)
-                info!(
-                    "✅ [EPOCH TRANSITION] Using Go epoch {} boundary timestamp {}ms",
-                    prev_epoch, stored_ts
-                );
-                stored_ts
-            }
-            _ => {
-                // Let Go derive from boundary block header — send 0 as sentinel
-                info!(
-                    "ℹ️ [EPOCH TRANSITION] Sending timestamp_ms=0 to Go for epoch {}. \
-                     Go will derive from boundary block {} header.",
-                    new_epoch, boundary_block_from_system_tx
-                );
-                0
-            }
-        }
-    };
+    let boundary_block_from_system_tx = boundary_block;
+    let provisional_timestamp: u64 = 0;
+    info!(
+        "ℹ️ [EPOCH TRANSITION] Sending timestamp_ms=0 to Go for epoch {}. \
+         Go will derive from boundary block {} header.",
+        new_epoch, boundary_block_from_system_tx
+    );
 
     node.system_transaction_provider
         .update_epoch(new_epoch, provisional_timestamp)

@@ -102,8 +102,8 @@ pub fn start_epoch_transition_handler(
                 if let Err(e) = node_guard
                     .transition_to_epoch_from_system_tx(
                         new_epoch,
-                        boundary_timestamp_ms,
-                        0, // boundary_block is unknown here
+                        0, // provisional epoch timestamp (unknown here)
+                        boundary_timestamp_ms, // boundary_timestamp_ms ACTUALLY contains the boundary_block
                         synced_global_exec_index,
                         &config,
                     )

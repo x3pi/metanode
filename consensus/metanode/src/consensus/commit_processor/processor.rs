@@ -240,7 +240,7 @@ impl CommitProcessor {
         let delivery_sender = self.delivery_sender;
         let pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
-        let mut go_last_commit_index = self.go_last_commit_index;
+        let go_last_commit_index = self.go_last_commit_index;
 
         // ═══════════════════════════════════════════════════════════════
         // PHASE-B: GO IS THE SOLE AUTHORITY FOR GEI
@@ -336,47 +336,16 @@ impl CommitProcessor {
                         next_expected_index
                     );
 
-                    // --- [AUTO-JUMP ON STARTUP] ---
-                    // If this is the VERY FIRST commit we receive after restart, and it is > expected,
-                    // we assume we are resuming from a higher commit index (provided by reliable Consensus Core).
-                    if next_expected_index == 1 && commit_index > 1 {
-                        warn!("🚀 [AUTO-JUMP] Initial commit {} > expected 1. Auto-jumping to match stream.", commit_index);
-                        next_expected_index = commit_index;
-                    }
+                    // FORK-SAFETY FIX: We NO LONGER auto-jump on startup!
+                    // If the node starts with expected=1, and the network is at commit 173,
+                    // we MUST WAIT for CommitSyncer to fetch commits 1..172.
+                    // Auto-jumping completely breaks state determinism.
 
-                    // --- [DAG-RESET DETECTION] ---
-                    // After a DAG wipe, the new DAG starts from commit 1 but next_expected_index
-                    // may be at the old DAG's last commit (e.g., 939). Detect this and jump DOWN.
-                    if commit_index < next_expected_index && next_expected_index > 1 {
-                        let gap = next_expected_index - commit_index;
-                        if gap > 100 {
-                            warn!(
-                                "🔄 [DAG-RESET] Detected DAG wipe: received commit {} but expected {}. \
-                                 Gap={} indicates new DAG instance. Resetting next_expected to {}.",
-                                commit_index, next_expected_index, gap, commit_index
-                            );
-                            next_expected_index = commit_index;
-
-                            // PHASE-B: No hint_gei to reset. Go assigns GEI authoritatively.
-                            tracing::info!("🔄 [DAG-RESET] Rust does not track GEI — Go will assign authoritatively.");
-
-                            // CRITICAL: Also reset go_last_commit_index when DAG-RESET is detected.
-                            // The old value is a cross-epoch cumulative index (e.g., 293) but the
-                            // new epoch's DAG produces per-epoch commit indices (1, 2, 3...).
-                            // Without this reset, ALL new epoch commits would be incorrectly
-                            // fast-forwarded (e.g., commit 1 <= 293 → skip), causing Go to never
-                            // process those commits. STARTUP-SYNC blocks would then have "extra" GEI
-                            // that CommitProcessor never created counterparts for → GEI divergence.
-                            if go_last_commit_index > 0 {
-                                warn!(
-                                    "🔄 [DAG-RESET] Resetting go_last_commit_index from {} to 0 \
-                                     (new epoch DAG uses per-epoch commit indices)",
-                                    go_last_commit_index
-                                );
-                                go_last_commit_index = 0;
-                            }
-                        }
-                    }
+                    // FORK-SAFETY: Removed DAG-RESET DETECTION heuristic.
+                    // We DO NOT jump `next_expected_index` downwards based on arbitrary gap heuristics.
+                    // If a node restarts and the DAG was wiped but Go state was not, that is an invalid
+                    // operational state and the node MUST NOT silently reset its commit index to 1,
+                    // as doing so would duplicate execution and cause a hard fork.
 
                     // CRITICAL FORK-SAFETY FIX: Fast-forward historical commits that Go has already executed.
                     // If we don't do this, CommitProcessor will replay historical commits and
@@ -547,85 +516,12 @@ impl CommitProcessor {
                         );
                         pending_commits.insert(commit_index, subdag);
 
-                        // ═══════════════════════════════════════════════════════════════
-                        // SNAPSHOT RESTORE FORWARD-JUMP (Batch-Optimized)
-                        // After snapshot restore, the DAG fast-forwards past the
-                        // CommitProcessor's expected index, creating an unbridgeable gap.
-                        // Commits between next_expected and the DAG's current position
-                        // will NEVER arrive — they were never produced by this DAG instance.
-                        //
-                        // Detection: If we have ≥50 pending commits AND the gap between
-                        // next_expected and the smallest pending commit is >100, jump to
-                        // the smallest pending to drain the queue.
-                        //
-                        // OPTIMIZATION: Empty commits (no TXs, ~90%+ during catch-up) are
-                        // batch-skipped in bulk — single GEI update + executor advance,
-                        // avoiding 1000x individual dispatch_commit() calls.
-                        //
-                        // FORK-SAFETY: The GEI formula uses epoch_base + commit_index.
-                        // After jumping, commit_index is correct (from consensus), so
-                        // GEI calculation remains deterministic across all nodes.
-                        // ═══════════════════════════════════════════════════════════════
-                        const FORWARD_JUMP_PENDING_THRESHOLD: usize = 10;
-                        const FORWARD_JUMP_GAP_THRESHOLD: u32 = 20;
-                        if pending_commits.len() >= FORWARD_JUMP_PENDING_THRESHOLD {
-                            if let Some(&smallest_pending) = pending_commits.keys().next() {
-                                let gap = smallest_pending.saturating_sub(next_expected_index);
-                                if gap > FORWARD_JUMP_GAP_THRESHOLD {
-                                    warn!(
-                                        "🚀 [FORWARD-JUMP] Unbridgeable gap detected! \
-                                         expected={}, smallest_pending={}, gap={}, pending_count={}. \
-                                         Jumping to {} to drain queue (snapshot restore recovery).",
-                                        next_expected_index, smallest_pending, gap,
-                                        pending_commits.len(), smallest_pending
-                                    );
-
-                                    next_expected_index = smallest_pending;
-
-                                    // ═════════════════════════════════════════════════
-                                    // BATCH DRAIN: Process pending commits sequentially.
-                                    // NOTE: We MUST NOT skip empty commits here, because
-                                    // Go relies on receiving every commit to deterministically
-                                    // increment its Global Execution Index (GEI).
-                                    // PHASE-A: Same logic, using hint GEI.
-                                    // ═════════════════════════════════════════════════
-                                    let drain_start = std::time::Instant::now();
-                                    let mut total_drained: u64 = 0;
-
-                                    while let Some(pending) = pending_commits.remove(&next_expected_index) {
-                                        let pending_commit_index = next_expected_index;
-
-                                        let _geis_consumed = super::executor::dispatch_commit(
-                                            &pending,
-                                            0, // PHASE-B: Go assigns GEI
-                                            current_epoch,
-                                            executor_client.clone(),
-                                            delivery_sender.clone(),
-                                            pending_transactions_queue.clone(),
-                                            self.epoch_eth_addresses.clone(),
-                                            self.tx_recycler.clone(),
-                                            self.shared_last_global_exec_index.clone(),
-                                        )
-                                        .await?;
-
-                                        if let Some(ref cb) = commit_index_callback {
-                                            cb(pending_commit_index);
-                                        }
-
-                                        total_drained += 1;
-                                        next_expected_index += 1;
-                                    }
-
-                                    let drain_elapsed = drain_start.elapsed();
-                                    info!(
-                                        "✅ [FORWARD-JUMP] Drain complete in {:?}. \
-                                         total_drained={}, next_expected={}, remaining_pending={}",
-                                        drain_elapsed, total_drained,
-                                        next_expected_index, pending_commits.len()
-                                    );
-                                }
-                            }
-                        }
+                        // FORK-SAFETY FIX: We NO LONGER jump forward heuristically!
+                        // If the node is catching up and pending_commits grows large,
+                        // we MUST wait for the CommitSyncer to deliver the missing commits.
+                        // Skipping commits based on `gap > 20` caused fatal DAG divergence
+                        // where different nodes assigned different commit_indices to the same GEI.
+                        // We strictly buffer until `commit_index == next_expected_index`.
                     } else {
                         warn!(
                             "Received commit with index {} which is less than expected {}",
