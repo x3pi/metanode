@@ -238,7 +238,7 @@ impl Core {
                 // before running the local committer. If `CommitSyncer` executed a cold-start
                 // fast-forward (`reset_to_network_baseline`), `Core`'s in-memory `last_decided_leader`
                 // will be stuck at Genesis. This ensures the local committer resumes from the correct
-                // post-sync network boundary instead of rebuilding history and causing a metadata fork.
+                // post-sync network boundary instead of rebuilding ancient history and causing a metadata fork.
                 let dag_last_decided = self.dag_state.read().last_commit_leader();
                 if self.last_decided_leader.round < dag_last_decided.round {
                     tracing::info!(
@@ -249,75 +249,23 @@ impl Core {
                     self.last_decided_leader = dag_last_decided;
                 }
 
-                // DAG DENSITY CHECK (ANTI-FORK):
-                // After CommitSyncer catch-up, the DAG only contains blocks from committed
-                // sub-dags. P2P block subscription hasn't had time to populate blocks from
-                // all authorities at recent rounds. If we run the local committer now,
-                // try_decide() will evaluate votes on a sparse DAG and may elect different
-                // leaders than other nodes, and calculate_commit_timestamp() will compute
-                // a different median, producing timestamp divergence (observed as 2s drift).
-                //
-                // Two checks:
-                // 1. PIPELINE DEPTH: Require at least 4 uncommitted rounds above last_commit_round.
-                //    The committer needs blocks at R, R+1, R+2 to decide a leader at R.
-                //    Having >=4 uncommitted rounds ensures sufficient data for decisions.
-                // 2. BLOCK DENSITY: At the first uncommitted round, check that at least a
-                //    quorum of authorities have blocks. This ensures P2P has populated the DAG.
-                {
-                    let dag_state = self.dag_state.read();
-                    let last_commit_round = dag_state.last_commit_round();
-                    let highest_round = dag_state.highest_accepted_round();
-                    let committee_size = self.context.committee.size();
-                    // 2f+1 count-based quorum (not stake-based)
-                    let quorum_count = committee_size * 2 / 3 + 1;
-
-                    // Check 1: Pipeline depth — need at least 4 uncommitted rounds
-                    let uncommitted_depth = highest_round.saturating_sub(last_commit_round);
-                    if uncommitted_depth < 4 {
-                        tracing::info!(
-                            "⏳ [ANTI-FORK] Insufficient pipeline depth: only {} uncommitted rounds \
-                             (last_commit_round={}, highest_round={}, need >=4). \
-                             Waiting for more P2P blocks before running local committer.",
-                            uncommitted_depth,
-                            last_commit_round,
-                            highest_round,
-                        );
-                        break;
-                    }
-
-                    // Check 2: Block density across ALL uncommitted rounds up to highest_round - 1.
-                    // We don't check `highest_round` itself because it might just be starting and
-                    // legitimately have < quorum blocks, which would stall the committer unnecessarily.
-                    // But all intermediate rounds must be dense to ensure safe leader evaluation.
-                    let mut sparse_round = None;
-                    let mut sparse_authors_count = 0;
-                    for r in (last_commit_round + 1)..highest_round {
-                        let blocks_at_round = dag_state.get_uncommitted_blocks_at_round(r);
-                        let distinct_authors: std::collections::HashSet<_> = blocks_at_round
-                            .iter()
-                            .map(|b| b.author())
-                            .collect();
-
-                        if distinct_authors.len() < quorum_count {
-                            sparse_round = Some(r);
-                            sparse_authors_count = distinct_authors.len();
-                            break;
-                        }
-                    }
-
-                    if let Some(r) = sparse_round {
-                        tracing::info!(
-                            "⏳ [ANTI-FORK] Sparse DAG at round {}: {}/{} authorities have blocks \
-                             (need {} for quorum). Skipping local committer to prevent leader \
-                             election divergence. Waiting for P2P block subscription to populate DAG.",
-                            r,
-                            sparse_authors_count,
-                            committee_size,
-                            quorum_count,
-                        );
-                        break;
-                    }
-                }
+                // DAG DENSITY CHECK AND LIVENESS SKIP REMOVED (v5):
+                // 1. The liveness skip (jumping last_decided_leader) is unsafe because it breaks
+                //    the contiguous prefix requirement, potentially allowing a node to commit a
+                //    leader locally that differs from the network, causing a metadata fork.
+                // 2. The DAG density check is unsafe because it permanently stalls the entire network
+                //    if any round naturally misses a block (e.g. node offline, delayed proposal).
+                // 
+                // Why it is safe without them:
+                // After a DAG wipe + fast-forward, last_commit_leader is round 0.
+                // The local committer evaluates down to round 1. Since ancient rounds are wiped,
+                // round 1 is empty, so try_decide returns Undecided and the prefix is empty.
+                // The node will naturally decide NOTHING locally.
+                // It will wait until the rest of the network decides the next commit.
+                // Once the network decides, quorum_commit_index advances.
+                // The (local_commit_index < quorum_commit_index) guard triggers, the node fetches
+                // the CertifiedCommit, processes it, and last_decided_leader is updated safely
+                // to the exact network-agreed round. Then local consensus resumes normally!
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
