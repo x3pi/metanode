@@ -44,6 +44,20 @@ impl LeaderSchedule {
         }
     }
 
+    pub fn commits_per_schedule() -> u64 {
+        Self::CONSENSUS_COMMITS_PER_SCHEDULE
+    }
+
+    pub(crate) fn update_from_baseline_scores(
+        &self,
+        context: Arc<Context>,
+        last_commit_index: CommitIndex,
+        scores: Vec<(AuthorityIndex, u64)>,
+    ) {
+        let table = LeaderSwapTable::new(context, last_commit_index, scores);
+        self.update_leader_swap_table(table);
+    }
+
     #[cfg(test)]
     pub(crate) fn with_num_commits_per_schedule(mut self, num_commits_per_schedule: u64) -> Self {
         self.num_commits_per_schedule = num_commits_per_schedule;

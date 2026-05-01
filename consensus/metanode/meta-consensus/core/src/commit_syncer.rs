@@ -889,6 +889,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if self.synced_commit_index <= last_commit_index { return; }
         
         let prev_index = self.synced_commit_index;
+        let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
+        let last_schedule_change_index = (prev_index / interval) * interval;
+        
         tracing::info!("🔗 Fetching network digest and timestamp for baseline commit #{}", prev_index);
         
         loop {
@@ -901,7 +904,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
             
-            for authority in target_authorities {
+            for authority in target_authorities.clone() {
                 if let Ok(Ok((serialized_commits, _))) = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
@@ -913,11 +916,42 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             let leader_round = commit.leader().round;
                             let digest = crate::commit::TrustedCommit::compute_digest(serialized);
                             
+                            // Try to fetch the reputation scores from the last schedule boundary if applicable
+                            let mut reputation_scores = None;
+                            if last_schedule_change_index > 0 {
+                                tracing::info!("🔗 Fetching last schedule boundary commit #{} for baseline reputation scores", last_schedule_change_index);
+                                let boundary_range: crate::commit::CommitRange = (last_schedule_change_index..=last_schedule_change_index).into();
+                                
+                                for fallback_authority in target_authorities.iter() {
+                                    if let Ok(Ok((boundary_commits, _))) = tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        self.inner.network_client.fetch_commits(*fallback_authority, boundary_range.clone(), Duration::from_secs(4))
+                                    ).await {
+                                        if let Some(boundary_serialized) = boundary_commits.first() {
+                                            if let Ok(boundary_commit) = bcs::from_bytes::<crate::commit::Commit>(boundary_serialized) {
+                                                let scores = boundary_commit.reputation_scores().to_vec();
+                                                if !scores.is_empty() {
+                                                    reputation_scores = Some(scores);
+                                                    tracing::info!("✅ Successfully extracted reputation scores from schedule boundary commit {}", last_schedule_change_index);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if reputation_scores.is_none() {
+                                    tracing::warn!("⚠️ Failed to fetch boundary commit {} for reputation scores. Will retry...", last_schedule_change_index);
+                                    continue; // Retry the entire outer loop if boundary fetch fails
+                                }
+                            }
+                            
                             self.inner.dag_state.write().reset_to_network_baseline(
                                 leader_round,
                                 prev_index,
                                 digest,
-                                timestamp_ms
+                                timestamp_ms,
+                                reputation_scores
                             );
                             tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={}, leader_round={})", prev_index, digest, timestamp_ms, leader_round);
                             return;

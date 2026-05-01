@@ -105,12 +105,19 @@ pub struct DagState {
 
     // Fallback timestamp for when last_commit is None (e.g., after DAG wipe)
     pub(crate) fallback_last_commit_timestamp_ms: u64,
+
+    // Stores reputation scores fetched during a cold-start baseline reset
+    pub(crate) baseline_reputation_scores: Option<Vec<(AuthorityIndex, u64)>>,
 }
 
 impl DagState {
     /// Get genesis block references for block verification.
     pub fn get_genesis_block_refs(&self) -> std::collections::BTreeSet<BlockRef> {
         self.genesis.keys().cloned().collect()
+    }
+
+    pub fn take_baseline_reputation_scores(&mut self) -> Option<Vec<(AuthorityIndex, u64)>> {
+        self.baseline_reputation_scores.take()
     }
 
     /// Initializes DagState from storage.
@@ -430,6 +437,7 @@ impl DagState {
         synced_commit_index: crate::commit::CommitIndex,
         real_digest: crate::commit::CommitDigest,
         timestamp_ms: consensus_types::block::BlockTimestampMs,
+        reputation_scores: Option<Vec<(consensus_config::AuthorityIndex, u64)>>,
     ) {
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);
@@ -448,13 +456,15 @@ impl DagState {
         );
 
         tracing::warn!(
-            "🧹 [DAG-RESET] Baseline injected: index={}, gc_round={}, digest_patched={}",
+            "🧹 [DAG-RESET] Baseline injected: index={}, gc_round={}, digest_patched={}, reputation_scores_fetched={}",
             target_index,
             target_round.saturating_sub(gc_depth),
-            real_digest != crate::commit::CommitDigest::MIN
+            real_digest != crate::commit::CommitDigest::MIN,
+            reputation_scores.is_some()
         );
 
         self.last_commit = Some(synthetic_commit);
+        self.baseline_reputation_scores = reputation_scores;
 
         // Update last_committed_rounds to the target round targeting GC efficiency
         for round in self.last_committed_rounds.iter_mut() {
