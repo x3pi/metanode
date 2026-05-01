@@ -429,6 +429,10 @@ pub struct CommittedSubDag {
     /// Global execution index - agreed upon by consensus.
     /// This is the execution layer block number and MUST NOT be recalculated locally.
     pub global_exec_index: u64,
+    /// CONSENSUS-DETERMINED: ETH address (20 bytes) of the leader validator.
+    /// Set once by CommitProcessor before dispatch. Read directly by executor.
+    /// Never recalculated — same immutability pattern as global_exec_index.
+    pub leader_address: Vec<u8>,
 
     /// Set by CommitObserver.
     ///
@@ -472,6 +476,7 @@ impl CommittedSubDag {
             timestamp_ms,
             commit_ref,
             global_exec_index,
+            leader_address: vec![],
             decided_with_local_blocks: true,
             recovered_rejected_transactions: false,
             reputation_scores_desc: vec![],

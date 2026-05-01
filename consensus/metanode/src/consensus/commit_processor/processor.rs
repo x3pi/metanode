@@ -229,6 +229,35 @@ impl CommitProcessor {
         self
     }
 
+    /// Resolve leader ETH address from committee cache and embed into subdag.
+    /// Called once per commit — same immutability pattern as global_exec_index.
+    /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
+    async fn resolve_leader_address(&self, subdag: &mut CommittedSubDag, epoch: u64) {
+        let leader_author_index = subdag.leader.author.value();
+
+        loop {
+            {
+                let epoch_addresses = self.epoch_eth_addresses.read().await;
+                if let Some(addrs) = epoch_addresses.get(&epoch) {
+                    if leader_author_index < addrs.len() {
+                        let addr = &addrs[leader_author_index];
+                        if addr.len() == 20 {
+                            subdag.leader_address = addr.clone();
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Cache not ready yet — wait and retry (same pattern as executor.rs had)
+            warn!(
+                "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={})...",
+                epoch, leader_author_index
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
     /// Process commits in order
     pub async fn run(self) -> Result<()> {
         let mut receiver = self.receiver;
@@ -307,7 +336,7 @@ impl CommitProcessor {
             }
 
             match receiver.recv().await {
-                Some(subdag) => {
+                Some(mut subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;
                     trace!("📥 [COMMIT PROCESSOR] Received committed subdag: commit_index={}, leader={:?}, blocks={}",
                         commit_index, subdag.leader, subdag.blocks.len());
@@ -384,6 +413,9 @@ impl CommitProcessor {
                             *gei_guard + 1
                         };
 
+                        // Resolve leader ETH address into subdag (immutable after this)
+                        self.resolve_leader_address(&mut subdag, current_epoch).await;
+
                         // Process commit — send accurate GEI to Go
                         let geis_consumed = super::executor::dispatch_commit(
                             &subdag,
@@ -392,7 +424,6 @@ impl CommitProcessor {
                             executor_client.clone(),
                             delivery_sender.clone(),
                             pending_transactions_queue.clone(),
-                            self.epoch_eth_addresses.clone(),
                             self.tx_recycler.clone(),
                             self.shared_last_global_exec_index.clone(),
                         )
@@ -466,13 +497,16 @@ impl CommitProcessor {
 
                         // Process pending out-of-order commits
                         let mut should_break = false;
-                        while let Some(pending) = pending_commits.remove(&next_expected_index) {
+                        while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
                             let pending_commit_index = next_expected_index;
 
                             let pending_gei = {
                                 let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
                                 *gei_guard + 1
                             };
+
+                            // Resolve leader ETH address into pending subdag
+                            self.resolve_leader_address(&mut pending, current_epoch).await;
 
                             let geis_consumed = super::executor::dispatch_commit(
                                 &pending,
@@ -481,7 +515,6 @@ impl CommitProcessor {
                                 executor_client.clone(),
                                 delivery_sender.clone(),
                                 pending_transactions_queue.clone(),
-                                self.epoch_eth_addresses.clone(),
                                 self.tx_recycler.clone(),
                                 self.shared_last_global_exec_index.clone(),
                             )

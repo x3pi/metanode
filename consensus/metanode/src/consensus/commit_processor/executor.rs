@@ -23,7 +23,6 @@ pub async fn dispatch_commit(
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
     _pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    validator_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     _tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
     _shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
 ) -> Result<u64> {
@@ -66,131 +65,9 @@ pub async fn dispatch_commit(
         return Ok(0); // GEI DOES NOT ADVANCE FOR EMPTY COMMITS! This ensures mathematical determinism based purely on transactions.
     }
 
-    // NOTE: CATCH-UP FORK GUARD was REMOVED here.
-    // Previous versions suppressed locally-decided commits when Go was lagging (lag > 10),
-    // but this CAUSED state divergence: node skips transactions while other nodes execute
-    // them → different stateRoot → hash mismatch → FORK.
-    // All commits passing through BFT consensus are canonical and MUST be executed.
-    let leader_address: Vec<u8> = if executor_client.is_some() {
-        let leader_author_index = subdag.leader.author.value();
-
-        // STEP 1: Validate committee data exists (with retry for startup race condition)
-
-        let resolved_address = loop {
-            let epoch_addresses = validator_eth_addresses.read().await;
-
-            // Check if committee HashMap is loaded
-            if epoch_addresses.is_empty() {
-                drop(epoch_addresses);
-                warn!("⏳ [LEADER] epoch_eth_addresses empty, waiting for committee...");
-                sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-
-            // Try to get committee for commit's epoch
-            let eth_addresses = if let Some(addrs) = epoch_addresses.get(&epoch) {
-                addrs.clone()
-            } else {
-                drop(epoch_addresses); // Release lock before retry
-                warn!(
-                    "⏳ [LEADER] epoch_eth_addresses missing epoch {}, waiting...",
-                    epoch
-                );
-                sleep(Duration::from_millis(200)).await;
-                continue;
-            };
-
-            // STEP 2: Validate leader index is in range
-            let committee_size = eth_addresses.len();
-            if leader_author_index >= committee_size {
-                // SELF-RECOVERY: Instead of panic, try to refresh the cache
-                drop(epoch_addresses); // Release lock before refresh
-
-                warn!(
-                        "⚠️ [LEADER] leader_index {} >= committee_size {} for epoch {}. Refreshing cache...",
-                        leader_author_index, committee_size, epoch
-                    );
-
-                // Try to refresh epoch_eth_addresses from Go
-                if let Some(ref client) = executor_client {
-                    match client.get_epoch_boundary_data(epoch).await {
-                        Ok((returned_epoch, _ts, _boundary, validators, _, _))
-                            if returned_epoch == epoch =>
-                        {
-                            // Sort validators same way as committee builder
-                            let mut sorted_validators: Vec<_> = validators.into_iter().collect();
-                            sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-
-                            let mut new_eth_addresses = Vec::new();
-                            for validator in &sorted_validators {
-                                let eth_addr_bytes = if validator.address.starts_with("0x")
-                                    && validator.address.len() == 42
-                                {
-                                    match hex::decode(&validator.address[2..]) {
-                                        Ok(bytes) if bytes.len() == 20 => bytes,
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                                new_eth_addresses.push(eth_addr_bytes);
-                            }
-
-                            // Update the cache
-                            let mut cache = validator_eth_addresses.write().await;
-                            cache.insert(epoch, new_eth_addresses);
-                            info!(
-                                    "🔄 [LEADER] Refreshed epoch_eth_addresses for epoch {}: now have {} validators (cache size: {})",
-                                    epoch, sorted_validators.len(), cache.len()
-                                );
-                        }
-                        Ok((returned_epoch, _, _, _, _, _)) => {
-                            warn!(
-                                    "⚠️ [LEADER] Go returned epoch {} but requested epoch {}. Retrying...",
-                                    returned_epoch, epoch
-                                );
-                        }
-                        Err(e) => {
-                            warn!("⚠️ [LEADER] Failed to refresh epoch_eth_addresses: {}. Retrying...", e);
-                        }
-                    }
-                }
-
-                sleep(Duration::from_millis(500)).await;
-                continue; // Retry the whole loop
-            }
-
-            // STEP 3: Validate ETH address is valid (20 bytes)
-            let addr = eth_addresses[leader_author_index].clone();
-            if addr.len() != 20 {
-                // SELF-RECOVERY: Try to refresh for invalid address too
-                drop(epoch_addresses);
-
-                warn!(
-                        "⚠️ [LEADER] Invalid eth_address length at index {}. Refreshing cache...",
-                        leader_author_index
-                    );
-                sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-
-            // SUCCESS: Valid leader address found
-            if total_transactions > 0 || has_system_tx {
-                info!(
-                    "✅ [LEADER] Resolved leader for commit #{} (epoch {}): index={} -> 0x{}",
-                    commit_index,
-                    epoch,
-                    leader_author_index,
-                    hex::encode(&addr)
-                );
-            }
-            break addr;
-        };
-
-        resolved_address
-    } else {
-        Vec::new() // No executor client = no need for leader address
-    };
+    // LEADER ADDRESS: Pre-resolved by CommitProcessor and embedded in subdag.
+    // Same immutability pattern as global_exec_index — set once, never recalculated.
+    let leader_address = subdag.leader_address.clone();
 
     if total_transactions > 0 || has_system_tx {
         trace!(
