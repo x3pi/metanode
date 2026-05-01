@@ -1163,6 +1163,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
 	// ═══════════════════════════════════════════════════════════════════════════
+	// STARTUP-SYNC DETECTION: If Go's current block is 0, this is a STARTUP-SYNC
+	// (node just started fresh). In this case, it's SAFE to rebuild NOMT trie
+	// because there's no concurrent consensus execution. During LAG-RECOVERY
+	// (block > 0), consensus is running concurrently so NOMT rebuild is unsafe.
+	// ═══════════════════════════════════════════════════════════════════════════
+	isStartupSync := storage.GetLastBlockNumber() == 0
+	if isStartupSync {
+		logger.Info("🔧 [STARTUP-SYNC] Detected fresh start (block=0). NOMT trie rebuild will be ENABLED for synced blocks.")
+	}
+	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
 	// ═══════════════════════════════════════════════════════════════════════════
 	currentGEI := storage.GetLastGlobalExecIndex()
@@ -1294,9 +1304,23 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
 		if isLastBlock {
-			// Only rebuild tries on non-NOMT backends where historical state is available
-			if trie.GetStateBackend() != trie.BackendNOMT {
+			// ═══════════════════════════════════════════════════════════════
+			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
+			//
+			// During STARTUP-SYNC (isStartupSync=true, block was 0):
+			//   SAFE to rebuild — no concurrent consensus execution exists.
+			//   WITHOUT this, NOMT stays at genesis root and block 16+ will
+			//   have genesis state_root, causing a permanent fork.
+			//
+			// During LAG-RECOVERY (isStartupSync=false, block > 0):
+			//   UNSAFE to rebuild — concurrent consensus execution would
+			//   have its NOMT trie root overwritten, causing a fork.
+			// ═══════════════════════════════════════════════════════════════
+			if trie.GetStateBackend() != trie.BackendNOMT || isStartupSync {
 				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+				if isStartupSync && trie.GetStateBackend() == trie.BackendNOMT {
+					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (fresh start, no concurrent consensus)", blockNum)
+				}
 			} else {
 				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
 					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie.", blockNum)

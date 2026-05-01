@@ -1465,6 +1465,48 @@ impl ConsensusNode {
             }
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // PHASE-2 CONSISTENCY CHECK (May 2026):
+        // After STARTUP-SYNC, verify Go's state is internally consistent.
+        // Detect block/commitIndex mismatches that indicate corrupted BackupDB
+        // or incomplete NOMT trie rebuild.
+        // ═══════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            match executor_client_for_proc.get_last_handled_commit_index().await {
+                Ok((commit_idx, gei, block_num, _epoch, _auth, _ts)) => {
+                    if block_num > 0 && commit_idx == 0 {
+                        tracing::error!(
+                            "🚨 [CONSISTENCY CHECK] Go reports block={} but lastHandledCommitIndex=0! \
+                             This indicates BackupDB didn't persist commit index. \
+                             CommitProcessor will start from commit 1 — Go's duplicate detection will handle already-executed blocks.",
+                            block_num
+                        );
+                        // Don't change anything — CommitProcessor starts from 1,
+                        // Go's GEI guard will skip already-executed blocks.
+                    } else if block_num == 0 && commit_idx > 0 {
+                        tracing::error!(
+                            "🚨 [CONSISTENCY CHECK] Go reports block=0 but lastHandledCommitIndex={}! \
+                             Stale BackupDB data detected. Resetting CommitProcessor to commit 1.",
+                            commit_idx
+                        );
+                        commit_processor.go_last_commit_index = 0;
+                        commit_processor.next_expected_index = 1;
+                    } else {
+                        tracing::info!(
+                            "✅ [CONSISTENCY CHECK] Post-sync state OK: block={}, gei={}, commit_index={}",
+                            block_num, gei, commit_idx
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [CONSISTENCY CHECK] Failed to query Go state: {}. Proceeding with current values.",
+                        e
+                    );
+                }
+            }
+        }
+
         let is_terminally_failed = Arc::new(AtomicBool::new(false));
 
         // FORK-SAFETY FIX v5: initialize_from_go() MUST be SYNCHRONOUS.
