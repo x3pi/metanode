@@ -1,8 +1,6 @@
 // Copyright (c) MetaNode Team
 // SPDX-License-Identifier: Apache-2.0
 
-use consensus_core::DefaultSystemTransactionProvider;
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info, warn};
 
@@ -12,7 +10,6 @@ use crate::config::NodeConfig;
 /// This task processes epoch transition requests from system transactions
 pub fn start_epoch_transition_handler(
     mut receiver: UnboundedReceiver<(u64, u64, u64)>, // CHANGED: u32 -> u64 for global_exec_index
-    system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     config: NodeConfig,
 ) {
     tokio::spawn(async move {
@@ -133,12 +130,11 @@ pub fn start_epoch_transition_handler(
                     // [FIX DONE]: Chỉ update Provider khi Node đã chuyển đổi thành công.
                     // Lúc này mới an toàn để reset đồng hồ cho epoch tiếp theo.
                     // NOTE: The actual timestamp is now derived inside transition function from Go's boundary block header.
-                    // We pass boundary_block here, but the transition function has already obtained the real timestamp.
-                    // The system_transaction_provider stores its own epoch_start for internal calculations.
-                    // This call is now primarily for updating the provider's epoch counter, timestamp is derived internally.
-                    system_transaction_provider
-                        .update_epoch(new_epoch, boundary_timestamp_ms)
-                        .await;
+                    // The transition function `transition_to_epoch_from_system_tx` ALREADY called 
+                    // `update_epoch` with the correct derived timestamp.
+                    // DO NOT call it here again, because `boundary_timestamp_ms` is actually the `boundary_block` 
+                    // (e.g. 522), and passing it here would set the epoch start time to 1970, causing 
+                    // an immediate unintended EndOfEpoch trigger.
                 }
             } else {
                 // No node available, fail the transition

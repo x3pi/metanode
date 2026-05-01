@@ -1887,7 +1887,6 @@ impl ConsensusNode {
 
         crate::consensus::epoch_transition::start_epoch_transition_handler(
             consensus.epoch_tx_receiver,
-            node.system_transaction_provider.clone(),
             config.clone(),
         );
 

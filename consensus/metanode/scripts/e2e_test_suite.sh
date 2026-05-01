@@ -29,7 +29,7 @@ GO_DIR="$BASE_DIR/execution/cmd/simple_chain"
 LOG_BASE="$RUST_DIR/logs"
 ORCHESTRATOR="$SCRIPT_DIR/mtn-orchestrator.sh"
 TX_SENDER_DIR="$BASE_DIR/execution/cmd/tool/tx_sender"
-TX_SENDER_NODE="127.0.0.1:10100"  # TCP port cho node 0 (nhận giao dịch qua RpcServer)
+TX_SENDER_NODE="127.0.0.1:4201"  # TCP port cho node 0 (nhận giao dịch)
 
 # ─── Tham số ─────────────────────────────────────────────────────
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
