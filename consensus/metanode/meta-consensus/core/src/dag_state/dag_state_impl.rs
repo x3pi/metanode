@@ -107,7 +107,7 @@ pub struct DagState {
     pub(crate) fallback_last_commit_timestamp_ms: u64,
 
     // Stores reputation scores fetched during a cold-start baseline reset
-    pub(crate) baseline_reputation_scores: Option<Vec<(AuthorityIndex, u64)>>,
+    pub(crate) baseline_reputation_scores: Option<crate::leader_scoring::ReputationScores>,
 }
 
 impl DagState {
@@ -116,7 +116,7 @@ impl DagState {
         self.genesis.keys().cloned().collect()
     }
 
-    pub fn take_baseline_reputation_scores(&mut self) -> Option<Vec<(AuthorityIndex, u64)>> {
+    pub fn take_baseline_reputation_scores(&mut self) -> Option<crate::leader_scoring::ReputationScores> {
         self.baseline_reputation_scores.take()
     }
 
@@ -262,6 +262,7 @@ impl DagState {
             cached_rounds,
             evicted_rounds: vec![0; num_authorities],
             fallback_last_commit_timestamp_ms: 0,
+            baseline_reputation_scores: None,
         };
 
         for (authority_index, _) in context.committee.authorities() {
@@ -437,7 +438,7 @@ impl DagState {
         synced_commit_index: crate::commit::CommitIndex,
         real_digest: crate::commit::CommitDigest,
         timestamp_ms: consensus_types::block::BlockTimestampMs,
-        reputation_scores: Option<Vec<(consensus_config::AuthorityIndex, u64)>>,
+        reputation_scores: Option<crate::leader_scoring::ReputationScores>,
     ) {
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);

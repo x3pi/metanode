@@ -915,12 +915,53 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             let timestamp_ms = commit.timestamp_ms(); 
                             let leader_round = commit.leader().round;
                             let digest = crate::commit::TrustedCommit::compute_digest(serialized);
+                            
+                            // Try to compute the reputation scores from the last schedule boundary if applicable
+                            let mut reputation_scores = None;
+                            if last_schedule_change_index > 0 {
+                                tracing::info!("🔗 Fetching commits for schedule boundary {} to compute baseline reputation scores", last_schedule_change_index);
+                                let start_index = last_schedule_change_index.saturating_sub(interval - 1).max(1);
+                                let boundary_range: crate::commit::CommitRange = (start_index..=last_schedule_change_index).into();
+                                
+                                for fallback_authority in target_authorities.iter() {
+                                    if let Ok(Ok((boundary_commits, _))) = tokio::time::timeout(
+                                        Duration::from_secs(10),
+                                        self.inner.network_client.fetch_commits(*fallback_authority, boundary_range.clone(), Duration::from_secs(8))
+                                    ).await {
+                                        let mut scores_per_authority = vec![0u64; self.inner.context.committee.size()];
+                                        let mut valid_commits = 0;
+                                        for serialized in boundary_commits {
+                                            if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(&serialized) {
+                                                use crate::commit::CommitAPI;
+                                                for block_ref in commit.blocks() {
+                                                    scores_per_authority[block_ref.author.value()] += 1;
+                                                }
+                                                valid_commits += 1;
+                                            }
+                                        }
+                                        if valid_commits > 0 {
+                                            reputation_scores = Some(crate::leader_scoring::ReputationScores::new(
+                                                boundary_range.clone(),
+                                                scores_per_authority
+                                            ));
+                                            tracing::info!("✅ Successfully computed reputation scores from schedule boundary commits {}..{}", start_index, last_schedule_change_index);
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if reputation_scores.is_none() {
+                                    tracing::warn!("⚠️ Failed to fetch boundary commits {}..{} for reputation scores. Will retry...", start_index, last_schedule_change_index);
+                                    continue; // Retry the entire outer loop if boundary fetch fails
+                                }
+                            }
+                            
                             self.inner.dag_state.write().reset_to_network_baseline(
                                 leader_round,
                                 prev_index,
                                 digest,
                                 timestamp_ms,
-                                None
+                                reputation_scores
                             );
                             tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={}, leader_round={})", prev_index, digest, timestamp_ms, leader_round);
                             return;

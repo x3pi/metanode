@@ -52,7 +52,7 @@ impl LeaderSchedule {
         &self,
         context: Arc<Context>,
         last_commit_index: CommitIndex,
-        scores: Vec<(AuthorityIndex, u64)>,
+        scores: crate::leader_scoring::ReputationScores,
     ) {
         let table = LeaderSwapTable::new(context, last_commit_index, scores);
         self.update_leader_swap_table(table);
