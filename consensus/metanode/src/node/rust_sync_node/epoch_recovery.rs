@@ -8,7 +8,7 @@ use anyhow::Result;
 use consensus_core::{CommitAPI, CommitRef, CommittedSubDag};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::network::peer_rpc::query_peer_epoch_boundary_data;
 

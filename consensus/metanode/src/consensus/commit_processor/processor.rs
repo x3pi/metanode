@@ -232,13 +232,17 @@ impl CommitProcessor {
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
-    async fn resolve_leader_address(&self, subdag: &mut CommittedSubDag, epoch: u64) {
+    async fn resolve_leader_address(
+        epoch_eth_addresses: &tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>,
+        subdag: &mut CommittedSubDag,
+        epoch: u64,
+    ) {
         let leader_author_index = subdag.leader.author.value();
 
         loop {
             {
-                let epoch_addresses = self.epoch_eth_addresses.read().await;
-                if let Some(addrs) = epoch_addresses.get(&epoch) {
+                let addrs_guard = epoch_eth_addresses.read().await;
+                if let Some(addrs) = addrs_guard.get(&epoch) {
                     if leader_author_index < addrs.len() {
                         let addr = &addrs[leader_author_index];
                         if addr.len() == 20 {
@@ -249,7 +253,7 @@ impl CommitProcessor {
                 }
             }
 
-            // Cache not ready yet — wait and retry (same pattern as executor.rs had)
+            // Cache not ready yet — wait and retry
             warn!(
                 "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={})...",
                 epoch, leader_author_index
@@ -270,6 +274,7 @@ impl CommitProcessor {
         let pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
+        let epoch_eth_addresses = self.epoch_eth_addresses;
 
         // ═══════════════════════════════════════════════════════════════
         // PHASE-B: GO IS THE SOLE AUTHORITY FOR GEI
@@ -414,7 +419,7 @@ impl CommitProcessor {
                         };
 
                         // Resolve leader ETH address into subdag (immutable after this)
-                        self.resolve_leader_address(&mut subdag, current_epoch).await;
+                        Self::resolve_leader_address(&epoch_eth_addresses, &mut subdag, current_epoch).await;
 
                         // Process commit — send accurate GEI to Go
                         let geis_consumed = super::executor::dispatch_commit(
@@ -506,7 +511,7 @@ impl CommitProcessor {
                             };
 
                             // Resolve leader ETH address into pending subdag
-                            self.resolve_leader_address(&mut pending, current_epoch).await;
+                            Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
                             let geis_consumed = super::executor::dispatch_commit(
                                 &pending,

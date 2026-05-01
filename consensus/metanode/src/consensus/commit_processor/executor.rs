@@ -4,7 +4,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tracing::{error, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
