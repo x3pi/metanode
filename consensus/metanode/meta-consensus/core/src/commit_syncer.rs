@@ -327,23 +327,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // ════════════════════════════════════════════════════════════════════════
         // SNAPSHOT RESTORE FAST-FORWARD
         // If Rust DAG is empty (local_commit == 0) BUT Go executor has restored state
-        // up to highest_handled_index > 0, we MUST fast-forward the baseline NOW.
-        // Otherwise, `is_behind` will evaluate to `true`, node stays stuck in
-        // CatchingUp trying to fetch blocks 1..highest_handled_index which are
-        // irrelevant and will cause own-slot conflicts.
+        // up to highest_handled_index > 0, we fast-forward the baseline.
+        // CRITICAL FIX: We must NOT fast-forward all the way to highest_handled_index.
+        // We MUST preserve the past 300 commits to allow `update_leader_schedule_v2`
+        // to compute the correct LeaderSchedule based on identical past state.
+        // Otherwise, Node 1 will compute a divergent LeaderSchedule and fork the network.
         // ════════════════════════════════════════════════════════════════════════
         if local_commit == 0 && highest_handled_index > 0 {
-            tracing::info!(
-                "🚀 [COLD-START/RESTORE] Node initialized with empty DAG but Go execution is at {}. Fast-forwarding DAG baseline NOW.",
-                highest_handled_index
-            );
-            
-            // Fast-forward DAG state to match Go Execution Engine's progress
-            // We use 0 as the target round for GC dropping to avoid accidentally skipping blocks
-            // because commit_index is much higher than round in multi-leader setups. The round 
-            // will naturally catch up as new commits are processed.
-            self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled_index, crate::commit::CommitDigest::MIN, 0, None);
-            self.synced_commit_index = highest_handled_index;
+            // Find the last schedule boundary. num_commits matches LeaderSchedule::new
+            let num_commits = 300;
+            let last_boundary = (highest_handled_index / num_commits) * num_commits;
+            let baseline_target = last_boundary.saturating_sub(num_commits);
+
+            if baseline_target > 0 {
+                tracing::info!(
+                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG but Go execution is at {}. \
+                     Fast-forwarding DAG baseline to {} (preserving last {} commits for LeaderSchedule).",
+                    highest_handled_index, baseline_target, highest_handled_index - baseline_target
+                );
+                
+                // Fast-forward DAG state to match the boundary
+                self.inner.dag_state.write().reset_to_network_baseline(0, baseline_target, crate::commit::CommitDigest::MIN, 0, None);
+                self.synced_commit_index = baseline_target;
+            } else {
+                tracing::info!(
+                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG. Go is at {}. \
+                     No fast-forward needed (fetching all from Genesis to reconstruct LeaderSchedule).",
+                    highest_handled_index
+                );
+            }
         }
 
         let current_phase = self.coordination_hub.get_phase();

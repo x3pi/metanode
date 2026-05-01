@@ -25,6 +25,13 @@ pub(crate) struct LeaderSchedule {
     pub leader_swap_table: Arc<RwLock<LeaderSwapTable>>,
     context: Arc<Context>,
     num_commits_per_schedule: u64,
+    /// FORK-SAFETY: Tracks whether the LeaderSwapTable has been confirmed valid.
+    /// Set to `true` when:
+    ///   1. CommitInfo is successfully recovered from RocksDB at startup, OR
+    ///   2. `update_leader_schedule_v2` completes a full 300-commit scoring cycle, OR
+    ///   3. `update_from_baseline_scores` injects network-verified scores.
+    /// When `false`, the local committer MUST NOT run to prevent leader divergence.
+    schedule_confirmed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LeaderSchedule {
@@ -41,6 +48,7 @@ impl LeaderSchedule {
             context,
             num_commits_per_schedule: Self::CONSENSUS_COMMITS_PER_SCHEDULE,
             leader_swap_table: Arc::new(RwLock::new(leader_swap_table)),
+            schedule_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -66,18 +74,25 @@ impl LeaderSchedule {
         );
         let table = LeaderSwapTable::new(context, last_commit_index, reputation_scores);
         self.update_leader_swap_table(table);
+        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+        tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via baseline scores injection.");
     }
 
     #[cfg(test)]
     pub(crate) fn with_num_commits_per_schedule(mut self, num_commits_per_schedule: u64) -> Self {
         self.num_commits_per_schedule = num_commits_per_schedule;
+        // In tests, auto-confirm the schedule so the SCHEDULE-GUARD doesn't block.
+        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
         self
     }
 
     /// Restores the `LeaderSchedule` from storage. It will attempt to retrieve the
     /// last stored `ReputationScores` and use them to build a `LeaderSwapTable`.
     pub(crate) fn from_store(context: Arc<Context>, dag_state: Arc<RwLock<DagState>>) -> Self {
-        let leader_swap_table = dag_state.read().recover_last_commit_info().map_or(
+        let recovered = dag_state.read().recover_last_commit_info();
+        let has_commit_info = recovered.is_some();
+        let last_commit_index = dag_state.read().last_commit_index();
+        let leader_swap_table = recovered.map_or(
             LeaderSwapTable::default(),
             |(last_commit_ref, last_commit_info)| {
                 LeaderSwapTable::new(
@@ -88,13 +103,32 @@ impl LeaderSchedule {
             },
         );
 
+        // Determine if the schedule is confirmed:
+        // 1. CommitInfo was recovered from store → schedule is exact.
+        // 2. last_commit_index < CONSENSUS_COMMITS_PER_SCHEDULE → No schedule change has
+        //    happened in this epoch yet. All nodes use the same default (no swaps) → safe.
+        // 3. Otherwise → Node restarted mid-epoch without persisted CommitInfo.
+        //    The default schedule may differ from the network's swapped schedule → NOT safe.
+        let is_confirmed = has_commit_info
+            || last_commit_index < Self::CONSENSUS_COMMITS_PER_SCHEDULE as u32;
+
         tracing::info!(
-            "LeaderSchedule recovered using {leader_swap_table:?}. There are {} committed subdags scored in DagState.",
+            "LeaderSchedule recovered using {leader_swap_table:?}. There are {} committed subdags scored in DagState. schedule_confirmed={}{}",
             dag_state.read().scoring_subdags_count(),
+            is_confirmed,
+            if !has_commit_info && last_commit_index >= Self::CONSENSUS_COMMITS_PER_SCHEDULE as u32 {
+                format!(" ⚠️ [SCHEDULE-STALE] CommitInfo missing but commit_index={}. LeaderSchedule may be stale — local committer BLOCKED until scoring cycle completes.", last_commit_index)
+            } else {
+                String::new()
+            },
         );
 
         // create the schedule
-        Self::new(context, leader_swap_table)
+        let schedule = Self::new(context, leader_swap_table);
+        if is_confirmed {
+            schedule.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+        }
+        schedule
     }
 
     pub(crate) fn commits_until_leader_schedule_update(
@@ -160,6 +194,18 @@ impl LeaderSchedule {
             .node_metrics
             .num_of_bad_nodes
             .set(self.leader_swap_table.read().bad_nodes.len() as i64);
+
+        // Mark the schedule as confirmed after a full scoring cycle.
+        if !self.schedule_confirmed.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via full {}-commit scoring cycle.", self.num_commits_per_schedule);
+        }
+        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns true if the LeaderSchedule has been confirmed valid for local commit evaluation.
+    /// When false, the local committer MUST NOT run to prevent leader divergence.
+    pub(crate) fn is_schedule_confirmed(&self) -> bool {
+        self.schedule_confirmed.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {

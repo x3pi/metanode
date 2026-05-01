@@ -63,19 +63,7 @@ impl Core {
                     new_commit_index
                 );
 
-                // COLD-START GUARD: Clear after successfully processing CertifiedCommits.
-                // The DAG is now populated with network-verified blocks, so the local
-                // committer can safely resume evaluating new rounds.
-                if self.cold_start_baseline_commit > 0 && !subdags.is_empty() {
-                    tracing::info!(
-                        "✅ [COLD-START-GUARD] Deactivated. Processed {} CertifiedCommit subdags. \
-                         Local committer unblocked (was baseline={}, now={}).",
-                        subdags.len(),
-                        self.cold_start_baseline_commit,
-                        new_commit_index
-                    );
-                    self.cold_start_baseline_commit = 0;
-                }
+
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
@@ -255,21 +243,14 @@ impl Core {
                 // post-sync network boundary instead of rebuilding ancient history and causing a metadata fork.
                 let dag_last_decided = self.dag_state.read().last_commit_leader();
                 if self.last_decided_leader.round < dag_last_decided.round {
+                    // Note: We rely on the Phase guard (CatchingUp/StateSyncing) below
+                    // to prevent the local committer from running until the DAG is populated.
                     tracing::info!(
-                        "🔄 [SYNC] Core fast-forwarding last_decided_leader from {:?} to {:?} to match DagState baseline. This prevents local committer from rebuilding ancient history.",
+                        "🔄 [SYNC] Core fast-forwarding last_decided_leader from {:?} to {:?} to match DagState baseline. Local committer will resume when node becomes Healthy.",
                         self.last_decided_leader,
                         dag_last_decided
                     );
                     self.last_decided_leader = dag_last_decided;
-
-                    // COLD-START GUARD: Mark that we just fast-forwarded.
-                    // The local committer MUST NOT run until CertifiedCommits populate the DAG.
-                    let baseline = self.dag_state.read().last_commit_index();
-                    self.cold_start_baseline_commit = baseline;
-                    tracing::info!(
-                        "🛡️ [COLD-START-GUARD] Activated at commit index {}. Local committer blocked until CertifiedCommits arrive.",
-                        baseline
-                    );
 
                     // CRITICAL FIX: Restore LeaderSchedule from the baseline if available
                     if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
@@ -300,15 +281,32 @@ impl Core {
                 // the CertifiedCommit, processes it, and last_decided_leader is updated safely
                 // to the exact network-agreed round. Then local consensus resumes normally!
 
-                // COLD-START GUARD: Block local committer after DAG wipe + fast-forward.
+                // PHASE GUARD: Block local committer while the node is catching up.
                 // The DAG is sparse (missing ancestor blocks) so local commit evaluation
                 // would produce divergent timestamps and leader addresses.
-                // Only CertifiedCommits (network-verified) are safe to process.
-                if self.cold_start_baseline_commit > 0 {
+                // Only CertifiedCommits (network-verified) are safe to process during catch-up.
+                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() {
                     tracing::info!(
-                        "🛡️ [COLD-START-GUARD] Blocking local committer (baseline={}). \
-                         Waiting for CertifiedCommits to populate DAG.",
-                        self.cold_start_baseline_commit
+                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase. \
+                         Waiting for node to become Healthy.",
+                        self.coordination_hub.get_phase()
+                    );
+                    break;
+                }
+
+                // SCHEDULE GUARD: Block local committer when LeaderSchedule is unconfirmed.
+                // After restart, if CommitInfo was not persisted in RocksDB, the schedule
+                // falls back to a default (empty) LeaderSwapTable. This produces different
+                // leader elections than the network's reputation-swapped schedule, causing
+                // LEADER_ADDR divergence and hash forks.
+                // The schedule becomes confirmed when either:
+                //   - CommitInfo is recovered from store, OR
+                //   - A full 300-commit scoring cycle completes, OR
+                //   - Baseline scores are injected from the network.
+                if !self.leader_schedule.is_schedule_confirmed() {
+                    tracing::info!(
+                        "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
+                         Waiting for 300-commit scoring cycle or network baseline scores."
                     );
                     break;
                 }
