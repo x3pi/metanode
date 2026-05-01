@@ -281,13 +281,7 @@ pub async fn dispatch_commit(
                     trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
                                 batch_id, global_exec_index, commit_index, geis_consumed);
 
-                    // Update shared_last_global_exec_index to the LAST GEI of the fragment range
-                    let last_gei = global_exec_index + geis_consumed - 1;
-                    if let Some(shared_index) = shared_last_global_exec_index.clone() {
-                        let mut index_guard = shared_index.lock().await;
-                        *index_guard = last_gei;
-                        trace!("📊 [GLOBAL_EXEC_INDEX] Updated shared last_global_exec_index to {} after successful send (geis_consumed={})", last_gei, geis_consumed);
-                    }
+                    // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.
 
                     // Track lag every 500 commits (reduced from 100 to minimize Go RPC during sync)
                     if commit_index % 500 == 0 {

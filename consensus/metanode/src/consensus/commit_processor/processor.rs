@@ -403,7 +403,7 @@ impl CommitProcessor {
                             let mut gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
                             *gei_guard += geis_consumed;
                         }
-
+                        
                         // ♻️ TX RECYCLER: Confirm committed TXs
                         if let Some(ref recycler) = self.tx_recycler {
                             if total_txs_in_commit > 0 {
