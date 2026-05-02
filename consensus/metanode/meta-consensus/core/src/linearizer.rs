@@ -203,13 +203,19 @@ impl Linearizer {
         };
 
         // Create the corresponding committed sub dag
-        let sub_dag = CommittedSubDag::new(
+        let mut sub_dag = CommittedSubDag::new(
             leader_block.reference(),
             to_commit,
             timestamp_ms,
             commit.reference(),
             commit.global_exec_index(),
         );
+
+        // FORK-SAFETY (May 2026): Propagate consensus-agreed leader_address from commit
+        let stored_leader_addr = commit.leader_address();
+        if !stored_leader_addr.is_empty() {
+            sub_dag.leader_address = stored_leader_addr.to_vec();
+        }
 
         Some((sub_dag, commit))
     }

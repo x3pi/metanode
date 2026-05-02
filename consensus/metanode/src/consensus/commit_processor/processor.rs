@@ -232,11 +232,25 @@ impl CommitProcessor {
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
+    ///
+    /// FORK-SAFETY (May 2026): If leader_address is already set (from stored/synced commit),
+    /// skip re-resolution to prevent divergence on nodes with corrupted DAG state.
     async fn resolve_leader_address(
         epoch_eth_addresses: &tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>,
         subdag: &mut CommittedSubDag,
         epoch: u64,
     ) {
+        // FORK-SAFETY: If leader_address was pre-populated from stored commit data,
+        // trust it and skip local resolution. This ensures recovering nodes use the
+        // same address as the original producing node.
+        if subdag.leader_address.len() == 20 {
+            trace!(
+                "✅ [LEADER] Using pre-embedded leader_address from commit (commit={}, epoch={}, addr=0x{})",
+                subdag.commit_ref.index, epoch, hex::encode(&subdag.leader_address)
+            );
+            return;
+        }
+
         let leader_author_index = subdag.leader.author.value();
 
         loop {

@@ -49,11 +49,24 @@ impl RustSyncNode {
                 commit_data.commit.global_exec_index(),
             );
 
+            // FORK-SAFETY (May 2026): Propagate pre-embedded leader_address from commit
+            let stored_leader_addr = commit_data.commit.leader_address();
+            if stored_leader_addr.len() == 20 {
+                subdag.leader_address = stored_leader_addr.to_vec();
+            }
+
             // Resolve leader ETH address and embed into subdag (same pattern as CommitProcessor)
             let epoch = commit_data.epoch;
             let leader_author_index = subdag.leader.author.value();
 
             let resolve_start = Instant::now();
+            // FORK-SAFETY: Skip resolution if already pre-embedded
+            if subdag.leader_address.len() == 20 {
+                debug!(
+                    "✅ [RUST-SYNC] Using pre-embedded leader_address from commit (epoch={}, commit={})",
+                    epoch, commit_data.commit.index()
+                );
+            } else {
             let mut retry_count = 0u32;
             loop {
                 {
@@ -147,6 +160,7 @@ impl RustSyncNode {
                 }
                 tokio::time::sleep(Duration::from_millis(1000)).await;
             }
+            } // end else (no pre-embedded leader_address)
             self.metrics
                 .leader_resolve_duration_seconds
                 .observe(resolve_start.elapsed().as_secs_f64());
