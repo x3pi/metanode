@@ -178,7 +178,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             dag_state,
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
-        let handled_commit = inner.commit_consumer_monitor.highest_handled_commit();
         // FORK-SAFETY: DO NOT initialize with `handled_commit`!
         // If DAG was wiped (dag_commit = 0) but Go has state (handled_commit = 400),
         // we MUST start fetching from 0 to reconstruct the LeaderSchedule!
