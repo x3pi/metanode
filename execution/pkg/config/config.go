@@ -153,6 +153,7 @@ type SimpleChainConfig struct {
 	SnapshotMethod          string `json:"snapshot_method"`                     // "hardlink" (default) hoặc "rsync" (safe cho Xapian)
 	SnapshotSourceDir       string `json:"snapshot_source_dir"`                 // Thư mục cần snapshot (mặc định = RootPath parent)
 	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
+	SnapshotBlockOffset     int    `json:"snapshot_block_offset,omitempty"`     // Offset per-node để stagger snapshot (vd: node0=0, node1=100, node2=200). Đảm bảo không tất cả nodes snapshot cùng lúc
 
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.

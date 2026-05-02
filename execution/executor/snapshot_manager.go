@@ -42,6 +42,7 @@ type SnapshotManager struct {
 	snapshotMethod    string // "hardlink", "rsync", hoặc "hybrid"
 	snapshotSourceDir string // Thư mục cần snapshot (cho rsync/hybrid method, vd: data-write)
 	frequencyBlocks   uint64 // Nếu > 0, tạo snapshot định kỳ mỗi N block thay vì chờ hết epoch
+	blockOffset       uint64 // Per-node offset to stagger snapshots (prevents all nodes pausing at same block)
 
 	// Filesystem capabilities
 	reflinkSupported bool // true nếu filesystem hỗ trợ cp --reflink (btrfs, xfs)
@@ -224,6 +225,18 @@ func (sm *SnapshotManager) SetSnapshotFrequency(frequency int) {
 	sm.frequencyBlocks = uint64(frequency)
 }
 
+// SetSnapshotBlockOffset sets the per-node offset for staggered snapshots.
+// With 5 nodes and frequency=500: node0 offset=0, node1 offset=100, etc.
+// This ensures at most 1 node snapshots at any given block → consensus never loses quorum.
+func (sm *SnapshotManager) SetSnapshotBlockOffset(offset int) {
+	if offset < 0 {
+		offset = 0
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.blockOffset = uint64(offset)
+}
+
 // OnEpochAdvanced được gọi khi epoch transition xảy ra
 func (sm *SnapshotManager) OnEpochAdvanced(boundaryBlock uint64, newEpoch uint64) {
 	if !sm.enabled {
@@ -258,7 +271,14 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 	isStandardTrigger := sm.snapshotPending && blockNumber >= (sm.epochBoundaryBlock+uint64(sm.blocksAfterEpoch))
 
 	// Tính năng 2: Tạo snapshot tĩnh dựa trên chu kỳ block cố định
-	isPeriodicTrigger := sm.frequencyBlocks > 0 && blockNumber > 0 && blockNumber%sm.frequencyBlocks == 0
+	// STAGGER FIX: Dùng offset per-node để tránh tất cả nodes snapshot cùng lúc
+	// Formula: (blockNumber - offset) % frequency == 0
+	// Ví dụ frequency=500, node0 offset=0 → snap ở 500, 1000, 1500
+	//                        node1 offset=100 → snap ở 600, 1100, 1600
+	var isPeriodicTrigger bool
+	if sm.frequencyBlocks > 0 && blockNumber > sm.blockOffset {
+		isPeriodicTrigger = (blockNumber-sm.blockOffset)%sm.frequencyBlocks == 0
+	}
 
 	if !isStandardTrigger && !isPeriodicTrigger {
 		sm.mu.Unlock()

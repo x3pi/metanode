@@ -78,6 +78,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	// Tạo SnapshotManager
 	sm := NewSnapshotManager(dataDir, snapshotDir, 2, blocksDelay)
 	sm.SetSnapshotFrequency(cfg.SnapshotFrequencyBlocks)
+	sm.SetSnapshotBlockOffset(cfg.SnapshotBlockOffset)
 	globalSnapshotManager = sm
 
 	// Cấu hình snapshot method
@@ -176,6 +177,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	logger.Info("📸 [SNAPSHOT]    Data dir: %s", dataDir)
 	logger.Info("📸 [SNAPSHOT]    Snapshot dir: %s", snapshotDir)
 	logger.Info("📸 [SNAPSHOT]    Blocks delay: %d", blocksDelay)
+	logger.Info("📸 [SNAPSHOT]    Frequency: every %d blocks (offset=%d)", cfg.SnapshotFrequencyBlocks, cfg.SnapshotBlockOffset)
 	logger.Info("📸 [SNAPSHOT]    HTTP server port: %d", serverPort)
 
 	return sm
