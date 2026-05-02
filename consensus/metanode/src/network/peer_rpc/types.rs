@@ -58,6 +58,9 @@ pub struct ValidatorInfoSimple {
     pub protocol_key: String,
     pub network_key: String,
     pub authority_key: String,
+    /// P2P address (Multiaddr format) — needed for committee building
+    #[serde(default)]
+    pub p2p_address: String,
 }
 
 /// Response for /get_epoch_boundary_data endpoint

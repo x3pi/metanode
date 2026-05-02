@@ -126,10 +126,10 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			// from nodes that ran continuously from genesis.
 			// We MUST use the genesis validators directly from genesis.json.
 			logger.Warn("Block 0 not found, getting validators from genesis.json to ensure fork-safe deterministic committee")
-			
+
 			validatorInfoList := &pb.ValidatorInfoList{}
 			var genesisValidators []*pb.Validator
-			
+
 			if rh.genesisPath != "" {
 				if genesisData, err := config.LoadGenesisData(rh.genesisPath); err == nil {
 					genesisValidators = genesisData.Validators
@@ -147,7 +147,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 					// Use 1000000 as deterministic starting stake (since genesis validators start with no stake)
 					stakeNormalized := big.NewInt(1000000)
 					validatorsWithMinStake++
-					
+
 					val := &pb.ValidatorInfo{
 						Address:                    genVal.Address,
 						Stake:                      stakeNormalized.String(),
@@ -670,6 +670,31 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 		rh.snapshotManager.OnEpochAdvanced(request.BoundaryBlock, request.NewEpoch)
 	}
 
+	// ═══════════════════════════════════════════════════════════════════
+	// EPOCH VALIDATOR PERSISTENCE: Snapshot validators at boundary block.
+	// This is the ONLY correct moment to capture them — NOMT state
+	// contains the exact validators active at the epoch boundary.
+	// After this, new blocks in the next epoch may change NOMT state.
+	// The cached validators are persisted in epoch_data_backup.json,
+	// which survives snapshot restore even when NOMT knownKeys is empty.
+	// ═══════════════════════════════════════════════════════════════════
+	if validators, vErr := rh.GetValidatorsAtBlockInternal(request.BoundaryBlock); vErr == nil && len(validators.Validators) > 0 {
+		if serialized, sErr := json.Marshal(validators); sErr == nil {
+			rh.chainState.SetEpochValidators(request.NewEpoch, serialized)
+			logger.Info("💾 [EPOCH VALIDATORS] Cached %d validators for epoch %d at boundary block %d",
+				len(validators.Validators), request.NewEpoch, request.BoundaryBlock)
+			// Persist the epoch data again to include the validator cache
+			if pErr := rh.chainState.SaveEpochDataSafe(); pErr != nil {
+				logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to persist epoch data with validators: %v", pErr)
+			}
+		} else {
+			logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to serialize validators: %v", sErr)
+		}
+	} else {
+		logger.Warn("⚠️ [EPOCH VALIDATORS] Could not cache validators for epoch %d at boundary %d: vErr=%v",
+			request.NewEpoch, request.BoundaryBlock, vErr)
+	}
+
 	response := &pb.AdvanceEpochResponse{
 		NewEpoch:              request.NewEpoch,
 		EpochStartTimestampMs: timestampMs,
@@ -757,42 +782,71 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		}
 	}
 
-	// Get validators at boundary block (or current state if sync incomplete)
+	// ═══════════════════════════════════════════════════════════════════
+	// THREE-PRIORITY VALIDATOR LOOKUP
+	// ═══════════════════════════════════════════════════════════════════
+	//
+	// PRIORITY 1: Epoch validator cache (NOMT-independent)
+	//   → Cached during AdvanceEpoch, persisted in epoch_data_backup.json.
+	//   → Survives snapshot restore even when NOMT knownKeys is empty.
+	//
+	// PRIORITY 2: NOMT live state at boundary block
+	//   → Only works when NOMT knownKeys is populated (normal operation).
+	//   → Falls through when sync is incomplete or NOMT is empty.
+	//
+	// PRIORITY 3: Return error → Rust fetches from network peers
+	//   → Safety net for edge cases (very old snapshot, data corruption).
+	// ═══════════════════════════════════════════════════════════════════
 	var validators *pb.ValidatorInfoList
 	var err error
 
+	// PRIORITY 1: Check epoch validator cache
+	if cachedValidators := rh.chainState.GetEpochValidators(epoch); cachedValidators != nil {
+		cachedList := &pb.ValidatorInfoList{}
+		if jErr := json.Unmarshal(cachedValidators, cachedList); jErr == nil && len(cachedList.Validators) > 0 {
+			validators = cachedList
+			logger.Info("✅ [EPOCH BOUNDARY] PRIORITY 1: Loaded %d validators from epoch cache (NOMT-independent) for epoch %d",
+				len(validators.Validators), epoch)
+			// Skip NOMT query — cache is authoritative
+			goto epochBoundaryResponse
+		} else {
+			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch validator cache exists but failed to deserialize or is empty for epoch %d: %v",
+				epoch, jErr)
+		}
+	}
+
+	// PRIORITY 2: Query NOMT live state at boundary block
 	if syncComplete || epoch == 0 {
 		validators, err = rh.GetValidatorsAtBlockInternal(boundaryBlock)
+		if err != nil {
+			logger.Error("❌ [EPOCH BOUNDARY] PRIORITY 2: NOMT query failed at boundary block %d: %v", boundaryBlock, err)
+		} else if len(validators.Validators) == 0 && epoch > 0 {
+			logger.Warn("⚠️ [EPOCH BOUNDARY] PRIORITY 2: NOMT returned 0 validators for epoch %d (knownKeys likely empty after snapshot restore)", epoch)
+			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty)", epoch, boundaryBlock)
+		}
 	} else {
-		// ═══════════════════════════════════════════════════════════════════
-		// FORK-SAFETY: DO NOT return validators from non-boundary block!
-		//
-		// When sync is incomplete, the boundary block (last block of prev epoch)
-		// is not yet available in local DB. Previously this fell back to
-		// GetValidatorsAtBlockInternal(lastBlock), but if lastBlock has
-		// DIFFERENT validators than boundaryBlock (e.g., a validator was
-		// added/removed between the two blocks), Rust would build a WRONG
-		// committee → wrong leader addresses → block hash divergence → FORK.
-		//
-		// FIX: Return an error. Rust's fetch_committee() has retry logic
-		// (60 attempts, 500ms delay) and will retry until sync completes
-		// and boundary block becomes available.
-		// ═══════════════════════════════════════════════════════════════════
+		// Sync incomplete — boundary block not available
 		lastBlock := storage.GetLastBlockNumber()
 		logger.Error("❌ [EPOCH BOUNDARY] Boundary block %d NOT synced yet (lastBlock=%d). "+
 			"REFUSING to return validators from non-boundary block to prevent committee mismatch → fork! "+
-			"Rust should retry after sync completes.", boundaryBlock, lastBlock)
-		return nil, fmt.Errorf(
+			"Checking epoch cache or Rust should retry.", boundaryBlock, lastBlock)
+		err = fmt.Errorf(
 			"boundary block %d not synced yet (lastBlock=%d, epoch=%d). "+
-				"Cannot return committee from non-boundary block — this would cause fork. "+
-				"Retry after sync completes", boundaryBlock, lastBlock, epoch)
+				"Cannot return committee from non-boundary block", boundaryBlock, lastBlock, epoch)
 	}
 
-	if err != nil {
-		logger.Error("❌ [EPOCH BOUNDARY] Failed to get validators at boundary block", "epoch", epoch, "block", boundaryBlock, "error", err)
-		return nil, fmt.Errorf("failed to get validators at block %d: %w", boundaryBlock, err)
+	// PRIORITY 3: If all local sources failed, return error for Rust to fetch from peers
+	if err != nil || validators == nil || len(validators.Validators) == 0 {
+		errMsg := "unknown error"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		logger.Error("❌ [EPOCH BOUNDARY] All local validator sources failed for epoch %d: %s. "+
+			"Rust should fetch from network peers.", epoch, errMsg)
+		return nil, fmt.Errorf("no validators available locally for epoch %d: %s", epoch, errMsg)
 	}
 
+epochBoundaryResponse:
 	// 🔍 DIAGNOSTIC: Log detailed committee information
 	logger.Info("📊 [EPOCH BOUNDARY] === UNIFIED COMMITTEE DATA FOR EPOCH %d ===", epoch)
 	logger.Info("   📊 boundary_block: %d", boundaryBlock)
@@ -806,6 +860,17 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		"boundary_block", boundaryBlock,
 		"validator_count", len(validators.Validators),
 		"sync_complete", syncComplete)
+
+	// Opportunistically cache validators if they came from NOMT (for future use/snapshots)
+	if rh.chainState.GetEpochValidators(epoch) == nil && len(validators.Validators) > 0 {
+		if serialized, sErr := json.Marshal(validators); sErr == nil {
+			rh.chainState.SetEpochValidators(epoch, serialized)
+			logger.Info("💾 [EPOCH BOUNDARY] Opportunistically cached %d validators for epoch %d", len(validators.Validators), epoch)
+			if pErr := rh.chainState.SaveEpochDataSafe(); pErr != nil {
+				logger.Warn("⚠️ [EPOCH BOUNDARY] Failed to persist opportunistic cache: %v", pErr)
+			}
+		}
+	}
 
 	// Load epoch_duration_seconds from genesis config (authoritative source for all nodes)
 	var epochDurationSeconds uint64 = 900 // default 15 minutes
@@ -1221,8 +1286,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
-		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify 
-		// that the block hash actually exists in our local database. Sometimes PebbleDB 
+		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify
+		// that the block hash actually exists in our local database. Sometimes PebbleDB
 		// persists the GEI counter but fails to flush the actual block data.
 		// ═══════════════════════════════════════════════════════════════════════════
 		isFullyExecuted := false
@@ -1311,7 +1376,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		if blockNum == 0 {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
-			
+
 			// CRITICAL FIX: Even if the block is empty, if it's the LAST block in a STARTUP-SYNC
 			// batch, we MUST trigger the trie rebuild. Otherwise, NOMT memory state stays stale.
 			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
@@ -1533,9 +1598,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
-		// CRITICAL FIX: Push an async GEI update so that Go's Authoritative GEI 
-		// counter advances. Without this, GEIAuthority stays at the pre-sync value 
-		// (e.g. 76) while the database advances to 113. When consensus resumes, 
+		// CRITICAL FIX: Push an async GEI update so that Go's Authoritative GEI
+		// counter advances. Without this, GEIAuthority stays at the pre-sync value
+		// (e.g. 76) while the database advances to 113. When consensus resumes,
 		// it would assign 77 to the next block instead of 114, causing a fork.
 		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
 			// Find the last commit index to sync that as well
@@ -1748,11 +1813,11 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
 
 	response := &pb.GetLastHandledCommitIndexResponse{
-		LastCommitIndex: storage.GetLastHandledCommitIndex(),
-		LastGei:         lastGEI,
-		LastBlockNumber: lastBlockNumber,
-		Epoch:           currentEpoch,
-		IsAuthoritative: isAuthoritative,
+		LastCommitIndex:      storage.GetLastHandledCommitIndex(),
+		LastGei:              lastGEI,
+		LastBlockNumber:      lastBlockNumber,
+		Epoch:                currentEpoch,
+		IsAuthoritative:      isAuthoritative,
 		LastBlockTimestampMs: lastBlockTimestampMs,
 	}
 

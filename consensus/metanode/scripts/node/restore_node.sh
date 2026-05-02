@@ -281,19 +281,38 @@ fi
 
 # Step 5: Start Node
 echo -e "${BLUE}[5/7] 🚀 Khởi động tuần tự Node $NODE_ID...${NC}"
-echo -e "${CYAN}  [5a] Go Master...${NC}"
+
+# 5a. Clean stale UDS sockets — CRITICAL for Rust FFI consensus reconnection
+# Without this, Rust FFI inside Go Master cannot bind/connect to peers
+echo -e "${CYAN}  [5a] Dọn sạch stale UDS sockets...${NC}"
+rm -f "/tmp/executor${NODE_ID}.sock" 2>/dev/null || true
+rm -f "/tmp/rust-go-node${NODE_ID}-master.sock" 2>/dev/null || true
+rm -f "/tmp/metanode-tx-${NODE_ID}.sock" 2>/dev/null || true
+echo -e "${GREEN}    ✅ Sockets cleaned${NC}"
+
+# 5b. Start Go Master (embeds Rust Consensus via FFI)
+echo -e "${CYAN}  [5b] Go Master + Rust FFI...${NC}"
 cd "$GO_SIMPLE_ROOT"
 DATA="${GO_DATA_DIR[$NODE_ID]}"
+XAPIAN_PATH="sample/$DATA/data/data/xapian_node"
+mkdir -p "$XAPIAN_PATH"
+
+# Use EXACT same startup command as mtn-orchestrator.sh for consistency
 tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
-echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
+    "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_PATH' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && exec ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+echo -e "${GREEN}    🚀 Go Master + Rust FFI started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
+# 5c. Wait for Go Master to initialize and Rust FFI to bootstrap
+echo -e "${CYAN}  [5c] Đợi Go Master + Rust FFI khởi tạo (15s)...${NC}"
+sleep 15
 
-
-echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
-sleep 10
-GO_BLOCK=$(grep -a "last_committed_block=" "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | sed -n 's/.*last_committed_block=\([0-9]*\).*/\1/p') || true
-if [ -n "$GO_BLOCK" ]; then echo -e "${GREEN}    ✅ Go Master nhận snapshot — block=$GO_BLOCK${NC}"; fi
+# 5d. Verify process is alive
+HAS_PID=$(pgrep -f "simple_chain.*config-master-node${NODE_ID}" 2>/dev/null | head -1 || true)
+if [ -n "$HAS_PID" ]; then
+    echo -e "${GREEN}    ✅ Go Master alive (PID: $HAS_PID)${NC}"
+else
+    echo -e "${RED}    ❌ Go Master crashed! Check: tail -50 $LOG_DIR/node_$NODE_ID/go-master-stdout.log${NC}"
+fi
 
 
 

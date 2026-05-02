@@ -333,6 +333,7 @@ impl PeerRpcServer {
                         protocol_key: v.protocol_key.clone(),
                         network_key: v.network_key.clone(),
                         authority_key: v.authority_key.clone(),
+                        p2p_address: v.p2p_address.clone(),
                     })
                     .collect();
 
