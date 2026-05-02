@@ -656,17 +656,41 @@ pub extern "C" fn nomt_checkpoint(
         return -1;
     }
 
-    // Core NOMT data files to copy (skip .lock and wal)
-    let data_files = ["bbn", "ht", "ln", "meta"];
+    // Copy ALL files in the NOMT directory EXCEPT .lock (which is an OS flock, not data).
+    // We must NOT hardcode file names — NOMT may create additional files (wal, etc.)
+    // that are required for a valid database open.
+    let entries = match fs::read_dir(src) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint: failed to read src dir {:?}: {}", src, e);
+            return -1;
+        }
+    };
 
-    for filename in &data_files {
-        let src_file = src.join(filename);
-        let dest_file = dest.join(filename);
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[nomt_ffi] nomt_checkpoint: failed to read dir entry: {}", e);
+                return -1;
+            }
+        };
 
-        if !src_file.exists() {
-            // File may not exist for fresh/empty databases — skip silently
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        // Skip .lock file (OS advisory flock, not data)
+        if filename_str == ".lock" {
             continue;
         }
+
+        // Skip subdirectories (NOMT only uses flat files)
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        let src_file = src.join(&filename);
+        let dest_file = dest.join(&filename);
 
         if let Err(e) = fs::copy(&src_file, &dest_file) {
             eprintln!(
