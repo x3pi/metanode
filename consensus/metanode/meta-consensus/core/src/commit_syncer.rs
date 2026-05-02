@@ -179,10 +179,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
         let handled_commit = inner.commit_consumer_monitor.highest_handled_commit();
-        // FORK-SAFETY: Use max of DAG commit and Go-handled commit.
-        // After supervisor restart following a DAG wipe + fast-forward,
-        // DAG may report 0 while Go has already processed up to N.
-        let synced_commit_index = dag_commit.max(handled_commit);
+        // FORK-SAFETY: DO NOT initialize with `handled_commit`!
+        // If DAG was wiped (dag_commit = 0) but Go has state (handled_commit = 400),
+        // we MUST start fetching from 0 to reconstruct the LeaderSchedule!
+        // CommitProcessor will safely skip executing these already-handled commits.
+        let synced_commit_index = dag_commit;
         
         CommitSyncer {
             inner,
@@ -734,7 +735,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
             highest_handled_index.max(self.highest_scheduled_index.unwrap_or(0))
         } else {
             // Normal operation: use local_commit_index to prevent redundant peer fetches.
-            self.synced_commit_index.max(local_commit_index).max(highest_handled_index)
+            // FORK-SAFETY: DO NOT max with highest_handled_index!
+            // If Go is at 400 but DAG is at 0, we WANT synced_commit_index to be 0 so
+            // we fetch commits 1..400 and reconstruct the LeaderSchedule!
+            self.synced_commit_index.max(local_commit_index)
         };
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
