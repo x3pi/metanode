@@ -10,8 +10,12 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 	"sync"
+	"time"
 	"unsafe"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
 // maxValueSize is the maximum expected value size for account state data.
@@ -80,8 +84,8 @@ func (h *Handle) GetPath() string {
 	return h.path
 }
 
-// CloseForSnapshot acquires the lock and fully closes the underlying NOMT/RocksDB 
-// database instance. This guarantees that all background compaction and flush 
+// CloseForSnapshot acquires the lock and fully closes the underlying NOMT/RocksDB
+// database instance. This guarantees that all background compaction and flush
 // threads are stopped, making it 100% safe to `cp -a` the database directory.
 func (h *Handle) CloseForSnapshot() {
 	h.mu.Lock()
@@ -93,14 +97,38 @@ func (h *Handle) CloseForSnapshot() {
 
 // ReopenAfterSnapshot reopens the database using the previously saved path and config,
 // and releases the lock acquired by `CloseForSnapshot()`.
+// Includes retry logic because the OS may not have fully released the NOMT directory
+// lock file immediately after nomt_close() returns (e.g., background compaction threads
+// still cleaning up).
 func (h *Handle) ReopenAfterSnapshot() error {
 	cPath := C.CString(h.path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	ptr := C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+	// Remove stale lock file left by the previous instance.
+	// nomt_close() should clean this up, but on some filesystems the OS-level
+	// flock may linger for a few milliseconds after the fd is closed.
+	lockFile := h.path + "/.lock"
+	_ = os.Remove(lockFile)
+
+	const maxRetries = 5
+	var ptr *C.NomtHandle
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+		if ptr != nil {
+			break
+		}
+		// Wait with exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+		waitMs := 50 << attempt
+		logger.Warn("⚠️ [TRIE] nomt_ffi ReopenAfterSnapshot: attempt %d/%d failed, retrying in %dms (path=%s)",
+			attempt+1, maxRetries, waitMs, h.path)
+		time.Sleep(time.Duration(waitMs) * time.Millisecond)
+		// Try removing lock file again in case it was recreated
+		_ = os.Remove(lockFile)
+	}
+
 	if ptr == nil {
 		h.mu.Unlock() // avoid deadlock on failure
-		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s", h.path)
+		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s (after %d retries)", h.path, maxRetries)
 	}
 	h.ptr = ptr
 	h.mu.Unlock()
@@ -333,12 +361,12 @@ func (s *Session) BatchWrite(keys [][32]byte, values [][]byte) error {
 	// Flatten values and collect lengths
 	var flatValsPtr *C.uint8_t
 	var flatValues []byte
-	
+
 	if totalValsLen > 0 {
 		flatValues = make([]byte, totalValsLen)
 		flatValsPtr = (*C.uint8_t)(&flatValues[0])
 	}
-	
+
 	valLens := make([]C.size_t, n)
 	offset := 0
 	for i, v := range values {
@@ -418,7 +446,7 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	if fs.ptr == nil {
 		return fmt.Errorf("nomt_ffi: finished session is already committed or aborted")
 	}
-	
+
 	// Fast lock to ensure Handle isn't closed during commit
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -428,7 +456,7 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 
 	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
 	fs.ptr = nil // consumed
-	
+
 	if ret != 0 {
 		return fmt.Errorf("nomt_ffi: commit_payload failed")
 	}
