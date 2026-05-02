@@ -55,18 +55,10 @@ impl DagState {
         // Ensure we don't write multiple blocks per slot for our own index.
         // During cold-start amnesia recovery, old own-blocks fetched from peers can
         // conflict with newly created blocks at the same round/author slot.
-        // Instead of panicking, gracefully skip the duplicate.
-        if block_ref.author == self.context.own_index {
-            let existing_blocks = self.get_uncommitted_blocks_at_slot(block_ref.into());
-            if !existing_blocks.is_empty() {
-                error!(
-                    "⚠️ [DAG] Own-slot conflict: attempted to add block {block:#?} to slot \
-                     where block(s) {existing_blocks:#?} already exist. Keeping existing block, \
-                     skipping new one. (Common during amnesia recovery after snapshot restore)"
-                );
-                return;
-            }
-        }
+        // We MUST NOT drop these blocks, because if peers already included the old block
+        // in their causal history, dropping it locally will cause a fork when we try to
+        // reconstruct the commit's causal history.
+        // Mysticeti natively handles multiple blocks per slot (equivocation).
         self.update_block_metadata(&block);
         self.blocks_to_write.push(block);
         let source = if self.context.own_index == block_ref.author {
@@ -217,10 +209,29 @@ impl DagState {
             if block_ref.round <= gc_round {
                 continue;
             }
-            let block_info = self
-                .recent_blocks
-                .get_mut(&block_ref)
-                .unwrap_or_else(|| panic!("Block {:?} is not in DAG state", block_ref));
+            if !self.recent_blocks.contains_key(&block_ref) {
+                // Try to load from DB in case it was evicted
+                if let Ok(mut blocks) = self.store.read_blocks(&[block_ref]) {
+                    if let Some(Some(block)) = blocks.pop() {
+                        let info = BlockInfo::new(block);
+                        self.recent_blocks.insert(block_ref, info);
+                    } else {
+                        tracing::warn!(
+                            "⚠️ [DAG] link_causal_history: Block {:?} is not in cache or DB (likely dropped own-slot conflict). Skipping.",
+                            block_ref
+                        );
+                        continue;
+                    }
+                } else {
+                    tracing::warn!(
+                        "⚠️ [DAG] link_causal_history: Failed to read block {:?} from DB. Skipping.",
+                        block_ref
+                    );
+                    continue;
+                }
+            }
+
+            let block_info = self.recent_blocks.get_mut(&block_ref).unwrap();
             if block_info.included {
                 continue;
             }
