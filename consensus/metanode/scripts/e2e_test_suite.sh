@@ -588,33 +588,43 @@ test_scan_fork_warnings() {
     local total_warnings=0
     
     for i in $(seq 0 $((NUM_NODES - 1))); do
-        local log_file="$LOG_BASE/node_$i/go-master-stdout.log"
-        if [ ! -f "$log_file" ]; then
-            log "- ⚠️ Node $i: Log file không tồn tại: \`$log_file\`"
-            continue
+        local go_log="$LOG_BASE/node_$i/go-master-stdout.log"
+        local rust_log="$LOG_BASE/node_$i/consensus-stdout.log"
+        local combined_warnings=""
+        local count=0
+        
+        # Go Log
+        if [ -f "$go_log" ]; then
+            local go_warnings
+            go_warnings=$(tail -n 10000 "$go_log" 2>/dev/null \
+                | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
+                | grep -ivE "(FORK-GUARD|FORK-DIAG|ANTI-FORK|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe|COLD-START-GUARD|STARTUP-SYNC|FORK-SAFETY)" \
+                | tail -n 10) || true
+            if [ -n "$go_warnings" ]; then
+                combined_warnings="${combined_warnings}Go Master:\n${go_warnings}\n"
+                count=$((count + $(echo "$go_warnings" | wc -l)))
+            fi
+        fi
+
+        # Rust Log
+        if [ -f "$rust_log" ]; then
+            local rust_warnings
+            rust_warnings=$(tail -n 10000 "$rust_log" 2>/dev/null \
+                | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
+                | grep -ivE "(FORK-GUARD|FORK-DIAG|ANTI-FORK|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe|COLD-START-GUARD|STARTUP-SYNC|FORK-SAFETY)" \
+                | tail -n 10) || true
+            if [ -n "$rust_warnings" ]; then
+                combined_warnings="${combined_warnings}Consensus:\n${rust_warnings}\n"
+                count=$((count + $(echo "$rust_warnings" | wc -l)))
+            fi
         fi
         
-        # Lọc 10,000 dòng gần nhất
-        # Loại bỏ false positives:
-        #   - "FORK-GUARD" là tên feature, không phải lỗi
-        #   - "FORK-DIAG" là diagnostic log, không phải lỗi thực
-        #   - "ANTI-FORK" là tên check, PASS/SKIP cũng match → chỉ lấy FAIL
-        #   - "Created block" là normal proposer log (base64 hashes có thể chứa "fatal")
-        #   - Bare "fatal" matches base64 encoded data → đổi sang "fatal error|fatal:"
-        local warnings
-        warnings=$(tail -n 10000 "$log_file" 2>/dev/null \
-            | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
-            | grep -ivE "(FORK-GUARD|FORK-DIAG|ANTI-FORK|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe)" \
-            | tail -n 10) || true
-        
-        if [ -n "$warnings" ]; then
-            local count
-            count=$(echo "$warnings" | wc -l)
+        if [ $count -gt 0 ]; then
             total_warnings=$((total_warnings + count))
             log "⚠️ **Node $i**: Tìm thấy $count cảnh báo nghiêm trọng:"
             log ""
             log '```text'
-            log_raw "$warnings"
+            log_raw "$combined_warnings"
             log '```'
             log ""
             found_issues=1

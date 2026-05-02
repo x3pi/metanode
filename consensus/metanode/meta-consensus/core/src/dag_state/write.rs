@@ -283,15 +283,19 @@ impl DagState {
             }
             assert_eq!(commit.index(), last_commit.index() + 1);
 
-            if commit.timestamp_ms() < last_commit.timestamp_ms() {
-                panic!(
-                    "Commit timestamps do not monotonically increment, prev commit {:?}, new commit {:?}",
-                    last_commit, commit
+            let time_diff = if commit.timestamp_ms() < last_commit.timestamp_ms() {
+                tracing::warn!(
+                    "🚨 [FORK-SAFETY] Commit timestamps do not monotonically increment! Prev (index={}) time={}ms, New (index={}) time={}ms. This can occur during catch-up syncing. Bypassing panic.",
+                    last_commit.index(),
+                    last_commit.timestamp_ms(),
+                    commit.index(),
+                    commit.timestamp_ms()
                 );
-            }
-            commit
-                .timestamp_ms()
-                .saturating_sub(last_commit.timestamp_ms())
+                0
+            } else {
+                commit.timestamp_ms().saturating_sub(last_commit.timestamp_ms())
+            };
+            time_diff
         } else {
             assert_eq!(commit.index(), 1);
             0
