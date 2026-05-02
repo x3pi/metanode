@@ -279,18 +279,27 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 }
 
 // SnapshotAllNomtDBs coordinates taking a snapshot of all active NOMT databases.
-// It acquires an exclusive lock on each database to ensure quiescence, copies the files
-// to destBasePath/nomt_db, and then releases the lock.
+// Uses the Checkpoint API to copy files while the database remains OPEN —
+// no Close/Reopen needed, eliminating ~700ms overhead and os error 11 lock issues.
+//
+// PREREQUISITE: The caller (SnapshotManager) MUST have already called:
+//   PauseExecution() + WaitForPersistence() to ensure no active sessions or pending I/O.
 func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 	globalNomtHandlesMu.Lock()
 	// Create a stable snapshot of handles to iterate
-	handlesToSnapshot := make(map[string]*nomt_ffi.Handle, len(globalNomtHandles))
+	handlesList := make([]struct {
+		namespace string
+		handle    *nomt_ffi.Handle
+	}, 0, len(globalNomtHandles))
 	for ns, handle := range globalNomtHandles {
-		handlesToSnapshot[ns] = handle
+		handlesList = append(handlesList, struct {
+			namespace string
+			handle    *nomt_ffi.Handle
+		}{ns, handle})
 	}
 	globalNomtHandlesMu.Unlock()
 
-	if len(handlesToSnapshot) == 0 {
+	if len(handlesList) == 0 {
 		return nil
 	}
 
@@ -299,46 +308,20 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 		return fmt.Errorf("failed to create NOMT destination base directory %s: %w", nomtDestBase, err)
 	}
 
-	for namespace, handle := range handlesToSnapshot {
-		srcPath := handle.GetPath()
-		destPath := filepath.Join(nomtDestBase, namespace)
+	for _, entry := range handlesList {
+		destPath := filepath.Join(nomtDestBase, entry.namespace)
 
-		if err := os.MkdirAll(destPath, 0755); err != nil {
-			return fmt.Errorf("failed to create NOMT destination directory %s: %w", destPath, err)
-		}
-
-		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s: %s -> %s", namespace, srcPath, destPath)
+		logger.Info("📸 [TRIE] Checkpointing NOMT namespace %s: %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
 		start := time.Now()
 
-		// 1. Acquire Exclusive Lock & Stop RocksDB
-		// This blocks all Read() and CommitPayload() operations on this handle IN THE GO ROUTINES
-		// AND ALSO totally shuts down the internal RocksDB C++ instance so that NO background
-		// compaction or flush threads are running while we execute `cp -a`.
-		handle.CloseForSnapshot()
-
-		// 2. Perform the copy while locked and stopped
-		var copyErr error
-		if useReflink {
-			copyErr = copyDirReflink(srcPath, destPath)
-		} else {
-			copyErr = copyDirFallback(srcPath, destPath)
+		// Use the new Checkpoint API — database stays OPEN, no Close/Reopen needed.
+		// This acquires h.mu.Lock() internally, drains pending sessions, then copies
+		// the data files (bbn, ht, ln, meta) via the Rust FFI.
+		if err := entry.handle.Checkpoint(destPath); err != nil {
+			return fmt.Errorf("NOMT checkpoint failed for namespace %s: %w", entry.namespace, err)
 		}
 
-		// 3. Reopen RocksDB & Release Exclusive Lock
-		reopenErr := handle.ReopenAfterSnapshot()
-
-		if copyErr != nil {
-			return fmt.Errorf("failed to copy NOMT database %s: %w", namespace, copyErr)
-		}
-		if reopenErr != nil {
-			logger.Fatal("❌ [SNAPSHOT] CRITICAL ERROR: Failed to reopen database %s after snapshot: %v", namespace, reopenErr)
-		}
-
-		// 4. Cleanup lock file from snapshot
-		lockFile := filepath.Join(destPath, ".lock")
-		_ = os.Remove(lockFile)
-
-		logger.Info("✅ [TRIE] NOMT snapshot %s completed in %v (reflink=%v)", namespace, time.Since(start), useReflink)
+		logger.Info("✅ [TRIE] NOMT checkpoint %s completed in %v", entry.namespace, time.Since(start))
 	}
 
 	return nil

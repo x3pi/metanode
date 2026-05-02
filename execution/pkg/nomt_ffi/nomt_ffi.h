@@ -38,6 +38,9 @@ int nomt_commit_payload(NomtHandle* handle, FinishedSessionHandle* finished_sess
 void nomt_session_abort(SessionHandle* session);
 void nomt_finished_session_abort(FinishedSessionHandle* finished_session);
 
+/* Checkpoint: copy database files to dest without close/reopen */
+int nomt_checkpoint(const NomtHandle* handle, const char* src_path, const char* dest_path);
+
 #ifdef __cplusplus
 }
 #endif
