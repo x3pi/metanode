@@ -386,7 +386,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	}
 
 	// Store accountBatch for network transfer (same as original Commit)
-	// ALWAYS call SetAccountBatch (even if nil) to clear any leftover batch 
+	// ALWAYS call SetAccountBatch (even if nil) to clear any leftover batch
 	// from the previous block, ensuring we don't leak stale data to Sub nodes.
 	db.SetAccountBatch(accountBatchData)
 
@@ -674,20 +674,20 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// DEBUG: Log chi tiết từng account bị commit vào trie
 	// So sánh log này giữa các node để tìm account nào bị lệch
 	// ═══════════════════════════════════════════════════════════════
-	if totalDirty > 0 {
-		logger.Info("🔍 [TRIE-COMMIT-DEBUG] Committing %d dirty accounts to trie:", totalDirty)
-		for _, entry := range keysToProcess {
-			as := entry.state
-			if as != nil {
-				logger.Info("  📝 [TRIE-COMMIT-DEBUG] addr=%s nonce=%d balance=%s lastHash=%s",
-					entry.addr.Hex(),
-					as.Nonce(),
-					as.Balance().String(),
-					as.LastHash().Hex()[:16],
-				)
-			}
-		}
-	}
+	// if totalDirty > 0 {
+	// 	// logger.Info("🔍 [TRIE-COMMIT-DEBUG] Committing %d dirty accounts to trie:", totalDirty)
+	// 	for _, entry := range keysToProcess {
+	// 		as := entry.state
+	// 		if as != nil {
+	// 			// logger.Info("  📝 [TRIE-COMMIT-DEBUG] addr=%s nonce=%d balance=%s lastHash=%s",
+	// 			// 	entry.addr.Hex(),
+	// 			// 	as.Nonce(),
+	// 			// 	as.Balance().String(),
+	// 			// 	as.LastHash().Hex()[:16],
+	// 			// )
+	// 		}
+	// 	}
+	// }
 
 	if totalDirty > 0 {
 		hasChanges = true
@@ -872,7 +872,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 					logger.Error("BatchUpdateWithCachedOldValues (NOMT) failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 				}
-				
+
 				// Release guard immediately after update
 				db.nomtCommitGuard <- struct{}{}
 			} else {
@@ -966,7 +966,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	// TPS OPT Phase 1: Bounded eviction for loadedAccounts and lruCache.
 	// loadedAccounts and lruCache grow unbounded across blocks (~10-30K new entries/block).
-	// After 10 blocks, clear them to cap memory. 
+	// After 10 blocks, clear them to cap memory.
 	// FORK-SAFETY: these are read-only caches — clearing/rotating them only
 	// causes re-reads from trie, which produce identical values.
 	db.blocksSinceLoadedClear++

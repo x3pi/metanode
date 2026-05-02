@@ -40,8 +40,10 @@ MASTER_RPC_PORTS=(8757 10747 10749 10750 10748)
 
 # Config maps
 GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
+GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
 GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
+GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
 GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
@@ -154,7 +156,7 @@ echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng Node $NODE_ID...${NC}"
 "$SCRIPT_DIR/stop_node.sh" "$NODE_ID" 2>/dev/null || true
 
-for sess in "go-master-${NODE_ID}"; do
+for sess in "go-master-${NODE_ID}" "go-sub-${NODE_ID}"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
         tmux send-keys -t "$sess" C-c 2>/dev/null || true
         sleep 2
@@ -175,6 +177,7 @@ RUST_STORAGE="$METANODE_ROOT/config/storage/node_$NODE_ID"
 rm -rf "$RUST_STORAGE" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Rust DAG storage đã xóa: ${NC}$RUST_STORAGE"
 rm -f "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null || true
+rm -f "$LOG_DIR/node_$NODE_ID/go-sub-stdout.log" 2>/dev/null || true
 rm -f "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null || true
 mkdir -p "$LOG_DIR/node_$NODE_ID"
 echo -e "${GREEN}  ✅ Dữ liệu và logs đã xóa sạch${NC}"
@@ -281,14 +284,20 @@ fi
 
 # Step 5: Start Node
 echo -e "${BLUE}[5/7] 🚀 Khởi động tuần tự Node $NODE_ID...${NC}"
-echo -e "${CYAN}  [5a] Go Master...${NC}"
 cd "$GO_SIMPLE_ROOT"
 DATA="${GO_DATA_DIR[$NODE_ID]}"
+
+echo -e "${CYAN}  [5a] Go Master...${NC}"
+XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
 tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
 echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
-
+echo -e "${CYAN}  [5b] Go Sub...${NC}"
+XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
+tmux new-session -d -s "${GO_SUB_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
+    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=${GO_SUB_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-sub-stdout.log\" 2>&1"
+echo -e "${GREEN}    🚀 Go Sub started (${GO_SUB_SESSION[$NODE_ID]})${NC}"
 
 echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10
@@ -318,14 +327,8 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180; do
     fi
     
     GO_BATCH_GEI=$(grep -a 'BATCH-DRAIN' "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | grep -oP '\d+→\d+' | awk -F'→' '{print $2}' || echo "")
-    RUST_GEI=$(grep -a 'GEI ' "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null | tail -1 | grep -oP '\d+→\d+' | awk -F'→' '{print $2}' || echo "")
-    
-    CURRENT_GEI=""
-    if [ -n "$RUST_GEI" ] && [ -n "$GO_BATCH_GEI" ]; then
-        if [ "$RUST_GEI" -gt "$GO_BATCH_GEI" ]; then CURRENT_GEI=$RUST_GEI; else CURRENT_GEI=$GO_BATCH_GEI; fi
-    elif [ -n "$RUST_GEI" ]; then CURRENT_GEI=$RUST_GEI
-    elif [ -n "$GO_BATCH_GEI" ]; then CURRENT_GEI=$GO_BATCH_GEI
-    fi
+    # Rust is now embedded in Go Master via FFI. There is no rust.log.
+    CURRENT_GEI=$GO_BATCH_GEI
 
     DISP_BLOCK=${CURRENT_BLOCK:-"?"}
     DISP_GEI=${CURRENT_GEI:-"?"}
@@ -403,4 +406,5 @@ echo -e "${GREEN}═════════════════════
 echo ""
 echo -e "  ${BLUE}tmux sessions:${NC}"
 echo "    Go Master: tmux attach -t go-master-${NODE_ID}"
+echo "    Go Sub:    tmux attach -t go-sub-${NODE_ID}"
 echo ""

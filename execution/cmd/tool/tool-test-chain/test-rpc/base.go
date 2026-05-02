@@ -271,12 +271,12 @@ func runGetBlockTransactions(url string, cfg Config) (string, error) {
 
 	txsRaw, ok := blockData["transactions"].([]interface{})
 	if !ok {
-		return "0 transactions", nil
+		return "0 transactions nil", nil
 	}
 
 	txCount := len(txsRaw)
 	if txCount == 0 {
-		return "0 transactions", nil
+		return "0 transactions count = 0", nil
 	}
 
 	var txHashes []string

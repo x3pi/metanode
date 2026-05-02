@@ -376,14 +376,12 @@ PROCESS_BLOCK:
 	// Empty commits don't change state, so creating blocks for them wastes CPU/IO
 	// All nodes receive the same commits from Rust → all skip the same empties → no fork
 	// EXCEPTION: If this empty commit triggers an epoch transition, we MUST create an empty boundary block!
-	isEpochBoundary := false
 	if lastBlock != nil && epochNum > lastBlock.Header().Epoch() {
-		isEpochBoundary = true
 		logger.Info("🔄 [EPOCH-BOUNDARY] Processing empty commit at GEI=%d as boundary block for epoch %d→%d",
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
-	if len(epochData.Transactions) == 0 && !isEpochBoundary {
+	if epochData.GetBlockNumber() == 0 {
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
@@ -475,9 +473,9 @@ PROCESS_BLOCK:
 		totalTxsFromRust += len(transactions)
 	}
 
-	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 && !isEpochBoundary {
-		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
+	// If block number is 0, it means Rust explicitly marked this commit to be skipped
+	if epochData.GetBlockNumber() == 0 {
+		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: block number is 0 after unmarshal (marked as skip by Rust): global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
 		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks

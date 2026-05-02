@@ -126,10 +126,10 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			// from nodes that ran continuously from genesis.
 			// We MUST use the genesis validators directly from genesis.json.
 			logger.Warn("Block 0 not found, getting validators from genesis.json to ensure fork-safe deterministic committee")
-			
+
 			validatorInfoList := &pb.ValidatorInfoList{}
 			var genesisValidators []*pb.Validator
-			
+
 			if rh.genesisPath != "" {
 				if genesisData, err := config.LoadGenesisData(rh.genesisPath); err == nil {
 					genesisValidators = genesisData.Validators
@@ -147,7 +147,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 					// Use 1000000 as deterministic starting stake (since genesis validators start with no stake)
 					stakeNormalized := big.NewInt(1000000)
 					validatorsWithMinStake++
-					
+
 					val := &pb.ValidatorInfo{
 						Address:                    genVal.Address,
 						Stake:                      stakeNormalized.String(),
@@ -543,7 +543,7 @@ func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpo
 		Epoch: currentEpoch,
 	}
 
-	// logger.Info("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
+	logger.Info("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
 	return response, nil
 }
 
@@ -1162,6 +1162,24 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
+	hasNewBlocks := false // Tracks whether any genuinely NEW block was executed (not deduped)
+	// ═══════════════════════════════════════════════════════════════════════════
+	// NOMT TRIE REBUILD DECISION:
+	// When execute_mode=true, the caller is either:
+	//   1. STARTUP-SYNC (consensus_node.rs) — runs BEFORE consensus starts
+	//   2. SyncOnly node (sync_loop.rs) — never runs consensus
+	// In both cases, there is NO concurrent consensus execution, so NOMT
+	// trie rebuild is SAFE on the last block.
+	//
+	// CRITICAL FIX (May 2026): The old check `GetLastBlockNumber() == 0`
+	// was too restrictive. When a node restarts with block=470, STARTUP-SYNC
+	// syncs blocks 471-536 but SKIPS NOMT rebuild → NOMT trie stays at
+	// block 470's root → new consensus blocks get wrong state_root → FORK.
+	// ═══════════════════════════════════════════════════════════════════════════
+	isPreConsensusSync := request.GetExecuteMode()
+	if isPreConsensusSync {
+		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
+	}
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -1170,7 +1188,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {
-		if executedCount > 0 {
+		if hasNewBlocks {
 			rh.chainState.InvalidateAllState()
 			mvm.ClearAllMVMApi()
 			mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
@@ -1204,8 +1222,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
-		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify 
-		// that the block hash actually exists in our local database. Sometimes PebbleDB 
+		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify
+		// that the block hash actually exists in our local database. Sometimes PebbleDB
 		// persists the GEI counter but fails to flush the actual block data.
 		// ═══════════════════════════════════════════════════════════════════════════
 		isFullyExecuted := false
@@ -1444,8 +1462,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 
 		executedCount++
-		lastExecutedBlock = blockNum
 		hasNewBlocks = true
+		lastExecutedBlock = blockNum
 		if blockGEI > lastExecutedGEI {
 			lastExecutedGEI = blockGEI
 		}
@@ -1483,15 +1501,34 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// RUST CONTROL (Apr 2026 Architectural Fix):
 	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
 	// this EXECUTE command explicitly governs memory state advancement.
-	// CRITICAL FIX: Only update if hasNewBlocks is true. Otherwise, if the batch
-	// contained only deduped (old) blocks, this callback would REWIND the
-	// in-memory bp.lastBlock to an older state, causing "CHAIN BROKEN" errors.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if executedCount > 0 && rh.updateLastBlockCallback != nil {
-		if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
-			if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
-				rh.updateLastBlockCallback(lastBlk)
+	if hasNewBlocks {
+		if rh.updateLastBlockCallback != nil {
+			if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
+				if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
+					rh.updateLastBlockCallback(lastBlk)
+				}
 			}
+		}
+
+		// CRITICAL FIX: Push an async GEI update so that Go's Authoritative GEI
+		// counter advances. Without this, GEIAuthority stays at the pre-sync value
+		// (e.g. 76) while the database advances to 113. When consensus resumes,
+		// it would assign 77 to the next block instead of 114, causing a fork.
+		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
+			// Find the last commit index to sync that as well
+			var lastCommitIdx uint32 = 0
+			if len(blocks) > 0 {
+				lastBlockBytes := blocks[len(blocks)-1].GetRawBlockBytes()
+				if len(lastBlockBytes) > 0 {
+					lastBlk := &block.Block{}
+					if err := lastBlk.Unmarshal(lastBlockBytes); err == nil {
+						lastCommitIdx = uint32(lastBlk.Header().CommitIndex())
+					}
+				}
+			}
+			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx)
+			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d)", lastExecutedGEI, lastCommitIdx)
 		}
 	}
 
@@ -1689,11 +1726,11 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
 
 	response := &pb.GetLastHandledCommitIndexResponse{
-		LastCommitIndex: storage.GetLastHandledCommitIndex(),
-		LastGei:         lastGEI,
-		LastBlockNumber: lastBlockNumber,
-		Epoch:           currentEpoch,
-		IsAuthoritative: isAuthoritative,
+		LastCommitIndex:      storage.GetLastHandledCommitIndex(),
+		LastGei:              lastGEI,
+		LastBlockNumber:      lastBlockNumber,
+		Epoch:                currentEpoch,
+		IsAuthoritative:      isAuthoritative,
 		LastBlockTimestampMs: lastBlockTimestampMs,
 	}
 

@@ -259,12 +259,26 @@ impl ExecutorClient {
         let block_number = {
             let mut next_bn = self.next_block_number.lock().await;
             let mut last_ep = self.last_processed_epoch.lock().await;
-            if epoch > *last_ep {
+            
+            let is_epoch_boundary = epoch > *last_ep;
+            if is_epoch_boundary {
                 *last_ep = epoch;
             }
-            let bn = *next_bn;
-            *next_bn += 1;
-            bn
+            
+            // ONLY increment block number if there are REAL user transactions OR it's an epoch boundary.
+            // We use total_after_dedup (post-filter count) because total_tx_before includes
+            // SystemTransactions (BCS format) that build_sorted_transactions filters out.
+            // Using total_tx_before would create empty blocks for commits that only contain
+            // SystemTransactions (e.g. consensus heartbeat rounds with no user TXs).
+            // FORK-SAFETY: total_after_dedup is deterministic — all nodes filter the same
+            // SystemTransactions and apply the same dedup logic.
+            if total_after_dedup > 0 || is_epoch_boundary {
+                let bn = *next_bn;
+                *next_bn += 1;
+                bn
+            } else {
+                0
+            }
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
