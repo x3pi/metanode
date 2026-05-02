@@ -1312,15 +1312,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 2: Save block to LevelDB (by hash + number→hash mapping)
 		// ═══════════════════════════════════════════════════════════════════════════
-		if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
-			continue
-		}
-		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-		}
-		for _, txHash := range blk.Transactions() {
-			bc.SetTxHashMapBlockNumber(txHash, blockNum)
+		if blockNum > 0 {
+			if err := blockDatabase.SaveBlockByHash(blk); err != nil {
+				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
+				continue
+			}
+			if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
+			}
+			for _, txHash := range blk.Transactions() {
+				bc.SetTxHashMapBlockNumber(txHash, blockNum)
+			}
+			// CRITICAL: Update fast-sync block number pointer
+			bc.SetLastBlockNumber(blockNum)
+		} else {
+			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping DB save and pointer update for empty block (GEI=%d)", blockGEI)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════

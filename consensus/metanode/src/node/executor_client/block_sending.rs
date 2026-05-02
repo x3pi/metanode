@@ -259,12 +259,23 @@ impl ExecutorClient {
         let block_number = {
             let mut next_bn = self.next_block_number.lock().await;
             let mut last_ep = self.last_processed_epoch.lock().await;
-            if epoch > *last_ep {
+            
+            let is_epoch_boundary = epoch > *last_ep;
+            if is_epoch_boundary {
                 *last_ep = epoch;
             }
-            let bn = *next_bn;
-            *next_bn += 1;
-            bn
+            
+            // CRITICAL FORK-SAFETY v7: Only increment block number if the commit 
+            // will actually result in a Go block (has txs or is epoch boundary).
+            // This prevents artificial block inflation during STARTUP-SYNC replay.
+            if total_after_dedup > 0 || is_epoch_boundary {
+                let bn = *next_bn;
+                *next_bn += 1;
+                bn
+            } else {
+                trace!("⏭️  [BLOCK-NUM] Commit is empty and not epoch boundary, keeping BN=0");
+                0
+            }
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
