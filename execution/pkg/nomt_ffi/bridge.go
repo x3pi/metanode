@@ -10,6 +10,7 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 	"unsafe"
@@ -124,9 +125,18 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	cPath := C.CString(h.path)
 	defer C.free(unsafe.Pointer(cPath))
 
+	// CRITICAL FIX: Remove stale lock file before reopening.
+	// After nomt_close(), leaked Go Session objects may still hold Rust Arc<Core>
+	// references that keep the OS-level flock() alive on the old file descriptor.
+	// Since PauseExecution() + WaitForPersistence() guarantees exclusive single-process
+	// access at this point, removing the lock file is safe — the new nomt_open() will
+	// create a fresh lock file on a new inode, bypassing the stale flock entirely.
+	lockFile := h.path + "/.lock"
+	_ = os.Remove(lockFile)
+
 	var ptr *C.NomtHandle
-	// Retry up to 100 times (total 10s) if the OS or a copy process is still holding the directory lock (os error 11)
-	for i := 0; i < 100; i++ {
+	// Retry a few times as a safety net (filesystem flush delay, etc.)
+	for i := 0; i < 10; i++ {
 		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
 		if ptr != nil {
 			if i > 0 {
@@ -134,12 +144,14 @@ func (h *Handle) ReopenAfterSnapshot() error {
 			}
 			break
 		}
+		// Try removing lock file again in case it was recreated
+		_ = os.Remove(lockFile)
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	if ptr == nil {
 		h.mu.Unlock() // avoid deadlock on failure
-		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s even after 10s", h.path)
+		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s even after retries", h.path)
 	}
 	h.ptr = ptr
 	h.mu.Unlock()
