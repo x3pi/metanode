@@ -390,8 +390,8 @@ impl ExecutorClient {
                 let mut next_bn_guard = self.next_block_number.lock().await;
                 *next_bn_guard = last_block_number + 1;
                 info!(
-                    "📊 [INIT] Initialized next_block_number to {}",
-                    *next_bn_guard
+                    "📊 [INIT] Initialized next_block_number to {} (from last_block_number={})",
+                    *next_bn_guard, last_block_number
                 );
             }
 

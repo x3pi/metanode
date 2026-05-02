@@ -108,6 +108,21 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		return blockNum, nil // Return without error — silently skip
 	}
 
+	if blockNum > lastBlockNum+1 && lastBlockNum > 0 && !cfg.rebuildTries {
+		// ═══════════════════════════════════════════════════════════════════════
+		// GAP WARNING (not a halt): Rust assigns sequential block_numbers to ALL
+		// commits, including empty ones that Go skips. This creates legitimate
+		// gaps during recovery/catch-up. For example:
+		//   - Go skips empty commits 204-207 (block_numbers 128-131)
+		//   - Next non-empty commit 208 arrives with block_number=132
+		//   - Gap from 127→132 is expected and safe
+		// We log a warning but ALLOW the commit to proceed.
+		// ═══════════════════════════════════════════════════════════════════════
+		logger.Warn("⚠️ [SEQUENTIAL GUARD] Block gap detected: received block #%d but last committed is #%d (gap=%d). "+
+			"This is expected during recovery when empty commits are skipped.",
+			blockNum, lastBlockNum, blockNum-lastBlockNum-1)
+	}
+
 	// ─── 1. Update in-memory header pointer (always) ──────────────────────
 	headerCopy := header
 	cs.SetcurrentBlockHeader(&headerCopy)

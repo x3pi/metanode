@@ -183,7 +183,7 @@ func (app *App) initBlockchain() error {
 		targetGEI := headerGEI
 		if backupGEI > headerGEI {
 			targetGEI = backupGEI
-			logger.Info("✅ [STARTUP] BackupDb GEI (%d) is higher than block header GEI (%d). Using BackupDb value to preserve empty commits.", backupGEI, headerGEI)
+			logger.Info("✅ [STARTUP] Initialized LastGlobalExecIndex from BackupDb: %d (higher than header: %d). This accounts for empty commits.", targetGEI, headerGEI)
 		} else if headerGEI > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastGlobalExecIndex from last block header: gei=%d (block=#%d)",
 				headerGEI, app.startLastBlock.Header().BlockNumber())
@@ -210,7 +210,6 @@ func (app *App) initBlockchain() error {
 
 		// ─── Initialize LastHandledCommitIndex ──────────
 		headerCommitIndex := uint32(app.startLastBlock.Header().CommitIndex())
-		
 		var backupCommitIndex uint32 = 0
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
 			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
@@ -223,11 +222,11 @@ func (app *App) initBlockchain() error {
 		targetCommitIndex := headerCommitIndex
 		if backupCommitIndex > headerCommitIndex {
 			targetCommitIndex = backupCommitIndex
-			logger.Info("✅ [STARTUP] BackupDb CommitIndex (%d) is higher than block header CommitIndex (%d). Using BackupDb value.", backupCommitIndex, headerCommitIndex)
+			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from BackupDb: %d (higher than header: %d). This prevents empty commit replays.", targetCommitIndex, headerCommitIndex)
 		} else if headerCommitIndex > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
 		} else {
-			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb or header)")
+			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in header)")
 		}
 
 		if targetCommitIndex > 0 {
