@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // initBlockchain initializes blockchain-related components
@@ -169,8 +170,21 @@ func (app *App) initBlockchain() error {
 		// correct GEI during initialization and can resume epoch transitions.
 		headerGEI := app.startLastBlock.Header().GlobalExecIndex()
 		
+		// Attempt to load from BackupDb as well
+		var backupGEI uint64 = 0
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
+			if geiBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastGlobalExecIndexHashKey.Bytes()); err == nil {
+				if parsedGei, err := utils.BytesToUint64(geiBytes); err == nil {
+					backupGEI = parsedGei
+				}
+			}
+		}
+
 		targetGEI := headerGEI
-		if headerGEI > 0 {
+		if backupGEI > headerGEI {
+			targetGEI = backupGEI
+			logger.Info("✅ [STARTUP] Initialized LastGlobalExecIndex from BackupDb: %d (higher than header: %d). This accounts for empty commits.", targetGEI, headerGEI)
+		} else if headerGEI > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastGlobalExecIndex from last block header: gei=%d (block=#%d)",
 				headerGEI, app.startLastBlock.Header().BlockNumber())
 		} else {
@@ -196,8 +210,20 @@ func (app *App) initBlockchain() error {
 
 		// ─── Initialize LastHandledCommitIndex ──────────
 		headerCommitIndex := uint32(app.startLastBlock.Header().CommitIndex())
+		var backupCommitIndex uint32 = 0
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
+			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
+				if parsedIdx, err := utils.BytesToUint32(commitIdxBytes); err == nil {
+					backupCommitIndex = parsedIdx
+				}
+			}
+		}
+
 		targetCommitIndex := headerCommitIndex
-		if headerCommitIndex > 0 {
+		if backupCommitIndex > headerCommitIndex {
+			targetCommitIndex = backupCommitIndex
+			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from BackupDb: %d (higher than header: %d). This prevents empty commit replays.", targetCommitIndex, headerCommitIndex)
+		} else if headerCommitIndex > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
 		} else {
 			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in header)")
