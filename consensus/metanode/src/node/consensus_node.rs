@@ -1277,6 +1277,68 @@ impl ConsensusNode {
             }
 
             // ═══════════════════════════════════════════════════════════════
+            // ANTI-FORK (May 2026): Verify Go's local block hash against peers.
+            //
+            // ROOT CAUSE: After DAG wipe + restart, Go may load a stale block
+            // from a previous run. Example: Go reports block=1 with gei=170
+            // (from a previous epoch) while the cluster's block #1 has gei=1.
+            // STARTUP-SYNC then starts from block 2, never correcting block #1.
+            //
+            // FIX: Fetch Go's block at `local_block` from a peer and compare.
+            // If different → reset local_block=0 → re-sync from block 1.
+            // Go's dedup logic (hash check) skips correct blocks automatically,
+            // so this is zero-overhead for healthy nodes.
+            // ═══════════════════════════════════════════════════════════════
+            if local_block > 0 && !barrier_peers.is_empty() {
+                match crate::network::peer_rpc::fetch_blocks_from_peer(
+                    &barrier_peers, local_block, local_block,
+                ).await {
+                    Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                        // Compare raw block bytes — if Go's block at this number
+                        // has different content, the local state is corrupt.
+                        match barrier_client.get_blocks_range(local_block, local_block).await {
+                            Ok(local_blocks) if !local_blocks.is_empty() => {
+                                let local_raw = &local_blocks[0].raw_block_bytes;
+                                let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                if local_raw != peer_raw {
+                                    tracing::warn!(
+                                        "🚨 [ANTI-FORK] Block #{} hash MISMATCH between Go and peer! \
+                                         Go has stale/corrupt data. Forcing full re-sync from block 1. \
+                                         (local_bytes={}, peer_bytes={})",
+                                        local_block, local_raw.len(), peer_raw.len()
+                                    );
+                                    local_block = 0;
+                                } else {
+                                    tracing::info!(
+                                        "✅ [ANTI-FORK] Block #{} verified: Go matches peer.",
+                                        local_block
+                                    );
+                                }
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    "⚠️ [ANTI-FORK] Could not fetch block #{} from Go for verification. Skipping check.",
+                                    local_block
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            "⚠️ [ANTI-FORK] Peer returned no data for block #{}. Skipping verification.",
+                            local_block
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [ANTI-FORK] Could not fetch block #{} from peer for verification: {}. Skipping check.",
+                            local_block, e
+                        );
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
             // FORK-SAFETY FIX (v8): Retry peer sync until gap is closed.
             //
             // ROOT CAUSE: Single-shot sync fetches blocks up to the peer's
