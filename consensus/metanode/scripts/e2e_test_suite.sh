@@ -763,7 +763,9 @@ test_dag_wipe_recovery() {
     sleep 3
     
     # Xóa toàn bộ storage Rust (giữ Go data nguyên)
-    local storage_dir="$RUST_DIR/config/storage/node_${TARGET_NODE}"
+    # CRITICAL FIX: FFI overrides storage_path to Go's RootPath/rust_consensus.
+    # The config path (RUST_DIR/config/storage/node_X) is never used.
+    local storage_dir="$BASE_DIR/execution/cmd/simple_chain/sample/node${TARGET_NODE}/data/data/rust_consensus"
     log "- 🗑️ Xóa toàn bộ Rust DAG storage: \`$storage_dir\`"
     if [ -d "$storage_dir" ]; then
         local contents

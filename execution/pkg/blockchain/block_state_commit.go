@@ -12,7 +12,6 @@
 package blockchain
 
 import (
-	"fmt"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -110,9 +109,18 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	}
 
 	if blockNum > lastBlockNum+1 && lastBlockNum > 0 && !cfg.rebuildTries {
-		logger.Error("🚨 [SEQUENTIAL GUARD] Block gap detected! Received block #%d but last committed is #%d. Halting commit to prevent state corruption.",
-			blockNum, lastBlockNum)
-		return lastBlockNum, fmt.Errorf("block gap detected: received #%d, last #%d", blockNum, lastBlockNum)
+		// ═══════════════════════════════════════════════════════════════════════
+		// GAP WARNING (not a halt): Rust assigns sequential block_numbers to ALL
+		// commits, including empty ones that Go skips. This creates legitimate
+		// gaps during recovery/catch-up. For example:
+		//   - Go skips empty commits 204-207 (block_numbers 128-131)
+		//   - Next non-empty commit 208 arrives with block_number=132
+		//   - Gap from 127→132 is expected and safe
+		// We log a warning but ALLOW the commit to proceed.
+		// ═══════════════════════════════════════════════════════════════════════
+		logger.Warn("⚠️ [SEQUENTIAL GUARD] Block gap detected: received block #%d but last committed is #%d (gap=%d). "+
+			"This is expected during recovery when empty commits are skipped.",
+			blockNum, lastBlockNum, blockNum-lastBlockNum-1)
 	}
 
 	// ─── 1. Update in-memory header pointer (always) ──────────────────────

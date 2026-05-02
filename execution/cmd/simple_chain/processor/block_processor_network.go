@@ -247,14 +247,8 @@ PROCESS_LOOP:
 		// transitions (SyncBlocksRequest updates DB). Detect if the DB's
 		// lastGEI has advanced beyond our in-memory nextExpected, and
 		// sync up. This prevents stale nextExpected after a DB fast-forward.
-		//
-		// EXCEPTION: When rustSessionRestarted is active, DO NOT re-inflate
-		// nextExpected from storage. The session restart detection has already
-		// reset nextExpected to accept the new Rust DAG's lower GEI sequence.
-		// Re-reading the old lastGEI from storage would undo this reset and
-		// cause all new-session commits to be silently discarded.
 		// ═══════════════════════════════════════════════════════════════════
-		if !bp.rustSessionRestarted.Load() {
+		{
 			actualLastGEI := storage.GetLastGlobalExecIndex()
 
 			// CRITICAL FIX: Actually advance local state when DB is ahead
@@ -279,34 +273,18 @@ PROCESS_LOOP:
 		}
 
 		// ═══════════════════════════════════════════════════════════════════
-		// RUST SESSION RESTART DETECTION: After DAG-wipe + restart, Rust
-		// sends commits with GEI (hint) lower than Go's existing lastGEI.
-		//
-		// FIX (2026-04-29): Go is the AUTHORITATIVE GEI source. We must
-		// NEVER reset nextExpectedGlobalExecIndex based on Rust's hint GEI.
-		// The is_authoritative_gei path in processSingleEpochData assigns
-		// the correct GEI regardless of what Rust sends as the hint.
-		//
-		// Previously, resetting nextExpected = incomingGEI caused a permanent
-		// GEI offset (~16-23) between this node and the cluster because the
-		// incoming GEI is a Rust hint (epoch_base + commit_index), not the
-		// actual authoritative GEI.
-		//
-		// We only set rustSessionRestarted=true to bypass the GEI-REGRESSION
-		// guard, which would otherwise drop legitimate new-session commits.
+		// GEI BACKWARD GAP DIAGNOSTIC: In Phase-B architecture, Rust reads
+		// GEI from Go's authoritative state. If incoming GEI is much lower
+		// than nextExpected, it means Rust is replaying historical commits.
+		// The GEI-REGRESSION guard in processSingleEpochData will skip them.
+		// We log a diagnostic warning but do NOT set any bypass flags.
 		// ═══════════════════════════════════════════════════════════════════
 		if incomingGEI < nextExpectedGlobalExecIndex && incomingGEI > 0 {
 			geiBackwardGap := nextExpectedGlobalExecIndex - incomingGEI
 			if geiBackwardGap > 50 || incomingTxCount > 0 {
-				// Rust session restart detected — mark flag but do NOT reset nextExpected.
-				// Go is the authoritative GEI source and must continue from its own counter.
-				if !bp.rustSessionRestarted.Load() {
-					logger.Warn("🔄 [RUST-SESSION-RESTART] Detected: incoming GEI=%d << nextExpected=%d (gap=%d). "+
-						"Marking session restart. Go will continue authoritative GEI from %d (NOT resetting to Rust hint).",
-						incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, nextExpectedGlobalExecIndex)
-					bp.rustSessionRestarted.Store(true)
-				}
-				// DO NOT reset nextExpectedGlobalExecIndex — Go is authoritative.
+				logger.Warn("🔍 [GEI-BACKWARD] Incoming GEI=%d << nextExpected=%d (gap=%d, txs=%d). "+
+					"Rust is replaying historical commits — GEI-REGRESSION guard will skip stale ones.",
+					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, incomingTxCount)
 			}
 		}
 

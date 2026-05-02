@@ -533,23 +533,11 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
 	//
-	// ROOT CAUSE: After snapshot restore, Rust's cold-start guard clears when it
-	// detects a "live" commit (recent timestamp + go_gei < commit_gei). However,
-	// the replayed DAG uses a wrong epoch_base_index, producing commits with GEI
-	// LOWER than what P2P sync already wrote. For example:
-	//   - P2P sync wrote blocks up to block 4239 with GEI=18022
-	//   - Rust's first post-cold-start commit has GEI=17344 (from wrong epoch_base)
-	//   - Go would create block 4240 with GEI=17344 → hash differs from network
-	//
-	// FIX: If the incoming commit's GEI is LESS THAN the last block's GEI (from
-	// P2P sync), the commit is STALE and must be skipped. The last block's GEI
-	// represents the network's authoritative state at that height. Any commit with
-	// a lower GEI is from a replayed DAG with incorrect epoch_base_index.
-	//
-	// EXCEPTION (2026-04-27): After DAG-wipe + restart, Rust starts a new GEI
-	// sequence that is legitimately lower than Go's historical lastBlockGEI.
-	// When rustSessionRestarted is set, this guard is bypassed to allow the new
-	// session's commits through. The flag auto-resets when GEI catches up.
+	// In Phase-B architecture, Rust reads GEI from Go's authoritative state
+	// and starts CommitProcessor from lastGEI+1. Therefore, legitimate
+	// recovery commits should ALWAYS have GEI > lastBlockGEI. Any commit
+	// with GEI <= lastBlockGEI is stale and must be skipped to prevent
+	// duplicate block creation (which causes hash divergence and forks).
 	// ═══════════════════════════════════════════════════════════════════════════
 	{
 		lastBlockGEI := uint64(0)
@@ -557,36 +545,22 @@ PROCESS_BLOCK:
 			lastBlockGEI = lastBlock.Header().GlobalExecIndex()
 		}
 
-		// Auto-reset rustSessionRestarted once GEI catches up to historical level
-		if bp.rustSessionRestarted.Load() && globalExecIndex > lastBlockGEI {
-			logger.Info("✅ [GEI-REGRESSION] Rust session GEI=%d has caught up to lastBlockGEI=%d. Re-enabling regression guard.",
-				globalExecIndex, lastBlockGEI)
-			bp.rustSessionRestarted.Store(false)
-		}
-
 		if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
-			// Check if this is a legitimate new Rust session (not stale replay)
-			if bp.rustSessionRestarted.Load() {
-				logger.Info("🔄 [GEI-REGRESSION] BYPASSED: Rust session restarted. Allowing GEI=%d (≤ lastBlockGEI=%d) — new session commit.",
-					globalExecIndex, lastBlockGEI)
-				// Do NOT skip — fall through to block creation
-			} else {
-				logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
-					"This commit is from a replayed DAG with wrong epoch_base_index — not creating block.",
-					globalExecIndex, lastBlockGEI, *currentBlockNumber)
+			logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
+				"This commit was already executed — not creating duplicate block.",
+				globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
-				// Still update GEI counter so the processor advances past this commit
-				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
-				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			// Still update GEI counter so the processor advances past this commit
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-				// Check pending blocks
-				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-					epochData = pendingBlock
-					goto PROCESS_SINGLE_EPOCH_DATA_START
-				}
-				return
+			// Check pending blocks
+			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+				epochData = pendingBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
 			}
+			return
 		}
 	}
 
