@@ -354,6 +354,30 @@ func copyDirReflink(src, dst string) error {
 	return nil
 }
 
+// GetNomtHandleRoot returns the current NOMT Merkle root for a given namespace.
+// Returns zero hash and false if the namespace hasn't been initialized or backend is not NOMT.
+// This is used for diagnostic verification after STARTUP-SYNC batch applies.
+func GetNomtHandleRoot(namespace string) (e_common.Hash, bool) {
+	if globalStateBackend != BackendNOMT {
+		return e_common.Hash{}, false
+	}
+
+	globalNomtHandlesMu.Lock()
+	handle, exists := globalNomtHandles[namespace]
+	globalNomtHandlesMu.Unlock()
+
+	if !exists || handle == nil {
+		return e_common.Hash{}, false
+	}
+
+	rootBytes, err := handle.Root()
+	if err != nil {
+		return e_common.Hash{}, false
+	}
+
+	return e_common.BytesToHash(rootBytes[:]), true
+}
+
 // copyDirFallback performs a standard copy when reflink is not supported
 func copyDirFallback(src, dst string) error {
 	cmd := exec.Command("cp", "-a", src+"/.", dst+"/")

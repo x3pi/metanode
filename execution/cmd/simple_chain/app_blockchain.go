@@ -273,6 +273,24 @@ SKIP_GENESIS:
 		nomtRoot := app.chainState.GetAccountStateDB().Trie().Hash()
 		startStateRoot := app.startLastBlock.Header().AccountStatesRoot()
 
+		// ═══════════════════════════════════════════════════════════════
+		// FORK-DIAG (May 2026): Cross-check trie cached root vs direct NOMT handle root.
+		// If these differ, the NomtStateTrie was constructed with a stale root and all
+		// subsequent state reads will be inconsistent.
+		// ═══════════════════════════════════════════════════════════════
+		if nomtHandleRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+			if nomtHandleRoot != nomtRoot {
+				logger.Error("🚨 [STARTUP] CRITICAL: NOMT handle root (%s) differs from trie cached root (%s)! "+
+					"The AccountStateDB trie is stale.",
+					nomtHandleRoot.Hex()[:18]+"...", nomtRoot.Hex()[:18]+"...")
+				// Use the handle root as the authoritative source
+				nomtRoot = nomtHandleRoot
+			} else {
+				logger.Info("✅ [STARTUP] NOMT handle root matches trie cached root: %s",
+					nomtRoot.Hex()[:18]+"...")
+			}
+		}
+
 		// Attempt to load metadata.json
 		metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
 		var metadata *executor.SnapshotMetadata

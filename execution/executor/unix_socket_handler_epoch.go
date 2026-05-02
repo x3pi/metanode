@@ -1163,14 +1163,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
 	// ═══════════════════════════════════════════════════════════════════════════
-	// STARTUP-SYNC DETECTION: If Go's current block is 0, this is a STARTUP-SYNC
-	// (node just started fresh). In this case, it's SAFE to rebuild NOMT trie
-	// because there's no concurrent consensus execution. During LAG-RECOVERY
-	// (block > 0), consensus is running concurrently so NOMT rebuild is unsafe.
+	// NOMT TRIE REBUILD DECISION:
+	// When execute_mode=true, the caller is either:
+	//   1. STARTUP-SYNC (consensus_node.rs) — runs BEFORE consensus starts
+	//   2. SyncOnly node (sync_loop.rs) — never runs consensus
+	// In both cases, there is NO concurrent consensus execution, so NOMT
+	// trie rebuild is SAFE on the last block.
+	//
+	// CRITICAL FIX (May 2026): The old check `GetLastBlockNumber() == 0`
+	// was too restrictive. When a node restarts with block=470, STARTUP-SYNC
+	// syncs blocks 471-536 but SKIPS NOMT rebuild → NOMT trie stays at
+	// block 470's root → new consensus blocks get wrong state_root → FORK.
 	// ═══════════════════════════════════════════════════════════════════════════
-	isStartupSync := storage.GetLastBlockNumber() == 0
-	if isStartupSync {
-		logger.Info("🔧 [STARTUP-SYNC] Detected fresh start (block=0). NOMT trie rebuild will be ENABLED for synced blocks.")
+	isPreConsensusSync := request.GetExecuteMode()
+	if isPreConsensusSync {
+		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
 	}
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
@@ -1269,6 +1276,26 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
+
+				// ═══════════════════════════════════════════════════════════════
+				// FORK-DIAG (May 2026): Log NOMT handle root after EACH block's
+				// batch apply during STARTUP-SYNC. This pinpoints the exact block
+				// where state drift begins (if any batch is incomplete/corrupted).
+				// ═══════════════════════════════════════════════════════════════
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						expectedAccountRoot := header.AccountStatesRoot()
+						rootMatch := "MATCH"
+						if nomtRoot != expectedAccountRoot && expectedAccountRoot != (common.Hash{}) {
+							rootMatch = "MISMATCH"
+						}
+						logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, expected=%s → %s",
+							blockNum, blockGEI,
+							nomtRoot.Hex()[:18]+"...",
+							expectedAccountRoot.Hex()[:18]+"...",
+							rootMatch)
+					}
+				}
 			}
 		}
 
@@ -1307,19 +1334,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// ═══════════════════════════════════════════════════════════════
 			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
 			//
-			// During STARTUP-SYNC (isStartupSync=true, block was 0):
+			// During pre-consensus sync (execute_mode=true):
 			//   SAFE to rebuild — no concurrent consensus execution exists.
-			//   WITHOUT this, NOMT stays at genesis root and block 16+ will
-			//   have genesis state_root, causing a permanent fork.
+			//   WITHOUT this, NOMT stays at stale root and subsequent
+			//   consensus blocks will have wrong state_root → permanent fork.
 			//
-			// During LAG-RECOVERY (isStartupSync=false, block > 0):
-			//   UNSAFE to rebuild — concurrent consensus execution would
-			//   have its NOMT trie root overwritten, causing a fork.
+			// Non-execute-mode (store-only sync):
+			//   No trie rebuild needed — blocks are stored, not executed.
 			// ═══════════════════════════════════════════════════════════════
-			if trie.GetStateBackend() != trie.BackendNOMT || isStartupSync {
+			if trie.GetStateBackend() != trie.BackendNOMT || isPreConsensusSync {
 				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
-				if isStartupSync && trie.GetStateBackend() == trie.BackendNOMT {
-					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (fresh start, no concurrent consensus)", blockNum)
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (pre-consensus, no concurrent execution)", blockNum)
 				}
 			} else {
 				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
@@ -1336,17 +1362,62 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
 		} else if isLastBlock {
-			// R2: Add stateRoot verify after batch sync
-			// FORK-SAFETY FIX (Apr 2026): NOMT block headers store the PRE-COMMIT state root
-			// (i.e. the state BEFORE the block's mutations). Therefore, verifying the 
-			// expectedRoot against the localRoot (POST-COMMIT) will falsely fail precisely 
-			// when state actually changes. Since we trust the replication batch, we bypass 
-			// this strict check for BackendNOMT. The state root will naturally align and 
-			// be verified implicitly by the cluster consensus.
-			if trie.GetStateBackend() != trie.BackendNOMT {
-				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-				expectedRoot := header.AccountStatesRoot()
-				
+			// ═══════════════════════════════════════════════════════════════
+			// STATE ROOT VERIFICATION (May 2026):
+			// After applying all backup batches + WithRebuildTries(), verify
+			// that the NOMT state actually matches what the block header expects.
+			//
+			// CRITICAL FIX: The previous code BYPASSED this check entirely for
+			// NOMT backend with the false claim that "NOMT headers store PRE-COMMIT
+			// state root". In reality, block headers store POST-EXECUTION roots
+			// (state AFTER the block's transactions). The bypass was masking real
+			// state drift, causing silent permanent forks after restart (see
+			// debug_report_20260501_201046.md — STATE_ROOT divergence at block #582).
+			// ═══════════════════════════════════════════════════════════════
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+
+			if trie.GetStateBackend() == trie.BackendNOMT {
+				// Cross-check: Query the NOMT handle root directly to verify
+				// it matches both the trie's cached root and the block header.
+				nomtHandleRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+
+				logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
+					blockNum,
+					localRoot.Hex()[:18]+"...",
+					func() string {
+						if hasNomtRoot {
+							return nomtHandleRoot.Hex()[:18] + "..."
+						}
+						return "N/A"
+					}(),
+					expectedRoot.Hex()[:18]+"...",
+					hasNomtRoot)
+
+				// Verify NOMT handle root matches the trie's cached root
+				if hasNomtRoot && nomtHandleRoot != localRoot {
+					logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT handle root DIFFERS from trie root! "+
+						"handleRoot=%s, trieRoot=%s, block=#%d. "+
+						"This indicates a stale NomtStateTrie — state reads will return wrong data!",
+						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
+				}
+
+				// Verify NOMT handle root matches block header expected root
+				if hasNomtRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
+					if nomtHandleRoot != expectedRoot {
+						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
+							"handleRoot=%s, expected=%s, block=#%d. "+
+							"Batch apply was incomplete or corrupted — subsequent consensus blocks WILL FORK!",
+							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
+						// Don't halt sync — the node can still attempt to recover via consensus.
+						// But this error MUST be investigated immediately.
+					} else {
+						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
+							blockNum, nomtHandleRoot.Hex()[:18]+"...")
+					}
+				}
+			} else {
+				// Non-NOMT backend: strict verification with halt on mismatch
 				if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
 					logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
 						blockNum, localRoot.Hex(), expectedRoot.Hex())
@@ -1356,16 +1427,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
 				}
 				logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
-			} else {
-				// ═══════════════════════════════════════════════════════════════
-				// FORK-DIAG (Apr 2026): Log NOMT handle roots for ALL namespaces
-				// to enable side-by-side comparison with master node logs.
-				// Each NOMT handle has an independent Merkle root that MUST match
-				// across all nodes for consensus to hold.
-				// ═══════════════════════════════════════════════════════════════
-				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-				logger.Info("[FORK-DIAG][SYNC-VERIFY] NOMT batch applied: block=#%d, accountRoot=%s",
-					blockNum, localRoot.Hex()[:18]+"...")
 			}
 		}
 
