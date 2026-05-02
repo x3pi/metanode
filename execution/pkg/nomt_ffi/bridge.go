@@ -11,6 +11,7 @@ import "C"
 import (
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -97,7 +98,16 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	cPath := C.CString(h.path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	ptr := C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+	var ptr *C.NomtHandle
+	// Retry up to 15 times (total 1.5s) if the OS or a copy process is still holding the directory lock (os error 11)
+	for i := 0; i < 15; i++ {
+		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+		if ptr != nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	if ptr == nil {
 		h.mu.Unlock() // avoid deadlock on failure
 		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s", h.path)

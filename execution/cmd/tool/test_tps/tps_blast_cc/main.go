@@ -858,6 +858,9 @@ func main() {
 				c.rw = reconnectNode(c.addr)
 				if c.rw != nil {
 					c.rw.sendRaw(command.SendTransactions, batchBytes)
+				} else {
+					fmt.Printf("\n  ❌ Skipping batch %d due to reconnect failure on %s\n", i, c.addr)
+					continue
 				}
 			}
 
