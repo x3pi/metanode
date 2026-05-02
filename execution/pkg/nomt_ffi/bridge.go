@@ -27,6 +27,9 @@ type Handle struct {
 	commitConcurrency int
 	pageCacheMB       int
 	leafCacheMB       int
+
+	sessionsMu      sync.Mutex
+	pendingSessions []*FinishedSession
 }
 
 // Session wraps the opaque NOMT write session pointer.
@@ -81,11 +84,30 @@ func (h *Handle) GetPath() string {
 	return h.path
 }
 
-// CloseForSnapshot acquires the lock and fully closes the underlying NOMT/RocksDB 
-// database instance. This guarantees that all background compaction and flush 
-// threads are stopped, making it 100% safe to `cp -a` the database directory.
+// CloseForSnapshot acquires the lock, flushes all pending async sessions, and fully 
+// closes the underlying NOMT/RocksDB database instance. This guarantees that all 
+// background compaction and flush threads are stopped, and all Rust Arc<Core> 
+// references are released, making it 100% safe to `cp -a` the database directory.
 func (h *Handle) CloseForSnapshot() {
 	h.mu.Lock()
+
+	h.sessionsMu.Lock()
+	pending := h.pendingSessions
+	h.pendingSessions = nil
+	h.sessionsMu.Unlock()
+
+	// Drain any async sessions that haven't been committed yet.
+	// If we don't do this, the FinishedSession inside Go holds a reference
+	// to the Rust Session, which keeps the Arc<Core> alive, causing nomt_close
+	// to NOT actually release the RocksDB directory lock!
+	for _, fs := range pending {
+		if fs != nil && fs.ptr != nil {
+			fmt.Printf("nomt_ffi: forcefully flushing pending finished session at %s before snapshot\n", h.path)
+			C.nomt_commit_payload(h.ptr, fs.ptr)
+			fs.ptr = nil
+		}
+	}
+
 	if h.ptr != nil {
 		C.nomt_close(h.ptr)
 		h.ptr = nil
@@ -99,10 +121,13 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	defer C.free(unsafe.Pointer(cPath))
 
 	var ptr *C.NomtHandle
-	// Retry up to 15 times (total 1.5s) if the OS or a copy process is still holding the directory lock (os error 11)
-	for i := 0; i < 15; i++ {
+	// Retry up to 100 times (total 10s) if the OS or a copy process is still holding the directory lock (os error 11)
+	for i := 0; i < 100; i++ {
 		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
 		if ptr != nil {
+			if i > 0 {
+				fmt.Printf("nomt_ffi: successfully reopened database at %s after %d retries\n", h.path, i)
+			}
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -110,7 +135,7 @@ func (h *Handle) ReopenAfterSnapshot() error {
 
 	if ptr == nil {
 		h.mu.Unlock() // avoid deadlock on failure
-		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s", h.path)
+		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s even after 10s", h.path)
 	}
 	h.ptr = ptr
 	h.mu.Unlock()
@@ -419,19 +444,26 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 	if ptr == nil {
 		return newRoot, nil, fmt.Errorf("nomt_ffi: session finish failed")
 	}
-	return newRoot, &FinishedSession{ptr: ptr, handle: h}, nil
+
+	fs := &FinishedSession{ptr: ptr, handle: h}
+	h.sessionsMu.Lock()
+	h.pendingSessions = append(h.pendingSessions, fs)
+	h.sessionsMu.Unlock()
+
+	return newRoot, fs, nil
 }
 
 // CommitPayload performs the actual disk I/O to persist a FinishedSession.
 // This is typically called from a background worker thread.
 func (fs *FinishedSession) CommitPayload(h *Handle) error {
-	if fs.ptr == nil {
-		return fmt.Errorf("nomt_ffi: finished session is already committed or aborted")
-	}
-	
 	// Fast lock to ensure Handle isn't closed during commit
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	
+	if fs.ptr == nil {
+		return nil // already consumed by CloseForSnapshot or earlier commit
+	}
+	
 	if h.ptr == nil {
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
@@ -439,6 +471,15 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
 	fs.ptr = nil // consumed
 	
+	h.sessionsMu.Lock()
+	for i, pfs := range h.pendingSessions {
+		if pfs == fs {
+			h.pendingSessions = append(h.pendingSessions[:i], h.pendingSessions[i+1:]...)
+			break
+		}
+	}
+	h.sessionsMu.Unlock()
+
 	if ret != 0 {
 		return fmt.Errorf("nomt_ffi: commit_payload failed")
 	}
@@ -462,9 +503,24 @@ func (fs *FinishedSession) Abort() {
 	if fs.ptr != nil && fs.handle != nil {
 		fs.handle.mu.RLock()
 		defer fs.handle.mu.RUnlock()
+		
+		if fs.ptr == nil {
+			return // Already consumed
+		}
+
 		if fs.handle.ptr != nil {
 			C.nomt_finished_session_abort(fs.ptr)
 		}
 		fs.ptr = nil
+
+		h := fs.handle
+		h.sessionsMu.Lock()
+		for i, pfs := range h.pendingSessions {
+			if pfs == fs {
+				h.pendingSessions = append(h.pendingSessions[:i], h.pendingSessions[i+1:]...)
+				break
+			}
+		}
+		h.sessionsMu.Unlock()
 	}
 }
