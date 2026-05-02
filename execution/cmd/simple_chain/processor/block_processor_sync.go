@@ -522,8 +522,21 @@ PROCESS_BLOCK:
 	if epochData.GetBlockNumber() > 0 {
 		*currentBlockNumber = epochData.GetBlockNumber()
 	} else {
-		// Fallback for genesis / phase-b if needed
-		*currentBlockNumber++
+		// CRITICAL FORK-SAFETY FIX: Rust sets block_number = 0 for empty commits.
+		// We MUST skip creating a Go block for them to prevent block inflation.
+		logger.Info("⏭️  [BLOCK-NUM] Skipping empty commit from Rust (GEI=%d, commitIndex=%d) - PREVENTING INFLATION", globalExecIndex, commitIndex)
+		
+		// Still update GEI counter so the processor advances past this commit
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+		*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
+		// Check pending blocks
+		if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+			delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+			epochData = pendingBlock
+			goto PROCESS_SINGLE_EPOCH_DATA_START
+		}
+		return
 	}
 	
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
