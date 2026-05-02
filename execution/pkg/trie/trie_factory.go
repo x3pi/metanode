@@ -321,6 +321,19 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 			return fmt.Errorf("NOMT checkpoint failed for namespace %s: %w", entry.namespace, err)
 		}
 
+		// CRITICAL FIX: The NOMT Checkpoint API only copies the B-Tree data files,
+		// but the knownKeys registry is stored in a separate file by nomt_state_trie.go.
+		// If we don't explicitly copy this file, GetAll() will return empty arrays after restore.
+		srcRegistryPath := filepath.Join(filepath.Dir(entry.handle.GetPath()), "nomt_registry_"+entry.namespace+".bin")
+		dstRegistryPath := filepath.Join(nomtDestBase, "nomt_registry_"+entry.namespace+".bin")
+		if data, err := os.ReadFile(srcRegistryPath); err == nil {
+			if writeErr := os.WriteFile(dstRegistryPath, data, 0644); writeErr != nil {
+				logger.Warn("📸 [TRIE] Failed to copy registry file %s: %v", entry.namespace, writeErr)
+			} else {
+				logger.Info("✅ [TRIE] Copied registry file for namespace: %s", entry.namespace)
+			}
+		}
+
 		logger.Info("✅ [TRIE] NOMT checkpoint %s completed in %v", entry.namespace, time.Since(start))
 	}
 
