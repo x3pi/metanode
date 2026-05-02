@@ -316,25 +316,43 @@ MAX_STUCK=3
 for t in 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180; do
     sleep 10
     RESTORED_PORT=${MASTER_RPC_PORTS[$NODE_ID]}
-    RESTORED_RESP=$(curl -sf -m 1 -X POST -H "Content-Type: application/json" \
-        --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-        "http://127.0.0.1:$RESTORED_PORT" 2>/dev/null || echo "")
-        
-    CURRENT_BLOCK=""
-    if [ -n "$RESTORED_RESP" ]; then
-        RESTORED_HEX=$(echo "$RESTORED_RESP" | python3 -c "import sys,json; r=json.load(sys.stdin).get('result',None); print(r if r else '')" 2>/dev/null || echo "")
-        if [ -n "$RESTORED_HEX" ] && [ "$RESTORED_HEX" != "0x" ]; then CURRENT_BLOCK=$((16#${RESTORED_HEX#0x})); fi
-    fi
     
-    GO_BATCH_GEI=$(grep -a 'BATCH-DRAIN' "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | grep -oP '\d+→\d+' | awk -F'→' '{print $2}' || echo "")
-    # Rust is now embedded in Go Master via FFI. There is no rust.log.
-    CURRENT_GEI=$GO_BATCH_GEI
+    # Use RPC to get both block number AND GEI from latest block
+    BLOCK_RESP=$(curl -sf -m 2 -X POST -H "Content-Type: application/json" \
+        --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
+        "http://127.0.0.1:$RESTORED_PORT" 2>/dev/null || echo "")
+    
+    CURRENT_BLOCK=""
+    CURRENT_GEI=""
+    CURRENT_EPOCH=""
+    if [ -n "$BLOCK_RESP" ]; then
+        BLOCK_INFO=$(echo "$BLOCK_RESP" | python3 -c "
+import sys,json
+try:
+    r=json.load(sys.stdin).get('result',None)
+    if r:
+        bn=int(r.get('number','0x0'),16)
+        gei=int(r.get('globalExecIndex','0x0'),16)
+        ep=int(r.get('epoch','0x0'),16)
+        print(f'{bn} {gei} {ep}')
+    else:
+        print('')
+except:
+    print('')
+" 2>/dev/null || echo "")
+        if [ -n "$BLOCK_INFO" ]; then
+            CURRENT_BLOCK=$(echo "$BLOCK_INFO" | awk '{print $1}')
+            CURRENT_GEI=$(echo "$BLOCK_INFO" | awk '{print $2}')
+            CURRENT_EPOCH=$(echo "$BLOCK_INFO" | awk '{print $3}')
+        fi
+    fi
 
     DISP_BLOCK=${CURRENT_BLOCK:-"?"}
     DISP_GEI=${CURRENT_GEI:-"?"}
+    DISP_EPOCH=${CURRENT_EPOCH:-"?"}
 
     if [ -z "$CURRENT_BLOCK" ] && [ -z "$CURRENT_GEI" ]; then
-        echo -e "  ${YELLOW}⏱️ +${t}s: node chưa khởi chạy xong (chưa có log & RPC)${NC}"
+        echo -e "  ${YELLOW}⏱️ +${t}s: node chưa khởi chạy xong (RPC chưa sẵn sàng)${NC}"
         continue
     fi
     
@@ -343,16 +361,16 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180; do
     
     if [ "$CURRENT_PROGRESS" = "$PREV_BLOCK" ]; then
         STUCK_COUNT=$((STUCK_COUNT + 1))
-        if [ $STUCK_COUNT -ge $MAX_STUCK ]; then echo -e "  ${RED}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚠️ STUCK ${STUCK_COUNT}x!${NC}"
-        else echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — (chưa tăng)${NC}"; fi
+        if [ $STUCK_COUNT -ge $MAX_STUCK ]; then echo -e "  ${RED}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI, epoch=$DISP_EPOCH — ⚠️ STUCK ${STUCK_COUNT}x!${NC}"
+        else echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI, epoch=$DISP_EPOCH — (chưa tăng)${NC}"; fi
     else
         STUCK_COUNT=0
         if [ -n "$PREV_BLOCK" ]; then
             JUMP=$((CURRENT_PROGRESS - PREV_BLOCK))
-            if [ $JUMP -gt 100 ]; then echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ⚡ jump +$JUMP $PROG_LABEL${NC}"
-            else echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ✅ +$JUMP $PROG_LABEL${NC}"; fi
+            if [ $JUMP -gt 100 ]; then echo -e "  ${YELLOW}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI, epoch=$DISP_EPOCH — ⚡ jump +$JUMP $PROG_LABEL${NC}"
+            else echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI, epoch=$DISP_EPOCH — ✅ +$JUMP $PROG_LABEL${NC}"; fi
         else
-            echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI — ✅ syncing${NC}"
+            echo -e "  ${GREEN}⏱️ +${t}s: block=$DISP_BLOCK, GEI=$DISP_GEI, epoch=$DISP_EPOCH — ✅ syncing${NC}"
         fi
     fi
     PREV_BLOCK="$CURRENT_PROGRESS"

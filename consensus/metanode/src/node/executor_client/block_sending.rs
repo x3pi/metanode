@@ -635,7 +635,7 @@ impl ExecutorClient {
             }
             // Wipe-safe persist more frequently (every 10 commits) because this is
             // the critical recovery path for DAG wipe scenarios. Regular persist
-            // uses PERSIST_INTERVAL=100 which is too coarse for recovery accuracy.
+            // uses PERSIST_INTERVAL=100 which is too coarse for recovery accuracy.f
             const WIPE_SAFE_PERSIST_INTERVAL: u64 = 10;
             if last_idx.is_multiple_of(WIPE_SAFE_PERSIST_INTERVAL) || batch_size > 1 {
                 let _ = super::persistence::persist_last_sent_index_wipe_safe(
