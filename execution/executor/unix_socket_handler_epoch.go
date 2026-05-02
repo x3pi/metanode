@@ -1309,24 +1309,32 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
+		if blockNum == 0 {
+			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
+			
+			// CRITICAL FIX: Even if the block is empty, if it's the LAST block in a STARTUP-SYNC
+			// batch, we MUST trigger the trie rebuild. Otherwise, NOMT memory state stays stale.
+			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on empty last block (GEI=%d)", blockGEI)
+				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for empty block: %v", err)
+				}
+			}
+			continue
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 2: Save block to LevelDB (by hash + number→hash mapping)
 		// ═══════════════════════════════════════════════════════════════════════════
-		if blockNum > 0 {
-			if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
-				continue
-			}
-			if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-			}
-			for _, txHash := range blk.Transactions() {
-				bc.SetTxHashMapBlockNumber(txHash, blockNum)
-			}
-			// CRITICAL: Update fast-sync block number pointer
-			bc.SetLastBlockNumber(blockNum)
-		} else {
-			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping DB save and pointer update for empty block (GEI=%d)", blockGEI)
+		if err := blockDatabase.SaveBlockByHash(blk); err != nil {
+			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
+			continue
+		}
+		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
+		}
+		for _, txHash := range blk.Transactions() {
+			bc.SetTxHashMapBlockNumber(txHash, blockNum)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
