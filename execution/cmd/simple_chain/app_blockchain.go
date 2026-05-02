@@ -181,10 +181,7 @@ func (app *App) initBlockchain() error {
 		}
 
 		targetGEI := headerGEI
-		if backupGEI > headerGEI {
-			targetGEI = backupGEI
-			logger.Info("✅ [STARTUP] BackupDb GEI (%d) is higher than block header GEI (%d). Using BackupDb value to preserve empty commits.", backupGEI, headerGEI)
-		} else if headerGEI > 0 {
+		if headerGEI > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastGlobalExecIndex from last block header: gei=%d (block=#%d)",
 				headerGEI, app.startLastBlock.Header().BlockNumber())
 		} else {
@@ -221,13 +218,10 @@ func (app *App) initBlockchain() error {
 		}
 
 		targetCommitIndex := headerCommitIndex
-		if backupCommitIndex > headerCommitIndex {
-			targetCommitIndex = backupCommitIndex
-			logger.Info("✅ [STARTUP] BackupDb CommitIndex (%d) is higher than block header CommitIndex (%d). Using BackupDb value.", backupCommitIndex, headerCommitIndex)
-		} else if headerCommitIndex > 0 {
+		if headerCommitIndex > 0 {
 			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
 		} else {
-			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb or header)")
+			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in header)")
 		}
 
 		if targetCommitIndex > 0 {

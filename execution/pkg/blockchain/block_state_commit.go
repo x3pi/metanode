@@ -12,6 +12,7 @@
 package blockchain
 
 import (
+	"fmt"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -106,6 +107,12 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		logger.Warn("⚠️ [SEQUENTIAL GUARD] Rejecting duplicate block #%d (last committed: #%d, hash: %s)",
 			blockNum, lastBlockNum, blockHash.Hex()[:18])
 		return blockNum, nil // Return without error — silently skip
+	}
+
+	if blockNum > lastBlockNum+1 && lastBlockNum > 0 && !cfg.rebuildTries {
+		logger.Error("🚨 [SEQUENTIAL GUARD] Block gap detected! Received block #%d but last committed is #%d. Halting commit to prevent state corruption.",
+			blockNum, lastBlockNum)
+		return lastBlockNum, fmt.Errorf("block gap detected: received #%d, last #%d", blockNum, lastBlockNum)
 	}
 
 	// ─── 1. Update in-memory header pointer (always) ──────────────────────

@@ -1246,6 +1246,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			if len(backupBytes) > 0 {
 				rh.persistBackupForSub(backupBytes, blockNum)
 			}
+
+			// CRITICAL FIX: If this is the last block of a STARTUP-SYNC batch,
+			// we MUST trigger the trie rebuild even if the block was already in LevelDB.
+			// Otherwise, NOMT memory state stays stale and subsequent blocks will fork.
+			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d", blockNum)
+				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
+				}
+			}
 			continue
 		}
 
