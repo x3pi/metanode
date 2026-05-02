@@ -18,6 +18,22 @@ func (bp *BlockProcessor) updateAndPersistLastGlobalExecIndex(index uint64) {
 	}
 }
 
+// updateAndPersistLastHandledCommitIndex updates the commit_index in memory and persists it
+func (bp *BlockProcessor) updateAndPersistLastHandledCommitIndex(index uint32) {
+	if index == 0 {
+		return
+	}
+	storage.UpdateLastHandledCommitIndex(index)
+	geiAuthority := GetGEIAuthority()
+	if geiAuthority != nil {
+		geiAuthority.RecordCommitIndex(index)
+	}
+	value := utils.Uint32ToBytes(index)
+	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+		bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), value)
+	}
+}
+
 // updateAndPersistLastExecutedCommitHash updates the commit hash in memory and persists it
 func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
 	if len(hash) == 0 {
@@ -31,15 +47,17 @@ func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
 
 // geiWorker processes coalesced GEI updates, sending only the latest to commitChannel
 func (bp *BlockProcessor) geiWorker() {
-	for index := range bp.geiUpdateChan {
-		latest := index
+	for update := range bp.geiUpdateChan {
+		latestGEI := update.GlobalExecIndex
+		latestCommit := update.CommitIndex
 		drained := 0
 	DRAIN_LOOP:
 		for {
 			select {
-			case n := <-bp.geiUpdateChan:
-				if n > latest {
-					latest = n
+			case u := <-bp.geiUpdateChan:
+				if u.GlobalExecIndex > latestGEI {
+					latestGEI = u.GlobalExecIndex
+					latestCommit = u.CommitIndex
 				}
 				drained++
 			default:
@@ -49,7 +67,8 @@ func (bp *BlockProcessor) geiWorker() {
 
 		job := CommitJob{
 			Block:           nil,
-			GlobalExecIndex: latest,
+			GlobalExecIndex: latestGEI,
+			CommitIndex:     latestCommit,
 		}
 		select {
 		case bp.commitChannel <- job:
@@ -59,24 +78,29 @@ func (bp *BlockProcessor) geiWorker() {
 	}
 }
 
-// pushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
+// PushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
 // This ensures that the global_exec_index is persisted to DB *strictly after*
 // any pending blocks with transactions. Prevents GEI from racing ahead of lost async blocks.
-func (bp *BlockProcessor) pushAsyncGEIUpdate(index uint64, hash []byte) {
+func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIndex uint32) {
 	if index == 0 {
 		return
 	}
-	// We only use the channel to track the highest GEI. The hash will be stored immediately if batch-drain is not used.
-	// Actually, batch-drain handles highestGEI itself, pushAsyncGEIUpdate is for normal processing.
-	// Let's create an explicit CommitJob for the hash since geiUpdateChan only takes uint64.
-	// But it's simpler to just persist it directly if we want.
-	// Wait, geiUpdateChan coalesces GEI! We should just send a full CommitJob directly for empty commits!
-	// No, geiUpdateChan is for coalescing. I will just update the memory state for now, and the CommitWorker will persist it when it gets the next job.
-	// But empty blocks don't trigger CommitWorker unless they are large in number.
-	// Actually, I can just persist it directly here!
+	// GO-AUTHORITATIVE FIX: Keep GEIAuthority counter in sync with every GEI
+	// advancement. Without this, the full-path and BATCH-DRAIN could have
+	// different GEIAuthority.lastAssignedGEI values, causing +1 offset.
+	geiAuth := GetGEIAuthority()
+	if geiAuth.IsEnabled() {
+		geiAuth.AdvanceGEITo(index)
+	}
 	bp.updateAndPersistLastExecutedCommitHash(hash)
+	
+	update := AsyncGEIUpdate{
+		GlobalExecIndex: index,
+		CommitIndex:     commitIndex,
+	}
+
 	select {
-	case bp.geiUpdateChan <- index:
+	case bp.geiUpdateChan <- update:
 		// Sent successfully
 	default:
 		// Queue full, replace oldest item
@@ -85,7 +109,7 @@ func (bp *BlockProcessor) pushAsyncGEIUpdate(index uint64, hash []byte) {
 		default:
 		}
 		select {
-		case bp.geiUpdateChan <- index:
+		case bp.geiUpdateChan <- update:
 		default:
 		}
 	}

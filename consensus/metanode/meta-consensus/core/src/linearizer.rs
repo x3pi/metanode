@@ -136,6 +136,30 @@ impl Linearizer {
             (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
         } else {
             let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+
+            // DEFENSE-IN-DEPTH: For locally-decided commits, verify that ALL ancestor
+            // blocks needed for timestamp calculation are present in the DAG.
+            // If any are missing (sparse DAG after fast-forward), we MUST defer this
+            // commit to prevent producing a divergent timestamp.
+            let parent_refs = leader_block
+                .ancestors()
+                .iter()
+                .filter(|block_ref| block_ref.round == leader_block.round() - 1)
+                .cloned()
+                .collect::<Vec<_>>();
+            let parent_blocks = dag_state.get_blocks(&parent_refs);
+            let missing = parent_blocks.iter().filter(|b| b.is_none()).count();
+            if missing > 0 {
+                tracing::warn!(
+                    "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
+                     {}/{} ancestor blocks missing. Deferring to prevent timestamp divergence.",
+                    leader_block.reference(),
+                    missing,
+                    parent_refs.len()
+                );
+                return None;
+            }
+
             let ts = Self::calculate_commit_timestamp(
                 &self.context,
                 &mut dag_state,
@@ -179,13 +203,19 @@ impl Linearizer {
         };
 
         // Create the corresponding committed sub dag
-        let sub_dag = CommittedSubDag::new(
+        let mut sub_dag = CommittedSubDag::new(
             leader_block.reference(),
             to_commit,
             timestamp_ms,
             commit.reference(),
             commit.global_exec_index(),
         );
+
+        // FORK-SAFETY (May 2026): Propagate consensus-agreed leader_address from commit
+        let stored_leader_addr = commit.leader_address();
+        if !stored_leader_addr.is_empty() {
+            sub_dag.leader_address = stored_leader_addr.to_vec();
+        }
 
         Some((sub_dag, commit))
     }
@@ -207,21 +237,36 @@ impl Linearizer {
                 .filter(|block_ref| block_ref.round == leader_block.round() - 1)
                 .cloned()
                 .collect::<Vec<_>>();
+            let expected_count = block_refs.len();
             // Get the blocks from dag state - filter out any missing blocks gracefully.
             // During commit sync, some ancestor blocks might not be in dag_state yet.
             // This prevents panic during epoch transitions when syncing from peers.
-            let blocks = dag_state
+            let mut missing_count = 0usize;
+            let blocks: Vec<_> = dag_state
                 .get_blocks(&block_refs)
                 .into_iter()
                 .filter_map(|block_opt| {
                     if block_opt.is_none() {
-                        tracing::warn!(
-                            "⚠️ [LINEARIZER] Missing ancestor block during commit timestamp calculation - this may happen during commit sync"
-                        );
+                        missing_count += 1;
                     }
                     block_opt
-                });
-            median_timestamp_by_stake(context, blocks).unwrap_or_else(|e| {
+                })
+                .collect();
+            if missing_count > 0 {
+                // ANTI-FORK DIAGNOSTIC: Missing parent blocks cause
+                // median_timestamp_by_stake to compute a different median than
+                // nodes with the full set, resulting in timestamp divergence.
+                tracing::warn!(
+                    "⚠️ [LINEARIZER] Missing {}/{} ancestor blocks for leader {:?} at round {} \
+                     during commit timestamp calculation. This WILL cause timestamp divergence \
+                     if the local committer is producing this commit!",
+                    missing_count,
+                    expected_count,
+                    leader_block.reference(),
+                    leader_block.round(),
+                );
+            }
+            median_timestamp_by_stake(context, blocks.into_iter()).unwrap_or_else(|e| {
                 // DEFENSIVE FIX: During commit sync, ALL ancestor blocks may be missing if
                 // genesis blocks don't match between nodes (due to validator ordering differences
                 // during epoch transitions). Instead of panicking, use the leader block's own

@@ -72,6 +72,7 @@ type CommitJob struct {
 
 	// Snapshot Fix: Track the rust consensus commit index
 	GlobalExecIndex uint64
+	CommitIndex     uint32
 
 	// Crash-Safety Fix: Synchronously prepared backup data so it can be written to disk
 	// before we unblock Rust via DoneChan.
@@ -86,6 +87,12 @@ type PersistJob struct {
 	StakeResult   *stake_state_db.StakePipelineCommitResult
 	ReceiptResult *types.ReceiptPipelineResult
 	DoneSignal    chan struct{}
+}
+
+// AsyncGEIUpdate bundles GEI and CommitIndex updates together to ensure they are persisted atomically
+type AsyncGEIUpdate struct {
+	GlobalExecIndex uint64
+	CommitIndex     uint32
 }
 
 
@@ -151,7 +158,7 @@ type BlockProcessor struct {
 	// Backup DB Coalescing
 	backupDbChannel chan CommitJob
 	// GEI Coalescing
-	geiUpdateChan chan uint64
+	geiUpdateChan chan AsyncGEIUpdate
     
 	forceCommitChan chan struct{}
 
@@ -304,7 +311,7 @@ func NewBlockProcessor(
 		// Pipeline commit: async persistence channel
 		persistChannel: make(chan PersistJob, 100),
 		backupDbChannel: make(chan CommitJob, 1),
-		geiUpdateChan: make(chan uint64, 1),
+		geiUpdateChan: make(chan AsyncGEIUpdate, 1),
 
 		forceCommitChan:  make(chan struct{}, 8),
 		lastRateCheckTime: time.Now(),

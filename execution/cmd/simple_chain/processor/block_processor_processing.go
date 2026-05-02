@@ -62,7 +62,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 				// Check max size limit to avoid memory leak
 				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
 					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
-					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 					accumulatedResults = nil
 					currentBlockNumber++
 				}
@@ -75,7 +75,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 		// Phase 2: Check if we should flush or wait
 		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
 			// Enough TXs accumulated — flush immediately
-			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 			accumulatedResults = nil
 			currentBlockNumber++
 			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
@@ -92,7 +92,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 				accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
 			case <-bp.forceCommitChan:
 				// Event-driven flush — create block with whatever we have immediately
-				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0)
+				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
 				accumulatedResults = nil
 				currentBlockNumber++
 				logger.Info("Created block #%d with %d txs (event-driven flush)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
@@ -152,7 +152,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 // produce identical block hashes. Pass 0 for backward compatibility (will use time.Now()).
 // CRITICAL FORK-SAFETY: leaderAddressOverride (optional, variadic) allows passing leader address
 // from Rust consensus. If not provided, falls back to bp.validatorAddress (for local processing).
-func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, leaderAddressOverride ...common.Address) *block.Block {
+func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, leaderAddressOverride ...common.Address) *block.Block {
 	overallStart := time.Now()
 
 	tracer := tracing.GetTracer()
@@ -248,6 +248,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if globalExecIndex > 0 {
 		bl.Header().SetGlobalExecIndex(globalExecIndex)
 	}
+	
+	// CRITICAL FIX: Set CommitIndex on the block so it is serialized and transmitted to Sub nodes.
+	if commitIndex > 0 {
+		bl.Header().SetCommitIndex(uint64(commitIndex))
+	}
 
 	phase2Elapsed := time.Since(phase2Start)
 
@@ -309,12 +314,33 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	mappingBatch = blockchain.GetBlockChainInstance().GetMappingBatch()
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY FIX: Synchronous commit for Rust-driven execution path.
+	//
+	// ROOT CAUSE: When commit was async (DoneChan=nil), Block N+1's
+	// ProcessTransactions could race with Block N's commitWorker:
+	//   - commitWorker: CommitPipeline() → PersistAsync() (modifies trie)
+	//   - processSingleEpochData: ProcessTransactions → AccountState() (reads trie)
+	// Different nodes complete PersistAsync at different times relative to
+	// the next block's read → different IntermediateRoot() → different
+	// AccountStatesRoot → different block hash → FORK.
+	//
+	// FIX: When called from Rust (globalExecIndex > 0), use DoneChan to block
+	// until commitWorker finishes. This serializes execution:
+	//   Block N committed → Block N+1 starts processing.
+	// The legacy GenerateBlock path (globalExecIndex == 0) remains async.
+	// ═══════════════════════════════════════════════════════════════════════════
+	var doneChan chan struct{}
+	if globalExecIndex > 0 {
+		doneChan = make(chan struct{}, 1)
+	}
+
 	job := CommitJob{
 		Block:                     bl,
 		ProcessResults:            &processResults,
 		Receipts:                  receipts,
 		TxDB:                      txDB,
-		DoneChan:                  nil, // ASYNC: No blocking — disk persistence runs concurrently
+		DoneChan:                  doneChan,
 		MappingWg:                 &mappingWg,
 		TrieBatchSnapshot:         trieBatchSnapshot,
 		AccountBatch:              accountBatch,
@@ -324,19 +350,24 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		MappingBatch:              mappingBatch,
 		StakeBatch:                stakeBatch,
 		GlobalExecIndex:           globalExecIndex,
+		CommitIndex:               commitIndex,
 	}
 
-	// ASYNC COMMIT: Send job to commitWorker without blocking.
-	// The commitWorker handles disk persistence (SaveLastBlock, PrepareBackup, Broadcast)
-	// CONCURRENTLY while the execution loop processes the next block.
-	// This eliminates the 32-second gap caused by waiting for large block commits.
+	// Send job to commitWorker.
 	select {
 	case bp.commitChannel <- job:
-		// Sent successfully — commitWorker will process async
+		// Sent successfully
 	case <-time.After(5 * time.Second):
 		logger.Error("❌ [CRITICAL] commitChannel full for more than 5 seconds! Block #%d could not be sent. Check commitWorker.",
 			currentBlockNumber)
 		bp.commitChannel <- job // Fallback: blocking send
+	}
+
+	// FORK-SAFETY: Wait for commit to complete before returning.
+	// This ensures the trie is fully updated before the next block reads it.
+	if doneChan != nil {
+		<-doneChan
+		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
 
 	// NO MORE BLOCKING: execution loop immediately continues to next block

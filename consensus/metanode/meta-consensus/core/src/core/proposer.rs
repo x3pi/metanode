@@ -65,6 +65,21 @@ impl Core {
                 );
                 return None;
             }
+
+            // COLD-START RECOVERY FIX:
+            // If the DAG was fast-forwarded (e.g. gc_round is high), but the threshold_clock is still at 1
+            // (or any low round) because we haven't synced recent blocks yet, proposing a block at this round 
+            // is invalid and will be rejected by the BlockManager, causing a crash.
+            let gc_round = dag_state.gc_round();
+            if clock_round <= gc_round {
+                info!(
+                    "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
+                    clock_round,
+                    gc_round
+                );
+                return None;
+            }
+
             clock_round
         };
 

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tracing::{error, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
@@ -23,9 +23,8 @@ pub async fn dispatch_commit(
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
     _pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    validator_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     _tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    _shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -59,209 +58,16 @@ pub async fn dispatch_commit(
     //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
     if total_transactions == 0 && !has_system_tx {
-        // Update shared GEI counter
-        if let Some(shared_index) = shared_last_global_exec_index.clone() {
-            let mut index_guard = shared_index.lock().await;
-            if global_exec_index > *index_guard {
-                *index_guard = global_exec_index;
-            }
-        }
-
-        // Advance executor_client's next_expected_index so non-empty commits
-        // don't trigger gap detection when they arrive later
-        if let Some(ref client) = executor_client {
-            client.skip_empty_commit(global_exec_index).await;
-        }
-
         tracing::trace!(
-            "⏭️ [FAST-SKIP] Empty commit #{} (GEI={}) skipped — no FFI call needed",
+            "⏭️ [FAST-SKIP] Empty commit #{} (GEI expected={}) skipped — no transactions",
             commit_index, global_exec_index
         );
-        return Ok(1);
+        return Ok(0); // GEI DOES NOT ADVANCE FOR EMPTY COMMITS! This ensures mathematical determinism based purely on transactions.
     }
 
-    // NOTE: CATCH-UP FORK GUARD was REMOVED here.
-    // Previous versions suppressed locally-decided commits when Go was lagging (lag > 10),
-    // but this CAUSED state divergence: node skips transactions while other nodes execute
-    // them → different stateRoot → hash mismatch → FORK.
-    // All commits passing through BFT consensus are canonical and MUST be executed.
-    let leader_address: Option<Vec<u8>> = if executor_client.is_some() {
-        let leader_author_index = subdag.leader.author.value();
-
-        // STEP 1: Validate committee data exists (with retry for startup race condition)
-        let mut retry_attempts = 0;
-        let max_retries = 10; // 10 * 200ms = 2 seconds max wait
-
-        let resolved_address = loop {
-            let epoch_addresses = validator_eth_addresses.read().await;
-
-            // Check if committee HashMap is loaded
-            if epoch_addresses.is_empty() {
-                drop(epoch_addresses);
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!("🚨 [FATAL] epoch_eth_addresses STILL EMPTY after {} retries! Committee not loaded.", max_retries);
-                    error!("🚨 [FATAL] Cannot process commit #{} (global_exec_index={}) without valid committee data!", 
-                            commit_index, global_exec_index);
-                    anyhow::bail!(
-                            "Committee data empty after {} retries — cannot process commit #{} (GEI={}). Node requires restart.",
-                            max_retries, commit_index, global_exec_index
-                        );
-                }
-                warn!(
-                    "⏳ [LEADER] epoch_eth_addresses empty, waiting for committee... retry {}/{}",
-                    retry_attempts, max_retries
-                );
-                sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-
-            // Try to get committee for commit's epoch, with fallback to current or previous epoch
-            let eth_addresses = if let Some(addrs) = epoch_addresses.get(&epoch) {
-                addrs.clone()
-            } else if epoch > 0 {
-                // Try previous epoch (common during transition)
-                if let Some(addrs) = epoch_addresses.get(&(epoch - 1)) {
-                    warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (during transition)",
-                            epoch - 1, epoch);
-                    addrs.clone()
-                } else {
-                    // Last resort: use any available epoch
-                    if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
-                        warn!("⚠️ [LEADER] Using epoch {} committee for commit from epoch {} (only available)",
-                                available_epoch, epoch);
-                        addrs.clone()
-                    } else {
-                        error!("🚨 [FATAL] No committees available in cache!");
-                        anyhow::bail!("No committee data available in cache — cannot determine leader for epoch {}.", epoch);
-                    }
-                }
-            } else {
-                // epoch == 0 but not found - use any available
-                if let Some((available_epoch, addrs)) = epoch_addresses.iter().next() {
-                    warn!(
-                        "⚠️ [LEADER] Using epoch {} committee for commit from epoch 0",
-                        available_epoch
-                    );
-                    addrs.clone()
-                } else {
-                    error!("🚨 [FATAL] No committees available in cache!");
-                    anyhow::bail!(
-                        "No committee data available in cache (epoch 0) — cannot determine leader."
-                    );
-                }
-            };
-
-            // STEP 2: Validate leader index is in range
-            let committee_size = eth_addresses.len();
-            if leader_author_index >= committee_size {
-                // SELF-RECOVERY: Instead of panic, try to refresh the cache
-                drop(epoch_addresses); // Release lock before refresh
-
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!(
-                        "🚨 [FATAL] leader_author_index {} >= committee_size {} after {} retries!",
-                        leader_author_index, committee_size, max_retries
-                    );
-                    error!("🚨 [FATAL] Committee size mismatch - letting Go handle the deterministic fallback to prevent cluster Hash divergence.");
-                    break None;
-                }
-
-                warn!(
-                        "⚠️ [LEADER] leader_index {} >= committee_size {} for epoch {}. Refreshing cache... retry {}/{}",
-                        leader_author_index, committee_size, epoch, retry_attempts, max_retries
-                    );
-
-                // Try to refresh epoch_eth_addresses from Go
-                if let Some(ref client) = executor_client {
-                    match client.get_epoch_boundary_data(epoch).await {
-                        Ok((returned_epoch, _ts, _boundary, validators, _, _))
-                            if returned_epoch == epoch =>
-                        {
-                            // Sort validators same way as committee builder
-                            let mut sorted_validators: Vec<_> = validators.into_iter().collect();
-                            sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-
-                            let mut new_eth_addresses = Vec::new();
-                            for validator in &sorted_validators {
-                                let eth_addr_bytes = if validator.address.starts_with("0x")
-                                    && validator.address.len() == 42
-                                {
-                                    match hex::decode(&validator.address[2..]) {
-                                        Ok(bytes) if bytes.len() == 20 => bytes,
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                                new_eth_addresses.push(eth_addr_bytes);
-                            }
-
-                            // Update the cache
-                            let mut cache = validator_eth_addresses.write().await;
-                            cache.insert(epoch, new_eth_addresses);
-                            info!(
-                                    "🔄 [LEADER] Refreshed epoch_eth_addresses for epoch {}: now have {} validators (cache size: {})",
-                                    epoch, sorted_validators.len(), cache.len()
-                                );
-                        }
-                        Ok((returned_epoch, _, _, _, _, _)) => {
-                            warn!(
-                                    "⚠️ [LEADER] Go returned epoch {} but requested epoch {}. Retrying...",
-                                    returned_epoch, epoch
-                                );
-                        }
-                        Err(e) => {
-                            warn!("⚠️ [LEADER] Failed to refresh epoch_eth_addresses: {}. Retrying...", e);
-                        }
-                    }
-                }
-
-                sleep(Duration::from_millis(500)).await;
-                continue; // Retry the whole loop
-            }
-
-            // STEP 3: Validate ETH address is valid (20 bytes)
-            let addr = eth_addresses[leader_author_index].clone();
-            if addr.len() != 20 {
-                // SELF-RECOVERY: Try to refresh for invalid address too
-                drop(epoch_addresses);
-
-                retry_attempts += 1;
-                if retry_attempts > max_retries {
-                    error!(
-                            "🚨 [FATAL] eth_address at index {} has invalid length {} (expected 20) after {} retries! Letting Go handle the deterministic fallback to prevent cluster Hash divergence.",
-                            leader_author_index, addr.len(), max_retries
-                        );
-                    break None;
-                }
-
-                warn!(
-                        "⚠️ [LEADER] Invalid eth_address length at index {}. Refreshing cache... retry {}/{}",
-                        leader_author_index, retry_attempts, max_retries
-                    );
-                sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-
-            // SUCCESS: Valid leader address found
-            if total_transactions > 0 || has_system_tx {
-                info!(
-                    "✅ [LEADER] Resolved leader for commit #{} (epoch {}): index={} -> 0x{}",
-                    commit_index,
-                    epoch,
-                    leader_author_index,
-                    hex::encode(&addr)
-                );
-            }
-            break Some(addr);
-        };
-
-        resolved_address
-    } else {
-        None // No executor client = no need for leader address
-    };
+    // LEADER ADDRESS: Pre-resolved by CommitProcessor and embedded in subdag.
+    // Same immutability pattern as global_exec_index — set once, never recalculated.
+    let leader_address = subdag.leader_address.clone();
 
     if total_transactions > 0 || has_system_tx {
         trace!(
@@ -308,7 +114,15 @@ pub async fn dispatch_commit(
                     "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit GEI={}.",
                     commit_index, go_current_gei, global_exec_index
                 );
-                return Ok(1);
+                // CRITICAL FORK-SAFETY v5: Do NOT return Ok(1) blindly!
+                // If a commit had 50001 TXs, it consumed 2 GEIs. If we skip it and return 1, 
+                // this node will permanently lose 1 GEI from its cumulative_fragment_offset!
+                let expected_fragments = if total_transactions > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {
+                    total_transactions.div_ceil(crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK) as u64
+                } else {
+                    1
+                };
+                return Ok(expected_fragments);
             } else {
                 info!(
                     "⚠️ [GEI GUARD] Go GEI={} >= commit GEI={}, but commit #{} \
@@ -344,13 +158,7 @@ pub async fn dispatch_commit(
                     trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
                                 batch_id, global_exec_index, commit_index, geis_consumed);
 
-                    // Update shared_last_global_exec_index to the LAST GEI of the fragment range
-                    let last_gei = global_exec_index + geis_consumed - 1;
-                    if let Some(shared_index) = shared_last_global_exec_index.clone() {
-                        let mut index_guard = shared_index.lock().await;
-                        *index_guard = last_gei;
-                        trace!("📊 [GLOBAL_EXEC_INDEX] Updated shared last_global_exec_index to {} after successful send (geis_consumed={})", last_gei, geis_consumed);
-                    }
+                    // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.
 
                     // Track lag every 500 commits (reduced from 100 to minimize Go RPC during sync)
                     if commit_index % 500 == 0 {

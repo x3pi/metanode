@@ -62,6 +62,8 @@ impl Core {
                     subdags.len(),
                     new_commit_index
                 );
+
+
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
@@ -203,6 +205,109 @@ impl Core {
                 // have dangling blocks that trick the committer into choosing a leader whose
                 // ancestors are missing from RocksDB, leading to a fatal StorageFailure panic.
                 if is_sync_mode {
+                    break;
+                }
+
+                // CRITICAL FORK-SAFETY FIX:
+                // Do not run local committer if the node is not in Healthy phase (e.g. CatchingUp).
+                // We MUST rely on CommitSyncer to provide canonical network commits to
+                // ensure bit-perfect metadata (timestamp, leader) parity with the cluster.
+                if self.coordination_hub.should_skip_proposal() {
+                    tracing::debug!(
+                        "⏭️ [SYNC] Skipping local committer because node phase is {:?}. Waiting for CommitSyncer.",
+                        self.coordination_hub.get_phase()
+                    );
+                    break;
+                }
+
+                // DAG SPARSENESS PREVENTION:
+                // Even if the phase is Healthy (e.g., lag <= 10), if we are missing ANY network commits,
+                // we MUST NOT evaluate the local committer!
+                // Local evaluation on a recently fast-forwarded (sparse) DAG will produce a truncated
+                // sub-dag with missing historical blocks, resulting in a divergent Timestamp and State Root!
+                let local_commit_index = self.dag_state.read().last_commit_index();
+                let quorum_commit_index = self.coordination_hub.get_quorum_commit_index();
+                if local_commit_index < quorum_commit_index {
+                    tracing::info!(
+                        "⏳ [ANTI-FORK] Local commit ({}) < Quorum commit ({}). Skipping local committer to prevent sparse DAG evaluation. Waiting for CertifiedCommits from CommitSyncer.",
+                        local_commit_index,
+                        quorum_commit_index
+                    );
+                    break;
+                }
+
+                // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`
+                // before running the local committer. If `CommitSyncer` executed a cold-start
+                // fast-forward (`reset_to_network_baseline`), `Core`'s in-memory `last_decided_leader`
+                // will be stuck at Genesis. This ensures the local committer resumes from the correct
+                // post-sync network boundary instead of rebuilding ancient history and causing a metadata fork.
+                let dag_last_decided = self.dag_state.read().last_commit_leader();
+                if self.last_decided_leader.round < dag_last_decided.round {
+                    // Note: We rely on the Phase guard (CatchingUp/StateSyncing) below
+                    // to prevent the local committer from running until the DAG is populated.
+                    tracing::info!(
+                        "🔄 [SYNC] Core fast-forwarding last_decided_leader from {:?} to {:?} to match DagState baseline. Local committer will resume when node becomes Healthy.",
+                        self.last_decided_leader,
+                        dag_last_decided
+                    );
+                    self.last_decided_leader = dag_last_decided;
+
+                    // CRITICAL FIX: Restore LeaderSchedule from the baseline if available
+                    if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
+                        tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
+                        self.leader_schedule.update_from_baseline_scores(
+                            self.context.clone(),
+                            self.dag_state.read().last_commit_index(),
+                            scores
+                        );
+                    }
+                }
+
+                // DAG DENSITY CHECK AND LIVENESS SKIP REMOVED (v5):
+                // 1. The liveness skip (jumping last_decided_leader) is unsafe because it breaks
+                //    the contiguous prefix requirement, potentially allowing a node to commit a
+                //    leader locally that differs from the network, causing a metadata fork.
+                // 2. The DAG density check is unsafe because it permanently stalls the entire network
+                //    if any round naturally misses a block (e.g. node offline, delayed proposal).
+                // 
+                // Why it is safe without them:
+                // After a DAG wipe + fast-forward, last_commit_leader is round 0.
+                // The local committer evaluates down to round 1. Since ancient rounds are wiped,
+                // round 1 is empty, so try_decide returns Undecided and the prefix is empty.
+                // The node will naturally decide NOTHING locally.
+                // It will wait until the rest of the network decides the next commit.
+                // Once the network decides, quorum_commit_index advances.
+                // The (local_commit_index < quorum_commit_index) guard triggers, the node fetches
+                // the CertifiedCommit, processes it, and last_decided_leader is updated safely
+                // to the exact network-agreed round. Then local consensus resumes normally!
+
+                // PHASE GUARD: Block local committer while the node is catching up.
+                // The DAG is sparse (missing ancestor blocks) so local commit evaluation
+                // would produce divergent timestamps and leader addresses.
+                // Only CertifiedCommits (network-verified) are safe to process during catch-up.
+                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() {
+                    tracing::info!(
+                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase. \
+                         Waiting for node to become Healthy.",
+                        self.coordination_hub.get_phase()
+                    );
+                    break;
+                }
+
+                // SCHEDULE GUARD: Block local committer when LeaderSchedule is unconfirmed.
+                // After restart, if CommitInfo was not persisted in RocksDB, the schedule
+                // falls back to a default (empty) LeaderSwapTable. This produces different
+                // leader elections than the network's reputation-swapped schedule, causing
+                // LEADER_ADDR divergence and hash forks.
+                // The schedule becomes confirmed when either:
+                //   - CommitInfo is recovered from store, OR
+                //   - A full 300-commit scoring cycle completes, OR
+                //   - Baseline scores are injected from the network.
+                if !self.leader_schedule.is_schedule_confirmed() {
+                    tracing::info!(
+                        "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
+                         Waiting for 300-commit scoring cycle or network baseline scores."
+                    );
                     break;
                 }
 

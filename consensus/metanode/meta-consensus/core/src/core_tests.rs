@@ -97,7 +97,7 @@ impl CoreTextFixture {
         let block_receiver = signal_receivers.block_broadcast_receiver();
 
         let (commit_consumer, commit_output_receiver, blocks_output_receiver) =
-            CommitConsumerArgs::new(0, 0, [0; 32]);
+            CommitConsumerArgs::new(0, 0, [0; 32], 0);
         let commit_observer = CommitObserver::new(
             context.clone(),
             commit_consumer,
@@ -230,7 +230,7 @@ async fn test_core_recover_from_store_for_full_round() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -374,7 +374,7 @@ async fn test_core_recover_from_store_for_partial_round() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -495,7 +495,7 @@ async fn test_core_propose_after_genesis() {
         dag_state.clone(),
     ));
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -726,7 +726,7 @@ async fn test_commit_and_notify_for_block_status() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -897,7 +897,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -1000,7 +1000,7 @@ async fn test_core_set_min_propose_round() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -1360,7 +1360,7 @@ async fn test_smart_ancestor_selection() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -1656,7 +1656,7 @@ async fn test_excluded_ancestor_limit() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -1755,7 +1755,7 @@ async fn test_core_set_propagation_delay_per_authority() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -2207,7 +2207,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32]);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,

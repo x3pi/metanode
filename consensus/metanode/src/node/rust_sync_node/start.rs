@@ -18,7 +18,7 @@ use tracing::{info, warn};
 #[allow(dead_code)]
 pub async fn start_rust_sync_task(
     executor_client: Arc<ExecutorClient>,
-    epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64)>,
+    epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64, u64)>,
     initial_epoch: u64,
     initial_commit_index: u32,
     epoch_base_index: u64,
@@ -39,7 +39,7 @@ pub async fn start_rust_sync_task(
 /// Start the Rust P2P sync task with full networking support
 pub async fn start_rust_sync_task_with_network(
     executor_client: Arc<ExecutorClient>,
-    epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64)>,
+    epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64, u64)>,
     initial_epoch: u64,
     _initial_commit_index: u32, // Deprecated - we now use go_last_block for queue initialization
     context: Arc<Context>,

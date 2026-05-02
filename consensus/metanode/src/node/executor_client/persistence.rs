@@ -92,11 +92,9 @@ pub async fn read_last_block_number(storage_path: &Path) -> Result<u64> {
     Ok(u64::from_le_bytes(buf))
 }
 
-/// RS-2: Persist cumulative_fragment_offset to disk for crash recovery.
-/// During block fragmentation (commits with >MAX_TXS_PER_GO_BLOCK TXs), the offset
-/// accumulates extra GEIs. If a node crashes mid-epoch, this offset MUST be recovered
-/// to compute correct GEIs — otherwise the node diverges (fork).
-/// Uses atomic write (temp + rename) for corruption safety.
+/// PHASE-B DEPRECATED: Fragment offset tracking is no longer used.
+/// Go assigns GEI exclusively via GEIAuthority.
+#[allow(dead_code)]
 pub async fn persist_fragment_offset(storage_path: &Path, offset: u64) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let persist_dir = storage_path.join("executor_state");
@@ -117,8 +115,7 @@ pub async fn persist_fragment_offset(storage_path: &Path, offset: u64) -> Result
     Ok(())
 }
 
-/// Reset/Delete persisted fragment offset from disk.
-/// Call this during epoch transitions to prevent carrying over the offset into the new epoch.
+#[allow(dead_code)]
 pub async fn reset_fragment_offset(storage_path: &Path) -> Result<()> {
     let persist_path = storage_path
         .join("executor_state")
@@ -131,8 +128,7 @@ pub async fn reset_fragment_offset(storage_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// RS-2: Load persisted fragment offset from disk.
-/// Returns 0 if file doesn't exist (first start or clean epoch).
+#[allow(dead_code)]
 pub fn load_fragment_offset(storage_path: &Path) -> u64 {
     let persist_path = storage_path
         .join("executor_state")
@@ -213,6 +209,211 @@ pub fn load_persisted_last_index(storage_path: &Path) -> Option<(u64, u32)> {
             warn!("⚠️ [PERSIST] Failed to read last_sent_index: {}", e);
             None
         }
+    }
+}
+
+/// Get a wipe-safe storage path that survives DAG wipes.
+/// DAG wipe deletes `config/storage/node_{id}/` but this creates
+/// `config/storage/wipe_safe_node_{id}/` as a sibling directory.
+pub fn wipe_safe_path(storage_path: &Path) -> std::path::PathBuf {
+    // storage_path is like: config/storage/node_1
+    // We want: config/storage/wipe_safe_node_1
+    if let Some(parent) = storage_path.parent() {
+        if let Some(dir_name) = storage_path.file_name().and_then(|n| n.to_str()) {
+            return parent.join(format!("wipe_safe_{}", dir_name));
+        }
+    }
+    // Fallback: use storage_path itself
+    storage_path.to_path_buf()
+}
+
+#[allow(dead_code)]
+pub async fn persist_fragment_offset_wipe_safe(storage_path: &Path, offset: u64) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let temp_path = safe_dir.join("fragment_offset.tmp");
+    let final_path = safe_dir.join("fragment_offset.bin");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(&offset.to_le_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    trace!(
+        "💾 [PERSIST-SAFE] Saved fragment_offset={} to {:?}",
+        offset, final_path
+    );
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn load_fragment_offset_wipe_safe(storage_path: &Path) -> u64 {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offset.bin");
+
+    if !persist_path.exists() {
+        return 0;
+    }
+
+    match std::fs::read(&persist_path) {
+        Ok(bytes) if bytes.len() == 8 => {
+            let offset = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            info!(
+                "📂 [PERSIST-SAFE] Loaded wipe-safe fragment_offset={} from {:?}",
+                offset, persist_path
+            );
+            offset
+        }
+        Ok(bytes) => {
+            warn!(
+                "⚠️ [PERSIST-SAFE] Corrupted wipe-safe fragment_offset file: {} bytes",
+                bytes.len()
+            );
+            0
+        }
+        Err(e) => {
+            warn!("⚠️ [PERSIST-SAFE] Failed to read wipe-safe fragment_offset: {}", e);
+            0
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub async fn reset_fragment_offset_wipe_safe(storage_path: &Path) -> Result<()> {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offset.bin");
+
+    if persist_path.exists() {
+        tokio::fs::remove_file(&persist_path).await?;
+        info!("📂 [PERSIST-SAFE] Reset wipe-safe fragment_offset file for new epoch.");
+    }
+    
+    // Also reset the JSON map
+    let json_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("fragment_offsets.json");
+    if json_path.exists() {
+        tokio::fs::remove_file(&json_path).await?;
+        info!("📂 [PERSIST-SAFE] Reset wipe-safe fragment_offsets JSON file for new epoch.");
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn persist_recent_fragment_offsets_wipe_safe(
+    storage_path: &Path,
+    commit_index: u32,
+    offset: u64,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    use tokio::io::AsyncWriteExt;
+
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let final_path = safe_dir.join("fragment_offsets.json");
+    let temp_path = safe_dir.join("fragment_offsets.tmp");
+
+    let mut map: BTreeMap<u32, u64> = BTreeMap::new();
+    if final_path.exists() {
+        if let Ok(contents) = tokio::fs::read_to_string(&final_path).await {
+            if let Ok(parsed) = serde_json::from_str(&contents) {
+                map = parsed;
+            }
+        }
+    }
+
+    map.insert(commit_index, offset);
+
+    // Prune old entries to keep bounded size
+    while map.len() > 100 {
+        if let Some(first_key) = map.keys().next().copied() {
+            map.remove(&first_key);
+        }
+    }
+
+    let json = serde_json::to_string(&map)?;
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(json.as_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn load_recent_fragment_offsets_wipe_safe(storage_path: &Path) -> std::collections::BTreeMap<u32, u64> {
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    let final_path = safe_dir.join("fragment_offsets.json");
+
+    if let Ok(contents) = std::fs::read_to_string(&final_path) {
+        if let Ok(parsed) = serde_json::from_str(&contents) {
+            return parsed;
+        }
+    }
+    std::collections::BTreeMap::new()
+}
+
+/// Persist last_sent_index to a WIPE-SAFE location.
+pub async fn persist_last_sent_index_wipe_safe(
+    storage_path: &Path,
+    index: u64,
+    commit_index: u32,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let safe_dir = wipe_safe_path(storage_path).join("executor_state");
+    std::fs::create_dir_all(&safe_dir)?;
+    let temp_path = safe_dir.join("last_sent_index.tmp");
+    let final_path = safe_dir.join("last_sent_index.bin");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    file.write_all(&index.to_le_bytes()).await?;
+    file.write_all(&commit_index.to_le_bytes()).await?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    std::fs::rename(&temp_path, &final_path)?;
+    trace!(
+        "💾 [PERSIST-SAFE] Saved last_sent_index={}, commit_index={} to {:?}",
+        index, commit_index, final_path
+    );
+    Ok(())
+}
+
+/// Load last_sent_index from wipe-safe location.
+pub fn load_persisted_last_index_wipe_safe(storage_path: &Path) -> Option<(u64, u32)> {
+    let persist_path = wipe_safe_path(storage_path)
+        .join("executor_state")
+        .join("last_sent_index.bin");
+
+    if !persist_path.exists() {
+        return None;
+    }
+
+    match std::fs::read(&persist_path) {
+        Ok(bytes) if bytes.len() == 12 => {
+            let index = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            let commit = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+            info!(
+                "📂 [PERSIST-SAFE] Loaded wipe-safe last_sent_index={}, commit_index={} from {:?}",
+                index, commit, persist_path
+            );
+            Some((index, commit))
+        }
+        Ok(bytes) if bytes.len() == 8 => {
+            let index = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            warn!("⚠️ [PERSIST-SAFE] Legacy format detected. Defaulting commit_index to 0.");
+            Some((index, 0))
+        }
+        _ => None,
     }
 }
 

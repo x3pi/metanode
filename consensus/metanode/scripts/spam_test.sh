@@ -19,6 +19,7 @@ for ((i=1; i<=MAX_RUNS; i++)); do
     
     # Chỉ chạy destructive test (khởi động/wipe) và bỏ qua rác Log 
     # Nếu muốn bỏ qua restart hoàn toàn cả trong test chặn, hãy thêm --skip-destructive
+    export DISABLE_REPUTATION_SWAPS=1
     if ./e2e_test_suite.sh --node "$TARGET_NODE"; then
         echo -e "\n✅ Vòng $i PASSED thành công rực rỡ!"
         PASSED=$((PASSED + 1))

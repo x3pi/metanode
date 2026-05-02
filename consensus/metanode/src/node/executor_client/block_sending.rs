@@ -52,7 +52,7 @@ impl ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<u64> {
         if !self.is_enabled() {
             return Ok(1); // Silently skip if not enabled
@@ -85,13 +85,22 @@ impl ExecutorClient {
                     )
                 })
                 .collect();
-            info!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
+            trace!("[batch_id={}] 🔍 [DIAG] send_committed_subdag: total_tx={}, blocks={}, details=[{}]",
                 batch_id, total_tx_before, subdag.blocks.len(), block_details.join(", "));
         }
 
+        // Determine expected fragments early so we can return it if we skip
+        let expected_fragments = if total_tx_before > MAX_TXS_PER_GO_BLOCK {
+            total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK) as u64
+        } else {
+            1
+        };
+
         // REPLAY PROTECTION: Discard blocks that are already processed
         // This is critical when Consensus replays old commits on restart
-        {
+        // PHASE-B: When global_exec_index=0, Rust doesn't track GEI — skip this guard.
+        // Go handles dedup internally via is_authoritative_gei + GEIAuthority.
+        if global_exec_index > 0 {
             let next_expected = self.next_expected_index.lock().await;
             if global_exec_index < *next_expected {
                 // Only log periodically or for non-empty blocks to avoid noise during replay
@@ -101,20 +110,20 @@ impl ExecutorClient {
                         global_exec_index, *next_expected
                     );
                 }
-                return Ok(1);
+                return Ok(expected_fragments);
             }
         }
 
         // DUAL-STREAM DEDUP: Prevent duplicate sends from Consensus and Sync streams
-        // This is critical for BlockCoordinator integration
-        {
+        // PHASE-B: Skip when global_exec_index=0 — all commits would hash to 0.
+        if global_exec_index > 0 {
             let sent = self.sent_indices.lock().await;
             if sent.contains(&global_exec_index) {
                 info!(
                     "🔄 [DEDUP] Skipping already-sent block from dual-stream: global_exec_index={}",
                     global_exec_index
                 );
-                return Ok(1); // Already sent, skip
+                return Ok(expected_fragments); // Already sent, skip but return correct fragments
             }
             // Don't insert yet - insert only after successful send
         }
@@ -124,7 +133,7 @@ impl ExecutorClient {
         // ═══════════════════════════════════════════════════════════════
         let mut all_proto_txs = Vec::new();
         let mut total_after_dedup = 0;
-
+        
         if total_tx_before > 0 {
             all_proto_txs = self.build_sorted_transactions(subdag)?;
             total_after_dedup = all_proto_txs.len();
@@ -141,68 +150,15 @@ impl ExecutorClient {
             info!("🔪 [FRAGMENT] Splitting large commit: {} TXs → {} fragments of ≤{} TXs each (global_exec_index={}, commit_index={}, epoch={})",
                 total_tx_before, num_fragments, MAX_TXS_PER_GO_BLOCK, global_exec_index, subdag.commit_ref.index, epoch);
 
-            if total_after_dedup == 0 {
-                // All TXs were filtered out — send as empty commit
-                let block_number = {
-                    let next_expected_guard = self.next_expected_index.lock().await;
-                    if global_exec_index < *next_expected_guard {
-                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already processed, keeping BN=0", global_exec_index);
-                        0
-                    } else if self
-                        .send_buffer
-                        .lock()
-                        .await
-                        .contains_key(&global_exec_index)
-                    {
-                        trace!("⏭️  [BLOCK-NUM] Empty commit GEI={} is already in buffer, keeping BN=0", global_exec_index);
-                        0
-                    } else {
-                        let mut next_bn = self.next_block_number.lock().await;
-                        let mut last_ep = self.last_processed_epoch.lock().await;
-                        let is_epoch_boundary = epoch > *last_ep;
-                        if epoch > *last_ep {
-                            *last_ep = epoch;
-                        }
-                        if is_epoch_boundary {
-                            let bn = *next_bn;
-                            *next_bn += 1;
-                            bn
-                        } else {
-                            0
-                        }
-                    }
-                };
-
-                let epoch_data = ExecutableBlock {
-                    transactions: vec![],
-                    global_exec_index,
-                    commit_index: subdag.commit_ref.index,
-                    epoch,
-                    commit_timestamp_ms: subdag.timestamp_ms,
-                    leader_author_index: subdag.leader.author.value() as u32,
-                    leader_address: leader_address.clone().unwrap_or_default(),
-                    block_number,
-                    commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
-                };
-                let mut empty_bytes = Vec::new();
-                epoch_data.encode(&mut empty_bytes)?;
-
-                self.buffer_and_flush(
-                    global_exec_index,
-                    empty_bytes,
-                    epoch,
-                    subdag.commit_ref.index,
-                    0,
-                )
-                .await?;
-                return Ok(1);
-            }
-
-            // Recalculate fragments after dedup
-            let actual_fragments = total_after_dedup.div_ceil(MAX_TXS_PER_GO_BLOCK);
+            // CRITICAL FORK-SAFETY v5: Recalculate fragments using total_tx_before 
+            // (from the consensus deterministic subdag) instead of total_after_dedup.
+            // If we use total_after_dedup, a restarted node (empty tx_recycler) will 
+            // fragment differently than a continuous node (populated tx_recycler), 
+            // causing GEI divergence!
+            let actual_fragments = total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK);
 
             for frag_idx in 0..actual_fragments {
-                let start = frag_idx * MAX_TXS_PER_GO_BLOCK;
+                let start = std::cmp::min(frag_idx * MAX_TXS_PER_GO_BLOCK, total_after_dedup);
                 let end = std::cmp::min(start + MAX_TXS_PER_GO_BLOCK, total_after_dedup);
                 let fragment_txs: Vec<TransactionExe> = all_proto_txs[start..end].to_vec();
                 let fragment_gei = global_exec_index + frag_idx as u64;
@@ -211,43 +167,55 @@ impl ExecutorClient {
                     let next_expected_guard = self.next_expected_index.lock().await;
                     if fragment_gei < *next_expected_guard {
                         // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
-                        trace!(
-                            "⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0",
-                            fragment_gei
-                        );
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
                         0
                     } else if self.send_buffer.lock().await.contains_key(&fragment_gei) {
-                        trace!(
-                            "⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0",
-                            fragment_gei
-                        );
+                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0", fragment_gei);
                         0
                     } else {
                         let mut next_bn = self.next_block_number.lock().await;
                         let mut last_ep = self.last_processed_epoch.lock().await;
-                        // Fragment with txs > 0 ALWAYS consumes a block number
-                        if epoch > *last_ep {
+                        
+                        let is_epoch_boundary = epoch > *last_ep;
+                        if is_epoch_boundary {
                             *last_ep = epoch;
                         }
-                        // Since fragment total_after_dedup > MAX_TXS_PER_GO_BLOCK, it definitely has txs > 0
-                        // unless somehow after dedup all fragments have 0 txs, which is handled above.
-                        // So we always allocate a block number.
+
+                        // We ALWAYS increment block number for fragments to ensure block numbers 
+                        // stay perfectly synchronized between continuous nodes (whose TxRecycler 
+                        // may deduplicate many TXs making the fragment empty) and restarted nodes 
+                        // (whose empty TxRecycler will allow TXs through).
                         let bn = *next_bn;
                         *next_bn += 1;
                         bn
                     }
                 };
 
+                let subdag_commit_idx = subdag.commit_ref.index;
+                let is_last_frag = frag_idx == actual_fragments - 1;
+                
+                // CRITICAL FORK-SAFETY v6: Do not update Go's last_handled_commit_index until
+                // the FINAL fragment of a commit is executed. If a node crashes mid-commit,
+                // Go will stay at C-1, forcing the node to safely replay the entire commit C
+                // on restart, using executor_client's next_expected_index to skip already-executed fragments.
+                let commit_index_for_go = if is_last_frag {
+                    subdag_commit_idx
+                } else {
+                    subdag_commit_idx.saturating_sub(1)
+                };
+
                 let epoch_data = ExecutableBlock {
-                    transactions: fragment_txs,
+                    transactions: fragment_txs.clone(),
                     global_exec_index: fragment_gei,
-                    commit_index: subdag.commit_ref.index,
+                    commit_index: commit_index_for_go,
                     epoch,
                     commit_timestamp_ms: subdag.timestamp_ms,
                     leader_author_index: subdag.leader.author.value() as u32,
-                    leader_address: leader_address.clone().unwrap_or_default(),
+                    leader_address: leader_address.clone(),
                     block_number,
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+                    // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
+                    is_authoritative_gei: false,
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -282,54 +250,21 @@ impl ExecutorClient {
         // NORMAL PATH: Commit fits within MAX_TXS_PER_GO_BLOCK
         // ═══════════════════════════════════════════════════════════════
 
-        let has_system_tx = subdag.blocks.iter().any(|b| {
-            b.transactions()
-                .iter()
-                .any(|tx| SystemTransaction::from_bytes(tx.data()).is_ok())
+        let _has_system_tx = subdag.blocks.iter().any(|b| {
+            b.transactions().iter().any(|tx| {
+                SystemTransaction::from_bytes(tx.data()).is_ok()
+            })
         });
 
         let block_number = {
-            let next_expected_guard = self.next_expected_index.lock().await;
-            if global_exec_index < *next_expected_guard {
-                // REPLAY PROTECTION: Skip incrementing block number for already-processed commit
-                trace!("⏭️  [BLOCK-NUM] Commit GEI={} is already processed (expected {}), keeping BN=0", global_exec_index, *next_expected_guard);
-                0
-            } else if self
-                .send_buffer
-                .lock()
-                .await
-                .contains_key(&global_exec_index)
-            {
-                trace!(
-                    "⏭️  [BLOCK-NUM] Commit GEI={} is already in buffer, keeping BN=0",
-                    global_exec_index
-                );
-                0
-            } else {
-                let mut next_bn = self.next_block_number.lock().await;
-                let mut last_ep = self.last_processed_epoch.lock().await;
-                let is_epoch_boundary = epoch > *last_ep;
-
-                // Force block generation for EndOfEpoch commit
-                let force_block_creation = is_epoch_boundary || has_system_tx;
-
-                if epoch > *last_ep {
-                    *last_ep = epoch;
-                }
-
-                if total_after_dedup > 0 || force_block_creation {
-                    let bn = *next_bn;
-                    *next_bn += 1;
-                    trace!(
-                        "📊 [BLOCK-NUM] Generating new block_number={} for GEI={}",
-                        bn,
-                        global_exec_index
-                    );
-                    bn
-                } else {
-                    0
-                }
+            let mut next_bn = self.next_block_number.lock().await;
+            let mut last_ep = self.last_processed_epoch.lock().await;
+            if epoch > *last_ep {
+                *last_ep = epoch;
             }
+            let bn = *next_bn;
+            *next_bn += 1;
+            bn
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
@@ -340,9 +275,11 @@ impl ExecutorClient {
             epoch,
             commit_timestamp_ms: subdag.timestamp_ms,
             leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
+            leader_address,
             block_number,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            // GO-AUTHORITATIVE GEI: Disabled. Rust is the absolute authority for GEI.
+            is_authoritative_gei: false,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -370,6 +307,39 @@ impl ExecutorClient {
         commit_index: u32,
         total_tx: usize,
     ) -> Result<()> {
+        // ═══════════════════════════════════════════════════════════════
+        // PHASE-B DIRECT SEND: When global_exec_index=0, Rust doesn't
+        // track GEI. The GEI-keyed buffer is incompatible (all commits
+        // would get key=0, causing overwrites). CommitProcessor already
+        // ensures sequential ordering, so bypass buffer and send directly.
+        // ═══════════════════════════════════════════════════════════════
+        if global_exec_index == 0 {
+            // Ensure connection
+            if let Err(e) = self.connect().await {
+                warn!("⚠️  Executor connection failed: {}", e);
+                return Ok(());
+            }
+
+            if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                let success = c_fn(epoch_data_bytes.as_ptr(), epoch_data_bytes.len());
+                if success {
+                    self.record_send_success().await;
+                    trace!(
+                        "✅ [PHASE-B DIRECT] Sent commit_index={} to Go FFI (epoch={}, tx={})",
+                        commit_index, epoch, total_tx
+                    );
+                } else {
+                    warn!("⚠️  [PHASE-B DIRECT] FFI execute_block failed for commit_index={}", commit_index);
+                    self.record_send_failure().await;
+                }
+            } else {
+                warn!("⚠️  [PHASE-B DIRECT] FFI execute_block not registered");
+                self.record_send_failure().await;
+            }
+            return Ok(());
+        }
+
+        // LEGACY PATH: GEI-based buffer (for non-PHASE-B or transition)
         // SEQUENTIAL BUFFERING: Add to buffer and try to send in order
         {
             let mut buffer = self.send_buffer.lock().await;
@@ -418,9 +388,7 @@ impl ExecutorClient {
                     warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
-            buffer
-                .entry(global_exec_index)
-                .or_insert((epoch_data_bytes, epoch, commit_index));
+            buffer.entry(global_exec_index).or_insert((epoch_data_bytes, epoch, commit_index));
             trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
@@ -651,6 +619,15 @@ impl ExecutorClient {
                     );
                 }
             }
+            // Wipe-safe persist more frequently (every 10 commits) because this is
+            // the critical recovery path for DAG wipe scenarios. Regular persist
+            // uses PERSIST_INTERVAL=100 which is too coarse for recovery accuracy.
+            const WIPE_SAFE_PERSIST_INTERVAL: u64 = 10;
+            if last_idx.is_multiple_of(WIPE_SAFE_PERSIST_INTERVAL) || batch_size > 1 {
+                let _ = super::persistence::persist_last_sent_index_wipe_safe(
+                    storage_path, last_idx, last_commit_index
+                ).await;
+            }
 
             // Phase 4.5: Store ExecutableBlock bytes for sync peers
             // This allows sync nodes to fetch blocks directly from Rust RocksDB
@@ -770,7 +747,7 @@ impl ExecutorClient {
         subdag: &CommittedSubDag,
         epoch: u64,
         global_exec_index: u64,
-        leader_address: Option<Vec<u8>>,
+        leader_address: Vec<u8>,
     ) -> Result<()> {
         if !self.is_enabled() {
             return Ok(()); // Silently skip if not enabled
@@ -785,9 +762,11 @@ impl ExecutorClient {
             epoch,
             commit_timestamp_ms: subdag.timestamp_ms,
             leader_author_index: subdag.leader.author.value() as u32,
-            leader_address: leader_address.unwrap_or_default(),
+            leader_address,
             block_number: 0,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            // GO-AUTHORITATIVE GEI: Disabled
+            is_authoritative_gei: false,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -846,6 +825,7 @@ impl ExecutorClient {
             Err(anyhow::anyhow!("FFI execute_block not registered"))
         }
     }
+
 
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///

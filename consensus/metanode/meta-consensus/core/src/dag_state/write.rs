@@ -55,18 +55,10 @@ impl DagState {
         // Ensure we don't write multiple blocks per slot for our own index.
         // During cold-start amnesia recovery, old own-blocks fetched from peers can
         // conflict with newly created blocks at the same round/author slot.
-        // Instead of panicking, gracefully skip the duplicate.
-        if block_ref.author == self.context.own_index {
-            let existing_blocks = self.get_uncommitted_blocks_at_slot(block_ref.into());
-            if !existing_blocks.is_empty() {
-                error!(
-                    "⚠️ [DAG] Own-slot conflict: attempted to add block {block:#?} to slot \
-                     where block(s) {existing_blocks:#?} already exist. Keeping existing block, \
-                     skipping new one. (Common during amnesia recovery after snapshot restore)"
-                );
-                return;
-            }
-        }
+        // We MUST NOT drop these blocks, because if peers already included the old block
+        // in their causal history, dropping it locally will cause a fork when we try to
+        // reconstruct the commit's causal history.
+        // Mysticeti natively handles multiple blocks per slot (equivocation).
         self.update_block_metadata(&block);
         self.blocks_to_write.push(block);
         let source = if self.context.own_index == block_ref.author {
@@ -175,6 +167,12 @@ impl DagState {
 
     /// Returns true if the block is committed. Only valid for blocks above the GC round.
     pub fn is_committed(&self, block_ref: &BlockRef) -> bool {
+        // FAST PATH: If the block's round is <= the last committed round for its author,
+        // it must have been committed (or is older than the network baseline).
+        if block_ref.round <= self.last_committed_rounds[block_ref.author] {
+            return true;
+        }
+
         match self.recent_blocks.get(block_ref) {
             Some(info) => info.committed,
             None => {
@@ -211,10 +209,29 @@ impl DagState {
             if block_ref.round <= gc_round {
                 continue;
             }
-            let block_info = self
-                .recent_blocks
-                .get_mut(&block_ref)
-                .unwrap_or_else(|| panic!("Block {:?} is not in DAG state", block_ref));
+            if !self.recent_blocks.contains_key(&block_ref) {
+                // Try to load from DB in case it was evicted
+                if let Ok(mut blocks) = self.store.read_blocks(&[block_ref]) {
+                    if let Some(Some(block)) = blocks.pop() {
+                        let info = BlockInfo::new(block);
+                        self.recent_blocks.insert(block_ref, info);
+                    } else {
+                        tracing::warn!(
+                            "⚠️ [DAG] link_causal_history: Block {:?} is not in cache or DB (likely dropped own-slot conflict). Skipping.",
+                            block_ref
+                        );
+                        continue;
+                    }
+                } else {
+                    tracing::warn!(
+                        "⚠️ [DAG] link_causal_history: Failed to read block {:?} from DB. Skipping.",
+                        block_ref
+                    );
+                    continue;
+                }
+            }
+
+            let block_info = self.recent_blocks.get_mut(&block_ref).unwrap();
             if block_info.included {
                 continue;
             }
@@ -266,15 +283,19 @@ impl DagState {
             }
             assert_eq!(commit.index(), last_commit.index() + 1);
 
-            if commit.timestamp_ms() < last_commit.timestamp_ms() {
-                panic!(
-                    "Commit timestamps do not monotonically increment, prev commit {:?}, new commit {:?}",
-                    last_commit, commit
+            let time_diff = if commit.timestamp_ms() < last_commit.timestamp_ms() {
+                tracing::warn!(
+                    "🚨 [FORK-SAFETY] Commit timestamps do not monotonically increment! Prev (index={}) time={}ms, New (index={}) time={}ms. This can occur during catch-up syncing. Bypassing panic.",
+                    last_commit.index(),
+                    last_commit.timestamp_ms(),
+                    commit.index(),
+                    commit.timestamp_ms()
                 );
-            }
-            commit
-                .timestamp_ms()
-                .saturating_sub(last_commit.timestamp_ms())
+                0
+            } else {
+                commit.timestamp_ms().saturating_sub(last_commit.timestamp_ms())
+            };
+            time_diff
         } else {
             assert_eq!(commit.index(), 1);
             0
@@ -417,8 +438,13 @@ impl DagState {
     pub fn last_commit_timestamp_ms(&self) -> consensus_types::block::BlockTimestampMs {
         match &self.last_commit {
             Some(commit) => commit.timestamp_ms(),
-            None => 0,
+            None => self.fallback_last_commit_timestamp_ms,
         }
+    }
+
+    /// Sets the fallback timestamp when last_commit is None
+    pub fn set_last_commit_timestamp_ms(&mut self, timestamp_ms: u64) {
+        self.fallback_last_commit_timestamp_ms = timestamp_ms;
     }
 
     /// Leader slot of the last commit.

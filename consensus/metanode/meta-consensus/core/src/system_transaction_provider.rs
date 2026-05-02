@@ -156,35 +156,22 @@ impl DefaultSystemTransactionProvider {
             .expect("SystemTime before UNIX_EPOCH — clock is misconfigured")
             .as_millis() as u64;
 
-        // FORK-SAFETY: More lenient check for Go-synced timestamps
-        // Only override if timestamp is more than 5 seconds in the past
-        // This allows for reasonable clock differences between Go and Rust
-        let adjusted_timestamp_ms = if new_timestamp_ms < now_ms.saturating_sub(5000) {
-            warn!(
-                "⚠️  [EPOCH TIMING] SystemTransactionProvider::update_epoch: new_timestamp_ms {}ms is significantly in the past (now={}ms, diff={}ms). \
-                 This may indicate clock sync issues. Using current time to prevent rapid transitions.",
-                new_timestamp_ms,
-                now_ms,
-                now_ms.saturating_sub(new_timestamp_ms)
-            );
-            now_ms
-        } else {
-            new_timestamp_ms
-        };
-
+        // FORK-SAFETY (Apr 2026 Audit): ALWAYS use the authoritative timestamp from Go.
+        // Overriding the timestamp with now_ms if it was >5s in the past caused nodes that 
+        // were catching up to have a desynced epoch_start_timestamp_ms compared to the network.
+        // The cold-start immediate-trigger bug is solved by the go_lag check, not by corrupting the timestamp.
         *self
             .epoch_start_timestamp_ms
             .write()
-            .unwrap_or_else(|p| p.into_inner()) = adjusted_timestamp_ms;
+            .unwrap_or_else(|p| p.into_inner()) = new_timestamp_ms;
         *self
             .last_checked_commit_index
             .write()
             .unwrap_or_else(|p| p.into_inner()) = 0;
 
         info!(
-            "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms (from new_timestamp_ms={}ms, now={}ms)",
+            "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms (now={}ms)",
             new_epoch,
-            adjusted_timestamp_ms,
             new_timestamp_ms,
             now_ms
         );

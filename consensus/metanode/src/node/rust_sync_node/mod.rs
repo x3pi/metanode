@@ -96,7 +96,7 @@ impl Default for RustSyncConfig {
 pub struct RustSyncNode {
     pub(crate) executor_client: Arc<ExecutorClient>,
     pub(crate) network_client: Option<Arc<TonicClient>>,
-    pub(crate) epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64)>,
+    pub(crate) epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64, u64)>,
     pub(crate) current_epoch: Arc<AtomicU64>,
     pub(crate) last_synced_commit_index: Arc<AtomicU32>,
     pub(crate) committee: Arc<RwLock<Option<Committee>>>,
@@ -128,7 +128,7 @@ impl RustSyncNode {
     ///                   (boundary block). Commit index 1 in current epoch = epoch_base_index + 1
     pub fn new(
         executor_client: Arc<ExecutorClient>,
-        epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64)>,
+        epoch_transition_sender: mpsc::UnboundedSender<(u64, u64, u64, u64)>,
         initial_epoch: u64,
         initial_global_exec_index: u32,
         epoch_base_index: u64,

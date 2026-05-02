@@ -54,6 +54,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 		logger.Info("🔄 [RUST CONTROL] Rust explicitly advanced Go Master memory to block #%d", blk.Header().BlockNumber())
 	})
 
+	// Inject PushAsyncGEIUpdate callback to prevent empty commit stalls
+	reqHandler.SetPushAsyncGEIUpdateCallback(bp.PushAsyncGEIUpdate)
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
@@ -183,8 +186,30 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	// MEMORY FIX: Create FileLogger once (not per-epoch-data) to avoid leaking os.File handles
 	epochFileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("runSocketExecutor_" + ".log"))
 
-	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan (batch-drain enabled)...")
-	for epochData := range dataChan {
+	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (batch-drain enabled)...")
+	authQueue := executor.GetAuthoritativeBlockQueue()
+
+PROCESS_LOOP:
+	for {
+		var epochData *pb.ExecutableBlock
+		var authRespCh chan<- *pb.ExecuteBlockResponse
+
+		select {
+		case req, ok := <-authQueue:
+			if !ok {
+				logger.Warn("Authoritative queue closed")
+				break PROCESS_LOOP
+			}
+			epochData = req.Block
+			authRespCh = req.ResponseCh
+		case data, ok := <-dataChan:
+			if !ok {
+				logger.Info("Data channel closed")
+				break PROCESS_LOOP
+			}
+			epochData = data
+		}
+
 		// Self-monitoring queue and processing rate
 		bp.processedBlockCount++
 		if bp.processedBlockCount%100 == 0 {
@@ -230,61 +255,58 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		// cause all new-session commits to be silently discarded.
 		// ═══════════════════════════════════════════════════════════════════
 		if !bp.rustSessionRestarted.Load() {
-			actualLastBlockDB := storage.GetLastBlockNumber()
-			bpLastBlock := bp.GetLastBlock()
-			bpLastBlockNum := uint64(0)
-			if bpLastBlock != nil {
-				bpLastBlockNum = bpLastBlock.Header().BlockNumber()
-			}
-
 			actualLastGEI := storage.GetLastGlobalExecIndex()
 
 			// CRITICAL FIX: Actually advance local state when DB is ahead
 			if actualLastGEI > 0 && actualLastGEI >= nextExpectedGlobalExecIndex {
 				oldNextExpected := nextExpectedGlobalExecIndex
 				nextExpectedGlobalExecIndex = actualLastGEI + 1
-				if actualLastBlockDB > currentBlockNumber {
+				
+				// WE MUST ALSO ADVANCE currentBlockNumber !!!
+				actualLastBlockDB := storage.GetLastBlockNumber()
+				if actualLastBlockDB > 0 && actualLastBlockDB > currentBlockNumber {
+					oldBlockNumber := currentBlockNumber
 					currentBlockNumber = actualLastBlockDB
+					logger.Info("🔄 [TRANSITION SYNC] Advanced block number from DB: %d → %d",
+						oldBlockNumber, currentBlockNumber)
 				}
+
 				if oldNextExpected != nextExpectedGlobalExecIndex {
-					logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d, block %d → %d (SYNC-FIRST or SyncBlocksRequest advanced DB)",
-						oldNextExpected, nextExpectedGlobalExecIndex, bpLastBlockNum, currentBlockNumber)
+					logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d",
+						oldNextExpected, nextExpectedGlobalExecIndex)
 				}
-			} else if actualLastBlockDB > 0 && actualLastBlockDB > bpLastBlockNum {
-				// Block advanced but GEI didn't — unlikely but handle gracefully
-				currentBlockNumber = actualLastBlockDB
-				logger.Debug("🔍 [TRANSITION SYNC] DB block #%d > in-memory block #%d. Updated currentBlockNumber.",
-					actualLastBlockDB, bpLastBlockNum)
 			}
 		}
 
 		// ═══════════════════════════════════════════════════════════════════
 		// RUST SESSION RESTART DETECTION: After DAG-wipe + restart, Rust
-		// sends commits with GEI lower than Go's existing lastGEI. Without
-		// this detection, processSingleEpochData's Case 1 (duplicate/old)
-		// and GEI-REGRESSION-GUARD silently drop ALL transactions, causing
-		// frozen stateRoot → FORK.
+		// sends commits with GEI (hint) lower than Go's existing lastGEI.
 		//
-		// Detection: If incoming GEI is far below nextExpected AND has
-		// transactions, this is a new Rust session (not a stale replay).
-		// Reset nextExpected to accept the new GEI sequence.
+		// FIX (2026-04-29): Go is the AUTHORITATIVE GEI source. We must
+		// NEVER reset nextExpectedGlobalExecIndex based on Rust's hint GEI.
+		// The is_authoritative_gei path in processSingleEpochData assigns
+		// the correct GEI regardless of what Rust sends as the hint.
+		//
+		// Previously, resetting nextExpected = incomingGEI caused a permanent
+		// GEI offset (~16-23) between this node and the cluster because the
+		// incoming GEI is a Rust hint (epoch_base + commit_index), not the
+		// actual authoritative GEI.
+		//
+		// We only set rustSessionRestarted=true to bypass the GEI-REGRESSION
+		// guard, which would otherwise drop legitimate new-session commits.
 		// ═══════════════════════════════════════════════════════════════════
 		if incomingGEI < nextExpectedGlobalExecIndex && incomingGEI > 0 {
 			geiBackwardGap := nextExpectedGlobalExecIndex - incomingGEI
-			if geiBackwardGap > 50 {
-				// Large backward jump = new Rust session after DAG-wipe
-				logger.Warn("🔄 [RUST-SESSION-RESTART] Detected GEI backward jump: incoming GEI=%d << nextExpected=%d (gap=%d). "+
-					"Rust DAG restarted. Resetting nextExpected to accept new session.",
-					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap)
-				nextExpectedGlobalExecIndex = incomingGEI
-				bp.rustSessionRestarted.Store(true)
-			} else if incomingTxCount > 0 {
-				// Small backward jump with transactions — also likely a new session
-				logger.Warn("⚠️ [RUST-SESSION-RESTART] GEI=%d with %d txs is below nextExpected=%d (gap=%d). "+
-					"Resetting nextExpected for near-gap session restart.",
-					incomingGEI, incomingTxCount, nextExpectedGlobalExecIndex, geiBackwardGap)
-				nextExpectedGlobalExecIndex = incomingGEI
-				bp.rustSessionRestarted.Store(true)
+			if geiBackwardGap > 50 || incomingTxCount > 0 {
+				// Rust session restart detected — mark flag but do NOT reset nextExpected.
+				// Go is the authoritative GEI source and must continue from its own counter.
+				if !bp.rustSessionRestarted.Load() {
+					logger.Warn("🔄 [RUST-SESSION-RESTART] Detected: incoming GEI=%d << nextExpected=%d (gap=%d). "+
+						"Marking session restart. Go will continue authoritative GEI from %d (NOT resetting to Rust hint).",
+						incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, nextExpectedGlobalExecIndex)
+					bp.rustSessionRestarted.Store(true)
+				}
+				// DO NOT reset nextExpectedGlobalExecIndex — Go is authoritative.
 			}
 		}
 
@@ -297,10 +319,12 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 		// This gives 100-10000x speedup during catch-up sync.
 		// FORK-SAFETY: Only empty commits are batched. Any commit with TXs
 		// goes through the full processing path unchanged.
+		// BATCH-DRAIN OPTIMIZATION is skipped for authoritative commits (they require responses)
 		// ═══════════════════════════════════════════════════════════════════
-		if bp.isEmptyCommit(epochData) && epochData.GetGlobalExecIndex() == nextExpectedGlobalExecIndex {
+		if authRespCh == nil && bp.isEmptyCommit(epochData) && epochData.GetGlobalExecIndex() == nextExpectedGlobalExecIndex {
 			batchCount := uint64(1)
 			highestGEI := epochData.GetGlobalExecIndex()
+			highestCommitIndex := epochData.GetCommitIndex()
 
 			// Check epoch from commit
 			lastEpochNum := epochData.GetEpoch()
@@ -327,6 +351,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 					if bp.isEmptyCommit(next) && nextGEI == highestGEI+1 {
 						// Consecutive empty commit — absorb into batch
 						highestGEI = nextGEI
+						highestCommitIndex = next.GetCommitIndex()
 						batchCount++
 						// Track epoch from latest commit
 						nextEpoch := next.GetEpoch()
@@ -347,9 +372,13 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 						// then handle this commit normally below
 						draining = false
 						// Process the batch first
+						// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
+						// use the same atomic counter. Previously used Rust's hint GEI
+						// directly, which could diverge from GEIAuthority's counter.
 						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
-						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash()) // update hash from the last empty commit
 						nextExpectedGlobalExecIndex = highestGEI + 1
+						bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
+						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
 							bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
 						}
@@ -375,8 +404,11 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 			drainTimeout.Stop()
 
 			// Persist only the final GEI (1 DB write for entire batch)
+			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
+			// use the same atomic counter, preventing +1 offset divergence.
 			bp.updateAndPersistLastGlobalExecIndex(highestGEI)
 			nextExpectedGlobalExecIndex = highestGEI + 1
+			bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
 			}
@@ -394,13 +426,25 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 			}
 		BATCH_DONE:
 			continue
-		}
+		} else {
+			// Non-empty commit, authoritative, or non-sequential — full processing path
+			logger.Info("📥 [PROCESSOR] Read block from channel: global_exec_index=%d, auth=%v", epochData.GetGlobalExecIndex(), authRespCh != nil)
+			bp.ExecutionMutex.RLock()
+			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
+			bp.ExecutionMutex.RUnlock()
 
-		// Non-empty commit or non-sequential — full processing path
-		logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", epochData.GetGlobalExecIndex())
-		bp.ExecutionMutex.RLock()
-		bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
-		bp.ExecutionMutex.RUnlock()
+			// GO-AUTHORITATIVE GEI: Send Response
+			if authRespCh != nil {
+				// The GEI authority has already advanced nextExpectedGlobalExecIndex inside processSingleEpochData
+				assignedGei := nextExpectedGlobalExecIndex - 1
+				authRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true,
+					ActualGei:    assignedGei,
+					BlockNumber:  currentBlockNumber,
+					GeisConsumed: 1,
+				}
+			}
+		}
 	}
 
 	// Channel has been closed - can happen when:

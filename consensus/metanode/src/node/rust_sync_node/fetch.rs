@@ -362,12 +362,20 @@ impl RustSyncNode {
                 let actual_blocks = commit_blocks.len();
 
                 if actual_blocks < expected_blocks {
-                    debug!(
-                        "[RUST-SYNC] Commit {} has {}/{} blocks",
+                    warn!(
+                        "🚨 [RUST-SYNC] INCOMPLETE COMMIT DETECTED! Peer {} sent Commit {} missing {} blocks ({} / {}). \
+                         This causes hash divergence. Penalizing peer and rejecting.",
+                        authority_idx,
                         commit.index(),
+                        expected_blocks - actual_blocks,
                         actual_blocks,
                         expected_blocks
                     );
+                    {
+                        let mut health = self.peer_health.lock().await;
+                        health.record_failure(authority_idx.value() as u32); // Penalize!
+                    }
+                    break; // Stop processing this batch. The sync loop will retry.
                 }
 
                 // Log commit details to debug missing blocks
@@ -659,6 +667,26 @@ impl RustSyncNode {
                 let epoch_from_peer = global_info.epoch;
                 let global_idx = global_info.global_exec_index;
 
+                let expected_blocks = commit.blocks().len();
+                let actual_blocks = commit_blocks.len();
+
+                if actual_blocks < expected_blocks {
+                    warn!(
+                        "🚨 [GLOBAL-SYNC] INCOMPLETE COMMIT DETECTED! Peer {} sent Commit gei={} missing {} blocks ({} / {}). \
+                         This causes hash divergence. Penalizing peer and rejecting.",
+                        authority_idx,
+                        global_idx,
+                        expected_blocks - actual_blocks,
+                        actual_blocks,
+                        expected_blocks
+                    );
+                    {
+                        let mut health = self.peer_health.lock().await;
+                        health.record_failure(authority_idx.value() as u32); // Penalize!
+                    }
+                    break;
+                }
+
                 let will_add =
                     global_idx >= queue.next_expected() && !queue.pending.contains_key(&global_idx);
 
@@ -760,12 +788,12 @@ impl RustSyncNode {
                             block_num, current_epoch, epoch
                         );
 
-                        if let Ok((_e, timestamp, boundary, _, _, _)) =
+                        if let Ok((_e, timestamp, boundary, _, _, gei)) =
                             self.executor_client.get_epoch_boundary_data(epoch).await
                         {
                             let _ = self
                                 .epoch_transition_sender
-                                .send((epoch, timestamp, boundary));
+                                .send((epoch, timestamp, boundary, gei));
                             self.current_epoch
                                 .store(epoch, std::sync::atomic::Ordering::SeqCst);
                         }

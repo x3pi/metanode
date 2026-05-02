@@ -1063,7 +1063,15 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					namespace, len(nomtKeys), preRoot[:8])
 
 				trie := NewNomtStateTrie(handle, false, namespace)
-				trie.SetReplicationSync(true)
+				
+				// CRITICAL FIX: For stake_db, we MUST NOT set isReplicationSync to true.
+				// If we do, the knownKeys registry is bypassed, and subsequent calls
+				// to GetAllValidators() will return 0 validators, causing consensus forks
+				// (each node falls back to electing itself as leader).
+				if namespace != "stake_db" {
+					trie.SetReplicationSync(true)
+				}
+				
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					return fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}

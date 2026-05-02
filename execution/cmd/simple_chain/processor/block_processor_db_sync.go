@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
@@ -25,6 +26,17 @@ import (
 // consensus, but when node is SyncOnly and only receiving empty commits, the fast-path
 // may not trigger frequently enough or may be blocked by stateRoot checks.
 func (bp *BlockProcessor) syncLastBlockFromDB() {
+	// FORK-SAFETY FIX (2026-04-29): Master nodes MUST NOT adopt P2P-synced blocks
+	// from LevelDB. Their bp.lastBlock is updated by the consensus execution pipeline
+	// (processSingleEpochData → createBlockFromResults → SetLastBlock). Importing
+	// P2P blocks here causes trie state divergence because P2P blocks are created
+	// by different leaders with different state roots.
+	// This goroutine is only useful for Sub/SyncOnly nodes.
+	if bp.serviceType == p_common.ServiceTypeMaster {
+		logger.Debug("🔒 [DB-SYNC-REFRESH] Disabled for Master node — bp.lastBlock managed by consensus pipeline")
+		return
+	}
+
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 

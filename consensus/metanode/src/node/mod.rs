@@ -141,7 +141,7 @@ pub struct ConsensusNode {
     pub(crate) executor_commit_enabled: bool,
     pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
-    pub(crate) epoch_transition_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64)>,
+    pub(crate) epoch_transition_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
 
     // Handles for background tasks
     pub(crate) sync_task_handle: Option<crate::node::rust_sync_node::RustSyncHandle>,

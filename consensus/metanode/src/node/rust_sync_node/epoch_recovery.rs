@@ -8,7 +8,7 @@ use anyhow::Result;
 use consensus_core::{CommitAPI, CommitRef, CommittedSubDag};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::network::peer_rpc::query_peer_epoch_boundary_data;
 
@@ -38,7 +38,7 @@ impl RustSyncNode {
 
         for (idx, commit_data) in ready_commits.iter().enumerate() {
             // Construct CommittedSubDag
-            let subdag = CommittedSubDag::new(
+            let mut subdag = CommittedSubDag::new(
                 commit_data.commit.leader(),
                 commit_data.blocks.clone(),
                 commit_data.commit.timestamp_ms(),
@@ -49,36 +49,38 @@ impl RustSyncNode {
                 commit_data.commit.global_exec_index(),
             );
 
-            // ═══════════════════════════════════════════════════════════════════════════════
-            // CRITICAL FIX: Ensure Single Source of Truth
-            // Strict Retry Loop: We MUST resolve the leader_address from our cache.
-            // If we cannot, we wait and retry. We NEVER send None to Go.
-            // ═══════════════════════════════════════════════════════════════════════════════
+            // FORK-SAFETY (May 2026): Propagate pre-embedded leader_address from commit
+            let stored_leader_addr = commit_data.commit.leader_address();
+            if stored_leader_addr.len() == 20 {
+                subdag.leader_address = stored_leader_addr.to_vec();
+            }
+
+            // Resolve leader ETH address and embed into subdag (same pattern as CommitProcessor)
             let epoch = commit_data.epoch;
             let leader_author_index = subdag.leader.author.value();
 
-            let mut retry_count = 0;
             let resolve_start = Instant::now();
-            let leader_address = loop {
-                // 1. Try to resolve from cache
+            // FORK-SAFETY: Skip resolution if already pre-embedded
+            if subdag.leader_address.len() == 20 {
+                debug!(
+                    "✅ [RUST-SYNC] Using pre-embedded leader_address from commit (epoch={}, commit={})",
+                    epoch, commit_data.commit.index()
+                );
+            } else {
+            let mut retry_count = 0u32;
+            loop {
                 {
                     let mut cache = self.epoch_eth_addresses.write().await;
 
-                    // Load if missing
+                    // Load from peers/Go if missing
                     if !cache.contains_key(&epoch) {
                         info!(
-                            "📥 [RUST-SYNC] Cache miss for epoch {}. Trying PEERS FIRST (more reliable for SyncOnly)...",
+                            "📥 [RUST-SYNC] Cache miss for epoch {}. Trying PEERS FIRST...",
                             epoch
                         );
-
                         let mut loaded = false;
 
-                        // ═══════════════════════════════════════════════════════════════
-                        // FORK FIX: Try PEERS FIRST for SyncOnly nodes!
-                        // Local Go on SyncOnly may have stale StakeStateDB, causing
-                        // GetEpochBoundaryData to return wrong validator set.
-                        // Peers (validators) are authoritative for epoch boundary data.
-                        // ═══════════════════════════════════════════════════════════════
+                        // Try peers first (authoritative for SyncOnly nodes)
                         if !self.config.peer_rpc_addresses.is_empty() {
                             for peer_addr in &self.config.peer_rpc_addresses {
                                 match query_peer_epoch_boundary_data(peer_addr, epoch).await {
@@ -97,10 +99,6 @@ impl RustSyncNode {
                                                         .unwrap_or_default()
                                                 })
                                                 .collect();
-                                            info!(
-                                                "✅ [RUST-SYNC] Cache populated from PEER {} for epoch {} ({} validators)",
-                                                peer_addr, epoch, addr_list.len()
-                                            );
                                             cache.insert(epoch, addr_list);
                                             loaded = true;
                                             break;
@@ -116,14 +114,13 @@ impl RustSyncNode {
                             }
                         }
 
-                        // 2. Fallback to local Go only if peers failed
+                        // Fallback to local Go
                         if !loaded {
                             match self.executor_client.get_epoch_boundary_data(epoch).await {
                                 Ok((_e, _ts, _boundary, validators, _, _)) => {
                                     let mut sorted_validators = validators.clone();
                                     sorted_validators
                                         .sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-
                                     let addr_list: Vec<Vec<u8>> = sorted_validators
                                         .iter()
                                         .map(|v| {
@@ -131,64 +128,39 @@ impl RustSyncNode {
                                                 .unwrap_or_default()
                                         })
                                         .collect();
-                                    warn!(
-                                        "⚠️ [RUST-SYNC] Cache populated from LOCAL Go for epoch {} ({} validators). \
-                                         LOCAL Go data may be STALE on SyncOnly nodes!",
-                                        epoch, addr_list.len()
-                                    );
                                     cache.insert(epoch, addr_list);
-                                    loaded = true;
                                 }
                                 Err(e) => {
                                     warn!(
-                                        "⚠️ [RUST-SYNC] Local Go also failed for epoch {}: {}",
+                                        "⚠️ [RUST-SYNC] All sources failed for epoch {}: {}",
                                         epoch, e
                                     );
                                 }
                             }
                         }
-
-                        // All sources failed (peers tried first, then local Go)
-                        if !loaded {
-                            warn!(
-                                "⚠️ [RUST-SYNC] All sources (peers + local Go) failed for epoch {}. Will retry...",
-                                epoch
-                            );
-                        }
                     }
 
-                    // Lookup
+                    // Lookup and embed into subdag
                     if let Some(addrs) = cache.get(&epoch) {
                         if leader_author_index < addrs.len() {
                             let addr = &addrs[leader_author_index];
                             if addr.len() == 20 {
-                                break Some(addr.clone()); // SUCCESS
-                            } else {
-                                error!(
-                                    "🚨 [FATAL] Invalid address length {} for index {}",
-                                    addr.len(),
-                                    leader_author_index
-                                );
+                                subdag.leader_address = addr.clone();
+                                break; // SUCCESS
                             }
-                        } else {
-                            error!(
-                                "🚨 [FATAL] Leader index {} out of range (size {})",
-                                leader_author_index,
-                                addrs.len()
-                            );
                         }
                     }
                 }
 
-                // 2. Backoff and Retry
+                // Backoff and Retry
                 retry_count += 1;
                 if retry_count % 10 == 0 {
                     warn!("⏳ [RUST-SYNC] Still waiting for leader address... (epoch={}, index={}, retry={})", 
                         epoch, leader_author_index, retry_count);
                 }
-
                 tokio::time::sleep(Duration::from_millis(1000)).await;
-            };
+            }
+            } // end else (no pre-embedded leader_address)
             self.metrics
                 .leader_resolve_duration_seconds
                 .observe(resolve_start.elapsed().as_secs_f64());
@@ -201,7 +173,7 @@ impl RustSyncNode {
                     &subdag,
                     commit_data.epoch,
                     commit_data.commit.global_exec_index(),
-                    leader_address, // Now properly resolved from cache!
+                    subdag.leader_address.clone(), // Pre-resolved and embedded in subdag
                 )
                 .await
             {
@@ -356,6 +328,7 @@ impl RustSyncNode {
                         trans.epoch,
                         trans.timestamp_ms,
                         trans.boundary_block,
+                        trans.boundary_gei,
                     )) {
                         warn!(
                             "⚠️ [DEFERRED EPOCH] Failed to send epoch transition signal: {}",

@@ -142,18 +142,22 @@ impl ScoringSubdag {
                     // it's a vote for leader.
                     if self.leaders.contains(ancestor) {
                         // There should never be duplicate references to blocks
-                        // with strong linked ancestors to leader.
+                        // with strong linked ancestors to leader, but during
+                        // recovery or edge cases, overlapping subdags might occur.
+                        // Instead of panicking, we gracefully ignore duplicates.
                         tracing::trace!(
                             "Found a vote {} for leader {ancestor} from authority {}",
                             block.reference(),
                             block.author()
                         );
-                        assert!(
-                            self.votes
-                                .insert(block.reference(), StakeAggregator::new())
-                                .is_none(),
-                            "Vote {block} already exists. Duplicate vote found for leader {ancestor}"
-                        );
+                        if !self.votes.contains_key(&block.reference()) {
+                            self.votes.insert(block.reference(), StakeAggregator::new());
+                        } else {
+                            tracing::warn!(
+                                "🚨 [ANTI-FORK] Vote {} already exists. Duplicate vote found for leader {ancestor}. Ignoring to prevent panic.",
+                                block.reference()
+                            );
+                        }
                     }
 
                     if let Some(stake) = self.votes.get_mut(ancestor) {

@@ -517,6 +517,18 @@ func (app *App) Stop() {
 	if app.storageManager != nil {
 		logger.Info("💾 [SHUTDOWN] Flushing all databases to disk...")
 		flushStart := time.Now()
+
+		// CRITICAL (Apr 2026): Flush blockchain memory mappings (dirtyStorage) to LevelDB.
+		// This ensures BlockNumberHashKey is saved so that GetBlockHashByNumber doesn't
+		// fail on restart, which would cause DAG-RESET to incorrectly shift the epoch_base.
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			if err := bc.Commit(); err != nil {
+				logger.Error("❌ [SHUTDOWN] Failed to commit blockchain mappings: %v", err)
+			} else {
+				logger.Info("✅ [SHUTDOWN] Blockchain mappings flushed to LevelDB")
+			}
+		}
+
 		if err := app.storageManager.FlushAll(); err != nil {
 			logger.Error("❌ [SHUTDOWN] FlushAll error: %v", err)
 		} else {

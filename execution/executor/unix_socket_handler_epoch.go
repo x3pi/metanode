@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
@@ -119,94 +120,115 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	logger.Debug("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
 	if !ok {
 		if blockNumber == 0 {
-			// Block 0 doesn't exist yet — Go Master may not have initialized genesis block
-			// In this case, get validators from current state (genesis)
-			logger.Warn("Block 0 not found, getting validators from current state (genesis fallback)")
-			// Fallback: get validators from current state instead of block 0
-			logger.Debug("🔍 [EPOCH] Getting validators from stake state DB...")
-			validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
-			if err != nil {
-				logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
-				return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
-			}
-
-			logger.Debug("🔍 [EPOCH] Found %d total validators in state (before filtering)", len(validators))
-
-			if len(validators) == 0 {
-				logger.Warn("🔍 [EPOCH] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
-			} else {
-				// Log details of each validator found
-				for i, val := range validators {
-					stake := val.TotalStakedAmount()
-					logger.Debug("🔍 [EPOCH] Validator[%d] from DB: address=%s, name=%s, stake=%s, jailed=%v, p2p=%s",
-						i, val.Address().Hex(), val.Name(), stake.String(), val.IsJailed(), val.P2PAddress())
-				}
-			}
-
-			// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-			// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-			// Go must use the SAME string comparison to produce identical ordering
-			sort.Slice(validators, func(i, j int) bool {
-				return validators[i].AuthorityKey() < validators[j].AuthorityKey()
-			})
-
+			// CRITICAL FORK-SAFETY FIX: NEVER use current state for epoch 0 boundary!
+			// If a node restarts midway through the chain, its "current state" might have
+			// NEW validators or changed stakes, causing its epoch 0 committee to diverge
+			// from nodes that ran continuously from genesis.
+			// We MUST use the genesis validators directly from genesis.json.
+			logger.Warn("Block 0 not found, getting validators from genesis.json to ensure fork-safe deterministic committee")
+			
 			validatorInfoList := &pb.ValidatorInfoList{}
-			skippedJailed := 0
-			validatorsWithMinStake := 0
-			for _, dbValidator := range validators {
-				if dbValidator.IsJailed() {
-					skippedJailed++
-					logger.Debug("Skipping jailed validator: %s", dbValidator.Address().Hex())
-					continue
-				}
-				totalStake := dbValidator.TotalStakedAmount()
-
-				// CRITICAL FIX: For genesis (block 0), include validators even if they have no stake yet
-				// This allows Rust to start up and create committee from genesis validators
-				// Validators will get stake through delegation later
-				var stakeNormalized *big.Int
-				if totalStake == nil || totalStake.Sign() <= 0 {
-					// Genesis validators may not have stake yet - use minimum stake of 1000000
-					logger.Info("Genesis validator %s has no stake yet, using minimum stake of 1000000", dbValidator.Address().Hex())
-					stakeNormalized = big.NewInt(1000000)
-					validatorsWithMinStake++
+			var genesisValidators []*pb.Validator
+			
+			if rh.genesisPath != "" {
+				if genesisData, err := config.LoadGenesisData(rh.genesisPath); err == nil {
+					genesisValidators = genesisData.Validators
+					logger.Info("✅ [EPOCH] Loaded %d genesis validators directly from %s for deterministic epoch 0 committee", len(genesisValidators), rh.genesisPath)
 				} else {
-					const precision = 1_000_000_000_000_000_000
-					stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(precision))
-					if stakeNormalized.Sign() <= 0 {
-						stakeNormalized = big.NewInt(1)
-						validatorsWithMinStake++
+					logger.Error("🚨 [FORK-SAFETY] Could not load genesis.json: %v. This may cause consensus fork if validators changed since genesis!", err)
+				}
+			} else {
+				logger.Error("🚨 [FORK-SAFETY] No genesis path configured! This may cause consensus fork if validators changed since genesis!")
+			}
+
+			if len(genesisValidators) > 0 {
+				validatorsWithMinStake := 0
+				for _, genVal := range genesisValidators {
+					// Use 1000000 as deterministic starting stake (since genesis validators start with no stake)
+					stakeNormalized := big.NewInt(1000000)
+					validatorsWithMinStake++
+					
+					val := &pb.ValidatorInfo{
+						Address:                    genVal.Address,
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               genVal.AuthorityKey,
+						ProtocolKey:                genVal.ProtocolKey,
+						NetworkKey:                 genVal.NetworkKey,
+						Name:                       genVal.Name,
+						Description:                genVal.Description,
+						Website:                    genVal.Website,
+						Image:                      genVal.Image,
+						CommissionRate:             genVal.CommissionRate,
+						MinSelfDelegation:          "0",
+						AccumulatedRewardsPerShare: "0",
+						P2PAddress:                 genVal.P2PAddress,
 					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 				}
 
-				// CRITICAL: Use separate protocol_key and network_key for committee.json compatibility
-				protocolKey := dbValidator.ProtocolKey()
-				networkKey := dbValidator.NetworkKey()
-				val := &pb.ValidatorInfo{
-					Address:                    dbValidator.Address().Hex(), // FIXED: Ethereum wallet address
-					Stake:                      stakeNormalized.String(),
-					AuthorityKey:               dbValidator.AuthorityKey(),
-					ProtocolKey:                protocolKey, // Protocol key (Ed25519) - compatible with committee.json
-					NetworkKey:                 networkKey,  // Network key (Ed25519) - compatible with committee.json
-					Name:                       dbValidator.Name(),
-					Description:                dbValidator.Description(),
-					Website:                    dbValidator.Website(),
-					Image:                      dbValidator.Image(),
-					CommissionRate:             dbValidator.CommissionRate(),
-					MinSelfDelegation:          dbValidator.MinSelfDelegation().String(),
-					AccumulatedRewardsPerShare: dbValidator.AccumulatedRewardsPerShare().String(),
-					P2PAddress:                 dbValidator.P2PAddress(), // NEW: P2P address for committee
+				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
+				sort.Slice(validatorInfoList.Validators, func(i, j int) bool {
+					return validatorInfoList.Validators[i].AuthorityKey < validatorInfoList.Validators[j].AuthorityKey
+				})
+
+				for i, val := range validatorInfoList.Validators {
+					authKeyPreview := val.AuthorityKey
+					if len(authKeyPreview) > 50 {
+						authKeyPreview = authKeyPreview[:50] + "..."
+					}
+					logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] Genesis ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s",
+						i, val.Address, val.Stake, val.Name, authKeyPreview)
+				}
+			} else {
+				// Fallback to current state ONLY if genesis.json is missing (should not happen in prod)
+				logger.Warn("⚠️ [EPOCH] Using current StakeStateDB as fallback for genesis committee. This is NOT fork-safe!")
+				validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
+				if err != nil {
+					logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
+					return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
 				}
 
-				// CRITICAL: Log ValidatorInfo exactly as Rust will receive it
-				authKeyPreview := val.AuthorityKey
-				if len(authKeyPreview) > 50 {
-					authKeyPreview = authKeyPreview[:50] + "..."
+				if len(validators) == 0 {
+					logger.Warn("🔍 [EPOCH] ⚠️  WARNING: GetAllValidators() returned 0 validators! This means Go has not initialized genesis block or validators were not registered.")
 				}
-				logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s, p2p_address='%s'",
-					len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey, val.P2PAddress)
 
-				validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				// Sort
+				sort.Slice(validators, func(i, j int) bool {
+					return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+				})
+
+				for _, dbValidator := range validators {
+					if dbValidator.IsJailed() {
+						continue
+					}
+					totalStake := dbValidator.TotalStakedAmount()
+					var stakeNormalized *big.Int
+					if totalStake == nil || totalStake.Sign() <= 0 {
+						stakeNormalized = big.NewInt(1000000)
+					} else {
+						const precision = 1_000_000_000_000_000_000
+						stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(precision))
+						if stakeNormalized.Sign() <= 0 {
+							stakeNormalized = big.NewInt(1)
+						}
+					}
+					val := &pb.ValidatorInfo{
+						Address:                    dbValidator.Address().Hex(),
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               dbValidator.AuthorityKey(),
+						ProtocolKey:                dbValidator.ProtocolKey(),
+						NetworkKey:                 dbValidator.NetworkKey(),
+						Name:                       dbValidator.Name(),
+						Description:                dbValidator.Description(),
+						Website:                    dbValidator.Website(),
+						Image:                      dbValidator.Image(),
+						CommissionRate:             dbValidator.CommissionRate(),
+						MinSelfDelegation:          dbValidator.MinSelfDelegation().String(),
+						AccumulatedRewardsPerShare: dbValidator.AccumulatedRewardsPerShare().String(),
+						P2PAddress:                 dbValidator.P2PAddress(),
+					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				}
 			}
 
 			// Set epoch_timestamp_ms and last_global_exec_index for genesis
@@ -231,8 +253,8 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			}
 			validatorInfoList.LastGlobalExecIndex = 0 // Genesis block
 
-			logger.Debug("🔍 [EPOCH] Returning validators from current state (genesis fallback): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=0",
-				len(validatorInfoList.Validators), skippedJailed, validatorsWithMinStake, validatorInfoList.EpochTimestampMs)
+			logger.Debug("🔍 [EPOCH] Returning validators from genesis.json (genesis fallback): count=%d, epoch_timestamp_ms=%d, last_global_exec_index=0",
+				len(validatorInfoList.Validators), validatorInfoList.EpochTimestampMs)
 
 			if len(validatorInfoList.Validators) == 0 {
 				logger.Warn("⚠️  No validators found in state! This may indicate:")
@@ -260,6 +282,20 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	// correct knownKeys and reads current state (which is the only state
 	// available in NOMT anyway).
 	// ═══════════════════════════════════════════════════════════════════════
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT CACHE FIX: Check if we have cached validators for this block!
+	// ═══════════════════════════════════════════════════════════════════════
+	validatorCacheKey := crypto.Keccak256([]byte(fmt.Sprintf("epoch_validators_at_block_%d", blockNumber)))
+	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
+		if cachedData, err := blockStorage.Get(validatorCacheKey); err == nil && len(cachedData) > 0 {
+			cachedList := &pb.ValidatorInfoList{}
+			if err := json.Unmarshal(cachedData, cachedList); err == nil {
+				logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache (Crucial for NOMT)", blockNumber)
+				return cachedList, nil
+			}
+		}
+	}
+
 	var validators []state.ValidatorState
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
@@ -398,6 +434,17 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	}
 	validatorInfoList.EpochTimestampMs = epochTimestampMs
 	validatorInfoList.LastGlobalExecIndex = lastGlobalExecIndex
+
+	// Cache the validators to storage
+	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
+		if serializedData, err := json.Marshal(validatorInfoList); err == nil {
+			if err := blockStorage.Put(validatorCacheKey, serializedData); err != nil {
+				logger.Warn("⚠️ [EPOCH] Failed to cache validators to storage: %v", err)
+			} else {
+				logger.Debug("💾 [EPOCH] Cached historical validators for block %d to storage", blockNumber)
+			}
+		}
+	}
 
 	// CRITICAL FOR SNAPSHOT: Confirm block commitment to DB
 	logger.Info("✅ [SNAPSHOT] Returning validators at block %d (COMMITTED TO DB): count=%d (skipped: %d jailed, %d had no stake but included with min stake=1), epoch_timestamp_ms=%d, last_global_exec_index=%d, last_committed_block=%d",
@@ -600,6 +647,16 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	err := rh.chainState.AdvanceEpochWithBoundary(request.NewEpoch, timestampMs, request.BoundaryBlock, request.BoundaryGei)
 	if err != nil {
 		return nil, fmt.Errorf("could not advance epoch to %d: %w", request.NewEpoch, err)
+	}
+
+	// CRITICAL FIX: Push an async GEI update so that Go's LastGlobalExecIndex
+	// actually advances to the boundary GEI. This prevents Go from staying at
+	// the last executed block's GEI when empty commits are fast-skipped by Rust.
+	// We also synchronously update the atomic variable to prevent a data race where
+	// processRustEpochData reads the old GEI before the async persist completes.
+	storage.UpdateLastGlobalExecIndex(request.BoundaryGei)
+	if rh.pushAsyncGEIUpdateCallback != nil {
+		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil, uint32(request.BoundaryBlock))
 	}
 
 	logger.Info("✅ Successfully advanced Go state epoch",
@@ -1105,20 +1162,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
-	var hasNewBlocks bool = false
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
 	// ═══════════════════════════════════════════════════════════════════════════
 	currentGEI := storage.GetLastGlobalExecIndex()
 
 	// R7: Crash-guard for Cache Invalidation
-	// Guarantee cache is invalidated on exit, even if batch is interrupted or fails
+	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {
-		rh.chainState.InvalidateAllState()
-		mvm.ClearAllMVMApi()
-		mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
-		mvm.CallClearAllStateInstances()
-		logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+		if executedCount > 0 {
+			rh.chainState.InvalidateAllState()
+			mvm.ClearAllMVMApi()
+			mvm.ClearAllProtectedMVMApi() // CRITICAL: Clear protected instances that hold stale data
+			mvm.CallClearAllStateInstances()
+			logger.Debug("🧹 [SNAPSHOT-RESUME] Deferred cache invalidation complete after batch sync")
+		}
 	}()
 
 	for i, blockData := range blocks {
@@ -1179,6 +1237,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			currentGEI = blockGEI
 		}
 
+		// CRITICAL FIX: Restore lastHandledCommitIndex from the synced block!
+		// This prevents Go from double-executing these commits when Rust resumes consensus.
+		if header.CommitIndex() > 0 {
+			commitIdx32 := uint32(header.CommitIndex())
+			if commitIdx32 > storage.GetLastHandledCommitIndex() {
+				storage.UpdateLastHandledCommitIndex(commitIdx32)
+				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d from synced block #%d", commitIdx32, blockNum)
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
@@ -1190,6 +1258,26 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			} else {
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
+				}
+
+				// ═══════════════════════════════════════════════════════════════
+				// FORK-DIAG (May 2026): Log NOMT handle root after EACH block's
+				// batch apply during STARTUP-SYNC. This pinpoints the exact block
+				// where state drift begins (if any batch is incomplete/corrupted).
+				// ═══════════════════════════════════════════════════════════════
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						expectedAccountRoot := header.AccountStatesRoot()
+						rootMatch := "MATCH"
+						if nomtRoot != expectedAccountRoot && expectedAccountRoot != (common.Hash{}) {
+							rootMatch = "MISMATCH"
+						}
+						logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, expected=%s → %s",
+							blockNum, blockGEI,
+							nomtRoot.Hex()[:18]+"...",
+							expectedAccountRoot.Hex()[:18]+"...",
+							rootMatch)
+					}
 				}
 			}
 		}
@@ -1209,18 +1297,43 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 3: REBUILD NOMT TRIES — this is the KEY difference from store-only mode.
-		// CommitBlockState(WithRebuildTries) reloads the trie from the state that was
-		// just written to LevelDB by applyBackupDbBatches. After this call, NOMT's
-		// persistent root matches the block's stateRoot.
-		// OPTIMIZATION: Only rebuild trie and verify root on the LAST block of the batch!
+		// STEP 3: REBUILD TRIES (conditionally) — sync memory state with DB.
+		//
+		// CRITICAL FIX (Apr 2026): On NOMT backend, WithRebuildTries() MUST NOT
+		// be used here. NOMT keeps ONLY the latest state root. When this handler
+		// runs concurrently with consensus execution (e.g., via LAG-RECOVERY or
+		// STARTUP-SYNC), calling UpdateStateForNewHeader() overwrites the current
+		// NOMT trie root with the P2P-synced block's root. Since NOMT cannot look
+		// up historical state, this irreversibly corrupts the trie — subsequent
+		// consensus blocks are created from the wrong state root, causing a fork.
+		//
+		// On MPT/legacy backends, WithRebuildTries() is safe because they maintain
+		// a full historical trie in LevelDB.
 		// ═══════════════════════════════════════════════════════════════════════════
 		var commitOpts []blockchain.CommitOption
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
 		if isLastBlock {
-			// Trigger trie rebuild on the last block to sync memory state with PebbleDB
-			commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			// ═══════════════════════════════════════════════════════════════
+			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
+			//
+			// During pre-consensus sync (execute_mode=true):
+			//   SAFE to rebuild — no concurrent consensus execution exists.
+			//   WITHOUT this, NOMT stays at stale root and subsequent
+			//   consensus blocks will have wrong state_root → permanent fork.
+			//
+			// Non-execute-mode (store-only sync):
+			//   No trie rebuild needed — blocks are stored, not executed.
+			// ═══════════════════════════════════════════════════════════════
+			if trie.GetStateBackend() != trie.BackendNOMT || isPreConsensusSync {
+				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (pre-consensus, no concurrent execution)", blockNum)
+				}
+			} else {
+				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
+					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie.", blockNum)
+			}
 			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
 			// Without this, synced blocks mapping (block number -> hash) remain in volatile
 			// cache and are lost if the node crashes/restarts before the next normal block.
@@ -1232,17 +1345,62 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
 		} else if isLastBlock {
-			// R2: Add stateRoot verify after batch sync
-			// FORK-SAFETY FIX (Apr 2026): NOMT block headers store the PRE-COMMIT state root
-			// (i.e. the state BEFORE the block's mutations). Therefore, verifying the 
-			// expectedRoot against the localRoot (POST-COMMIT) will falsely fail precisely 
-			// when state actually changes. Since we trust the replication batch, we bypass 
-			// this strict check for BackendNOMT. The state root will naturally align and 
-			// be verified implicitly by the cluster consensus.
-			if trie.GetStateBackend() != trie.BackendNOMT {
-				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-				expectedRoot := header.AccountStatesRoot()
-				
+			// ═══════════════════════════════════════════════════════════════
+			// STATE ROOT VERIFICATION (May 2026):
+			// After applying all backup batches + WithRebuildTries(), verify
+			// that the NOMT state actually matches what the block header expects.
+			//
+			// CRITICAL FIX: The previous code BYPASSED this check entirely for
+			// NOMT backend with the false claim that "NOMT headers store PRE-COMMIT
+			// state root". In reality, block headers store POST-EXECUTION roots
+			// (state AFTER the block's transactions). The bypass was masking real
+			// state drift, causing silent permanent forks after restart (see
+			// debug_report_20260501_201046.md — STATE_ROOT divergence at block #582).
+			// ═══════════════════════════════════════════════════════════════
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+
+			if trie.GetStateBackend() == trie.BackendNOMT {
+				// Cross-check: Query the NOMT handle root directly to verify
+				// it matches both the trie's cached root and the block header.
+				nomtHandleRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+
+				logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
+					blockNum,
+					localRoot.Hex()[:18]+"...",
+					func() string {
+						if hasNomtRoot {
+							return nomtHandleRoot.Hex()[:18] + "..."
+						}
+						return "N/A"
+					}(),
+					expectedRoot.Hex()[:18]+"...",
+					hasNomtRoot)
+
+				// Verify NOMT handle root matches the trie's cached root
+				if hasNomtRoot && nomtHandleRoot != localRoot {
+					logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT handle root DIFFERS from trie root! "+
+						"handleRoot=%s, trieRoot=%s, block=#%d. "+
+						"This indicates a stale NomtStateTrie — state reads will return wrong data!",
+						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
+				}
+
+				// Verify NOMT handle root matches block header expected root
+				if hasNomtRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
+					if nomtHandleRoot != expectedRoot {
+						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
+							"handleRoot=%s, expected=%s, block=#%d. "+
+							"Batch apply was incomplete or corrupted — subsequent consensus blocks WILL FORK!",
+							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
+						// Don't halt sync — the node can still attempt to recover via consensus.
+						// But this error MUST be investigated immediately.
+					} else {
+						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
+							blockNum, nomtHandleRoot.Hex()[:18]+"...")
+					}
+				}
+			} else {
+				// Non-NOMT backend: strict verification with halt on mismatch
 				if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
 					logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
 						blockNum, localRoot.Hex(), expectedRoot.Hex())
@@ -1252,16 +1410,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
 				}
 				logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
-			} else {
-				// ═══════════════════════════════════════════════════════════════
-				// FORK-DIAG (Apr 2026): Log NOMT handle roots for ALL namespaces
-				// to enable side-by-side comparison with master node logs.
-				// Each NOMT handle has an independent Merkle root that MUST match
-				// across all nodes for consensus to hold.
-				// ═══════════════════════════════════════════════════════════════
-				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-				logger.Info("[FORK-DIAG][SYNC-VERIFY] NOMT batch applied: block=#%d, accountRoot=%s",
-					blockNum, localRoot.Hex()[:18]+"...")
 			}
 		}
 
@@ -1339,7 +1487,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// contained only deduped (old) blocks, this callback would REWIND the
 	// in-memory bp.lastBlock to an older state, causing "CHAIN BROKEN" errors.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if hasNewBlocks && rh.updateLastBlockCallback != nil {
+	if executedCount > 0 && rh.updateLastBlockCallback != nil {
 		if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
 			if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
 				rh.updateLastBlockCallback(lastBlk)
@@ -1350,16 +1498,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Completed: executed %d/%d blocks, last_block=#%d, last_gei=%d",
 		executedCount, blockCount, lastExecutedBlock, lastExecutedGEI)
 
-	// CRITICAL FIX (Apr 2026): When blocks are synced directly into the database without 
-	// executing EVM transactions, the C++ MVM's internal state and Go-side MVMApi caches 
-	// become stale. If we don't forcefully clear ALL of them (including protected ones), 
-	// the very next native block execution will read stale data, mutating local state 
-	// incorrectly and causing a hard fork.
-	rh.chainState.InvalidateAllState()
-	mvm.ClearAllMVMApi()
-	mvm.ClearAllProtectedMVMApi()
-	mvm.CallClearAllStateInstances()
-	logger.Info("🧹 [SNAPSHOT-RESUME] Actively cleared all C++ MVM and Go-side caches after block sync")
+	// Cache invalidation is handled by the defer block at the start of the function
 
 	return &pb.SyncBlocksResponse{
 		SyncedCount:     executedCount,
@@ -1518,4 +1657,45 @@ func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, bl
 		}
 	}
 	return nil
+}
+
+// ============================================================================
+// GO-AUTHORITATIVE GEI: Recovery RPC
+// ============================================================================
+
+// HandleGetLastHandledCommitIndexRequest returns Go's current execution state
+// so Rust can resume from the correct point after restart.
+// This replaces the fragile fragment_offset reconstruction logic.
+func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.GetLastHandledCommitIndexRequest) (*pb.GetLastHandledCommitIndexResponse, error) {
+	lastGEI := storage.GetLastGlobalExecIndex()
+	lastBlockNumber := storage.GetLastBlockNumber()
+	currentEpoch := rh.chainState.GetCurrentEpoch()
+
+	// Go is the authoritative source for lastHandledCommitIndex
+	isAuthoritative := true
+
+	var lastBlockTimestampMs uint64 = 0
+	if lastBlockNumber > 0 {
+		blockchainInstance := blockchain.GetBlockChainInstance()
+		if blockchainInstance != nil {
+			lastBlock := blockchainInstance.GetLastBlock()
+			if lastBlock != nil {
+				lastBlockTimestampMs = lastBlock.Header().TimeStamp() * 1000
+			}
+		}
+	}
+
+	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_gei=%d, last_block=%d, epoch=%d, authoritative=%v, ts=%d",
+		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
+
+	response := &pb.GetLastHandledCommitIndexResponse{
+		LastCommitIndex: storage.GetLastHandledCommitIndex(),
+		LastGei:         lastGEI,
+		LastBlockNumber: lastBlockNumber,
+		Epoch:           currentEpoch,
+		IsAuthoritative: isAuthoritative,
+		LastBlockTimestampMs: lastBlockTimestampMs,
+	}
+
+	return response, nil
 }

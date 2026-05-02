@@ -80,6 +80,31 @@ impl Commit {
             leader,
             blocks,
             global_exec_index,
+            leader_address: vec![],
+        })
+    }
+
+    /// Create a new commit with embedded leader address.
+    /// FORK-SAFETY (May 2026): leader_address is consensus-agreed and must not
+    /// be recalculated locally. Same immutability pattern as global_exec_index.
+    #[allow(dead_code)]
+    pub(crate) fn new_with_leader_address(
+        index: CommitIndex,
+        previous_digest: CommitDigest,
+        timestamp_ms: BlockTimestampMs,
+        leader: BlockRef,
+        blocks: Vec<BlockRef>,
+        global_exec_index: u64,
+        leader_address: Vec<u8>,
+    ) -> Self {
+        Commit::V1(CommitV1 {
+            index,
+            previous_digest,
+            timestamp_ms,
+            leader,
+            blocks,
+            global_exec_index,
+            leader_address,
         })
     }
 
@@ -100,6 +125,9 @@ pub trait CommitAPI {
     fn blocks(&self) -> &[BlockRef];
     /// Global execution index - agreed upon by consensus to prevent fork
     fn global_exec_index(&self) -> u64;
+    /// Leader ETH address (20 bytes) - consensus-agreed, embedded in commit.
+    /// Returns empty Vec for commits created before this field was added.
+    fn leader_address(&self) -> &[u8];
 }
 
 /// Specifies one consensus commit.
@@ -121,6 +149,11 @@ pub struct CommitV1 {
     /// Global execution index - the execution layer block number.
     /// This is agreed upon by consensus to prevent forks.
     global_exec_index: u64,
+    /// FORK-SAFETY (May 2026): Leader validator ETH address (20 bytes).
+    /// Consensus-agreed and embedded in commit to prevent leader address divergence.
+    /// Empty for commits created before this field was added (backward compat).
+    #[serde(default)]
+    leader_address: Vec<u8>,
 }
 
 impl CommitAPI for CommitV1 {
@@ -150,6 +183,10 @@ impl CommitAPI for CommitV1 {
 
     fn global_exec_index(&self) -> u64 {
         self.global_exec_index
+    }
+
+    fn leader_address(&self) -> &[u8] {
+        &self.leader_address
     }
 }
 
@@ -429,6 +466,10 @@ pub struct CommittedSubDag {
     /// Global execution index - agreed upon by consensus.
     /// This is the execution layer block number and MUST NOT be recalculated locally.
     pub global_exec_index: u64,
+    /// CONSENSUS-DETERMINED: ETH address (20 bytes) of the leader validator.
+    /// Set once by CommitProcessor before dispatch. Read directly by executor.
+    /// Never recalculated — same immutability pattern as global_exec_index.
+    pub leader_address: Vec<u8>,
 
     /// Set by CommitObserver.
     ///
@@ -472,6 +513,7 @@ impl CommittedSubDag {
             timestamp_ms,
             commit_ref,
             global_exec_index,
+            leader_address: vec![],
             decided_with_local_blocks: true,
             recovered_rejected_transactions: false,
             reputation_scores_desc: vec![],
@@ -599,6 +641,14 @@ pub fn load_committed_subdag_from_store(
         commit.global_exec_index(),
     );
 
+    // FORK-SAFETY (May 2026): Propagate consensus-agreed leader_address from Commit.
+    // When loading from store (commit sync / recovery), use the embedded address
+    // instead of locally re-resolving from epoch_eth_addresses.
+    let stored_leader_addr = commit.leader_address();
+    if !stored_leader_addr.is_empty() {
+        subdag.leader_address = stored_leader_addr.to_vec();
+    }
+
     subdag.reputation_scores_desc = reputation_scores_desc;
 
     let reject_votes = store
@@ -649,6 +699,13 @@ pub fn try_load_committed_subdag_from_store(
         commit.reference(),
         commit.global_exec_index(),
     );
+
+    // FORK-SAFETY (May 2026): Propagate consensus-agreed leader_address from Commit.
+    let stored_leader_addr = commit.leader_address();
+    if !stored_leader_addr.is_empty() {
+        subdag.leader_address = stored_leader_addr.to_vec();
+    }
+
     subdag.reputation_scores_desc = reputation_scores_desc;
 
     let reject_votes = store

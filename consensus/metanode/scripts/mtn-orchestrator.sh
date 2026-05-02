@@ -372,7 +372,7 @@ cmd_start() {
         session_exists "go-master-${i}" && existing=$((existing + 1))
         session_exists "metanode-${i}" && existing=$((existing + 1))
     done
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
     if [ $existing -gt 0 ] || [ $orphans -gt 0 ]; then
         log_warn "Phát hiện $existing session + $orphans orphan process đang chạy!"
         if ! $fresh; then
@@ -392,6 +392,7 @@ cmd_start() {
         log_step "Xóa Rust storage..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
             rm -rf "$RUST_DIR/config/storage/node_${i}"
+            rm -rf "$RUST_DIR/config/storage/wipe_safe_node_${i}"
         done
         log_step "Xóa Go data và snapshots..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
@@ -409,15 +410,13 @@ cmd_start() {
         log_info "✅ Dọn sạch hoàn tất"
     fi
 
-    # ─── CRASH SAFETY (Mar 2026): Xóa Rust executor_state trước khi start ──
-    # executor_state/last_sent_index.bin lưu GEI đã gửi cho Go. Sau nhiều epochs,
-    # DAG GC xóa commits cũ. Nếu restart, Rust dựa vào local_go_gei để resume.
-    # Xóa file này an toàn vì Rust luôn query Go để lấy GEI hiện tại.
-    log_step "Xóa Rust executor_state (tránh recovery gap)..."
-    for i in $(seq 0 $((NUM_NODES - 1))); do
-        if [ "$i" = "$exclude_node" ]; then continue; fi
-        rm -rf "$RUST_DIR/config/storage/node_${i}/executor_state"
-    done
+    # ─── NOTE (Apr 2026): executor_state is now PRESERVED across restarts ──
+    # Fork-safety v5 uses persisted commit_index + fragment_offset for correct
+    # recovery after restart and DAG wipe. Deleting executor_state would cause
+    # the node to lose fragment_offset, leading to GEI divergence (fork).
+    # Wipe-safe persistence (config/storage/wipe_safe_node_*/executor_state/)
+    # provides an additional safety net for DAG wipe recovery.
+    # Only --fresh start deletes everything (handled above at line 392-395).
 
     # ─── PHASE 1: Go Master (nhúng Rust FFI) ────────────────────
     log_phase "PHASE 1/1: Khởi động Go Master + Rust FFI (${NUM_NODES} node)"
@@ -430,7 +429,7 @@ cmd_start() {
             sleep "$NODE_DELAY"
         fi
         # Health check: verify process is alive after startup
-        local hc_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1)
+        local hc_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         if [ -z "$hc_pid" ]; then
             log_warn "⚠️  Node ${i} process died during startup! Check logs: $LOG_BASE/node_${i}/go-master-stdout.log"
             # Retry once
@@ -512,13 +511,13 @@ cmd_stop() {
     echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
     # Tự động kill orphan process (thay vì chỉ cảnh báo)
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
     if [ $orphans -gt 0 ]; then
         log_warn "⚠️  Phát hiện ${orphans} Go orphan process — đang kill..."
         pkill -TERM -f "simple_chain.*config-" 2>/dev/null || true
         sleep 3
         # Force kill nếu vẫn còn
-        local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l)
+        local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
         if [ $remaining -gt 0 ]; then
             log_warn "⚠️  Vẫn còn ${remaining} orphan → SIGKILL"
             pkill -KILL -f "simple_chain.*config-" 2>/dev/null || true
@@ -571,7 +570,7 @@ cmd_status() {
 
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local master_status="${RED}❌ DOWN${NC}"
-        local real_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1)
+        local real_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         
         if [ -n "$real_pid" ]; then
             alive_nodes=$((alive_nodes + 1))
@@ -579,7 +578,7 @@ cmd_status() {
             local height_hex=$(curl -s --max-time 1 -X POST http://127.0.0.1:${rpc_port} \
                 -H "Content-Type: application/json" \
                 -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
-                | grep -oP '"result":"(0x[0-9a-fA-F]+)"' | cut -d'"' -f4)
+                | grep -oP '"result":"(0x[0-9a-fA-F]+)"' | cut -d'"' -f4 || true)
             
             local height_dec=""
             if [ -n "$height_hex" ]; then
@@ -678,8 +677,8 @@ cmd_start_node() {
     cleanup_socket "$(get_master_sock $node_id)"
     cleanup_socket "$(get_tx_sock $node_id)"
 
-    # Xóa Rust executor_state (tránh recovery gap)
-    rm -rf "$RUST_DIR/config/storage/node_${node_id}/executor_state"
+    # NOTE (Apr 2026): executor_state is PRESERVED for fork-safety v5.
+    # Only --fresh deletes executor_state. Normal restart preserves it.
 
     # Khởi động Go Master (Rust FFI tự động khởi chạy bên trong)
     start_go_master "$node_id"

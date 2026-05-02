@@ -119,42 +119,14 @@ pub async fn transition_to_epoch_from_system_tx(
     let executor_client =
         committee_source.create_executor_client(&config.executor_send_socket_path);
 
-    // FORK-SAFETY: Derive timestamp from Go (authoritative source)
-    // CRITICAL FIX: Despite the name, `boundary_timestamp_ms` actually contains a
-    // BOUNDARY BLOCK NUMBER from the system transaction (see processor.rs:534-538).
-    // Using a block number (e.g., 1067) as a timestamp caused epoch_start_timestamp_ms=1067
-    // → massive timestamp mismatch → epoch sync retry loops → cluster death.
-    //
-    // SOLUTION: Always set provisional_timestamp=0 and let Go's AdvanceEpochRequest handler
-    // derive the real timestamp from the boundary block header (it already has this logic).
-    // The actual epoch timestamp will be fetched later in STEP 9 via verify_epoch_consistency().
-    let boundary_block_from_system_tx = boundary_timestamp_ms; // Rename for clarity
-    let provisional_timestamp: u64 = {
-        // Try to get timestamp from Go boundary data for the previous epoch
-        let prev_epoch = new_epoch.saturating_sub(1);
-        match executor_client
-            .get_epoch_boundary_data(prev_epoch)
-            .await
-        {
-            Ok((_epoch, stored_ts, _boundary, _, _, _)) if stored_ts > 1000000000 => {
-                // Sanity check: real timestamps are > 1 billion ms (year ~2001)
-                info!(
-                    "✅ [EPOCH TRANSITION] Using Go epoch {} boundary timestamp {}ms",
-                    prev_epoch, stored_ts
-                );
-                stored_ts
-            }
-            _ => {
-                // Let Go derive from boundary block header — send 0 as sentinel
-                info!(
-                    "ℹ️ [EPOCH TRANSITION] Sending timestamp_ms=0 to Go for epoch {}. \
-                     Go will derive from boundary block {} header.",
-                    new_epoch, boundary_block_from_system_tx
-                );
-                0
-            }
-        }
-    };
+    // SINGLE SOURCE OF TRUTH: Rust provides the exact timestamp of the commit that contained
+    // the EndOfEpoch system transaction. Go MUST NOT use time.Now() or header fallback.
+    let provisional_timestamp = boundary_timestamp_ms;
+    info!(
+        "ℹ️ [EPOCH TRANSITION] Sending exact timestamp_ms={} to Go for epoch {}. \
+         Go MUST use this timestamp as authoritative.",
+        provisional_timestamp, new_epoch
+    );
 
     node.system_transaction_provider
         .update_epoch(new_epoch, provisional_timestamp)
@@ -202,6 +174,7 @@ pub async fn transition_to_epoch_from_system_tx(
     // Update state
     node.current_epoch = new_epoch;
     node.current_commit_index.store(0, Ordering::SeqCst);
+    node.coordination_hub.reset_quorum_commit_index(0);
 
     let effective_synced = std::cmp::max(synced_index, synced_global_exec_index);
     if effective_synced > synced_index {
@@ -323,11 +296,16 @@ pub async fn transition_to_epoch_from_system_tx(
     }
     std::fs::create_dir_all(&db_path)?;
 
-    // Reset fragment offset for the new epoch
+    // Reset fragment offset for the new epoch (both regular and wipe-safe)
     if let Err(e) =
         crate::node::executor_client::persistence::reset_fragment_offset(&node.storage_path).await
     {
         warn!("⚠️ [PERSIST] Failed to reset fragment offset: {}", e);
+    }
+    if let Err(e) =
+        crate::node::executor_client::persistence::reset_fragment_offset_wipe_safe(&node.storage_path).await
+    {
+        warn!("⚠️ [PERSIST] Failed to reset wipe-safe fragment offset: {}", e);
     }
 
     // Fetch committee with unified timestamp
@@ -335,7 +313,7 @@ pub async fn transition_to_epoch_from_system_tx(
         "📋 [COMMITTEE] Fetching for epoch {} from {}",
         new_epoch, committee_source.socket_path
     );
-    let (committee, epoch_timestamp_to_use) = committee_source
+    let (committee, epoch_timestamp_to_use, eth_addresses) = committee_source
         .fetch_committee_with_timestamp(&config.executor_send_socket_path, new_epoch)
         .await?;
 
@@ -350,24 +328,15 @@ pub async fn transition_to_epoch_from_system_tx(
 
     let committee_for_priority_check = committee.clone();
 
-    // Update epoch_eth_addresses cache
-    if let Err(e) = committee_source
-        .fetch_and_update_epoch_eth_addresses(
-            &config.executor_send_socket_path,
-            new_epoch,
-            &node.epoch_eth_addresses,
-        )
-        .await
+    // Update epoch_eth_addresses cache atomically
     {
-        warn!("⚠️ [TRANSITION] Failed to update epoch_eth_addresses: {}", e);
-    }
-
-    // Prune old epochs from epoch_eth_addresses (keep 2 max)
-    {
-        let mut addrs = node.epoch_eth_addresses.write().await;
-        if addrs.len() > 2 {
+        let mut cache = node.epoch_eth_addresses.write().await;
+        cache.insert(new_epoch, eth_addresses);
+        
+        // Keep only last 2 epochs to prevent unbounded growth
+        if cache.len() > 2 {
             let min_keep = new_epoch.saturating_sub(1);
-            addrs.retain(|&epoch, _| epoch >= min_keep);
+            cache.retain(|&epoch, _| epoch >= min_keep);
         }
     }
 

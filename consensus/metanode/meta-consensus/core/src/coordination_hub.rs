@@ -71,6 +71,10 @@ pub struct ConsensusCoordinationHub {
     /// Mutated by CommitProcessor (skip) and CommitObserver (execution).
     /// Read by Peer P2P Sync to inform peers of local catch-up progress.
     global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+
+    /// The highest quorum commit index observed by CommitVoteMonitor.
+    /// Used by Core to prevent the local committer from diverging when missing network commits.
+    quorum_commit_index: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ConsensusCoordinationHub {
@@ -79,6 +83,7 @@ impl ConsensusCoordinationHub {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
+            quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -111,6 +116,24 @@ impl ConsensusCoordinationHub {
     /// Atomically swap the epoch transitioning flag and return the old value
     pub fn swap_epoch_transitioning(&self, is_transitioning: bool) -> bool {
         self.is_transitioning.swap(is_transitioning, Ordering::SeqCst)
+    }
+
+    /// Update the highest quorum commit index observed
+    pub fn update_quorum_commit_index(&self, index: u32) {
+        let current = self.quorum_commit_index.load(Ordering::Relaxed);
+        if index > current {
+            self.quorum_commit_index.fetch_max(index, Ordering::Relaxed);
+        }
+    }
+
+    /// Reset the highest quorum commit index observed (used during epoch transition)
+    pub fn reset_quorum_commit_index(&self, index: u32) {
+        self.quorum_commit_index.store(index, Ordering::Relaxed);
+    }
+
+    /// Retrieve the highest quorum commit index
+    pub fn get_quorum_commit_index(&self) -> u32 {
+        self.quorum_commit_index.load(Ordering::Relaxed)
     }
 
     /// Retrieve the current consensus phase.
@@ -184,6 +207,9 @@ impl ConsensusCoordinationHub {
     pub fn new_for_testing() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
+            is_transitioning: Arc::new(AtomicBool::new(false)),
+            global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
+            quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }

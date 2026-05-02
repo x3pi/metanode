@@ -89,7 +89,7 @@
         "XapianPath": "/xapian"
     },
     "nodes": {
-        "network_sync_enabled": true,
+        "network_sync_enabled": false,
         "list_sub_address": [
             "0.0.0.0:6241"
         ],

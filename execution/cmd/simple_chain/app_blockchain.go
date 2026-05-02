@@ -208,6 +208,34 @@ func (app *App) initBlockchain() error {
 			}
 		}
 
+		// ─── Initialize LastHandledCommitIndex ──────────
+		headerCommitIndex := uint32(app.startLastBlock.Header().CommitIndex())
+		
+		var backupCommitIndex uint32 = 0
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
+			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
+				if parsedIdx, err := utils.BytesToUint32(commitIdxBytes); err == nil {
+					backupCommitIndex = parsedIdx
+				}
+			}
+		}
+
+		targetCommitIndex := headerCommitIndex
+		if backupCommitIndex > headerCommitIndex {
+			targetCommitIndex = backupCommitIndex
+			logger.Info("✅ [STARTUP] BackupDb CommitIndex (%d) is higher than block header CommitIndex (%d). Using BackupDb value.", backupCommitIndex, headerCommitIndex)
+		} else if headerCommitIndex > 0 {
+			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
+		} else {
+			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in BackupDb or header)")
+		}
+
+		if targetCommitIndex > 0 {
+			storage.UpdateLastHandledCommitIndex(targetCommitIndex)
+		} else {
+			storage.UpdateLastHandledCommitIndex(0)
+		}
+
 		// ─── Startup State Sync Logging ────────────────────────────────
 		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s",
 			app.startLastBlock.Header().BlockNumber(),
@@ -244,6 +272,24 @@ SKIP_GENESIS:
 	if app.chainState != nil && app.chainState.GetAccountStateDB() != nil {
 		nomtRoot := app.chainState.GetAccountStateDB().Trie().Hash()
 		startStateRoot := app.startLastBlock.Header().AccountStatesRoot()
+
+		// ═══════════════════════════════════════════════════════════════
+		// FORK-DIAG (May 2026): Cross-check trie cached root vs direct NOMT handle root.
+		// If these differ, the NomtStateTrie was constructed with a stale root and all
+		// subsequent state reads will be inconsistent.
+		// ═══════════════════════════════════════════════════════════════
+		if nomtHandleRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+			if nomtHandleRoot != nomtRoot {
+				logger.Error("🚨 [STARTUP] CRITICAL: NOMT handle root (%s) differs from trie cached root (%s)! "+
+					"The AccountStateDB trie is stale.",
+					nomtHandleRoot.Hex()[:18]+"...", nomtRoot.Hex()[:18]+"...")
+				// Use the handle root as the authoritative source
+				nomtRoot = nomtHandleRoot
+			} else {
+				logger.Info("✅ [STARTUP] NOMT handle root matches trie cached root: %s",
+					nomtRoot.Hex()[:18]+"...")
+			}
+		}
 
 		// Attempt to load metadata.json
 		metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")

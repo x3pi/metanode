@@ -20,6 +20,7 @@ message BlockHeader{
   bytes StakeStatesRoot = 9;
   uint64 Epoch = 10;
   uint64 GlobalExecIndex = 11; // Maps Go block number → Rust commit index (for decoupled block numbering)
+  uint64 CommitIndex = 12; // Rust consensus commit index
 }
 
 message Block {

@@ -170,7 +170,7 @@ pub async fn check_promotion_eligibility(
     }
 
     // Fetch committee for current epoch
-    let committee = committee_source
+    let (committee, _eth_addresses) = committee_source
         .fetch_committee(&config.executor_send_socket_path, network_epoch)
         .await?;
 
@@ -232,7 +232,7 @@ pub async fn determine_role_for_epoch(
     };
 
     // Step 2: Fetch committee for this epoch
-    let committee = match committee_source
+    let (committee, _eth_addresses) = match committee_source
         .fetch_committee(&config.executor_send_socket_path, epoch)
         .await
     {

@@ -126,6 +126,9 @@ impl ExecutorClient {
             | Some(proto::response::Payload::SyncBlocksResponse(_)) => {
                 warn!("🔍 [EXECUTOR-REQ] Payload is Block Sync response (not expected for this request)");
             }
+            Some(proto::response::Payload::GetLastHandledCommitIndexResponse(_)) => {
+                warn!("🔍 [EXECUTOR-REQ] Payload is GetLastHandledCommitIndexResponse (not expected for this request)");
+            }
             None => {
                 warn!("🔍 [EXECUTOR-REQ] Payload is None - response structure may be incorrect");
                 warn!("🔍 [EXECUTOR-REQ] Full response debug: {:?}", response);
@@ -212,6 +215,11 @@ impl ExecutorClient {
                 | Some(proto::response::Payload::SyncBlocksResponse(_)) => {
                     Err(anyhow::anyhow!(
                         "Unexpected Block Sync response (expected ValidatorInfoList)"
+                    ))
+                }
+                Some(proto::response::Payload::GetLastHandledCommitIndexResponse(_)) => {
+                    Err(anyhow::anyhow!(
+                        "Unexpected GetLastHandledCommitIndexResponse (expected ValidatorInfoList)"
                     ))
                 }
                 None => {
@@ -391,6 +399,61 @@ impl ExecutorClient {
                 Err(anyhow::anyhow!("Go returned error: {}", error_msg))
             }
             _ => Err(anyhow::anyhow!("Unexpected response type for ForceCommit")),
+        }
+    }
+
+    // ========================================================================
+    // GO-AUTHORITATIVE GEI: Recovery Query
+    // ========================================================================
+
+    /// Query Go's last handled commit state for recovery after restart.
+    /// This replaces the fragile fragment_offset reconstruction logic.
+    ///
+    /// Returns (last_commit_index, last_gei, last_block_number, epoch, is_authoritative, last_block_timestamp_ms)
+    pub async fn get_last_handled_commit_index(&self) -> Result<(u32, u64, u64, u64, bool, u64)> {
+        if !self.is_enabled() {
+            return Err(anyhow::anyhow!("Executor client is not enabled"));
+        }
+
+        // Circuit breaker check
+        if let Err(reason) = self.rpc_circuit_breaker.check("get_last_handled_commit_index") {
+            return Err(anyhow::anyhow!("Circuit breaker: {}", reason));
+        }
+
+        let request = Request {
+            payload: Some(proto::request::Payload::GetLastHandledCommitIndexRequest(
+                proto::GetLastHandledCommitIndexRequest {},
+            )),
+        };
+
+        let mut request_buf = Vec::new();
+        request.encode(&mut request_buf)?;
+
+        // FFI INTEGRATION: Send request directly via CGo callback
+        let response_buf = self.execute_rpc_request(&request_buf).await?;
+
+        let response = Response::decode(&response_buf[..])
+            .map_err(|e| anyhow::anyhow!("Failed to decode response from Go: {}", e))?;
+
+        match response.payload {
+            Some(proto::response::Payload::GetLastHandledCommitIndexResponse(res)) => {
+                info!(
+                    "🔑 [GO-AUTH GEI] Recovery state received: last_commit={}, last_gei={}, block={}, epoch={}, authoritative={}, timestamp={}",
+                    res.last_commit_index, res.last_gei, res.last_block_number, res.epoch, res.is_authoritative, res.last_block_timestamp_ms
+                );
+                Ok((
+                    res.last_commit_index,
+                    res.last_gei,
+                    res.last_block_number,
+                    res.epoch,
+                    res.is_authoritative,
+                    res.last_block_timestamp_ms,
+                ))
+            }
+            Some(proto::response::Payload::Error(error_msg)) => {
+                Err(anyhow::anyhow!("Go returned error for GetLastHandledCommitIndex: {}", error_msg))
+            }
+            _ => Err(anyhow::anyhow!("Unexpected response type for GetLastHandledCommitIndex")),
         }
     }
 }

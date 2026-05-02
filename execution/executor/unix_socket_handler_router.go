@@ -286,6 +286,25 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 					},
 				}
 			}
+		case *pb.Request_GetLastHandledCommitIndexRequest:
+			logger.Info("[Go Server] 📥 Received GetLastHandledCommitIndexRequest (GO-AUTH GEI recovery)")
+			res, err := se.HandleGetLastHandledCommitIndexRequest(req.GetLastHandledCommitIndexRequest)
+			if err != nil {
+				logger.Error("[Go Server] ❌ Error handling GetLastHandledCommitIndexRequest: %v", err)
+				wrappedResponse = &pb.Response{
+					Payload: &pb.Response_Error{
+						Error: err.Error(),
+					},
+				}
+			} else {
+				logger.Info("[Go Server] ✅ GetLastHandledCommitIndexRequest: last_commit=%d, last_gei=%d, block=%d, epoch=%d",
+					res.GetLastCommitIndex(), res.GetLastGei(), res.GetLastBlockNumber(), res.GetEpoch())
+				wrappedResponse = &pb.Response{
+					Payload: &pb.Response_GetLastHandledCommitIndexResponse{
+						GetLastHandledCommitIndexResponse: res,
+					},
+				}
+			}
 		default:
 			logger.Error("[Go Server] Unknown request type: %T", req)
 			// Send error response instead of continue

@@ -26,7 +26,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["hash"] = block.Header().Hash()
 	blockMap["number"] = hexutil.EncodeUint64(block.Header().BlockNumber())
 	blockMap["sha3Uncles"] = common.Hash{}
-	blockMap["miner"] = common.Address{}
+	blockMap["miner"] = block.Header().LeaderAddress()
 	blockMap["parentHash"] = block.Header().LastBlockHash()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      // Hash của khối cha
 	blockMap["stateRoot"] = block.Header().AccountStatesRoot()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   // Root của Merkle Patricia Trie chứa trạng thái tài khoản
 	blockMap["receiptsRoot"] = block.Header().ReceiptRoot()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      // Root của Merkle Patricia Trie chứa receipts của các giao dịch
@@ -55,6 +55,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["globalExecIndex"] = hexutil.EncodeUint64(block.Header().GlobalExecIndex()) // Maps Go block → Rust consensus commit index
 	blockMap["stakeStatesRoot"] = block.Header().StakeStatesRoot()                       // Root của Merkle trie chứa trạng thái stake
 	blockMap["epoch"] = hexutil.EncodeUint64(block.Header().Epoch())                     // Epoch của khối
+	blockMap["leaderAddress"] = block.Header().LeaderAddress().Hex()                     // Địa chỉ validator tạo khối
 
 	// Add transactions to the map.
 	txHashes := block.Transactions()

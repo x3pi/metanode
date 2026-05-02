@@ -349,6 +349,11 @@ test_hash_parity() {
         # Collect hashes and GEIs from all online nodes
         local node_hashes=()
         local node_geis=()
+        local node_timestamps=()
+        local node_state_roots=()
+        local node_leader_addrs=()
+        local node_parent_hashes=()
+        local node_stake_roots=()
         local null_count=0
         local first_hash=""
         local first_gei=""
@@ -359,6 +364,11 @@ test_hash_parity() {
             if [ "${blocks[$i]}" = "-1" ]; then
                 node_hashes+=("offline")
                 node_geis+=("offline")
+                node_timestamps+=("offline")
+                node_state_roots+=("offline")
+                node_leader_addrs+=("offline")
+                node_parent_hashes+=("offline")
+                node_stake_roots+=("offline")
                 continue
             fi
             
@@ -372,10 +382,25 @@ test_hash_parity() {
             hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
             local gei
             gei=$(echo "$result" | grep -o '"globalExecIndex":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local timestamp
+            timestamp=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local state_root
+            state_root=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local leader_address
+            leader_address=$(echo "$result" | grep -o '"leaderAddress":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local parent_hash
+            parent_hash=$(echo "$result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local stake_root
+            stake_root=$(echo "$result" | grep -o '"stakeStatesRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
             
             if [ -z "$hash" ] || [ "$hash" = "null" ]; then
                 node_hashes+=("null")
                 node_geis+=("null")
+                node_timestamps+=("null")
+                node_state_roots+=("null")
+                node_leader_addrs+=("null")
+                node_parent_hashes+=("null")
+                node_stake_roots+=("null")
                 null_count=$((null_count + 1))
                 continue
             fi
@@ -388,6 +413,16 @@ test_hash_parity() {
             
             node_hashes+=("$hash")
             node_geis+=("$gei_dec")
+            
+            local ts_dec="?"
+            if [ -n "$timestamp" ]; then
+                ts_dec=$(printf "%d" "$timestamp" 2>/dev/null || echo "?")
+            fi
+            node_timestamps+=("$ts_dec")
+            node_state_roots+=("$state_root")
+            node_leader_addrs+=("$leader_address")
+            node_parent_hashes+=("$parent_hash")
+            node_stake_roots+=("$stake_root")
             
             if [ -z "$first_hash" ]; then
                 first_hash="$hash"
@@ -422,8 +457,36 @@ test_hash_parity() {
                     log "  - Node $i: \`(block không tồn tại - đang sync)\`"
                 else
                     log "  - Node $i: hash=\`${node_hashes[$i]:0:18}...\` gei=\`${node_geis[$i]}\`"
+                    log "             state=\`${node_state_roots[$i]:0:18}...\` stake=\`${node_stake_roots[$i]:0:18}...\`"
+                    log "             leader=\`${node_leader_addrs[$i]:0:14}...\` ts=\`${node_timestamps[$i]}\` parent=\`${node_parent_hashes[$i]:0:18}...\`"
                 fi
             done
+            
+            local mismatched_fields=""
+            local valid_node=-1
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${node_hashes[$i]}" != "offline" ] && [ "${node_hashes[$i]}" != "null" ]; then
+                    if [ "$valid_node" = "-1" ]; then
+                        valid_node=$i
+                    else
+                        if [ "${node_hashes[$i]}" != "${node_hashes[$valid_node]}" ]; then
+                            if [ "${node_geis[$i]}" != "${node_geis[$valid_node]}" ]; then mismatched_fields="$mismatched_fields GEI"; fi
+                            if [ "${node_timestamps[$i]}" != "${node_timestamps[$valid_node]}" ]; then mismatched_fields="$mismatched_fields TIMESTAMP"; fi
+                            if [ "${node_state_roots[$i]}" != "${node_state_roots[$valid_node]}" ]; then mismatched_fields="$mismatched_fields STATE_ROOT"; fi
+                            if [ "${node_leader_addrs[$i]}" != "${node_leader_addrs[$valid_node]}" ]; then mismatched_fields="$mismatched_fields LEADER_ADDR"; fi
+                            if [ "${node_parent_hashes[$i]}" != "${node_parent_hashes[$valid_node]}" ]; then mismatched_fields="$mismatched_fields PARENT_HASH"; fi
+                            if [ "${node_stake_roots[$i]}" != "${node_stake_roots[$valid_node]}" ]; then mismatched_fields="$mismatched_fields STAKE_ROOT"; fi
+                        fi
+                    fi
+                fi
+            done
+            if [ -n "$mismatched_fields" ]; then
+                local unique_fields=$(echo $mismatched_fields | tr ' ' '\n' | sort | uniq | tr '\n' ' ')
+                log "  🔍 TRƯỜNG BỊ LỆCH (Nguyên nhân khác hash): **$unique_fields**"
+            elif [ "$block_mismatch" = "true" ]; then
+                log "  🔍 TRƯỜNG BỊ LỆCH: **TRANSACTIONS / RECEIPTS / UNKNOWN** (Các trường metadata giống hệt nhau)"
+            fi
+            
             log ""
         else
             log "✅ Block #$check_block: hash nhất quán (gei=${first_gei:-?})"
@@ -438,6 +501,66 @@ test_hash_parity() {
         if [ "$total_null_misses" -gt 0 ]; then
             log "> 🚨 $total_null_misses trường hợp node trả null cho common block — node bị fork hoặc chain broken."
         fi
+        
+        log ""
+        log "🔍 Đang thực hiện Binary Search để tìm BLOCK ĐẦU TIÊN bị lệch (range: 1..$min_block)..."
+        local low=1
+        local high=$min_block
+        local first_mismatch_block=-1
+        
+        while [ "$low" -le "$high" ]; do
+            local mid=$(( (low + high) / 2 ))
+            local mid_hex=$(printf "0x%x" "$mid")
+            
+            local has_mismatch=false
+            local ref_hash=""
+            
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${blocks[$i]}" = "-1" ]; then continue; fi
+                local port=${RPC_PORTS[$i]}
+                local result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$port" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$mid_hex\", false],\"id\":1}" 2>/dev/null)
+                local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                
+                if [ -z "$hash" ] || [ "$hash" = "null" ]; then continue; fi
+                
+                if [ -z "$ref_hash" ]; then
+                    ref_hash="$hash"
+                elif [ "$hash" != "$ref_hash" ]; then
+                    has_mismatch=true
+                    break
+                fi
+            done
+            
+            if [ "$has_mismatch" = "true" ]; then
+                first_mismatch_block=$mid
+                high=$((mid - 1))
+            else
+                low=$((mid + 1))
+            fi
+        done
+        
+        if [ "$first_mismatch_block" != "-1" ]; then
+            log "🎯 **BLOCK ĐẦU TIÊN BỊ LỆCH CHÍNH XÁC LÀ: #$first_mismatch_block**"
+            log "Chi tiết block #$first_mismatch_block:"
+            local fm_hex=$(printf "0x%x" "$first_mismatch_block")
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                if [ "${blocks[$i]}" = "-1" ]; then continue; fi
+                local port=${RPC_PORTS[$i]}
+                local result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$port" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fm_hex\", false],\"id\":1}" 2>/dev/null)
+                local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local gei=$(echo "$result" | grep -o '"globalExecIndex":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local ts=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                local st=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+                if [ -n "$hash" ] && [ "$hash" != "null" ]; then
+                    local gei_dec="?"
+                    if [ -n "$gei" ]; then gei_dec=$(printf "%d" "$gei" 2>/dev/null || echo "?"); fi
+                    local ts_dec="?"
+                    if [ -n "$ts" ]; then ts_dec=$(printf "%d" "$ts" 2>/dev/null || echo "?"); fi
+                    log "  - Node $i: hash=\`${hash:0:18}...\` gei=\`${gei_dec}\` ts=\`${ts_dec}\` state=\`${st:0:18}...\`"
+                fi
+            done
+        fi
+        
         record_result "$test_label" "false"
     else
         log "> ✅ Tất cả ${blocks_checked} blocks đều nhất quán hash+GEI giữa các node."
@@ -465,33 +588,43 @@ test_scan_fork_warnings() {
     local total_warnings=0
     
     for i in $(seq 0 $((NUM_NODES - 1))); do
-        local log_file="$LOG_BASE/node_$i/go-master-stdout.log"
-        if [ ! -f "$log_file" ]; then
-            log "- ⚠️ Node $i: Log file không tồn tại: \`$log_file\`"
-            continue
+        local go_log="$LOG_BASE/node_$i/go-master-stdout.log"
+        local rust_log="$LOG_BASE/node_$i/consensus-stdout.log"
+        local combined_warnings=""
+        local count=0
+        
+        # Go Log
+        if [ -f "$go_log" ]; then
+            local go_warnings
+            go_warnings=$(tail -n 10000 "$go_log" 2>/dev/null \
+                | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
+                | grep -ivE "(FORK-GUARD|FORK-DIAG|ANTI-FORK|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe|COLD-START-GUARD|STARTUP-SYNC|FORK-SAFETY)" \
+                | tail -n 10) || true
+            if [ -n "$go_warnings" ]; then
+                combined_warnings="${combined_warnings}Go Master:\n${go_warnings}\n"
+                count=$((count + $(echo "$go_warnings" | wc -l)))
+            fi
+        fi
+
+        # Rust Log
+        if [ -f "$rust_log" ]; then
+            local rust_warnings
+            rust_warnings=$(tail -n 10000 "$rust_log" 2>/dev/null \
+                | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
+                | grep -ivE "(FORK-GUARD|FORK-DIAG|ANTI-FORK|no panic|Created block|AssertUnwindSafe|catch_unwind|unwind_safe|COLD-START-GUARD|STARTUP-SYNC|FORK-SAFETY)" \
+                | tail -n 10) || true
+            if [ -n "$rust_warnings" ]; then
+                combined_warnings="${combined_warnings}Consensus:\n${rust_warnings}\n"
+                count=$((count + $(echo "$rust_warnings" | wc -l)))
+            fi
         fi
         
-        # Lọc 10,000 dòng gần nhất
-        # Loại bỏ false positives:
-        #   - "FORK-GUARD" là tên feature, không phải lỗi
-        #   - "FORK-DIAG" là diagnostic log, không phải lỗi thực
-        #   - "ANTI-FORK" là tên check, PASS/SKIP cũng match → chỉ lấy FAIL
-        #   - "Created block" là normal proposer log (base64 hashes có thể chứa "fatal")
-        #   - Bare "fatal" matches base64 encoded data → đổi sang "fatal error|fatal:"
-        local warnings
-        warnings=$(tail -n 10000 "$log_file" 2>/dev/null \
-            | grep -iE "(FORK DETECTED|DIVERGE|HASH MISMATCH|PANIC|fatal error|fatal:)" \
-            | grep -ivE "(FORK-GUARD|FORK-DIAG|anti-fork.*pass|anti-fork.*skip|no panic|Created block)" \
-            | tail -n 10) || true
-        
-        if [ -n "$warnings" ]; then
-            local count
-            count=$(echo "$warnings" | wc -l)
+        if [ $count -gt 0 ]; then
             total_warnings=$((total_warnings + count))
             log "⚠️ **Node $i**: Tìm thấy $count cảnh báo nghiêm trọng:"
             log ""
             log '```text'
-            log_raw "$warnings"
+            log_raw "$combined_warnings"
             log '```'
             log ""
             found_issues=1
