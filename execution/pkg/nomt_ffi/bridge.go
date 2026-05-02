@@ -29,7 +29,6 @@ type Handle struct {
 	leafCacheMB       int
 
 	sessionsMu      sync.Mutex
-	activeSessions  []*Session
 	pendingSessions []*FinishedSession
 }
 
@@ -89,26 +88,19 @@ func (h *Handle) GetPath() string {
 // closes the underlying NOMT/RocksDB database instance. This guarantees that all 
 // background compaction and flush threads are stopped, and all Rust Arc<Core> 
 // references are released, making it 100% safe to `cp -a` the database directory.
+//
+// IMPORTANT: The caller (SnapshotManager) MUST call PauseExecution() + WaitForPersistence()
+// BEFORE calling this function. This ensures no active sessions exist — only
+// pendingSessions (async disk I/O not yet flushed) need draining.
 func (h *Handle) CloseForSnapshot() {
 	h.mu.Lock()
 
 	h.sessionsMu.Lock()
-	active := h.activeSessions
 	pending := h.pendingSessions
-	h.activeSessions = nil
 	h.pendingSessions = nil
 	h.sessionsMu.Unlock()
 
-	// Abort any leaked active sessions that were never committed or aborted.
-	for _, s := range active {
-		if s != nil && s.ptr != nil {
-			fmt.Printf("nomt_ffi: forcefully aborting leaked active session at %s before snapshot\n", h.path)
-			C.nomt_session_abort(s.ptr)
-			s.ptr = nil
-		}
-	}
-
-	// Drain any async sessions that haven't been committed yet.
+	// Drain any async finished sessions that haven't been committed yet.
 	// If we don't do this, the FinishedSession inside Go holds a reference
 	// to the Rust Session, which keeps the Arc<Core> alive, causing nomt_close
 	// to NOT actually release the RocksDB directory lock!
@@ -254,13 +246,7 @@ func BeginSession(h *Handle) *Session {
 	if ptr == nil {
 		return nil
 	}
-	
-	s := &Session{ptr: ptr, handle: h}
-	h.sessionsMu.Lock()
-	h.activeSessions = append(h.activeSessions, s)
-	h.sessionsMu.Unlock()
-	
-	return s
+	return &Session{ptr: ptr, handle: h}
 }
 
 // WarmUp sends an asynchronous prefetch request to the NOMT threadpool to load
@@ -436,16 +422,6 @@ func (s *Session) Commit(h *Handle) ([32]byte, error) {
 	if ret != 0 {
 		return newRoot, fmt.Errorf("nomt_ffi: commit failed")
 	}
-
-	h.sessionsMu.Lock()
-	for i, as := range h.activeSessions {
-		if as == s {
-			h.activeSessions = append(h.activeSessions[:i], h.activeSessions[i+1:]...)
-			break
-		}
-	}
-	h.sessionsMu.Unlock()
-
 	return newRoot, nil
 }
 
@@ -475,12 +451,6 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 
 	fs := &FinishedSession{ptr: ptr, handle: h}
 	h.sessionsMu.Lock()
-	for i, as := range h.activeSessions {
-		if as == s {
-			h.activeSessions = append(h.activeSessions[:i], h.activeSessions[i+1:]...)
-			break
-		}
-	}
 	h.pendingSessions = append(h.pendingSessions, fs)
 	h.sessionsMu.Unlock()
 
@@ -529,16 +499,6 @@ func (s *Session) Abort() {
 			C.nomt_session_abort(s.ptr)
 		}
 		s.ptr = nil
-
-		h := s.handle
-		h.sessionsMu.Lock()
-		for i, as := range h.activeSessions {
-			if as == s {
-				h.activeSessions = append(h.activeSessions[:i], h.activeSessions[i+1:]...)
-				break
-			}
-		}
-		h.sessionsMu.Unlock()
 	}
 }
 
