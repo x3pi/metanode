@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -48,6 +50,7 @@ type ChainState struct {
 	blockDatabase      *block.BlockDatabase
 	stakeStateDB       *stake_state_db.StakeStateDB
 	freeFeeAddress     map[common.Address]struct{}
+	changelogDB        *state_changelog.StateChangelogDB
 
 	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
 	// concurrent access during UpdateStateForNewHeader (writer) and Get*DB (readers).
@@ -114,6 +117,18 @@ func NewChainStateWithGenesis(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account state trie: %v", err)
 	}
+	var changelogDB *state_changelog.StateChangelogDB
+	if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
+		if backupPath != "" {
+			changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db")
+			changelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "account_state")
+			if err == nil {
+				nomtTrie.SetChangelogDB(changelogDB)
+			} else {
+				logger.Error("Failed to init StateChangelogDB at %s: %v", changelogPath, err)
+			}
+		}
+	}
 	stakeStorage := sm.GetStorageStake()
 
 	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, true)
@@ -146,6 +161,7 @@ func NewChainStateWithGenesis(
 		blockDatabase:         blockDatabase,
 		freeFeeAddress:        freeFeeAddress,
 		maxCachedEpochs:       maxCached,
+		changelogDB:           changelogDB,
 		currentEpoch:          0, // Start with epoch 0 (genesis)
 		epochStartTimestampMs: 0, // Will be set on first epoch advance
 		epochStartTimestamps:  make(map[uint64]uint64),
@@ -227,6 +243,11 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if err != nil {
 		logger.Error("Failed to create new account state trie during update", "error", err, "newRoot", newAccountRoot)
 		return fmt.Errorf("failed to create new account state trie for update: %w", err)
+	}
+	if cs.changelogDB != nil {
+		if nomtTrie, ok := newAccountStateTrie.(*trie.NomtStateTrie); ok {
+			nomtTrie.SetChangelogDB(cs.changelogDB)
+		}
 	}
 	newAsDB := account_state_db.NewAccountStateDB(newAccountStateTrie, accountStorage)
 

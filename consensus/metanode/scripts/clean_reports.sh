@@ -1,10 +1,13 @@
 #!/bin/bash
+# ═══════════════════════════════════════════════════════════════════
+#  Clean Report Files
+#  Xóa các file báo cáo stability_report_*.md và debug_report_*.md
+# ═══════════════════════════════════════════════════════════════════
 
-# Script to clean up generated test and debug reports
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cd "$(dirname "$0")"
+echo "🧹 Đang dọn dẹp các file báo cáo trong thư mục $SCRIPT_DIR..."
+rm -f "$SCRIPT_DIR"/stability_report_*.md
+rm -f "$SCRIPT_DIR"/debug_report_*.md
 
-echo "🧹 Cleaning up report files in scripts directory..."
-rm -f stability_report_*.md
-rm -f debug_report_*.md
-echo "✅ Cleanup complete."
+echo "✅ Đã dọn dẹp xong."

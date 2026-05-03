@@ -33,6 +33,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
+	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
 // State represents the processor state
@@ -401,6 +402,14 @@ func NewBlockProcessor(
 		snapshotManager.SetStateRootCallback(func() string {
 			if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
 				return bp.chainState.GetAccountStateDB().Trie().Hash().Hex()
+			}
+			return ""
+		})
+
+		// Set callback to fetch atomic StakeStatesRoot during snapshot
+		snapshotManager.SetStakeRootCallback(func() string {
+			if root, ok := mt_trie.GetNomtHandleRoot("stake_db"); ok {
+				return root.Hex()
 			}
 			return ""
 		})

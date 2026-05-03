@@ -286,7 +286,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	phase32Start := time.Now()
 	var trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	trieDBSnapshots = processResults.TrieDBSnapshots
-	bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots)
+	bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
 	phase32Elapsed := time.Since(phase32Start)
 
 	phase4Start := time.Now()

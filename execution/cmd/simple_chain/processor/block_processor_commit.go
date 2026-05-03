@@ -245,7 +245,7 @@ func (bp *BlockProcessor) commitWorker() {
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // The persist jobs are sent to persistWorker for async LevelDB persistence.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot) {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) {
 	overallStart := time.Now()
 
 	// ═══════════════════════════════════════════════════════════════
@@ -315,6 +315,11 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			defer wg.Done()
 			start := time.Now()
 			var err error
+			// Set blockNumber for StateChangelog BEFORE CommitPipeline.
+			// CRITICAL: Use SetTrieCommitBlock() instead of Trie() to avoid deadlock.
+			// muTrie.Lock() is held by IntermediateRoot(true) from block creation,
+			// so calling Trie() (which needs muTrie.RLock()) would deadlock.
+			bp.chainState.GetAccountStateDB().SetTrieCommitBlock(blockNumber)
 			accountPipelineResult, err = bp.chainState.GetAccountStateDB().CommitPipeline()
 			resultsChan <- taskResult{name: "AccountPipeline", err: err, duration: time.Since(start)}
 		}()

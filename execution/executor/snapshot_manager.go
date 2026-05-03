@@ -31,6 +31,7 @@ type SnapshotMetadata struct {
 	Method               string            `json:"method"`
 	GlobalExecIndex      uint64            `json:"global_exec_index"`
 	StateRoot            string            `json:"state_root"`
+	StakeStatesRoot      string            `json:"stake_states_root"`
 	RustDAGEpoch         uint64            `json:"rust_dag_epoch"`
 	RustCommitIndex      uint64            `json:"rust_commit_index"`
 	MetadataChecksum     string            `json:"metadata_checksum"`         // SHA256 of metadata (excluding this field)
@@ -92,6 +93,9 @@ type SnapshotManager struct {
 
 	// Callback to get the current exact StateRoot
 	stateRootCallback func() string
+
+	// Callback to get the current exact StakeStatesRoot
+	stakeRootCallback func() string
 }
 
 // NewSnapshotManager tạo instance mới của SnapshotManager
@@ -190,6 +194,13 @@ func (sm *SnapshotManager) SetStateRootCallback(cb func() string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.stateRootCallback = cb
+}
+
+// SetStakeRootCallback registers a callback to fetch the current NOMT stake state root.
+func (sm *SnapshotManager) SetStakeRootCallback(cb func() string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.stakeRootCallback = cb
 }
 
 // SetResumeCallback registers a callback to resume transaction execution
@@ -401,6 +412,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	rustPauseCb := sm.rustPauseCallback
 	rustResumeCb := sm.rustResumeCallback
 	stateRootCb := sm.stateRootCallback
+	stakeRootCb := sm.stakeRootCallback
 	sm.mu.Unlock()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -440,6 +452,10 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	if stateRootCb != nil {
 		actualStateRoot = stateRootCb()
 	}
+	actualStakeRoot := ""
+	if stakeRootCb != nil {
+		actualStakeRoot = stakeRootCb()
+	}
 	if actualBlockNumber == 0 {
 		actualBlockNumber = blockNumber
 	}
@@ -447,8 +463,8 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	rustDAGEpoch := uint64(0)
 	rustCommitIndex := uint64(0)
 
-	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s",
-		actualBlockNumber, actualGEI, actualStateRoot)
+	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s, StakeRoot=%s",
+		actualBlockNumber, actualGEI, actualStateRoot, actualStakeRoot)
 
 	// Nếu method là rsync, chạy độc lập lệnh rsync -a
 	if method == "rsync" {
@@ -664,6 +680,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 		Method:               method,
 		GlobalExecIndex:      actualGEI,
 		StateRoot:            actualStateRoot,
+		StakeStatesRoot:      actualStakeRoot,
 		RustDAGEpoch:         rustDAGEpoch,
 		RustCommitIndex:      rustCommitIndex,
 		LastHandledCommitIdx: uint64(storage.GetLastHandledCommitIndex()),

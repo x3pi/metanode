@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -88,6 +89,12 @@ type NomtStateTrie struct {
 
 	// tracks if knownKeys was modified since last commit
 	registryChanged bool
+
+	// Optional state changelog DB for historical queries
+	changelogDB *state_changelog.StateChangelogDB
+
+	// currentCommitBlock tracks the block number for the current commit
+	currentCommitBlock uint64
 }
 
 type nomtDirtyEntry struct {
@@ -263,8 +270,23 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		knownKeys:       knownKeys,
 		rootHash:        rootHash,
 		isHash:          isHash,
-		registryChanged: false,
+		isReplicationSync: false,
+		registryChanged:   false,
 	}
+}
+
+// SetChangelogDB sets the state changelog database for historical querying.
+func (n *NomtStateTrie) SetChangelogDB(db *state_changelog.StateChangelogDB) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.changelogDB = db
+}
+
+// SetCurrentCommitBlock sets the block number for the upcoming commit.
+func (n *NomtStateTrie) SetCurrentCommitBlock(blockNumber uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.currentCommitBlock = blockNumber
 }
 
 // SetReplicationSync configures the trie to bypass registry tracking and modifications.
@@ -794,6 +816,24 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 
 	// Store batch for network replication to Sub nodes
 	n.lastCommitBatch = replicationBatch
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// STATE CHANGELOG (Phase 2): Record per-block state diffs for historical access.
+	// ═══════════════════════════════════════════════════════════════════════
+	if n.changelogDB != nil && n.currentCommitBlock > 0 {
+		var changes []state_changelog.StateChange
+		for _, hexKey := range sortedDirtyKeys {
+			entry := n.dirty[hexKey]
+			changes = append(changes, state_changelog.StateChange{
+				Key:      entry.originalKey,
+				OldValue: n.oldValues[hexKey],
+				NewValue: entry.value,
+			})
+		}
+		if err := n.changelogDB.WriteBlockChanges(n.currentCommitBlock, changes); err != nil {
+			logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB: %v", err)
+		}
+	}
 
 	// Move dirty to committing to serve reads while async commit runs
 	n.committing = n.dirty

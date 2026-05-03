@@ -111,13 +111,13 @@ collect_diagnostics() {
     log ""
     log "---"
     log ""
-    log "## 🔬 Diagnostics for Round $round Failure"
+    log "## 🔬 Chẩn đoán cho Lỗi tại Vòng $round"
     log ""
-    log "**Failure Reason:** $failure_reason"
+    log "**Lý do thất bại:** $failure_reason"
     log ""
 
     # Node status
-    log "### Cluster Status"
+    log "### Trạng thái Cụm (Cluster Status)"
     log ""
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local port=${RPC_PORTS[$i]}
@@ -128,14 +128,13 @@ collect_diagnostics() {
         local epoch=$(echo "$info" | grep -o '"current_epoch":[0-9]*' | cut -d: -f2)
         if [ "$block" != "-1" ]; then
             log "- **Node $i**: block=\`$block\` gei=\`${gei:-?}\` epoch=\`${epoch:-?}\` state_root=\`${sr:0:20}...\`"
-        else
-            log "- **Node $i**: \`OFFLINE\`"
+            log "- **Node $i**: \`NGOẠI TUYẾN (OFFLINE)\`"
         fi
     done
     log ""
 
     # Hash comparison at recent blocks
-    log "### Block Hash Comparison (last 5 common blocks)"
+    log "### So sánh Mã Băm Khối (5 khối chung gần nhất)"
     log ""
     local min_block=999999999
     for i in $(seq 0 $((NUM_NODES - 1))); do
@@ -144,7 +143,7 @@ collect_diagnostics() {
     done
 
     if [ "$min_block" -gt 0 ] && [ "$min_block" -lt 999999999 ]; then
-        log "| Block | $(for i in $(seq 0 $((NUM_NODES-1))); do printf "Node %d | " $i; done)"
+        log "| Khối | $(for i in $(seq 0 $((NUM_NODES-1))); do printf "Node %d | " $i; done)"
         log "|-------|$(for i in $(seq 0 $((NUM_NODES-1))); do printf "------|"; done)"
         for offset in 0 1 2 3 4; do
             local bn=$((min_block - offset))
@@ -167,14 +166,14 @@ collect_diagnostics() {
     # Recent logs from failed node
     local dst_log="$LOG_BASE/node_${dst}/go-master-stdout.log"
     if [ -f "$dst_log" ]; then
-        log "### Node $dst Recent Logs (last 60 lines)"
+        log "### Nhật ký gần đây của Node $dst (60 dòng cuối)"
         log ""
         log '```text'
         tail -n 60 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
         log '```'
         log ""
 
-        log "### Node $dst Sync/Recovery Markers"
+        log "### Các Cột Mốc Đồng Bộ/Phục Hồi của Node $dst"
         log ""
         log '```text'
         grep -E "(STARTUP-SYNC|ANTI-FORK|STATE-ROOT|HEALTH|HALT|FORWARD-JUMP|CONSISTENCY|GEI-CROSSCHECK|baseline|Bootstrapping|CatchingUp|Healthy|FORK|DIVERGE|PANIC|fatal)" \
@@ -186,7 +185,7 @@ collect_diagnostics() {
     # Source node log excerpt
     local src_log="$LOG_BASE/node_${SRC_NODE}/go-master-stdout.log"
     if [ -f "$src_log" ]; then
-        log "### Node $SRC_NODE (Source) Recent Sync Markers"
+        log "### Các Cột Mốc Đồng Bộ Gần Đây của Node $SRC_NODE (Nguồn)"
         log ""
         log '```text'
         grep -E "(snapshot|FORK|DIVERGE|STATE-ROOT|MISMATCH)" "$src_log" 2>/dev/null | tail -15 | \
@@ -206,21 +205,21 @@ run_single_round() {
     local snap_url="http://127.0.0.1:${snap_port}"
     local round_start=$SECONDS
 
-    log "## 🔄 Round $round/$MAX_ROUNDS — Snapshot Recovery (Node $src → Node $dst)"
+    log "## 🔄 Vòng $round/$MAX_ROUNDS — Phục hồi từ Snapshot (Node $src → Node $dst)"
     log ""
-    log "**Start:** $(date '+%Y-%m-%d %H:%M:%S')"
+    log "**Bắt đầu:** $(date '+%Y-%m-%d %H:%M:%S')"
     log ""
 
     # ── Phase 1: Check snapshot availability ──
-    log "### Phase 1: Snapshot Check"
+    log "### Giai đoạn 1: Kiểm tra Snapshot"
     local snap_json=$(curl -sf "${snap_url}/api/snapshots" 2>/dev/null || echo "null")
     if [ "$snap_json" = "null" ] || [ -z "$snap_json" ]; then
-        log "- ❌ Snapshot API unresponsive on Node $src"
+        log "- ❌ API Snapshot không phản hồi trên Node $src"
         return 1
     fi
     local snap_count=$(echo "$snap_json" | jq 'length' 2>/dev/null || echo "0")
     if [ "$snap_count" -eq 0 ]; then
-        log "- ⚠️ No snapshots. Pumping TX to force epoch boundary..."
+        log "- ⚠️ Không có snapshot nào. Bơm giao dịch để bắt buộc chuyển epoch..."
         start_tx_pump
         for attempt in $(seq 1 12); do
             sleep 5
@@ -230,21 +229,21 @@ run_single_round() {
         done
         stop_tx_pump
         if [ "$snap_count" -eq 0 ]; then
-            log "- ❌ No snapshots created after 60s"
+            log "- ❌ Không có snapshot nào được tạo sau 60s"
             return 1
         fi
     fi
     local snap_name=$(echo "$snap_json" | jq -r '.[-1].snapshot_name')
-    log "- ✅ Snapshot found: \`$snap_name\` ($snap_count total)"
+    log "- ✅ Đã tìm thấy Snapshot: \`$snap_name\` (Tổng cộng $snap_count)"
 
     # Record pre-recovery state
     local pre_block_src=$(get_block_number "$src_port")
     local pre_block_dst=$(get_block_number "$dst_port")
-    log "- Pre-recovery: src_block=\`$pre_block_src\` dst_block=\`$pre_block_dst\`"
+    log "- Trước khi phục hồi: src_block=\`$pre_block_src\` dst_block=\`$pre_block_dst\`"
     log ""
 
     # ── Phase 2: Destroy & Restore ──
-    log "### Phase 2: Destroy & Restore Node $dst"
+    log "### Giai đoạn 2: Hủy và Phục hồi Node $dst"
     "$ORCHESTRATOR" stop-node "$dst" > /dev/null 2>&1 || true
 
     local dst_data="$GO_DIR/sample/node$dst"
@@ -288,17 +287,18 @@ run_single_round() {
             [ $gap -lt 0 ] && gap=0
             if [ $gap -le 5 ]; then
                 log "- ✅ Synced in ${elapsed}s (dst=\`$dst_block\` src=\`$src_block\`)"
+                log "- ✅ Đã đồng bộ sau ${elapsed}s (dst=\`$dst_block\` src=\`$src_block\`)"
                 sync_ok=true
                 break
             fi
-            [ $((elapsed % 10)) -eq 0 ] && log "- ⏳ Catching up... dst=\`$dst_block\` src=\`$src_block\` gap=\`$gap\` (${elapsed}s)"
+            [ $((elapsed % 10)) -eq 0 ] && log "- ⏳ Đang đồng bộ... dst=\`$dst_block\` src=\`$src_block\` gap=\`$gap\` (${elapsed}s)"
         fi
         sleep 3; elapsed=$((elapsed + 3))
     done
 
     if [ "$sync_ok" = false ]; then
         stop_tx_pump
-        log "- ❌ Catch-up timeout after ${CATCHUP_TIMEOUT}s"
+        log "- ❌ Quá thời gian chờ đồng bộ (Timeout) sau ${CATCHUP_TIMEOUT}s"
         return 1
     fi
 
@@ -307,7 +307,7 @@ run_single_round() {
     log ""
 
     # ── Phase 4: Integrity Verification ──
-    log "### Phase 4: Integrity Audit"
+    log "### Giai đoạn 4: Xác minh tính nhất quán (Integrity Audit)"
     local src_info=$(get_peer_info "$src_port")
     local dst_info=$(get_peer_info "$dst_port")
 
@@ -318,10 +318,10 @@ run_single_round() {
     local src_blk=$(get_block_number "$src_port")
     local dst_blk=$(get_block_number "$dst_port")
 
-    log "| Metric | Node $src (Source) | Node $dst (Target) | Match |"
+    log "| Chỉ số | Node $src (Nguồn) | Node $dst (Đích) | Khớp |"
     log "|--------|-------------------|-------------------|-------|"
     local blk_match="✅"; [ "$src_blk" != "$dst_blk" ] && { local bdiff=$((src_blk-dst_blk)); [ $bdiff -lt 0 ] && bdiff=$((-bdiff)); [ $bdiff -gt 5 ] && blk_match="❌"; }
-    log "| Block | $src_blk | $dst_blk | $blk_match |"
+    log "| Khối | $src_blk | $dst_blk | $blk_match |"
 
     local gei_match="✅"
     if [ -n "$src_gei" ] && [ -n "$dst_gei" ]; then
@@ -335,18 +335,18 @@ run_single_round() {
     log ""
 
     if [ "$sr_match" = "❌" ]; then
-        log "- 🚨 **STATE ROOT MISMATCH — FORK DETECTED**"
+        log "- 🚨 **LỆCH STATE ROOT — PHÁT HIỆN FORK**"
         return 1
     fi
     if [ "$gei_match" = "❌" ]; then
-        log "- 🚨 **GEI DIVERGENCE DETECTED** (src=$src_gei dst=$dst_gei)"
+        log "- 🚨 **LỆCH GEI — PHÁT HIỆN DIVERGENCE** (src=$src_gei dst=$dst_gei)"
         return 1
     fi
-    log "- ✅ Integrity checks passed"
+    log "- ✅ Đã thông qua các kiểm tra tính nhất quán"
     log ""
 
     # ── Phase 5: Liveness Check ──
-    log "### Phase 5: Post-Recovery Liveness"
+    log "### Giai đoạn 5: Kiểm tra Liveness sau phục hồi"
     local live_start=$(get_block_number "$dst_port")
     start_tx_pump
     sleep $LIVENESS_WAIT
@@ -355,15 +355,15 @@ run_single_round() {
 
     if [ "$live_end" -gt "$live_start" ]; then
         local produced=$((live_end - live_start))
-        log "- ✅ Liveness OK: $produced blocks produced in ${LIVENESS_WAIT}s"
+        log "- ✅ Liveness OK: $produced khối đã được tạo trong ${LIVENESS_WAIT}s"
     else
-        log "- ❌ **LIVENESS FAILURE**: No new blocks in ${LIVENESS_WAIT}s"
+        log "- ❌ **THẤT BẠI LIVENESS**: Không có khối mới nào trong ${LIVENESS_WAIT}s"
         return 1
     fi
 
     # ── Phase 6: Hash Parity (spot check) ──
     log ""
-    log "### Phase 6: Cross-Node Hash Parity"
+    log "### Giai đoạn 6: Kiểm tra tính tương đồng Mã băm (Hash Parity)"
     local parity_ok=true
     local check_block=$(get_block_number "$dst_port")
     for offset in 0 2 5; do
@@ -385,23 +385,23 @@ run_single_round() {
             elif [ "$hash" != "$ref_hash" ]; then mismatch=true; break; fi
         done
         if [ "$mismatch" = true ]; then
-            log "- ❌ Block #$bn: HASH MISMATCH"
+            log "- ❌ Khối #$bn: Lệch HASH"
             parity_ok=false
         else
-            log "- ✅ Block #$bn: hash consistent"
+            log "- ✅ Khối #$bn: Hash đồng nhất"
         fi
     done
 
     if [ "$parity_ok" = false ]; then
-        log "- 🚨 **HASH PARITY FAILURE — FORK DETECTED**"
+        log "- 🚨 **THẤT BẠI TÍNH TƯƠNG ĐỒNG HASH — PHÁT HIỆN FORK**"
         return 1
     fi
 
     local round_duration=$((SECONDS - round_start))
     log ""
-    log "**Duration:** ${round_duration}s"
+    log "**Thời gian:** ${round_duration}s"
     log ""
-    log "> ✅ **Round $round PASSED**"
+    log "> ✅ **Vòng $round THÀNH CÔNG**"
     log ""
     return 0
 }
@@ -413,13 +413,12 @@ run_single_round() {
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}║  🔁 Snapshot Recovery Stability Loop                   ║${NC}"
-echo -e "${BOLD}║  Rounds: $MAX_ROUNDS | Src: Node $SRC_NODE | Dst: Node $DST_NODE              ║${NC}"
+echo -e "${BOLD}║  Vòng: $MAX_ROUNDS | Nguồn: Node $SRC_NODE | Đích: Node $DST_NODE              ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Initialize report
 cat > "$REPORT_FILE" <<EOF
-# 📋 Snapshot Recovery Stability Test Report
 
 | Parameter | Value |
 |-----------|-------|

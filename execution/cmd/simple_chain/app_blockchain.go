@@ -95,8 +95,18 @@ func (app *App) initBlockchain() error {
 				var md executor.SnapshotMetadata
 				if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
 					if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
+						// Fallback: lấy stake root từ metadata hoặc NOMT database
+						stakeRoot := e_common.HexToHash(md.StakeStatesRoot)
+						if stakeRoot == (e_common.Hash{}) {
+							// Old snapshot format: query NOMT directly
+							if nomtRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+								stakeRoot = nomtRoot
+								logger.Info("📸 [SNAPSHOT] StakeStatesRoot from NOMT: %s", stakeRoot.Hex())
+							}
+						}
+
 						app.startLastBlock = block.NewBlock(
-							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), e_common.HexToHash(""), e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
+							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), stakeRoot, e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
 							nil, nil,
 						)
 					}
@@ -106,6 +116,25 @@ func (app *App) initBlockchain() error {
 					storage.UpdateLastGlobalExecIndex(app.startLastBlock.Header().GlobalExecIndex())
 					app.GetAccountStateTrie(app.startLastBlock.Header().AccountStatesRoot())
 					app.chainState, _ = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
+					
+					// Verify NOMT roots match header
+					if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						headerRoot := app.startLastBlock.Header().AccountStatesRoot()
+						if nomtAccountRoot != headerRoot {
+							logger.Warn("⚠️ [SNAPSHOT] AccountState NOMT root MISMATCH: nomt=%s header=%s → patching header",
+								nomtAccountRoot.Hex(), headerRoot.Hex())
+							app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+						}
+					}
+					if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+						if nomtStakeRoot != headerStakeRoot {
+							logger.Warn("⚠️ [SNAPSHOT] StakeState NOMT root MISMATCH: nomt=%s header=%s → patching header",
+								nomtStakeRoot.Hex(), headerStakeRoot.Hex())
+							app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
+						}
+					}
+
 					trie_database.CreateTrieDatabaseManager(app.storageManager.GetStorageDatabaseTrie(), app.chainState.GetAccountStateDB())
 					blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
 					goto SKIP_GENESIS
