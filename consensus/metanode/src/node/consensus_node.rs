@@ -227,6 +227,7 @@ impl ConsensusNode {
                     let retry_interval = std::time::Duration::from_millis(500);
                     let mut final_epoch = 0u64;
                     let mut last_err = e;
+                    let mut resolved = false;
 
                     for attempt in 2..=max_retries {
                         warn!(
@@ -241,7 +242,7 @@ impl ConsensusNode {
                                     e, attempt, latest_block_number
                                 );
                                 final_epoch = e;
-                                last_err = anyhow::anyhow!("resolved");
+                                resolved = true;
                                 break;
                             }
                             Err(e) => {
@@ -249,7 +250,7 @@ impl ConsensusNode {
                             }
                         }
                     }
-                    if last_err.to_string() != "resolved" {
+                    if !resolved {
                         return Err(anyhow::anyhow!(
                             "Failed to fetch epoch from Go after {} attempts: {}",
                             max_retries,
@@ -1170,7 +1171,7 @@ impl ConsensusNode {
             ),
         )
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
-        .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
+        .with_epoch_info(storage.current_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_go_last_commit_index(go_replay_after as u32)
         .with_is_transitioning(is_transitioning.clone())

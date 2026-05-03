@@ -87,7 +87,7 @@ pub(super) async fn setup_validator_consensus(
             ),
         )
         .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
-        .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_epoch_info(new_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
@@ -223,7 +223,7 @@ pub(super) async fn setup_synconly_sync(
             ),
         )
         .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
-        .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_epoch_info(new_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())

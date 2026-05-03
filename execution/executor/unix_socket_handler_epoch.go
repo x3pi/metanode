@@ -483,7 +483,6 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	// This ensures that `catchup` block syncer does not loop infinitely trying to fetch
 	// empty blocks that were skipped by Go Master.
 	returnBlockNumber := validatedBlockNumber
-	// logger.Info("✅ [INIT] Using validated LastBlockNumber: %d (counter was %d)", returnBlockNumber, counterBlockNumber)
 
 	// Also return LastGlobalExecIndex (tracks ALL commits including empty ones)
 	// CRITICAL: Rust uses this for epoch transition SYNC WAIT comparison
