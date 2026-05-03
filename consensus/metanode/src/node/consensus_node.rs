@@ -283,16 +283,13 @@ impl ConsensusNode {
         // MUST NOT start and generate Block 1 with the network's GEI, otherwise it
         // will cause an unrecoverable hash mismatch.
         // ═══════════════════════════════════════════════════════════════════════════
-        if latest_block_number == 0 && peer_last_block > 100 {
-            panic!(
-                "\n\n🚨 [ANTI-FORK GUARD FATAL ERROR] 🚨\n\
-                 Local Go DB is completely empty (Block=0), but the network is at Block {}.\n\
-                 You MUST restore a snapshot (using restore_node.sh) before joining the network!\n\
-                 Starting from Block 0 will cause a permanent Hash Mismatch (Fork).\n\
-                 Node startup aborted to protect network integrity.\n\n",
-                peer_last_block
-            );
-        }
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ANTI-FORK GUARD: Previously this panicked if the node started with an
+        // empty Go DB while the network was far ahead. But with the STARTUP-SYNC
+        // improvements, the node can now safely fetch all blocks from peers,
+        // rebuild the state, and correctly update the commit indexes.
+        // We removed the panic to allow automatic recovery from a Full Wipe.
+        // ═══════════════════════════════════════════════════════════════════════════
 
         // CATCHUP: Check if we need to sync epoch from local storage
         let storage_path = config.storage_path.clone();
@@ -372,7 +369,7 @@ impl ConsensusNode {
         };
 
         let (
-            current_epoch,
+            mut current_epoch,
             epoch_timestamp_ms,
             boundary_block,
             validators,
@@ -1476,6 +1473,20 @@ impl ConsensusNode {
                                         "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}, replay_after_updated={}",
                                         sync_round, new_gei, new_handled, new_handled
                                     );
+                                    
+                                    // CRITICAL FIX: Re-read local epoch from Go's DB!
+                                    // If we started from a Full Wipe (epoch 0), STARTUP-SYNC fetched
+                                    // blocks from newer epochs. Go updated its epoch to match the blocks.
+                                    // We MUST update Rust's current_epoch before spawning Consensus Core,
+                                    // otherwise Rust will start at epoch 0 while the network is at epoch 2!
+                                    let post_sync_epoch = detect_local_epoch(&config.storage_path);
+                                    if post_sync_epoch > current_epoch {
+                                        tracing::info!(
+                                            "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
+                                            current_epoch, post_sync_epoch
+                                        );
+                                        current_epoch = post_sync_epoch;
+                                    }
                                 }
                             }
                             Err(e) => {
