@@ -1488,14 +1488,15 @@ impl ConsensusNode {
                                         storage.current_epoch = post_sync_epoch;
                                         commit_processor.update_epoch(post_sync_epoch);
                                         // Update the committee in CommitProcessor so it can resolve leaders
-                                        let (_, new_eth_addrs) = crate::node::committee::build_committee_with_eth_addresses(
+                                        if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
                                             crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None)
                                                 .get_epoch_boundary_data(post_sync_epoch).await.unwrap_or_default().3, 
                                             post_sync_epoch
-                                        ).unwrap_or_default();
-                                        if !new_eth_addrs.is_empty() {
-                                            storage.validator_eth_addresses = new_eth_addrs.clone();
-                                            commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
+                                        ) {
+                                            if !new_eth_addrs.is_empty() {
+                                                storage.validator_eth_addresses = new_eth_addrs.clone();
+                                                commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
+                                            }
                                         }
                                     }
                                 }

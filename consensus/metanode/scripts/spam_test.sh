@@ -17,6 +17,22 @@ for ((i=1; i<=MAX_RUNS; i++)); do
     echo "▶️ Đang chạy Test vòng $i / $MAX_RUNS mạnh tay trên Node $TARGET_NODE..."
     echo "=========================================================================="
     
+    # Kiểm tra xem Node 0 đã có snapshot chưa trước khi chạy test (vì test 4.5 cần snapshot)
+    echo "🔍 Đang kiểm tra Node 0 xem đã có snapshot chưa..."
+    SNAPSHOTS_JSON=$(curl -sf "http://127.0.0.1:8700/api/snapshots" 2>/dev/null || echo "null")
+    if [ "$SNAPSHOTS_JSON" = "null" ] || [ -z "$SNAPSHOTS_JSON" ]; then
+        echo -e "⚠️ Node 0 chưa có snapshot (HTTP không phản hồi). Dừng test một cách an toàn."
+        exit 0
+    fi
+    
+    SNAPSHOT_COUNT=$(echo "$SNAPSHOTS_JSON" | jq 'length' 2>/dev/null || echo "0")
+    if [ "$SNAPSHOT_COUNT" -eq 0 ]; then
+        echo -e "⚠️ Node 0 chưa tạo xong snapshot nào. Dừng test một cách an toàn (chưa đủ điều kiện test)."
+        exit 0
+    fi
+    echo -e "✅ Đã phát hiện $SNAPSHOT_COUNT snapshot trên Node 0! Bắt đầu đập phá..."
+
+    
     # Chỉ chạy destructive test (khởi động/wipe) và bỏ qua rác Log 
     # Nếu muốn bỏ qua restart hoàn toàn cả trong test chặn, hãy thêm --skip-destructive
     export DISABLE_REPUTATION_SWAPS=1
