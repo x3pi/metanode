@@ -368,6 +368,11 @@ func (cs *ChainState) SetcurrentBlockHeader(header *types.BlockHeader) {
 	cs.currentBlockHeader.Store(header)
 }
 
+// GetChangelogDB returns the state changelog database instance for historical state tracking.
+func (cs *ChainState) GetChangelogDB() *state_changelog.StateChangelogDB {
+	return cs.changelogDB
+}
+
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
 	cs.stateMutex.RLock()
 	db := cs.accountStateDB
