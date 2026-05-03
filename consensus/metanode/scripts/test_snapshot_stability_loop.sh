@@ -31,7 +31,7 @@ CATCHUP_TIMEOUT=90
 LIVENESS_WAIT=30
 SETTLE_TIME=15
 TX_PUMP_PID=""
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node"
+LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

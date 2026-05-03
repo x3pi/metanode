@@ -311,14 +311,37 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 	for _, entry := range handlesList {
 		destPath := filepath.Join(nomtDestBase, entry.namespace)
 
-		logger.Info("📸 [TRIE] Checkpointing NOMT namespace %s: %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
+		// ═══════════════════════════════════════════════════════════════
+		// FORK FIX (May 2026): Revert to CloseForSnapshot + OS copy + Reopen
+		// The Checkpoint API via rust `fs::copy` races with NOMT memory mapped
+		// files and skips the `wal` directory, causing silent structural B-Tree
+		// corruption. Upon restore, NOMT detects corruption and WIPES the DB.
+		// ═══════════════════════════════════════════════════════════════
+		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (Close -> Copy -> Reopen): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
 		start := time.Now()
 
-		// Use the new Checkpoint API — database stays OPEN, no Close/Reopen needed.
-		// This acquires h.mu.Lock() internally, drains pending sessions, then copies
-		// the data files (bbn, ht, ln, meta) via the Rust FFI.
-		if err := entry.handle.Checkpoint(destPath); err != nil {
-			return fmt.Errorf("NOMT checkpoint failed for namespace %s: %w", entry.namespace, err)
+		// 1. Close cleanly to flush WAL, memory maps, and ensure consistency
+		entry.handle.CloseForSnapshot()
+
+		// 2. Safely copy the entire directory
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", err)
+		}
+
+		var copyErr error
+		if useReflink {
+			copyErr = copyDirReflink(entry.handle.GetPath(), destPath)
+		} else {
+			copyErr = copyDirFallback(entry.handle.GetPath(), destPath)
+		}
+
+		// 3. Reopen immediately
+		if reopenErr := entry.handle.ReopenAfterSnapshot(); reopenErr != nil {
+			return fmt.Errorf("CRITICAL: failed to reopen NOMT namespace %s after snapshot: %w", entry.namespace, reopenErr)
+		}
+
+		if copyErr != nil {
+			return fmt.Errorf("NOMT directory copy failed for %s: %w", entry.namespace, copyErr)
 		}
 
 		// CRITICAL FIX: The NOMT Checkpoint API only copies the B-Tree data files,
