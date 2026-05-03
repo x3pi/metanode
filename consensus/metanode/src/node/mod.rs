@@ -36,6 +36,7 @@ pub mod notification_listener;
 pub mod notification_server;
 pub mod peer_go_client;
 pub mod peer_health;
+pub mod health_check;
 pub mod queue;
 pub mod recovery;
 pub mod rpc_circuit_breaker;

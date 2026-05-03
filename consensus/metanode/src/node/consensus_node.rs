@@ -1369,8 +1369,10 @@ impl ConsensusNode {
             // FIX: Loop the sync until gap ≤ 2 blocks (network jitter).
             // Max 5 retries to prevent infinite loops.
             // ═══════════════════════════════════════════════════════════════
-            const MAX_SYNC_RETRIES: u32 = 5;
+            const MAX_SYNC_RETRIES: u32 = 15;
             const ACCEPTABLE_GAP: u64 = 2;
+            const INITIAL_RETRY_DELAY_MS: u64 = 500;
+            const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
             for sync_round in 0..MAX_SYNC_RETRIES {
@@ -1518,7 +1520,11 @@ impl ConsensusNode {
 
                 // Small delay before retry to let the cluster produce more blocks
                 if sync_round < MAX_SYNC_RETRIES - 1 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let delay = std::cmp::min(
+                        INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
+                        MAX_RETRY_DELAY_MS
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                 }
             }
 
@@ -1565,6 +1571,78 @@ impl ConsensusNode {
                 );
                 commit_processor.go_last_commit_index = new_go_last;
                 commit_processor.next_expected_index = new_next_expected;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // CRITICAL: Verify the FINAL synced block matches peers.
+            //
+            // Why block hash instead of state root?
+            // - State root changes every block, so comparing with a peer at a
+            //   different height always mismatches (false positive on live nets).
+            // - Block hash at height N is immutable regardless of peer's current
+            //   height. And block hash includes the state root in the header,
+            //   so verifying block hash implicitly verifies state root.
+            // ═══════════════════════════════════════════════════════════════
+            if total_synced_blocks > 0 && !barrier_peers.is_empty() {
+                tracing::info!(
+                    "🔍 [POST-SYNC-VERIFY] Verifying block #{} integrity against peers...",
+                    local_block
+                );
+                match crate::network::peer_rpc::fetch_blocks_from_peer(
+                    &barrier_peers, local_block, local_block,
+                ).await {
+                    Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                        match barrier_client.get_blocks_range(local_block, local_block).await {
+                            Ok(local_blocks) if !local_blocks.is_empty() => {
+                                let local_raw = &local_blocks[0].raw_block_bytes;
+                                let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                if local_raw == peer_raw {
+                                    tracing::info!(
+                                        "✅ [POST-SYNC-VERIFY] Block #{} verified: local matches peer ({} bytes). \
+                                         State integrity confirmed.",
+                                        local_block, local_raw.len()
+                                    );
+                                } else {
+                                    tracing::error!(
+                                        "🚨 [POST-SYNC-VERIFY] Block #{} MISMATCH! local_bytes={} peer_bytes={}. \
+                                         Data corruption detected after sync!",
+                                        local_block, local_raw.len(), peer_raw.len()
+                                    );
+                                    tracing::error!("🛑 [HALT] Halting node due to block data divergence post-sync.");
+                                    std::process::exit(1);
+                                }
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    "⚠️ [POST-SYNC-VERIFY] Could not fetch block #{} from Go for verification. Skipping.",
+                                    local_block
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            "⚠️ [POST-SYNC-VERIFY] Peer returned no data for block #{}. Skipping verification.",
+                            local_block
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [POST-SYNC-VERIFY] Could not fetch block #{} from peer: {}. Skipping verification.",
+                            local_block, e
+                        );
+                    }
+                }
+
+                // Log state root for diagnostics (informational only —
+                // block hash parity above already guarantees correctness)
+                let local_root = crate::ffi::get_go_state_root();
+                if !local_root.is_empty() && local_root != "0000000000000000000000000000000000000000000000000000000000000000" {
+                    tracing::info!(
+                        "📊 [POST-SYNC-VERIFY] Local state root at block {}: 0x{}",
+                        local_block, local_root
+                    );
+                }
             }
         }
 
@@ -1703,6 +1781,21 @@ impl ConsensusNode {
         // Removing this eliminates ~2s startup delay and ~70 lines of duplicate logic.
         // CommitSyncer is the single source of truth for DAG catch-up.
         // ═══════════════════════════════════════════════════════════════════════════
+
+        // 🏥 AUTOMATED RECOVERY HEALTH CHECK
+        // Spawns a background task that waits 30s after startup to verify node health
+        let health_client = executor_client_for_proc.clone();
+        let health_peers = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            let checker = crate::node::health_check::PostRecoveryHealthCheck::new(health_client, health_peers);
+            let result = checker.run().await;
+            if result.is_healthy() {
+                tracing::info!("✅ [HEALTH] Post-recovery health check PASSED: {:?}", result);
+            } else {
+                tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED: {:?}", result);
+            }
+        });
 
         // ♻️ TX Recycler: Create shared instance for tracking and recycling uncommitted TXs
         let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());

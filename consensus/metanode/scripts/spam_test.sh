@@ -37,6 +37,25 @@ for ((i=1; i<=MAX_RUNS; i++)); do
     # Nếu muốn bỏ qua restart hoàn toàn cả trong test chặn, hãy thêm --skip-destructive
     export DISABLE_REPUTATION_SWAPS=1
     if ./e2e_test_suite.sh --node "$TARGET_NODE"; then
+        echo -e "\n✅ Vòng $i PASSED e2e_test_suite!"
+        
+        # Sau khi e2e_test_suite.sh pass, verify state root trên tất cả nodes
+        echo "🔍 Đang kiểm tra State Root parity giữa các nodes..."
+        ROOT_0=$(curl -sf "http://127.0.0.1:19200/peer_info" | jq -r '.state_root' 2>/dev/null)
+        ROOT_1=$(curl -sf "http://127.0.0.1:19201/peer_info" | jq -r '.state_root' 2>/dev/null)
+
+        if [ -n "$ROOT_0" ] && [ -n "$ROOT_1" ] && [ "$ROOT_0" != "null" ] && [ "$ROOT_1" != "null" ]; then
+            if [ "$ROOT_0" != "$ROOT_1" ]; then
+                echo "🚨 STATE ROOT MISMATCH! Node 0: $ROOT_0 ≠ Node 1: $ROOT_1"
+                echo "   → Fork CONFIRMED ngay cả khi e2e_test_suite.sh passed!"
+                FAILED=$((FAILED + 1))
+                exit 1
+            fi
+            echo "✅ State root verified: $ROOT_0"
+        else
+            echo "⚠️ Không thể lấy được State Root từ một trong hai node. Bỏ qua check."
+        fi
+
         echo -e "\n✅ Vòng $i PASSED thành công rực rỡ!"
         PASSED=$((PASSED + 1))
     else

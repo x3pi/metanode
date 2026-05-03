@@ -530,11 +530,11 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 
 // HandleGetCurrentEpochRequest processes a GetCurrentEpochRequest and returns the current epoch from Go state (Sui-style)
 func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpochRequest) (*pb.GetCurrentEpochResponse, error) {
-	logger.Info("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
+	logger.Debug("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
 
 	// Get current epoch from blockchain state
 	currentEpoch := rh.chainState.GetCurrentEpoch()
-	logger.Info("🔍 [GET CURRENT EPOCH] Current epoch from Go state", "epoch", currentEpoch)
+	logger.Debug("🔍 [GET CURRENT EPOCH] Current epoch from Go state", "epoch", currentEpoch)
 
 	// NOTE: SaveEpochData() removed here - it was debug code causing unnecessary I/O
 	// Epoch data is already saved correctly during AdvanceEpoch
@@ -543,7 +543,7 @@ func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpo
 		Epoch: currentEpoch,
 	}
 
-	logger.Info("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
+	logger.Debug("✅ [GET CURRENT EPOCH] Returning current epoch to Rust", "epoch", currentEpoch)
 	return response, nil
 }
 

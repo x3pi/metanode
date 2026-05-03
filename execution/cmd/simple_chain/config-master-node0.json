@@ -110,7 +110,7 @@
         "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
     },
     "snapshot_enabled": true,
-    "snapshot_frequency_blocks": 500,
+    "snapshot_frequency_blocks": 50,
     "snapshot_block_offset": 0,
     "Databases": {
         "RootPath": "./sample/node0/data/data",

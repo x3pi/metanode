@@ -139,6 +139,7 @@ cmd/tool/validator_test_suite/validator_test_suite
 # **/debug.log
 # ===== Debug/scratch scripts =====
 **/debug_report_*.md
+**/stability_report_*.md
 /demo
 # ===== Demo / hybrid =====
 demo/receiver/incoming_chunks
