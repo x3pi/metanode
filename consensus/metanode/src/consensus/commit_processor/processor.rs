@@ -126,6 +126,11 @@ impl CommitProcessor {
         self
     }
 
+    /// Update the current epoch (used after STARTUP-SYNC if epoch advanced)
+    pub fn update_epoch(&mut self, epoch: u64) {
+        self.current_epoch = epoch;
+    }
+
     /// Set the next expected commit index for ordered processing.
     /// CRITICAL: Must be called during initialization to match the node's actual progress
     /// after restart. If not set, CommitProcessor starts at 1, causing AUTO-JUMP behavior

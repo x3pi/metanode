@@ -112,12 +112,12 @@ impl ConsensusNode {
         info!("Initializing consensus node {}...", config.node_id);
 
         // Phase 1: Storage, epoch discovery, committee, execution index, identity
-        let storage = Self::setup_storage(&config).await?;
+        let mut storage = Self::setup_storage(&config).await?;
 
         let coordination_hub = consensus_core::coordination_hub::ConsensusCoordinationHub::new();
 
         // Phase 2: Consensus params, commit processor, authority start
-        let consensus = Self::setup_consensus(&config, &storage, &registry, coordination_hub.clone()).await?;
+        let consensus = Self::setup_consensus(&config, &mut storage, &registry, coordination_hub.clone()).await?;
 
         // Phase 3: Clock/NTP sync
         let clock_sync_manager = Self::setup_networking(&config);
@@ -369,7 +369,7 @@ impl ConsensusNode {
         };
 
         let (
-            mut current_epoch,
+            current_epoch,
             epoch_timestamp_ms,
             boundary_block,
             validators,
@@ -1006,7 +1006,7 @@ impl ConsensusNode {
     /// and wires up all the shared state.
     async fn setup_consensus(
         config: &NodeConfig,
-        storage: &StorageSetup,
+        storage: &mut StorageSetup,
         registry: &Registry,
         coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     ) -> Result<ConsensusSetup> {
@@ -1480,12 +1480,23 @@ impl ConsensusNode {
                                     // We MUST update Rust's current_epoch before spawning Consensus Core,
                                     // otherwise Rust will start at epoch 0 while the network is at epoch 2!
                                     let post_sync_epoch = detect_local_epoch(&config.storage_path);
-                                    if post_sync_epoch > current_epoch {
+                                    if post_sync_epoch > storage.current_epoch {
                                         tracing::info!(
                                             "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
-                                            current_epoch, post_sync_epoch
+                                            storage.current_epoch, post_sync_epoch
                                         );
-                                        current_epoch = post_sync_epoch;
+                                        storage.current_epoch = post_sync_epoch;
+                                        commit_processor.update_epoch(post_sync_epoch);
+                                        // Update the committee in CommitProcessor so it can resolve leaders
+                                        let (_, new_eth_addrs) = crate::node::committee::build_committee_with_eth_addresses(
+                                            crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None)
+                                                .get_epoch_boundary_data(post_sync_epoch).await.unwrap_or_default().3, 
+                                            post_sync_epoch
+                                        ).unwrap_or_default();
+                                        if !new_eth_addrs.is_empty() {
+                                            storage.validator_eth_addresses = new_eth_addrs.clone();
+                                            commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
+                                        }
                                     }
                                 }
                             }
