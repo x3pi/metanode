@@ -276,6 +276,24 @@ impl ConsensusNode {
             latest_block_number, go_epoch, peer_last_block
         );
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ANTI-FORK GUARD: Prevent joining the network with a fully wiped Go DB
+        // without restoring a snapshot.
+        // If Go DB is empty (Block=0) but the network is at Block > 100, the node
+        // MUST NOT start and generate Block 1 with the network's GEI, otherwise it
+        // will cause an unrecoverable hash mismatch.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if latest_block_number == 0 && peer_last_block > 100 {
+            panic!(
+                "\n\n🚨 [ANTI-FORK GUARD FATAL ERROR] 🚨\n\
+                 Local Go DB is completely empty (Block=0), but the network is at Block {}.\n\
+                 You MUST restore a snapshot (using restore_node.sh) before joining the network!\n\
+                 Starting from Block 0 will cause a permanent Hash Mismatch (Fork).\n\
+                 Node startup aborted to protect network integrity.\n\n",
+                peer_last_block
+            );
+        }
+
         // CATCHUP: Check if we need to sync epoch from local storage
         let storage_path = config.storage_path.clone();
         let local_epoch = detect_local_epoch(&storage_path);
