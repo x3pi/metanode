@@ -42,10 +42,14 @@ type blockResult struct {
 	Number           string `json:"number"`
 	ParentHash       string `json:"parentHash"`
 	StateRoot        string `json:"stateRoot"`
+	StakeStatesRoot  string `json:"stakeStatesRoot"`
 	TransactionsRoot string `json:"transactionsRoot"`
 	ReceiptsRoot     string `json:"receiptsRoot"`
 	GlobalExecIndex  string `json:"globalExecIndex"`
 	Epoch            string `json:"epoch"`
+	LeaderAddress    string `json:"leaderAddress"`
+	Miner            string `json:"miner"`
+	Timestamp        string `json:"timestamp"`
 }
 
 // ===== Block info (parsed from blockResult) =====
@@ -54,10 +58,13 @@ type blockInfo struct {
 	Hash             string
 	ParentHash       string
 	StateRoot        string
+	StakeStatesRoot  string
 	TransactionsRoot string
 	ReceiptsRoot     string
 	GlobalExecIndex  string
 	Epoch            string
+	LeaderAddress    string
+	Timestamp        string
 	Error            string // non-empty if fetch failed
 }
 
@@ -313,7 +320,8 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			b := validBlocks[i]
 			if b.Hash != ref.Hash || b.ParentHash != ref.ParentHash ||
 				b.StateRoot != ref.StateRoot || b.TransactionsRoot != ref.TransactionsRoot ||
-				b.ReceiptsRoot != ref.ReceiptsRoot {
+				b.ReceiptsRoot != ref.ReceiptsRoot || b.LeaderAddress != ref.LeaderAddress ||
+				b.StakeStatesRoot != ref.StakeStatesRoot || b.Timestamp != ref.Timestamp {
 				hasMismatch = true
 				break
 			}
@@ -419,14 +427,23 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		return blockInfo{}, fmt.Errorf("cannot parse block result: %v", err)
 	}
 
+	// Prefer leaderAddress (custom field), fall back to miner (ETH standard)
+	leaderAddr := block.LeaderAddress
+	if leaderAddr == "" {
+		leaderAddr = block.Miner
+	}
+
 	return blockInfo{
 		Hash:             block.Hash,
 		ParentHash:       block.ParentHash,
 		StateRoot:        block.StateRoot,
+		StakeStatesRoot:  block.StakeStatesRoot,
 		TransactionsRoot: block.TransactionsRoot,
 		ReceiptsRoot:     block.ReceiptsRoot,
 		GlobalExecIndex:  block.GlobalExecIndex,
 		Epoch:            block.Epoch,
+		LeaderAddress:    leaderAddr,
+		Timestamp:        block.Timestamp,
 	}, nil
 }
 
@@ -532,7 +549,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	}
 
 	// Determine which fields differ
-	hashDiff, parentDiff, stateDiff, txDiff, rcpDiff := false, false, false, false, false
+	hashDiff, parentDiff, stateDiff, stakeDiff, txDiff, rcpDiff, leaderDiff, timeDiff := false, false, false, false, false, false, false, false
 	if len(validBlocks) >= 2 {
 		ref := validBlocks[0]
 		for _, b := range validBlocks[1:] {
@@ -545,11 +562,20 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			if b.StateRoot != ref.StateRoot {
 				stateDiff = true
 			}
+			if b.StakeStatesRoot != ref.StakeStatesRoot {
+				stakeDiff = true
+			}
 			if b.TransactionsRoot != ref.TransactionsRoot {
 				txDiff = true
 			}
 			if b.ReceiptsRoot != ref.ReceiptsRoot {
 				rcpDiff = true
+			}
+			if b.LeaderAddress != ref.LeaderAddress {
+				leaderDiff = true
+			}
+			if b.Timestamp != ref.Timestamp {
+				timeDiff = true
 			}
 		}
 	}
@@ -565,11 +591,20 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	if stateDiff {
 		diffs = append(diffs, "stateRoot")
 	}
+	if stakeDiff {
+		diffs = append(diffs, "stakeStatesRoot")
+	}
 	if txDiff {
 		diffs = append(diffs, "txRoot")
 	}
 	if rcpDiff {
 		diffs = append(diffs, "receiptsRoot")
+	}
+	if leaderDiff {
+		diffs = append(diffs, "leaderAddress")
+	}
+	if timeDiff {
+		diffs = append(diffs, "timestamp")
 	}
 	if len(diffs) > 0 {
 		fmt.Printf("   ⚠\ufe0f  Fields differ: %s\n", strings.Join(diffs, ", "))
@@ -585,18 +620,27 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			fmt.Printf("   %-12s %s\n", n.Name+":", bi.Error)
 			continue
 		}
-		fmt.Printf("   %-12s hash=%s gei=%d epoch=%d\n", n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
+		fmt.Printf("   %-12s hash=%s leader=%s gei=%d epoch=%d\n", n.Name+":", bi.Hash, bi.LeaderAddress, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 		if parentDiff {
 			fmt.Printf("   %-12s parentHash=%s\n", "", bi.ParentHash)
 		}
 		if stateDiff {
 			fmt.Printf("   %-12s stateRoot=%s\n", "", bi.StateRoot)
 		}
+		if stakeDiff {
+			fmt.Printf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot)
+		}
 		if txDiff {
 			fmt.Printf("   %-12s txRoot=%s\n", "", bi.TransactionsRoot)
 		}
 		if rcpDiff {
 			fmt.Printf("   %-12s receiptsRoot=%s\n", "", bi.ReceiptsRoot)
+		}
+		if leaderDiff {
+			fmt.Printf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress)
+		}
+		if timeDiff {
+			fmt.Printf("   %-12s timestamp=%s\n", "", bi.Timestamp)
 		}
 	}
 	fmt.Println()
@@ -623,8 +667,11 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 		header += "," + name + "_hash"
 		header += "," + name + "_parentHash"
 		header += "," + name + "_stateRoot"
+		header += "," + name + "_stakeStatesRoot"
 		header += "," + name + "_txRoot"
 		header += "," + name + "_receiptsRoot"
+		header += "," + name + "_leaderAddress"
+		header += "," + name + "_timestamp"
 		header += "," + name + "_gei"
 		header += "," + name + "_epoch"
 	}
@@ -640,13 +687,16 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 				if ok {
 					errMsg = bi.Error
 				}
-				line += "," + errMsg + ",,,,,,"
+				line += "," + errMsg + ",,,,,,,,,"
 			} else {
 				line += "," + bi.Hash
 				line += "," + bi.ParentHash
 				line += "," + bi.StateRoot
+				line += "," + bi.StakeStatesRoot
 				line += "," + bi.TransactionsRoot
 				line += "," + bi.ReceiptsRoot
+				line += "," + bi.LeaderAddress
+				line += "," + bi.Timestamp
 				line += fmt.Sprintf(",%d,%d", parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
@@ -829,7 +879,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			} else if bi.IsError() {
 				fmt.Printf("      %-12s %s\n", n.Name+":", bi.Error)
 			} else {
-				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
+				fmt.Printf("      %-12s hash=%s  stateRoot=%s  leader=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, bi.LeaderAddress, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		return false
@@ -839,6 +889,37 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	// MISMATCH DETECTED — write to file + print to console + signal stop
 	// ═══════════════════════════════════════════════════════════════════
 	*totalMismatches += len(mismatches)
+
+	// --- AUTO BACKTRACK TO FIND EXACT FORK POINT ---
+	earliestMismatch := mismatches[0].BlockNumber
+	for _, m := range mismatches {
+		if m.BlockNumber < earliestMismatch {
+			earliestMismatch = m.BlockNumber
+		}
+	}
+
+	fmt.Printf("\n🔍 Tự động dò ngược (backtrack) từ block %d để tìm điểm chia nhánh (fork point)...\n", earliestMismatch)
+	
+	// Try up to 500 blocks backwards to find the exact fork point
+	forkPoint := earliestMismatch
+	for b := earliestMismatch - 1; b > 0 && b >= earliestMismatch-500; b-- {
+		bMismatches, _, bErrors, _, _ := checkBatch(client, nodes, b, b)
+		if len(bMismatches) > 0 {
+			forkPoint = b
+			// Prepend to our mismatch list for the report
+			mismatches = append([]mismatch{bMismatches[0]}, mismatches...)
+		} else if bErrors == 0 {
+			// Found a block that MATCHES and has NO errors! This means 'b+1' is the fork point.
+			fmt.Printf("   ✅ Block %d khớp hash.\n", b)
+			fmt.Printf("   🛑 => ĐIỂM CHIA NHÁNH (FORK POINT) CHÍNH XÁC LÀ BLOCK: %d\n", forkPoint)
+			break
+		} else {
+			// error fetching block, we just stop backtracking
+			fmt.Printf("   ⚠️ Lỗi khi lấy block %d, dừng dò ngược.\n", b)
+			break
+		}
+	}
+	// ------------------------------------------------
 
 	// Build alert content for both console and file
 	var alertBuf strings.Builder
@@ -856,10 +937,55 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	}
 	alertBuf.WriteString("\n─── Mismatch Details ───\n")
 
-	for _, m := range mismatches {
-		alertBuf.WriteString(fmt.Sprintf("\n⚠️  Block %d:\n", m.BlockNumber))
+	// Sort mismatches by BlockNumber ascending
+	sort.Slice(mismatches, func(i, j int) bool {
+		return mismatches[i].BlockNumber < mismatches[j].BlockNumber
+	})
+
+	if len(mismatches) > 0 {
+		firstMismatch := mismatches[0]
+		alertBuf.WriteString(fmt.Sprintf("\n🛑 ĐIỂM CHIA NHÁNH (FORK POINT) - Block %d:\n", firstMismatch.BlockNumber))
+		
+		// Find mismatched fields
+		var validBlocks []blockInfo
 		for _, n := range nodes {
-			bi, ok := m.Blocks[n.Name]
+			bi, ok := firstMismatch.Blocks[n.Name]
+			if ok && !bi.IsError() {
+				validBlocks = append(validBlocks, bi)
+			}
+		}
+
+		hashDiff, parentDiff, stateDiff, stakeDiff, txDiff, rcpDiff, leaderDiff, timeDiff := false, false, false, false, false, false, false, false
+		if len(validBlocks) >= 2 {
+			ref := validBlocks[0]
+			for _, b := range validBlocks[1:] {
+				if b.Hash != ref.Hash { hashDiff = true }
+				if b.ParentHash != ref.ParentHash { parentDiff = true }
+				if b.StateRoot != ref.StateRoot { stateDiff = true }
+				if b.StakeStatesRoot != ref.StakeStatesRoot { stakeDiff = true }
+				if b.TransactionsRoot != ref.TransactionsRoot { txDiff = true }
+				if b.ReceiptsRoot != ref.ReceiptsRoot { rcpDiff = true }
+				if b.LeaderAddress != ref.LeaderAddress { leaderDiff = true }
+				if b.Timestamp != ref.Timestamp { timeDiff = true }
+			}
+		}
+
+		var diffs []string
+		if hashDiff { diffs = append(diffs, "hash") }
+		if parentDiff { diffs = append(diffs, "parentHash") }
+		if stateDiff { diffs = append(diffs, "stateRoot") }
+		if stakeDiff { diffs = append(diffs, "stakeStatesRoot") }
+		if txDiff { diffs = append(diffs, "txRoot") }
+		if rcpDiff { diffs = append(diffs, "receiptsRoot") }
+		if leaderDiff { diffs = append(diffs, "leaderAddress") }
+		if timeDiff { diffs = append(diffs, "timestamp") }
+		
+		if len(diffs) > 0 {
+			alertBuf.WriteString(fmt.Sprintf("   🔍 NGUYÊN NHÂN: Sai lệch ở các trường -> %s\n", strings.Join(diffs, ", ")))
+		}
+
+		for _, n := range nodes {
+			bi, ok := firstMismatch.Blocks[n.Name]
 			if !ok {
 				alertBuf.WriteString(fmt.Sprintf("   %-12s (no data)\n", n.Name+":"))
 				continue
@@ -868,8 +994,37 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
 				continue
 			}
-			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  gei=%d  epoch=%d\n",
-				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
+			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  stakeRoot=%s  txRoot=%s  receiptsRoot=%s  leader=%s  time=%s  gei=%d  epoch=%d\n",
+				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, bi.StakeStatesRoot, bi.TransactionsRoot, bi.ReceiptsRoot, bi.LeaderAddress, bi.Timestamp, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
+		}
+
+		// Only show last 3 blocks if there are many
+		showLast := 3
+		startIdx := len(mismatches) - showLast
+		if startIdx <= 0 {
+			startIdx = 1
+		}
+
+		if startIdx > 1 {
+			alertBuf.WriteString(fmt.Sprintf("\n   ... (bỏ qua %d block sai lệch ở giữa) ...\n", startIdx-1))
+		}
+
+		for i := startIdx; i < len(mismatches); i++ {
+			m := mismatches[i]
+			alertBuf.WriteString(fmt.Sprintf("\n⚠️  Block %d:\n", m.BlockNumber))
+			for _, n := range nodes {
+				bi, ok := m.Blocks[n.Name]
+				if !ok {
+					alertBuf.WriteString(fmt.Sprintf("   %-12s (no data)\n", n.Name+":"))
+					continue
+				}
+				if bi.IsError() {
+					alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
+					continue
+				}
+				alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  stakeRoot=%s  txRoot=%s  receiptsRoot=%s  leader=%s  time=%s  gei=%d  epoch=%d\n",
+					n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, bi.StakeStatesRoot, bi.TransactionsRoot, bi.ReceiptsRoot, bi.LeaderAddress, bi.Timestamp, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
+			}
 		}
 	}
 

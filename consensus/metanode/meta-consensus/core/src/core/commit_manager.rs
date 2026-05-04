@@ -63,7 +63,12 @@ impl Core {
                     new_commit_index
                 );
 
-
+                // FORK-SAFETY: Confirm network participation after processing CertifiedCommits.
+                // This unlocks the local committer by proving the DAG is populated enough
+                // for correct `calculate_commit_timestamp()` median calculation.
+                if !subdags.is_empty() {
+                    self.coordination_hub.confirm_network_commit();
+                }
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
@@ -208,13 +213,23 @@ impl Core {
                     break;
                 }
 
-                // CRITICAL FORK-SAFETY FIX:
-                // Do not run local committer if the node is not in Healthy phase (e.g. CatchingUp).
-                // We MUST rely on CommitSyncer to provide canonical network commits to
-                // ensure bit-perfect metadata (timestamp, leader) parity with the cluster.
-                if self.coordination_hub.should_skip_proposal() {
+                // CRITICAL FORK-SAFETY FIX (Deterministic Network Confirmation):
+                //
+                // Do not run local committer until the node has processed at least one
+                // CertifiedCommit from the network while in Healthy phase. This proves
+                // the DAG is populated enough for `calculate_commit_timestamp()` to produce
+                // the correct stake-weighted median timestamp.
+                //
+                // Without this, after snapshot restore the node oscillates CatchingUp↔Healthy.
+                // If the local committer fires during a brief Healthy window with a sparse DAG,
+                // it produces commits with wrong timestamps → fork.
+                //
+                // This guard is deterministic and event-driven — no arbitrary time delays.
+                // The lock is released by `confirm_network_commit()` in `add_certified_commits()`.
+                if !self.coordination_hub.is_healthy_stable() {
                     tracing::debug!(
-                        "⏭️ [SYNC] Skipping local committer because node phase is {:?}. Waiting for CommitSyncer.",
+                        "⏭️ [SYNC] Skipping local committer: awaiting network confirmation (phase={:?}). \
+                         Will unlock after processing a CertifiedCommit in Healthy phase.",
                         self.coordination_hub.get_phase()
                     );
                     break;
