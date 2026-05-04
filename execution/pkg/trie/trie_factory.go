@@ -312,36 +312,38 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 		destPath := filepath.Join(nomtDestBase, entry.namespace)
 
 		// ═══════════════════════════════════════════════════════════════
-		// FORK FIX (May 2026): Revert to CloseForSnapshot + OS copy + Reopen
-		// The Checkpoint API via rust `fs::copy` races with NOMT memory mapped
-		// files and skips the `wal` directory, causing silent structural B-Tree
-		// corruption. Upon restore, NOMT detects corruption and WIPES the DB.
+		// NON-BLOCKING CHECKPOINT (May 2026 v2):
+		// The Rust nomt_checkpoint now properly recurses into subdirectories
+		// (including WAL) and uses hard_link for O(1) file copies.
+		// This eliminates the 5-30s node freeze from Close→Copy→Reopen.
 		// ═══════════════════════════════════════════════════════════════
-		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (Close -> Copy -> Reopen): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
+		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (Checkpoint API): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
 		start := time.Now()
 
-		// 1. Close cleanly to flush WAL, memory maps, and ensure consistency
-		entry.handle.CloseForSnapshot()
+		if err := entry.handle.Checkpoint(destPath); err != nil {
+			// Fallback: if Checkpoint fails, try Close→Copy→Reopen
+			logger.Warn("📸 [TRIE] Checkpoint API failed for %s, falling back to Close→Copy→Reopen: %v", entry.namespace, err)
 
-		// 2. Safely copy the entire directory
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", err)
-		}
+			entry.handle.CloseForSnapshot()
 
-		var copyErr error
-		if useReflink {
-			copyErr = copyDirReflink(entry.handle.GetPath(), destPath)
-		} else {
-			copyErr = copyDirFallback(entry.handle.GetPath(), destPath)
-		}
+			if mkdirErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkdirErr != nil {
+				return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", mkdirErr)
+			}
 
-		// 3. Reopen immediately
-		if reopenErr := entry.handle.ReopenAfterSnapshot(); reopenErr != nil {
-			return fmt.Errorf("CRITICAL: failed to reopen NOMT namespace %s after snapshot: %w", entry.namespace, reopenErr)
-		}
+			var copyErr error
+			if useReflink {
+				copyErr = copyDirReflink(entry.handle.GetPath(), destPath)
+			} else {
+				copyErr = copyDirFallback(entry.handle.GetPath(), destPath)
+			}
 
-		if copyErr != nil {
-			return fmt.Errorf("NOMT directory copy failed for %s: %w", entry.namespace, copyErr)
+			if reopenErr := entry.handle.ReopenAfterSnapshot(); reopenErr != nil {
+				return fmt.Errorf("CRITICAL: failed to reopen NOMT namespace %s after snapshot: %w", entry.namespace, reopenErr)
+			}
+
+			if copyErr != nil {
+				return fmt.Errorf("NOMT directory copy failed for %s: %w", entry.namespace, copyErr)
+			}
 		}
 
 		// CRITICAL FIX: The NOMT Checkpoint API only copies the B-Tree data files,
