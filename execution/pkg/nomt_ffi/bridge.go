@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
 // maxValueSize is the maximum expected value size for account state data.
@@ -87,9 +85,9 @@ func (h *Handle) GetPath() string {
 	return h.path
 }
 
-// CloseForSnapshot acquires the lock, flushes all pending async sessions, and fully 
-// closes the underlying NOMT/RocksDB database instance. This guarantees that all 
-// background compaction and flush threads are stopped, and all Rust Arc<Core> 
+// CloseForSnapshot acquires the lock, flushes all pending async sessions, and fully
+// closes the underlying NOMT/RocksDB database instance. This guarantees that all
+// background compaction and flush threads are stopped, and all Rust Arc<Core>
 // references are released, making it 100% safe to `cp -a` the database directory.
 //
 // IMPORTANT: The caller (SnapshotManager) MUST call PauseExecution() + WaitForPersistence()
@@ -169,9 +167,9 @@ func (h *Handle) ReopenAfterSnapshot() error {
 // lock contention issues entirely.
 //
 // SAFETY: The caller MUST ensure:
-//   1. PauseExecution() — no active sessions
-//   2. WaitForPersistence() — all disk I/O flushed
-//   3. No concurrent reads/writes (this method acquires h.mu.Lock internally)
+//  1. PauseExecution() — no active sessions
+//  2. WaitForPersistence() — all disk I/O flushed
+//  3. No concurrent reads/writes (this method acquires h.mu.Lock internally)
 func (h *Handle) Checkpoint(destPath string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -523,18 +521,18 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	// Fast lock to ensure Handle isn't closed during commit
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	
+
 	if fs.ptr == nil {
 		return nil // already consumed by CloseForSnapshot or earlier commit
 	}
-	
+
 	if h.ptr == nil {
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
 	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
 	fs.ptr = nil // consumed
-	
+
 	h.sessionsMu.Lock()
 	for i, pfs := range h.pendingSessions {
 		if pfs == fs {
@@ -567,7 +565,7 @@ func (fs *FinishedSession) Abort() {
 	if fs.ptr != nil && fs.handle != nil {
 		fs.handle.mu.RLock()
 		defer fs.handle.mu.RUnlock()
-		
+
 		if fs.ptr == nil {
 			return // Already consumed
 		}

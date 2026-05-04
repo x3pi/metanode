@@ -242,6 +242,10 @@ if [ "$EPOCH_RESTORED" = false ]; then
 fi
 
 find "$NODE_DATA" -name "LOCK" -delete 2>/dev/null
+# Also remove NOMT .lock files — these contain the PID of the snapshot source process
+# and will prevent nomt_open from working on a different node process.
+find "$NODE_DATA" -name ".lock" -path "*/nomt_db/*" -delete 2>/dev/null
+echo -e "${GREEN}  ✅ Removed stale PebbleDB LOCK and NOMT .lock files${NC}"
 if [ "$SNAP_MODE" = "network" ] && [ -n "$TEMP_SNAP" ]; then rm -rf "$TEMP_SNAP"; fi
 RESTORED_SIZE=$(du -sh "$NODE_DATA" 2>/dev/null | awk '{print $1}')
 echo -e "${GREEN}  ✅ Đã khôi phục tổng cộng: $RESTORED_SIZE${NC}"

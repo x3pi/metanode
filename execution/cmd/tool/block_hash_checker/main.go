@@ -762,7 +762,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-		
+
 		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
 		gei, epoch, _ := getPeerInfo(client, n.URL)
 
@@ -882,11 +882,11 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			// Format the basic info
 			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  gei=%d  epoch=%d\n",
 				n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
-			
+
 			// Always print parentHash and stateRoot in watch mode to maintain previous format
 			alertBuf.WriteString(fmt.Sprintf("   %-12s parentHash=%s\n", "", bi.ParentHash))
 			alertBuf.WriteString(fmt.Sprintf("   %-12s stateRoot=%s\n", "", bi.StateRoot))
-			
+
 			// Print new fields so we can see what differs
 			alertBuf.WriteString(fmt.Sprintf("   %-12s timestamp=%s\n", "", bi.TimeStamp))
 			alertBuf.WriteString(fmt.Sprintf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot))
