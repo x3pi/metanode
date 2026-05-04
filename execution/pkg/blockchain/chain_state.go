@@ -112,49 +112,45 @@ func NewChainStateWithGenesis(
 	// CRITICAL: Must use NewStateTrie() (factory) to match the backend used by AccountStateDB.Commit().
 	// Using trie.New() (MPT hardcoded) would fail when backend=flat because flat entries (fs:*) are stored
 	// instead of MPT trie nodes.
+	// initChangelog is a local helper to init a StateChangelogDB and attach it to a NomtStateTrie.
+	// Each trie (account, stake) needs its own separate changelog DB with a different namespace
+	// because they track completely different data:
+	//   - account_state → user balances, nonces, BLS keys
+	//   - stake_db      → validator stake amounts
+	// They CANNOT be merged into one DB.
+	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string) *state_changelog.StateChangelogDB {
+		if config == nil || !config.EnableHistoricalState || backupPath == "" {
+			return nil
+		}
+		cPath := filepath.Join(filepath.Dir(backupPath), dirName)
+		cdb, cErr := state_changelog.NewStateChangelogDB(cPath, namespace)
+		if cErr != nil {
+			logger.Error("Failed to init StateChangelogDB for %s at %s: %v", namespace, cPath, cErr)
+			return nil
+		}
+		nomtTrie.SetChangelogDB(cdb)
+		logger.Info("✅ [STATE CHANGELOG] Enabled for %s", namespace)
+		return cdb
+	}
+
 	accountStorage := sm.GetStorageAccount()
 	accountStateTrie, err := trie.NewStateTrie(currentBlockHeader.AccountStatesRoot(), accountStorage, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account state trie: %v", err)
 	}
 	var changelogDB *state_changelog.StateChangelogDB
-	if config != nil && config.EnableHistoricalState {
-		if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
-			if backupPath != "" {
-				changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db_account")
-				changelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "account_state")
-				if err == nil {
-					nomtTrie.SetChangelogDB(changelogDB)
-					logger.Info("✅ [STATE CHANGELOG] Enabled for account_state")
-				} else {
-					logger.Error("Failed to init StateChangelogDB for account_state at %s: %v", changelogPath, err)
-				}
-			}
-		}
+	if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
+		changelogDB = initChangelog(nomtTrie, "changelog_db_account", "account_state")
 	}
-	
+
 	stakeStorage := sm.GetStorageStake()
-
 	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, true)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stake state trie: %v", err)
 	}
-
 	var stakeChangelogDB *state_changelog.StateChangelogDB
-	if config != nil && config.EnableHistoricalState {
-		if nomtTrie, ok := stakeStateTrie.(*trie.NomtStateTrie); ok {
-			if backupPath != "" {
-				changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db_stake")
-				stakeChangelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "stake_db")
-				if err == nil {
-					nomtTrie.SetChangelogDB(stakeChangelogDB)
-					logger.Info("✅ [STATE CHANGELOG] Enabled for stake_db")
-				} else {
-					logger.Error("Failed to init StateChangelogDB for stake_db at %s: %v", changelogPath, err)
-				}
-			}
-		}
+	if nomtTrie, ok := stakeStateTrie.(*trie.NomtStateTrie); ok {
+		stakeChangelogDB = initChangelog(nomtTrie, "changelog_db_stake", "stake_db")
 	}
 
 	asDB := account_state_db.NewAccountStateDB(accountStateTrie, accountStorage)

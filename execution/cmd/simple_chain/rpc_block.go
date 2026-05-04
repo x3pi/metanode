@@ -236,7 +236,6 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 		S:                   (*hexutil.Big)(s),
 		YParity:             nil,
 	}
-
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
@@ -282,7 +281,6 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 		S:                   (*hexutil.Big)(s),
 		YParity:             nil,
 	}
-
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
