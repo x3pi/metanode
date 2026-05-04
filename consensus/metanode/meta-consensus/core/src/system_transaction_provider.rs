@@ -156,14 +156,29 @@ impl DefaultSystemTransactionProvider {
             .expect("SystemTime before UNIX_EPOCH — clock is misconfigured")
             .as_millis() as u64;
 
-        // FORK-SAFETY (Apr 2026 Audit): ALWAYS use the authoritative timestamp from Go.
-        // Overriding the timestamp with now_ms if it was >5s in the past caused nodes that 
-        // were catching up to have a desynced epoch_start_timestamp_ms compared to the network.
-        // The cold-start immediate-trigger bug is solved by the go_lag check, not by corrupting the timestamp.
+        // Apply FIX 6 logic to update_epoch as well to prevent catching up nodes from immediately
+        // triggering EndOfEpoch if they are given an old timestamp by Go.
+        let elapsed_seconds = now_ms.saturating_sub(new_timestamp_ms) / 1000;
+        let effective_timestamp = if self.time_based_enabled && elapsed_seconds >= self.epoch_duration_seconds {
+            warn!(
+                "⚠️  SystemTransactionProvider::update_epoch: Given timestamp is {}s old (>= duration {}s). \
+                 Resetting to now() ({}ms) to prevent immediate EndOfEpoch trigger. \
+                 Original timestamp: {}ms. This is normal during snapshot restore / catch-up.",
+                elapsed_seconds,
+                self.epoch_duration_seconds,
+                now_ms,
+                new_timestamp_ms
+            );
+            now_ms
+        } else {
+            new_timestamp_ms
+        };
+
+        // FORK-SAFETY (Apr 2026 Audit): We now safely handle catch-up timestamps above.
         *self
             .epoch_start_timestamp_ms
             .write()
-            .unwrap_or_else(|p| p.into_inner()) = new_timestamp_ms;
+            .unwrap_or_else(|p| p.into_inner()) = effective_timestamp;
         *self
             .last_checked_commit_index
             .write()
@@ -172,7 +187,7 @@ impl DefaultSystemTransactionProvider {
         info!(
             "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms (now={}ms)",
             new_epoch,
-            new_timestamp_ms,
+            effective_timestamp,
             now_ms
         );
     }

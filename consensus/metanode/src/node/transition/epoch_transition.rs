@@ -34,7 +34,7 @@ use super::demotion::determine_role_and_check_transition;
 use super::mode_transition::transition_mode_only;
 use super::tx_recovery::recover_epoch_pending_transactions;
 use super::verification::{
-    verify_epoch_consistency, wait_for_commit_processor_completion, wait_for_consensus_ready,
+    verify_epoch_consistency, wait_for_consensus_ready,
 };
 
 pub async fn transition_to_epoch_from_system_tx(
@@ -133,30 +133,14 @@ pub async fn transition_to_epoch_from_system_tx(
         .await;
 
     // =========================================================================
-    // STEP 3: Wait for commit processor (Validator only)
+    // STEP 3: Commit processor wait removed
     // =========================================================================
-    let target_commit_index = if synced_global_exec_index > node.last_global_exec_index {
-        (synced_global_exec_index - node.last_global_exec_index) as u32
-    } else {
-        synced_global_exec_index as u32
-    };
-
-    if !is_sync_only {
-        let timeout_secs = if config.epoch_transition_optimization == "fast" {
-            5
-        } else {
-            10
-        };
-        info!(
-            "⏳ [TRANSITION] Waiting for commit_processor: target={}, current={}",
-            target_commit_index,
-            node.current_commit_index.load(Ordering::SeqCst),
-        );
-        let _ =
-            wait_for_commit_processor_completion(node, target_commit_index, timeout_secs).await;
-    } else {
-        info!("⚡ [TRANSITION] SyncOnly: skipping commit_processor wait");
-    }
+    // We no longer wait for the commit processor here because:
+    // 1. CommitProcessor breaks its loop immediately after dispatching the EndOfEpoch commit.
+    // 2. Its `current_commit_index` will never increment further for this epoch.
+    // 3. Waiting here previously caused a 5-10s timeout stall on every transition.
+    // 4. Actual synchronization with Go execution is safely handled in STEP 4 (poll_go_until_synced).
+    info!("⚡ [TRANSITION] Skipping commit_processor wait (handled by Go poll)");
 
     // =========================================================================
     // STEP 4: Stop old authority, flush blocks, poll Go

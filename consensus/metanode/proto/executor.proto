@@ -48,6 +48,10 @@ message ExecutableBlock {
     // Go assigns the actual GEI and returns it via ExecuteBlockResponse.
     // Migration flag: false = legacy mode (Rust computes GEI), true = Go-authoritative.
     bool is_authoritative_gei = 10;
+    // SYSTEM TRANSACTIONS: Epoch transitions and other system signals that are not 
+    // standard user transactions. These are passed to Go for RPC logging but are NOT
+    // part of the Go transaction trie or Execution block payload.
+    repeated bytes system_transactions = 11;
 }
 
 // Response from Go after processing an ExecutableBlock.

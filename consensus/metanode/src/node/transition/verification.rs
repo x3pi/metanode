@@ -93,27 +93,7 @@ pub(super) async fn verify_epoch_consistency(
     Ok(())
 }
 
-pub(super) async fn wait_for_commit_processor_completion(
-    node: &ConsensusNode,
-    target: u32,
-    max_wait: u64,
-) -> Result<()> {
-    use std::sync::atomic::Ordering;
 
-    let start = std::time::Instant::now();
-    loop {
-        let current = node.current_commit_index.load(Ordering::SeqCst);
-        if current >= target {
-            return Ok(());
-        }
-        if start.elapsed().as_secs() >= max_wait {
-            return Err(anyhow::anyhow!("Timeout"));
-        }
-        // Polling sleep: Wait 100ms before checking commit index again
-        // This is acceptable for infrequent epoch transitions where precise timing isn't critical
-        sleep(Duration::from_millis(100)).await;
-    }
-}
 
 /// Wait for consensus to become ready with retries instead of fixed sleep
 /// This replaces the unreliable 1000ms sleep with proper synchronization
