@@ -93,6 +93,7 @@ func main() {
 
 	var lastDeployedAddress *common.Address
 	var summary []string
+	hasError := false
 
 	// Lặp qua từng task cấu hình
 	for idx, d := range dataList {
@@ -203,6 +204,7 @@ func main() {
 		if taskErr != nil {
 			fmt.Printf("\n❌ Dừng pipeline tại Task %d do lỗi: %v\n", idx+1, taskErr)
 			summary = append(summary, fmt.Sprintf("❌ %s -> THẤT BẠI: %v", taskTitle, taskErr))
+			hasError = true
 			break
 		} else {
 			if len(d.ExpectedEvents) > 0 {
@@ -220,8 +222,15 @@ func main() {
 		fmt.Println("  " + s)
 	}
 	fmt.Println("==================================================")
-	fmt.Println("🎉 HOÀN THẤT THỰC THI!")
 	fmt.Println("==================================================")
+	if hasError {
+		fmt.Println("❌ THỰC THI THẤT BẠI!")
+		fmt.Println("==================================================")
+		os.Exit(1)
+	} else {
+		fmt.Println("🎉 HOÀN THẤT THỰC THI!")
+		fmt.Println("==================================================")
+	}
 }
 
 // ----------------------------------------------------
@@ -554,7 +563,7 @@ func executeSend(client *ethclient.Client, privateKey *ecdsa.PrivateKey, chainId
 							fmt.Printf("      - Log [%d]: Topic0=%s (Không tìm thấy trong ABI)\n", i, vLog.Topics[0].Hex())
 							continue
 						}
-						
+
 						logStrBuilder := strings.Builder{}
 						fmt.Printf("      - Log [%d] Event: %s\n", i, event.Name)
 						for j, topic := range vLog.Topics {
