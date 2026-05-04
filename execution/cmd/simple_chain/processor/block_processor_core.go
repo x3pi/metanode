@@ -172,6 +172,12 @@ type BlockProcessor struct {
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
 
+	// snapshotGate gates ProcessorPool and GenerateBlock during NOMT snapshots.
+	// Snapshot goroutine holds Write lock; all NOMT-writing goroutines hold Read lock.
+	// This prevents the deadlock where CloseForSnapshot() waits for active NOMT sessions
+	// while ProcessorPool keeps opening new ones.
+	snapshotGate sync.RWMutex
+
 	// FORK-SAFETY: Track Rust FFI session GEI baseline.
 	// After DAG-wipe + restart, Rust sends commits with GEIs lower than Go's existing
 	// lastBlockGEI. The GEI-REGRESSION-GUARD must be bypassed for these legitimate
@@ -182,8 +188,13 @@ type BlockProcessor struct {
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
 func (bp *BlockProcessor) PauseExecution() {
+	// 1. Gate all NOMT-writing goroutines (ProcessorPool, GenerateBlock).
+	//    This MUST come first — it blocks new NOMT sessions from starting,
+	//    which is required for CloseForSnapshot() to complete without deadlock.
+	bp.snapshotGate.Lock()
+	// 2. Lock execution mutex (gates network handlers)
 	bp.ExecutionMutex.Lock()
-	// CRITICAL FIX: Wait for all background persistence to complete before pausing.
+	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
 	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
 	// preventing truncated/partial snapshots where metadata.json has a newer StateRoot than the disk.
 	bp.WaitForPersistence()
@@ -192,6 +203,8 @@ func (bp *BlockProcessor) PauseExecution() {
 // ResumeExecution releases the exclusive execution lock
 func (bp *BlockProcessor) ResumeExecution() {
 	bp.ExecutionMutex.Unlock()
+	// Release snapshotGate AFTER ExecutionMutex to maintain lock ordering
+	bp.snapshotGate.Unlock()
 }
 
 // GetTxClient returns the txClient for transaction forwarding (used by Go Sub to forward transactions to Rust)

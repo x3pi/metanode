@@ -171,7 +171,7 @@ pub(super) async fn setup_synconly_sync(
     info!("🔄 [EPOCH TRANSITION] SyncOnly mode - setting up CommitProcessor for epoch detection");
 
     // Use boundary_gei for epoch_base
-    let actual_epoch_base = boundary_gei;
+    let _actual_epoch_base = boundary_gei;
 
     // FORK-SAFETY FIX v5: New epoch starts fresh — no commits processed yet.
     let go_replay_after_sync = 0u32;

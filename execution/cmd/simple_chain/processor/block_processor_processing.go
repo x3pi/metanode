@@ -37,6 +37,12 @@ func (bp *BlockProcessor) GenerateBlock() {
 	const maxTxsInAccumulatedResults = MaxTxsInAccumulatedResults
 
 	for {
+		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
+		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
+		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
+		bp.snapshotGate.RLock()
+		bp.snapshotGate.RUnlock()
+
 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
 		// Go's native select has uniform random selection when multiple cases are ready.
 		// Under high load, timeoutChan may fire while ProcessResultChan also has data,
@@ -109,6 +115,11 @@ func (bp *BlockProcessor) GenerateBlock() {
 // T2-3: Uses blocking channel send instead of spin-wait to avoid burning CPU when lock is held.
 func (bp *BlockProcessor) ProcessorPool() {
 	for {
+		// SNAPSHOT GATE: Block transaction processing while NOMT snapshot is in progress.
+		// Without this, ProcessorPool continues NOMT writes, causing CloseForSnapshot() deadlock.
+		bp.snapshotGate.RLock()
+		bp.snapshotGate.RUnlock()
+
 		// Only check when transaction pool has data or excluded items left to avoid unnecessary loops
 		if bp.transactionProcessor.transactionPool.CountTransactions() > 0 || bp.transactionProcessor.GetExcludedItemsCount() > 0 {
 			// T2-3 FIX: Blocking send replaces select+default+Sleep(10µs) spin-wait.
