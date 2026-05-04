@@ -13,6 +13,7 @@
     "abi_path": "../../abi/normal-test.json",
     "action": "call",
     "method": "getValue",
-    "args": []
+    "args": [],
+    "verify": [1234]
   }
 ]

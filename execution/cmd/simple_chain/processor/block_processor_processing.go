@@ -9,8 +9,9 @@ import (
 	"runtime"
 	runtime_debug "runtime/debug"
 
-	"github.com/ethereum/go-ethereum/common"
 	"context"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -236,7 +237,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if isStateChanging {
 		accountRoot := processResults.Root
 		lastConfirmedBlock := bp.GetLastBlock()
-		
+
 		bl, err = GenerateBlockData(
 			lastConfirmedBlock.Header(), blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
@@ -258,7 +259,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if globalExecIndex > 0 {
 		bl.Header().SetGlobalExecIndex(globalExecIndex)
 	}
-	
+
 	// CRITICAL FIX: Set CommitIndex on the block so it is serialized and transmitted to Sub nodes.
 	if commitIndex > 0 {
 		bl.Header().SetCommitIndex(uint64(commitIndex))
@@ -375,7 +376,10 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// FORK-SAFETY: Wait for commit to complete before returning.
 	// This ensures the trie is fully updated before the next block reads it.
 	if doneChan != nil {
+		// Unlock ExecutionMutex to prevent deadlock with snapshot's PauseExecution
+		// bp.ExecutionMutex.RUnlock()
 		<-doneChan
+		// bp.ExecutionMutex.RLock()
 		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
 
@@ -502,6 +506,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 		txDB.Discard()
 	}
 }
+
 // ForceCommit triggers an immediate block generation by sending a signal to forceCommitChan
 func (bp *BlockProcessor) ForceCommit() {
 	select {

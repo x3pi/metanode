@@ -949,7 +949,7 @@ ExecuteResult *processNativeMintBurn(
 
     mvm::ExecResult result;
     result.er = mvm::ExitReason::returned;
-    result.gas_used = gas_price * gas_limit;
+    result.gas_used = gas_limit;
 
     ExecuteResult *rs = processResult(result, gs, log_handler);
     return rs;
@@ -1009,7 +1009,7 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
 
     mvm::ExecResult result;
     result.er = mvm::ExitReason::returned;
-    result.gas_used = gas_price * gas_limit;
+    result.gas_used = gas_limit;
 
     ExecuteResult *rs = processResult(result, gs, log_handler);
     return rs;

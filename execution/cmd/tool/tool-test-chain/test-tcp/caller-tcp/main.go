@@ -25,14 +25,21 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
+type ExpectedEvent struct {
+	Name     string   `json:"name"`
+	Contains []string `json:"contains"`
+}
+
 type DataPayload struct {
 	Contract  string        `json:"contract"`
 	AbiPath   string        `json:"abi_path"`
 	Action    string        `json:"action"` // "call" hoặc "send" / "deploy" / "transfer"
-	Method    string        `json:"method"`
-	Args      []interface{} `json:"args"`
-	InputData string        `json:"input_data"`
-	Amount    string        `json:"amount"` // Số lượng MOC (đơn vị wei)
+	Method         string          `json:"method"`
+	Args           []interface{}   `json:"args"`
+	InputData      string          `json:"input_data"`
+	ExpectedEvents []ExpectedEvent `json:"expected_events"`
+	Amount         string          `json:"amount"` // Số lượng MOC (đơn vị wei)
+	Verify         []interface{}   `json:"verify"` // Kiểm tra dữ liệu trả về của call
 }
 
 func main() {
@@ -181,7 +188,7 @@ func main() {
 			}
 			executeDeployTCP(tcpClient, cfg, fromAddress, payloadData, &lastDeployedAddress)
 		} else if action == "call" || action == "read" {
-			executeCallTCP(tcpClient, cfg, contractAddress, fromAddress, contractAbi, d.Method, payloadData)
+			executeCallTCP(tcpClient, cfg, contractAddress, fromAddress, contractAbi, d.Method, payloadData, d.Verify)
 		} else if action == "send" || action == "write" {
 			executeSendTCP(tcpClient, cfg, contractAddress, fromAddress, payloadData, txAmount, d.Method)
 		} else if action == "transfer" {
@@ -259,7 +266,7 @@ func executeDeployTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, from
 // ----------------------------------------------------
 // THỰC THI ACTION: CALL (TCP)
 // ----------------------------------------------------
-func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contractAddress common.Address, fromAddress common.Address, parsedABI abi.ABI, methodName string, payloadData []byte) {
+func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contractAddress common.Address, fromAddress common.Address, parsedABI abi.ABI, methodName string, payloadData []byte, expectedVerify []interface{}) {
 	fmt.Printf("▶️  Chạy thử TCP Call (READ) cho hàm %s...\n", methodName)
 
 	receipt, err := tx_helper.SendReadTransaction(
@@ -284,6 +291,31 @@ func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contra
 		} else {
 			if len(outputs) > 0 {
 				fmt.Printf("   ✅ KẾT QUẢ ĐỌC: %+v\n", outputs)
+				
+				// Kiểm tra mảng Verify nếu được cung cấp
+				if len(expectedVerify) > 0 {
+					if len(outputs) != len(expectedVerify) {
+						log.Fatalf("❌ KẾT QUẢ ĐỌC SAI: Mong đợi %d giá trị trả về, nhưng nhận được %d", len(expectedVerify), len(outputs))
+					}
+					
+					method, ok := parsedABI.Methods[methodName]
+					if ok {
+						for i, expectedRaw := range expectedVerify {
+							expectedVal, err := convertToType(method.Outputs[i].Type, expectedRaw)
+							if err != nil {
+								log.Fatalf("❌ Lỗi chuyển đổi tham số Verify thứ [%d]: %v", i, err)
+							}
+							
+							outputStr := fmt.Sprintf("%v", outputs[i])
+							expectedStr := fmt.Sprintf("%v", expectedVal)
+							
+							if outputStr != expectedStr {
+								log.Fatalf("❌ KẾT QUẢ ĐỌC SAI ở tham số thứ [%d]: Mong đợi '%s', nhận được '%s'", i, expectedStr, outputStr)
+							}
+						}
+						fmt.Printf("   ✅ VERIFY MATCH: Kết quả trả về khớp 100%% với mong đợi!\n")
+					}
+				}
 			} else {
 				fmt.Printf("   ✅ eth_call thành công (Kết quả trả về rỗng).\n")
 			}

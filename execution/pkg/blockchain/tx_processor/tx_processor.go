@@ -876,9 +876,7 @@ func processSingleGroup(
 		// ✅ Đảm bảo receipt luôn được đưa vào list, kể cả khi giao dịch bị revert (THREW/HALTED)
 		// Giao dịch bị revert vẫn cần có receipt và đưa vào block để client biết được trạng thái
 		if enableTrace && txSpan != nil {
-
 			txSpan.End()
-
 		}
 
 		gRs.Receipts = append(gRs.Receipts, rcp)

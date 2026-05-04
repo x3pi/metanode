@@ -93,6 +93,7 @@ func main() {
 
 	var lastDeployedAddress *common.Address
 	var summary []string
+	hasError := false
 
 	// Lặp qua từng task cấu hình
 	for idx, d := range dataList {
@@ -203,6 +204,7 @@ func main() {
 		if taskErr != nil {
 			fmt.Printf("\n❌ Dừng pipeline tại Task %d do lỗi: %v\n", idx+1, taskErr)
 			summary = append(summary, fmt.Sprintf("❌ %s -> THẤT BẠI: %v", taskTitle, taskErr))
+			hasError = true
 			break
 		} else {
 			if len(d.ExpectedEvents) > 0 {
@@ -222,6 +224,9 @@ func main() {
 	fmt.Println("==================================================")
 	fmt.Println("🎉 HOÀN THẤT THỰC THI!")
 	fmt.Println("==================================================")
+	if hasError {
+		os.Exit(1)
+	}
 }
 
 // ----------------------------------------------------

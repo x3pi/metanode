@@ -134,7 +134,7 @@ if should_run 3; then
 fi
 
 # ----------------------------------------------------
-# BƯỚC 4: Test HTTP RPC - Xapian V0
+# BƯỚC 4: Test HTTP RPC - Xapian V0 & Send Native
 # ----------------------------------------------------
 if should_run 4; then
     echo ""
@@ -142,6 +142,12 @@ if should_run 4; then
     cd "$PROJECT_ROOT/cmd/tool/tool-test-chain/test-rpc"
     go run main.go -config=./config-local.json -data=./test_read_wire_xapian/data-xapian-v0.json
     if [ $? -ne 0 ]; then echo "❌ Lỗi ở Test Xapian V0 (Bước 4)"; exit 1; fi
+
+    echo ""
+    echo "📌 BƯỚC 4.1: Test Send Native Coin..."
+    cd "$PROJECT_ROOT/cmd/tool/tool-test-chain/test-rpc/send-native"
+    go run main.go
+    if [ $? -ne 0 ]; then echo "❌ Lỗi ở Send Native (Bước 4.1)"; exit 1; fi
 fi
 
 # ----------------------------------------------------
@@ -164,6 +170,7 @@ if should_run 6; then
     cd "$PROJECT_ROOT/cmd/tool/test_tps/tps_blast_cc"
     if [ "$DEPLOY_MODE" == "single" ]; then
         go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=10
+        #go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=500
     else
         go run main.go --count 20000 --parallel_native=true --rounds 1 --load_balance=true --batch=500
     fi
