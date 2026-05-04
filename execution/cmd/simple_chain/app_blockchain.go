@@ -95,8 +95,18 @@ func (app *App) initBlockchain() error {
 				var md executor.SnapshotMetadata
 				if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
 					if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
+						// Fallback: lấy stake root từ metadata hoặc NOMT database
+						stakeRoot := e_common.HexToHash(md.StakeStatesRoot)
+						if stakeRoot == (e_common.Hash{}) {
+							// Old snapshot format: query NOMT directly
+							if nomtRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+								stakeRoot = nomtRoot
+								logger.Info("📸 [SNAPSHOT] StakeStatesRoot from NOMT: %s", stakeRoot.Hex())
+							}
+						}
+
 						app.startLastBlock = block.NewBlock(
-							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), e_common.HexToHash(""), e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
+							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), stakeRoot, e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
 							nil, nil,
 						)
 					}
@@ -105,7 +115,41 @@ func (app *App) initBlockchain() error {
 					storage.UpdateLastBlockNumber(app.startLastBlock.Header().BlockNumber())
 					storage.UpdateLastGlobalExecIndex(app.startLastBlock.Header().GlobalExecIndex())
 					app.GetAccountStateTrie(app.startLastBlock.Header().AccountStatesRoot())
+
+					// ═══════════════════════════════════════════════════════════════
+					// CRITICAL FIX: Verify and patch NOMT roots BEFORE NewChainStateWithGenesis.
+					// GetAccountStateTrie() above lazily initializes the "account_state" NOMT handle.
+					// We must also force "stake_db" handle init so GetNomtHandleRoot works.
+					// ═══════════════════════════════════════════════════════════════
+					
+					// Force stake_db NOMT handle initialization by creating a temporary trie.
+					// This ensures GetNomtHandleRoot("stake_db") works before NewChainStateWithGenesis.
+					stakeStorage := app.storageManager.GetStorageStake()
+					if _, initErr := trie.NewStateTrie(e_common.Hash{}, stakeStorage, true); initErr != nil {
+						logger.Warn("⚠️ [SNAPSHOT] Failed to pre-init stake_db NOMT handle: %v", initErr)
+					}
+
+					// Now verify NOMT roots match header — BEFORE ChainState is created
+					if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						headerRoot := app.startLastBlock.Header().AccountStatesRoot()
+						if nomtAccountRoot != headerRoot {
+							logger.Warn("⚠️ [SNAPSHOT] AccountState NOMT root MISMATCH: nomt=%s header=%s → patching header",
+								nomtAccountRoot.Hex(), headerRoot.Hex())
+							app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+						}
+					}
+					if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+						if nomtStakeRoot != headerStakeRoot {
+							logger.Warn("⚠️ [SNAPSHOT] StakeState NOMT root MISMATCH: nomt=%s header=%s → patching header",
+								nomtStakeRoot.Hex(), headerStakeRoot.Hex())
+							app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
+						}
+					}
+
+					// Now create ChainState with the CORRECTED header roots
 					app.chainState, _ = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
+
 					trie_database.CreateTrieDatabaseManager(app.storageManager.GetStorageDatabaseTrie(), app.chainState.GetAccountStateDB())
 					blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
 					goto SKIP_GENESIS
@@ -236,14 +280,48 @@ func (app *App) initBlockchain() error {
 		}
 
 		// ─── Startup State Sync Logging ────────────────────────────────
-		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s",
+		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s, stake_root=%s",
 			app.startLastBlock.Header().BlockNumber(),
-			app.startLastBlock.Header().AccountStatesRoot().Hex())
+			app.startLastBlock.Header().AccountStatesRoot().Hex(),
+			app.startLastBlock.Header().StakeStatesRoot().Hex())
 
 		// Create account state trie from existing root and cache it
 		_, err := app.GetAccountStateTrie(app.startLastBlock.Header().AccountStatesRoot())
 		if err != nil {
 			return fmt.Errorf("failed to create account state trie: %v", err)
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// CRITICAL FIX (May 2026): Pre-init stake_db NOMT handle and verify root
+		// BEFORE NewChainStateWithGenesis. NOMT backend ignores the root parameter
+		// passed to NewStateTrie() — it reads root from handle.Root() on disk.
+		// If stake_db was not correctly restored, handle.Root() = 0x0, causing
+		// all subsequent blocks to have stakeStatesRoot=0x0 → consensus fork.
+		// ═══════════════════════════════════════════════════════════════
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			stakeStorage := app.storageManager.GetStorageStake()
+			if _, initErr := trie.NewStateTrie(e_common.Hash{}, stakeStorage, true); initErr != nil {
+				logger.Warn("⚠️ [STARTUP] Failed to pre-init stake_db NOMT handle: %v", initErr)
+			}
+
+			if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+				headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+				logger.Info("🔍 [STARTUP] stake_db NOMT root=%s, header StakeStatesRoot=%s",
+					nomtStakeRoot.Hex(), headerStakeRoot.Hex())
+
+				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
+					logger.Error("🚨 [FATAL] stake_db NOMT database is EMPTY (root=0x0) but header expects StakeStatesRoot=%s!",
+						headerStakeRoot.Hex())
+					panic("FATAL: stake_db NOMT database is empty after snapshot restore. " +
+						"The nomt_db/stake_db directory may be missing or corrupt.")
+				}
+
+				if nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] StakeStatesRoot MISMATCH: nomt=%s header=%s → patching header to use NOMT authoritative root",
+						nomtStakeRoot.Hex(), headerStakeRoot.Hex())
+					app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
+				}
+			}
 		}
 
 		app.chainState, err = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
@@ -288,6 +366,30 @@ SKIP_GENESIS:
 				logger.Info("✅ [STARTUP] NOMT handle root matches trie cached root: %s",
 					nomtRoot.Hex()[:18]+"...")
 			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// FORK-FIX (May 2026): Cross-check NOMT stake_db handle root.
+		// This was previously MISSING — only AccountStatesRoot was verified,
+		// leaving StakeStatesRoot=0x0 undetected after snapshot restore.
+		// ═══════════════════════════════════════════════════════════════
+		if nomtStakeHandleRoot, okStake := trie.GetNomtHandleRoot("stake_db"); okStake {
+			headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+			if nomtStakeHandleRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
+				logger.Error("🚨 [STARTUP] CRITICAL: stake_db NOMT is EMPTY (root=0x0) but header expects %s!",
+					headerStakeRoot.Hex())
+				panic("FATAL: stake_db NOMT database is empty. Snapshot restore incomplete.")
+			}
+			if nomtStakeHandleRoot != headerStakeRoot {
+				logger.Error("🚨 [STARTUP] NOMT stake_db handle root (%s) differs from header StakeStatesRoot (%s)! Patching header.",
+					nomtStakeHandleRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
+				app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeHandleRoot)
+			} else {
+				logger.Info("✅ [STARTUP] NOMT stake_db handle root matches header: %s",
+					nomtStakeHandleRoot.Hex()[:18]+"...")
+			}
+		} else {
+			logger.Warn("⚠️ [STARTUP] stake_db NOMT handle not initialized, cannot verify StakeStatesRoot")
 		}
 
 		// Attempt to load metadata.json

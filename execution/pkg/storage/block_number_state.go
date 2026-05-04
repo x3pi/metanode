@@ -111,7 +111,7 @@ func SetBlockchainInitDone() {
 // IsBlockchainInitDone returns true if blockchain initialization is complete.
 func IsBlockchainInitDone() bool {
 	val := atomic.LoadUint32(&blockchainInitDone)
-	logger.Info("🔍 [INIT-DEBUG] IsBlockchainInitDone() checked: flag=%d, lastBlockNumber=%d", val, GetLastBlockNumber())
+	logger.Debug("🔍 [INIT-DEBUG] IsBlockchainInitDone() checked: flag=%d, lastBlockNumber=%d", val, GetLastBlockNumber())
 	return val >= 1
 }
 

@@ -852,6 +852,73 @@ test_dag_wipe_recovery() {
 }
 
 # ═══════════════════════════════════════════════════════════════════
+#  TEST 4.5: Full Wipe & Snapshot Restore Recovery
+# ═══════════════════════════════════════════════════════════════════
+
+test_full_wipe_restore() {
+    log "## $(date +%H:%M:%S) — Full Wipe & Snapshot Restore Test (Node $TARGET_NODE)"
+    log ""
+    
+    local ref_port=${RPC_PORTS[0]}
+    local target_port=${RPC_PORTS[$TARGET_NODE]}
+    
+    # Ghi nhận block trước khi stop (từ reference node)
+    local block_before
+    block_before=$(get_block_number "$ref_port")
+    log "- Block cluster trước khi wipe (node 0): \`$block_before\`"
+    
+    # Bật TX pump để đảm bảo cluster có tạo block và có snapshot mới
+    start_tx_pump
+    
+    # Gọi test_snapshot_restore.sh (script này tự stop, tự wipe toàn bộ, tải snapshot và tự start)
+    log "- 📸 Bắt đầu khôi phục Snapshot từ Node 0 sang Node $TARGET_NODE..."
+    local restore_output
+    restore_output=$("$SCRIPT_DIR/node/test_snapshot_restore.sh" 0 "$TARGET_NODE" "127.0.0.1" 2>&1)
+    if [ $? -ne 0 ]; then
+        log "> 🚨 Khôi phục snapshot thất bại!"
+        log '```text'
+        log_raw "$restore_output"
+        log '```'
+        record_result "Full Wipe & Restore (Node $TARGET_NODE)" "false"
+        stop_tx_pump
+        return
+    fi
+    log "- ✅ Snapshot khôi phục thành công. Node $TARGET_NODE đã được bật lại bởi script."
+    
+    # Chờ node sống lại
+    if ! wait_for_node_alive "$TARGET_NODE" "$WIPE_CATCHUP_WAIT"; then
+        stop_tx_pump
+        log "> 🚨 Node $TARGET_NODE không phản hồi RPC sau ${WIPE_CATCHUP_WAIT}s!"
+        record_result "Full Wipe & Restore (Node $TARGET_NODE)" "false"
+        return
+    fi
+    
+    # Chờ thêm cho quá trình sync
+    sleep 10
+    stop_tx_pump
+    
+    local block_after
+    block_after=$(get_block_number "$target_port")
+    local block_ref_after
+    block_ref_after=$(get_block_number "$ref_port")
+    log "- Block node $TARGET_NODE sau wipe+restore: \`$block_after\`"
+    log "- Block node 0 (reference): \`$block_ref_after\`"
+    log ""
+    
+    # Đánh giá
+    if [ "$block_after" != "-1" ] && [ "$block_after" -ge "$block_before" ]; then
+        log "> Node $TARGET_NODE đã phục hồi thành công từ Snapshot ($block_before → $block_after)."
+        record_result "Full Wipe & Restore (Node $TARGET_NODE)" "true"
+    elif [ "$block_after" != "-1" ]; then
+        log "> ⚠️ Node $TARGET_NODE đã sống nhưng block thấp hơn trước ($block_before → $block_after). Có thể đang catch-up."
+        record_result "Full Wipe & Restore (Node $TARGET_NODE)" "true"
+    else
+        log "> 🚨 Node $TARGET_NODE không phản hồi RPC!"
+        record_result "Full Wipe & Restore (Node $TARGET_NODE)" "false"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════
 #  TỔNG HỢP BÁO CÁO
 # ═══════════════════════════════════════════════════════════════════
 
@@ -939,11 +1006,12 @@ test_scan_fork_warnings
 
 # ─── Test 3+4: Destructive tests ────────────────────────────────
 if [ "$SKIP_DESTRUCTIVE" = "true" ]; then
-    log "## ⏭️ Bỏ qua Test 3+4 (--skip-destructive)"
+    log "## ⏭️ Bỏ qua Test 3, 4, 4.5 (--skip-destructive)"
     log ""
 else
     test_node_restart
     test_dag_wipe_recovery
+    test_full_wipe_restore
 fi
 
 # ─── Test 5: Post-recovery hash parity ──────────────────────────

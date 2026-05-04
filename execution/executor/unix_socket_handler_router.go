@@ -10,7 +10,7 @@ import (
 // ProcessProtobufRequest handles a proto request directly, independent of socket logic.
 // This is used by both the FFI Bridge and the legacy UnixSocket handler.
 func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb.Response {
-    var wrappedResponse *pb.Response
+	var wrappedResponse *pb.Response
 	switch req := wrappedRequest.GetPayload().(type) {
 		case *pb.Request_BlockRequest:
 			logger.Info("[Go Server] Received BlockRequest for block: %d", req.BlockRequest.GetBlockNumber())
@@ -81,7 +81,6 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 				}
 			}
 		case *pb.Request_GetLastBlockNumberRequest:
-			// logger.Info("[Go Server] Nhận được yêu cầu GetLastBlockNumberRequest (Rust executor_client initializing)")
 			res, err := se.HandleGetLastBlockNumberRequest(req.GetLastBlockNumberRequest)
 			if err != nil {
 				logger.Error("[Go Server] Error handling GetLastBlockNumberRequest: %v", err)
@@ -91,7 +90,6 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 					},
 				}
 			} else {
-				// logger.Info("[Go Server] Đã xử lý xong GetLastBlockNumberRequest, gửi LastBlockNumberResponse với last_block_number=%d", res.GetLastBlockNumber())
 				wrappedResponse = &pb.Response{
 					Payload: &pb.Response_LastBlockNumberResponse{
 						LastBlockNumberResponse: res,
@@ -99,7 +97,6 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 				}
 			}
 		case *pb.Request_GetCurrentEpochRequest:
-			// logger.Info("[Go Server] Nhận được yêu cầu GetCurrentEpochRequest (Sui-style epoch transition)")
 			res, err := se.HandleGetCurrentEpochRequest(req.GetCurrentEpochRequest)
 			if err != nil {
 				logger.Error("[Go Server] Error handling GetCurrentEpochRequest: %v", err)
@@ -109,7 +106,6 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 					},
 				}
 			} else {
-				// logger.Info("[Go Server] Đã xử lý xong GetCurrentEpochRequest, gửi GetCurrentEpochResponse với epoch=%d", res.GetEpoch())
 				wrappedResponse = &pb.Response{
 					Payload: &pb.Response_GetCurrentEpochResponse{
 						GetCurrentEpochResponse: res,
@@ -117,7 +113,6 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 				}
 			}
 		case *pb.Request_GetEpochStartTimestampRequest:
-			// logger.Info("[Go Server] Nhận được yêu cầu GetEpochStartTimestampRequest (Sui-style epoch transition) cho epoch %d", req.GetEpochStartTimestampRequest.GetEpoch())
 			res, err := se.HandleGetEpochStartTimestampRequest(req.GetEpochStartTimestampRequest)
 			if err != nil {
 				logger.Error("[Go Server] Error handling GetEpochStartTimestampRequest: %v", err)
@@ -315,13 +310,13 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 			}
 		}
 
-    if wrappedResponse == nil {
-        logger.Error("[RequestHandler] wrappedResponse is nil - this is a bug!")
-        wrappedResponse = &pb.Response{
-            Payload: &pb.Response_Error{
-                Error: "Internal server error: response is nil",
-            },
-        }
-    }
-    return wrappedResponse
+	if wrappedResponse == nil {
+		logger.Error("[RequestHandler] wrappedResponse is nil - this is a bug!")
+		wrappedResponse = &pb.Response{
+			Payload: &pb.Response_Error{
+				Error: "Internal server error: response is nil",
+			},
+		}
+	}
+	return wrappedResponse
 }

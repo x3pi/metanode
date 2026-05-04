@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -206,14 +207,50 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	}
 
 	var blockMap map[string]interface{}
+	var targetBlockNumber uint64
+	var foundBlockNumber bool
+
 	if blockNr, ok := blockNrOrHash.Number(); ok {
+		targetBlockNumber = uint64(blockNr.Int64())
+		foundBlockNumber = true
 		blockMap = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), true)
 	} else if hash, ok := blockNrOrHash.Hash(); ok {
 		blockMap = api.GetBlockByHash(ctx, hash, true)
+		if blockMap != nil {
+			if numStr, okStr := blockMap["number"].(string); okStr {
+				if num, err := hexutil.DecodeUint64(numStr); err == nil {
+					targetBlockNumber = num
+					foundBlockNumber = true
+				}
+			}
+		}
 	}
 
 	if blockMap == nil {
 		return nil, fmt.Errorf("block not found")
+	}
+
+	// Phase 2.4: Try to get historical state from StateChangelogDB
+	changelogDB := api.App.chainState.GetChangelogDB()
+	if changelogDB != nil && foundBlockNumber {
+		stateBytes, err := changelogDB.GetStateAt(address.Bytes(), targetBlockNumber)
+		if err == nil {
+			if len(stateBytes) == 0 {
+				// Address explicitly deleted or does not exist
+				return nil, nil
+			}
+			// Unmarshal the protobuf bytes
+			as := &state.AccountState{}
+			if errUnmarshal := as.Unmarshal(stateBytes); errUnmarshal == nil {
+				return as, nil
+			} else {
+				logger.Warn("⚠️ [RPC] Failed to unmarshal historical state for %x at block %d: %v", address, targetBlockNumber, errUnmarshal)
+			}
+		} else {
+			// ErrNotFound could mean the address has never been modified since changelog started,
+			// or the changelog is incomplete. We fallback to NOMT gracefully but issue a warning.
+			logger.Warn("⚠️ [RPC] StateChangelogDB missing entry for %x at block %d (err: %v). Falling back to NOMT latest state.", address, targetBlockNumber, err)
+		}
 	}
 
 	stateRootInterface := blockMap["stateRoot"]

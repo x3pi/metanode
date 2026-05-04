@@ -46,6 +46,9 @@ func (ss *SnapshotServer) Start() error {
 	// API endpoint — trả về JSON metadata
 	mux.HandleFunc("/api/snapshots", ss.handleAPISnapshots)
 
+	// API endpoint — verify snapshot integrity
+	mux.HandleFunc("/api/snapshots/verify", ss.handleAPISnapshotVerify)
+
 	// Phục vụ file tĩnh từ thư mục snapshot
 	// http.FileServer tự động hỗ trợ:
 	// - Range requests (resume download)
@@ -142,6 +145,39 @@ func (ss *SnapshotServer) handleAPISnapshots(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(snapshots)
+}
+
+// handleAPISnapshotVerify verifies a snapshot by name and returns JSON
+func (ss *SnapshotServer) handleAPISnapshotVerify(w http.ResponseWriter, r *http.Request) {
+	snapshotName := r.URL.Query().Get("name")
+	if snapshotName == "" {
+		http.Error(w, `{"error":"Missing 'name' query parameter"}`, http.StatusBadRequest)
+		return
+	}
+
+	snapshotPath := filepath.Join(ss.snapshotDir, snapshotName)
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		http.Error(w, fmt.Sprintf(`{"error":"Snapshot not found: %s"}`, snapshotName), http.StatusNotFound)
+		return
+	}
+
+	metadata, err := VerifySnapshotIntegrity(snapshotPath)
+	w.Header().Set("Content-Type", "application/json")
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "corrupt",
+			"error":    err.Error(),
+			"metadata": metadata,
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "verified",
+		"metadata": metadata,
+	})
 }
 
 // StartSnapshotServer khởi động snapshot HTTP server trong goroutine riêng

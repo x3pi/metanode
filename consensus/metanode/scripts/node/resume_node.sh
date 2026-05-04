@@ -91,15 +91,23 @@ mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/data-write/data/xapian_node"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up_write"
 
+# ─── Step 3.5: Clean stale UDS sockets ───────────────────────
+# CRITICAL: Without this, Rust FFI cannot bind/connect to consensus peers
+echo -e "${BLUE}📋 Step 3.5: Clean stale UDS sockets...${NC}"
+rm -f "/tmp/executor${NODE_ID}.sock" 2>/dev/null || true
+rm -f "/tmp/rust-go-node${NODE_ID}-master.sock" 2>/dev/null || true
+rm -f "/tmp/metanode-tx-${NODE_ID}.sock" 2>/dev/null || true
+echo -e "${GREEN}  ✅ Sockets cleaned${NC}"
+
 # ─── Step 4: Start Go Master ────────────────────────────────
-echo -e "${BLUE}📋 Step 3: Start Go Master...${NC}"
+echo -e "${BLUE}📋 Step 4: Start Go Master + Rust FFI...${NC}"
 cd "$GO_SIMPLE_ROOT"
 
 XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
 tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+    "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && exec ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
 
-echo -e "${GREEN}  🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
+echo -e "${GREEN}  🚀 Go Master + Rust FFI started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
 
 # ─── Step 5: Start Go Sub ───────────────────────────────────
 echo -e "${BLUE}📋 Step 4: Start Go Sub...${NC}"

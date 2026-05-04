@@ -201,6 +201,17 @@ func (db *AccountStateDB) Trie() p_trie.StateTrie {
 	return db.trie
 }
 
+// SetTrieCommitBlock sets the current commit block number on the underlying trie
+// for StateChangelog tracking. This accesses db.trie directly WITHOUT acquiring
+// muTrie because it is called from CommitPipeline's goroutine while muTrie.Lock()
+// is already held by IntermediateRoot(true) in the processing goroutine.
+// The trie reference is stable while muTrie is held, so direct access is safe.
+func (db *AccountStateDB) SetTrieCommitBlock(blockNumber uint64) {
+	if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+		nomtTrie.SetCurrentCommitBlock(blockNumber)
+	}
+}
+
 // DirtyAccountCount returns the number of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountCount() int {
 	count := 0

@@ -31,6 +31,10 @@ type Handle struct {
 
 	sessionsMu      sync.Mutex
 	pendingSessions []*FinishedSession
+
+	closing         bool
+	activeCount     int
+	activeCond      *sync.Cond
 }
 
 // Session wraps the opaque NOMT write session pointer.
@@ -61,13 +65,16 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB int) (*Handle
 		return nil, fmt.Errorf("nomt_ffi: failed to open database at %s", path)
 	}
 
-	return &Handle{
+	h := &Handle{
 		ptr:               ptr,
 		path:              path,
 		commitConcurrency: commitConcurrency,
 		pageCacheMB:       pageCacheMB,
 		leafCacheMB:       leafCacheMB,
-	}, nil
+	}
+	h.activeCond = sync.NewCond(&h.sessionsMu)
+
+	return h, nil
 }
 
 // Close frees all resources associated with the database.
@@ -85,26 +92,28 @@ func (h *Handle) GetPath() string {
 	return h.path
 }
 
-// CloseForSnapshot acquires the lock, flushes all pending async sessions, and fully
-// closes the underlying NOMT/RocksDB database instance. This guarantees that all
-// background compaction and flush threads are stopped, and all Rust Arc<Core>
-// references are released, making it 100% safe to `cp -a` the database directory.
-//
-// IMPORTANT: The caller (SnapshotManager) MUST call PauseExecution() + WaitForPersistence()
-// BEFORE calling this function. This ensures no active sessions exist — only
-// pendingSessions (async disk I/O not yet flushed) need draining.
+// CloseForSnapshot gracefully closes the database for snapshotting.
+// It pauses new session creation and waits for all active sessions to finish
+// mutating memory-mapped files before invoking nomt_close().
 func (h *Handle) CloseForSnapshot() {
-	h.mu.Lock()
-
+	// 1. Prevent new sessions from starting
 	h.sessionsMu.Lock()
+	h.closing = true
+
+	// 2. Wait for all active sessions to either Close() or turn into FinishedSessions
+	for h.activeCount > len(h.pendingSessions) {
+		h.activeCond.Wait()
+	}
+
+	// At this point, ALL sessions are either fully closed or sitting in pendingSessions.
+	// No new sessions can start. It is safe to grab pending sessions.
 	pending := h.pendingSessions
 	h.pendingSessions = nil
 	h.sessionsMu.Unlock()
 
-	// Drain any async finished sessions that haven't been committed yet.
-	// If we don't do this, the FinishedSession inside Go holds a reference
-	// to the Rust Session, which keeps the Arc<Core> alive, causing nomt_close
-	// to NOT actually release the RocksDB directory lock!
+	// 3. Acquire exclusive lock to prevent any Reads while we close
+	h.mu.Lock()
+
 	for _, fs := range pending {
 		if fs != nil && fs.ptr != nil {
 			fmt.Printf("nomt_ffi: forcefully flushing pending finished session at %s before snapshot\n", h.path)
@@ -113,10 +122,14 @@ func (h *Handle) CloseForSnapshot() {
 		}
 	}
 
+	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
+	// Arc<Core> references, nomt_close will fully drop the database synchronously,
+	// flushing all WALs and memory mapped files safely.
 	if h.ptr != nil {
 		C.nomt_close(h.ptr)
 		h.ptr = nil
 	}
+	h.mu.Unlock()
 }
 
 // ReopenAfterSnapshot reopens the database using the previously saved path and config,
@@ -153,11 +166,17 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	}
 
 	if ptr == nil {
-		h.mu.Unlock() // avoid deadlock on failure
 		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s even after retries", h.path)
 	}
 	h.ptr = ptr
-	h.mu.Unlock()
+
+	// Reset closing state to allow new sessions
+	h.sessionsMu.Lock()
+	h.closing = false
+	h.activeCount = 0 // pendingSessions were consumed
+	h.activeCond.Broadcast()
+	h.sessionsMu.Unlock()
+
 	return nil
 }
 
@@ -295,13 +314,30 @@ func BeginSession(h *Handle) *Session {
 	if h == nil {
 		return nil
 	}
+
+	h.sessionsMu.Lock()
+	for h.closing {
+		h.activeCond.Wait()
+	}
+	h.activeCount++
+	h.sessionsMu.Unlock()
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.ptr == nil {
+		// Rollback active count if ptr is nil
+		h.sessionsMu.Lock()
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
 		return nil
 	}
 	ptr := C.nomt_session_begin(h.ptr)
 	if ptr == nil {
+		h.sessionsMu.Lock()
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
 		return nil
 	}
 	return &Session{ptr: ptr, handle: h}
@@ -309,6 +345,7 @@ func BeginSession(h *Handle) *Session {
 
 // WarmUp sends an asynchronous prefetch request to the NOMT threadpool to load
 // the Merkle branch nodes from disk.
+
 func (s *Session) WarmUp(key [32]byte) error {
 	if s.ptr == nil || s.handle == nil {
 		return fmt.Errorf("nomt_ffi: invalid session")
@@ -477,6 +514,12 @@ func (s *Session) Commit(h *Handle) ([32]byte, error) {
 	)
 	s.ptr = nil // session consumed
 
+	// Active session finished
+	h.sessionsMu.Lock()
+	h.activeCount--
+	h.activeCond.Broadcast()
+	h.sessionsMu.Unlock()
+
 	if ret != 0 {
 		return newRoot, fmt.Errorf("nomt_ffi: commit failed")
 	}
@@ -501,10 +544,17 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 		s.ptr,
 		(*C.uint8_t)(&newRoot[0]),
 	)
+	// NOTE: We DO NOT decrement activeCount here, because the returned
+	// FinishedSession still holds an Arc<Core> reference and represents an active session.
 	s.ptr = nil // session consumed
 
 	if ptr == nil {
-		return newRoot, nil, fmt.Errorf("nomt_ffi: session finish failed")
+		// On error, the session is consumed but we failed to get a FinishedSession
+		h.sessionsMu.Lock()
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
+		return newRoot, nil, fmt.Errorf("nomt_ffi: failed to finish session")
 	}
 
 	fs := &FinishedSession{ptr: ptr, handle: h}
@@ -531,8 +581,7 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	}
 
 	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
-	fs.ptr = nil // consumed
-
+	
 	h.sessionsMu.Lock()
 	for i, pfs := range h.pendingSessions {
 		if pfs == fs {
@@ -540,11 +589,20 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 			break
 		}
 	}
-	h.sessionsMu.Unlock()
 
 	if ret != 0 {
-		return fmt.Errorf("nomt_ffi: commit_payload failed")
+		fs.ptr = nil
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
+		return fmt.Errorf("nomt_ffi: failed to commit payload")
 	}
+	fs.ptr = nil
+
+	h.activeCount--
+	h.activeCond.Broadcast()
+	h.sessionsMu.Unlock()
+
 	return nil
 }
 
@@ -552,30 +610,30 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 func (s *Session) Abort() {
 	if s.ptr != nil && s.handle != nil {
 		s.handle.mu.RLock()
-		defer s.handle.mu.RUnlock()
 		if s.handle.ptr != nil {
 			C.nomt_session_abort(s.ptr)
 		}
+		s.handle.mu.RUnlock()
 		s.ptr = nil
+
+		s.handle.sessionsMu.Lock()
+		s.handle.activeCount--
+		s.handle.activeCond.Broadcast()
+		s.handle.sessionsMu.Unlock()
 	}
 }
 
 // Abort discards an uncommitted finished session.
 func (fs *FinishedSession) Abort() {
 	if fs.ptr != nil && fs.handle != nil {
-		fs.handle.mu.RLock()
-		defer fs.handle.mu.RUnlock()
-
-		if fs.ptr == nil {
-			return // Already consumed
-		}
-
-		if fs.handle.ptr != nil {
+		h := fs.handle
+		h.mu.RLock()
+		if h.ptr != nil {
 			C.nomt_finished_session_abort(fs.ptr)
 		}
+		h.mu.RUnlock()
 		fs.ptr = nil
 
-		h := fs.handle
 		h.sessionsMu.Lock()
 		for i, pfs := range h.pendingSessions {
 			if pfs == fs {
@@ -583,6 +641,8 @@ func (fs *FinishedSession) Abort() {
 				break
 			}
 		}
+		h.activeCount--
+		h.activeCond.Broadcast()
 		h.sessionsMu.Unlock()
 	}
 }

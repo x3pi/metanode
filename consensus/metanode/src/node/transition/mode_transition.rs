@@ -265,7 +265,7 @@ pub async fn transition_mode_only(
             ),
         )
         .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
-        .with_epoch_info(epoch, epoch_base_gei_from_go)
+        .with_epoch_info(epoch)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)

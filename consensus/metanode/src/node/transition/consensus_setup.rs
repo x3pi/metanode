@@ -87,7 +87,7 @@ pub(super) async fn setup_validator_consensus(
             ),
         )
         .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
-        .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_epoch_info(new_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
@@ -171,7 +171,7 @@ pub(super) async fn setup_synconly_sync(
     info!("🔄 [EPOCH TRANSITION] SyncOnly mode - setting up CommitProcessor for epoch detection");
 
     // Use boundary_gei for epoch_base
-    let actual_epoch_base = boundary_gei;
+    let _actual_epoch_base = boundary_gei;
 
     // FORK-SAFETY FIX v5: New epoch starts fresh — no commits processed yet.
     let go_replay_after_sync = 0u32;
@@ -223,7 +223,7 @@ pub(super) async fn setup_synconly_sync(
             ),
         )
         .with_shared_last_global_exec_index(node.coordination_hub.get_global_exec_index_ref())
-        .with_epoch_info(new_epoch, actual_epoch_base)
+        .with_epoch_info(new_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_is_transitioning(node.coordination_hub.get_is_transitioning_ref())
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())

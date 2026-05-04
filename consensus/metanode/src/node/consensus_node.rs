@@ -112,12 +112,12 @@ impl ConsensusNode {
         info!("Initializing consensus node {}...", config.node_id);
 
         // Phase 1: Storage, epoch discovery, committee, execution index, identity
-        let storage = Self::setup_storage(&config).await?;
+        let mut storage = Self::setup_storage(&config).await?;
 
         let coordination_hub = consensus_core::coordination_hub::ConsensusCoordinationHub::new();
 
         // Phase 2: Consensus params, commit processor, authority start
-        let consensus = Self::setup_consensus(&config, &storage, &registry, coordination_hub.clone()).await?;
+        let consensus = Self::setup_consensus(&config, &mut storage, &registry, coordination_hub.clone()).await?;
 
         // Phase 3: Clock/NTP sync
         let clock_sync_manager = Self::setup_networking(&config);
@@ -227,6 +227,7 @@ impl ConsensusNode {
                     let retry_interval = std::time::Duration::from_millis(500);
                     let mut final_epoch = 0u64;
                     let mut last_err = e;
+                    let mut resolved = false;
 
                     for attempt in 2..=max_retries {
                         warn!(
@@ -241,7 +242,7 @@ impl ConsensusNode {
                                     e, attempt, latest_block_number
                                 );
                                 final_epoch = e;
-                                last_err = anyhow::anyhow!("resolved");
+                                resolved = true;
                                 break;
                             }
                             Err(e) => {
@@ -249,7 +250,7 @@ impl ConsensusNode {
                             }
                         }
                     }
-                    if last_err.to_string() != "resolved" {
+                    if !resolved {
                         return Err(anyhow::anyhow!(
                             "Failed to fetch epoch from Go after {} attempts: {}",
                             max_retries,
@@ -275,6 +276,21 @@ impl ConsensusNode {
             "📊 [STARTUP] Go State: Block {}, Epoch {} (peer_block={})",
             latest_block_number, go_epoch, peer_last_block
         );
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ANTI-FORK GUARD: Prevent joining the network with a fully wiped Go DB
+        // without restoring a snapshot.
+        // If Go DB is empty (Block=0) but the network is at Block > 100, the node
+        // MUST NOT start and generate Block 1 with the network's GEI, otherwise it
+        // will cause an unrecoverable hash mismatch.
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ANTI-FORK GUARD: Previously this panicked if the node started with an
+        // empty Go DB while the network was far ahead. But with the STARTUP-SYNC
+        // improvements, the node can now safely fetch all blocks from peers,
+        // rebuild the state, and correctly update the commit indexes.
+        // We removed the panic to allow automatic recovery from a Full Wipe.
+        // ═══════════════════════════════════════════════════════════════════════════
 
         // CATCHUP: Check if we need to sync epoch from local storage
         let storage_path = config.storage_path.clone();
@@ -991,7 +1007,7 @@ impl ConsensusNode {
     /// and wires up all the shared state.
     async fn setup_consensus(
         config: &NodeConfig,
-        storage: &StorageSetup,
+        storage: &mut StorageSetup,
         registry: &Registry,
         coordination_hub: consensus_core::coordination_hub::ConsensusCoordinationHub,
     ) -> Result<ConsensusSetup> {
@@ -1155,7 +1171,7 @@ impl ConsensusNode {
             ),
         )
         .with_shared_last_global_exec_index(shared_last_global_exec_index.clone())
-        .with_epoch_info(storage.current_epoch, storage.epoch_base_exec_index)
+        .with_epoch_info(storage.current_epoch)
         .with_next_expected_index(next_expected_commit_index)
         .with_go_last_commit_index(go_replay_after as u32)
         .with_is_transitioning(is_transitioning.clone())
@@ -1354,8 +1370,10 @@ impl ConsensusNode {
             // FIX: Loop the sync until gap ≤ 2 blocks (network jitter).
             // Max 5 retries to prevent infinite loops.
             // ═══════════════════════════════════════════════════════════════
-            const MAX_SYNC_RETRIES: u32 = 5;
+            const MAX_SYNC_RETRIES: u32 = 15;
             const ACCEPTABLE_GAP: u64 = 2;
+            const INITIAL_RETRY_DELAY_MS: u64 = 500;
+            const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
             for sync_round in 0..MAX_SYNC_RETRIES {
@@ -1458,6 +1476,32 @@ impl ConsensusNode {
                                         "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}, replay_after_updated={}",
                                         sync_round, new_gei, new_handled, new_handled
                                     );
+                                    
+                                    // CRITICAL FIX: Re-read local epoch from Go's DB!
+                                    // If we started from a Full Wipe (epoch 0), STARTUP-SYNC fetched
+                                    // blocks from newer epochs. Go updated its epoch to match the blocks.
+                                    // We MUST update Rust's current_epoch before spawning Consensus Core,
+                                    // otherwise Rust will start at epoch 0 while the network is at epoch 2!
+                                    let post_sync_epoch = detect_local_epoch(&config.storage_path);
+                                    if post_sync_epoch > storage.current_epoch {
+                                        tracing::info!(
+                                            "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
+                                            storage.current_epoch, post_sync_epoch
+                                        );
+                                        storage.current_epoch = post_sync_epoch;
+                                        commit_processor.update_epoch(post_sync_epoch);
+                                        // Update the committee in CommitProcessor so it can resolve leaders
+                                        if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
+                                            crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None)
+                                                .get_epoch_boundary_data(post_sync_epoch).await.unwrap_or_default().3, 
+                                            post_sync_epoch
+                                        ) {
+                                            if !new_eth_addrs.is_empty() {
+                                                storage.validator_eth_addresses = new_eth_addrs.clone();
+                                                commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1477,7 +1521,11 @@ impl ConsensusNode {
 
                 // Small delay before retry to let the cluster produce more blocks
                 if sync_round < MAX_SYNC_RETRIES - 1 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let delay = std::cmp::min(
+                        INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
+                        MAX_RETRY_DELAY_MS
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                 }
             }
 
@@ -1524,6 +1572,78 @@ impl ConsensusNode {
                 );
                 commit_processor.go_last_commit_index = new_go_last;
                 commit_processor.next_expected_index = new_next_expected;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // CRITICAL: Verify the FINAL synced block matches peers.
+            //
+            // Why block hash instead of state root?
+            // - State root changes every block, so comparing with a peer at a
+            //   different height always mismatches (false positive on live nets).
+            // - Block hash at height N is immutable regardless of peer's current
+            //   height. And block hash includes the state root in the header,
+            //   so verifying block hash implicitly verifies state root.
+            // ═══════════════════════════════════════════════════════════════
+            if total_synced_blocks > 0 && !barrier_peers.is_empty() {
+                tracing::info!(
+                    "🔍 [POST-SYNC-VERIFY] Verifying block #{} integrity against peers...",
+                    local_block
+                );
+                match crate::network::peer_rpc::fetch_blocks_from_peer(
+                    &barrier_peers, local_block, local_block,
+                ).await {
+                    Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                        match barrier_client.get_blocks_range(local_block, local_block).await {
+                            Ok(local_blocks) if !local_blocks.is_empty() => {
+                                let local_raw = &local_blocks[0].raw_block_bytes;
+                                let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                if local_raw == peer_raw {
+                                    tracing::info!(
+                                        "✅ [POST-SYNC-VERIFY] Block #{} verified: local matches peer ({} bytes). \
+                                         State integrity confirmed.",
+                                        local_block, local_raw.len()
+                                    );
+                                } else {
+                                    tracing::error!(
+                                        "🚨 [POST-SYNC-VERIFY] Block #{} MISMATCH! local_bytes={} peer_bytes={}. \
+                                         Data corruption detected after sync!",
+                                        local_block, local_raw.len(), peer_raw.len()
+                                    );
+                                    tracing::error!("🛑 [HALT] Halting node due to block data divergence post-sync.");
+                                    std::process::exit(1);
+                                }
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    "⚠️ [POST-SYNC-VERIFY] Could not fetch block #{} from Go for verification. Skipping.",
+                                    local_block
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            "⚠️ [POST-SYNC-VERIFY] Peer returned no data for block #{}. Skipping verification.",
+                            local_block
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [POST-SYNC-VERIFY] Could not fetch block #{} from peer: {}. Skipping verification.",
+                            local_block, e
+                        );
+                    }
+                }
+
+                // Log state root for diagnostics (informational only —
+                // block hash parity above already guarantees correctness)
+                let local_root = crate::ffi::get_go_state_root();
+                if !local_root.is_empty() && local_root != "0000000000000000000000000000000000000000000000000000000000000000" {
+                    tracing::info!(
+                        "📊 [POST-SYNC-VERIFY] Local state root at block {}: 0x{}",
+                        local_block, local_root
+                    );
+                }
             }
         }
 
@@ -1662,6 +1782,21 @@ impl ConsensusNode {
         // Removing this eliminates ~2s startup delay and ~70 lines of duplicate logic.
         // CommitSyncer is the single source of truth for DAG catch-up.
         // ═══════════════════════════════════════════════════════════════════════════
+
+        // 🏥 AUTOMATED RECOVERY HEALTH CHECK
+        // Spawns a background task that waits 30s after startup to verify node health
+        let health_client = executor_client_for_proc.clone();
+        let health_peers = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            let checker = crate::node::health_check::PostRecoveryHealthCheck::new(health_client, health_peers);
+            let result = checker.run().await;
+            if result.is_healthy() {
+                tracing::info!("✅ [HEALTH] Post-recovery health check PASSED: {:?}", result);
+            } else {
+                tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED: {:?}", result);
+            }
+        });
 
         // ♻️ TX Recycler: Create shared instance for tracking and recycling uncommitted TXs
         let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());

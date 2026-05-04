@@ -22,9 +22,6 @@ pub async fn dispatch_commit(
     epoch: u64,
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
-    _pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    _tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-    _shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -147,6 +144,7 @@ pub async fn dispatch_commit(
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
 
+                    // Fix 4 Revert: Use direct indefinite wait (no 90s timeout) to enforce backpressure
                     let geis_consumed = match response_rx.await {
                         Ok(c) => c,
                         Err(_) => {

@@ -7,14 +7,11 @@ use mysten_metrics::monitored_mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-// [Added] Import Duration
-// [Added] Import sleep for retry mechanism
 use tracing::{error, info, trace, warn};
 
 use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
-// calculate_transaction_hash_hex removed: was only used for dead logging code
 
 /// Commit processor that ensures commits are executed in order
 pub struct CommitProcessor {
@@ -52,7 +49,6 @@ pub struct CommitProcessor {
     epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     /// TX recycler for confirming committed TXs
     tx_recycler: Option<Arc<TxRecycler>>,
-
 
     /// RS-2: Storage path for persistence
     storage_path: Option<std::path::PathBuf>,
@@ -121,9 +117,14 @@ impl CommitProcessor {
 
     /// Set epoch number.
     /// PHASE-B: epoch_base_index is no longer tracked. Go assigns GEI exclusively.
-    pub fn with_epoch_info(mut self, epoch: u64, _last_global_exec_index: u64) -> Self {
+    pub fn with_epoch_info(mut self, epoch: u64) -> Self {
         self.current_epoch = epoch;
         self
+    }
+
+    /// Update the current epoch (used after STARTUP-SYNC if epoch advanced)
+    pub fn update_epoch(&mut self, epoch: u64) {
+        self.current_epoch = epoch;
     }
 
     /// Set the next expected commit index for ordered processing.
@@ -216,8 +217,6 @@ impl CommitProcessor {
         self
     }
 
-
-
     /// Set a sender for lag alerts
     pub fn with_lag_alert_sender(
         mut self,
@@ -278,6 +277,10 @@ impl CommitProcessor {
 
     /// Process commits in order
     pub async fn run(self) -> Result<()> {
+        // Validate required dependencies upfront to avoid bare .unwrap() in hot loop
+        let shared_gei = self.shared_last_global_exec_index.clone()
+            .ok_or_else(|| anyhow::anyhow!("BUG: shared_last_global_exec_index must be set before CommitProcessor::run()"))?;
+
         let mut receiver = self.receiver;
         let mut next_expected_index = self.next_expected_index;
         let mut pending_commits = self.pending_commits;
@@ -285,18 +288,13 @@ impl CommitProcessor {
         let current_epoch = self.current_epoch;
         let executor_client = self.executor_client;
         let delivery_sender = self.delivery_sender;
-        let pending_transactions_queue = self.pending_transactions_queue;
+        let _pending_transactions_queue = self.pending_transactions_queue;
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
         let epoch_eth_addresses = self.epoch_eth_addresses;
 
-        // ═══════════════════════════════════════════════════════════════
-        // PHASE-B: GO IS THE SOLE AUTHORITY FOR GEI
-        //
-        // Rust does NOT track any GEI counter. It sends commit_index +
+        // PHASE-B: Go is the sole authority for GEI. Rust sends commit_index +
         // transactions to Go. Go assigns GEI via GEIAuthority singleton.
-        // This eliminates the root cause of all restart divergence bugs.
-        // ═══════════════════════════════════════════════════════════════
         info!("🚀 [COMMIT PROCESSOR] PHASE-B: Go-Authoritative GEI. epoch={}, next_expected_index={}",
             current_epoch, next_expected_index);
 
@@ -354,6 +352,7 @@ impl CommitProcessor {
                 }
             }
 
+            // Fix 3 Revert: Use direct indefinite block (no 120s timeout) to enforce backpressure
             match receiver.recv().await {
                 Some(mut subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;
@@ -428,7 +427,7 @@ impl CommitProcessor {
                         );
 
                         let gei = {
-                            let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                            let gei_guard = shared_gei.lock().await;
                             *gei_guard + 1
                         };
 
@@ -442,15 +441,12 @@ impl CommitProcessor {
                             current_epoch,
                             executor_client.clone(),
                             delivery_sender.clone(),
-                            pending_transactions_queue.clone(),
-                            self.tx_recycler.clone(),
-                            self.shared_last_global_exec_index.clone(),
                         )
                         .await?;
 
                         // Accumulate exact number of fragments consumed by this commit
                         {
-                            let mut gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                            let mut gei_guard = shared_gei.lock().await;
                             *gei_guard += geis_consumed;
                         }
                         
@@ -493,7 +489,7 @@ impl CommitProcessor {
                                     );
 
                                     let current_gei = {
-                                        let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                        let gei_guard = shared_gei.lock().await;
                                         *gei_guard
                                     };
                                     if let Err(e) = callback(
@@ -520,7 +516,7 @@ impl CommitProcessor {
                             let pending_commit_index = next_expected_index;
 
                             let pending_gei = {
-                                let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                let gei_guard = shared_gei.lock().await;
                                 *gei_guard + 1
                             };
 
@@ -533,14 +529,11 @@ impl CommitProcessor {
                                 current_epoch,
                                 executor_client.clone(),
                                 delivery_sender.clone(),
-                                pending_transactions_queue.clone(),
-                                self.tx_recycler.clone(),
-                                self.shared_last_global_exec_index.clone(),
                             )
                             .await?;
 
                             {
-                                let mut gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                let mut gei_guard = shared_gei.lock().await;
                                 *gei_guard += geis_consumed;
                             }
 
@@ -558,7 +551,7 @@ impl CommitProcessor {
                                     system_tx.as_end_of_epoch()
                                 {
                                     let current_gei = {
-                                        let gei_guard = self.shared_last_global_exec_index.as_ref().unwrap().lock().await;
+                                        let gei_guard = shared_gei.lock().await;
                                         *gei_guard
                                     };
                                     if let Some(ref callback) = epoch_transition_callback {

@@ -601,8 +601,53 @@ pub extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
 // CHECKPOINT (snapshot without close/reopen)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Create a filesystem-level checkpoint of the NOMT database by copying
-/// its data files to a destination directory.
+/// Recursively copy a directory tree using hard links for regular files
+/// (instant, O(1) per file) with `fs::copy` as fallback (e.g. cross-device).
+/// Skips `.lock` files which are OS advisory flocks, not data.
+fn recursive_copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
+    if let Err(e) = fs::create_dir_all(dest) {
+        return Err(format!("failed to create dir {:?}: {}", dest, e));
+    }
+
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("failed to read dir {:?}: {}", src, e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read dir entry in {:?}: {}", src, e))?;
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        // Skip .lock file (OS advisory flock, not data)
+        if filename_str == ".lock" {
+            continue;
+        }
+
+        let src_path = src.join(&filename);
+        let dest_path = dest.join(&filename);
+        let file_type = entry.file_type()
+            .map_err(|e| format!("failed to get file type for {:?}: {}", src_path, e))?;
+
+        if file_type.is_dir() {
+            // CRITICAL FIX: Recursively copy subdirectories (including `wal`).
+            // The old code skipped all subdirectories, causing WAL data loss and
+            // silent B-Tree corruption on restore.
+            recursive_copy_dir(&src_path, &dest_path)?;
+        } else if file_type.is_file() {
+            // Try hard_link first (instant, O(1), zero disk I/O).
+            // Falls back to fs::copy if hard_link fails (e.g. cross-device mount).
+            if fs::hard_link(&src_path, &dest_path).is_err() {
+                fs::copy(&src_path, &dest_path)
+                    .map_err(|e| format!("failed to copy {:?} -> {:?}: {}", src_path, dest_path, e))?;
+            }
+        }
+        // Skip symlinks and other special files
+    }
+
+    Ok(())
+}
+
+/// Create a filesystem-level checkpoint of the NOMT database by recursively
+/// copying all data files (including WAL subdirectories) to a destination.
 ///
 /// The database remains OPEN during this operation — no close/reopen needed.
 /// This is safe because the caller (Go SnapshotManager) guarantees:
@@ -610,13 +655,14 @@ pub extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
 ///   2. WaitForPersistence() → all disk I/O flushed
 ///   3. h.mu.Lock() → exclusive access at Go level
 ///
-/// The function copies: bbn, ht, ln, meta (the core data files).
-/// It skips: .lock (OS flock, not data) and wal (transient).
+/// Uses hard links for regular files (instant, O(1)) with fs::copy fallback.
+/// Recursively copies ALL subdirectories (including `wal`) to prevent corruption.
+/// Skips only `.lock` files (OS advisory flocks, not data).
 ///
 /// # Parameters
 /// - `handle`: NOMT handle (must be valid/open)
 /// - `src_path`: null-terminated C string for the source database directory
-/// - `dest_path`: null-terminated C string for the destination directory (must exist)
+/// - `dest_path`: null-terminated C string for the destination directory
 ///
 /// # Returns
 /// 0 on success, -1 on failure.
@@ -650,32 +696,11 @@ pub extern "C" fn nomt_checkpoint(
     let src = Path::new(src_str);
     let dest = Path::new(dest_str);
 
-    // Create destination directory if it doesn't exist
-    if let Err(e) = fs::create_dir_all(dest) {
-        eprintln!("[nomt_ffi] nomt_checkpoint: failed to create dest dir {:?}: {}", dest, e);
-        return -1;
-    }
-
-    // Core NOMT data files to copy (skip .lock and wal)
-    let data_files = ["bbn", "ht", "ln", "meta"];
-
-    for filename in &data_files {
-        let src_file = src.join(filename);
-        let dest_file = dest.join(filename);
-
-        if !src_file.exists() {
-            // File may not exist for fresh/empty databases — skip silently
-            continue;
-        }
-
-        if let Err(e) = fs::copy(&src_file, &dest_file) {
-            eprintln!(
-                "[nomt_ffi] nomt_checkpoint: failed to copy {:?} -> {:?}: {}",
-                src_file, dest_file, e
-            );
-            return -1;
+    match recursive_copy_dir(src, dest) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint failed: {}", e);
+            -1
         }
     }
-
-    0
 }

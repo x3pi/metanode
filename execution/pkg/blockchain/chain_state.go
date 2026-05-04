@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -31,6 +33,10 @@ type EpochData struct {
 	EpochBoundaryBlocks map[uint64]uint64 `json:"epoch_boundary_blocks"`
 	// NEW: Track boundary GEI for each epoch
 	EpochBoundaryGeis map[uint64]uint64 `json:"epoch_boundary_geis"`
+	// EPOCH VALIDATOR PERSISTENCE: Validator list per epoch, decoupled from NOMT.
+	// Key = epoch number, Value = JSON-serialized pb.ValidatorInfoList.
+	// This ensures validators survive snapshot restore even when NOMT knownKeys is empty.
+	EpochValidators map[uint64]json.RawMessage `json:"epoch_validators,omitempty"`
 }
 
 // ChainState quản lý trạng thái toàn cục của blockchain
@@ -44,6 +50,7 @@ type ChainState struct {
 	blockDatabase      *block.BlockDatabase
 	stakeStateDB       *stake_state_db.StakeStateDB
 	freeFeeAddress     map[common.Address]struct{}
+	changelogDB        *state_changelog.StateChangelogDB
 
 	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
 	// concurrent access during UpdateStateForNewHeader (writer) and Get*DB (readers).
@@ -55,9 +62,10 @@ type ChainState struct {
 	currentEpoch          uint64
 	epochStartTimestampMs uint64
 	epochStartTimestamps  map[uint64]uint64 // epoch -> timestamp_ms mapping
-	epochBoundaryBlocks   map[uint64]uint64 // NEW: epoch -> boundary_block mapping (last block of prev epoch)
-	epochBoundaryGeis     map[uint64]uint64 // NEW: epoch -> boundary_gei mapping
-	maxCachedEpochs       uint64            // 0 = keep all, N = keep only N most recent epochs in cache
+	epochBoundaryBlocks   map[uint64]uint64          // NEW: epoch -> boundary_block mapping (last block of prev epoch)
+	epochBoundaryGeis     map[uint64]uint64          // NEW: epoch -> boundary_gei mapping
+	epochValidatorsCache  map[uint64]json.RawMessage // EPOCH VALIDATOR PERSISTENCE: serialized ValidatorInfoList per epoch
+	maxCachedEpochs       uint64                     // 0 = keep all, N = keep only N most recent epochs in cache
 
 	// RWMutex to prevent concurrent epoch map access
 	// Writers: AdvanceEpochWithBoundary, CheckAndUpdateEpochFromBlock, PruneEpochCache, InitializeGenesisEpoch
@@ -109,6 +117,18 @@ func NewChainStateWithGenesis(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account state trie: %v", err)
 	}
+	var changelogDB *state_changelog.StateChangelogDB
+	if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
+		if backupPath != "" {
+			changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db")
+			changelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "account_state")
+			if err == nil {
+				nomtTrie.SetChangelogDB(changelogDB)
+			} else {
+				logger.Error("Failed to init StateChangelogDB at %s: %v", changelogPath, err)
+			}
+		}
+	}
 	stakeStorage := sm.GetStorageStake()
 
 	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, true)
@@ -141,12 +161,14 @@ func NewChainStateWithGenesis(
 		blockDatabase:         blockDatabase,
 		freeFeeAddress:        freeFeeAddress,
 		maxCachedEpochs:       maxCached,
+		changelogDB:           changelogDB,
 		currentEpoch:          0, // Start with epoch 0 (genesis)
 		epochStartTimestampMs: 0, // Will be set on first epoch advance
 		epochStartTimestamps:  make(map[uint64]uint64),
-		epochBoundaryBlocks:   make(map[uint64]uint64), // Track epoch boundary blocks
-		epochBoundaryGeis:     make(map[uint64]uint64), // Track epoch boundary GEIs
-		backupPath:            backupPath,              // CRITICAL: Set BEFORE LoadEpochData()
+		epochBoundaryBlocks:   make(map[uint64]uint64),          // Track epoch boundary blocks
+		epochBoundaryGeis:     make(map[uint64]uint64),          // Track epoch boundary GEIs
+		epochValidatorsCache:  make(map[uint64]json.RawMessage), // Validator list per epoch
+		backupPath:            backupPath,                       // CRITICAL: Set BEFORE LoadEpochData()
 		attestationInterval:   10,                      // Default: attestation every 10 blocks
 	}
 
@@ -221,6 +243,11 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if err != nil {
 		logger.Error("Failed to create new account state trie during update", "error", err, "newRoot", newAccountRoot)
 		return fmt.Errorf("failed to create new account state trie for update: %w", err)
+	}
+	if cs.changelogDB != nil {
+		if nomtTrie, ok := newAccountStateTrie.(*trie.NomtStateTrie); ok {
+			nomtTrie.SetChangelogDB(cs.changelogDB)
+		}
 	}
 	newAsDB := account_state_db.NewAccountStateDB(newAccountStateTrie, accountStorage)
 
@@ -339,6 +366,11 @@ func (cs *ChainState) GetcurrentBlockHeader() *types.BlockHeader {
 // SetcurrentBlock cập nhật header của block cuối cùng một cách an toàn.
 func (cs *ChainState) SetcurrentBlockHeader(header *types.BlockHeader) {
 	cs.currentBlockHeader.Store(header)
+}
+
+// GetChangelogDB returns the state changelog database instance for historical state tracking.
+func (cs *ChainState) GetChangelogDB() *state_changelog.StateChangelogDB {
+	return cs.changelogDB
 }
 
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
@@ -460,6 +492,34 @@ func (cs *ChainState) GetEpochBoundaryGei(epoch uint64) uint64 {
 	logger.Error("❌ [EPOCH BOUNDARY] No stored boundary GEI for epoch %d! "+
 		"This node may not have witnessed the epoch transition.", epoch)
 	return 0
+}
+
+// SetEpochValidators stores the validator list for a given epoch in the cache.
+// This is called during epoch transitions to snapshot the validator set,
+// decoupled from NOMT's transient state.
+// The data is a JSON-serialized pb.ValidatorInfoList.
+func (cs *ChainState) SetEpochValidators(epoch uint64, serializedValidators json.RawMessage) {
+	cs.epochMutex.Lock()
+	defer cs.epochMutex.Unlock()
+	if cs.epochValidatorsCache == nil {
+		cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
+	}
+	cs.epochValidatorsCache[epoch] = serializedValidators
+	logger.Info("💾 [EPOCH VALIDATORS] Cached validators for epoch %d (%d bytes)", epoch, len(serializedValidators))
+}
+
+// GetEpochValidators returns the cached validator list for a given epoch.
+// Returns nil if no cached validators exist for this epoch.
+func (cs *ChainState) GetEpochValidators(epoch uint64) json.RawMessage {
+	cs.epochMutex.RLock()
+	defer cs.epochMutex.RUnlock()
+	if cs.epochValidatorsCache == nil {
+		return nil
+	}
+	if data, exists := cs.epochValidatorsCache[epoch]; exists {
+		return data
+	}
+	return nil
 }
 
 // AdvanceEpoch advances the system to the next epoch (Sui-style)
@@ -703,6 +763,7 @@ func (cs *ChainState) pruneEpochCacheLocked() {
 			delete(cs.epochBoundaryBlocks, epoch)
 			delete(cs.epochBoundaryGeis, epoch)
 			delete(cs.epochStartTimestamps, epoch)
+			delete(cs.epochValidatorsCache, epoch)
 			pruned++
 		}
 	}
@@ -717,6 +778,16 @@ var (
 	epochDataKey = common.BytesToHash(crypto.Keccak256([]byte("epochData")))
 )
 
+// SaveEpochDataSafe saves epoch data while acquiring the epochMutex.
+// Use this from external callers (e.g., HandleAdvanceEpochRequest) that need
+// to persist after modifying the validator cache.
+// DO NOT call from within advanceEpochLocked or other methods that already hold the lock.
+func (cs *ChainState) SaveEpochDataSafe() error {
+	cs.epochMutex.Lock()
+	defer cs.epochMutex.Unlock()
+	return cs.SaveEpochData()
+}
+
 // SaveEpochData lưu thông tin epoch vào database (với backup file system)
 func (cs *ChainState) SaveEpochData() error {
 	logger.Info("💾 [EPOCH PERSISTENCE] Starting to save epoch data to database - current_epoch={}, epoch_timestamp_ms={}",
@@ -730,8 +801,9 @@ func (cs *ChainState) SaveEpochData() error {
 		CurrentEpoch:          cs.currentEpoch,
 		EpochStartTimestampMs: cs.epochStartTimestampMs,
 		EpochStartTimestamps:  cs.epochStartTimestamps,
-		EpochBoundaryBlocks:   cs.epochBoundaryBlocks, // NEW: Include epoch boundary blocks
-		EpochBoundaryGeis:     cs.epochBoundaryGeis,   // NEW: Include epoch boundary GEIs
+		EpochBoundaryBlocks:   cs.epochBoundaryBlocks,   // Include epoch boundary blocks
+		EpochBoundaryGeis:     cs.epochBoundaryGeis,     // Include epoch boundary GEIs
+		EpochValidators:       cs.epochValidatorsCache,  // NOMT-independent validator persistence
 	}
 
 	data, err := json.Marshal(epochData)
@@ -832,6 +904,10 @@ func (cs *ChainState) LoadEpochData() error {
 	}
 	if epochData.EpochBoundaryGeis != nil {
 		cs.epochBoundaryGeis = epochData.EpochBoundaryGeis
+	}
+	if epochData.EpochValidators != nil {
+		cs.epochValidatorsCache = epochData.EpochValidators
+		logger.Info("✅ [EPOCH VALIDATORS] Loaded cached validators for %d epochs", len(epochData.EpochValidators))
 	}
 
 	logger.Info("✅ [EPOCH PERSISTENCE] Epoch data successfully loaded and restored",

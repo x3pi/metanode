@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,18 +21,22 @@ import (
 
 // SnapshotMetadata chứa thông tin metadata của snapshot
 type SnapshotMetadata struct {
-	Epoch           uint64 `json:"epoch"`
-	BlockNumber     uint64 `json:"block_number"`
-	BoundaryBlock   uint64 `json:"boundary_block"`
-	Timestamp       int64  `json:"timestamp"`
-	CreatedAt       string `json:"created_at"`
-	DataDir         string `json:"data_dir"`
-	SnapshotName    string `json:"snapshot_name"`
-	Method          string `json:"method"`
-	GlobalExecIndex uint64 `json:"global_exec_index"`
-	StateRoot       string `json:"state_root"`
-	RustDAGEpoch    uint64 `json:"rust_dag_epoch"`
-	RustCommitIndex uint64 `json:"rust_commit_index"`
+	Epoch                uint64            `json:"epoch"`
+	BlockNumber          uint64            `json:"block_number"`
+	BoundaryBlock        uint64            `json:"boundary_block"`
+	Timestamp            int64             `json:"timestamp"`
+	CreatedAt            string            `json:"created_at"`
+	DataDir              string            `json:"data_dir"`
+	SnapshotName         string            `json:"snapshot_name"`
+	Method               string            `json:"method"`
+	GlobalExecIndex      uint64            `json:"global_exec_index"`
+	StateRoot            string            `json:"state_root"`
+	StakeStatesRoot      string            `json:"stake_states_root"`
+	RustDAGEpoch         uint64            `json:"rust_dag_epoch"`
+	RustCommitIndex      uint64            `json:"rust_commit_index"`
+	MetadataChecksum     string            `json:"metadata_checksum"`         // SHA256 of metadata (excluding this field)
+	CriticalChecksums    map[string]string `json:"critical_checksums"`        // SHA256 per critical dir
+	LastHandledCommitIdx uint64            `json:"last_handled_commit_index"` // Rust DAG commit position
 }
 
 // SnapshotManager quản lý việc tạo và xoay vòng snapshot
@@ -87,6 +93,9 @@ type SnapshotManager struct {
 
 	// Callback to get the current exact StateRoot
 	stateRootCallback func() string
+
+	// Callback to get the current exact StakeStatesRoot
+	stakeRootCallback func() string
 }
 
 // NewSnapshotManager tạo instance mới của SnapshotManager
@@ -185,6 +194,13 @@ func (sm *SnapshotManager) SetStateRootCallback(cb func() string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.stateRootCallback = cb
+}
+
+// SetStakeRootCallback registers a callback to fetch the current NOMT stake state root.
+func (sm *SnapshotManager) SetStakeRootCallback(cb func() string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.stakeRootCallback = cb
 }
 
 // SetResumeCallback registers a callback to resume transaction execution
@@ -396,6 +412,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	rustPauseCb := sm.rustPauseCallback
 	rustResumeCb := sm.rustResumeCallback
 	stateRootCb := sm.stateRootCallback
+	stakeRootCb := sm.stakeRootCallback
 	sm.mu.Unlock()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -435,6 +452,10 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	if stateRootCb != nil {
 		actualStateRoot = stateRootCb()
 	}
+	actualStakeRoot := ""
+	if stakeRootCb != nil {
+		actualStakeRoot = stakeRootCb()
+	}
 	if actualBlockNumber == 0 {
 		actualBlockNumber = blockNumber
 	}
@@ -442,8 +463,8 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	rustDAGEpoch := uint64(0)
 	rustCommitIndex := uint64(0)
 
-	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s",
-		actualBlockNumber, actualGEI, actualStateRoot)
+	logger.Info("📸 [SNAPSHOT] Atomic state captured: Block #%d, GEI=%d, StateRoot=%s, StakeRoot=%s",
+		actualBlockNumber, actualGEI, actualStateRoot, actualStakeRoot)
 
 	// Nếu method là rsync, chạy độc lập lệnh rsync -a
 	if method == "rsync" {
@@ -649,19 +670,41 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	}
 
 	metadata := SnapshotMetadata{
-		Epoch:           epoch,
-		BlockNumber:     actualBlockNumber,
-		BoundaryBlock:   boundaryBlock,
-		Timestamp:       time.Now().UnixMilli(),
-		CreatedAt:       time.Now().Format(time.RFC3339),
-		DataDir:         metadataDir,
-		SnapshotName:    snapshotName,
-		Method:          method,
-		GlobalExecIndex: actualGEI,
-		StateRoot:       actualStateRoot,
-		RustDAGEpoch:    rustDAGEpoch,
-		RustCommitIndex: rustCommitIndex,
+		Epoch:                epoch,
+		BlockNumber:          actualBlockNumber,
+		BoundaryBlock:        boundaryBlock,
+		Timestamp:            time.Now().UnixMilli(),
+		CreatedAt:            time.Now().Format(time.RFC3339),
+		DataDir:              metadataDir,
+		SnapshotName:         snapshotName,
+		Method:               method,
+		GlobalExecIndex:      actualGEI,
+		StateRoot:            actualStateRoot,
+		StakeStatesRoot:      actualStakeRoot,
+		RustDAGEpoch:         rustDAGEpoch,
+		RustCommitIndex:      rustCommitIndex,
+		LastHandledCommitIdx: uint64(storage.GetLastHandledCommitIndex()),
+		CriticalChecksums:    make(map[string]string),
 	}
+
+	// Tính checksum cho các thư mục quan trọng
+	criticalDirs := []string{"account_state", "blocks", "executor_state", "rust_consensus"}
+	for _, dirName := range criticalDirs {
+		dirPath := filepath.Join(snapshotPath, dirName)
+		if _, err := os.Stat(dirPath); err == nil {
+			checksum, err := calculateDirectoryChecksum(dirPath)
+			if err == nil {
+				metadata.CriticalChecksums[dirName] = checksum
+			} else {
+				logger.Warn("📸 [SNAPSHOT] Failed to calculate checksum for %s: %v", dirName, err)
+			}
+		}
+	}
+
+	// Calculate metadata checksum (excluding the MetadataChecksum field itself)
+	metadataBytes, _ := json.Marshal(metadata)
+	hash := sha256.Sum256(metadataBytes)
+	metadata.MetadataChecksum = hex.EncodeToString(hash[:])
 
 	metadataPath := filepath.Join(snapshotPath, "metadata.json")
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
@@ -836,26 +879,20 @@ func (sm *SnapshotManager) ForceSnapshotNow(blockNumber uint64, epoch uint64) {
 			sm.mu.Unlock()
 		}()
 
-		// Trigger storage flush
+		// CRITICAL FIX: Wait for ALL async persistence jobs BEFORE flushing
 		sm.mu.Lock()
-		flushCb := sm.forceFlushCallback
+		waitCb := sm.waitPersistenceCallback
 		sm.mu.Unlock()
-		if flushCb != nil {
-			// logger.Info("💾 [SNAPSHOT] Force flushing before epoch boundary snapshot...")
-			if err := flushCb(); err != nil {
-				logger.Error("❌ [SNAPSHOT] Flush failed: %v", err)
-			}
+		if waitCb != nil {
+			logger.Info("⏳ [SNAPSHOT] ForceSnapshotNow: Waiting for persistence pipeline...")
+			waitCb()
 		}
 
-		var createErr, rotateErr error
-		switch sm.snapshotMethod {
-		case "rsync":
-			createErr = sm.CreateRsyncSnapshot(epoch, blockNumber, blockNumber)
-		case "hybrid":
-			createErr = sm.CreateHybridSnapshot(epoch, blockNumber, blockNumber)
-		default:
-			createErr = sm.CreateSnapshot(epoch, blockNumber, blockNumber)
-		}
+		// Use createAtomicSnapshot which PAUSES Rust+Go → captures state → resumes
+		var createErr error
+		createErr = sm.createAtomicSnapshot(epoch, blockNumber, blockNumber, sm.snapshotMethod)
+		
+		var rotateErr error
 		if createErr == nil {
 			rotateErr = sm.RotateSnapshots()
 		}

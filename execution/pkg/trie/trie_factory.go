@@ -311,14 +311,52 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 	for _, entry := range handlesList {
 		destPath := filepath.Join(nomtDestBase, entry.namespace)
 
-		logger.Info("📸 [TRIE] Checkpointing NOMT namespace %s: %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
+		// ═══════════════════════════════════════════════════════════════
+		// NON-BLOCKING CHECKPOINT (May 2026 v2):
+		// The Rust nomt_checkpoint now properly recurses into subdirectories
+		// (including WAL) and uses hard_link for O(1) file copies.
+		// This eliminates the 5-30s node freeze from Close→Copy→Reopen.
+		// ═══════════════════════════════════════════════════════════════
+		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (Checkpoint API): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
 		start := time.Now()
 
-		// Use the new Checkpoint API — database stays OPEN, no Close/Reopen needed.
-		// This acquires h.mu.Lock() internally, drains pending sessions, then copies
-		// the data files (bbn, ht, ln, meta) via the Rust FFI.
 		if err := entry.handle.Checkpoint(destPath); err != nil {
-			return fmt.Errorf("NOMT checkpoint failed for namespace %s: %w", entry.namespace, err)
+			// Fallback: if Checkpoint fails, try Close→Copy→Reopen
+			logger.Warn("📸 [TRIE] Checkpoint API failed for %s, falling back to Close→Copy→Reopen: %v", entry.namespace, err)
+
+			entry.handle.CloseForSnapshot()
+
+			if mkdirErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkdirErr != nil {
+				return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", mkdirErr)
+			}
+
+			var copyErr error
+			if useReflink {
+				copyErr = copyDirReflink(entry.handle.GetPath(), destPath)
+			} else {
+				copyErr = copyDirFallback(entry.handle.GetPath(), destPath)
+			}
+
+			if reopenErr := entry.handle.ReopenAfterSnapshot(); reopenErr != nil {
+				return fmt.Errorf("CRITICAL: failed to reopen NOMT namespace %s after snapshot: %w", entry.namespace, reopenErr)
+			}
+
+			if copyErr != nil {
+				return fmt.Errorf("NOMT directory copy failed for %s: %w", entry.namespace, copyErr)
+			}
+		}
+
+		// CRITICAL FIX: The NOMT Checkpoint API only copies the B-Tree data files,
+		// but the knownKeys registry is stored in a separate file by nomt_state_trie.go.
+		// If we don't explicitly copy this file, GetAll() will return empty arrays after restore.
+		srcRegistryPath := filepath.Join(filepath.Dir(entry.handle.GetPath()), "nomt_registry_"+entry.namespace+".bin")
+		dstRegistryPath := filepath.Join(nomtDestBase, "nomt_registry_"+entry.namespace+".bin")
+		if data, err := os.ReadFile(srcRegistryPath); err == nil {
+			if writeErr := os.WriteFile(dstRegistryPath, data, 0644); writeErr != nil {
+				logger.Warn("📸 [TRIE] Failed to copy registry file %s: %v", entry.namespace, writeErr)
+			} else {
+				logger.Info("✅ [TRIE] Copied registry file for namespace: %s", entry.namespace)
+			}
 		}
 
 		logger.Info("✅ [TRIE] NOMT checkpoint %s completed in %v", entry.namespace, time.Since(start))

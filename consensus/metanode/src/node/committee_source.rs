@@ -278,10 +278,86 @@ impl CommitteeSource {
             tokio::time::sleep(tokio::time::Duration::from_millis(DELAY_MS)).await;
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // PEER FALLBACK: Local Go failed after MAX_ATTEMPTS.
+        // This typically happens after snapshot restore when:
+        // 1. NOMT knownKeys is empty → GetAllValidators() returns 0
+        // 2. Epoch validator cache doesn't exist (old snapshot)
+        // Query healthy peers for the authoritative epoch boundary data.
+        // ═══════════════════════════════════════════════════════════════════
+        if !self.peer_rpc_addresses.is_empty() {
+            warn!(
+                "⚠️ [COMMITTEE SOURCE] Local Go timed out for epoch {}. Trying {} peer(s)...",
+                target_epoch, self.peer_rpc_addresses.len()
+            );
+
+            for peer_addr in &self.peer_rpc_addresses {
+                match crate::network::peer_rpc::query_peer_epoch_boundary_data(peer_addr, target_epoch).await {
+                    Ok(pb) if pb.epoch == target_epoch && !pb.validators.is_empty() => {
+                        info!(
+                            "✅ [COMMITTEE SOURCE] PEER FALLBACK: Got {} validators for epoch {} from peer {}",
+                            pb.validators.len(), target_epoch, peer_addr
+                        );
+
+                        // Convert ValidatorInfoSimple → proto::ValidatorInfo
+                        let proto_validators: Vec<crate::node::executor_client::proto::ValidatorInfo> =
+                            pb.validators.iter().map(|v| {
+                                crate::node::executor_client::proto::ValidatorInfo {
+                                    name: v.name.clone(),
+                                    address: v.address.clone(),
+                                    stake: v.stake.to_string(),
+                                    protocol_key: v.protocol_key.clone(),
+                                    network_key: v.network_key.clone(),
+                                    authority_key: v.authority_key.clone(),
+                                    p2p_address: v.p2p_address.clone(),
+                                    ..Default::default()
+                                }
+                            }).collect();
+
+                        // Extract eth_addresses
+                        let mut sorted = proto_validators.clone();
+                        sorted.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
+                        let mut eth_addresses = Vec::new();
+                        for validator in &sorted {
+                            let eth_addr_bytes = if validator.address.starts_with("0x") && validator.address.len() == 42 {
+                                hex::decode(&validator.address[2..]).unwrap_or_default()
+                            } else {
+                                vec![]
+                            };
+                            eth_addresses.push(eth_addr_bytes);
+                        }
+
+                        match crate::node::committee::build_committee_from_validator_info_list(
+                            &proto_validators, target_epoch,
+                        ).await {
+                            Ok(committee) => {
+                                info!(
+                                    "✅ [COMMITTEE SOURCE] PEER FALLBACK: Built committee with {} authorities from peer {}",
+                                    committee.size(), peer_addr
+                                );
+                                return Ok((committee, eth_addresses));
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [COMMITTEE SOURCE] PEER FALLBACK: build_committee failed from peer {}: {}", peer_addr, e);
+                            }
+                        }
+                    }
+                    Ok(pb) => {
+                        warn!("⚠️ [COMMITTEE SOURCE] Peer {} returned epoch={} validators={} (expected epoch={})",
+                            peer_addr, pb.epoch, pb.validators.len(), target_epoch);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [COMMITTEE SOURCE] Peer {} query failed: {}", peer_addr, e);
+                    }
+                }
+            }
+        }
+
         Err(anyhow::anyhow!(
-            "Timeout waiting for epoch {} committee from local Go after {} attempts",
+            "All sources failed for epoch {} committee: local Go timed out after {} attempts, {} peer(s) also failed",
             target_epoch,
-            MAX_ATTEMPTS
+            MAX_ATTEMPTS,
+            self.peer_rpc_addresses.len()
         ))
     }
 
@@ -321,11 +397,83 @@ impl CommitteeSource {
             // CRITICAL FIX: Prevent infinite loop when Go doesn't have epoch data
             // This can happen when transition_mode_only is called before Go syncs
             if attempt > MAX_ATTEMPTS {
+                // ═══════════════════════════════════════════════════════════════════
+                // PEER FALLBACK: Local Go failed after MAX_ATTEMPTS.
+                // Query healthy peers for epoch boundary data + timestamp.
+                // ═══════════════════════════════════════════════════════════════════
+                if !self.peer_rpc_addresses.is_empty() {
+                    warn!(
+                        "⚠️ [UNIFIED TIMESTAMP] Local Go timed out for epoch {}. Trying {} peer(s)...",
+                        target_epoch, self.peer_rpc_addresses.len()
+                    );
+
+                    for peer_addr in &self.peer_rpc_addresses {
+                        match crate::network::peer_rpc::query_peer_epoch_boundary_data(peer_addr, target_epoch).await {
+                            Ok(pb) if pb.epoch == target_epoch && !pb.validators.is_empty() => {
+                                info!(
+                                    "✅ [UNIFIED TIMESTAMP] PEER FALLBACK: Got {} validators, timestamp={} for epoch {} from {}",
+                                    pb.validators.len(), pb.timestamp_ms, target_epoch, peer_addr
+                                );
+
+                                // Convert ValidatorInfoSimple → proto::ValidatorInfo
+                                let proto_validators: Vec<crate::node::executor_client::proto::ValidatorInfo> =
+                                    pb.validators.iter().map(|v| {
+                                        crate::node::executor_client::proto::ValidatorInfo {
+                                            name: v.name.clone(),
+                                            address: v.address.clone(),
+                                            stake: v.stake.to_string(),
+                                            protocol_key: v.protocol_key.clone(),
+                                            network_key: v.network_key.clone(),
+                                            authority_key: v.authority_key.clone(),
+                                            p2p_address: v.p2p_address.clone(),
+                                            ..Default::default()
+                                        }
+                                    }).collect();
+
+                                // Extract eth_addresses
+                                let mut sorted = proto_validators.clone();
+                                sorted.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
+                                let mut eth_addresses = Vec::new();
+                                for validator in &sorted {
+                                    let eth_addr_bytes = if validator.address.starts_with("0x") && validator.address.len() == 42 {
+                                        hex::decode(&validator.address[2..]).unwrap_or_default()
+                                    } else {
+                                        vec![]
+                                    };
+                                    eth_addresses.push(eth_addr_bytes);
+                                }
+
+                                match crate::node::committee::build_committee_from_validator_info_list(
+                                    &proto_validators, target_epoch,
+                                ).await {
+                                    Ok(committee) => {
+                                        info!(
+                                            "✅ [UNIFIED TIMESTAMP] PEER FALLBACK: Built committee size={}, timestamp={} from peer {}",
+                                            committee.size(), pb.timestamp_ms, peer_addr
+                                        );
+                                        return Ok((committee, pb.timestamp_ms, eth_addresses));
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ [UNIFIED TIMESTAMP] PEER FALLBACK: build_committee failed from peer {}: {}", peer_addr, e);
+                                    }
+                                }
+                            }
+                            Ok(pb) => {
+                                warn!("⚠️ [UNIFIED TIMESTAMP] Peer {} returned epoch={} validators={} (expected epoch={})",
+                                    peer_addr, pb.epoch, pb.validators.len(), target_epoch);
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [UNIFIED TIMESTAMP] Peer {} query failed: {}", peer_addr, e);
+                            }
+                        }
+                    }
+                }
+
                 return Err(anyhow::anyhow!(
-                    "Timeout waiting for Go to have epoch {} data after {} attempts. \
-                    Go may not have synced to this epoch yet.",
+                    "All sources failed for epoch {} data after {} attempts, {} peer(s) also failed.",
                     target_epoch,
-                    MAX_ATTEMPTS
+                    MAX_ATTEMPTS,
+                    self.peer_rpc_addresses.len()
                 ));
             }
 
