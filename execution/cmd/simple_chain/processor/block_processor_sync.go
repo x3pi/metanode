@@ -456,6 +456,22 @@ PROCESS_BLOCK:
 			continue
 		}
 
+		// EXPLICIT FILTER: Skip 64-byte zero payloads (SystemTransaction artifact)
+		// These artifacts appear at epoch boundaries and are not valid user transactions.
+		if len(ms.Digest) == 64 {
+			isZero := true
+			for _, b := range ms.Digest {
+				if b != 0 {
+					isZero = false
+					break
+				}
+			}
+			if isZero {
+				logger.Debug("⏭️  [TX FLOW] Explicitly filtering 64-byte zero payload (SystemTransaction artifact) at txIdx=%d", txIdx)
+				continue
+			}
+		}
+
 		// Unmarshal as single Transaction first
 		singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
 		if err == nil {
@@ -468,7 +484,7 @@ PROCESS_BLOCK:
 		// Fallback: try unmarshal as Transactions message (backward compatibility)
 		transactions, err := transaction.UnmarshalTransactions(ms.Digest)
 		if err != nil {
-			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes)", txIdx, err, len(ms.Digest))
+			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes). Hex: %x", txIdx, err, len(ms.Digest), ms.Digest)
 			continue
 		}
 		allTransactions = append(allTransactions, transactions...)
@@ -675,6 +691,17 @@ PROCESS_BLOCK:
 	blockHash := newBlock.Header().Hash().Hex()
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
+
+	// Save SystemTransactions if present
+	sysTxs := epochData.GetSystemTransactions()
+	if len(sysTxs) > 0 {
+		err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(*currentBlockNumber, sysTxs)
+		if err != nil {
+			logger.Error("❌ [SYSTEM-TX] Failed to save SystemTransactions for block #%d: %v", *currentBlockNumber, err)
+		} else {
+			logger.Info("💾 [SYSTEM-TX] Saved %d SystemTransactions for block #%d", len(sysTxs), *currentBlockNumber)
+		}
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// PHASE 1 DIAGNOSTIC: Log hash-input fields for fork forensics.

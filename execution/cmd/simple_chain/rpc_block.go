@@ -144,6 +144,31 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 	return blockMap
 }
 
+// GetSystemTransactionsByBlockNumber returns the system transactions for a given block number.
+func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, number rpc.BlockNumber) []string {
+	var blockNum uint64
+	if number == rpc.LatestBlockNumber {
+		if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil {
+			blockNum = lastBlock.Header().BlockNumber()
+		} else {
+			return nil
+		}
+	} else {
+		blockNum = uint64(number.Int64())
+	}
+
+	sysTxs, err := api.App.chainState.GetBlockDatabase().GetSystemTransactions(blockNum)
+	if err != nil || len(sysTxs) == 0 {
+		return []string{}
+	}
+
+	result := make([]string, 0, len(sysTxs))
+	for _, txBytes := range sysTxs {
+		result = append(result, hexutil.Encode(txBytes))
+	}
+	return result
+}
+
 // GetBlockByHash returns the requested block. When fullTx is true all transactions in the block are returned in full
 // detail, otherwise only the transaction hash is returned.
 func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) map[string]interface{} {

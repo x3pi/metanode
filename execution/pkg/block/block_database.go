@@ -272,3 +272,31 @@ func (blockDatabase *BlockDatabase) GetLastBlockFromDb() (types.Block, error) {
 	return blockDatabase.GetBlockByHashFromDb(lastBlockHashKey)
 }
 
+// SaveSystemTransactions saves the system transactions for a given block number.
+func (blockDatabase *BlockDatabase) SaveSystemTransactions(blockNumber uint64, txs [][]byte) error {
+	if len(txs) == 0 {
+		return nil
+	}
+	key := fmt.Sprintf("system_txs_%d", blockNumber)
+	data, err := json.Marshal(txs)
+	if err != nil {
+		return err
+	}
+	return blockDatabase.db.Put([]byte(key), data)
+}
+
+// GetSystemTransactions retrieves the system transactions for a given block number.
+func (blockDatabase *BlockDatabase) GetSystemTransactions(blockNumber uint64) ([][]byte, error) {
+	key := fmt.Sprintf("system_txs_%d", blockNumber)
+	data, err := blockDatabase.db.Get([]byte(key))
+	if err != nil {
+		// Return empty slice if not found
+		return [][]byte{}, nil
+	}
+	var txs [][]byte
+	err = json.Unmarshal(data, &txs)
+	if err != nil {
+		return nil, err
+	}
+	return txs, nil
+}

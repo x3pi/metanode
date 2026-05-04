@@ -132,10 +132,13 @@ impl ExecutorClient {
         // PRE-PROCESS TRANSACTIONS: Filter (SystemTx, Invalid) and Dedup
         // ═══════════════════════════════════════════════════════════════
         let mut all_proto_txs = Vec::new();
+        let mut all_system_txs = Vec::new();
         let mut total_after_dedup = 0;
         
         if total_tx_before > 0 {
-            all_proto_txs = self.build_sorted_transactions(subdag)?;
+            let (txs, sys_txs) = self.build_sorted_transactions(subdag)?;
+            all_proto_txs = txs;
+            all_system_txs = sys_txs;
             total_after_dedup = all_proto_txs.len();
         }
 
@@ -216,6 +219,7 @@ impl ExecutorClient {
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
                     // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
                     is_authoritative_gei: false,
+                    system_transactions: if is_last_frag { all_system_txs.clone() } else { Vec::new() },
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -291,6 +295,7 @@ impl ExecutorClient {
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
             // GO-AUTHORITATIVE GEI: Disabled. Rust is the absolute authority for GEI.
             is_authoritative_gei: false,
+            system_transactions: all_system_txs,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -764,7 +769,7 @@ impl ExecutorClient {
             return Ok(()); // Silently skip if not enabled
         }
 
-        let all_proto_txs = self.build_sorted_transactions(subdag)?;
+        let (all_proto_txs, all_system_txs) = self.build_sorted_transactions(subdag)?;
 
         let epoch_data = ExecutableBlock {
             transactions: all_proto_txs,
@@ -778,6 +783,7 @@ impl ExecutorClient {
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
             // GO-AUTHORITATIVE GEI: Disabled
             is_authoritative_gei: false,
+            system_transactions: all_system_txs,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -841,14 +847,16 @@ impl ExecutorClient {
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///
     /// This extracts the filter → dedup → sort logic from convert_to_protobuf
-    /// so it can be reused by the fragmentation path. Returns Vec<TransactionExe>
-    /// in deterministic order (sorted by tx hash).
-    fn build_sorted_transactions(&self, subdag: &CommittedSubDag) -> Result<Vec<TransactionExe>> {
+    /// so it can be reused by the fragmentation path. Returns `(Vec<TransactionExe>, Vec<Vec<u8>>)`
+    /// where the first is deterministic order (sorted by tx hash) user transactions, 
+    /// and the second is the list of BCS-encoded SystemTransactions.
+    fn build_sorted_transactions(&self, subdag: &CommittedSubDag) -> Result<(Vec<TransactionExe>, Vec<Vec<u8>>)> {
         use crate::types::tx_hash::{
             calculate_transaction_hash_single, verify_transaction_protobuf,
         };
 
         let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new();
+        let mut system_transactions: Vec<Vec<u8>> = Vec::new();
         let mut skipped_count = 0;
 
         for (block_idx, block) in subdag.blocks.iter().enumerate() {
@@ -856,8 +864,9 @@ impl ExecutorClient {
                 let tx_data = tx.data();
                 let tx_hash = calculate_transaction_hash_single(tx_data);
 
-                // Filter: Skip SystemTransaction (BCS format)
+                // Filter: Separate SystemTransaction (BCS format)
                 if SystemTransaction::from_bytes(tx_data).is_ok() {
+                    system_transactions.push(tx_data.to_vec());
                     skipped_count += 1;
                     continue;
                 }
@@ -898,13 +907,14 @@ impl ExecutorClient {
             .collect();
 
         info!(
-            "🔪 [FRAGMENT-BUILD] Built sorted TX list: input={}, filtered={}, deduped={}, final={}",
+            "🔪 [FRAGMENT-BUILD] Built sorted TX list: input={}, filtered={}, deduped={}, final={}, system_txs={}",
             original_len + skipped_count,
             skipped_count,
             dedup_removed,
-            transactions.len()
+            transactions.len(),
+            system_transactions.len()
         );
 
-        Ok(transactions)
+        Ok((transactions, system_transactions))
     }
 }

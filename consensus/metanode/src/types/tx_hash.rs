@@ -85,7 +85,13 @@ pub fn calculate_transaction_hash_single_hex(tx_data: &[u8]) -> String {
 /// STRICT VALIDATION: After decoding, we check that at least one transaction has
 /// a non-empty `from_address`. This prevents false positives from permissive
 /// protobuf decoding (e.g. a raw Transaction being incorrectly decoded as Transactions).
-pub fn verify_transaction_protobuf(_tx_data: &[u8]) -> bool {
+pub fn verify_transaction_protobuf(tx_data: &[u8]) -> bool {
+    // EXPLICIT FILTER: Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+    // These payloads cause UnmarshalTransaction FAILED errors in the Go execution engine.
+    if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+        return false;
+    }
+
     // Relaxed validation: Allow all transactions to be sent to Go, 
     // even if they cannot be decoded as standard protobuf here.
     // The Go engine contains the authoritative decoding logic 

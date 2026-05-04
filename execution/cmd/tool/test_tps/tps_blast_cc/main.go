@@ -976,6 +976,11 @@ func main() {
 			processingDuration = time.Since(processStart)
 		}
 
+		if totalTxsInBlocks < uint64(len(allTxs)) {
+			fmt.Printf("\n❌ ERROR: Not all transactions were processed! (%d/%d)\n", totalTxsInBlocks, len(allTxs))
+			os.Exit(1)
+		}
+
 		endBlock, _ := rpcClient.GetBlockNumber()
 
 		// Block statistics
