@@ -1,0 +1,103 @@
+{
+    "debug": true,
+    "chainId": 991,
+    "private_key": "27c8f505bcae593cc0e3ac8ae9ed1b1d4493eabd11736aabda176d4d3255fa69",
+    "address": "9065e2caaa4bf6533ded0b2a763e4ee81cd31bd2",
+    "log_path": "../../../consensus/metanode/logs/node_5/go-master",
+    "epochs_to_keep": 0,
+    "backup_path": "./sample/synconly/back_up",
+    "last_block_save_path": "/last_block.dat",
+    "rust_send_socket_path": "/tmp/executor5.sock",
+    "rust_receive_socket_path": "/tmp/rust-go-node5-master.sock",
+    "rust_tx_socket_path": "/tmp/metanode-tx-5.sock",
+    "meta_node_rpc_address": "127.0.0.1:10105",
+    "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
+    "block_hash_to_number_db_root_path": "/block_hash_to_number_db_root_path",
+    "free_fee_addresses": [
+        "55798165960a62cED34a0d86e36B1758D1303907"
+    ],
+    "connection_address": "0.0.0.0:4206",
+    "dns_server_address": "0.0.0.0:7086",
+    "version": "0.0.1.0",
+    "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
+    "service_type": "MASTER",
+    "rpc_port": ":8762",
+    "securepassword": "mysecretpassword",
+    "peer_rpc_port": 19205,
+    "db_type": 2,
+    "genesis_file_path": "genesis.json",
+    "cross_chain": {
+        "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+    },
+    "snapshot_enabled": true,
+    "snapshot_frequency_blocks": 500,
+    "snapshot_block_offset": 0,
+    "Databases": {
+        "RootPath": "./sample/synconly/data/data",
+        "DBEngine": "sharded",
+        "Version": "0.0.1.0",
+        "SnapshotPath": "./sample/synconly/data/snapshot_data_synconly",
+        "MaxPartSizeMB": 100,
+        "ArchiveBaseName": "snapshot_archive",
+        "AccountState": {
+            "Path": "/account_state/",
+            "ListenAddress": "0.0.0.0:6051"
+        },
+        "Trie": {
+            "Path": "/trie_database/",
+            "ListenAddress": "0.0.0.0:6052"
+        },
+        "SmartContractCode": {
+            "Path": "/smart_contract_code/",
+            "ListenAddress": "0.0.0.0:6053"
+        },
+        "SmartContractStorage": {
+            "Path": "/smart_contract_storage/",
+            "ListenAddress": "0.0.0.0:6054"
+        },
+        "Blocks": {
+            "Path": "/blocks/",
+            "ListenAddress": "0.0.0.0:6055"
+        },
+        "Receipts": {
+            "Path": "/receipts/",
+            "ListenAddress": "0.0.0.0:6056"
+        },
+        "BackupDeviceKey": {
+            "Path": "/backup_device_key_storage/",
+            "ListenAddress": "0.0.0.0:6057"
+        },
+        "TransactionState": {
+            "Path": "/transaction_state/",
+            "ListenAddress": "0.0.0.0:6058"
+        },
+        "Mapping": {
+            "Path": "/mapping/",
+            "ListenAddress": "0.0.0.0:6059"
+        },
+        "Backup": {
+            "Path": "/backup_db/",
+            "ListenAddress": null
+        },
+        "Stake": {
+            "Path": "/stake_db/"
+        },
+        "XapianPath": "/xapian"
+    },
+    "nodes": {
+        "list_sub_address": [
+            "0.0.0.0:4206"
+        ]
+    },
+    "snapshot_method": "hybrid",
+    "snapshot_source_dir": "./sample/synconly/data",
+    "snapshot_server_port": 8605,
+    "state_backend": "nomt",
+    "nomt_commit_concurrency": 32,
+    "nomt_page_cache_mb": 1024,
+    "nomt_leaf_cache_mb": 1024,
+    "rust_config_path": "../../../consensus/metanode/config/node_5.toml",
+    "is_explorer": true,
+    "explorer_db_path": "./sample/synconly/data/other/explorer",
+    "explorer_read_only_db_path": "./sample/synconly/data/other/explorer-read-only"
+}

@@ -89,7 +89,7 @@ type NomtStateTrie struct {
 	// ─── WRITER-PRIVATE STATE (protected by writerMu) ──────────────────
 	// Only the block-processor goroutine accesses these fields.
 	// writerMu serializes Update/BatchUpdate/Commit calls.
-	writerMu  sync.Mutex
+	writerMu  sync.RWMutex
 	wDirty    map[string]*nomtDirtyEntry // live mutable dirty map
 	wOldValues map[string][]byte         // pre-commit values for replication
 	wOldLoaded map[string]bool           // tracks which old values were loaded
@@ -370,6 +370,13 @@ func (n *NomtStateTrie) SetReplicationSync(syncMode bool) {
 func (n *NomtStateTrie) Get(key []byte) ([]byte, error) {
 	hexKey := hex.EncodeToString(key)
 
+	n.writerMu.RLock()
+	if entry, ok := n.wDirty[hexKey]; ok {
+		n.writerMu.RUnlock()
+		return entry.value, nil
+	}
+	n.writerMu.RUnlock()
+
 	// Atomic load — ZERO contention, ~1ns, NEVER blocks
 	view := n.loadReadView()
 
@@ -402,6 +409,17 @@ func (n *NomtStateTrie) Get(key []byte) ([]byte, error) {
 // Each known key is fetched from NOMT individually.
 // LOCK-FREE for dirty/committing access via atomic read view.
 func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
+	n.writerMu.RLock()
+	wDirtySnapshot := make(map[string][]byte)
+	for k, v := range n.wDirty {
+		wDirtySnapshot[k] = v.originalKey
+	}
+	wDirtyValues := make(map[string][]byte)
+	for k, v := range n.wDirty {
+		wDirtyValues[k] = v.value
+	}
+	n.writerMu.RUnlock()
+
 	// Atomic load — lock-free snapshot
 	view := n.loadReadView()
 
@@ -425,7 +443,10 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 	}
 	n.knownKeysMu.RUnlock()
 
-	// Also add keys from dirty that bypass knownKeys tracking
+	// Also add keys from wDirty and view.dirty that bypass knownKeys tracking
+	for hexKey, origKey := range wDirtySnapshot {
+		allHexKeys[hexKey] = origKey
+	}
 	if view.dirty != nil {
 		for hexKey, entry := range view.dirty {
 			allHexKeys[hexKey] = entry.originalKey
@@ -435,6 +456,13 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 	results := make(map[string][]byte, len(allHexKeys))
 
 	for hexKey, origKey := range allHexKeys {
+		// Check wDirty first
+		if val, ok := wDirtyValues[hexKey]; ok {
+			if len(val) > 0 {
+				results[hexKey] = val
+			}
+			continue
+		}
 		// Check dirty first
 		if val, ok := dirtySnapshot[hexKey]; ok {
 			if len(val) > 0 {
@@ -989,8 +1017,16 @@ func (n *NomtStateTrie) Close() {
 }
 
 // HasUncommittedChanges returns true if there are dirty changes pending commit.
-// LOCK-FREE: reads from atomic readView.
+// LOCK-FREE: reads from atomic readView and safely checks writer dirty under RLock.
 func (n *NomtStateTrie) HasUncommittedChanges() bool {
+	n.writerMu.RLock()
+	hasWDirty := len(n.wDirty) > 0
+	n.writerMu.RUnlock()
+	
+	if hasWDirty {
+		return true
+	}
+
 	view := n.loadReadView()
 	return len(view.dirty) > 0 || len(view.committing) > 0
 }

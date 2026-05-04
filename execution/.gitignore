@@ -164,6 +164,7 @@ run.stderr
 cmd/simple_chain/run.stdout
 compile_output.txt
 strace_*.txt
+error_report.txt
 
 # ===== CSV / benchmark result artifacts =====
 /mismatches_*.csv
