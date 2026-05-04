@@ -75,6 +75,24 @@ pub struct ConsensusCoordinationHub {
     /// The highest quorum commit index observed by CommitVoteMonitor.
     /// Used by Core to prevent the local committer from diverging when missing network commits.
     quorum_commit_index: Arc<std::sync::atomic::AtomicU32>,
+
+    /// FORK-SAFETY: Network confirmation flag.
+    ///
+    /// Set to `true` whenever the node transitions to Healthy phase.
+    /// Cleared to `false` only when the node successfully processes at least one
+    /// CertifiedCommit from the network while in Healthy phase.
+    ///
+    /// The local committer is BLOCKED while this flag is `true`, because:
+    /// - The DAG might be sparse (missing ancestor blocks from incomplete sync)
+    /// - `calculate_commit_timestamp()` would produce wrong median → timestamp divergence → fork
+    ///
+    /// Processing a CertifiedCommit while Healthy proves:
+    /// 1. The network is actively producing commits (not stalled)
+    /// 2. This node can process them (DAG has required blocks)
+    /// 3. The DAG is populated enough for the local committer to produce correct timestamps
+    ///
+    /// This is deterministic and event-driven — no arbitrary time delays.
+    awaiting_network_confirmation: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -84,6 +102,7 @@ impl ConsensusCoordinationHub {
             is_transitioning: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            awaiting_network_confirmation: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -145,11 +164,46 @@ impl ConsensusCoordinationHub {
     pub fn set_phase(&self, new_phase: NodeConsensusPhase) {
         let mut w = self.phase.write();
         if *w != new_phase {
+            let old_phase = *w;
             tracing::info!(
                 "🔄 [HUB] Phase transition: {:?} -> {:?}",
-                *w,
+                old_phase,
                 new_phase
             );
+            // FORK-SAFETY: When transitioning TO Healthy from a catch-up phase,
+            // require network confirmation before allowing local commit decisions.
+            //
+            // This blocks the local committer until a CertifiedCommit is processed,
+            // proving the DAG is populated enough for correct timestamp calculation.
+            //
+            // EXCEPTION: Bootstrapping → Healthy (fresh cluster start) does NOT
+            // require confirmation. In a fresh cluster all nodes start together and
+            // there are no CertifiedCommits yet — all commits are locally decided.
+            // Requiring confirmation here would deadlock the entire network.
+            if new_phase == NodeConsensusPhase::Healthy {
+                let needs_confirmation = matches!(
+                    old_phase,
+                    NodeConsensusPhase::CatchingUp
+                        | NodeConsensusPhase::StateSyncing
+                        | NodeConsensusPhase::Aligning
+                );
+                if needs_confirmation {
+                    self.awaiting_network_confirmation.store(true, Ordering::Release);
+                    tracing::info!(
+                        "🛡️ [HUB] Network confirmation required (was {:?}). Local committer \
+                         blocked until a CertifiedCommit is processed in Healthy phase.",
+                        old_phase
+                    );
+                } else {
+                    // Fresh start or direct transition — local committer enabled immediately
+                    self.awaiting_network_confirmation.store(false, Ordering::Release);
+                    tracing::info!(
+                        "✅ [HUB] Direct transition {:?}→Healthy. Local committer enabled \
+                         (no catch-up phase detected).",
+                        old_phase
+                    );
+                }
+            }
             *w = new_phase;
         }
     }
@@ -157,6 +211,50 @@ impl ConsensusCoordinationHub {
     /// Convenience check for whether we are in a normal operational mode.
     pub fn is_healthy(&self) -> bool {
         matches!(*self.phase.read(), NodeConsensusPhase::Healthy)
+    }
+
+    /// Called by Core::add_certified_commits() after successfully processing
+    /// CertifiedCommits from the network. If the node is in Healthy phase,
+    /// this clears the network confirmation flag, enabling the local committer.
+    ///
+    /// This is the ONLY way to unlock the local committer after a phase transition
+    /// to Healthy. It proves the DAG is populated and the node is truly caught up.
+    pub fn confirm_network_commit(&self) {
+        if self.is_healthy() && self.awaiting_network_confirmation.load(Ordering::Acquire) {
+            self.awaiting_network_confirmation.store(false, Ordering::Release);
+            tracing::info!(
+                "✅ [HUB] Network confirmed! CertifiedCommit processed while Healthy. \
+                 Local committer is now enabled."
+            );
+        }
+    }
+
+    /// Returns true if the node is Healthy AND has been confirmed by the network.
+    ///
+    /// The local committer MUST use this instead of `is_healthy()` to prevent
+    /// producing commits with divergent timestamps from a sparse DAG.
+    ///
+    /// After snapshot restore, the node oscillates CatchingUp↔Healthy rapidly.
+    /// If the local committer fires during a brief Healthy window, it evaluates
+    /// leaders on a sparse DAG → `calculate_commit_timestamp()` produces wrong
+    /// median → timestamp divergence → fork.
+    ///
+    /// This guard is deterministic and event-driven:
+    /// - Transitions to Healthy → `awaiting_network_confirmation = true`
+    /// - Node processes a CertifiedCommit while Healthy → confirmation cleared
+    /// - No arbitrary time delays
+    pub fn is_healthy_stable(&self) -> bool {
+        if !self.is_healthy() {
+            return false;
+        }
+        if self.awaiting_network_confirmation.load(Ordering::Acquire) {
+            tracing::debug!(
+                "🛡️ [NETWORK-CONFIRM] Healthy but awaiting network confirmation. \
+                 Local committer blocked until a CertifiedCommit is processed."
+            );
+            return false;
+        }
+        true
     }
 
     /// Convenience check for whether the node is explicitly catching up.
@@ -202,14 +300,21 @@ impl Default for ConsensusCoordinationHub {
 
 #[cfg(test)]
 impl ConsensusCoordinationHub {
-    /// Creates a hub starting in Healthy phase, for use in tests where
-    /// proposals should work immediately without phase transitions.
+    /// Creates a hub starting in Healthy phase with network already confirmed,
+    /// for use in tests where the local committer should work immediately.
     pub fn new_for_testing() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            // Network already confirmed — local committer works immediately in tests
+            awaiting_network_confirmation: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Alias for `new_for_testing()` — both have network pre-confirmed.
+    pub fn new_for_testing_stable() -> Self {
+        Self::new_for_testing()
     }
 }
