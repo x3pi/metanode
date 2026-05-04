@@ -46,9 +46,6 @@ type blockResult struct {
 	ReceiptsRoot     string `json:"receiptsRoot"`
 	GlobalExecIndex  string `json:"globalExecIndex"`
 	Epoch            string `json:"epoch"`
-	TimeStamp        string `json:"timestamp"`
-	StakeStatesRoot  string `json:"stakeStatesRoot"`
-	LeaderAddress    string `json:"leaderAddress"`
 }
 
 // ===== Block info (parsed from blockResult) =====
@@ -61,9 +58,6 @@ type blockInfo struct {
 	ReceiptsRoot     string
 	GlobalExecIndex  string
 	Epoch            string
-	TimeStamp        string
-	StakeStatesRoot  string
-	LeaderAddress    string
 	Error            string // non-empty if fetch failed
 }
 
@@ -156,7 +150,7 @@ func main() {
 			batchEnd = *toBlock
 		}
 
-		batchMismatches, batchMatches, batchErrors, batchSkips := checkBatch(client, nodes, batchStart, batchEnd)
+		batchMismatches, batchMatches, batchErrors, batchSkips, _ := checkBatch(client, nodes, batchStart, batchEnd)
 		allMismatches = append(allMismatches, batchMismatches...)
 		matchCount += batchMatches
 		errorCount += batchErrors
@@ -230,7 +224,7 @@ func parseNodes(s string) []nodeInfo {
 
 // ===== Check a batch of blocks =====
 
-func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatches []mismatch, matchCount, errorCount, skipCount uint64) {
+func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatches []mismatch, matchCount, errorCount, skipCount uint64, emptyBlocks []uint64) {
 	type result struct {
 		blockNum uint64
 		blocks   map[string]blockInfo
@@ -294,10 +288,10 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 		}
 
 		if len(validBlocks) < 2 {
-			// CRITICAL FIX: If ALL nodes report the block doesn't exist, it's an implicitly dropped
-			// empty commit (caused by Rust assigning a block number to an empty transition but Go dropping it).
-			// This is normal and shouldn't be counted as a skipped check due to insufficient nodes.
-			if missingResponseCount == len(nodes) {
+			// Nếu tất cả các node phản hồi đều báo block không tồn tại, thì coi là ghost block và bỏ qua.
+			// (Không cần đợi các node đang lỗi/sập phản hồi)
+			if len(validBlocks) == 0 && missingResponseCount > 0 {
+				emptyBlocks = append(emptyBlocks, r.blockNum)
 				continue
 			}
 
@@ -312,15 +306,14 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			continue
 		}
 
-		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot, etc. across all valid nodes
+		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot across all valid nodes
 		hasMismatch := false
 		ref := validBlocks[0]
 		for i := 1; i < len(validBlocks); i++ {
 			b := validBlocks[i]
 			if b.Hash != ref.Hash || b.ParentHash != ref.ParentHash ||
 				b.StateRoot != ref.StateRoot || b.TransactionsRoot != ref.TransactionsRoot ||
-				b.ReceiptsRoot != ref.ReceiptsRoot || b.TimeStamp != ref.TimeStamp ||
-				b.StakeStatesRoot != ref.StakeStatesRoot || b.LeaderAddress != ref.LeaderAddress {
+				b.ReceiptsRoot != ref.ReceiptsRoot {
 				hasMismatch = true
 				break
 			}
@@ -434,9 +427,6 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		ReceiptsRoot:     block.ReceiptsRoot,
 		GlobalExecIndex:  block.GlobalExecIndex,
 		Epoch:            block.Epoch,
-		TimeStamp:        block.TimeStamp,
-		StakeStatesRoot:  block.StakeStatesRoot,
-		LeaderAddress:    block.LeaderAddress,
 	}, nil
 }
 
@@ -542,7 +532,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	}
 
 	// Determine which fields differ
-	hashDiff, parentDiff, stateDiff, txDiff, rcpDiff, timeDiff, stakeDiff, leaderDiff := false, false, false, false, false, false, false, false
+	hashDiff, parentDiff, stateDiff, txDiff, rcpDiff := false, false, false, false, false
 	if len(validBlocks) >= 2 {
 		ref := validBlocks[0]
 		for _, b := range validBlocks[1:] {
@@ -560,15 +550,6 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			}
 			if b.ReceiptsRoot != ref.ReceiptsRoot {
 				rcpDiff = true
-			}
-			if b.TimeStamp != ref.TimeStamp {
-				timeDiff = true
-			}
-			if b.StakeStatesRoot != ref.StakeStatesRoot {
-				stakeDiff = true
-			}
-			if b.LeaderAddress != ref.LeaderAddress {
-				leaderDiff = true
 			}
 		}
 	}
@@ -589,15 +570,6 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 	}
 	if rcpDiff {
 		diffs = append(diffs, "receiptsRoot")
-	}
-	if timeDiff {
-		diffs = append(diffs, "timestamp")
-	}
-	if stakeDiff {
-		diffs = append(diffs, "stakeStatesRoot")
-	}
-	if leaderDiff {
-		diffs = append(diffs, "leaderAddress")
 	}
 	if len(diffs) > 0 {
 		fmt.Printf("   ⚠\ufe0f  Fields differ: %s\n", strings.Join(diffs, ", "))
@@ -625,15 +597,6 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 		}
 		if rcpDiff {
 			fmt.Printf("   %-12s receiptsRoot=%s\n", "", bi.ReceiptsRoot)
-		}
-		if timeDiff {
-			fmt.Printf("   %-12s timestamp=%s\n", "", bi.TimeStamp)
-		}
-		if stakeDiff {
-			fmt.Printf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot)
-		}
-		if leaderDiff {
-			fmt.Printf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress)
 		}
 	}
 	fmt.Println()
@@ -664,9 +627,6 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 		header += "," + name + "_receiptsRoot"
 		header += "," + name + "_gei"
 		header += "," + name + "_epoch"
-		header += "," + name + "_timestamp"
-		header += "," + name + "_stakeStatesRoot"
-		header += "," + name + "_leaderAddress"
 	}
 	fmt.Fprintln(f, header)
 
@@ -688,9 +648,6 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 				line += "," + bi.TransactionsRoot
 				line += "," + bi.ReceiptsRoot
 				line += fmt.Sprintf(",%d,%d", parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
-				line += "," + bi.TimeStamp
-				line += "," + bi.StakeStatesRoot
-				line += "," + bi.LeaderAddress
 			}
 		}
 		fmt.Fprintln(f, line)
@@ -718,9 +675,10 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 
 	totalChecks := 0
 	totalMismatches := 0
+	trackedGhosts := make(map[uint64]bool)
 
 	// Run immediately on start
-	if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches) {
+	if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches, trackedGhosts) {
 		fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
 		fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
 		os.Exit(1)
@@ -729,7 +687,7 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 	for {
 		select {
 		case <-ticker.C:
-			if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches) {
+			if watchOnce(client, nodes, checkLast, &totalChecks, &totalMismatches, trackedGhosts) {
 				fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
 				fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
 				os.Exit(1)
@@ -743,7 +701,7 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, che
 }
 
 // watchOnce returns true if mismatch detected (caller should stop)
-func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks, totalMismatches *int) bool {
+func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks, totalMismatches *int, trackedGhosts map[uint64]bool) bool {
 	*totalChecks++
 	now := time.Now().Format("15:04:05")
 
@@ -762,9 +720,16 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-
-		// Query peer info for current epoch and GEI (may not exist as p2p is in Rust)
-		gei, epoch, _ := getPeerInfo(client, n.URL)
+		
+		var gei, epoch uint64
+		if err == nil {
+			// Lấy gei và epoch từ chính block mới nhất thông qua eth_getBlockByNumber
+			bi, errBi := getBlockInfo(client, n.URL, num)
+			if errBi == nil {
+				gei = parseHexStr(bi.GlobalExecIndex)
+				epoch = parseHexStr(bi.Epoch)
+			}
+		}
 
 		results = append(results, nodeBlock{name: n.Name, block: num, gei: gei, epoch: epoch, err: err})
 		if err == nil {
@@ -823,14 +788,38 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		from = 1
 	}
 
-	mismatches, matched, _, skipped := checkBatch(client, nodes, from, minBlock)
+	mismatches, matched, _, skipped, emptyBlocks := checkBatch(client, nodes, from, minBlock)
 
 	if len(mismatches) == 0 {
 		if skipped > 0 {
 			fmt.Printf(" ✅ hash khớp %d blocks, ⚠️ %d blocks không đủ node (block %d→%d)\n", matched, skipped, from, minBlock)
 		} else {
-			fmt.Printf(" ✅ hash khớp (block %d→%d)\n", from, minBlock)
+			fmt.Printf(" ✅ hash khớp %d blocks (block %d→%d)\n", matched, from, minBlock)
 		}
+		
+		if len(emptyBlocks) > 0 {
+			show := len(emptyBlocks)
+			if show > 10 { show = 10 }
+			fmt.Printf("   👻 Có %d block rỗng/nhảy cóc: %v", len(emptyBlocks), emptyBlocks[:show])
+			if len(emptyBlocks) > 10 { fmt.Printf("...") }
+			fmt.Println()
+			
+			// Lưu vào file (tránh trùng lặp)
+			if trackedGhosts != nil {
+				f, err := os.OpenFile("ghost_blocks.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err == nil {
+					nowStr := time.Now().Format("2006-01-02 15:04:05")
+					for _, b := range emptyBlocks {
+						if !trackedGhosts[b] {
+							fmt.Fprintf(f, "[%s] Ghost block detected: %d\n", nowStr, b)
+							trackedGhosts[b] = true
+						}
+					}
+					f.Close()
+				}
+			}
+		}
+		
 		// In hash của block mới nhất (minBlock) từ mỗi node
 		fmt.Printf("   📦 Block %d hashes:\n", minBlock)
 		for _, n := range nodes {
@@ -840,7 +829,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			} else if bi.IsError() {
 				fmt.Printf("      %-12s %s\n", n.Name+":", bi.Error)
 			} else {
-				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d  timestamp=%s  leaderAddress=%s\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch), bi.TimeStamp, bi.LeaderAddress)
+				fmt.Printf("      %-12s hash=%s  stateRoot=%s  gei=%d  epoch=%d\n", n.Name+":", bi.Hash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
 			}
 		}
 		return false
@@ -853,11 +842,11 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	// Build alert content for both console and file
 	var alertBuf strings.Builder
-	alertBuf.WriteString(fmt.Sprintf("╔══════════════════════════════════════════════════════════════════╗\n"))
+	alertBuf.WriteString("╔══════════════════════════════════════════════════════════════════╗\n")
 	alertBuf.WriteString(fmt.Sprintf("║  🚨 HASH MISMATCH DETECTED — %s                      ║\n", time.Now().Format("2006-01-02 15:04:05")))
-	alertBuf.WriteString(fmt.Sprintf("╚══════════════════════════════════════════════════════════════════╝\n"))
+	alertBuf.WriteString("╚══════════════════════════════════════════════════════════════════╝\n")
 	alertBuf.WriteString(fmt.Sprintf("\nCheck #%d | Blocks checked: %d→%d | Mismatches: %d\n", *totalChecks, from, minBlock, len(mismatches)))
-	alertBuf.WriteString(fmt.Sprintf("\nNode Heights:\n"))
+	alertBuf.WriteString("\nNode Heights:\n")
 	for _, r := range results {
 		if r.err != nil {
 			alertBuf.WriteString(fmt.Sprintf("  %-12s ERR: %v\n", r.name+":", r.err))
@@ -865,7 +854,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			alertBuf.WriteString(fmt.Sprintf("  %-12s block=%d\n", r.name+":", r.block))
 		}
 	}
-	alertBuf.WriteString(fmt.Sprintf("\n─── Mismatch Details ───\n"))
+	alertBuf.WriteString("\n─── Mismatch Details ───\n")
 
 	for _, m := range mismatches {
 		alertBuf.WriteString(fmt.Sprintf("\n⚠️  Block %d:\n", m.BlockNumber))
@@ -879,23 +868,12 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				alertBuf.WriteString(fmt.Sprintf("   %-12s %s\n", n.Name+":", bi.Error))
 				continue
 			}
-			// Format the basic info
-			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  gei=%d  epoch=%d\n",
-				n.Name+":", bi.Hash, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
-
-			// Always print parentHash and stateRoot in watch mode to maintain previous format
-			alertBuf.WriteString(fmt.Sprintf("   %-12s parentHash=%s\n", "", bi.ParentHash))
-			alertBuf.WriteString(fmt.Sprintf("   %-12s stateRoot=%s\n", "", bi.StateRoot))
-
-			// Print new fields so we can see what differs
-			alertBuf.WriteString(fmt.Sprintf("   %-12s timestamp=%s\n", "", bi.TimeStamp))
-			alertBuf.WriteString(fmt.Sprintf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot))
-			alertBuf.WriteString(fmt.Sprintf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress))
-			alertBuf.WriteString("\n")
+			alertBuf.WriteString(fmt.Sprintf("   %-12s hash=%s  parentHash=%s  stateRoot=%s  gei=%d  epoch=%d\n",
+				n.Name+":", bi.Hash, bi.ParentHash, bi.StateRoot, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch)))
 		}
 	}
 
-	alertBuf.WriteString(fmt.Sprintf("\n─── Summary ───\n"))
+	alertBuf.WriteString("\n─── Summary ───\n")
 	alertBuf.WriteString(fmt.Sprintf("Total mismatches: %d\n", *totalMismatches))
 	alertBuf.WriteString(fmt.Sprintf("Detected at: %s\n", time.Now().Format("2006-01-02 15:04:05.000")))
 

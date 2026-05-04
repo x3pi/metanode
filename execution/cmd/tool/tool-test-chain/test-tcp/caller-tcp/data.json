@@ -7,13 +7,17 @@
     "abi_path": "../../abi/normal-test.json",
     "action": "send",
     "method": "setValue",
-    "args": [1234]
+    "args": [
+      12345
+    ]
   },
   {
     "abi_path": "../../abi/normal-test.json",
     "action": "call",
     "method": "getValue",
     "args": [],
-    "verify": [1234]
+    "verify": [
+      12345
+    ]
   }
 ]

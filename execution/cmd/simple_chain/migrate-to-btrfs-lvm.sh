@@ -5,8 +5,8 @@ echo "==========================================================="
 echo "🚀 BẮT ĐẦU TẠO PHÂN VÙNG BTRFS VẬT LÝ TỪ LVM"
 echo "==========================================================="
 
-# Di chuyển đến đúng thư mục
-cd /home/abc/chain-n/metanode/execution/cmd/simple_chain
+# Di chuyển đến thư mục chứa script
+cd "$(dirname "$0")"
 
 # 1. Kiểm tra Volume Group ubuntu-vg có tồn tại không
 if ! sudo vgdisplay ubuntu-vg >/dev/null 2>&1; then
