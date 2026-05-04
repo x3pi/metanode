@@ -155,6 +155,9 @@ type SimpleChainConfig struct {
 	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
 	SnapshotBlockOffset     int    `json:"snapshot_block_offset,omitempty"`     // Offset per-node để stagger snapshot (vd: node0=0, node1=100, node2=200). Đảm bảo không tất cả nodes snapshot cùng lúc
 
+	// Bật/tắt theo dõi lịch sử trạng thái bằng StateChangelogDB (cần cho NOMT khi cần truy vấn block cũ)
+	EnableHistoricalState bool `json:"enable_historical_state"`
+
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.
 	StateBackend string `json:"state_backend,omitempty"`
@@ -192,7 +195,9 @@ func JoinPathIfNotURL(basePath, path string) string {
 func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	var err error
 	loadConfig.Do(func() {
-		ConfigApp = &SimpleChainConfig{}
+		ConfigApp = &SimpleChainConfig{
+			EnableHistoricalState: true, // Mặc định bật tính năng trạng thái lịch sử
+		}
 		var raw []byte
 		raw, err = os.ReadFile(configPath)
 		if err != nil {
@@ -227,6 +232,13 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if v := os.Getenv("META_SECURE_PASSWORD"); v != "" {
 			ConfigApp.Securepassword = v
+		}
+		if v := os.Getenv("META_ENABLE_HISTORICAL_STATE"); v != "" {
+			if v == "true" || v == "1" {
+				ConfigApp.EnableHistoricalState = true
+			} else if v == "false" || v == "0" {
+				ConfigApp.EnableHistoricalState = false
+			}
 		}
 
 	})

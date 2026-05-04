@@ -51,7 +51,7 @@ type ChainState struct {
 	stakeStateDB       *stake_state_db.StakeStateDB
 	freeFeeAddress     map[common.Address]struct{}
 	changelogDB        *state_changelog.StateChangelogDB
-
+	stakeChangelogDB   *state_changelog.StateChangelogDB
 	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
 	// concurrent access during UpdateStateForNewHeader (writer) and Get*DB (readers).
 	// Without this, virtual execution can race with block processing and read a
@@ -118,23 +118,43 @@ func NewChainStateWithGenesis(
 		return nil, fmt.Errorf("failed to create account state trie: %v", err)
 	}
 	var changelogDB *state_changelog.StateChangelogDB
-	if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
-		if backupPath != "" {
-			changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db")
-			changelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "account_state")
-			if err == nil {
-				nomtTrie.SetChangelogDB(changelogDB)
-			} else {
-				logger.Error("Failed to init StateChangelogDB at %s: %v", changelogPath, err)
+	if config != nil && config.EnableHistoricalState {
+		if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok {
+			if backupPath != "" {
+				changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db_account")
+				changelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "account_state")
+				if err == nil {
+					nomtTrie.SetChangelogDB(changelogDB)
+					logger.Info("✅ [STATE CHANGELOG] Enabled for account_state")
+				} else {
+					logger.Error("Failed to init StateChangelogDB for account_state at %s: %v", changelogPath, err)
+				}
 			}
 		}
 	}
+	
 	stakeStorage := sm.GetStorageStake()
 
 	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, true)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stake state trie: %v", err)
+	}
+
+	var stakeChangelogDB *state_changelog.StateChangelogDB
+	if config != nil && config.EnableHistoricalState {
+		if nomtTrie, ok := stakeStateTrie.(*trie.NomtStateTrie); ok {
+			if backupPath != "" {
+				changelogPath := filepath.Join(filepath.Dir(backupPath), "changelog_db_stake")
+				stakeChangelogDB, err = state_changelog.NewStateChangelogDB(changelogPath, "stake_db")
+				if err == nil {
+					nomtTrie.SetChangelogDB(stakeChangelogDB)
+					logger.Info("✅ [STATE CHANGELOG] Enabled for stake_db")
+				} else {
+					logger.Error("Failed to init StateChangelogDB for stake_db at %s: %v", changelogPath, err)
+				}
+			}
+		}
 	}
 
 	asDB := account_state_db.NewAccountStateDB(accountStateTrie, accountStorage)
@@ -162,6 +182,7 @@ func NewChainStateWithGenesis(
 		freeFeeAddress:        freeFeeAddress,
 		maxCachedEpochs:       maxCached,
 		changelogDB:           changelogDB,
+		stakeChangelogDB:      stakeChangelogDB,
 		currentEpoch:          0, // Start with epoch 0 (genesis)
 		epochStartTimestampMs: 0, // Will be set on first epoch advance
 		epochStartTimestamps:  make(map[uint64]uint64),
@@ -258,6 +279,11 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if err != nil {
 		logger.Error("Failed to create new stake state trie during update", "error", err, "newRoot", newStakeRoot)
 		return fmt.Errorf("failed to create new stake state trie for update: %w", err)
+	}
+	if cs.stakeChangelogDB != nil {
+		if nomtTrie, ok := newStakeStateTrie.(*trie.NomtStateTrie); ok {
+			nomtTrie.SetChangelogDB(cs.stakeChangelogDB)
+		}
 	}
 	newStakeStateDB := stake_state_db.NewStakeStateDB(newStakeStateTrie, stakeStorage)
 
@@ -371,6 +397,11 @@ func (cs *ChainState) SetcurrentBlockHeader(header *types.BlockHeader) {
 // GetChangelogDB returns the state changelog database instance for historical state tracking.
 func (cs *ChainState) GetChangelogDB() *state_changelog.StateChangelogDB {
 	return cs.changelogDB
+}
+
+// GetStakeChangelogDB returns the state changelog database instance for historical stake tracking.
+func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
+	return cs.stakeChangelogDB
 }
 
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
