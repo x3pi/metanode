@@ -81,6 +81,14 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	sm.SetSnapshotBlockOffset(cfg.SnapshotBlockOffset)
 	globalSnapshotManager = sm
 
+	// FATAL CHECK: Nếu snapshot được bật (Synconly node) nhưng ổ cứng không hỗ trợ reflink (btrfs/xfs)
+	if cfg.SnapshotEnabled && !sm.reflinkSupported {
+		logger.Error("❌ [FATAL ERROR] Ổ cứng không hỗ trợ reflink (btrfs/xfs)!")
+		logger.Error("Việc copy dữ liệu Xapian trên filesystem thông thường (ext4) sẽ mất hàng chục giây và làm block node.")
+		logger.Error("Dừng bắt buộc. Vui lòng tắt 'snapshot_enabled' hoặc format ổ đĩa sang Btrfs/XFS.")
+		panic("CRITICAL: Reflink (btrfs/xfs) is required for snapshotting. Please disable snapshot_enabled or use a supported filesystem.")
+	}
+
 	// Cấu hình snapshot method
 	method := cfg.SnapshotMethod
 	if method == "" {
