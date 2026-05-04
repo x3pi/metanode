@@ -1309,6 +1309,20 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
+		if blockNum == 0 {
+			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
+			
+			// CRITICAL FIX: Even if the block is empty, if it's the LAST block in a STARTUP-SYNC
+			// batch, we MUST trigger the trie rebuild. Otherwise, NOMT memory state stays stale.
+			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on empty last block (GEI=%d)", blockGEI)
+				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for empty block: %v", err)
+				}
+			}
+			continue
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 2: Save block to LevelDB (by hash + number→hash mapping)
 		// ═══════════════════════════════════════════════════════════════════════════

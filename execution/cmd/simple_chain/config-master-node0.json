@@ -111,6 +111,7 @@
     },
     "snapshot_enabled": true,
     "snapshot_frequency_blocks": 10,
+    "snapshot_block_offset": 0,
     "Databases": {
         "RootPath": "./sample/node0/data/data",
         "DBEngine": "sharded",

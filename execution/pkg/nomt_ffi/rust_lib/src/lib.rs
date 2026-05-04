@@ -13,6 +13,8 @@ use libc::{c_char, c_int, size_t};
 use nomt::hasher::Blake3Hasher;
 use nomt::{KeyReadWrite, Nomt, Options};
 use std::ffi::CStr;
+use std::fs;
+use std::path::Path;
 use std::ptr;
 use std::slice;
 
@@ -593,4 +595,87 @@ pub extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
             let _ = Box::from_raw(session);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHECKPOINT (snapshot without close/reopen)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Create a filesystem-level checkpoint of the NOMT database by copying
+/// its data files to a destination directory.
+///
+/// The database remains OPEN during this operation — no close/reopen needed.
+/// This is safe because the caller (Go SnapshotManager) guarantees:
+///   1. PauseExecution() → no active sessions
+///   2. WaitForPersistence() → all disk I/O flushed
+///   3. h.mu.Lock() → exclusive access at Go level
+///
+/// The function copies: bbn, ht, ln, meta (the core data files).
+/// It skips: .lock (OS flock, not data) and wal (transient).
+///
+/// # Parameters
+/// - `handle`: NOMT handle (must be valid/open)
+/// - `src_path`: null-terminated C string for the source database directory
+/// - `dest_path`: null-terminated C string for the destination directory (must exist)
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn nomt_checkpoint(
+    handle: *const NomtHandle,
+    src_path: *const c_char,
+    dest_path: *const c_char,
+) -> c_int {
+    if handle.is_null() || src_path.is_null() || dest_path.is_null() {
+        eprintln!("[nomt_ffi] nomt_checkpoint: null argument");
+        return -1;
+    }
+
+    let src_str = match unsafe { CStr::from_ptr(src_path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint: invalid src path: {}", e);
+            return -1;
+        }
+    };
+
+    let dest_str = match unsafe { CStr::from_ptr(dest_path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint: invalid dest path: {}", e);
+            return -1;
+        }
+    };
+
+    let src = Path::new(src_str);
+    let dest = Path::new(dest_str);
+
+    // Create destination directory if it doesn't exist
+    if let Err(e) = fs::create_dir_all(dest) {
+        eprintln!("[nomt_ffi] nomt_checkpoint: failed to create dest dir {:?}: {}", dest, e);
+        return -1;
+    }
+
+    // Core NOMT data files to copy (skip .lock and wal)
+    let data_files = ["bbn", "ht", "ln", "meta"];
+
+    for filename in &data_files {
+        let src_file = src.join(filename);
+        let dest_file = dest.join(filename);
+
+        if !src_file.exists() {
+            // File may not exist for fresh/empty databases — skip silently
+            continue;
+        }
+
+        if let Err(e) = fs::copy(&src_file, &dest_file) {
+            eprintln!(
+                "[nomt_ffi] nomt_checkpoint: failed to copy {:?} -> {:?}: {}",
+                src_file, dest_file, e
+            );
+            return -1;
+        }
+    }
+
+    0
 }
