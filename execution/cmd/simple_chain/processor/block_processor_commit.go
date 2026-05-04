@@ -329,6 +329,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			defer wg.Done()
 			start := time.Now()
 			var err error
+			bp.chainState.GetStakeStateDB().SetTrieCommitBlock(blockNumber)
 			stakePipelineResult, err = bp.chainState.GetStakeStateDB().CommitPipeline()
 			resultsChan <- taskResult{name: "StakePipeline", err: err, duration: time.Since(start)}
 		}()

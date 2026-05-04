@@ -76,6 +76,14 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		if err != nil {
 			return nil, err
 		}
+
+		if stakeDB := chainStateNew.GetStakeStateDB(); stakeDB != nil && v.chainState.GetConfig().EnableHistoricalState {
+			changelogDB := v.chainState.GetStakeChangelogDB()
+			if changelogDB != nil {
+				stakeDB.SetHistoricalContext(changelogDB, header.BlockNumber())
+			}
+		}
+
 		validatorHandler, err := tx_processor.GetValidatorHandler()
 		if err != nil {
 			return nil, err

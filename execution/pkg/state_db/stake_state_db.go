@@ -16,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
@@ -39,6 +40,9 @@ type StakeStateDB struct {
 	// IntermediateRoot(true) waits on this channel before proceeding,
 	// ensuring the trie reference reflects the previous block's committed state.
 	persistReady chan struct{}
+	
+	changelogDB           *state_changelog.StateChangelogDB
+	historicalBlockNumber uint64
 }
 
 // NewStakeStateDB tạo một instance mới của StakeStateDB.
@@ -62,9 +66,23 @@ func NewStakeStateDB(
 	}
 }
 
+// SetHistoricalContext configures the DB to query historical state from ChangelogDB
+func (db *StakeStateDB) SetHistoricalContext(changelogDB *state_changelog.StateChangelogDB, blockNumber uint64) {
+	db.changelogDB = changelogDB
+	db.historicalBlockNumber = blockNumber
+}
+
 // Trie returns the underlying StateTrie instance.
 func (db *StakeStateDB) Trie() p_trie.StateTrie {
 	return db.trie
+}
+
+// SetTrieCommitBlock sets the current commit block number on the underlying trie
+// for StateChangelog tracking.
+func (db *StakeStateDB) SetTrieCommitBlock(blockNumber uint64) {
+	if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+		nomtTrie.SetCurrentCommitBlock(blockNumber)
+	}
 }
 
 func (db *StakeStateDB) getOrCreateValidatorState(
@@ -81,7 +99,18 @@ func (db *StakeStateDB) getOrCreateValidatorState(
 	if trieToUse == nil {
 		return nil, errors.New("stake state DB has a nil trie")
 	}
-	bData, err := trieToUse.Get(address.Bytes())
+	var bData []byte
+	var err error
+
+	if db.historicalBlockNumber > 0 && db.changelogDB != nil {
+		bData, err = db.changelogDB.GetStateAt(address.Bytes(), db.historicalBlockNumber)
+		if err != nil {
+			bData, err = trieToUse.Get(address.Bytes())
+		}
+	} else {
+		bData, err = trieToUse.Get(address.Bytes())
+	}
+	
 	if err != nil {
 		return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 	}
@@ -359,8 +388,18 @@ func (db *StakeStateDB) GetValidator(address common.Address) (state.ValidatorSta
 	if trieToUse == nil {
 		return nil, errors.New("stake state DB has a nil trie")
 	}
-	bData, err := trieToUse.Get(address.Bytes())
 
+	var bData []byte
+	var err error
+
+	if db.historicalBlockNumber > 0 && db.changelogDB != nil {
+		bData, err = db.changelogDB.GetStateAt(address.Bytes(), db.historicalBlockNumber)
+		if err != nil {
+			bData, err = trieToUse.Get(address.Bytes())
+		}
+	} else {
+		bData, err = trieToUse.Get(address.Bytes())
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
