@@ -358,14 +358,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	}
 
 	// Send job to commitWorker.
-	select {
-	case bp.commitChannel <- job:
-		// Sent successfully
-	case <-time.After(5 * time.Second):
-		logger.Error("❌ [CRITICAL] commitChannel full for more than 5 seconds! Block #%d could not be sent. Check commitWorker.",
-			currentBlockNumber)
-		bp.commitChannel <- job // Fallback: blocking send
-	}
+	// Block until commitChannel has space (natural backpressure)
+	bp.commitChannel <- job
 
 	// FORK-SAFETY: Wait for commit to complete before returning.
 	// This ensures the trie is fully updated before the next block reads it.

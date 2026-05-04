@@ -352,6 +352,7 @@ impl CommitProcessor {
                 }
             }
 
+            // Fix 3 Revert: Use direct indefinite block (no 120s timeout) to enforce backpressure
             match receiver.recv().await {
                 Some(mut subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;

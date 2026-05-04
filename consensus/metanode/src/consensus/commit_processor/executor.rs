@@ -144,6 +144,7 @@ pub async fn dispatch_commit(
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
 
+                    // Fix 4 Revert: Use direct indefinite wait (no 90s timeout) to enforce backpressure
                     let geis_consumed = match response_rx.await {
                         Ok(c) => c,
                         Err(_) => {
