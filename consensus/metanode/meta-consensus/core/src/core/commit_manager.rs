@@ -63,12 +63,6 @@ impl Core {
                     new_commit_index
                 );
 
-                // FORK-SAFETY: Confirm network participation after processing CertifiedCommits.
-                // This unlocks the local committer by proving the DAG is populated enough
-                // for correct `calculate_commit_timestamp()` median calculation.
-                if !subdags.is_empty() {
-                    self.coordination_hub.confirm_network_commit();
-                }
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);

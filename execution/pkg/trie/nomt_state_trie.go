@@ -17,8 +17,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 )
 
@@ -794,22 +792,12 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 	return newSession
 }
 
-// PreWarm actively pre-fetches Merkle authentication pages from the backend
-// asynchronously, completely eliminating synchronous disk stalls during commit.
 func (n *NomtStateTrie) PreWarm(keys [][]byte) {
-	// Sub nodes never commit to the trie, so they don't need Merkle authentication pages.
-	// Bypassing PreWarm prevents session leaks on Sub nodes.
-	if config.ConfigApp == nil || config.ConfigApp.ServiceType != p_common.ServiceTypeMaster {
-		return
-	}
-	session := n.getOrCreateSession()
-	if session == nil {
-		return
-	}
-	for _, key := range keys {
-		keyPath := addressToKeyPathWithNamespace(n.namespace, key)
-		session.WarmUp(keyPath)
-	}
+	// PreWarm is a no-op for NomtStateTrie.
+	// We read directly from the handle in parallel during BatchUpdate,
+	// which sufficiently warms up the page cache.
+	// Bypassing PreWarm prevents session leaks on copies created for PreloadAccounts,
+	// which caused deadlocks during CloseForSnapshot().
 }
 
 // Hash returns the current root hash.

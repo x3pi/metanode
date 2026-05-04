@@ -51,7 +51,7 @@ The script supports overriding the starting step and the deployment topology mod
 
 **3. Run specific steps only (e.g. Cluster Deploy, Xapian V0, and Xapian V2):**
 ```bash
-./auto_test.sh --steps "2,4,6" --mode multi
+./auto_test.sh   "2,4,6" --mode multi
 ```
 
 ## Pipeline Steps Explained

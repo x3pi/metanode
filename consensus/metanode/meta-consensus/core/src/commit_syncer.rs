@@ -151,13 +151,6 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// After DAG wipe, the CommitConsumerMonitor might not be properly aligned,
     /// causing false genesis detection. Waiting allows quorum data to arrive.
     bootstrap_start_time: tokio::time::Instant,
-
-    // --- hysteresis for CatchingUp→Healthy transition ---
-    /// Tracks the first time lag reaches 0 while in CatchingUp phase.
-    /// The node only transitions to Healthy after lag has been 0 continuously
-    /// for at least HEALTHY_HYSTERESIS_MS. This prevents rapid CatchingUp↔Healthy
-    /// oscillation which can cause the local committer to fire on a sparse DAG.
-    healthy_stable_since: Option<tokio::time::Instant>,
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -210,7 +203,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
             bootstrap_start_time: tokio::time::Instant::now(),
-            healthy_stable_since: None,
         }
     }
 
@@ -376,42 +368,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
 
         let next_phase = if lag > 50_000 {
-            self.healthy_stable_since = None; // Reset hysteresis
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
         } else if is_behind {
-            self.healthy_stable_since = None; // Reset hysteresis — still behind
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
-        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp {
-            // HYSTERESIS: Don't transition to Healthy immediately when lag first hits 0.
-            // Wait for lag to remain at 0 for at least 500ms to prevent rapid
-            // CatchingUp↔Healthy oscillation that can unlock the local committer
-            // on a sparse DAG → wrong timestamps → fork.
-            const HEALTHY_HYSTERESIS_MS: u64 = 500;
-            match self.healthy_stable_since {
-                None => {
-                    self.healthy_stable_since = Some(tokio::time::Instant::now());
-                    tracing::debug!(
-                        "⏳ [HYSTERESIS] Lag reached 0. Waiting {}ms before transitioning to Healthy.",
-                        HEALTHY_HYSTERESIS_MS
-                    );
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp // Stay in CatchingUp
-                }
-                Some(since) if since.elapsed() < Duration::from_millis(HEALTHY_HYSTERESIS_MS) => {
-                    tracing::debug!(
-                        "⏳ [HYSTERESIS] Lag stable at 0 for {:.0}ms/{:.0}ms. Still waiting.",
-                        since.elapsed().as_millis(), HEALTHY_HYSTERESIS_MS
-                    );
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp // Stay in CatchingUp
-                }
-                Some(since) => {
-                    tracing::info!(
-                        "✅ [HYSTERESIS] Lag stable at 0 for {:.0}ms (≥{}ms). Transitioning to Healthy.",
-                        since.elapsed().as_millis(), HEALTHY_HYSTERESIS_MS
-                    );
-                    self.healthy_stable_since = None; // Reset for next cycle
-                    crate::coordination_hub::NodeConsensusPhase::Healthy
-                }
-            }
         } else {
             crate::coordination_hub::NodeConsensusPhase::Healthy
         };
