@@ -231,8 +231,8 @@ impl StateTransitionManager {
             });
         }
 
-        // Check debounce
-        {
+        // Check debounce (Skip debounce for EpochChange as it must be executed if consensus agreed)
+        if !matches!(transition_type, TransitionType::EpochChange { .. }) {
             let last_time = self.last_transition_time.lock().await;
             if let Some(last) = *last_time {
                 let elapsed = last.elapsed();
