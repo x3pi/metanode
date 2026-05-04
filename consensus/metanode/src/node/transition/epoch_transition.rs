@@ -34,7 +34,7 @@ use super::demotion::determine_role_and_check_transition;
 use super::mode_transition::transition_mode_only;
 use super::tx_recovery::recover_epoch_pending_transactions;
 use super::verification::{
-    verify_epoch_consistency, wait_for_commit_processor_completion, wait_for_consensus_ready,
+    verify_epoch_consistency, wait_for_consensus_ready,
 };
 
 pub async fn transition_to_epoch_from_system_tx(
