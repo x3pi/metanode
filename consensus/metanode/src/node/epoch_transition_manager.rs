@@ -307,11 +307,15 @@ impl StateTransitionManager {
             *last_time = Some(Instant::now());
         }
 
-        // Clear transition start time
-        {
+        let duration_str = {
             let mut started = self.transition_started_at.lock().await;
+            let dur_str = match *started {
+                Some(start_time) => format!("{:?}", start_time.elapsed()),
+                None => "unknown".to_string(),
+            };
             *started = None;
-        }
+            dur_str
+        };
 
         let source = {
             let mut current = self.current_transition.lock().await;
@@ -323,8 +327,8 @@ impl StateTransitionManager {
         self.transition_in_progress.store(false, Ordering::SeqCst);
 
         info!(
-            "✅ [STATE MANAGER] Completed {}, source={:?}",
-            description, source
+            "✅ [STATE MANAGER] Completed {}, source={:?} (took {})",
+            description, source, duration_str
         );
     }
 
