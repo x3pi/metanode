@@ -127,6 +127,27 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 		// ═══════════════════════════════════════════════════════════════
+		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
+		// when there are 0 user transactions. Without this, EndOfEpoch
+		// system txs attached to empty commits are silently dropped,
+		// making them invisible to eth_getSystemTransactionsByBlockNumber.
+		// ═══════════════════════════════════════════════════════════════
+		fastPathSysTxs := epochData.GetSystemTransactions()
+		if len(fastPathSysTxs) > 0 {
+			// Use the current block number from the last persisted block
+			sysTxBlockNum := *currentBlockNumber
+			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
+				sysTxBlockNum = lastBlock.Header().BlockNumber()
+			}
+			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
+			if err != nil {
+				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
+			} else {
+				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
+			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════
 		// LAZY REFRESH: DISABLED (FORK-SAFETY FIX 2026-04-29)
 		//
 		// This block imported P2P-synced blocks from LevelDB into the
