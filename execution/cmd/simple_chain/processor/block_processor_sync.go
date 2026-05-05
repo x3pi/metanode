@@ -307,13 +307,16 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-		
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
 
-
-		logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
-			oldExpected, globalExecIndex, gapSize)
+		if len(epochData.Transactions) > 0 {
+			logger.Error("🚨 [CRITICAL-DIVERGENCE] GEI jumped from %d to %d (gap=%d). We missed blocks with transactions! This will cause a state root mismatch. Immediate debug required. Block epoch=%d", 
+				oldExpected, globalExecIndex, gapSize, epochNum)
+		} else {
+			logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
+				oldExpected, globalExecIndex, gapSize)
+		}
 			
 		// Fall through to process the block sequentially
 	}
@@ -386,7 +389,7 @@ PROCESS_BLOCK:
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
-	if len(epochData.Transactions) == 0 && !isEpochBoundary {
+	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
@@ -495,7 +498,7 @@ PROCESS_BLOCK:
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 && !isEpochBoundary {
+	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
