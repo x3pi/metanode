@@ -1918,6 +1918,8 @@ impl ConsensusNode {
 
         // Spawn background recycler is done in setup_epoch_management where tx_client is accessible
 
+        let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc().clone();
+
         let failed_processor = is_terminally_failed.clone();
         tokio::spawn(async move {
             if let Err(e) = commit_processor.run().await {
@@ -1973,24 +1975,77 @@ impl ConsensusNode {
         // If we fail (e.g., due to Go's NOMT amnesia and peer failures), we 
         // DO NOT panic. We simply log a warning, set is_in_committee = false,
         // and gracefully degrade to a SyncOnly node.
+        //
+        // CRITICAL FIX (2026-05-05): Use the existing executor_client_for_proc
+        // instead of creating a new ExecutorClient with enabled=false.
+        // The old code created `ExecutorClient::new(false, ...)` which made
+        // ALL RPC calls return "Executor client is not enabled", causing
+        // every snapshot-restored node to degrade to SyncOnly → LIVENESS DEAD.
         // ═══════════════════════════════════════════════════════════════════
         if storage.current_epoch > 0 {
             tracing::info!("🔄 [STARTUP] Resolving committee for post-sync epoch {}...", storage.current_epoch);
-            let temp_client = crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None);
             
-            let validators_opt = match temp_client.get_epoch_boundary_data(storage.current_epoch).await {
-                Ok((_, _, _, v, _, _)) => Some(v),
-                Err(e) => {
-                    tracing::warn!("⚠️ [STARTUP] Go failed to provide committee for epoch {} post-sync: {}. Falling back to peers...", storage.current_epoch, e);
-                    match temp_client.get_safe_epoch_boundary_data_with_force(storage.current_epoch, &config.peer_rpc_addresses, true).await {
-                        Ok((_, _, _, v, _, _)) => Some(v),
-                        Err(e2) => {
-                            tracing::error!("🚨 [STARTUP] Cannot determine committee for epoch {}. Go error: {}, Peer error: {}. Gracefully degrading to SyncOnly mode.", storage.current_epoch, e, e2);
-                            None
-                        }
+            // RETRY LOGIC: Attempt committee resolution with retries before degrading.
+            // Transient Go RPC failures should not permanently knock a validator out.
+            let max_committee_retries = 3u32;
+            let mut validators_opt = None;
+            
+            for attempt in 1..=max_committee_retries {
+                match executor_client_for_proc.get_epoch_boundary_data(storage.current_epoch).await {
+                    Ok((_, _, _, v, _, _)) if !v.is_empty() => {
+                        tracing::info!(
+                            "✅ [STARTUP] Got {} validators from Go for epoch {} (attempt {})",
+                            v.len(), storage.current_epoch, attempt
+                        );
+                        validators_opt = Some(v);
+                        break;
+                    }
+                    Ok((_, _, _, v, _, _)) => {
+                        tracing::warn!(
+                            "⚠️ [STARTUP] Go returned {} validators for epoch {} (attempt {}/{}). Retrying...",
+                            v.len(), storage.current_epoch, attempt, max_committee_retries
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [STARTUP] Go failed to provide committee for epoch {} (attempt {}/{}): {}",
+                            storage.current_epoch, attempt, max_committee_retries, e
+                        );
                     }
                 }
-            };
+                
+                if attempt < max_committee_retries {
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+            
+            // Fallback to peers if Go failed after retries
+            if validators_opt.is_none() {
+                tracing::warn!("⚠️ [STARTUP] Go failed after {} retries. Falling back to peers...", max_committee_retries);
+                match executor_client_for_proc.get_safe_epoch_boundary_data_with_force(
+                    storage.current_epoch, &config.peer_rpc_addresses, true
+                ).await {
+                    Ok((_, _, _, v, _, _)) if !v.is_empty() => {
+                        tracing::info!(
+                            "✅ [STARTUP] Got {} validators from peers for epoch {}",
+                            v.len(), storage.current_epoch
+                        );
+                        validators_opt = Some(v);
+                    }
+                    Ok((_, _, _, v, _, _)) => {
+                        tracing::error!(
+                            "🚨 [STARTUP] Peers returned {} validators for epoch {}. Gracefully degrading to SyncOnly mode.",
+                            v.len(), storage.current_epoch
+                        );
+                    }
+                    Err(e2) => {
+                        tracing::error!(
+                            "🚨 [STARTUP] Cannot determine committee for epoch {}. Peer error: {}. Gracefully degrading to SyncOnly mode.",
+                            storage.current_epoch, e2
+                        );
+                    }
+                }
+            }
             
             if let Some(validators) = validators_opt {
                 if let Ok((committee, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
@@ -2019,7 +2074,7 @@ impl ConsensusNode {
                             tracing::info!("ℹ️ [IDENTITY] Not in committee for epoch {}", storage.current_epoch);
                         }
                         
-                        commit_processor.get_epoch_eth_addresses_arc().write().await.insert(storage.current_epoch, new_eth_addrs);
+                        epoch_eth_addresses_arc.write().await.insert(storage.current_epoch, new_eth_addrs);
                     } else {
                         tracing::error!("🚨 [STARTUP] Committee for epoch {} has 0 authorities! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
                         storage.is_in_committee = false;
