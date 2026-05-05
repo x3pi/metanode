@@ -145,11 +145,13 @@ impl ConsensusCoordinationHub {
     pub fn set_phase(&self, new_phase: NodeConsensusPhase) {
         let mut w = self.phase.write();
         if *w != new_phase {
+            let old_phase = *w;
             tracing::info!(
                 "🔄 [HUB] Phase transition: {:?} -> {:?}",
-                *w,
+                old_phase,
                 new_phase
             );
+            // Phase changed.
             *w = new_phase;
         }
     }
@@ -157,6 +159,11 @@ impl ConsensusCoordinationHub {
     /// Convenience check for whether we are in a normal operational mode.
     pub fn is_healthy(&self) -> bool {
         matches!(*self.phase.read(), NodeConsensusPhase::Healthy)
+    }
+
+    /// Returns true if the node is Healthy.
+    pub fn is_healthy_stable(&self) -> bool {
+        self.is_healthy()
     }
 
     /// Convenience check for whether the node is explicitly catching up.
@@ -202,8 +209,8 @@ impl Default for ConsensusCoordinationHub {
 
 #[cfg(test)]
 impl ConsensusCoordinationHub {
-    /// Creates a hub starting in Healthy phase, for use in tests where
-    /// proposals should work immediately without phase transitions.
+    /// Creates a hub starting in Healthy phase with network already confirmed,
+    /// for use in tests where the local committer should work immediately.
     pub fn new_for_testing() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
@@ -211,5 +218,10 @@ impl ConsensusCoordinationHub {
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    /// Alias for `new_for_testing()` — both have network pre-confirmed.
+    pub fn new_for_testing_stable() -> Self {
+        Self::new_for_testing()
     }
 }

@@ -30,6 +30,11 @@ type GEIAuthority struct {
 	// Used for recovery: Rust asks "what commit_index did you last handle?"
 	lastHandledCommitIndex atomic.Uint32
 
+	// lastHandledCommitEpoch is the epoch when lastHandledCommitIndex was recorded.
+	// CRITICAL FOR FORK PREVENTION: On restart, if current_epoch != lastHandledCommitEpoch,
+	// the commit_index belongs to a previous epoch and MUST be treated as 0.
+	lastHandledCommitEpoch atomic.Uint64
+
 	// enabled controls whether Go-authoritative mode is active.
 	// When false, falls back to Rust-computed GEI (legacy mode).
 	enabled atomic.Bool
@@ -52,7 +57,9 @@ func GetGEIAuthority() *GEIAuthority {
 		geiAuthority.lastAssignedGEI.Store(lastGEI)
 		lastCommit := storage.GetLastHandledCommitIndex()
 		geiAuthority.lastHandledCommitIndex.Store(lastCommit)
-		logger.Info("🔑 [GEI-AUTHORITY] Initialized: lastGEI=%d, lastCommit=%d, mode=AUTHORITATIVE", lastGEI, lastCommit)
+		lastEpoch := storage.GetLastHandledCommitEpoch()
+		geiAuthority.lastHandledCommitEpoch.Store(lastEpoch)
+		logger.Info("🔑 [GEI-AUTHORITY] Initialized: lastGEI=%d, lastCommit=%d, lastCommitEpoch=%d, mode=AUTHORITATIVE", lastGEI, lastCommit, lastEpoch)
 	})
 	return geiAuthority
 }
@@ -122,18 +129,33 @@ func (ga *GEIAuthority) AdvanceGEITo(target uint64) {
 	}
 }
 
-// RecordCommitIndex records the last handled Rust commit_index.
+// RecordCommitIndex records the last handled Rust commit_index and its epoch.
 // Called after successfully processing a commit from Rust.
 func (ga *GEIAuthority) RecordCommitIndex(commitIndex uint32) {
 	ga.lastHandledCommitIndex.Store(commitIndex)
 }
 
-// ResetCommitIndex forces the commit index back to 0.
+// RecordCommitIndexWithEpoch records commit index paired with its epoch.
+// FORK-SAFETY: Epoch pairing ensures restart validation can detect cross-epoch staleness.
+func (ga *GEIAuthority) RecordCommitIndexWithEpoch(commitIndex uint32, epoch uint64) {
+	ga.lastHandledCommitIndex.Store(commitIndex)
+	ga.lastHandledCommitEpoch.Store(epoch)
+}
+
+// ResetCommitIndex forces the commit index back to 0 for a new epoch.
 // Used exclusively during epoch transitions to prevent deduplication
 // from incorrectly skipping commits in the new epoch.
 func (ga *GEIAuthority) ResetCommitIndex() {
 	ga.lastHandledCommitIndex.Store(0)
 	logger.Info("🔑 [GEI-AUTHORITY] Reset lastHandledCommitIndex to 0 for new epoch")
+}
+
+// ResetCommitIndexForEpoch resets commit index and records the new epoch.
+// FORK-SAFETY: This ensures the persisted epoch is always in sync with the commit index.
+func (ga *GEIAuthority) ResetCommitIndexForEpoch(newEpoch uint64) {
+	ga.lastHandledCommitIndex.Store(0)
+	ga.lastHandledCommitEpoch.Store(newEpoch)
+	logger.Info("🔑 [GEI-AUTHORITY] Reset lastHandledCommitIndex to 0 for epoch %d", newEpoch)
 }
 
 // GetLastAssignedGEI returns the last GEI that was assigned.
@@ -145,6 +167,34 @@ func (ga *GEIAuthority) GetLastAssignedGEI() uint64 {
 // Used for recovery: Rust asks Go "what's the last commit you handled?"
 func (ga *GEIAuthority) GetLastHandledCommitIndex() uint32 {
 	return ga.lastHandledCommitIndex.Load()
+}
+
+// GetLastHandledCommitEpoch returns the epoch when the last commit_index was recorded.
+func (ga *GEIAuthority) GetLastHandledCommitEpoch() uint64 {
+	return ga.lastHandledCommitEpoch.Load()
+}
+
+// GetCheckpointState returns (lastGEI, lastCommitIndex, lastCommitEpoch) as an atomic unit.
+// FORK-SAFETY: These three values must be read together for deterministic restart.
+func (ga *GEIAuthority) GetCheckpointState() (uint64, uint32, uint64) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	return ga.lastAssignedGEI.Load(), ga.lastHandledCommitIndex.Load(), ga.lastHandledCommitEpoch.Load()
+}
+
+// ReinitializeFromStorage re-reads all values from persistent storage.
+// FORK-SAFETY: Call this after ForceSetLastGlobalExecIndex (e.g., snapshot verification)
+// to ensure the singleton reflects the corrected values.
+func (ga *GEIAuthority) ReinitializeFromStorage() {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	lastGEI := storage.GetLastGlobalExecIndex()
+	ga.lastAssignedGEI.Store(lastGEI)
+	lastCommit := storage.GetLastHandledCommitIndex()
+	ga.lastHandledCommitIndex.Store(lastCommit)
+	lastEpoch := storage.GetLastHandledCommitEpoch()
+	ga.lastHandledCommitEpoch.Store(lastEpoch)
+	logger.Info("🔑 [GEI-AUTHORITY] Reinitialized from storage: lastGEI=%d, lastCommit=%d, lastCommitEpoch=%d", lastGEI, lastCommit, lastEpoch)
 }
 
 // PersistState persists the current GEI and commit_index to storage.

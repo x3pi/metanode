@@ -265,6 +265,49 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		bl.Header().SetCommitIndex(uint64(commitIndex))
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK GUARD: ParentHash Chain Continuity Verification
+	//
+	// This is the LAST LINE OF DEFENSE against ALL fork causes:
+	// - Consensus divergence (wrong leader/timestamp from sparse DAG)
+	// - Execution race condition (stale trie state → wrong stateRoot)
+	// - NomtStateTrie corruption (concurrent read/write)
+	//
+	// Every production blockchain verifies parentHash before committing.
+	// If this check fails, the block is REJECTED and the node halts to
+	// prevent fork propagation to the rest of the network.
+	//
+	// Cost: 1 hash comparison per block (zero performance impact).
+	// ═══════════════════════════════════════════════════════════════════════════
+	if isStateChanging && globalExecIndex > 0 && currentBlockNumber > 1 {
+		lastConfirmedForCheck := bp.GetLastBlock()
+		if lastConfirmedForCheck != nil {
+			expectedParentHash := lastConfirmedForCheck.Header().Hash()
+			actualParentHash := bl.Header().LastBlockHash()
+			if actualParentHash != expectedParentHash {
+				logger.Error(
+					"🛑 [FORK-GUARD] CHAIN BREAK DETECTED at block #%d! "+
+						"parentHash=%s ≠ lastBlock hash=%s. "+
+						"This node has DIVERGED from the canonical chain. "+
+						"Halting to prevent fork propagation. "+
+						"GEI=%d, leader=%s, timestamp=%d, stateRoot=%s",
+					currentBlockNumber,
+					actualParentHash.Hex(),
+					expectedParentHash.Hex(),
+					globalExecIndex,
+					blockLeaderAddress.Hex(),
+					timestampSec,
+					processResults.Root.Hex(),
+				)
+				logger.Fatal(
+					"🛑 [FORK-GUARD] FATAL: ParentHash chain integrity violation at block #%d. "+
+						"Node must be restarted with clean state to rejoin consensus.",
+					currentBlockNumber,
+				)
+			}
+		}
+	}
+
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
 	headerCopy := bl.Header()

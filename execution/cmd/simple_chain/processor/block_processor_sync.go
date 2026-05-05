@@ -14,6 +14,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -59,12 +60,14 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
 	// ═════════════════════════════════════════════════════════════════════
 	if epochNum > currentEpoch && lastBlock != nil {
-		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex.", currentEpoch, epochNum)
+		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum)
 		geiAuth := GetGEIAuthority()
-		geiAuth.ResetCommitIndex()
-		storage.UpdateLastHandledCommitIndex(0)
+		geiAuth.ResetCommitIndexForEpoch(epochNum)
+		storage.ForceSetLastHandledCommitIndex(0)
+		storage.UpdateLastHandledCommitEpoch(epochNum)
 		if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
 			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
+			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(epochNum))
 		}
 	}
 
@@ -96,7 +99,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			persistedGEI := storage.GetLastGlobalExecIndex()
 			if gapSize <= 16 && actualLastBlockDB == 0 {
 				*nextExpectedGlobalExecIndex = globalExecIndex
-				logger.Info("📋 [FAST-EMPTY-GAP-SKIP] Fresh start gap skip: nextExpected → %d (gap=%d)", globalExecIndex, gapSize)
+				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-SKIP] GEI Jump (Fresh Start): nextExpected → %d (gap=%d)", globalExecIndex, gapSize)
 			} else if persistedGEI > 0 && persistedGEI >= *nextExpectedGlobalExecIndex {
 				// Sync GEI from persisted state (GEI tracks ALL commits including empty)
 				*nextExpectedGlobalExecIndex = persistedGEI + 1
@@ -111,7 +114,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				// SNAPSHOT-RESTORE GAP BRIDGE (same as full-path, see line ~420)
 				*nextExpectedGlobalExecIndex = globalExecIndex
 				*currentBlockNumber = actualLastBlockDB
-				logger.Warn("🔗 [FAST-EMPTY GAP BRIDGE] Snapshot restore gap: nextExpected → %d (gap=%d, persistedGEI=%d, DB=%d)",
+				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-BRIDGE] GEI Jump (Snapshot Restore): nextExpected → %d (gap=%d, persistedGEI=%d, DB=%d)",
 					globalExecIndex, gapSize, persistedGEI, actualLastBlockDB)
 			} else {
 				pendingBlocks[globalExecIndex] = epochData
@@ -122,6 +125,27 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// Sequential empty commit — update GEI and advance
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
+		// ═══════════════════════════════════════════════════════════════
+		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
+		// when there are 0 user transactions. Without this, EndOfEpoch
+		// system txs attached to empty commits are silently dropped,
+		// making them invisible to eth_getSystemTransactionsByBlockNumber.
+		// ═══════════════════════════════════════════════════════════════
+		fastPathSysTxs := epochData.GetSystemTransactions()
+		if len(fastPathSysTxs) > 0 {
+			// Use the current block number from the last persisted block
+			sysTxBlockNum := *currentBlockNumber
+			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
+				sysTxBlockNum = lastBlock.Header().BlockNumber()
+			}
+			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
+			if err != nil {
+				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
+			} else {
+				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
+			}
+		}
 
 		// ═══════════════════════════════════════════════════════════════
 		// LAZY REFRESH: DISABLED (FORK-SAFETY FIX 2026-04-29)
@@ -271,7 +295,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 			// This duplicate has transactions - save for potential empty block replacement
 			// Check if we just processed an empty block with this index (race condition in epoch transition)
 			lastBlock := bp.GetLastBlock()
-			if lastBlock != nil && lastBlock.Header().BlockNumber() == globalExecIndex && len(lastBlock.Transactions()) == 0 {
+			if lastBlock != nil && lastBlock.Header().GlobalExecIndex() == globalExecIndex && len(lastBlock.Transactions()) == 0 {
 				logger.Warn("🔄 [EPOCH-RACE-FIX] Received duplicate block global_exec_index=%d with %d txs AFTER processing empty block! Replacing empty block.",
 					globalExecIndex, duplicateTxCount)
 				// Store for replacement - will be processed when we need to commit
@@ -293,22 +317,28 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		return
 	}
 
+
+
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
-	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
 	// means Rust intentionally fast-skipped empty commits during catch-up.
 	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
 
-		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
-			oldExpected, globalExecIndex, gapSize)
-
+		if len(epochData.Transactions) > 0 {
+			logger.Error("🚨 [CRITICAL-DIVERGENCE] GEI jumped from %d to %d (gap=%d). We missed blocks with transactions! This will cause a state root mismatch. Immediate debug required. Block epoch=%d", 
+				oldExpected, globalExecIndex, gapSize, epochNum)
+		} else {
+			logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
+				oldExpected, globalExecIndex, gapSize)
+		}
+			
 		// Fall through to process the block sequentially
 	}
 
@@ -380,7 +410,7 @@ PROCESS_BLOCK:
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
-	if len(epochData.Transactions) == 0 && !isEpochBoundary {
+	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 		// Update GlobalExecIndex tracking (persistent)
@@ -464,7 +494,7 @@ PROCESS_BLOCK:
 				}
 			}
 			if isZero {
-				logger.Debug("⏭️  [TX FLOW] Explicitly filtering 64-byte zero payload (SystemTransaction artifact) at txIdx=%d", txIdx)
+				logger.Info("📡 [TELEMETRY] SystemTransaction artifact detected and filtered. GEI=%d, Epoch=%d, TxIdx=%d", globalExecIndex, epochNum, txIdx)
 				continue
 			}
 		}
@@ -489,7 +519,7 @@ PROCESS_BLOCK:
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)
-	if len(allTransactions) == 0 && !isEpochBoundary {
+	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
@@ -538,7 +568,7 @@ PROCESS_BLOCK:
 		// CRITICAL FORK-SAFETY FIX: Rust sets block_number = 0 for empty commits.
 		// We MUST skip creating a Go block for them to prevent block inflation.
 		logger.Info("⏭️  [BLOCK-NUM] Skipping empty commit from Rust (GEI=%d, commitIndex=%d) - PREVENTING INFLATION", globalExecIndex, commitIndex)
-
+		
 		// Still update GEI counter so the processor advances past this commit
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
@@ -551,9 +581,10 @@ PROCESS_BLOCK:
 		}
 		return
 	}
-
+	
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
+
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
@@ -589,6 +620,7 @@ PROCESS_BLOCK:
 		}
 	}
 
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.
 	//
@@ -615,6 +647,7 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// FORK-SAFETY: Deduplication and sorting are now handled consistently by Rust in block_sending.rs
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// FORK-SAFETY FIX 2: Invalidate all in-memory state caches before executing.
 	//
@@ -627,6 +660,36 @@ PROCESS_BLOCK:
 	// This invalidation forces all reads to go through the committed trie.
 	// ═══════════════════════════════════════════════════════════════════════════
 	bp.chainState.InvalidateAllState()
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK-PREVENTION SAFETY NET (May 2026): Verify NOMT handle root matches
+	// the in-memory trie root BEFORE executing any transactions.
+	//
+	// This catches the case where STARTUP-SYNC's trie re-alignment failed
+	// or was incomplete. Without this check, a stale trie silently produces
+	// wrong AccountStatesRoot → different block hash → permanent fork.
+	//
+	// Cost: 1 NOMT FFI root query per block (negligible).
+	// ═══════════════════════════════════════════════════════════════════════════
+	if globalExecIndex > 0 && trie.GetStateBackend() == trie.BackendNOMT {
+		nomtRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+		trieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
+		if hasNomtRoot && nomtRoot != trieRoot {
+			logger.Error("🚨 [FORK-PREVENTION] NOMT handle root DIFFERS from trie root BEFORE processing block #%d! "+
+				"nomtRoot=%s, trieRoot=%s. Forcing trie re-alignment...",
+				*currentBlockNumber, nomtRoot.Hex()[:18]+"...", trieRoot.Hex()[:18]+"...")
+			lastBlock := bp.GetLastBlock()
+			if lastBlock != nil {
+				if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
+					logger.Error("❌ [FORK-PREVENTION] Failed to re-align trie: %v", err)
+				} else {
+					bp.chainState.InvalidateAllState()
+					logger.Info("✅ [FORK-PREVENTION] Trie re-aligned from NOMT handle. New trieRoot=%s",
+						bp.chainState.GetAccountStateDB().Trie().Hash().Hex()[:18]+"...")
+				}
+			}
+		}
+	}
 
 	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
 	processTxStart := time.Now()
@@ -693,7 +756,7 @@ PROCESS_BLOCK:
 		if err != nil {
 			logger.Error("❌ [SYSTEM-TX] Failed to save SystemTransactions for block #%d: %v", *currentBlockNumber, err)
 		} else {
-			logger.Info("💾 [SYSTEM-TX] Saved %d SystemTransactions for block #%d", len(sysTxs), *currentBlockNumber)
+			logger.Info("📡 [TELEMETRY] [SYSTEM-TX] Saved %d SystemTransactions for block #%d", len(sysTxs), *currentBlockNumber)
 		}
 	}
 

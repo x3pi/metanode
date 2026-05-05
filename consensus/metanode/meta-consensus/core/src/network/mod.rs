@@ -118,6 +118,13 @@ pub trait NetworkClient: Send + Sync + Sized + 'static {
         timeout: Duration,
     ) -> ConsensusResult<(Vec<Round>, Vec<Round>)>;
 
+    /// Gets the epoch status from a peer, including current epoch and first commit index.
+    async fn get_epoch_status(
+        &self,
+        peer: AuthorityIndex,
+        timeout: Duration,
+    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse>;
+
     /// Sends an epoch change proposal to a peer.
     #[allow(dead_code)]
     async fn send_epoch_change_proposal(
@@ -207,6 +214,12 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
         &self,
         peer: AuthorityIndex,
     ) -> ConsensusResult<(Vec<Round>, Vec<Round>)>;
+
+    /// Handles the request to get the epoch status from the peer.
+    async fn handle_get_epoch_status(
+        &self,
+        peer: AuthorityIndex,
+    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse>;
 
     /// Handles the epoch change proposal sent from the peer.
     async fn handle_send_epoch_change_proposal(

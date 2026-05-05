@@ -17,6 +17,7 @@ var (
 	LastGlobalExecIndexHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastGlobalExecIndexHashKey")))
 	LastExecutedCommitHashKey  common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastExecutedCommitHashKey")))
 	LastHandledCommitIndexHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastHandledCommitIndexHashKey")))
+	LastHandledCommitEpochHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastHandledCommitEpochHashKey")))
 )
 
 // StorageType sử dụng enum (iota) để định danh loại Storage

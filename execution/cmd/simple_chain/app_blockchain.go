@@ -150,6 +150,15 @@ func (app *App) initBlockchain() error {
 					// Now create ChainState with the CORRECTED header roots
 					app.chainState, _ = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
 
+					// FORK-SAFETY: Also align epoch in the recovery path
+					if app.startLastBlock.Header().Epoch() > 0 {
+						app.chainState.ForceAlignEpochFromBlockHeader(
+							app.startLastBlock.Header().Epoch(),
+							app.startLastBlock.Header().TimeStamp(),
+							app.startLastBlock.Header().BlockNumber(),
+						)
+					}
+
 					trie_database.CreateTrieDatabaseManager(app.storageManager.GetStorageDatabaseTrie(), app.chainState.GetAccountStateDB())
 					blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
 					goto SKIP_GENESIS
@@ -252,23 +261,50 @@ func (app *App) initBlockchain() error {
 			}
 		}
 
-		// ─── Initialize LastHandledCommitIndex ──────────
+		// ─── Initialize LastHandledCommitIndex (EPOCH-AWARE) ──────────
+		// FORK-SAFETY ROOT FIX: lastHandledCommitIndex is epoch-scoped.
+		// On restart, we MUST validate that the persisted commit_index belongs
+		// to the CURRENT epoch. If it belongs to a previous epoch, it's stale
+		// and must be reset to 0 — using it would cause Rust to skip all
+		// commits in the current epoch, leading to a fork.
 		headerCommitIndex := uint32(app.startLastBlock.Header().CommitIndex())
+		headerEpoch := app.startLastBlock.Header().Epoch()
+
 		var backupCommitIndex uint32 = 0
+		var backupCommitEpoch uint64 = 0
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
 			if commitIdxBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitIndexHashKey.Bytes()); err == nil && len(commitIdxBytes) > 0 {
 				if parsedIdx, err := utils.BytesToUint32(commitIdxBytes); err == nil {
 					backupCommitIndex = parsedIdx
 				}
 			}
+			if epochBytes, err := app.storageManager.GetStorageBackupDb().Get(storage.LastHandledCommitEpochHashKey.Bytes()); err == nil && len(epochBytes) > 0 {
+				if parsedEpoch, err := utils.BytesToUint64(epochBytes); err == nil {
+					backupCommitEpoch = parsedEpoch
+				}
+			}
 		}
 
-		targetCommitIndex := headerCommitIndex
-		if backupCommitIndex > headerCommitIndex {
-			targetCommitIndex = backupCommitIndex
-			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from BackupDb: %d (higher than header: %d). This prevents empty commit replays.", targetCommitIndex, headerCommitIndex)
+		// EPOCH VALIDATION: The commit_index is only valid if it belongs to the current epoch
+		targetCommitIndex := uint32(0)
+		if backupCommitEpoch == headerEpoch && backupCommitIndex > 0 {
+			// Backup is from the same epoch — safe to use
+			if backupCommitIndex > headerCommitIndex {
+				targetCommitIndex = backupCommitIndex
+				logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from BackupDb: %d (epoch=%d, higher than header: %d). This prevents empty commit replays.", targetCommitIndex, backupCommitEpoch, headerCommitIndex)
+			} else {
+				targetCommitIndex = headerCommitIndex
+				logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d (epoch=%d)", headerCommitIndex, headerEpoch)
+			}
+		} else if backupCommitEpoch > 0 && backupCommitEpoch != headerEpoch {
+			// STALE: Backup is from a DIFFERENT epoch — MUST reset to 0
+			logger.Warn("🚨 [STARTUP] EPOCH MISMATCH: BackupDb has lastHandledCommitIndex=%d from epoch=%d, but current epoch=%d. RESETTING to 0 to prevent cross-epoch fork!",
+				backupCommitIndex, backupCommitEpoch, headerEpoch)
+			targetCommitIndex = 0
 		} else if headerCommitIndex > 0 {
-			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d", headerCommitIndex)
+			// No epoch info in backup (legacy/first upgrade) — fall back to header
+			logger.Info("✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: %d (no epoch tracking in BackupDb)", headerCommitIndex)
+			targetCommitIndex = headerCommitIndex
 		} else {
 			logger.Info("ℹ️  [STARTUP] Defaulted LastHandledCommitIndex to 0 (not found in header)")
 		}
@@ -276,8 +312,11 @@ func (app *App) initBlockchain() error {
 		if targetCommitIndex > 0 {
 			storage.UpdateLastHandledCommitIndex(targetCommitIndex)
 		} else {
-			storage.UpdateLastHandledCommitIndex(0)
+			// Use ForceSet to allow reset to 0 (UpdateLastHandledCommitIndex has monotonic guard)
+			storage.ForceSetLastHandledCommitIndex(0)
 		}
+		// Always persist the current epoch for next restart
+		storage.UpdateLastHandledCommitEpoch(headerEpoch)
 
 		// ─── Startup State Sync Logging ────────────────────────────────
 		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s, stake_root=%s",
@@ -328,6 +367,20 @@ func (app *App) initBlockchain() error {
 		if err != nil {
 			return fmt.Errorf("failed NewChainState: %v", err)
 		}
+
+		// FORK-SAFETY ROOT FIX: After ChainState loads (including LoadEpochData),
+		// verify that the epoch matches the last block header. This prevents fork
+		// after snapshot restore where LoadEpochData() returns stale epoch data.
+		// Block headers contain authoritative epoch — the snapshot's blocks are the
+		// ground truth for what epoch the node should be in.
+		if app.startLastBlock != nil && app.startLastBlock.Header().Epoch() > 0 {
+			app.chainState.ForceAlignEpochFromBlockHeader(
+				app.startLastBlock.Header().Epoch(),
+				app.startLastBlock.Header().TimeStamp(),
+				app.startLastBlock.Header().BlockNumber(),
+			)
+		}
+
 		// Note: SetBackupPath is no longer needed - backupPath is set in constructor
 
 		// Initialize trie database manager
@@ -430,6 +483,12 @@ SKIP_GENESIS:
 
 				storage.ForceSetLastGlobalExecIndex(metadata.GlobalExecIndex)
 				storage.ForceSetLastBlockNumber(metadata.BlockNumber)
+				// ALSO align the commit index to avoid Rust skipping/re-running commits
+				storage.ForceSetLastHandledCommitIndex(uint32(metadata.LastHandledCommitIdx))
+
+				// NOTE: GEIAuthority singleton is not initialized yet at this point in startup.
+				// ForceSet calls above update the storage globals, which the singleton will
+				// read on its first initialization (sync.Once in GetGEIAuthority).
 
 				// Fix startLastBlock mapping
 				blkHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(metadata.BlockNumber)
@@ -474,10 +533,39 @@ SKIP_GENESIS:
 					}
 				}
 				if !found {
-					logger.Error("🛡️ [SNAPSHOT FIX] ⚠️ Could not find fallback block matching NOMT root %s! "+
-						"GEI may be inflated. Snapshot restore may produce forks.",
-						nomtRoot.Hex()[:18]+"...")
+					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! Could not find a block matching NOMT root %s. State is corrupted.", nomtRoot.Hex()[:18]+"...")
+					panic("FATAL: Snapshot restore failed. NOMT state corrupted.")
 				}
+			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// STRICT STARTUP VERIFICATION & ALIGNMENT
+		// Even if metadata.json wasn't used, the startLastBlock header is the
+		// absolute ground truth. If Go's BackupDb (GEI/CommitIndex) is out of sync
+		// with the last block header, we MUST align them before answering Rust.
+		// ═══════════════════════════════════════════════════════════════
+		if app.startLastBlock != nil {
+			headerGEI := app.startLastBlock.Header().GlobalExecIndex()
+			storageGEI := storage.GetLastGlobalExecIndex()
+			
+			if headerGEI != storageGEI {
+				logger.Error("🚨 [STARTUP] CRITICAL GEI MISMATCH! Header GEI=%d, Storage GEI=%d. Patching storage to match header.", 
+					headerGEI, storageGEI)
+				storage.ForceSetLastGlobalExecIndex(headerGEI)
+			} else {
+				logger.Info("✅ [STARTUP] GEI aligned: %d", headerGEI)
+			}
+
+			// We also need to align CommitIndex to prevent fork/skipping commits
+			headerCommit := app.startLastBlock.Header().CommitIndex()
+			storageCommit := storage.GetLastHandledCommitIndex()
+			if uint32(headerCommit) != storageCommit {
+				logger.Error("🚨 [STARTUP] CRITICAL COMMIT_INDEX MISMATCH! Header=%d, Storage=%d. Patching storage.",
+					headerCommit, storageCommit)
+				storage.ForceSetLastHandledCommitIndex(uint32(headerCommit))
+			} else {
+				logger.Info("✅ [STARTUP] CommitIndex aligned: %d", headerCommit)
 			}
 		}
 	}

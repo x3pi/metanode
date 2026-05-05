@@ -21,6 +21,7 @@ var (
 	lastGlobalExecIndex       uint64 // Maps Go block number → Rust consensus commit index
 	lastExecutedCommitHash    []byte // Rust DAG commit digest
 	lastHandledCommitIndex    uint32 // Rust consensus commit index
+	lastHandledCommitEpoch    uint64 // Epoch when lastHandledCommitIndex was recorded
 
 	// Callback invoked when a new block is committed (used by SnapshotManager)
 	blockCommitCallback BlockCommitCallback
@@ -159,6 +160,16 @@ func GetLastHandledCommitIndex() uint32 {
 
 func ForceSetLastHandledCommitIndex(index uint32) {
 	atomic.StoreUint32(&lastHandledCommitIndex, index)
+}
+
+// UpdateLastHandledCommitEpoch updates the epoch associated with lastHandledCommitIndex
+func UpdateLastHandledCommitEpoch(epoch uint64) {
+	atomic.StoreUint64(&lastHandledCommitEpoch, epoch)
+}
+
+// GetLastHandledCommitEpoch returns the epoch when lastHandledCommitIndex was last updated
+func GetLastHandledCommitEpoch() uint64 {
+	return atomic.LoadUint64(&lastHandledCommitEpoch)
 }
 
 func UpdateLastExecutedCommitHash(hash []byte) {

@@ -144,8 +144,83 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 	return blockMap
 }
 
+// decodeBCSSystemTransaction decodes a BCS-encoded SystemTransaction from Rust into a
+// human-readable map. BCS layout for SystemTransaction:
+//
+//	struct SystemTransaction { kind: SystemTransactionKind }
+//	enum SystemTransactionKind {
+//	  EndOfEpoch { new_epoch: u64, boundary_block: u64 },       // variant 0
+//	  EpochBoundary { epoch: u64, epoch_start_timestamp_ms: u64,
+//	                  boundary_block: u64, validators: Vec<...> }, // variant 1
+//	}
+//
+// BCS uses ULEB128 for enum variant index, little-endian for integers.
+func decodeBCSSystemTransaction(data []byte) map[string]interface{} {
+	if len(data) < 1 {
+		return map[string]interface{}{"raw": hexutil.Encode(data), "error": "empty data"}
+	}
+
+	// Read variant index (ULEB128 — for small values it's just 1 byte)
+	variant := data[0]
+	rest := data[1:]
+
+	readU64 := func(b []byte) (uint64, []byte) {
+		if len(b) < 8 {
+			return 0, b
+		}
+		v := uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+			uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+		return v, b[8:]
+	}
+
+	switch variant {
+	case 0: // EndOfEpoch
+		if len(rest) < 16 {
+			return map[string]interface{}{"type": "EndOfEpoch", "raw": hexutil.Encode(data), "error": "truncated"}
+		}
+		newEpoch, rest2 := readU64(rest)
+		boundaryBlock, _ := readU64(rest2)
+		return map[string]interface{}{
+			"type":           "EndOfEpoch",
+			"new_epoch":      newEpoch,
+			"boundary_block": boundaryBlock,
+		}
+	case 1: // EpochBoundary
+		if len(rest) < 24 {
+			return map[string]interface{}{"type": "EpochBoundary", "raw": hexutil.Encode(data), "error": "truncated"}
+		}
+		epoch, rest2 := readU64(rest)
+		epochStartTs, rest3 := readU64(rest2)
+		boundaryBlock, rest4 := readU64(rest3)
+		// Read validator count (ULEB128)
+		validatorCount := uint64(0)
+		if len(rest4) > 0 {
+			// Simple ULEB128 decode (handles up to 64-bit)
+			shift := uint(0)
+			for i := 0; i < len(rest4) && i < 10; i++ {
+				b := rest4[i]
+				validatorCount |= uint64(b&0x7f) << shift
+				if b&0x80 == 0 {
+					break
+				}
+				shift += 7
+			}
+		}
+		return map[string]interface{}{
+			"type":                     "EpochBoundary",
+			"epoch":                    epoch,
+			"epoch_start_timestamp_ms": epochStartTs,
+			"boundary_block":           boundaryBlock,
+			"validator_count":          validatorCount,
+		}
+	default:
+		return map[string]interface{}{"type": fmt.Sprintf("Unknown(%d)", variant), "raw": hexutil.Encode(data)}
+	}
+}
+
 // GetSystemTransactionsByBlockNumber returns the system transactions for a given block number.
-func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, number rpc.BlockNumber) []string {
+// Returns decoded, human-readable fields instead of raw BCS byte code.
+func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, number rpc.BlockNumber) []map[string]interface{} {
 	var blockNum uint64
 	if number == rpc.LatestBlockNumber {
 		if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil {
@@ -159,12 +234,15 @@ func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, numb
 
 	sysTxs, err := api.App.chainState.GetBlockDatabase().GetSystemTransactions(blockNum)
 	if err != nil || len(sysTxs) == 0 {
-		return []string{}
+		return []map[string]interface{}{}
 	}
 
-	result := make([]string, 0, len(sysTxs))
+	result := make([]map[string]interface{}, 0, len(sysTxs))
 	for _, txBytes := range sysTxs {
-		result = append(result, hexutil.Encode(txBytes))
+		decoded := decodeBCSSystemTransaction(txBytes)
+		decoded["raw_hex"] = hexutil.Encode(txBytes)
+		decoded["block_number"] = blockNum
+		result = append(result, decoded)
 	}
 	return result
 }

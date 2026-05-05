@@ -27,6 +27,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 
 		// Tạo lightweight SnapshotManager (disabled) chỉ để đăng ký callback cho log rotation
 		sm := &SnapshotManager{enabled: false}
+		globalSnapshotManager = sm
 
 		// Lấy epoch hiện tại từ chainState
 		if chainState != nil {

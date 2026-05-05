@@ -9,8 +9,10 @@ The `auto_test.sh` script is an end-to-end automation pipeline designed to facil
 2. Generating a massive set of spam keys for simulated loads.
 3. Deploying the local MetaNode cluster (supporting both single-machine local testnets and multi-machine setups).
 4. Running validation tests for basic TCP RPC functionality.
-5. Testing advanced MVM capabilities including the Xapian V0 and V2 precompiles.
-6. Triggering a massive TPS (Transactions Per Second) load test via parallel native transfers.
+5. Testing advanced MVM capabilities including the Xapian V0 precompile.
+6. Testing basic HTTP JSON-RPC capabilities for sending native currency transactions.
+7. Testing advanced MVM capabilities including the Xapian V2 precompile.
+8. Triggering a massive TPS (Transactions Per Second) load test via parallel native transfers.
 
 ## Prerequisites
 
@@ -42,14 +44,14 @@ The script supports overriding the starting step and the deployment topology mod
 ./auto_test.sh --mode multi
 ```
 
-**2. The cluster is already deployed. Run only the TPS load testing phase (Step 6):**
+**2. The cluster is already deployed. Run only the TPS load testing phase (Step 7):**
 ```bash
-./auto_test.sh --step 6 --mode multi
+./auto_test.sh --step 7 --mode multi
 ```
 
 **3. Run specific steps only (e.g. Cluster Deploy, Xapian V0, and Xapian V2):**
 ```bash
-./auto_test.sh --steps "2,4,5" --mode multi
+./auto_test.sh   "2,4,6" --mode multi
 ```
 
 ## Pipeline Steps Explained
@@ -73,11 +75,15 @@ The script supports overriding the starting step and the deployment topology mod
 - **Location:** `cmd/tool/tool-test-chain/test-rpc`
 - **Action:** Runs a targeted script implementing the initial tests (read/write data) aimed at validating Xapian V0's integration within the C++ MVM engine.
 
-### Bước 5: Test HTTP RPC - Xapian V2
+### Bước 5: Test Send Native Coin
+- **Location:** `cmd/tool/tool-test-chain/test-rpc/send-native`
+- **Action:** Tests the basic HTTP JSON-RPC capabilities for sending native currency transactions over the network.
+
+### Bước 6: Test HTTP RPC - Xapian V2
 - **Location:** `cmd/tool/tool-test-chain/test-rpc`
 - **Action:** Validates Xapian V2 integration updates over the JSON-RPC interface.
 
-### Bước 6: Load Test TPS (Load Balancer & Parallel Execution)
+### Bước 7: Load Test TPS (Load Balancer & Parallel Execution)
 - **Location:** `cmd/tool/test_tps/tps_blast_cc`
 - **Action:** Triggers the TPS load tester with a 20,000 TX spray across 5 rounds. Uses parallel native transfers (`--parallel_native=true`) and round-robin connection pools (`--load_balance=true`).
 - **Recent Updates for Debugging:** The tool is now equipped to automatically detect `invalid nonce` errors thrown by lagging consensus nodes. If an invalid nonce occurs, it triggers a cross-check array (Mismatch/Divergence Check) scanning all RPC targets in the pool concurrently and cleanly identifies which node represents stale network state. You can inspect the divergence table in your terminal during this step.
@@ -85,5 +91,5 @@ The script supports overriding the starting step and the deployment topology mod
 ## Troubleshooting
 
 - **"Lỗi ở Bước X" (Error at Step X):** Look at the lines directly above the error message to view the output of the Go program. Fix the compilation or logic error, and use `./auto_test.sh --step X` to resume from the failure point without resetting everything.
-- **Node 3 Deadlocks / "Missing Receipt":** If Step 6 hangs or states timeout waiting for receipts, one of the MVM Go/C++ consensus instances (potentially Master Node 3) has deadlocked. Check the `logs/node_X/go-master-stdout.log` logs to identify where GEI (Global Exec Index) stalled.
-- **"invalid nonce":** This is expected under massive load testing when fetching state from weakly-synchronised sub-nodes. Step 6's TPS tool will print out a table diagnosing which node yielded the stale nonce.
+- **Node 3 Deadlocks / "Missing Receipt":** If Step 7 hangs or states timeout waiting for receipts, one of the MVM Go/C++ consensus instances (potentially Master Node 3) has deadlocked. Check the `logs/node_X/go-master-stdout.log` logs to identify where GEI (Global Exec Index) stalled.
+- **"invalid nonce":** This is expected under massive load testing when fetching state from weakly-synchronised sub-nodes. Step 7's TPS tool will print out a table diagnosing which node yielded the stale nonce.

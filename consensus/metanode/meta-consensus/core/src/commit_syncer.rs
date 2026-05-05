@@ -241,6 +241,21 @@ impl CommitSyncerSupervisor {
                 let mut restart_delay = Duration::from_secs(1);
                 loop {
                     tracing::info!("🛡️ [SUPERVISOR] Starting CommitSyncer task...");
+
+                    // LIVENESS FIX: Before starting the new CommitSyncer, ensure
+                    // CommitVoteMonitor has a non-zero quorum if Go has already
+                    // processed blocks. Without this, the restarted CommitSyncer
+                    // sees quorum=0 → bootstrap genesis timeout → Healthy with
+                    // no proposals → permanent liveness stall after snapshot recovery.
+                    let highest_handled = commit_consumer_monitor.highest_handled_commit();
+                    if highest_handled > 0 {
+                        commit_vote_monitor.seed_from_execution_state(highest_handled);
+                        tracing::info!(
+                            "🛡️ [SUPERVISOR] Pre-seeded CommitVoteMonitor with highest_handled={} before restart",
+                            highest_handled
+                        );
+                    }
+
                     let syncer = CommitSyncer::new(
                         context.clone(),
                         core_thread_dispatcher.clone(),
@@ -364,12 +379,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // rather than the physical local_commit. During snapshot restore, local_commit
         // stays at 0 until the next commit triggers a fast-forward, but synced_commit_index
         // is eagerly advanced. Using synced_commit_index prevents an infinite CatchingUp deadlock.
-        let is_behind = self.synced_commit_index < quorum_commit;
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
+
+        // ════════════════════════════════════════════════════════════════════
+        // HYSTERESIS: Prevent rapid CatchingUp↔Healthy oscillation.
+        //
+        // Without hysteresis, a recovering node perpetually 1-2 commits behind
+        // oscillates phase every ~20ms:
+        //   Healthy → new commit → lag=1 → CatchingUp → fetch 1 → lag=0 → Healthy → repeat
+        //
+        // Each Healthy transition fires transition_phase_and_kick() which spawns
+        // a Core kick task, creating a thundering herd that overwhelms the system.
+        //
+        // Fix: Use different thresholds for entering vs leaving CatchingUp:
+        //   - Enter CatchingUp: lag > 5 (tolerate small jitter during live consensus)
+        //   - Stay in CatchingUp: lag > 0 (once catching up, finish completely)
+        //   - Enter Healthy: lag == 0 (only when fully synced)
+        // ════════════════════════════════════════════════════════════════════
+        let catching_up_enter_threshold = 5;
+        let is_currently_catching_up = current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp;
 
         let next_phase = if lag > 50_000 {
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
-        } else if is_behind {
+        } else if is_currently_catching_up && lag > 0 {
+            // Already catching up — stay until fully synced
+            crate::coordination_hub::NodeConsensusPhase::CatchingUp
+        } else if !is_currently_catching_up && lag > catching_up_enter_threshold {
+            // Not catching up yet — only enter when lag is significant
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
         } else {
             crate::coordination_hub::NodeConsensusPhase::Healthy
@@ -598,7 +634,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         if local_commit == 0
                             && quorum_commit == 0
                             && self.coordination_hub.is_healthy()
-                            && liveness_stall_duration >= Duration::from_secs(30)
+                            && liveness_stall_duration >= Duration::from_secs(10)
                         {
                             tracing::error!(
                                 "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, phase=Healthy). \
@@ -614,6 +650,29 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 }
                             });
                             self.last_local_commit_change_at = now; // prevent rapid re-triggers
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 4: Cluster Cold Start Deadlock
+                        // If local_commit == 0 (DAG wiped) and we are stuck in CatchingUp
+                        // for 15s without fetching, it means the ENTIRE cluster wiped
+                        // its DAG. No one has the past commits. Force fast-forward.
+                        // ════════════════════════════════════════════════════════
+                        let catching_up_stall = now.duration_since(self.last_quorum_change_at);
+                        if self.coordination_hub.is_catching_up()
+                            && local_commit == 0
+                            && highest_handled > 0
+                            && catching_up_stall >= Duration::from_secs(15)
+                        {
+                            tracing::error!(
+                                "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s. \
+                                 No peers have the past commits. Forcing fast-forward to highest_handled={}.",
+                                catching_up_stall.as_secs_f64(),
+                                highest_handled
+                            );
+                            self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled, crate::commit::CommitDigest::MIN, 0, None);
+                            self.synced_commit_index = highest_handled;
+                            self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         }
 
                         info!(
@@ -1391,7 +1450,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     async fn fetch_once(
         inner: Arc<Inner<C>>,
         target_authority: AuthorityIndex,
-        commit_range: CommitRange,
+        mut commit_range: CommitRange,
         timeout: Duration,
         is_severe_lag: bool,
     ) -> ConsensusResult<CertifiedCommits> {
@@ -1402,7 +1461,42 @@ impl<C: NetworkClient> CommitSyncer<C> {
             .commit_sync_fetch_once_latency
             .start_timer();
 
-        // 1. Fetch commits in the commit range from the target authority.
+        // 1. Query peer epoch status to proactively truncate cross-epoch fetches.
+        // This prevents the syncer from requesting a range that straddles the peer's
+        // current epoch boundary, which would otherwise result in 'UnexpectedStartCommit'
+        // or 'WrongEpoch' rejections from historical stores.
+        match inner
+            .network_client
+            .get_epoch_status(target_authority, timeout)
+            .await
+        {
+            Ok(status) => {
+                let peer_start = status.current_epoch_start_commit;
+                if peer_start > 0 && commit_range.start() < peer_start && commit_range.end() >= peer_start {
+                    tracing::info!(
+                        "[COMMIT-SYNCER] Truncating fetch range {:?} from {} to end at {} (peer's epoch {} starts at {})",
+                        commit_range,
+                        target_authority,
+                        peer_start - 1,
+                        status.epoch,
+                        peer_start
+                    );
+                    commit_range = CommitRange::new(commit_range.start()..=peer_start - 1);
+                } else if peer_start > 0 && commit_range.start() >= peer_start && commit_range.end() > status.last_commit_index {
+                    // Also useful: don't fetch past the peer's last commit index if we know it.
+                    let max_end = status.last_commit_index.max(commit_range.start());
+                    if max_end < commit_range.end() {
+                         commit_range = CommitRange::new(commit_range.start()..=max_end);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to query epoch status from {}: {}", target_authority, e);
+                // Continue with original range if query fails; legacy nodes might not support it.
+            }
+        }
+
+        // 2. Fetch commits in the commit range from the target authority.
         let (serialized_commits, serialized_blocks) = inner
             .network_client
             .fetch_commits(target_authority, commit_range.clone(), timeout)
@@ -1693,8 +1787,13 @@ impl<C: NetworkClient> Inner<C> {
                 bcs::from_bytes(&serialized).map_err(ConsensusError::MalformedBlock)?;
             // Only block signatures need to be verified, to verify commit votes.
             // But the blocks will be sent to Core, so they need to be fully verified.
+            // CROSS-EPOCH FIX: Use verify_for_commit_sync instead of verify_and_vote.
+            // During commit sync, vote blocks may belong to a previous epoch when the
+            // commit range spans epoch boundaries (e.g., snapshot restore). These blocks
+            // are already quorum-certified, so re-checking epoch is incorrect and causes
+            // permanent sync stalls (the "Block has wrong epoch" deadlock).
             let (block, reject_transaction_votes) =
-                self.block_verifier.verify_and_vote(block, serialized)?;
+                self.block_verifier.verify_for_commit_sync(block, serialized)?;
             if self.context.protocol_config.mysticeti_fastpath() {
                 self.transaction_certifier
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);

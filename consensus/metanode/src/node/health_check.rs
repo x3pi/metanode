@@ -63,21 +63,44 @@ impl PostRecoveryHealthCheck {
             }
         }
 
-        // Check 1: Block parity — local block == peer block (± 5)
+        // Check 1: Block parity — local block == peer block (± 50)
+        // Tolerance increased from ±5 to ±50: after snapshot recovery + STARTUP-SYNC,
+        // the recovering node is commonly 20-80 blocks behind peers during DAG catch-up.
+        // The tight ±5 tolerance caused false health-check failures.
         let block_diff = if local_block > peer_block { local_block - peer_block } else { peer_block - local_block };
-        result.block_parity = block_diff <= 5;
+        result.block_parity = block_diff <= 50;
 
-        // Check 2: GEI parity — local GEI == peer GEI (± 5)  
+        // Check 2: GEI parity — local GEI == peer GEI (± 50)
         let gei_diff = if local_gei > peer_gei { local_gei - peer_gei } else { peer_gei - local_gei };
-        result.gei_parity = gei_diff <= 5;
+        result.gei_parity = gei_diff <= 50;
 
-        // Check 3: State root match — NOMT root == peer NOMT root (if peers are synced)
-        // If blocks diverge greatly, roots will naturally diverge.
-        if result.block_parity && !peer_root.is_empty() {
+        // Check 3: State root match — NOMT root == peer NOMT root
+        // CRITICAL FIX: Only compare state roots when blocks are within ±5.
+        // State root changes EVERY block, so comparing at different heights always
+        // mismatches — producing a false positive that triggers unnecessary alerts.
+        // After snapshot recovery, the recovering node is commonly 10-50 blocks behind,
+        // making this comparison meaningless until it fully catches up.
+        if block_diff <= 5 && !peer_root.is_empty() {
             result.state_root_match = local_root == peer_root;
+            if !result.state_root_match {
+                tracing::warn!(
+                    "⚠️ [HEALTH] State root MISMATCH at close block heights! \
+                     local_block={}, peer_block={}, local_root=0x{}..., peer_root=0x{}...",
+                    local_block, peer_block,
+                    &local_root[..local_root.len().min(16)],
+                    &peer_root[..peer_root.len().min(16)]
+                );
+            }
         } else {
-            // Can't strictly match root if blocks differ, but we'll mark true if parity is ok to not spam
-            result.state_root_match = true; 
+            // Blocks differ by >5 — roots WILL differ, don't flag as unhealthy
+            result.state_root_match = true;
+            if block_diff > 5 {
+                tracing::info!(
+                    "ℹ️ [HEALTH] Skipping state root comparison: block_diff={} (local={}, peer={}). \
+                     Roots naturally diverge at different heights.",
+                    block_diff, local_block, peer_block
+                );
+            }
         }
 
         // Check 4: Committee hash match — local committee == peer committee

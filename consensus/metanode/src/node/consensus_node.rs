@@ -1648,19 +1648,43 @@ impl ConsensusNode {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // PHASE-2 CONSISTENCY CHECK (May 2026):
+        // PHASE-2 CONSISTENCY CHECK (May 2026 — ROOT CAUSE FIX):
         // After STARTUP-SYNC, verify Go's state is internally consistent.
-        // Detect block/commitIndex mismatches that indicate corrupted BackupDB
-        // or incomplete NOMT trie rebuild.
+        // Detect block/commitIndex/epoch mismatches that indicate corrupted
+        // BackupDB, incomplete NOMT trie rebuild, or cross-epoch staleness.
+        //
+        // ROOT CAUSE: lastHandledCommitIndex is epoch-scoped. On restart,
+        // Go now validates the epoch and returns 0 if the persisted value
+        // belongs to a previous epoch. This check verifies that happened.
         // ═══════════════════════════════════════════════════════════════
         if config.executor_read_enabled {
             match executor_client_for_proc.get_last_handled_commit_index().await {
-                Ok((commit_idx, gei, block_num, _epoch, _auth, _ts)) => {
-                    if block_num > 0 && commit_idx == 0 {
+                Ok((commit_idx, gei, block_num, go_epoch, _auth, _ts)) => {
+                    // Log complete diagnostic state
+                    tracing::info!(
+                        "🔍 [CONSISTENCY CHECK] Go state: block={}, gei={}, commit_index={}, epoch={}, \
+                         Rust state: go_replay_after={}, current_epoch={}, next_expected_commit={}",
+                        block_num, gei, commit_idx, go_epoch,
+                        go_replay_after, storage.current_epoch, next_expected_commit_index
+                    );
+
+                    // EPOCH CROSS-CHECK: Go should report commit_index=0 if epochs don't match.
+                    // If Go still reports a non-zero commit_index for a different epoch,
+                    // it means the epoch-aware fix didn't fire — override locally.
+                    if go_epoch != storage.current_epoch && commit_idx > 0 {
                         tracing::error!(
-                            "🚨 [CONSISTENCY CHECK] Go reports block={} but lastHandledCommitIndex=0! \
-                             This indicates BackupDB didn't persist commit index. \
-                             CommitProcessor will start from commit 1 — Go's duplicate detection will handle already-executed blocks.",
+                            "🚨 [CONSISTENCY CHECK] EPOCH MISMATCH: Go epoch={} != Rust epoch={}! \
+                             Go reports commit_index={} which may belong to wrong epoch. \
+                             Forcing go_replay_after=0 and next_expected=1 to prevent cross-epoch fork.",
+                            go_epoch, storage.current_epoch, commit_idx
+                        );
+                        commit_processor.go_last_commit_index = 0;
+                        commit_processor.next_expected_index = 1;
+                    } else if block_num > 0 && commit_idx == 0 {
+                        tracing::info!(
+                            "ℹ️ [CONSISTENCY CHECK] Go reports block={} but commit_index=0. \
+                             This is expected after epoch transition or snapshot restore. \
+                             CommitProcessor starts from commit 1 — Go's GEI guard handles duplicates.",
                             block_num
                         );
                         // Don't change anything — CommitProcessor starts from 1,
@@ -1675,8 +1699,8 @@ impl ConsensusNode {
                         commit_processor.next_expected_index = 1;
                     } else {
                         tracing::info!(
-                            "✅ [CONSISTENCY CHECK] Post-sync state OK: block={}, gei={}, commit_index={}",
-                            block_num, gei, commit_idx
+                            "✅ [CONSISTENCY CHECK] Post-sync state OK: block={}, gei={}, commit_index={}, epoch={}",
+                            block_num, gei, commit_idx, go_epoch
                         );
                     }
                 }

@@ -31,6 +31,23 @@ pub trait BlockVerifier: Send + Sync + 'static {
         serialized_block: Bytes,
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)>;
 
+    /// Verifies a block for commit sync, skipping the epoch check.
+    ///
+    /// During commit sync, blocks from quorum-certified commits may belong to previous
+    /// epochs (e.g., when a snapshot-restored node fetches historical commits spanning
+    /// epoch boundaries). These blocks have already been verified by 2f+1 validators
+    /// in their original epoch, so re-checking the epoch against the current committee
+    /// is incorrect and causes permanent sync stalls.
+    ///
+    /// All other verification checks (signature, ancestors, quorum, transactions) are
+    /// still performed for defense-in-depth.
+    #[allow(private_interfaces)]
+    fn verify_for_commit_sync(
+        &self,
+        block: SignedBlock,
+        serialized_block: Bytes,
+    ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)>;
+
     /// Votes on the transactions in a verified block.
     /// This is used to vote on transactions in a verified block, without having to verify the block again. The method
     /// will verify the transactions and vote on them.
@@ -65,10 +82,22 @@ impl SignedBlockVerifier {
     }
 
     fn verify_block(&self, block: &SignedBlock) -> ConsensusResult<()> {
+        self.verify_block_inner(block, false)
+    }
+
+    /// Verify block for commit sync — skips epoch check since blocks from
+    /// quorum-certified historical commits may belong to previous epochs.
+    fn verify_block_for_sync(&self, block: &SignedBlock) -> ConsensusResult<()> {
+        self.verify_block_inner(block, true)
+    }
+
+    /// Core verification logic. When `skip_epoch_check` is true, the epoch
+    /// validation is bypassed (used by commit sync for cross-epoch blocks).
+    fn verify_block_inner(&self, block: &SignedBlock, skip_epoch_check: bool) -> ConsensusResult<()> {
         let committee = &self.context.committee;
         // The block must belong to the current epoch and have valid authority index,
         // before having its signature verified.
-        if block.epoch() != committee.epoch() {
+        if !skip_epoch_check && block.epoch() != committee.epoch() {
             return Err(ConsensusError::WrongEpoch {
                 expected: committee.epoch(),
                 actual: block.epoch(),
@@ -125,8 +154,13 @@ impl SignedBlockVerifier {
                     block: block.round(),
                 });
             }
-            if ancestor.round == GENESIS_ROUND && !self.genesis.contains(ancestor) {
-                return Err(ConsensusError::InvalidGenesisAncestor(*ancestor));
+            if ancestor.round == GENESIS_ROUND {
+                // If we are skipping the epoch check (commit sync), the block may belong
+                // to a previous epoch, so its genesis blocks will not match `self.genesis`
+                // (which contains only the current epoch's genesis blocks).
+                if !skip_epoch_check && !self.genesis.contains(ancestor) {
+                    return Err(ConsensusError::InvalidGenesisAncestor(*ancestor));
+                }
             }
             if seen_ancestors[ancestor.author] {
                 return Err(ConsensusError::DuplicatedAncestorsAuthority(
@@ -216,6 +250,26 @@ impl BlockVerifier for SignedBlockVerifier {
         Ok((verified_block, rejected_transactions))
     }
 
+    fn verify_for_commit_sync(
+        &self,
+        block: SignedBlock,
+        serialized_block: Bytes,
+    ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
+        self.verify_block_for_sync(&block)?;
+
+        let verified_block = VerifiedBlock::new_verified(block, serialized_block);
+
+        let rejected_transactions = if self.context.protocol_config.mysticeti_fastpath() {
+            self.vote(&verified_block)?
+        } else {
+            self.transaction_verifier
+                .verify_batch(&verified_block.transactions_data())
+                .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
+            vec![]
+        };
+        Ok((verified_block, rejected_transactions))
+    }
+
     fn vote(&self, block: &VerifiedBlock) -> ConsensusResult<Vec<TransactionIndex>> {
         self.transaction_verifier
             .verify_and_vote_batch(&block.reference(), &block.transactions_data())
@@ -229,6 +283,18 @@ pub struct NoopBlockVerifier;
 impl BlockVerifier for NoopBlockVerifier {
     #[allow(private_interfaces)]
     fn verify_and_vote(
+        &self,
+        _block: SignedBlock,
+        _serialized_block: Bytes,
+    ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
+        Ok((
+            VerifiedBlock::new_verified(_block, _serialized_block),
+            vec![],
+        ))
+    }
+
+    #[allow(private_interfaces)]
+    fn verify_for_commit_sync(
         &self,
         _block: SignedBlock,
         _serialized_block: Bytes,
@@ -659,6 +725,77 @@ mod test {
             assert!(matches!(
                 verifier.verify_and_vote(signed_block, serialized_block),
                 Err(ConsensusError::InvalidTransaction(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_block_for_sync() {
+        let (context, keypairs) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        const AUTHOR: u32 = 2;
+        let author_protocol_keypair = &keypairs[AUTHOR as usize].1;
+        let verifier = SignedBlockVerifier::new(context.clone(), Arc::new(TxnSizeVerifier {}));
+
+        let test_block = TestBlock::new(10, AUTHOR)
+            .set_ancestors(vec![
+                BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
+                BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
+                BlockRef::new(9, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
+                BlockRef::new(7, AuthorityIndex::new_for_test(3), BlockDigest::MIN),
+            ])
+            .set_transactions(vec![Transaction::new(vec![4; 8])]);
+
+        // Cross-epoch block SHOULD PASS with verify_for_commit_sync
+        {
+            let block = test_block.clone().set_epoch(1).build();
+            let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
+            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
+            
+            // This should fail normal verification
+            assert!(matches!(
+                verifier.verify_block(&signed_block),
+                Err(ConsensusError::WrongEpoch { .. })
+            ));
+            
+            // But it should pass commit sync verification
+            assert!(verifier.verify_for_commit_sync(signed_block, serialized_block).is_ok());
+        }
+
+        // Other validation rules must STILL apply
+        // 1. Genesis round check
+        {
+            let block = test_block.clone().set_round(0).build();
+            let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
+            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
+            
+            assert!(matches!(
+                verifier.verify_for_commit_sync(signed_block, serialized_block),
+                Err(ConsensusError::UnexpectedGenesisBlock)
+            ));
+        }
+
+        // 2. Invalid authority index
+        {
+            let block = test_block.clone().set_author(AuthorityIndex::new_for_test(4)).build();
+            let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
+            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
+            
+            assert!(matches!(
+                verifier.verify_for_commit_sync(signed_block, serialized_block),
+                Err(ConsensusError::InvalidAuthorityIndex { .. })
+            ));
+        }
+        
+        // 3. Invalid signature
+        {
+            let block = test_block.clone().build();
+            let signed_block = SignedBlock::new(block, &keypairs[3].1).unwrap();
+            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
+            
+            assert!(matches!(
+                verifier.verify_for_commit_sync(signed_block, serialized_block),
+                Err(ConsensusError::SignatureVerificationFailure(_))
             ));
         }
     }

@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"encoding/binary"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,7 +81,7 @@ func callDataToAccountType(callData []byte) (pb.ACCOUNT_TYPE, *transaction.Trans
 func VerifyTransaction(
 	tx types.Transaction,
 	chainState *blockchain.ChainState,
-
+	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
 ) *transaction.TransactionError {
 	isCrossChainBatchSubmit := false
 	if tx.ToAddress() == common.CROSS_CHAIN_CONTRACT_ADDRESS {
@@ -89,15 +90,29 @@ func VerifyTransaction(
 			isCrossChainBatchSubmit = ccHandler.IsBatchSubmitTx(tx.CallData().Input())
 		}
 	}
-	as, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
-	if err != nil {
-		// For nonce-0 account setting TXs (BLS registration), a fresh account state
-		// is functionally correct: nonce=0, no BLS key, no balance, isFree=true.
-		accountSettingAddr := utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT)
-		if tx.GetNonce() == 0 && tx.ToAddress() == accountSettingAddr {
-			as = state.NewAccountState(tx.FromAddress())
-		} else {
-			return transaction.InvalidData
+
+	var as types.AccountState
+	if preloadedState != nil {
+		// PERFORMANCE: Use pre-loaded state from batch caller (avoids sync.Map lookup)
+		as = preloadedState
+	} else {
+		// Standard path: fetch from AccountStateDB
+		var err error
+		as, err = chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+		if err != nil {
+			// Retry once after yielding — transient trie contention under high TPS
+			runtime.Gosched()
+			as, err = chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+		}
+		if err != nil {
+			accountSettingAddr := utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT)
+			if tx.GetNonce() == 0 && tx.ToAddress() == accountSettingAddr {
+				as = state.NewAccountState(tx.FromAddress())
+			} else {
+				logger.Error("❌ [VERIFY] AccountStateReadOnly failed for %s after retry: %v (txHash=%s, nonce=%d)",
+					tx.FromAddress().Hex(), err, tx.Hash().Hex(), tx.GetNonce())
+				return transaction.InvalidData
+			}
 		}
 	}
 	if tx.GetNonce() < as.Nonce() {

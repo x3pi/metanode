@@ -25,6 +25,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -128,7 +129,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	}
 
 	if !skipVerification {
-		if err := tx_processor.VerifyTransaction(tx, vp.chainState); err != nil {
+		if err := tx_processor.VerifyTransaction(tx, vp.chainState, nil); err != nil {
 			logger.Error("Transaction verification failed: %v", err)
 			return transaction.VerifyTransactionError.Code, fmt.Errorf(err.Description)
 		}
@@ -248,12 +249,34 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
 	}
 
-	// Phase 2 (TPS Optimization): Parallel VerifyTransaction
+	// Phase 1.6 (TPS Optimization): Pre-load AccountStates into local slice
+	// PreloadAccounts above warmed the loadedAccounts sync.Map cache.
+	// Now we read states SEQUENTIALLY into a plain []AccountState slice.
+	// Subsequent parallel verification uses slice indexing (zero contention)
+	// instead of each goroutine calling AccountStateReadOnly via sync.Map.
+	preloadedStates := make([]types.AccountState, len(txs))
+	for i, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		as, asErr := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+		if asErr != nil || as == nil {
+			as = state.NewAccountState(tx.FromAddress())
+		}
+		preloadedStates[i] = as
+	}
+
+	// Phase 2 (TPS Optimization): Parallel VerifyTransactionWithState
 	// BLS verification is CPU heavy (~1ms per tx). 2000 txs = 2 seconds if sequential.
+	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
+	// verifiedSignaturesCache. 104 goroutines cause excessive cache-line bouncing.
 	if !skipVerification {
-		numWorkers := runtime.NumCPU()
-		if numWorkers > 104 {
-			numWorkers = 104
+		numWorkers := runtime.NumCPU() / 2
+		if numWorkers < 4 {
+			numWorkers = 4
+		}
+		if numWorkers > 48 {
+			numWorkers = 48
 		}
 		if len(txs) < numWorkers {
 			numWorkers = len(txs)
@@ -272,11 +295,11 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			go func(s, e int) {
 				defer wg.Done()
 				for i := s; i < e; i++ {
-					if txs[i] == nil {
+					if txs[i] == nil || preloadedStates[i] == nil {
 						continue
 					}
-					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState); err != nil {
-						errorsList[i] = fmt.Errorf(err.Description)
+					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, preloadedStates[i]); err != nil {
+						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
 					}
 				}
 			}(start, end)

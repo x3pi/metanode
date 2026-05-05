@@ -693,9 +693,23 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 }
             }
 
-            let (verified_block, reject_txn_votes) = block_verifier
+            let (verified_block, reject_txn_votes) = match block_verifier
                 .verify_and_vote(signed_block, serialized_block)
-                .tap_err(|e| {
+            {
+                Ok(result) => result,
+                Err(ConsensusError::WrongEpoch { expected, actual }) => {
+                    // CROSS-EPOCH FIX: After snapshot restore, peers retain epoch N-1
+                    // blocks in their DAG. Rejecting them aborts the entire batch,
+                    // causing an infinite retry loop → liveness stall.
+                    // Skip these stale blocks silently — CommitSyncer handles the
+                    // actual cross-epoch catch-up via verify_for_commit_sync.
+                    debug!(
+                        "Skipping cross-epoch block from peer {} (expected epoch {}, got {})",
+                        peer_index, expected, actual
+                    );
+                    continue;
+                }
+                Err(e) => {
                     let hostname = context.committee.authority(peer_index).hostname.clone();
                     context
                         .metrics
@@ -704,7 +718,9 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                         .with_label_values(&[&hostname, "synchronizer", e.clone().name()])
                         .inc();
                     info!("Invalid block received from {}: {}", peer_index, e);
-                })?;
+                    return Err(e);
+                }
+            };
 
             // TODO: improve efficiency, maybe suspend and continue processing the block asynchronously.
             let now = context.clock.timestamp_utc_ms();
