@@ -241,6 +241,21 @@ impl CommitSyncerSupervisor {
                 let mut restart_delay = Duration::from_secs(1);
                 loop {
                     tracing::info!("🛡️ [SUPERVISOR] Starting CommitSyncer task...");
+
+                    // LIVENESS FIX: Before starting the new CommitSyncer, ensure
+                    // CommitVoteMonitor has a non-zero quorum if Go has already
+                    // processed blocks. Without this, the restarted CommitSyncer
+                    // sees quorum=0 → bootstrap genesis timeout → Healthy with
+                    // no proposals → permanent liveness stall after snapshot recovery.
+                    let highest_handled = commit_consumer_monitor.highest_handled_commit();
+                    if highest_handled > 0 {
+                        commit_vote_monitor.seed_from_execution_state(highest_handled);
+                        tracing::info!(
+                            "🛡️ [SUPERVISOR] Pre-seeded CommitVoteMonitor with highest_handled={} before restart",
+                            highest_handled
+                        );
+                    }
+
                     let syncer = CommitSyncer::new(
                         context.clone(),
                         core_thread_dispatcher.clone(),
@@ -598,7 +613,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         if local_commit == 0
                             && quorum_commit == 0
                             && self.coordination_hub.is_healthy()
-                            && liveness_stall_duration >= Duration::from_secs(30)
+                            && liveness_stall_duration >= Duration::from_secs(10)
                         {
                             tracing::error!(
                                 "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, phase=Healthy). \

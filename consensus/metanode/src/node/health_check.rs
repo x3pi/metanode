@@ -63,13 +63,16 @@ impl PostRecoveryHealthCheck {
             }
         }
 
-        // Check 1: Block parity — local block == peer block (± 5)
+        // Check 1: Block parity — local block == peer block (± 50)
+        // Tolerance increased from ±5 to ±50: after snapshot recovery + STARTUP-SYNC,
+        // the recovering node is commonly 20-80 blocks behind peers during DAG catch-up.
+        // The tight ±5 tolerance caused false health-check failures.
         let block_diff = if local_block > peer_block { local_block - peer_block } else { peer_block - local_block };
-        result.block_parity = block_diff <= 5;
+        result.block_parity = block_diff <= 50;
 
-        // Check 2: GEI parity — local GEI == peer GEI (± 5)  
+        // Check 2: GEI parity — local GEI == peer GEI (± 50)
         let gei_diff = if local_gei > peer_gei { local_gei - peer_gei } else { peer_gei - local_gei };
-        result.gei_parity = gei_diff <= 5;
+        result.gei_parity = gei_diff <= 50;
 
         // Check 3: State root match — NOMT root == peer NOMT root (if peers are synced)
         // If blocks diverge greatly, roots will naturally diverge.
