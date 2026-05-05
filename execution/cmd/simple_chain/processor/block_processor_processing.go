@@ -255,12 +255,10 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		logger.Fatal("Error generating block #%d: %v", currentBlockNumber, err)
 	}
 
-	// CRITICAL FIX: Set GlobalExecIndex on the block immediately after creation, before returning.
-	if globalExecIndex > 0 {
-		bl.Header().SetGlobalExecIndex(globalExecIndex)
-	}
+	// NOTE: GlobalExecIndex is already set by NewBlockHeader() constructor (variadic param).
+	// No need to call SetGlobalExecIndex() again — the constructor handles it.
 
-	// CRITICAL FIX: Set CommitIndex on the block so it is serialized and transmitted to Sub nodes.
+	// CommitIndex is NOT a constructor param — must be set explicitly for Sub node serialization.
 	if commitIndex > 0 {
 		bl.Header().SetCommitIndex(uint64(commitIndex))
 	}
