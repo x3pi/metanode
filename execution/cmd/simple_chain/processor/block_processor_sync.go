@@ -293,25 +293,22 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		return
 	}
 
-
-
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
-	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex
 	// means Rust intentionally fast-skipped empty commits during catch-up.
 	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if globalExecIndex > *nextExpectedGlobalExecIndex {
 		gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-		
+
 		oldExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = globalExecIndex
 
-
 		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 			oldExpected, globalExecIndex, gapSize)
-			
+
 		// Fall through to process the block sequentially
 	}
 
@@ -541,7 +538,7 @@ PROCESS_BLOCK:
 		// CRITICAL FORK-SAFETY FIX: Rust sets block_number = 0 for empty commits.
 		// We MUST skip creating a Go block for them to prevent block inflation.
 		logger.Info("⏭️  [BLOCK-NUM] Skipping empty commit from Rust (GEI=%d, commitIndex=%d) - PREVENTING INFLATION", globalExecIndex, commitIndex)
-		
+
 		// Still update GEI counter so the processor advances past this commit
 		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
@@ -554,10 +551,9 @@ PROCESS_BLOCK:
 		}
 		return
 	}
-	
+
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
-
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
@@ -593,7 +589,6 @@ PROCESS_BLOCK:
 		}
 	}
 
-
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.
 	//
@@ -620,7 +615,6 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// FORK-SAFETY: Deduplication and sorting are now handled consistently by Rust in block_sending.rs
-
 	// ═══════════════════════════════════════════════════════════════════════════
 	// FORK-SAFETY FIX 2: Invalidate all in-memory state caches before executing.
 	//

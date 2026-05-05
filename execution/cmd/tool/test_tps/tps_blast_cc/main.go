@@ -1000,7 +1000,8 @@ func main() {
 			}
 		}
 
-		processingTPS := float64(totalTxsInBlocks) / processingDuration.Seconds()
+		totalDuration := blastDuration + processingDuration
+		processingTPS := float64(totalTxsInBlocks) / totalDuration.Seconds()
 		allRoundTPS = append(allRoundTPS, processingTPS)
 
 		roundSummaries = append(roundSummaries, RoundSummary{
@@ -1011,7 +1012,7 @@ func main() {
 			TxCount:       totalTxInBlocks,
 			MaxTxInBlock:  maxTxInBlock,
 			TPS:           processingTPS,
-			ProcessingSec: processingDuration.Seconds(),
+			ProcessingSec: totalDuration.Seconds(),
 		})
 
 		fmt.Printf("\n\n═══════════════════════════════════════════════════\n")
@@ -1022,8 +1023,8 @@ func main() {
 		fmt.Printf("  ⏱️  Injection time:       %s\n", blastDuration.Round(time.Millisecond))
 		fmt.Printf("  ─────────────────────────────────────────────────\n")
 		fmt.Printf("  📥 TX in blocks:         %d\n", totalTxsInBlocks)
-		fmt.Printf("  📊 Processing TPS:       ~%.0f tx/s\n", processingTPS)
-		fmt.Printf("  ⏱️  Processing time:      %s\n", processingDuration.Round(time.Millisecond))
+		fmt.Printf("  📊 End-to-End TPS:       ~%.0f tx/s\n", processingTPS)
+		fmt.Printf("  ⏱️  End-to-End time:      %s\n", totalDuration.Round(time.Millisecond))
 		fmt.Printf("  ─────────────────────────────────────────────────\n")
 		fmt.Printf("  📦 BLOCK STATISTICS (Blocks %d to %d)\n", startBlock, endBlock)
 		fmt.Printf("  🧊 Total Blocks:         %d\n", blockCount)

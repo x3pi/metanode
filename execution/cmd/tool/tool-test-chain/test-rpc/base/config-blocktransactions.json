@@ -1,0 +1,12 @@
+{
+    "type": "get_block_transactions",
+    "rpc_urls": [
+        "http://localhost:8757",
+        "http://localhost:10747",
+        "http://localhost:10749",
+        "http://localhost:10750"
+    ],
+    "params": {
+        "block": 966
+    }
+}

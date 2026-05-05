@@ -181,6 +181,8 @@ impl ExecutorClient {
                         
                         let is_epoch_boundary = epoch > *last_ep;
                         if is_epoch_boundary {
+                            info!("🔄 [EPOCH BOUNDARY FRAGMENT] Sending Epoch block to Go! Epoch {} -> {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}", 
+                                *last_ep, epoch, all_system_txs.len(), all_proto_txs.len(), fragment_gei, *next_bn);
                             *last_ep = epoch;
                         }
 
@@ -266,6 +268,8 @@ impl ExecutorClient {
             
             let is_epoch_boundary = epoch > *last_ep;
             if is_epoch_boundary {
+                info!("🔄 [EPOCH BOUNDARY] Preparing to send Epoch Boundary Block to Go: Epoch {} -> {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}", 
+                    *last_ep, epoch, all_system_txs.len(), all_proto_txs.len(), global_exec_index, *next_bn);
                 *last_ep = epoch;
             }
             
