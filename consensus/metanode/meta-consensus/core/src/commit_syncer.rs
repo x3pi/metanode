@@ -379,12 +379,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // rather than the physical local_commit. During snapshot restore, local_commit
         // stays at 0 until the next commit triggers a fast-forward, but synced_commit_index
         // is eagerly advanced. Using synced_commit_index prevents an infinite CatchingUp deadlock.
-        let is_behind = self.synced_commit_index < quorum_commit;
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
+
+        // ════════════════════════════════════════════════════════════════════
+        // HYSTERESIS: Prevent rapid CatchingUp↔Healthy oscillation.
+        //
+        // Without hysteresis, a recovering node perpetually 1-2 commits behind
+        // oscillates phase every ~20ms:
+        //   Healthy → new commit → lag=1 → CatchingUp → fetch 1 → lag=0 → Healthy → repeat
+        //
+        // Each Healthy transition fires transition_phase_and_kick() which spawns
+        // a Core kick task, creating a thundering herd that overwhelms the system.
+        //
+        // Fix: Use different thresholds for entering vs leaving CatchingUp:
+        //   - Enter CatchingUp: lag > 5 (tolerate small jitter during live consensus)
+        //   - Stay in CatchingUp: lag > 0 (once catching up, finish completely)
+        //   - Enter Healthy: lag == 0 (only when fully synced)
+        // ════════════════════════════════════════════════════════════════════
+        let catching_up_enter_threshold = 5;
+        let is_currently_catching_up = current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp;
 
         let next_phase = if lag > 50_000 {
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
-        } else if is_behind {
+        } else if is_currently_catching_up && lag > 0 {
+            // Already catching up — stay until fully synced
+            crate::coordination_hub::NodeConsensusPhase::CatchingUp
+        } else if !is_currently_catching_up && lag > catching_up_enter_threshold {
+            // Not catching up yet — only enter when lag is significant
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
         } else {
             crate::coordination_hub::NodeConsensusPhase::Healthy
