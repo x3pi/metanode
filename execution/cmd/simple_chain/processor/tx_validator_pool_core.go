@@ -276,7 +276,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 						continue
 					}
 					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState); err != nil {
-						errorsList[i] = fmt.Errorf(err.Description)
+						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
 					}
 				}
 			}(start, end)

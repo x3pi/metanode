@@ -263,6 +263,7 @@ run_single_round() {
     for dir_name in $LEVELDB_DIRS; do
         [ -d "$dl_dir/$dir_name" ] && mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
     done
+    [ -f "$dl_dir/metadata.json" ] && mv "$dl_dir/metadata.json" "$dst_data/data/data/metadata.json"
     [ -d "$dl_dir/back_up" ] && cp -r "$dl_dir/back_up/"* "$dst_data/back_up/" 2>/dev/null || true
     [ -d "$dl_dir/data-write" ] && cp -r "$dl_dir/data-write/"* "$dst_data/data-write/" 2>/dev/null || true
     [ -d "$dl_dir/back_up_write" ] && cp -r "$dl_dir/back_up_write/"* "$dst_data/back_up_write/" 2>/dev/null || true

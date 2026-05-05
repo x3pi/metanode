@@ -19,18 +19,31 @@ func (bp *BlockProcessor) updateAndPersistLastGlobalExecIndex(index uint64) {
 }
 
 // updateAndPersistLastHandledCommitIndex updates the commit_index in memory and persists it
+// FORK-SAFETY: Also persists the current epoch to enable epoch-aware restart validation.
+// On restart, if the persisted epoch doesn't match current_epoch, the commit_index
+// belongs to a previous epoch and must be treated as 0.
 func (bp *BlockProcessor) updateAndPersistLastHandledCommitIndex(index uint32) {
 	if index == 0 {
 		return
 	}
 	storage.UpdateLastHandledCommitIndex(index)
+
+	// Determine current epoch from last block
+	var currentEpoch uint64
+	lastBlock := bp.GetLastBlock()
+	if lastBlock != nil {
+		currentEpoch = lastBlock.Header().Epoch()
+	}
+
+	storage.UpdateLastHandledCommitEpoch(currentEpoch)
+
 	geiAuthority := GetGEIAuthority()
 	if geiAuthority != nil {
-		geiAuthority.RecordCommitIndex(index)
+		geiAuthority.RecordCommitIndexWithEpoch(index, currentEpoch)
 	}
-	value := utils.Uint32ToBytes(index)
 	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
-		bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), value)
+		bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(index))
+		bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch))
 	}
 }
 

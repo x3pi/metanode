@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -466,8 +468,20 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 		for i, err := range errors {
 			if err != nil {
 				queueFullErrs++
-				logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: txHash=%s, msg=%s", transactions[i].Hash().Hex(), err.Error())
-				tp.sendTransactionError(request.Connection(), transactions[i].Hash(), -1, err.Error(), nil, "")
+				errCode := int64(-1)
+				errMsg := err.Error()
+				// Extract code from "[code:30] invalid data" format
+				if strings.HasPrefix(errMsg, "[code:") {
+					if idx := strings.Index(errMsg, "] "); idx > 0 {
+						if code, parseErr := strconv.ParseInt(errMsg[6:idx], 10, 64); parseErr == nil {
+							errCode = code
+							errMsg = errMsg[idx+2:]
+						}
+					}
+				}
+				logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: txHash=%s, code=%d, msg=%s",
+					transactions[i].Hash().Hex(), errCode, errMsg)
+				tp.sendTransactionError(request.Connection(), transactions[i].Hash(), errCode, errMsg, nil, "")
 			}
 		}
 	}

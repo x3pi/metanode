@@ -594,6 +594,32 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 	logger.Info("🌟 [GENESIS] Epoch 0 initialized", "timestamp_ms", genesisTimestampMs)
 }
 
+// ForceAlignEpochFromBlockHeader ensures that ChainState.currentEpoch matches
+// the epoch recorded in the last block header. This is the DEFINITIVE fix for
+// snapshot-restore epoch desync:
+//
+// FAILURE SCENARIO: Snapshot was taken at epoch N, but after restore,
+// LoadEpochData() returns epoch N-1 (stale data in block storage or backup file).
+// Rust then asks Go for current epoch → gets N-1 → uses wrong committee/leader.
+// Result: Fork at the next block because leader schedule is wrong.
+//
+// FIX: Block headers contain authoritative epoch information. If the last block
+// header has epoch > ChainState.currentEpoch, force-advance to match.
+func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
+	cs.epochMutex.Lock()
+	defer cs.epochMutex.Unlock()
+
+	if blockEpoch > cs.currentEpoch {
+		logger.Warn("🚨 [SNAPSHOT FIX] Epoch alignment: ChainState.currentEpoch=%d but lastBlock.epoch=%d. "+
+			"Forcing epoch to %d to prevent fork. (block=%d, ts=%d)",
+			cs.currentEpoch, blockEpoch, blockEpoch, blockNumber, blockTimestamp)
+		cs.advanceEpochLocked(blockEpoch, blockTimestamp*1000, blockNumber, 0)
+	} else if blockEpoch == cs.currentEpoch {
+		logger.Info("✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=%d matches lastBlock.epoch=%d",
+			cs.currentEpoch, blockEpoch)
+	}
+}
+
 // advanceEpochLocked is the SINGLE place that writes to epoch state maps.
 // ALL epoch state mutations MUST go through this method to ensure consistency.
 // MUST be called with epochMutex already held (Lock, not RLock).

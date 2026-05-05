@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"encoding/binary"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,12 +92,21 @@ func VerifyTransaction(
 	}
 	as, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
 	if err != nil {
+		// Retry once after yielding — transient trie contention under high TPS
+		// can cause AccountStateReadOnly to fail momentarily when 104+ parallel
+		// workers compete for trie access during batch verification.
+		runtime.Gosched()
+		as, err = chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+	}
+	if err != nil {
 		// For nonce-0 account setting TXs (BLS registration), a fresh account state
 		// is functionally correct: nonce=0, no BLS key, no balance, isFree=true.
 		accountSettingAddr := utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT)
 		if tx.GetNonce() == 0 && tx.ToAddress() == accountSettingAddr {
 			as = state.NewAccountState(tx.FromAddress())
 		} else {
+			logger.Error("❌ [VERIFY] AccountStateReadOnly failed for %s after retry: %v (txHash=%s, nonce=%d)",
+				tx.FromAddress().Hex(), err, tx.Hash().Hex(), tx.GetNonce())
 			return transaction.InvalidData
 		}
 	}

@@ -313,7 +313,7 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			continue
 		}
 
-		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot across all valid nodes
+		// Compare hash, parentHash, stateRoot, txRoot, receiptsRoot, etc. across all valid nodes
 		hasMismatch := false
 		ref := validBlocks[0]
 		for i := 1; i < len(validBlocks); i++ {
@@ -321,7 +321,8 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			if b.Hash != ref.Hash || b.ParentHash != ref.ParentHash ||
 				b.StateRoot != ref.StateRoot || b.TransactionsRoot != ref.TransactionsRoot ||
 				b.ReceiptsRoot != ref.ReceiptsRoot || b.LeaderAddress != ref.LeaderAddress ||
-				b.StakeStatesRoot != ref.StakeStatesRoot || b.Timestamp != ref.Timestamp {
+				b.StakeStatesRoot != ref.StakeStatesRoot || b.Timestamp != ref.Timestamp ||
+				b.GlobalExecIndex != ref.GlobalExecIndex || b.Epoch != ref.Epoch {
 				hasMismatch = true
 				break
 			}
@@ -955,7 +956,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 			}
 		}
 
-		hashDiff, parentDiff, stateDiff, stakeDiff, txDiff, rcpDiff, leaderDiff, timeDiff := false, false, false, false, false, false, false, false
+		hashDiff, parentDiff, stateDiff, stakeDiff, txDiff, rcpDiff, leaderDiff, timeDiff, geiDiff, epochDiff := false, false, false, false, false, false, false, false, false, false
 		if len(validBlocks) >= 2 {
 			ref := validBlocks[0]
 			for _, b := range validBlocks[1:] {
@@ -967,6 +968,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				if b.ReceiptsRoot != ref.ReceiptsRoot { rcpDiff = true }
 				if b.LeaderAddress != ref.LeaderAddress { leaderDiff = true }
 				if b.Timestamp != ref.Timestamp { timeDiff = true }
+				if b.GlobalExecIndex != ref.GlobalExecIndex { geiDiff = true }
+				if b.Epoch != ref.Epoch { epochDiff = true }
 			}
 		}
 
@@ -979,6 +982,8 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		if rcpDiff { diffs = append(diffs, "receiptsRoot") }
 		if leaderDiff { diffs = append(diffs, "leaderAddress") }
 		if timeDiff { diffs = append(diffs, "timestamp") }
+		if geiDiff { diffs = append(diffs, "gei") }
+		if epochDiff { diffs = append(diffs, "epoch") }
 		
 		if len(diffs) > 0 {
 			alertBuf.WriteString(fmt.Sprintf("   🔍 NGUYÊN NHÂN: Sai lệch ở các trường -> %s\n", strings.Join(diffs, ", ")))

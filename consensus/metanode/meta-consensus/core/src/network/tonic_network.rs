@@ -330,6 +330,20 @@ impl NetworkClient for TonicClient {
         Ok((response.highest_received, response.highest_accepted))
     }
 
+    async fn get_epoch_status(
+        &self,
+        peer: AuthorityIndex,
+        timeout: Duration,
+    ) -> ConsensusResult<GetEpochStatusResponse> {
+        let mut client = self.get_client(peer, timeout).await?;
+        let mut request = Request::new(GetEpochStatusRequest {});
+        request.set_timeout(timeout);
+        let response = client.get_epoch_status(request).await.map_err(|e| {
+            ConsensusError::NetworkRequest(format!("get_epoch_status failed: {e:?}"))
+        })?;
+        Ok(response.into_inner())
+    }
+
     async fn send_epoch_change_proposal(
         &self,
         peer: AuthorityIndex,
@@ -760,6 +774,26 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
             highest_received,
             highest_accepted,
         }))
+    }
+
+    async fn get_epoch_status(
+        &self,
+        request: Request<GetEpochStatusRequest>,
+    ) -> Result<Response<GetEpochStatusResponse>, tonic::Status> {
+        let peer_index = request
+            .extensions()
+            .get::<PeerInfo>()
+            .map(|p| p.authority_index)
+            .unwrap_or_else(|| {
+                trace!("⚠️ [PEERINFO] PeerInfo missing, using dummy index 0");
+                AuthorityIndex::new_for_test(0)
+            });
+        let status = self
+            .service
+            .handle_get_epoch_status(peer_index)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+        Ok(Response::new(status))
     }
 
     async fn send_epoch_change_proposal(
@@ -1335,6 +1369,19 @@ pub(crate) struct GetLatestRoundsResponse {
     // Highest accepted round per authority.
     #[prost(uint32, repeated, tag = "2")]
     highest_accepted: Vec<u32>,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct GetEpochStatusRequest {}
+
+#[derive(Clone, prost::Message)]
+pub struct GetEpochStatusResponse {
+    #[prost(uint64, tag = "1")]
+    pub epoch: u64,
+    #[prost(uint32, tag = "2")]
+    pub current_epoch_start_commit: u32,
+    #[prost(uint32, tag = "3")]
+    pub last_commit_index: u32,
 }
 
 #[derive(Clone, prost::Message)]

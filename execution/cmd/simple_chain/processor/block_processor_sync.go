@@ -59,12 +59,14 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
 	// ═════════════════════════════════════════════════════════════════════
 	if epochNum > currentEpoch && lastBlock != nil {
-		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex.", currentEpoch, epochNum)
+		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum)
 		geiAuth := GetGEIAuthority()
-		geiAuth.ResetCommitIndex()
-		storage.UpdateLastHandledCommitIndex(0)
+		geiAuth.ResetCommitIndexForEpoch(epochNum)
+		storage.ForceSetLastHandledCommitIndex(0)
+		storage.UpdateLastHandledCommitEpoch(epochNum)
 		if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
 			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
+			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(epochNum))
 		}
 	}
 

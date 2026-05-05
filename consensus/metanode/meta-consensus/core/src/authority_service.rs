@@ -997,6 +997,28 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         Ok((highest_received_rounds, highest_accepted_rounds))
     }
 
+    async fn handle_get_epoch_status(
+        &self,
+        _peer: AuthorityIndex,
+    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse> {
+        fail_point_async!("consensus-rpc-response");
+
+        let epoch = self.context.committee.epoch();
+        let last_commit_index = self.dag_state.read().last_commit_index();
+
+        let current_epoch_start_commit = if let Ok(first_commits) = self.store.scan_commits((1..=1).into()) {
+            first_commits.first().map(|c| c.index()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        Ok(crate::network::tonic_network::GetEpochStatusResponse {
+            epoch,
+            current_epoch_start_commit,
+            last_commit_index,
+        })
+    }
+
     async fn handle_send_epoch_change_proposal(
         &self,
         _peer: AuthorityIndex,

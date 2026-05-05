@@ -97,6 +97,15 @@ fn build_tonic_services(out_dir: &Path) {
         )
         .method(
             tonic_build::manual::Method::builder()
+                .name("get_epoch_status")
+                .route_name("GetEpochStatus")
+                .input_type("crate::network::tonic_network::GetEpochStatusRequest")
+                .output_type("crate::network::tonic_network::GetEpochStatusResponse")
+                .codec_path(codec_path)
+                .build(),
+        )
+        .method(
+            tonic_build::manual::Method::builder()
                 .name("send_epoch_change_proposal")
                 .route_name("SendEpochChangeProposal")
                 .input_type("crate::network::tonic_network::SendEpochChangeProposalRequest")

@@ -177,6 +177,18 @@ var CodeToError = map[int64]*TransactionError{
 	68: UploadChunkError,
 }
 
+// DescriptionToError provides reverse lookup from error description to TransactionError.
+// Used by the batch TX processing path to recover actual error codes from wrapped errors.
+var DescriptionToError = map[string]*TransactionError{}
+
+func init() {
+	for _, err := range CodeToError {
+		if err != nil {
+			DescriptionToError[err.Description] = err
+		}
+	}
+}
+
 func (te *TransactionError) Proto() *pb.TransactionError {
 	return &pb.TransactionError{
 		Code:        te.Code,

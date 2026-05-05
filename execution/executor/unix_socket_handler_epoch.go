@@ -1797,6 +1797,18 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 	// Go is the authoritative source for lastHandledCommitIndex
 	isAuthoritative := true
 
+	// FORK-SAFETY: Return the epoch of the commit_index, not just current epoch.
+	// If lastHandledCommitEpoch != current_epoch, the commit_index is stale (from a previous epoch).
+	commitIndex := storage.GetLastHandledCommitIndex()
+	commitEpoch := storage.GetLastHandledCommitEpoch()
+
+	// Epoch validation: If commit belongs to a different epoch, report 0 to prevent cross-epoch fork
+	if commitEpoch > 0 && commitEpoch != currentEpoch {
+		logger.Warn("🚨 [GO-AUTH GEI] EPOCH MISMATCH in recovery: lastHandledCommitIndex=%d belongs to epoch=%d but current epoch=%d. Reporting commit_index=0 to Rust.",
+			commitIndex, commitEpoch, currentEpoch)
+		commitIndex = 0
+	}
+
 	var lastBlockTimestampMs uint64 = 0
 	if lastBlockNumber > 0 {
 		blockchainInstance := blockchain.GetBlockChainInstance()
@@ -1808,11 +1820,11 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		}
 	}
 
-	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_gei=%d, last_block=%d, epoch=%d, authoritative=%v, ts=%d",
-		lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
+	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_commit=%d (epoch=%d), last_gei=%d, last_block=%d, current_epoch=%d, authoritative=%v, ts=%d",
+		commitIndex, commitEpoch, lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
 
 	response := &pb.GetLastHandledCommitIndexResponse{
-		LastCommitIndex:      storage.GetLastHandledCommitIndex(),
+		LastCommitIndex:      commitIndex,
 		LastGei:              lastGEI,
 		LastBlockNumber:      lastBlockNumber,
 		Epoch:                currentEpoch,
