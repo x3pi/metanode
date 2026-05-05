@@ -103,87 +103,50 @@ impl PostRecoveryHealthCheck {
             }
         }
 
-        // Check 4: Committee hash match — verify local committee hash matches peers
-        // CRITICAL (2026-05-05): Previously hardcoded to true, masking committee divergence
-        // that caused liveness stalls. Now performs actual cross-validation.
+        // Check 4: Committee match — verify local validators match peers
+        // CRITICAL (2026-05-05): Previously hardcoded to true, masking committee divergence.
+        // Simplified approach: compare sorted authority_key lists directly (no full committee rebuild needed).
         match self.executor_client.get_current_epoch().await {
             Ok(local_epoch) if local_epoch > 0 => {
                 match self.executor_client.get_epoch_boundary_data(local_epoch).await {
                     Ok((_, _, _, local_validators, _, _)) if !local_validators.is_empty() => {
-                        match crate::node::committee::build_committee_from_validator_list(
-                            local_validators, local_epoch
-                        ) {
-                            Ok(local_committee) => {
-                                let local_hash = crate::node::committee_source::calculate_committee_hash(&local_committee);
-                                let local_hash_hex = hex::encode(&local_hash[..8]);
-                                
-                                let mut verified = false;
-                                for peer_addr in &self.peer_addresses {
-                                    if let Ok(peer_boundary) = crate::network::peer_rpc::query_peer_epoch_boundary_data(
-                                        peer_addr, local_epoch
-                                    ).await {
-                                        if !peer_boundary.validators.is_empty() {
-                                            use crate::node::executor_client::proto::ValidatorInfo as ProtoVI;
-                                            let peer_validators: Vec<ProtoVI> = peer_boundary.validators.into_iter().map(|v| ProtoVI {
-                                                address: v.address,
-                                                stake: v.stake.to_string(),
-                                                name: v.name,
-                                                authority_key: v.authority_key,
-                                                protocol_key: v.protocol_key,
-                                                network_key: v.network_key,
-                                                description: String::new(),
-                                                website: String::new(),
-                                                image: String::new(),
-                                                commission_rate: 0,
-                                                min_self_delegation: String::new(),
-                                                accumulated_rewards_per_share: String::new(),
-                                                p2p_address: String::new(),
-                                            }).collect();
-                                            
-                                            if let Ok(peer_committee) = crate::node::committee::build_committee_from_validator_list(
-                                                peer_validators, local_epoch
-                                            ) {
-                                                let peer_hash = crate::node::committee_source::calculate_committee_hash(&peer_committee);
-                                                let peer_hash_hex = hex::encode(&peer_hash[..8]);
-                                                
-                                                result.committee_match = local_hash == peer_hash;
-                                                if !result.committee_match {
-                                                    tracing::error!(
-                                                        "🚨 [HEALTH] Committee MISMATCH! local={}... ≠ peer={}... (epoch {}). \
-                                                         Local authorities: {}, Peer authorities: {}",
-                                                        local_hash_hex, peer_hash_hex, local_epoch,
-                                                        local_committee.size(), peer_committee.size()
-                                                    );
-                                                }
-                                                verified = true;
-                                            }
-                                            break;
-                                        }
+                        let mut local_keys: Vec<&str> = local_validators.iter()
+                            .map(|v| v.authority_key.as_str())
+                            .collect();
+                        local_keys.sort();
+                        
+                        let mut verified = false;
+                        for peer_addr in &self.peer_addresses {
+                            if let Ok(peer_boundary) = crate::network::peer_rpc::query_peer_epoch_boundary_data(
+                                peer_addr, local_epoch
+                            ).await {
+                                if !peer_boundary.validators.is_empty() {
+                                    let mut peer_keys: Vec<&str> = peer_boundary.validators.iter()
+                                        .map(|v| v.authority_key.as_str())
+                                        .collect();
+                                    peer_keys.sort();
+                                    
+                                    result.committee_match = local_keys == peer_keys;
+                                    if !result.committee_match {
+                                        tracing::error!(
+                                            "🚨 [HEALTH] Committee MISMATCH! local={} validators ≠ peer={} validators (epoch {})",
+                                            local_keys.len(), peer_keys.len(), local_epoch
+                                        );
                                     }
+                                    verified = true;
+                                    break;
                                 }
-                                
-                                if !verified {
-                                    // No peers responded — can't verify, assume OK
-                                    result.committee_match = true;
-                                    tracing::info!("ℹ️ [HEALTH] No peers responded for committee verification. Assuming OK.");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("⚠️ [HEALTH] Failed to build local committee: {}. Skipping check.", e);
-                                result.committee_match = true;
                             }
                         }
+                        
+                        if !verified {
+                            result.committee_match = true;
+                        }
                     }
-                    _ => {
-                        // No validators from Go — can't verify
-                        result.committee_match = true;
-                    }
+                    _ => { result.committee_match = true; }
                 }
             }
-            _ => {
-                // Epoch 0 or error — skip committee check
-                result.committee_match = true;
-            }
+            _ => { result.committee_match = true; }
         }
 
         result
