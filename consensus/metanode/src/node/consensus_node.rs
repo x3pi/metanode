@@ -1245,6 +1245,12 @@ impl ConsensusNode {
         // through Go BEFORE allowing consensus to start.
         // ═══════════════════════════════════════════════════════════════════════════
         if config.executor_read_enabled {
+            // FORK-PREVENTION: Lock proposals while STARTUP-SYNC imports blocks.
+            // Without this, CommitSyncer may declare Healthy (enabling proposals)
+            // while STARTUP-SYNC is still running → Core produces commits with
+            // stale DAG metadata → fork.
+            coordination_hub.set_startup_sync_active(true);
+
             let barrier_client = executor_client_for_proc.clone();
             let barrier_peers = config.peer_rpc_addresses.clone();
 
@@ -1693,6 +1699,75 @@ impl ConsensusNode {
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // FINAL SYNC GATE: Wait until network stabilizes before
+        // releasing proposals. The STARTUP-SYNC loop above exits with
+        // ACCEPTABLE_GAP=2, but the network may advance during the
+        // post-sync verification steps. This gate does 3 quick checks
+        // (500ms apart) to confirm the gap hasn't grown.
+        // ═══════════════════════════════════════════════════════════════
+        if total_synced_blocks > 0 && !barrier_peers.is_empty() {
+            for gate_check in 0..3u32 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                let mut max_peer_block = 0u64;
+                for peer_addr in &barrier_peers {
+                    if let Ok(info) = crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                        max_peer_block = max_peer_block.max(info.last_block);
+                    }
+                }
+                let gap = max_peer_block.saturating_sub(local_block);
+                if gap > ACCEPTABLE_GAP {
+                    tracing::warn!(
+                        "🔄 [FINAL-GATE] Check {}: Gap still {} (local={}, peer={}). Fetching remaining blocks...",
+                        gate_check, gap, local_block, max_peer_block
+                    );
+                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                        &barrier_peers, local_block + 1, max_peer_block
+                    ).await {
+                        Ok(blocks) if !blocks.is_empty() => {
+                            match barrier_client.sync_and_execute_blocks(blocks).await {
+                                Ok((synced, last_block, _gei)) => {
+                                    tracing::info!(
+                                        "✅ [FINAL-GATE] Synced {} more blocks (last={})",
+                                        synced, last_block
+                                    );
+                                    local_block = last_block;
+                                    total_synced_blocks += synced;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("⚠️ [FINAL-GATE] Sync failed: {}. Proceeding.", e);
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!("⚠️ [FINAL-GATE] No blocks fetched. Proceeding.");
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        "✅ [FINAL-GATE] Check {}: Gap={} ≤ {} — network stable. Proceeding.",
+                        gate_check, gap, ACCEPTABLE_GAP
+                    );
+                    break;
+                }
+            }
+
+            // Re-query Go for the final state after the gate
+            match executor_client_for_proc.get_last_handled_commit_index().await {
+                Ok((commit_idx, _, _, _, _, _)) if commit_idx > 0 => {
+                    tracing::info!(
+                        "🔑 [FINAL-GATE] Updated CommitProcessor: last_handled={} → {}",
+                        commit_processor.go_last_commit_index, commit_idx
+                    );
+                    commit_processor.go_last_commit_index = commit_idx;
+                    commit_processor.next_expected_index = commit_idx + 1;
+                    commit_consumer.monitor().set_highest_handled_commit(commit_idx);
+                    commit_consumer.update_replay_after_commit_index(commit_idx);
+                }
+                _ => {}
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // PHASE-2 CONSISTENCY CHECK (May 2026 — ROOT CAUSE FIX):
         // After STARTUP-SYNC, verify Go's state is internally consistent.
         // Detect block/commitIndex/epoch mismatches that indicate corrupted
@@ -1818,6 +1893,16 @@ impl ConsensusNode {
                 }
             }
         }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // FORK-PREVENTION: Unlock proposals after STARTUP-SYNC + init + verify.
+        // At this point:
+        //   1. All gap blocks have been synced from peers → Go state is current
+        //   2. initialize_from_go() has updated CommitProcessor guards
+        //   3. GEI cross-check has verified consistency
+        // It is now safe for Core to produce new commits.
+        // ═══════════════════════════════════════════════════════════════════
+        coordination_hub.set_startup_sync_active(false);
 
         // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();

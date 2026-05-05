@@ -67,6 +67,11 @@ pub struct ConsensusCoordinationHub {
     /// Read by TX Receivers (UDS) to reject transactions, and by Executors to pause execution.
     is_transitioning: Arc<AtomicBool>,
 
+    /// When true, STARTUP-SYNC is actively importing blocks from peers.
+    /// Proposals are blocked regardless of phase to prevent fork from stale DAG metadata.
+    /// Set by consensus_node.rs STARTUP-SYNC section.
+    startup_sync_active: Arc<AtomicBool>,
+
     /// The highest Global Execution Index (GEI) that Go has executed or skipped.
     /// Mutated by CommitProcessor (skip) and CommitObserver (execution).
     /// Read by Peer P2P Sync to inform peers of local catch-up progress.
@@ -82,6 +87,7 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
+            startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
@@ -195,9 +201,24 @@ impl ConsensusCoordinationHub {
     }
 
     /// Returns true if proposals are forbidden in the current phase.
-    /// Proposals are only allowed in Healthy phase.
+    /// Proposals are only allowed in Healthy phase AND when STARTUP-SYNC is not active.
     pub fn should_skip_proposal(&self) -> bool {
-        !self.is_healthy()
+        !self.is_healthy() || self.startup_sync_active.load(Ordering::Acquire)
+    }
+
+    /// Signal that STARTUP-SYNC has started/finished. While active, proposals are blocked.
+    pub fn set_startup_sync_active(&self, active: bool) {
+        self.startup_sync_active.store(active, Ordering::Release);
+        if active {
+            tracing::info!("🔒 [STARTUP-SYNC] Proposals LOCKED until sync completes");
+        } else {
+            tracing::info!("🔓 [STARTUP-SYNC] Proposals UNLOCKED — sync complete");
+        }
+    }
+
+    /// Check if STARTUP-SYNC is currently active.
+    pub fn is_startup_sync_active(&self) -> bool {
+        self.startup_sync_active.load(Ordering::Acquire)
     }
 }
 
@@ -215,6 +236,7 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
+            startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
