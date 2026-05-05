@@ -14,6 +14,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -98,7 +99,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			persistedGEI := storage.GetLastGlobalExecIndex()
 			if gapSize <= 16 && actualLastBlockDB == 0 {
 				*nextExpectedGlobalExecIndex = globalExecIndex
-				logger.Info("📋 [FAST-EMPTY-GAP-SKIP] Fresh start gap skip: nextExpected → %d (gap=%d)", globalExecIndex, gapSize)
+				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-SKIP] GEI Jump (Fresh Start): nextExpected → %d (gap=%d)", globalExecIndex, gapSize)
 			} else if persistedGEI > 0 && persistedGEI >= *nextExpectedGlobalExecIndex {
 				// Sync GEI from persisted state (GEI tracks ALL commits including empty)
 				*nextExpectedGlobalExecIndex = persistedGEI + 1
@@ -113,7 +114,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				// SNAPSHOT-RESTORE GAP BRIDGE (same as full-path, see line ~420)
 				*nextExpectedGlobalExecIndex = globalExecIndex
 				*currentBlockNumber = actualLastBlockDB
-				logger.Warn("🔗 [FAST-EMPTY GAP BRIDGE] Snapshot restore gap: nextExpected → %d (gap=%d, persistedGEI=%d, DB=%d)",
+				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-BRIDGE] GEI Jump (Snapshot Restore): nextExpected → %d (gap=%d, persistedGEI=%d, DB=%d)",
 					globalExecIndex, gapSize, persistedGEI, actualLastBlockDB)
 			} else {
 				pendingBlocks[globalExecIndex] = epochData
@@ -311,7 +312,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		*nextExpectedGlobalExecIndex = globalExecIndex
 
 
-		logger.Info("🔗 [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
+		logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 			oldExpected, globalExecIndex, gapSize)
 			
 		// Fall through to process the block sequentially
@@ -469,7 +470,7 @@ PROCESS_BLOCK:
 				}
 			}
 			if isZero {
-				logger.Debug("⏭️  [TX FLOW] Explicitly filtering 64-byte zero payload (SystemTransaction artifact) at txIdx=%d", txIdx)
+				logger.Info("📡 [TELEMETRY] SystemTransaction artifact detected and filtered. GEI=%d, Epoch=%d, TxIdx=%d", globalExecIndex, epochNum, txIdx)
 				continue
 			}
 		}
@@ -636,6 +637,36 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	bp.chainState.InvalidateAllState()
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORK-PREVENTION SAFETY NET (May 2026): Verify NOMT handle root matches
+	// the in-memory trie root BEFORE executing any transactions.
+	//
+	// This catches the case where STARTUP-SYNC's trie re-alignment failed
+	// or was incomplete. Without this check, a stale trie silently produces
+	// wrong AccountStatesRoot → different block hash → permanent fork.
+	//
+	// Cost: 1 NOMT FFI root query per block (negligible).
+	// ═══════════════════════════════════════════════════════════════════════════
+	if globalExecIndex > 0 && trie.GetStateBackend() == trie.BackendNOMT {
+		nomtRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+		trieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
+		if hasNomtRoot && nomtRoot != trieRoot {
+			logger.Error("🚨 [FORK-PREVENTION] NOMT handle root DIFFERS from trie root BEFORE processing block #%d! "+
+				"nomtRoot=%s, trieRoot=%s. Forcing trie re-alignment...",
+				*currentBlockNumber, nomtRoot.Hex()[:18]+"...", trieRoot.Hex()[:18]+"...")
+			lastBlock := bp.GetLastBlock()
+			if lastBlock != nil {
+				if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
+					logger.Error("❌ [FORK-PREVENTION] Failed to re-align trie: %v", err)
+				} else {
+					bp.chainState.InvalidateAllState()
+					logger.Info("✅ [FORK-PREVENTION] Trie re-aligned from NOMT handle. New trieRoot=%s",
+						bp.chainState.GetAccountStateDB().Trie().Hash().Hex()[:18]+"...")
+				}
+			}
+		}
+	}
+
 	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
@@ -701,7 +732,7 @@ PROCESS_BLOCK:
 		if err != nil {
 			logger.Error("❌ [SYSTEM-TX] Failed to save SystemTransactions for block #%d: %v", *currentBlockNumber, err)
 		} else {
-			logger.Info("💾 [SYSTEM-TX] Saved %d SystemTransactions for block #%d", len(sysTxs), *currentBlockNumber)
+			logger.Info("📡 [TELEMETRY] [SYSTEM-TX] Saved %d SystemTransactions for block #%d", len(sysTxs), *currentBlockNumber)
 		}
 	}
 

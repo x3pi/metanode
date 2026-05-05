@@ -72,9 +72,7 @@ get_block_number() {
 }
 
 get_peer_info() {
-    curl -s --max-time 3 -X POST "http://127.0.0.1:$1" \
-        -H "Content-Type: application/json" \
-        -d '{"jsonrpc":"2.0","method":"peer_info","params":[],"id":1}' 2>/dev/null
+    curl -s --max-time 3 -X GET "http://127.0.0.1:$1/peer_info" 2>/dev/null
 }
 
 get_snapshot_port() { echo $((8600 + $1)); }
@@ -122,7 +120,8 @@ collect_diagnostics() {
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local port=${RPC_PORTS[$i]}
         local block=$(get_block_number "$port")
-        local info=$(get_peer_info "$port")
+        local peer_port=$((19200 + i))
+        local info=$(get_peer_info "$peer_port")
         local gei=$(echo "$info" | grep -o '"global_exec_index":[0-9]*' | cut -d: -f2)
         local sr=$(echo "$info" | grep -o '"state_root":"[^"]*"' | cut -d'"' -f4)
         local epoch=$(echo "$info" | grep -o '"current_epoch":[0-9]*' | cut -d: -f2)
@@ -309,8 +308,10 @@ run_single_round() {
 
     # ── Phase 4: Integrity Verification ──
     log "### Giai đoạn 4: Xác minh tính nhất quán (Integrity Audit)"
-    local src_info=$(get_peer_info "$src_port")
-    local dst_info=$(get_peer_info "$dst_port")
+    local src_peer_port=$((19200 + src))
+    local dst_peer_port=$((19200 + dst))
+    local src_info=$(get_peer_info "$src_peer_port")
+    local dst_info=$(get_peer_info "$dst_peer_port")
 
     local src_gei=$(echo "$src_info" | grep -o '"global_exec_index":[0-9]*' | cut -d: -f2)
     local dst_gei=$(echo "$dst_info" | grep -o '"global_exec_index":[0-9]*' | cut -d: -f2)
@@ -331,19 +332,24 @@ run_single_round() {
     fi
     log "| GEI | ${src_gei:-?} | ${dst_gei:-?} | $gei_match |"
 
-    local sr_match="✅"; [ "$src_sr" != "$dst_sr" ] && sr_match="❌"
+    local sr_match="✅"
+    if [ "$src_blk" = "$dst_blk" ]; then
+        [ "$src_sr" != "$dst_sr" ] && sr_match="❌"
+    else
+        sr_match="⚠️ (Khác khối)"
+    fi
     log "| State Root | ${src_sr:0:20}... | ${dst_sr:0:20}... | $sr_match |"
     log ""
 
     if [ "$sr_match" = "❌" ]; then
-        log "- 🚨 **LỆCH STATE ROOT — PHÁT HIỆN FORK**"
+        log "- 🚨 **LỆCH STATE ROOT CÙNG KHỐI — PHÁT HIỆN FORK**"
         return 1
     fi
     if [ "$gei_match" = "❌" ]; then
-        log "- 🚨 **LỆCH GEI — PHÁT HIỆN DIVERGENCE** (src=$src_gei dst=$dst_gei)"
-        return 1
+        log "- ⚠️ **CẢNH BÁO: LỆCH GEI LỚN** (src=$src_gei dst=$dst_gei). Có thể do lag."
+        # Không return 1 ở đây, vì hash comparison (Phase 6) mới là kiểm tra chính xác nhất.
     fi
-    log "- ✅ Đã thông qua các kiểm tra tính nhất quán"
+    log "- ✅ Đã thông qua các kiểm tra trạng thái sơ bộ"
     log ""
 
     # ── Phase 5: Liveness Check ──

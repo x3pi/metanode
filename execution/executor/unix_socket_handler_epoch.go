@@ -1504,6 +1504,33 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 							blockNum, nomtHandleRoot.Hex()[:18]+"...")
 					}
 				}
+
+				// ═══════════════════════════════════════════════════════════════
+				// FORK-PREVENTION (May 2026): Force trie re-alignment from NOMT
+				// handle BEFORE returning to Rust for consensus.
+				//
+				// ROOT CAUSE: After batch-applying blocks during STARTUP-SYNC,
+				// the in-memory NomtStateTrie may hold a cached root that is
+				// stale relative to the NOMT handle's committed root. When
+				// consensus immediately sends the first new block, Go reads
+				// from this stale trie, producing a different AccountStatesRoot
+				// → different block hash → FORK (see block #2149 incident).
+				//
+				// FIX: Explicitly re-create the trie from the NOMT handle's
+				// actual root. This guarantees that ProcessTransactions on
+				// the first consensus block reads from the correct state.
+				// ═══════════════════════════════════════════════════════════════
+				if hasNomtRoot && isPreConsensusSync {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing trie re-alignment from NOMT handle root for block #%d", blockNum)
+					if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to re-align trie from NOMT handle: %v", err)
+					} else {
+						rh.chainState.InvalidateAllState()
+						finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+						logger.Info("✅ [STARTUP-SYNC] Trie re-aligned: trieRoot=%s (block=#%d). Ready for consensus.",
+							finalTrieRoot.Hex()[:18]+"...", blockNum)
+					}
+				}
 			} else {
 				// Non-NOMT backend: strict verification with halt on mismatch
 				if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
