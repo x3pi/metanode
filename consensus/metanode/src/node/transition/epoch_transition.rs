@@ -522,24 +522,25 @@ async fn stop_authority_and_poll_go(
         .unwrap_or(0);
     let raw_synced = std::cmp::max(raw_synced_gei, raw_synced_block);
 
-    // Committee floor
+    // CRITICAL FIX (2026-05-05): Use Go's ACTUAL reported state, NOT inflated
+    // by expected/committee floor. Inflating synced_index causes the new epoch
+    // to set boundary_gei higher than Go's real state, orphaning the last few
+    // old-epoch GEIs that Go hasn't processed yet. This was the root cause of
+    // the GEI off-by-one fork at block 1904 in stability test round 5.
+    let synced_index = raw_synced;
+    if raw_synced < expected_last_block {
+        warn!(
+            "⚠️ [SYNC WARNING] Go is behind expected: go_max={} < expected={}. \
+             If this persists, investigate Go's commitChannel pipeline stall.",
+            raw_synced, expected_last_block
+        );
+    }
+
     let committee_floor = if committee_source.last_block > 0 {
         committee_source.last_block
     } else {
         0
     };
-
-    // SAFETY FLOOR: Never let synced_index go below expected
-    let synced_index = *[raw_synced, expected_last_block, committee_floor]
-        .iter()
-        .max()
-        .unwrap();
-    if synced_index > raw_synced {
-        warn!(
-            "🚨 [SYNC SAFETY] Go returned max(gei,block)={} < floor={}. Using floor!",
-            raw_synced, synced_index
-        );
-    }
 
     info!(
         "📊 Final synced: {} (gei={}, block={}, expected={}, committee={})",
@@ -569,9 +570,13 @@ async fn poll_go_until_synced(
     let mut attempt = 0u64;
     let mut last_force_commit = std::time::Instant::now();
 
-    // Tolerance: Accept if Go is within this many GEIs of expected.
-    // In-flight empty commits in Go's async pipeline don't affect state.
-    const GEI_TOLERANCE: u64 = 5;
+    // CRITICAL FIX (2026-05-05): GEI_TOLERANCE REMOVED.
+    // Previously GEI_TOLERANCE=5 allowed the epoch transition to proceed when
+    // Go was up to 5 GEIs behind. This caused the last few old-epoch GEIs to
+    // be "orphaned" — never delivered to Go — because the new epoch's boundary_gei
+    // was inflated beyond Go's actual state. This was the root cause of the
+    // GEI off-by-one fork (block 1904, stability test round 5).
+    // The 30s timeout + ForceCommit is sufficient for Go to process all commits.
 
     // Immediately trigger a ForceCommit to flush Go's pipeline
     if let Err(e) = executor_client
@@ -603,15 +608,7 @@ async fn poll_go_until_synced(
                     break;
                 }
 
-                // TOLERANCE: Accept if gap is small (in-flight empty commits)
                 let remaining = expected_last_block.saturating_sub(go_last_gei);
-                if remaining <= GEI_TOLERANCE && wait_start.elapsed() > Duration::from_secs(5) {
-                    info!(
-                        "✅ [SYNC CLOSE-ENOUGH] gei={}, expected={}, gap={} <= tolerance={}. Proceeding. ({:?})",
-                        go_last_gei, expected_last_block, remaining, GEI_TOLERANCE, wait_start.elapsed()
-                    );
-                    break;
-                }
 
                 // Trigger ForceCommit every 3 seconds to flush Go's pipeline
                 if last_force_commit.elapsed() > Duration::from_secs(3) {
