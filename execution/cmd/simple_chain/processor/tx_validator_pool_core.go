@@ -19,7 +19,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
@@ -130,7 +129,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	}
 
 	if !skipVerification {
-		if err := tx_processor.VerifyTransaction(tx, vp.chainState); err != nil {
+		if err := tx_processor.VerifyTransaction(tx, vp.chainState, nil); err != nil {
 			logger.Error("Transaction verification failed: %v", err)
 			return transaction.VerifyTransactionError.Code, fmt.Errorf(err.Description)
 		}
@@ -250,35 +249,21 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
 	}
 
-	// Phase 1.6 (TPS Optimization): Pre-compute CrossChainHandler ONCE per batch
-	// Previously, GetCrossChainHandler() was called inside VerifyTransaction for EVERY TX.
-	// For 500 cross-chain TXs, that's 500 redundant function calls with potential lock contention.
-	var batchCCHandler *cross_chain_handler.CrossChainHandler
-	if ccH, ccErr := cross_chain_handler.GetCrossChainHandler(); ccErr == nil && ccH != nil {
-		batchCCHandler = ccH
-	}
-
-	// Phase 1.7 (TPS Optimization): Pre-load AccountStates into local slice
+	// Phase 1.6 (TPS Optimization): Pre-load AccountStates into local slice
 	// PreloadAccounts above warmed the loadedAccounts sync.Map cache.
-	// Now we read states into a plain []AccountState slice — subsequent parallel
-	// verification uses slice indexing (zero contention) instead of sync.Map lookups.
+	// Now we read states SEQUENTIALLY into a plain []AccountState slice.
+	// Subsequent parallel verification uses slice indexing (zero contention)
+	// instead of each goroutine calling AccountStateReadOnly via sync.Map.
 	preloadedStates := make([]types.AccountState, len(txs))
-	preloadedCCFlags := make([]bool, len(txs))
 	for i, tx := range txs {
 		if tx == nil {
 			continue
 		}
 		as, asErr := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
 		if asErr != nil || as == nil {
-			// Fallback: fresh account state (VerifyTransactionWithState will handle validation)
 			as = state.NewAccountState(tx.FromAddress())
 		}
 		preloadedStates[i] = as
-
-		// Pre-compute isCrossChainBatchSubmit per TX using the batch-cached handler
-		if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && batchCCHandler != nil {
-			preloadedCCFlags[i] = batchCCHandler.IsBatchSubmitTx(tx.CallData().Input())
-		}
 	}
 
 	// Phase 2 (TPS Optimization): Parallel VerifyTransactionWithState
@@ -313,7 +298,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 					if txs[i] == nil || preloadedStates[i] == nil {
 						continue
 					}
-					if err := tx_processor.VerifyTransactionWithState(txs[i], vp.chainState, preloadedStates[i], preloadedCCFlags[i]); err != nil {
+					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, preloadedStates[i]); err != nil {
 						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
 					}
 				}
