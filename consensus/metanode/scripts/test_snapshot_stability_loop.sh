@@ -149,8 +149,8 @@ collect_diagnostics() {
             [ "$bn" -lt 1 ] && continue
             local hex=$(printf "0x%x" "$bn")
             local row="| #$bn |"
-            for i in $(seq 0 $((NUM_NODES - 1))); do
-                local port=${RPC_PORTS[$i]}
+            for j in $(seq 0 $((NUM_NODES - 1))); do
+                local port=${RPC_PORTS[$j]}
                 local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \
                     -H "Content-Type: application/json" \
                     -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$hex\", false],\"id\":1}" 2>/dev/null)
@@ -379,8 +379,8 @@ run_single_round() {
         local hex=$(printf "0x%x" "$bn")
         local ref_hash=""
         local mismatch=false
-        for i in $(seq 0 $((NUM_NODES - 1))); do
-            local port=${RPC_PORTS[$i]}
+        for j in $(seq 0 $((NUM_NODES - 1))); do
+            local port=${RPC_PORTS[$j]}
             local b=$(get_block_number "$port")
             [ "$b" = "-1" ] || [ "$b" -lt "$bn" ] && continue
             local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \

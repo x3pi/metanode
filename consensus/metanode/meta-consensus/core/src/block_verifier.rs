@@ -154,8 +154,13 @@ impl SignedBlockVerifier {
                     block: block.round(),
                 });
             }
-            if ancestor.round == GENESIS_ROUND && !self.genesis.contains(ancestor) {
-                return Err(ConsensusError::InvalidGenesisAncestor(*ancestor));
+            if ancestor.round == GENESIS_ROUND {
+                // If we are skipping the epoch check (commit sync), the block may belong
+                // to a previous epoch, so its genesis blocks will not match `self.genesis`
+                // (which contains only the current epoch's genesis blocks).
+                if !skip_epoch_check && !self.genesis.contains(ancestor) {
+                    return Err(ConsensusError::InvalidGenesisAncestor(*ancestor));
+                }
             }
             if seen_ancestors[ancestor.author] {
                 return Err(ConsensusError::DuplicatedAncestorsAuthority(

@@ -274,7 +274,7 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 			// This duplicate has transactions - save for potential empty block replacement
 			// Check if we just processed an empty block with this index (race condition in epoch transition)
 			lastBlock := bp.GetLastBlock()
-			if lastBlock != nil && lastBlock.Header().BlockNumber() == globalExecIndex && len(lastBlock.Transactions()) == 0 {
+			if lastBlock != nil && lastBlock.Header().GlobalExecIndex() == globalExecIndex && len(lastBlock.Transactions()) == 0 {
 				logger.Warn("🔄 [EPOCH-RACE-FIX] Received duplicate block global_exec_index=%d with %d txs AFTER processing empty block! Replacing empty block.",
 					globalExecIndex, duplicateTxCount)
 				// Store for replacement - will be processed when we need to commit

@@ -202,12 +202,23 @@ impl BaseCommitter {
             if ancestor.round <= leader_slot.round {
                 continue;
             }
-            let ancestor = self
+            let ancestor_block_opt = self
                 .dag_state
                 .read()
-                .get_block(ancestor)
-                .unwrap_or_else(|| panic!("Block not found in storage: {:?}", ancestor));
-            if let Some(support) = self.find_supported_block(leader_slot, &ancestor) {
+                .get_block(ancestor);
+            
+            let ancestor_block = match ancestor_block_opt {
+                Some(block) => block,
+                None => {
+                    tracing::debug!(
+                        "Block not found in storage (likely missing from snapshot fast-forward): {:?}", 
+                        ancestor
+                    );
+                    continue;
+                }
+            };
+
+            if let Some(support) = self.find_supported_block(leader_slot, &ancestor_block) {
                 return Some(support);
             }
         }
@@ -247,11 +258,13 @@ impl BaseCommitter {
                     if let Some(potential_vote) = potential_vote {
                         self.is_vote(&potential_vote, leader_block)
                     } else {
-                        assert!(
-                            reference.round <= gc_round,
-                            "Block not found in storage: {:?} , and is not below gc_round: {gc_round}",
-                            reference
-                        );
+                        if reference.round > gc_round {
+                            tracing::debug!(
+                                "Block not found in storage (likely missing from snapshot fast-forward): {:?} (gc_round: {})",
+                                reference,
+                                gc_round
+                            );
+                        }
                         false
                     }
                 };
