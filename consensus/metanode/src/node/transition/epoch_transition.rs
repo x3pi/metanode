@@ -526,7 +526,7 @@ async fn stop_authority_and_poll_go(
         .await
         .map(|(b, _, _, _, _)| b)
         .unwrap_or(0);
-    let raw_synced = std::cmp::max(raw_synced_gei, raw_synced_block);
+    let raw_synced = raw_synced_gei;
 
     // CRITICAL FIX (2026-05-05): Use Go's ACTUAL reported state, NOT inflated
     // by expected/committee floor. Inflating synced_index causes the new epoch

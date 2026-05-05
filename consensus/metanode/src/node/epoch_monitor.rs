@@ -566,7 +566,7 @@ pub fn start_unified_epoch_monitor(
                         boundary_gei
                     } else {
                         let go_gei = client_arc.get_last_global_exec_index().await.unwrap_or(0);
-                        std::cmp::max(go_gei, boundary_block)
+                        go_gei
                     };
 
                     match node_guard

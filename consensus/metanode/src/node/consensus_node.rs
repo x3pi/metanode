@@ -723,19 +723,21 @@ impl ConsensusNode {
                                             peer_addr, peer_hash_hex
                                         );
                                     } else {
-                                        warn!(
-                                            "🚨 [COMMITTEE VERIFY] Peer {} committee MISMATCH! \
+                                        let err_msg = format!(
+                                            "🚨 [PARITY CHECK FAILED] Peer {} committee MISMATCH! \
                                              local={}... ≠ peer={}... (epoch {}). \
-                                             This WILL cause block hash divergence!",
+                                             Local authorities: {}, Peer authorities: {}. \
+                                             HALTING NODE: Starting with a mismatched committee WILL cause a hard fork. \
+                                             Please wipe the local database or verify your snapshot.",
                                             peer_addr,
                                             committee_hash_hex,
                                             peer_hash_hex,
-                                            current_epoch
+                                            current_epoch,
+                                            committee.size(),
+                                            peer_committee.size()
                                         );
-                                        warn!(
-                                            "🚨 [COMMITTEE VERIFY] Local: {} authorities, Peer: {} authorities",
-                                            committee.size(), peer_committee.size()
-                                        );
+                                        tracing::error!("{}", err_msg);
+                                        anyhow::bail!(err_msg);
                                     }
                                 }
                                 Err(e) => {
