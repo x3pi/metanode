@@ -821,7 +821,7 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 			logger.Error("❌ [EPOCH BOUNDARY] PRIORITY 2: NOMT query failed at boundary block %d: %v", boundaryBlock, err)
 		} else if len(validators.Validators) == 0 && epoch > 0 {
 			logger.Warn("⚠️ [EPOCH BOUNDARY] PRIORITY 2: NOMT returned 0 validators for epoch %d (knownKeys likely empty after snapshot restore)", epoch)
-			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty)", epoch, boundaryBlock)
+			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty). Rust MUST fallback to peers.", epoch, boundaryBlock)
 		}
 	} else {
 		// Sync incomplete — boundary block not available
@@ -1262,6 +1262,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
+		shouldCommitState := isLastBlock || (i > 0 && i%50 == 0)
 
 		rawBytes := blockData.GetRawBlockBytes()
 		backupBytes := blockData.GetBackupData()
@@ -1332,9 +1333,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// This prevents Go from double-executing these commits when Rust resumes consensus.
 		if header.CommitIndex() > 0 {
 			commitIdx32 := uint32(header.CommitIndex())
-			if commitIdx32 > storage.GetLastHandledCommitIndex() {
-				storage.UpdateLastHandledCommitIndex(commitIdx32)
-				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d from synced block #%d", commitIdx32, blockNum)
+			currentEpoch := header.Epoch()
+			lastEpoch := storage.GetLastHandledCommitEpoch()
+			
+			if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
+				storage.ForceSetLastHandledCommitIndex(commitIdx32)
+				storage.UpdateLastHandledCommitEpoch(currentEpoch)
+				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d (epoch %d) from synced block #%d", commitIdx32, currentEpoch, blockNum)
 			}
 		}
 
@@ -1418,7 +1423,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		var commitOpts []blockchain.CommitOption
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
-		if isLastBlock {
+		if shouldCommitState {
 			// ═══════════════════════════════════════════════════════════════
 			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
 			//
@@ -1449,7 +1454,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
-		} else if isLastBlock {
+		} else if shouldCommitState {
 			// ═══════════════════════════════════════════════════════════════
 			// STATE ROOT VERIFICATION (May 2026):
 			// After applying all backup batches + WithRebuildTries(), verify
