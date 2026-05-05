@@ -160,10 +160,16 @@ pub async fn transition_to_epoch_from_system_tx(
     node.current_commit_index.store(0, Ordering::SeqCst);
     node.coordination_hub.reset_quorum_commit_index(0);
 
-    let effective_synced = std::cmp::max(synced_index, synced_global_exec_index);
-    if effective_synced > synced_index {
-        info!(
-            "📊 [SYNC FLOOR] Using catch-up boundary {} instead of Go-reported {}",
+    // CRITICAL FIX (2026-05-05): Use Go's actual synced_index, NOT max() with Rust's
+    // synced_global_exec_index. Rust's GEI tracks dispatched commits, but Go may not
+    // have processed them yet. Using max() here inflates the new epoch's base GEI,
+    // causing nodes with different Go lag to assign different GEIs to the same block.
+    // This was the root cause of the fork at block 1199 where m1/m4 had GEI=1208
+    // while m0/m2/m3 had GEI=1205 — a 3 GEI difference from the inflated baseline.
+    let effective_synced = synced_index;
+    if synced_global_exec_index > synced_index {
+        warn!(
+            "⚠️ [SYNC GAP] Rust GEI ({}) > Go GEI ({}). Using Go's actual state to prevent fork.",
             synced_global_exec_index, synced_index
         );
     }

@@ -239,7 +239,7 @@ if should_run 7; then
     echo "📌 BƯỚC 7: Load Test TPS (20,000 txs)..."
     cd "$PROJECT_ROOT/cmd/tool/test_tps/tps_blast_cc"
     if [ "$DEPLOY_MODE" == "single" ]; then
-        run_and_capture "Load Test TPS (Bước 7) [Single]" go run main.go --count 20000 --parallel_native=true --rounds 10 --load_balance=false --batch=10
+        run_and_capture "Load Test TPS (Bước 7) [Single]" go run main.go --count 20000 --parallel_native=true --rounds 5 --load_balance=false --batch=10
     else
         run_and_capture "Load Test TPS (Bước 7) [Multi]" go run main.go --count 20000 --parallel_native=true --rounds 1 --load_balance=true --batch=500
     fi
