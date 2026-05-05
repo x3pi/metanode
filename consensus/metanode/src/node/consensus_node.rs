@@ -1545,11 +1545,6 @@ impl ConsensusNode {
                                         sync_round, new_gei, new_handled, new_handled
                                     );
                                     
-                                    // CRITICAL FIX: Re-read local epoch from Go's DB!
-                                    // If we started from a Full Wipe (epoch 0), STARTUP-SYNC fetched
-                                    // blocks from newer epochs. Go updated its epoch to match the blocks.
-                                    // We MUST update Rust's current_epoch before spawning Consensus Core,
-                                    // otherwise Rust will start at epoch 0 while the network is at epoch 2!
                                     if post_sync_epoch > storage.current_epoch {
                                         tracing::info!(
                                             "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
@@ -1557,34 +1552,6 @@ impl ConsensusNode {
                                         );
                                         storage.current_epoch = post_sync_epoch;
                                         commit_processor.update_epoch(post_sync_epoch);
-                                        // Update the committee in CommitProcessor so it can resolve leaders
-                                        let temp_client = crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None);
-                                        let validators = match temp_client.get_epoch_boundary_data(post_sync_epoch).await {
-                                            Ok((_, _, _, v, _, _)) => v,
-                                            Err(e) => {
-                                                tracing::warn!("⚠️ [FORK-SAFETY] Go failed to provide committee for epoch {} post-sync: {}. Falling back to peers...", post_sync_epoch, e);
-                                                match temp_client.get_safe_epoch_boundary_data_with_force(post_sync_epoch, &barrier_peers, true).await {
-                                                    Ok((_, _, _, v, _, _)) => v,
-                                                    Err(e2) => {
-                                                        panic!("🚨 [FORK-SAFETY] FATAL: Cannot determine committee for epoch {}. Go error: {}, Peer error: {}. Halting to prevent liveness stall with 0 validators.", post_sync_epoch, e, e2);
-                                                    }
-                                                }
-                                            }
-                                        };
-                                        
-                                        if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
-                                            validators, 
-                                            post_sync_epoch
-                                        ) {
-                                            if !new_eth_addrs.is_empty() {
-                                                storage.validator_eth_addresses = new_eth_addrs.clone();
-                                                commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
-                                            } else {
-                                                panic!("🚨 [FORK-SAFETY] FATAL: Committee for epoch {} has 0 authorities! Halting to prevent liveness stall.", post_sync_epoch);
-                                            }
-                                        } else {
-                                            panic!("🚨 [FORK-SAFETY] FATAL: Failed to build committee for epoch {}! Halting.", post_sync_epoch);
-                                        }
                                     }
                                     }
                                 }
@@ -1998,6 +1965,73 @@ impl ConsensusNode {
 
         // system_transaction_provider and epoch_duration_seconds are created earlier
         // (before executor_client_for_proc) for backpressure wiring
+
+        // ═══════════════════════════════════════════════════════════════════
+        // POST-SYNC COMMITTEE RESOLUTION & GRACEFUL DEGRADATION
+        // Once STARTUP-SYNC is completely done and we have caught up to the
+        // network, we need to determine the committee for the current epoch.
+        // If we fail (e.g., due to Go's NOMT amnesia and peer failures), we 
+        // DO NOT panic. We simply log a warning, set is_in_committee = false,
+        // and gracefully degrade to a SyncOnly node.
+        // ═══════════════════════════════════════════════════════════════════
+        if storage.current_epoch > 0 {
+            tracing::info!("🔄 [STARTUP] Resolving committee for post-sync epoch {}...", storage.current_epoch);
+            let temp_client = crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None);
+            
+            let validators_opt = match temp_client.get_epoch_boundary_data(storage.current_epoch).await {
+                Ok((_, _, _, v, _, _)) => Some(v),
+                Err(e) => {
+                    tracing::warn!("⚠️ [STARTUP] Go failed to provide committee for epoch {} post-sync: {}. Falling back to peers...", storage.current_epoch, e);
+                    match temp_client.get_safe_epoch_boundary_data_with_force(storage.current_epoch, &config.peer_rpc_addresses, true).await {
+                        Ok((_, _, _, v, _, _)) => Some(v),
+                        Err(e2) => {
+                            tracing::error!("🚨 [STARTUP] Cannot determine committee for epoch {}. Go error: {}, Peer error: {}. Gracefully degrading to SyncOnly mode.", storage.current_epoch, e, e2);
+                            None
+                        }
+                    }
+                }
+            };
+            
+            if let Some(validators) = validators_opt {
+                if let Ok((committee, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
+                    validators, 
+                    storage.current_epoch
+                ) {
+                    if !new_eth_addrs.is_empty() {
+                        tracing::info!("✅ [STARTUP] Successfully resolved committee with {} authorities for epoch {}", new_eth_addrs.len(), storage.current_epoch);
+                        storage.committee = committee.clone();
+                        storage.validator_eth_addresses = new_eth_addrs.clone();
+                        
+                        let own_protocol_pubkey = storage.protocol_keypair.public();
+                        let own_index_opt = committee.authorities().find_map(|(idx, auth)| {
+                            if auth.protocol_key == own_protocol_pubkey {
+                                Some(idx)
+                            } else {
+                                None
+                            }
+                        });
+                        
+                        storage.is_in_committee = own_index_opt.is_some();
+                        if let Some(idx) = own_index_opt {
+                            storage.own_index = idx;
+                            tracing::info!("✅ [IDENTITY] Assigned own_index = {} for epoch {}", idx, storage.current_epoch);
+                        } else {
+                            tracing::info!("ℹ️ [IDENTITY] Not in committee for epoch {}", storage.current_epoch);
+                        }
+                        
+                        commit_processor.get_epoch_eth_addresses_arc().write().await.insert(storage.current_epoch, new_eth_addrs);
+                    } else {
+                        tracing::error!("🚨 [STARTUP] Committee for epoch {} has 0 authorities! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
+                        storage.is_in_committee = false;
+                    }
+                } else {
+                    tracing::error!("🚨 [STARTUP] Failed to build committee for epoch {}! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
+                    storage.is_in_committee = false;
+                }
+            } else {
+                storage.is_in_committee = false;
+            }
+        }
 
         // Simplified validator startup: if node is in committee, always start consensus.
         // Cold-start / restart catch-up is handled by CommitSyncer (reset_to_network_baseline).
