@@ -3,7 +3,7 @@
 
 use crate::system_transaction::SystemTransaction;
 use consensus_config::Epoch;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
@@ -42,6 +42,34 @@ pub struct DefaultSystemTransactionProvider {
     /// Maximum lag threshold: EndOfEpoch is suppressed when go_lag >= this value
     #[allow(dead_code)]
     go_lag_threshold: u64,
+    /// FIX 7 (May 2026): EndOfEpoch SUPPRESSION flag.
+    ///
+    /// When a node starts with a stale epoch timestamp (snapshot restore / cold-start),
+    /// its local wall-clock epoch timing is NOT synchronized with the cluster.
+    /// If this node becomes leader and proposes EndOfEpoch based on local time,
+    /// it will trigger a premature epoch transition → different txRoot, leaderAddress,
+    /// timestamp → FORK.
+    ///
+    /// PRINCIPLE: A node that just recovered is NOT qualified to decide when an epoch
+    /// should end. It must FOLLOW the cluster's epoch transitions, not initiate them.
+    ///
+    /// This flag is set to `true` when stale timestamp is detected (constructor/update_epoch).
+    /// It is automatically cleared in TWO ways:
+    ///   1. `update_epoch()` receives a FRESH timestamp (elapsed < epoch_duration)
+    ///      → a REAL epoch transition was committed by the cluster
+    ///   2. Auto-unsuppress: node has been in Healthy phase for >= 2*epoch_duration
+    ///      → node is fully caught up and actively participating in consensus
+    ///      → safe to resume epoch timing decisions
+    ///      → handles FULL CLUSTER RESTART where all nodes are suppressed
+    ///
+    /// While suppressed, `should_trigger_epoch_change()` always returns false.
+    /// The node still PROCESSES EndOfEpoch from committed blocks — it just doesn't
+    /// INITIATE them.
+    epoch_change_suppressed: Arc<AtomicBool>,
+    /// Timestamp (ms) when this node entered Healthy phase.
+    /// Used for auto-unsuppress: if healthy for >= 2*epoch_duration, clear suppression.
+    /// Set to 0 when not yet healthy. Set by `notify_healthy()` from CoordinationHub.
+    healthy_since_ms: Arc<AtomicU64>,
 }
 
 impl DefaultSystemTransactionProvider {
@@ -94,58 +122,71 @@ impl DefaultSystemTransactionProvider {
             time_based_enabled
         );
 
-        // FIX 6 (replaces FIX 5): When epoch start timestamp is stale (elapsed > duration),
-        // reset to now() to prevent an immediate EndOfEpoch trigger.
+        // FIX 7 (replaces FIX 5 and FIX 6):
         //
-        // CONTEXT: After snapshot restore (cold-start), the Go boundary timestamp may be
-        // extremely old (e.g., genesis at 1772784000000ms = 45 days ago). FIX 5 kept the
-        // original timestamp to "ensure consistent epoch boundary blocks", but this caused
-        // a FATAL BUG:
-        //   1. Provider initialized with stale timestamp → elapsed=3864219s > duration=900s
-        //   2. First block proposal immediately injects EndOfEpoch system transaction
-        //   3. Network commits it → epoch transition fires on a still-syncing node
-        //   4. core_thread shuts down → GEI GAP GUARD deadlocks → node stuck forever
+        // HISTORY:
+        //   FIX 5: Kept original stale timestamp → immediate EndOfEpoch → deadlock
+        //   FIX 6: Reset to now() → 120s countdown → epoch racing fork
         //
-        // FIX: Reset to now(). This is safe because:
-        //   - On normal nodes, update_epoch() is called during epoch transitions, which
-        //     resets the timestamp anyway. The constructor value only matters at startup.
-        //   - On cold-start nodes, the priority is STABILITY (don't trigger premature
-        //     epoch transition). After catching up, the node will participate in the
-        //     network's epoch transitions normally.
-        //   - Network consistency is maintained because EndOfEpoch is only injected by
-        //     the LEADER, and a syncing node won't be leader until it catches up.
-        let effective_epoch_start = if time_based_enabled && elapsed_seconds >= epoch_duration_seconds {
+        // FIX 7 PRINCIPLE: A snapshot-restored node must NEVER initiate EndOfEpoch.
+        // It must FOLLOW the cluster's epoch transitions, not start its own.
+        //
+        // When epoch timestamp is stale:
+        //   1. Keep the original timestamp (cosmetic — doesn't matter because suppressed)
+        //   2. Set epoch_change_suppressed = true
+        //   3. should_trigger_epoch_change() returns false while suppressed
+        //   4. Suppression auto-clears when update_epoch() receives a FRESH timestamp
+        //      from a REAL epoch transition committed by the cluster
+        //
+        // This is safe because:
+        //   - The node still PROCESSES EndOfEpoch from committed blocks (consensus layer)
+        //   - It just doesn't PROPOSE them
+        //   - Other healthy nodes will trigger EndOfEpoch when the time comes
+        //   - When that committed EndOfEpoch reaches this node, update_epoch() is called
+        //     with a fresh timestamp → suppression cleared → normal participation
+        let is_stale = time_based_enabled && elapsed_seconds >= epoch_duration_seconds;
+        if is_stale {
             warn!(
-                "⚠️  SystemTransactionProvider: Epoch start timestamp is {}s old (>= duration {}s). \
-                 Resetting to now() ({}ms) to prevent immediate EndOfEpoch trigger. \
-                 Original timestamp: {}ms. This is normal during snapshot restore / cold-start.",
+                "🛡️ SystemTransactionProvider: Epoch start timestamp is {}s old (>= duration {}s). \
+                 SUPPRESSING EndOfEpoch emission until cluster triggers a real epoch transition. \
+                 Original timestamp: {}ms. This node will FOLLOW, not LEAD epoch changes. \
+                 This is normal during snapshot restore / cold-start.",
                 elapsed_seconds,
                 epoch_duration_seconds,
-                now_ms,
                 epoch_start_timestamp_ms
             );
-            now_ms
-        } else {
-            epoch_start_timestamp_ms
-        };
+        }
 
         Self {
             current_epoch: Arc::new(RwLock::new(current_epoch)),
             epoch_duration_seconds,
-            epoch_start_timestamp_ms: Arc::new(RwLock::new(effective_epoch_start)),
+            // Keep original timestamp — doesn't matter because suppressed
+            epoch_start_timestamp_ms: Arc::new(RwLock::new(epoch_start_timestamp_ms)),
             time_based_enabled,
             last_checked_commit_index: Arc::new(RwLock::new(0)),
             commit_index_buffer,
             go_lag: Arc::new(AtomicU64::new(0)),
-            go_lag_threshold: 50, // Suppress EndOfEpoch when Go is >= 50 blocks behind
+            go_lag_threshold: 50,
+            epoch_change_suppressed: Arc::new(AtomicBool::new(is_stale)),
+            healthy_since_ms: Arc::new(AtomicU64::new(0)), // 0 = not yet healthy
         }
     }
 
     /// Update current epoch (called after epoch transition)
-    /// FORK-SAFETY: When syncing from Go, prioritize Go's timestamp over local calculation
-    /// Only override if timestamp is significantly in the past (consensus delay scenario)
+    ///
+    /// FORK-SAFETY: This method is called from TWO contexts:
+    ///   1. Startup: consensus_node.rs calls this after Post-Sync Committee Resolution
+    ///      with the epoch boundary timestamp from Go. This timestamp is STALE
+    ///      (it's the timestamp when the current epoch started, which was in the past).
+    ///      → Suppression should REMAIN active.
+    ///
+    ///   2. Normal epoch transition: epoch_transition_callback calls this when the
+    ///      cluster commits an EndOfEpoch. The timestamp is FRESH (just happened).
+    ///      → Suppression should be CLEARED (node is now synchronized with cluster).
+    ///
+    /// The distinction is automatic: if elapsed >= duration → stale → stay suppressed.
+    /// If elapsed < duration → fresh → clear suppression.
     pub async fn update_epoch(&self, new_epoch: Epoch, new_timestamp_ms: u64) {
-        // Use blocking write from async context (safe - we're not blocking the runtime thread)
         *self
             .current_epoch
             .write()
@@ -156,39 +197,55 @@ impl DefaultSystemTransactionProvider {
             .expect("SystemTime before UNIX_EPOCH — clock is misconfigured")
             .as_millis() as u64;
 
-        // Apply FIX 6 logic to update_epoch as well to prevent catching up nodes from immediately
-        // triggering EndOfEpoch if they are given an old timestamp by Go.
         let elapsed_seconds = now_ms.saturating_sub(new_timestamp_ms) / 1000;
-        let effective_timestamp = if self.time_based_enabled && elapsed_seconds >= self.epoch_duration_seconds {
+
+        if self.time_based_enabled && elapsed_seconds >= self.epoch_duration_seconds {
+            // Timestamp is STALE — this is a startup sync or catch-up call.
+            // Keep suppression active. Use original timestamp (doesn't matter — suppressed).
             warn!(
-                "⚠️  SystemTransactionProvider::update_epoch: Given timestamp is {}s old (>= duration {}s). \
-                 Resetting to now() ({}ms) to prevent immediate EndOfEpoch trigger. \
-                 Original timestamp: {}ms. This is normal during snapshot restore / catch-up.",
+                "🛡️ SystemTransactionProvider::update_epoch: Given timestamp is {}s old (>= duration {}s). \
+                 EndOfEpoch remains SUPPRESSED. Node will follow cluster epoch transitions. \
+                 Original timestamp: {}ms.",
                 elapsed_seconds,
                 self.epoch_duration_seconds,
-                now_ms,
                 new_timestamp_ms
             );
-            now_ms
+            self.epoch_change_suppressed.store(true, Ordering::SeqCst);
+            // Still update the epoch number and timestamp for bookkeeping
+            *self
+                .epoch_start_timestamp_ms
+                .write()
+                .unwrap_or_else(|p| p.into_inner()) = new_timestamp_ms;
         } else {
-            new_timestamp_ms
-        };
+            // Timestamp is FRESH — this is a REAL epoch transition from the cluster.
+            // Clear suppression: this node is now synchronized with the network.
+            let was_suppressed = self.epoch_change_suppressed.swap(false, Ordering::SeqCst);
+            if was_suppressed {
+                info!(
+                    "✅ SystemTransactionProvider::update_epoch: Received FRESH epoch transition \
+                     (epoch={}, elapsed={}s < duration={}s). EndOfEpoch suppression CLEARED. \
+                     Node is now synchronized with cluster epoch timing.",
+                    new_epoch, elapsed_seconds, self.epoch_duration_seconds
+                );
+            }
+            *self
+                .epoch_start_timestamp_ms
+                .write()
+                .unwrap_or_else(|p| p.into_inner()) = new_timestamp_ms;
+        }
 
-        // FORK-SAFETY (Apr 2026 Audit): We now safely handle catch-up timestamps above.
-        *self
-            .epoch_start_timestamp_ms
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = effective_timestamp;
         *self
             .last_checked_commit_index
             .write()
             .unwrap_or_else(|p| p.into_inner()) = 0;
 
         info!(
-            "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms (now={}ms)",
+            "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms, \
+             now={}ms, suppressed={}",
             new_epoch,
-            effective_timestamp,
-            now_ms
+            new_timestamp_ms,
+            now_ms,
+            self.epoch_change_suppressed.load(Ordering::SeqCst)
         );
     }
 
@@ -202,11 +259,81 @@ impl DefaultSystemTransactionProvider {
         self.go_lag.store(lag, Ordering::Relaxed);
     }
 
+    /// Notify that the node has entered Healthy phase.
+    /// Called by CoordinationHub when phase transitions to Healthy.
+    /// Starts the auto-unsuppress timer: if node stays healthy for >= 2*epoch_duration,
+    /// suppression is automatically cleared (handles full-cluster-restart scenario).
+    pub fn notify_healthy(&self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("SystemTime before UNIX_EPOCH")
+            .as_millis() as u64;
+        // Only set once (don't reset on repeated calls)
+        self.healthy_since_ms.compare_exchange(
+            0, now_ms, Ordering::SeqCst, Ordering::SeqCst
+        ).ok();
+        if self.epoch_change_suppressed.load(Ordering::SeqCst) {
+            info!(
+                "🛡️ SystemTransactionProvider::notify_healthy: Node entered Healthy phase at {}ms. \
+                 Auto-unsuppress will occur after {}s (2x epoch_duration) if no cluster epoch transition arrives.",
+                now_ms, self.epoch_duration_seconds * 2
+            );
+        }
+    }
+
     /// Check if epoch transition should be triggered
     fn should_trigger_epoch_change(&self, current_commit_index: u32) -> bool {
         if !self.time_based_enabled {
             tracing::debug!("⏰ SystemTransactionProvider: time_based_enabled=false, skipping epoch change check");
             return false;
+        }
+
+        // FIX 7: If suppressed, this node is NOT qualified to initiate EndOfEpoch.
+        // It will still PROCESS EndOfEpoch from committed blocks — it just won't PROPOSE them.
+        //
+        // AUTO-UNSUPPRESS: If the node has been in Healthy phase for >= 2*epoch_duration,
+        // it has been actively participating in consensus for long enough. It's safe to
+        // resume epoch timing decisions. This handles the FULL CLUSTER RESTART scenario
+        // where ALL nodes are suppressed and nobody triggers EndOfEpoch.
+        if self.epoch_change_suppressed.load(Ordering::SeqCst) {
+            let healthy_since = self.healthy_since_ms.load(Ordering::SeqCst);
+            if healthy_since > 0 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("SystemTime before UNIX_EPOCH")
+                    .as_millis() as u64;
+                let healthy_duration_s = now_ms.saturating_sub(healthy_since) / 1000;
+                let unsuppress_threshold = self.epoch_duration_seconds * 2;
+
+                if healthy_duration_s >= unsuppress_threshold {
+                    self.epoch_change_suppressed.store(false, Ordering::SeqCst);
+                    // Reset epoch_start to now so we don't immediately trigger
+                    *self.epoch_start_timestamp_ms
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner()) = now_ms;
+                    info!(
+                        "✅ SystemTransactionProvider: AUTO-UNSUPPRESSED after {}s in Healthy phase \
+                         (threshold={}s). Epoch start reset to now. Node is fully caught up and \
+                         qualified to participate in epoch timing decisions.",
+                        healthy_duration_s, unsuppress_threshold
+                    );
+                    // Fall through to normal epoch check (won't trigger immediately
+                    // because we just set epoch_start = now)
+                } else {
+                    tracing::debug!(
+                        "🛡️ SystemTransactionProvider: EndOfEpoch SUPPRESSED. \
+                         Healthy for {}s / {}s needed for auto-unsuppress.",
+                        healthy_duration_s, unsuppress_threshold
+                    );
+                    return false;
+                }
+            } else {
+                tracing::debug!(
+                    "🛡️ SystemTransactionProvider: EndOfEpoch SUPPRESSED (not yet Healthy). \
+                     Waiting for cluster to trigger epoch transition."
+                );
+                return false;
+            }
         }
 
         // Only check once per commit index to avoid spam

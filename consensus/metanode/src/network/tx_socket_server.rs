@@ -182,9 +182,8 @@ impl TxSocketServer {
                 if transitioning.load(Ordering::SeqCst) {
                     warn!("⚡ [FFI TX FLOW] Epoch transition in progress. Delaying {} TXs internally.", transactions_to_submit.len());
                     attempt += 1;
-                    if attempt >= 120 {
-                        error!("❌ [FFI TX FLOW] Dropped {} TXs after 120 retries during transition", transactions_to_submit.len());
-                        return;
+                    if attempt % 60 == 0 {
+                        warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                     continue;
@@ -215,9 +214,8 @@ impl TxSocketServer {
                                 warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
                                 drop(node_guard);
                                 attempt += 1;
-                                if attempt >= 300 { // Allow 5 minutes during boot
-                                    error!("❌ [FFI TX FLOW] Dropped {} TXs after timeout waiting for sync", transactions_to_submit.len());
-                                    return;
+                                if attempt % 60 == 0 {
+                                    warn!("⏳ [FFI TX FLOW] Node still catching up. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                                 continue;
@@ -306,9 +304,8 @@ impl TxSocketServer {
 
             // If we broke out early due to transient transition error, sleep and retry
             attempt += 1;
-            if attempt >= 120 {
-                error!("❌ [FFI TX FLOW] Dropped remaining TXs after Max Retries reached");
-                return;
+            if attempt % 60 == 0 {
+                warn!("⏳ [FFI TX FLOW] Delayed TXs for {}s due to submission failure.", attempt);
             }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }

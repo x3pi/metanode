@@ -158,6 +158,7 @@ type BlockProcessor struct {
 
 	// Backup DB Coalescing
 	backupDbChannel chan CommitJob
+	backupDbWg      sync.WaitGroup // Track active backupDbWorker tasks
 	// GEI Coalescing
 	geiUpdateChan chan AsyncGEIUpdate
     
@@ -742,11 +743,21 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 // WaitForPersistence blocks until all pending async persistence jobs are processed.
 // This ensures that memory buffers and trie nodes are fully written out before snapshots.
 func (bp *BlockProcessor) WaitForPersistence() {
-	doneChan := make(chan struct{})
+	// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates 
+	// that were forwarded to commitChannel before this call)
+	commitDone := make(chan struct{})
+	bp.commitChannel <- CommitJob{DoneChan: commitDone}
+	<-commitDone
+
+	// 2. Drain Persist Worker (LevelDB trie nodes)
+	persistDone := make(chan struct{})
 	bp.persistChannel <- PersistJob{
-		DoneSignal: doneChan,
+		DoneSignal: persistDone,
 	}
-	<-doneChan
+	<-persistDone
+
+	// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex and block backup data is written)
+	bp.backupDbWg.Wait()
 }
 
 // StopWait safely drains all background worker channels before shutting down.

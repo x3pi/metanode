@@ -21,6 +21,7 @@ Giao tiếp qua **FFI Bridge** (CGo) và **Unix Domain Socket** (IPC).
 Rust KHÔNG ĐƯỢC tự suy đoán trạng thái Go.
 Go KHÔNG ĐƯỢC tự suy đoán trạng thái Rust.
 Mỗi engine hỏi trực tiếp engine kia khi cần dữ liệu.
+Queue transactions độc lập: Không chặn cứng quá trình tạo DAG bằng các tác vụ mạng đồng bộ. Các giao dịch trong lúc khởi tạo hoặc chuyển epoch được hàng đợi (queue) an toàn, tránh rơi rớt giao dịch đầu tiên.
 ```
 
 ---
@@ -29,36 +30,49 @@ Mỗi engine hỏi trực tiếp engine kia khi cần dữ liệu.
 
 Khởi động diễn ra **tuần tự nghiêm ngặt**. Mỗi pha phải hoàn thành trước khi pha sau bắt đầu.
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  PHASE 1: setup_storage()                                │
-│  ├─ Khởi tạo ExecutorClient (IPC tới Go)                 │
-│  ├─ Đợi Go ready (is_ready=true, max 30 retry)           │
-│  ├─ Đọc: block_number, epoch, committee từ Go            │
-│  ├─ Đọc: last_handled_commit_index từ Go                 │
-│  └─ Xác định identity (own_index trong committee)        │
-├──────────────────────────────────────────────────────────┤
-│  PHASE 2: setup_consensus()                              │
-│  ├─ Tính go_replay_after từ commit_index                 │
-│  ├─ Tạo CommitProcessor + CommitConsumer                 │
-│  ├─ STARTUP-SYNC: Bắt kịp mạng lưới                     │
-│  │   ├─ So sánh local_block vs peer_block                │
-│  │   ├─ Fetch blocks từ peers (nếu behind)               │
-│  │   ├─ Gửi blocks tới Go qua FFI                        │
-│  │   └─ Cập nhật commit_index sau sync                   │
-│  ├─ initialize_from_go() — ĐỒNG BỘ (không async)        │
-│  ├─ GEI Cross-check với peers                            │
-│  ├─ Health Check: block_parity + gei_parity              │
-│  └─ Khởi động Authority (Mysticeti consensus core)       │
-├──────────────────────────────────────────────────────────┤
-│  PHASE 3: setup_networking()                             │
-│  └─ Clock/NTP sync                                       │
-├──────────────────────────────────────────────────────────┤
-│  PHASE 4: setup_epoch_management()                       │
-│  ├─ StateTransitionManager                               │
-│  ├─ EpochMonitor                                         │
-│  └─ SyncController                                       │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    START(["ConsensusNode::new()"]) --> P1
+
+    subgraph P1["Phase 1: setup_storage()"]
+        direction TB
+        A1["ExecutorClient::new(IPC)"] --> A2["get_last_block_number()\n⏳ Infinite retry until is_ready=true"]
+        A2 --> A3["get_current_epoch() — LOCAL Go only\n(peers gây deadlock snapshot)"]
+        A3 --> A4["get_epoch_boundary_data()\nvalidators + boundary_gei + timestamp"]
+        A4 --> A5["Committee Hash Verify vs Peers\n(cold-start only)"]
+        A5 --> A6["calculate_last_global_exec_index()\nGEI + CommitIndex + CommitHash"]
+        A6 --> A7["Identity: find own_index in committee"]
+    end
+
+    P1 --> P2
+
+    subgraph P2["Phase 2: setup_consensus()"]
+        direction TB
+        B1["go_replay_after = last_handled_commit_index"] --> B2["Create CommitProcessor + CommitConsumer"]
+        B2 --> B3["Early Peer RPC Server\n(ngăn deadlock cluster)"]
+        B3 --> B4
+
+        subgraph B4["STARTUP-SYNC (retry loop)"]
+            direction TB
+            S1["Anti-Fork: verify local block hash vs peers\n🔴 PANIC nếu mismatch"] --> S2["Fetch blocks từ peers (chunk by epoch)"]
+            S2 --> S3["Execute qua Go FFI"]
+            S3 --> S4["Re-query Go: GEI, CommitIndex, Epoch"]
+            S4 --> S5{"Gap ≤ 2?"}
+            S5 -->|"Không"| S2
+            S5 -->|"Có"| S6["Post-Sync block hash verify\n🔴 EXIT(1) nếu mismatch"]
+        end
+
+        B4 --> B5["initialize_from_go() — ĐỒNG BỘ\nnext_block, next_gei, replay_guard"]
+        B5 --> B6["Sync Parity Assertion\nCP vs ExecutorClient vs Go"]
+        B6 --> B7["GEI Cross-check vs peers"]
+        B7 --> B8["Post-Sync Committee Resolution\n(epoch > 0, retry 3x + peer fallback)"]
+        B8 --> B9["Start Authority\n(Bootstrapping phase)"]
+        B9 --> B10["DAG-GATE: async wait Healthy\nthen unlock proposals"]
+    end
+
+    P2 --> P3["Phase 3: setup_networking()\nClock/NTP sync"]
+    P3 --> P4["Phase 4: setup_epoch_management()\nTransitionManager + EpochMonitor + SyncController"]
+    P4 --> LIVE(["🟢 Node Live"])
 ```
 
 ---
@@ -135,7 +149,29 @@ Hàm này:
 
 **Tại sao đồng bộ**: Nếu chạy async, CommitProcessor có thể bắt đầu xử lý commits **trước** khi guards được cập nhật → tạo block trùng lặp → fork.
 
-#### 3.2.3 GEI Cross-Check
+#### 3.2.3 Anti-Fork Hash Verification (Mandatory State Parity)
+
+Trong quá trình `STARTUP-SYNC`, Rust thực hiện cross-check block hiện tại của Go Master với mạng lưới:
+
+```
+Rust                    Peers                   Go
+  │                       │                      │
+  ├─ fetch_blocks(local) ─►│                      │
+  │◄── [Peer Block X] ────┤                      │
+  │                       │                      │
+  ├─ get_blocks_range(local) ───────────────────►│
+  │◄── [Local Block X] ──────────────────────────┤
+  │                       │                      │
+  │  Compare:             │                      │
+  │  - block_hash         │                      │
+  │  - timestamp_ms       │                      │
+  │  - txRoot & receiptRoot                      │
+  │                       │                      │
+```
+
+**Gate (FATAL PANIC):** Nếu bất kỳ trường dữ liệu nào (đặc biệt là hash, timestamp, txRoot, stateRoot) của `local` không khớp với `peer`, node sẽ bị **chặn hoàn toàn (panic!)** thay vì chỉ warning và gán `local_block = 0`. Điều này ngăn chặn việc state bị hỏng (corrupted DAG hoặc snapshot cũ) tiếp tục chạy và lan truyền state lỗi lên consensus, buộc operator phải wipe DB và sync lại từ đầu.
+
+#### 3.2.4 GEI Cross-Check
 
 ```
 Rust                    Peers
@@ -149,7 +185,67 @@ Rust                    Peers
 
 Cảnh báo nhưng không chặn nếu GEI lệch (peer có thể tạm thời ahead).
 
-#### 3.2.4 Health Check
+#### 3.2.5 Sync Parity Assertion (Post-init Verification)
+
+Ngay sau `initialize_from_go()`, hệ thống thực hiện kiểm tra chéo 3 chiều:
+
+```mermaid
+flowchart LR
+    GO["Go Authoritative\ncommit_index, gei, block, epoch"] --> CHECK{"Sync Parity\nAssertion"}
+    CP["CommitProcessor\ngo_last_commit_index\nnext_expected_index"] --> CHECK
+    EC["ExecutorClient\nnext_expected_index"] --> CHECK
+    CHECK -->|"Match"| OK["✅ PASS"]
+    CHECK -->|"CP ahead of Go"| FIX1["⚠️ Reset CP to Go values"]
+    CHECK -->|"Go at 0, CP > 0"| FIX2["⚠️ Reset CP to (0, 1)"]
+    CHECK -->|"EC ≠ CP > 1 delta"| WARN["⚠️ Log divergence warning"]
+```
+
+**Mục đích**: Ngăn chặn CommitProcessor bỏ sót commits (nếu ahead) hoặc replay commits đã xử lý (nếu behind) so với trạng thái Go thực tế.
+
+#### 3.2.6 Post-Sync Committee Resolution
+
+Sau khi STARTUP-SYNC hoàn tất và epoch có thể đã thay đổi, hệ thống **giải lại committee**:
+
+1. Query Go cho epoch hiện tại (retry 3 lần, mỗi lần cách 500ms)
+2. Nếu Go thất bại → fallback sang peers (`get_safe_epoch_boundary_data_with_force`)
+3. Nếu cả Go và peers đều thất bại → **graceful degradation** sang SyncOnly mode (không panic)
+4. Cập nhật `storage.committee`, `validator_eth_addresses`, `own_index`, `epoch_timestamp_ms`
+
+**Gate**: Không panic. Node tự chuyển sang SyncOnly nếu không thể xác định committee.
+
+#### 3.2.7 DAG-GATE (Dynamic Proposal Unlock)
+
+Sau khi Authority khởi động ở trạng thái `Bootstrapping`, hệ thống **không cho phép tạo proposals** ngay lập tức:
+
+```mermaid
+sequenceDiagram
+    participant Auth as Authority (Bootstrapping)
+    participant CS as CommitSyncer
+    participant Hub as CoordinationHub
+    participant Gate as DAG-GATE (async)
+
+    Auth->>Hub: startup_sync_active = true
+    Note over Auth: Proposals BLOCKED
+    Gate->>Gate: Wait 10s (Network Discovery)
+    CS->>CS: Replay DAG from peers
+    CS->>Hub: Phase = Healthy
+    Gate->>Hub: startup_sync_active = false
+    Note over Auth: Proposals UNLOCKED ✅
+```
+
+**Mục đích**: CommitSyncer cần thời gian để tái tạo DAG từ peers (leader schedule, commit history). Nếu unlock proposals quá sớm, node sẽ tạo blocks với metadata sai (timestamp, txRoot khác cluster) → fork.
+
+#### 3.2.8 Runtime Fork Guard (500-block Background Verification)
+
+Sau khi STARTUP-SYNC đồng bộ blocks, hệ thống spawn một task nền kiểm tra **500 block đầu tiên** sau khởi động:
+
+- Mỗi 10 blocks, so sánh hash của block mới nhất với peers
+- Nếu mismatch → `process::exit(1)` dừng node ngay lập tức
+- Nếu pass 500 blocks → task tự huỷ
+
+**Mục đích**: Bắt các fork muộn xuất phát từ lỗi timestamp non-determinism hoặc state drift nhỏ mà POST-SYNC-VERIFY bỏ sót (vì nó chỉ kiểm tra block cuối cùng được sync).
+
+#### 3.2.9 Health Check
 
 ```rust
 HealthCheckResult {
@@ -283,7 +379,53 @@ Bước 8: Authority starts
 
 ---
 
-## 7. Atomic Consensus Persistence & Crash Recovery
+## 7. Synchronized Snapshot Pipeline (Phòng Chống Mất Dữ Liệu GEI)
+
+**Vấn đề cốt lõi:**
+Trước đây, khi `snapshot_manager` kích hoạt tạo snapshot (PebbleDB Checkpoint), nó chỉ chờ `persistWorker` xả xong bộ nhớ của Trie (tức là stateRoot) mà bỏ qua tiến trình của `commitWorker` và `backupDbWorker`. Do quá trình lưu block payloads và cập nhật `GlobalExecIndex` (GEI) diễn ra bất đồng bộ, snapshot bị tạo ra **trước khi** GEI mới nhất được ghi xuống `backup_db`. Hậu quả là node sau khi restore snapshot sẽ bị mất GEI (GEI = 0) và tự động rơi vào trạng thái fork hoặc panic fail-fast.
+
+**Kiến trúc mới:**
+Quá trình tạo snapshot nay yêu cầu một khóa bảo vệ liên hoàn (Synchronized Drain) quét qua toàn bộ 3 pipeline lưu trữ ngầm trước khi cho phép đóng băng hệ thống để lấy Checkpoint.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SM as SnapshotManager
+    participant BP as BlockProcessor
+    participant CW as CommitWorker
+    participant PW as PersistWorker
+    participant BW as BackupDbWorker
+    participant DB as PebbleDB
+    
+    SM->>BP: PauseExecution() -> WaitForPersistence()
+    
+    rect rgb(230, 240, 250)
+        Note over BP,CW: Pipeline 1: Xả Commit Worker
+        BP->>CW: Gửi CommitJob{DoneChan}
+        CW-->>BP: Đóng DoneChan (Toàn bộ GEI/Block đã xử lý vào RAM)
+    end
+    
+    rect rgb(230, 250, 230)
+        Note over BP,PW: Pipeline 2: Xả Persist Worker
+        BP->>PW: Gửi PersistJob{DoneSignal}
+        PW-->>BP: Tín hiệu Done (Toàn bộ Trie Node ghi xong xuống LevelDB)
+    end
+    
+    rect rgb(250, 230, 230)
+        Note over BP,BW: Pipeline 3: Xả BackupDb Worker
+        BP->>BW: backupDbWg.Wait()
+        BW-->>BP: Bộ đếm về 0 (Toàn bộ GEI/CommitIndex/Payload ghi xong đĩa)
+    end
+    
+    SM->>DB: CheckpointAll()
+    Note right of DB: Snapshot được tạo với dữ liệu đồng nhất 100% giữa Go và Rust!
+```
+
+Nhờ kiến trúc rào chắn 3 lớp này, `metadata.json` chứa `stateRoot` và `backup_db` chứa `GEI/CommitIndex` luôn khớp hoàn hảo, đảm bảo không có giao dịch nào bị thất thoát qua khe hở async.
+
+---
+
+## 8. Atomic Consensus Persistence & Crash Recovery
 
 **Vấn đề cốt lõi:**
 Khi Go xử lý xong block từ Rust, hệ thống phải cập nhật 2 giá trị vào ổ đĩa (`BackupDb` - PebbleDB) để đánh dấu tiến độ: `last_global_exec_index` (GEI) và `last_handled_commit_index`.
@@ -301,7 +443,7 @@ Từ phiên bản tối ưu, quá trình này **bắt buộc** phải sử dụn
 
 ---
 
-## 8. CommitSyncer Gap Handling & Consumer Monitor Synchronization
+## 9. CommitSyncer Gap Handling & Consumer Monitor Synchronization
 
 **Vấn đề cốt lõi:**
 Khi CommitSyncer nhận thấy `local_commit_index` (của DAG) vượt xa tiến độ xử lý `highest_handled_commit` (của Go) quá 10 commit (Gap > 10), nó sẽ kích hoạt cơ chế kéo lùi `synced_commit_index` về vị trí `highest_handled_commit` để ưu tiên fetch lại block cho Go đuổi kịp.
@@ -324,7 +466,20 @@ Từ đó, `highest_handled_commit` luôn bám sát nút `local_commit` của DA
 
 ---
 
-## 7. Epoch Transition Timestamp Determinism
+## 10. Transaction Decoupling (Tách Biệt Nhận Giao Dịch và Quản Lý DAG)
+
+**Vấn đề cốt lõi:**
+Trước đây, khi tạo Genesis hoặc chuyển Epoch, quá trình `STARTUP-SYNC` hoặc `poll_go_until_synced` diễn ra đồng bộ và chặn luồng. Lúc này `TxSocketServer` bị vướng timeout (giới hạn số lần thử) và tự động drop "giao dịch đầu tiên" nếu việc khởi tạo DAG kéo dài (vd: mất hơn 2 phút chờ Go). Điều này gây ra việc mất giao dịch hệ thống và giao dịch người dùng ngay sau khi tạo epoch/genesis.
+
+**Giải Pháp Kiến Trúc:**
+Từ bản fix tháng 05/2026, luồng nhận giao dịch qua FFI/UDS hoàn toàn tách biệt:
+1. **No Drop Timeout:** `TxSocketServer` xóa bỏ giới hạn số lần retry (timeout). Giao dịch đến từ Go Master qua FFI sẽ được safely buffered (queue vô hạn với periodic log `Delayed TXs`) trong lúc Node thực hiện chuyển giao Epoch hoặc bắt kịp tiến độ (SyncOnly).
+2. **Smooth DAG Initialization:** `DagState::new` chỉ chạy sau khi quá trình đồng bộ hoàn tất (Phase 2). Việc này không còn bị vướng chặn timeout của Network UDS, tạo sự mượt mà lúc chuyển mạng và giữ an toàn tuyệt đối cho transactions ở buffer.
+3. **Backpressure:** Nếu hàng đợi của `ffi_tx_receiver` quá đầy (capacity = 1000 batches), Go Master sẽ nhận được `false` và tự động retry bên phía Go, đảm bảo 0% mất mát.
+
+---
+
+## 11. Epoch Transition Timestamp Determinism
 
 Quá trình chuyển giao Epoch (Epoch Transition) tiềm ẩn rủi ro fork lớn nhất nếu xử lý không cẩn thận.
 Nguyên tắc bất biến:
@@ -332,53 +487,105 @@ Nguyên tắc bất biến:
 2. **Deterministic GEI Base**: Khi epoch mới bắt đầu, GEI phải được nối tiếp chính xác từ GEI của block chuyển giao epoch (`synced_global_exec_index` từ `epoch_transition_callback`).
 3. **Go Processing Lag**: Trong lúc Rust đã sẵn sàng sang epoch mới, Go có thể đang xử lý các commit cuối của epoch cũ trong pipeline (Go lag). Rust **phải** dùng `synced_global_exec_index` làm `effective_synced` thay vì dùng giá trị GEI mà Go trả về lúc đó (`get_last_global_exec_index`). Nếu dùng GEI trả về từ Go khi Go chưa xử lý xong, epoch mới sẽ bị gán đè GEI lên các commit đang chờ xử lý của epoch cũ, dẫn đến mất transactions và fork (do GEI-REGRESSION guard của Go sẽ skip).
 
+### 11.1 SystemTransactionProvider Startup Sync (FIX 7 — May 2026)
+
+**Vấn đề**: `SystemTransactionProvider` được tạo **TRƯỚC** STARTUP-SYNC (line ~1186) với `epoch_timestamp_ms` từ snapshot (rất cũ). FIX 6 reset thành `now()`, nhưng sau 120s (`epoch_duration`), provider trigger `EndOfEpoch` → node nhảy epoch liên tục (3→4→5→6) trong khi cluster giữ epoch 3.
+
+**Triệu chứng**: m3 fork tại block 1113 với:
+- Khác `txRoot` (chứa EndOfEpoch system TX)
+- Khác `receiptsRoot`, `leaderAddress` (epoch-scoped)
+- Khác `timestamp` (epoch boundary timestamp)
+- GEI nhảy 3 mỗi block (do 3 system TX/block)
+
+**Nguyên tắc**: Node vừa phục hồi snapshot **KHÔNG ĐƯỢC** tự quyết định khi nào EndOfEpoch. Epoch timing là quyết định **toàn mạng**, node chưa sẵn sàng phải **THEO** chứ không **DẪN**.
+
+**Giải pháp (FIX 7 — Suppression Flag)**:
+
+1. **Suppress**: Khi phát hiện timestamp cũ (`elapsed >= epoch_duration`), đặt `epoch_change_suppressed = true`
+2. **Follow**: Node vẫn **XỬ LÝ** EndOfEpoch từ committed blocks, chỉ không **ĐỀ XUẤT** chúng
+3. **Auto-clear (từ cluster)**: Khi `update_epoch()` nhận timestamp **mới** (`elapsed < epoch_duration`) — tức cluster đã commit EndOfEpoch thật → suppression tự động tắt
+4. **Re-sync**: Sau Post-Sync Committee Resolution, gọi `system_transaction_provider.update_epoch()` — nếu timestamp vẫn cũ, suppression vẫn giữ
+5. **Auto-unsuppress (safety net)**: Nếu node đã ở Healthy **>= 2×epoch_duration** (240s) mà chưa nhận EndOfEpoch từ cluster → auto-clear suppression. Xử lý trường hợp **tất cả node restart đồng thời** (không ai trigger EndOfEpoch).
+
+```mermaid
+sequenceDiagram
+    participant STP as SystemTransactionProvider
+    participant CN as ConsensusNode
+    participant Cluster as Other Nodes
+
+    CN->>STP: new(epoch=1, ts=genesis)
+    Note over STP: 🛡️ ts cũ → suppressed=TRUE<br/>Node sẽ THEO, không DẪN
+
+    CN->>CN: STARTUP-SYNC (catch up)
+    CN->>STP: update_epoch(epoch=3, ts=epoch3_start)
+    Note over STP: ts vẫn cũ → suppressed=TRUE
+
+    CN->>CN: DAG-GATE unlock → Healthy
+    CN->>STP: notify_healthy()
+    Note over STP: Bắt đầu đếm auto-unsuppress
+
+    alt Cluster có node khỏe (bình thường)
+        Cluster->>Cluster: Leader khác trigger EndOfEpoch
+        Cluster->>CN: Committed block chứa EndOfEpoch
+        CN->>STP: update_epoch(epoch=4, ts=NOW)
+        Note over STP: ✅ ts mới → suppressed=FALSE
+    else Full cluster restart (tất cả suppressed)
+        Note over STP: Healthy >= 2×epoch_duration (240s)
+        STP->>STP: Auto-unsuppress + reset epoch_start=now
+        Note over STP: ✅ Node trigger EndOfEpoch bình thường
+    end
+```
+
 ---
 
-## 8. Module Dependencies
+## 12. Module Dependencies
 
-```
-                    ┌─────────────────────┐
-                    │   ConsensusNode     │
-                    │   (orchestrator)    │
-                    └─────────┬───────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-    ┌─────────▼──────┐  ┌────▼─────┐  ┌──────▼──────────┐
-    │ ExecutorClient │  │ Commit   │  │ Authority       │
-    │ (IPC to Go)    │  │ Processor│  │ (Mysticeti DAG) │
-    └─────────┬──────┘  └────┬─────┘  └──────┬──────────┘
-              │              │               │
-              │         ┌────▼─────┐         │
-              │         │ Block    │         │
-              │         │ Sending  │         │
-              │         └────┬─────┘         │
-              │              │               │
-    ┌─────────▼──────────────▼───────────────▼──┐
-    │              FFI Bridge (CGo)              │
-    └─────────────────────┬─────────────────────┘
-                          │
-    ┌─────────────────────▼─────────────────────┐
-    │           Go BlockProcessor               │
-    │  ├─ processSingleEpochData()              │
-    │  ├─ createBlockFromResults()              │
-    │  ├─ commitWorker() — synchronous commit   │
-    │  └─ persistWorker() — async LevelDB write │
-    └───────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    CN["ConsensusNode\n(orchestrator)"] --> EC["ExecutorClient\n(IPC to Go)"]
+    CN --> CP["CommitProcessor\n(Stage 3)"]
+    CN --> AUTH["Authority\n(Mysticeti DAG)"]
+    CN --> HUB["CoordinationHub\n(shared state)"]
+    
+    CP --> BDM["BlockDeliveryManager\n(Stage 4)"]
+    CP --> TR["TxRecycler"]
+    CP --> LM["LagMonitor"]
+    
+    AUTH --> CS["CommitSyncer"]
+    CS --> HUB
+    
+    EC --> FFI["FFI Bridge (CGo + UDS)"]
+    BDM --> FFI
+    
+    FFI --> GO_BP["Go BlockProcessor"]
+    
+    subgraph Go["Go Execution Engine"]
+        GO_BP --> CW["commitWorker"]
+        GO_BP --> PW["persistWorker\n(LevelDB trie)"]
+        GO_BP --> BW["backupDbWorker\n(PebbleDB backup)"]
+        GO_BP --> GW["geiWorker\n(coalesced GEI)"]
+        GO_BP --> SM["SnapshotManager\n(WaitForPersistence)"]
+    end
 ```
 
 ### Thứ Tự Khởi Tạo Module
 
 1. **ExecutorClient** — kết nối tới Go (phải có trước tất cả)
-2. **StorageSetup** — đọc state từ Go qua ExecutorClient
-3. **CommitProcessor** — cần StorageSetup data
-4. **STARTUP-SYNC** — cần CommitProcessor + peers
-5. **initialize_from_go()** — sau STARTUP-SYNC
-6. **Authority** — sau initialize_from_go()
+2. **CoordinationHub** — shared state container (startup_sync_active, GEI, phase)
+3. **StorageSetup** — đọc state từ Go qua ExecutorClient
+4. **CommitProcessor** — cần StorageSetup data
+5. **Early Peer RPC Server** — ngăn deadlock cluster
+6. **STARTUP-SYNC** — cần CommitProcessor + peers
+7. **initialize_from_go()** — sau STARTUP-SYNC (đồng bộ)
+8. **Sync Parity Assertion** — sau initialize_from_go()
+9. **Post-Sync Committee Resolution** — sau GEI cross-check
+10. **SystemTransactionProvider re-sync** — `update_epoch()` với epoch/timestamp mới (suppression giữ nếu timestamp cũ)
+11. **Authority** — sau committee resolution (Bootstrapping phase)
+12. **DAG-GATE** — async, unlock proposals khi phase == Healthy
 
 ---
 
-## 9. Anti-Patterns (Tránh Over-Engineering)
+## 13. Anti-Patterns (Tránh Over-Engineering)
 
 | ❌ Không làm | ✅ Thay thế |
 |-------------|------------|
@@ -389,3 +596,6 @@ Nguyên tắc bất biến:
 | Import P2P blocks trên Master | Chỉ Master tạo block từ consensus |
 | Async initialize_from_go() | Synchronous — fast (<1ms UDS call) |
 | Multiple source of truth | Go = state truth, Rust = consensus truth |
+| Reset epoch_start = now() (FIX 6) | Suppress EndOfEpoch, chờ cluster quyết định (FIX 7) |
+| Node vừa restore tự trigger EndOfEpoch | Node THEO cluster, không tự DẪN epoch transition |
+

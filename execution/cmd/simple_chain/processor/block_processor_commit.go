@@ -194,6 +194,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// This uses a coalescing queue to skip intermediate backups when catching up.
 		// ══════════════════════════════════════════════════════════════════
 		if bp.serviceType == p_common.ServiceTypeMaster && bp.storageManager.GetStorageBackupDb() != nil {
+			bp.backupDbWg.Add(1)
 			select {
 			case bp.backupDbChannel <- job:
 				// enqueued successfully
@@ -201,12 +202,14 @@ func (bp *BlockProcessor) commitWorker() {
 				// queue full, drop oldest and try again
 				select {
 				case <-bp.backupDbChannel:
+					bp.backupDbWg.Done() // The dropped job will never be processed
 				default:
 				}
 				// push newest
 				select {
 				case bp.backupDbChannel <- job:
 				default:
+					bp.backupDbWg.Done() // If still full (rare), we drop it
 				}
 			}
 		}
@@ -474,6 +477,7 @@ func (bp *BlockProcessor) backupDbWorker() {
 		go func() {
 			for job := range workChan {
 				bp.persistBackupDbAsync(job)
+				bp.backupDbWg.Done()
 			}
 		}()
 	}
@@ -488,6 +492,7 @@ func (bp *BlockProcessor) backupDbWorker() {
 			// All workers busy — serialize inline to prevent data loss
 			logger.Warn("⚠️ [BACKUP] All %d workers busy, serializing block #%d inline", numWorkers, job.Block.Header().BlockNumber())
 			bp.persistBackupDbAsync(job)
+			bp.backupDbWg.Done()
 		}
 	}
 	close(workChan)

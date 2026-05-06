@@ -1334,16 +1334,55 @@ impl ConsensusNode {
                         // has different content, the local state is corrupt.
                         match barrier_client.get_blocks_range(local_block, local_block).await {
                             Ok(local_blocks) if !local_blocks.is_empty() => {
-                                let local_raw = &local_blocks[0].raw_block_bytes;
-                                let peer_raw = &peer_blocks[0].raw_block_bytes;
-                                if local_raw != peer_raw {
-                                    tracing::warn!(
-                                        "🚨 [ANTI-FORK] Block #{} hash MISMATCH between Go and peer! \
-                                         Go has stale/corrupt data. Forcing full re-sync from block 1. \
-                                         (local_bytes={}, peer_bytes={})",
-                                        local_block, local_raw.len(), peer_raw.len()
+                                let local_b = &local_blocks[0];
+                                let peer_b = &peer_blocks[0];
+                                
+                                if local_b.raw_block_bytes != peer_b.raw_block_bytes {
+                                    let mut err_msg = format!(
+                                        "🚨 [ANTI-FORK] FATAL: Block #{} hash MISMATCH between Go and peer!\nGo has stale/corrupt data.",
+                                        local_block
                                     );
-                                    local_block = 0;
+                                    
+                                    err_msg.push_str(&format!(
+                                        "\n- Block Hash: local={}, peer={}",
+                                        hex::encode(&local_b.block_hash),
+                                        hex::encode(&peer_b.block_hash)
+                                    ));
+                                    
+                                    if local_b.timestamp_ms != peer_b.timestamp_ms {
+                                        err_msg.push_str(&format!(
+                                            "\n- Timestamp Mismatch: local={}, peer={}",
+                                            local_b.timestamp_ms, peer_b.timestamp_ms
+                                        ));
+                                    }
+                                    if local_b.transactions_root != peer_b.transactions_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- TxRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.transactions_root),
+                                            hex::encode(&peer_b.transactions_root)
+                                        ));
+                                    }
+                                    if local_b.receipts_root != peer_b.receipts_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- ReceiptsRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.receipts_root),
+                                            hex::encode(&peer_b.receipts_root)
+                                        ));
+                                    }
+                                    if local_b.state_root != peer_b.state_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- StateRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.state_root),
+                                            hex::encode(&peer_b.state_root)
+                                        ));
+                                    }
+                                    if local_b.extra_data != peer_b.extra_data {
+                                        err_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
+                                    }
+                                    
+                                    err_msg.push_str("\n\nHALTING NODE to prevent fork. Operator MUST wipe the database and restart from scratch.");
+                                    tracing::error!("{}", err_msg);
+                                    panic!("{}", err_msg);
                                 } else {
                                     tracing::info!(
                                         "✅ [ANTI-FORK] Block #{} verified: Go matches peer.",
@@ -2417,6 +2456,39 @@ impl ConsensusNode {
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
 
+        // ═══════════════════════════════════════════════════════════════════
+        // CRITICAL FIX (May 2026 — ROOT CAUSE of m3 epoch racing fork):
+        //
+        // SystemTransactionProvider was created at line ~1186 with the
+        // PRE-STARTUP-SYNC epoch_timestamp_ms. After snapshot restore, this
+        // timestamp is extremely old (genesis), so FIX 6 resets it to now().
+        //
+        // Problem: Post-Sync Committee Resolution (above) updates
+        // storage.epoch_timestamp_ms with the REAL epoch boundary timestamp
+        // from Go. But SystemTransactionProvider still holds the old now()
+        // value. When epoch_duration (120s) elapses from that now() moment,
+        // the provider triggers EndOfEpoch → node races through epochs
+        // (3→4→5→6) while the cluster stays on epoch 3. This causes:
+        //   - Different txRoot (contains EndOfEpoch system tx)
+        //   - Different receiptsRoot
+        //   - Different leaderAddress (epoch-scoped leader schedule)
+        //   - Different timestamp (epoch boundary timestamp)
+        //   - Cascading fork from the first premature EndOfEpoch block
+        //
+        // FIX: Re-sync SystemTransactionProvider with the authoritative
+        // epoch/timestamp from Post-Sync Committee Resolution.
+        // ═══════════════════════════════════════════════════════════════════
+        if storage.current_epoch > 0 {
+            system_transaction_provider.update_epoch(
+                storage.current_epoch,
+                storage.epoch_timestamp_ms,
+            ).await;
+            tracing::info!(
+                "🔄 [STARTUP] SystemTransactionProvider re-synced: epoch={}, epoch_timestamp_ms={}",
+                storage.current_epoch, storage.epoch_timestamp_ms
+            );
+        }
+
         // CRITICAL: Transition from Initializing → Bootstrapping BEFORE starting authority.
         // This ensures Core::recover() sees should_skip_proposal()=true, preventing
         // assertion panics when the DAG is empty after snapshot restore.
@@ -2432,6 +2504,7 @@ impl ConsensusNode {
             // (CatchingUp → Healthy) before unlocking proposals.
             // ═══════════════════════════════════════════════════════════════════
             let guard_hub = coordination_hub.clone();
+            let guard_stp = system_transaction_provider.clone();
             tokio::spawn(async move {
                 tracing::info!("🛡️ [DAG-GATE] Allowing 10s Network Discovery Window for CommitVoteMonitor to establish true quorum_commit...");
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -2440,6 +2513,13 @@ impl ConsensusNode {
                     if guard_hub.is_healthy_stable() {
                         tracing::info!("✅ [DAG-GATE] Consensus DAG is fully synced! Releasing startup_sync_active lock.");
                         guard_hub.set_startup_sync_active(false);
+                        // FIX 7: Notify SystemTransactionProvider that node is Healthy.
+                        // This starts the auto-unsuppress timer (2*epoch_duration).
+                        // If cluster has other healthy nodes → they trigger EndOfEpoch → 
+                        // update_epoch() clears suppression BEFORE auto-unsuppress fires.
+                        // If ALL nodes restart simultaneously → auto-unsuppress kicks in after
+                        // 2*epoch_duration → at least one node triggers EndOfEpoch → others follow.
+                        guard_stp.notify_healthy();
                         break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
