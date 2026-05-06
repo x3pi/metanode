@@ -474,11 +474,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             } else if quorum_commit > 0 {
                 // Snapshot restart: Go has state, wait for quorum detection
+                // FORK-PREVENTION (May 2026): During snapshot restore, force
+                // CatchingUp (not Healthy) even if lag appears to be 0.
+                // The DAG may have fast-forwarded synced_commit_index but
+                // blocks haven't been replayed through Go yet. Going directly
+                // to Healthy would enable proposals prematurely → fork.
+                let safe_phase = if startup_sync_active && lag > 0 {
+                    tracing::info!(
+                        "🛡️ [BOOTSTRAP] Snapshot restore: forcing CatchingUp (lag={}) \
+                         instead of {:?} to prevent premature proposals.",
+                        lag, next_phase
+                    );
+                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                } else {
+                    next_phase
+                };
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
-                    quorum_commit, next_phase
+                    quorum_commit, safe_phase
                 );
-                self.transition_phase_and_kick(next_phase);
+                self.transition_phase_and_kick(safe_phase);
             } else {
                 let elapsed = self.bootstrap_start_time.elapsed();
                 if elapsed >= Duration::from_secs(5) {

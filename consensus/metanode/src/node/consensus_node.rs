@@ -2017,55 +2017,146 @@ impl ConsensusNode {
         // Gate: Wait for quorum_commit_index to be non-zero and for the DAG's
         // local_commit to approach quorum. Timeout 30s to avoid deadlock.
         // ═══════════════════════════════════════════════════════════════════
-        if startup_total_synced_blocks > 0 || local_block > 0 {
-            let dag_gate_timeout = std::time::Duration::from_secs(30);
-            let dag_gate_start = std::time::Instant::now();
+        if startup_total_synced_blocks > 0 || startup_local_block > 0 {
+            // ═══════════════════════════════════════════════════════════════
+            // PROGRESS-BASED DAG GATE (May 2026 — ROOT CAUSE FIX):
+            //
+            // Previous bug: Hard 30s timeout released proposals even when
+            // CommitSyncer was still actively catching up (commit 699→733).
+            // The restored node then created its own blocks (different
+            // timestamp/txRoot) instead of replaying the cluster's committed
+            // blocks → permanent fork.
+            //
+            // Fix: Track progress (quorum/handled changes). Only timeout
+            // when NO progress has been made for 30s. NEVER release
+            // proposals while gap > tolerance, even on timeout — just
+            // log and keep waiting. The system recovers automatically
+            // when the network reconnects.
+            // ═══════════════════════════════════════════════════════════════
+            let stall_timeout = std::time::Duration::from_secs(30);
             let dag_gate_poll = std::time::Duration::from_millis(200);
             const DAG_GATE_TOLERANCE: u32 = 3;
 
+            let mut last_progress_time = std::time::Instant::now();
+            let mut last_progress_quorum: u32 = 0;
+            let mut last_progress_handled: u32 = 0;
+            let mut stall_logged = false;
+
             loop {
                 let quorum = coordination_hub.get_quorum_commit_index();
-                // Read highest_handled from commit_consumer_monitor as proxy for DAG progress
                 let handled = commit_consumer.monitor().highest_handled_commit();
+
+                // Track progress — reset stall timer when anything advances
+                if quorum != last_progress_quorum || handled != last_progress_handled {
+                    last_progress_time = std::time::Instant::now();
+                    last_progress_quorum = quorum;
+                    last_progress_handled = handled;
+                    stall_logged = false;
+                }
 
                 if quorum == 0 {
                     // Quorum not yet established — CommitSyncer is still bootstrapping
-                    if dag_gate_start.elapsed() > dag_gate_timeout {
+                    if last_progress_time.elapsed() > stall_timeout {
                         tracing::warn!(
-                            "⚠️ [DAG-GATE] Timeout waiting for quorum (still 0 after {:?}). \
-                             Releasing proposals to avoid deadlock.",
-                            dag_gate_timeout
+                            "⚠️ [DAG-GATE] No progress for {:?} and quorum still 0. \
+                             Releasing proposals (likely genesis or isolated node).",
+                            stall_timeout
                         );
                         break;
                     }
                     tracing::debug!(
-                        "⏳ [DAG-GATE] Waiting for quorum (currently 0, handled={}, elapsed={:.1}s)...",
+                        "⏳ [DAG-GATE] Waiting for quorum (currently 0, handled={}, \
+                         stall={:.1}s)...",
                         handled,
-                        dag_gate_start.elapsed().as_secs_f64()
+                        last_progress_time.elapsed().as_secs_f64()
                     );
                 } else if handled + DAG_GATE_TOLERANCE >= quorum {
+                    // DAG caught up — safe to release
                     tracing::info!(
                         "✅ [DAG-GATE] DAG caught up: handled={}, quorum={}, tolerance={}. \
                          Releasing proposals.",
                         handled, quorum, DAG_GATE_TOLERANCE
                     );
                     break;
-                } else if dag_gate_start.elapsed() > dag_gate_timeout {
-                    tracing::warn!(
-                        "⚠️ [DAG-GATE] Timeout: handled={}, quorum={} (gap={}). \
-                         Releasing proposals to avoid deadlock.",
-                        handled, quorum, quorum - handled
-                    );
-                    break;
+                } else if last_progress_time.elapsed() > stall_timeout {
+                    // No progress but gap still large — DO NOT release!
+                    // This prevents the fork. Keep waiting; the system
+                    // will recover when CommitSyncer makes progress.
+                    if !stall_logged {
+                        tracing::warn!(
+                            "⚠️ [DAG-GATE] No progress for {:?} but gap still large \
+                             (handled={}, quorum={}, gap={}). Keeping proposals LOCKED \
+                             to prevent fork. Will release when DAG catches up.",
+                            stall_timeout, handled, quorum, quorum - handled
+                        );
+                        stall_logged = true;
+                    }
+                    // Reset timer to avoid log spam — check again after another stall period
+                    last_progress_time = std::time::Instant::now();
                 } else {
                     tracing::debug!(
-                        "⏳ [DAG-GATE] DAG catching up: handled={}, quorum={}, gap={}, elapsed={:.1}s",
+                        "⏳ [DAG-GATE] DAG catching up: handled={}, quorum={}, gap={}, \
+                         stall={:.1}s",
                         handled, quorum, quorum - handled,
-                        dag_gate_start.elapsed().as_secs_f64()
+                        last_progress_time.elapsed().as_secs_f64()
                     );
                 }
 
                 tokio::time::sleep(dag_gate_poll).await;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // POST-GATE BLOCK HASH VERIFICATION:
+            // Before releasing proposals, verify that recent blocks match
+            // peers. This catches cases where Go sync completed but the
+            // DAG produces blocks with slightly different content.
+            // ═══════════════════════════════════════════════════════════════
+            if !config.peer_rpc_addresses.is_empty() {
+                match executor_client_for_proc.get_last_block_number().await {
+                    Ok((local_bn, _gei, true, _hash, _epoch)) if local_bn > 0 => {
+                        let check_block = local_bn;
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &config.peer_rpc_addresses, check_block, check_block,
+                        ).await {
+                            Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                                match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
+                                    Ok(local_blocks) if !local_blocks.is_empty() => {
+                                        let local_raw = &local_blocks[0].raw_block_bytes;
+                                        let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                        if local_raw != peer_raw {
+                                            tracing::error!(
+                                                "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
+                                                 Local and peer blocks differ. This indicates \
+                                                 state corruption. Node will continue but \
+                                                 fork is likely.",
+                                                check_block
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                "✅ [POST-GATE-VERIFY] Block {} matches peers. \
+                                                 Safe to release proposals.",
+                                                check_block
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        tracing::debug!(
+                                            "⚠️ [POST-GATE-VERIFY] Could not fetch local block {}.",
+                                            check_block
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "⚠️ [POST-GATE-VERIFY] Could not fetch peer block {}.",
+                                    check_block
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         coordination_hub.set_startup_sync_active(false);
