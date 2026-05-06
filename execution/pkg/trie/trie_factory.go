@@ -268,6 +268,21 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 		}
 	}
 
+	// Ensure the database directory exists before calling FFI.
+	// This prevents "os error 2" (No such file or directory) during snapshot restore
+	// if wget failed to download empty NOMT directories.
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create NOMT database directory at %s: %w", dbPath, err)
+	}
+
+	// CRITICAL FIX: wget skips empty directories during snapshot download.
+	// If the 'wal' directory was empty on the source node, wget won't create it locally.
+	// nomt_ffi.Open will then fail with "os error 2" when it tries to read the WAL dir
+	// of an existing database. We must ensure the 'wal' directory exists.
+	if err := os.MkdirAll(filepath.Join(dbPath, "wal"), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create NOMT wal directory at %s: %w", dbPath, err)
+	}
+
 	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize independent NOMT database at %s: %w", dbPath, err)
