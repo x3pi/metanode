@@ -372,7 +372,7 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 // copyDirReflink performs a fast O(1) Copy-On-Write clone using cp --reflink=auto
 func copyDirReflink(src, dst string) error {
 	// The trailing slash in src/. is important for cp to copy contents into dst
-	cmd := exec.Command("cp", "-a", "--reflink=always", src+"/.", dst+"/")
+	cmd := exec.Command("cp", "-a", "--reflink=auto", src+"/.", dst+"/")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cp reflink failed: %v, output: %s", err, string(out))
 	}

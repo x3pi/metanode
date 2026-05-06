@@ -1123,7 +1123,7 @@ func detectReflinkSupport(dataDir string) bool {
 	return true
 }
 
-// reflinkCopyDir copy thư mục bằng cp -a --reflink=always
+// reflinkCopyDir copy thư mục bằng cp -a --reflink=auto
 // Trên btrfs/xfs: tức thì (Copy-on-Write), 0 disk space cho đến khi file bị modify
 // An toàn cho mọi loại file bao gồm Xapian
 func reflinkCopyDir(src, dst string) error {
@@ -1131,9 +1131,9 @@ func reflinkCopyDir(src, dst string) error {
 		return fmt.Errorf("failed to create parent dir: %w", err)
 	}
 
-	// cp -a --reflink=always: CoW bắt buộc, nếu filesystem không hỗ trợ sẽ báo lỗi rõ ràng.
+	// cp -a --reflink=auto: CoW được ưu tiên, nếu filesystem không hỗ trợ (cross-device/tmpfs) sẽ tự fallback sang deep copy.
 	// -a = archive (recursive, preserve permissions, timestamps, symlinks)
-	cmd := exec.Command("cp", "-a", "--reflink=always", src, dst)
+	cmd := exec.Command("cp", "-a", "--reflink=auto", src, dst)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cp --reflink failed: %v, output: %s", err, string(output))
