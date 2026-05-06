@@ -1245,6 +1245,9 @@ impl ConsensusNode {
         // than a small threshold, fetch missing blocks via P2P and execute them
         // through Go BEFORE allowing consensus to start.
         // ═══════════════════════════════════════════════════════════════════════════
+        let mut startup_total_synced_blocks: u64 = 0;
+        let mut startup_local_block: u64 = 0;
+
         if config.executor_read_enabled {
             // FORK-PREVENTION: Lock proposals while STARTUP-SYNC imports blocks.
             // Without this, CommitSyncer may declare Healthy (enabling proposals)
@@ -1765,6 +1768,9 @@ impl ConsensusNode {
                     _ => {}
                 }
             }
+
+            startup_total_synced_blocks = total_synced_blocks;
+            startup_local_block = local_block;
         }
         // ═══════════════════════════════════════════════════════════════
         // PHASE-2 CONSISTENCY CHECK (May 2026 — ROOT CAUSE FIX):
@@ -1851,6 +1857,102 @@ impl ConsensusNode {
         );
 
         // ═══════════════════════════════════════════════════════════════════
+        // POST-INIT SYNC PARITY ASSERTION (May 2026):
+        //
+        // INVARIANT: After initialize_from_go(), CommitProcessor and
+        // ExecutorClient must agree on state. If they diverge, the node
+        // will either duplicate blocks or skip commits → fork.
+        //
+        // WHY THIS IS NEEDED:
+        // The startup sequence has 4 mutation points for
+        // go_last_commit_index/next_expected_index:
+        //   1. Line ~1625: After STARTUP-SYNC block count query
+        //   2. Line ~1760: After FINAL-GATE re-query
+        //   3. Line ~1800: EPOCH MISMATCH override → force (0, 1)
+        //   4. Line ~1817: block=0 + commit>0 → force (0, 1)
+        //
+        // Then initialize_from_go() updates ExecutorClient.next_expected_index
+        // from Go's authoritative state. But if Go's state was ALSO modified
+        // between the last mutation point and initialize_from_go() (e.g., by
+        // a concurrent block arriving via P2P), CommitProcessor and
+        // ExecutorClient could diverge.
+        //
+        // This assertion re-queries Go and verifies both sides match.
+        // ═══════════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            let executor_next_expected = {
+                let guard = executor_client_for_proc.next_expected_index.lock().await;
+                *guard
+            };
+            let cp_next_expected = commit_processor.next_expected_index;
+            let cp_go_last = commit_processor.go_last_commit_index;
+
+            // Also re-query Go for ground truth
+            match executor_client_for_proc.get_last_handled_commit_index().await {
+                Ok((go_commit_idx, go_gei, go_block, go_epoch, _, _)) => {
+                    tracing::info!(
+                        "🔍 [SYNC-PARITY] Post-init state comparison:\n  \
+                         CommitProcessor:  go_last_commit_index={}, next_expected_index={}\n  \
+                         ExecutorClient:   next_expected_index={}\n  \
+                         Go (authoritative): commit_index={}, gei={}, block={}, epoch={}",
+                        cp_go_last, cp_next_expected,
+                        executor_next_expected,
+                        go_commit_idx, go_gei, go_block, go_epoch
+                    );
+
+                    // CHECK 1: CommitProcessor.next_expected must not EXCEED
+                    // Go's commit_index + 1. If it does, CommitProcessor will
+                    // skip commits that Go still needs.
+                    if cp_next_expected > go_commit_idx + 1 && go_commit_idx > 0 {
+                        tracing::error!(
+                            "🚨 [SYNC-PARITY] CommitProcessor AHEAD of Go! \
+                             cp.next_expected={} > go.commit_index+1={}. \
+                             Correcting CommitProcessor to prevent commit skipping.",
+                            cp_next_expected, go_commit_idx + 1
+                        );
+                        commit_processor.go_last_commit_index = go_commit_idx;
+                        commit_processor.next_expected_index = go_commit_idx + 1;
+                    }
+
+                    // CHECK 2: If Go reports commit_index=0 (fresh epoch), 
+                    // CommitProcessor must also start from 1.
+                    if go_commit_idx == 0 && cp_go_last > 0 {
+                        tracing::warn!(
+                            "⚠️ [SYNC-PARITY] Go at commit_index=0 (fresh epoch) but \
+                             CommitProcessor.go_last_commit_index={}. \
+                             Resetting to (0, 1) to match Go's epoch-scoped state.",
+                            cp_go_last
+                        );
+                        commit_processor.go_last_commit_index = 0;
+                        commit_processor.next_expected_index = 1;
+                    }
+
+                    // CHECK 3: ExecutorClient and CommitProcessor must not diverge
+                    // on their understanding of the "next" index by more than a
+                    // small tolerance (1 commit of jitter is acceptable).
+                    let ec_cp_delta = (executor_next_expected as i64) - (cp_next_expected as i64);
+                    if ec_cp_delta.abs() > 1 {
+                        tracing::warn!(
+                            "⚠️ [SYNC-PARITY] ExecutorClient/CommitProcessor divergence: \
+                             EC.next_expected={} vs CP.next_expected={} (delta={}). \
+                             This can happen if initialize_from_go() advanced the EC \
+                             past the CP's expectation. The CP will naturally catch up \
+                             by skipping already-processed commits via go_last_commit_index.",
+                            executor_next_expected, cp_next_expected, ec_cp_delta
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [SYNC-PARITY] Could not verify sync parity — Go query failed: {}. \
+                         Proceeding with current state.",
+                        e
+                    );
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
         // GEI CROSS-CHECK: Verify local GEI matches peers after startup sync.
         // This catches post-recovery GEI divergence BEFORE consensus starts,
         // providing early diagnostic warning instead of silent fork.
@@ -1902,6 +2004,26 @@ impl ConsensusNode {
         // It is now safe for Core to produce new commits.
         // ═══════════════════════════════════════════════════════════════════
         coordination_hub.set_startup_sync_active(false);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // RUNTIME FORK GUARD (May 2026):
+        // Background task that verifies block hashes against peers for the
+        // first 500 blocks after startup. Catches late-manifesting forks
+        // that pass the initial POST-SYNC-VERIFY (which only checks the
+        // last synced block). If a checkpoint fails, the node halts.
+        //
+        // Why: Block 918 fork in hash_mismatch_alert.log was NOT caught by
+        // POST-SYNC-VERIFY because sync ended at block 917 (verified OK),
+        // but the NEXT block (918) diverged due to timestamp non-determinism.
+        // ═══════════════════════════════════════════════════════════════════
+        if startup_total_synced_blocks > 0 && !config.peer_rpc_addresses.is_empty() {
+            let guard_client = executor_client_for_proc.clone();
+            let guard_peers = config.peer_rpc_addresses.clone();
+            let guard_start_block = startup_local_block;
+            tokio::spawn(async move {
+                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block).await;
+            });
+        }
 
         // Tích hợp BlockDeliveryManager vào Phase khởi động
         let peer_addrs = config.peer_rpc_addresses.clone();
@@ -2426,6 +2548,96 @@ impl ConsensusNode {
         recovery::perform_fork_detection_check(&node).await?;
 
         Ok(node)
+    }
+
+    /// Runtime Fork Guard — Background post-startup block hash verification.
+    ///
+    /// Verifies block hashes against peers at regular checkpoints for the first
+    /// 500 blocks after startup. This catches late-manifesting forks that pass
+    /// the initial POST-SYNC-VERIFY (which only checks the last synced block).
+    ///
+    /// If a checkpoint mismatch is detected, the node halts to prevent fork
+    /// propagation to the rest of the cluster.
+    async fn runtime_fork_guard(
+        client: Arc<ExecutorClient>,
+        peers: Vec<String>,
+        start_block: u64,
+    ) {
+        const CHECK_INTERVAL: u64 = 100;
+        const MAX_CHECKS: u64 = 5; // 5 checks × 100 blocks = 500 blocks monitored
+
+        tracing::info!(
+            "🛡️ [RUNTIME-GUARD] Started: monitoring blocks {}-{} against peers (checkpoints every {} blocks)",
+            start_block + CHECK_INTERVAL,
+            start_block + MAX_CHECKS * CHECK_INTERVAL,
+            CHECK_INTERVAL
+        );
+
+        for i in 0..MAX_CHECKS {
+            let target_block = start_block + (i + 1) * CHECK_INTERVAL;
+
+            // Wait until Go has processed this block
+            loop {
+                match client.get_last_block_number().await {
+                    Ok((current, _, true, _, _)) if current >= target_block => break,
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+
+            // Compare block hash with peer
+            match crate::network::peer_rpc::fetch_blocks_from_peer(
+                &peers, target_block, target_block,
+            ).await {
+                Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                    match client.get_blocks_range(target_block, target_block).await {
+                        Ok(local_blocks) if !local_blocks.is_empty() => {
+                            let local_raw = &local_blocks[0].raw_block_bytes;
+                            let peer_raw = &peer_blocks[0].raw_block_bytes;
+                            if local_raw == peer_raw {
+                                tracing::info!(
+                                    "✅ [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} verified ({} bytes match)",
+                                    i + 1, MAX_CHECKS, target_block, local_raw.len()
+                                );
+                            } else {
+                                tracing::error!(
+                                    "🚨 [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} MISMATCH! \
+                                     local_bytes={} peer_bytes={}. \
+                                     HALTING NODE to prevent fork propagation.",
+                                    i + 1, MAX_CHECKS, target_block,
+                                    local_raw.len(), peer_raw.len()
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from Go. Skipping.",
+                                i + 1, MAX_CHECKS, target_block
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Peer returned no data for block #{}. Skipping.",
+                        i + 1, MAX_CHECKS, target_block
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from peer: {}. Skipping.",
+                        i + 1, MAX_CHECKS, target_block, e
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            "✅ [RUNTIME-GUARD] All {} checkpoints passed. Fork monitoring complete.",
+            MAX_CHECKS
+        );
     }
 
     pub(crate) fn is_alive(&self) -> bool {

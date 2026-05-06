@@ -571,10 +571,11 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 	}
 
 	var (
-		updateErr   error
-		hasChanges  bool = false
-		batchKeys   [][]byte
-		batchValues [][]byte
+		updateErr      error
+		hasChanges     bool = false
+		batchKeys      [][]byte
+		batchValues    [][]byte
+		batchOldValues [][]byte
 	)
 
 	var dirtyAddresses []common.Address
@@ -615,6 +616,21 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 
 		batchKeys = append(batchKeys, address.Bytes())
 		batchValues = append(batchValues, bytesToStore)
+
+		// CRITICAL FIX: NOMT requires the OLD value to correctly compute the Merkle root.
+		// If we pass nil for oldValues, NOMT treats all updates as NEW leaf insertions,
+		// which corrupts the internal tree and results in `0x0` or wrong hashes!
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			var oldData []byte
+			if db.trie != nil {
+				oldData, _ = db.trie.Get(address.Bytes())
+			}
+			if len(oldData) == 0 {
+				batchOldValues = append(batchOldValues, nil)
+			} else {
+				batchOldValues = append(batchOldValues, oldData)
+			}
+		}
 	}
 
 	if updateErr != nil {
@@ -626,7 +642,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			isNOMT = true
 			<-db.persistReady // For NOMT, we MUST wait for the C++ CommitPayload to complete
-			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, nil); err != nil {
+			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 			}
 		} 

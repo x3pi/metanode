@@ -58,22 +58,66 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 
 	// ═════════════════════════════════════════════════════════════════════
 	// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
+	//
+	// EPOCH-INFLATION GUARD (May 2026):
+	// Large epoch jumps (>2 at once) indicate replayed/corrupt data, not a
+	// real transition. Real transitions increment by exactly 1 epoch.
+	// Block 918 fork: m1 replayed stale commits → phantom epoch transitions
+	// → epoch 22 vs cluster epoch 19 → GEI inflation → permanent fork.
 	// ═════════════════════════════════════════════════════════════════════
 	if epochNum > currentEpoch && lastBlock != nil {
-		logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected. Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum)
-		geiAuth := GetGEIAuthority()
-		geiAuth.ResetCommitIndexForEpoch(epochNum)
-		storage.ForceSetLastHandledCommitIndex(0)
-		storage.UpdateLastHandledCommitEpoch(epochNum)
-		if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
-			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
-			bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(epochNum))
+		epochJump := epochNum - currentEpoch
+		if epochJump > 2 {
+			logger.Error("🚨 [EPOCH-INFLATION-GUARD] Suspicious epoch jump %d→%d (delta=%d, GEI=%d). "+
+				"This indicates replayed/corrupt commit data. BLOCKING epoch reset to prevent inflation.",
+				currentEpoch, epochNum, epochJump, globalExecIndex)
+			// DO NOT reset commitIndex — this would cause GEI inflation on forked nodes.
+			// The node should continue with its current epoch until a legitimate
+			// EndOfEpoch system transaction arrives via live consensus.
+		} else {
+			logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected (jump=%d). Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum, epochJump)
+			geiAuth := GetGEIAuthority()
+			geiAuth.ResetCommitIndexForEpoch(epochNum)
+			storage.ForceSetLastHandledCommitIndex(0)
+			storage.UpdateLastHandledCommitEpoch(epochNum)
+			if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil {
+				bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
+				bp.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(epochNum))
+			}
 		}
 	}
 
 	// Record the commit index to persist progress
 	geiAuth := GetGEIAuthority()
 	geiAuth.RecordCommitIndex(commitIndex)
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// POST-MUTATION DIAGNOSTIC (May 2026):
+	// After all state mutations above (epoch reset, commit index recording),
+	// emit a one-time diagnostic showing the exact values that the
+	// GEI-REGRESSION guard (line ~652) will use to decide whether to skip
+	// this commit. This is critical for E2E test traceability
+	// (test_snapshot_stability_loop.sh) — if the guard incorrectly skips
+	// a commit, this log will show exactly why.
+	//
+	// Only log on significant GEI values (first commit, epoch boundary,
+	// or every 100 commits) to avoid spam.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if commitIndex <= 1 || epochNum != currentEpoch || commitIndex%100 == 0 {
+		lastBlockGEIDiag := uint64(0)
+		if lastBlock != nil {
+			lastBlockGEIDiag = lastBlock.Header().GlobalExecIndex()
+		}
+		logger.Info("🔍 [SYNC-PARITY-DIAG] epoch=%d commitIndex=%d incomingGEI=%d lastBlockGEI=%d lastPersistedGEI=%d nextExpectedGEI=%d — "+
+			"GEI-REGRESSION guard will %s this commit",
+			epochNum, commitIndex, globalExecIndex, lastBlockGEIDiag, lastPersistedGEI, *nextExpectedGlobalExecIndex,
+			func() string {
+				if lastBlockGEIDiag > 0 && globalExecIndex <= lastBlockGEIDiag {
+					return "SKIP"
+				}
+				return "PROCESS"
+			}())
+	}
 
 	// Use commitIndex to avoid unused variable warning
 	_ = commitIndex
@@ -243,8 +287,31 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		logger.Debug("📅 [FORK-SAFETY] Using consensus timestamp from Rust: commit_timestamp_ms=%d (global_exec_index=%d)",
 			commitTimestampMs, globalExecIndex)
 	} else {
-		logger.Warn("⚠️  [FORK-SAFETY] No consensus timestamp from Rust (commit_timestamp_ms=0), will use time.Now() as fallback (global_exec_index=%d)",
-			globalExecIndex)
+		// ═══════════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY FIX (May 2026):
+		// NEVER use time.Now() for consensus blocks! time.Now() is
+		// non-deterministic — different nodes call it at different moments,
+		// producing different timestamps → different block hashes → FORK.
+		//
+		// ROOT CAUSE: Block 918 fork in hash_mismatch_alert.log was caused
+		// by m1 getting timestamp 0x69fa9331 while cluster got 0x69fa932f
+		// (2-second difference from time.Now() divergence during replay).
+		//
+		// FIX: Derive a deterministic timestamp from lastBlock.timestamp + 1s.
+		// All nodes have the same lastBlock after STARTUP-SYNC, so they all
+		// produce the same derived timestamp.
+		// ═══════════════════════════════════════════════════════════════════
+		lastBlockForTs := bp.GetLastBlock()
+		if lastBlockForTs != nil && lastBlockForTs.Header().TimeStamp() > 0 {
+			commitTimestampMs = lastBlockForTs.Header().TimeStamp()*1000 + 1000
+			logger.Warn("🛡️ [FORK-SAFETY] No consensus timestamp — using lastBlock.timestamp+1s = %d ms (GEI=%d, lastBlock=#%d)",
+				commitTimestampMs, globalExecIndex, lastBlockForTs.Header().BlockNumber())
+		} else {
+			// Genesis fallback: use 1 second (epoch 0, block 0)
+			commitTimestampMs = 1000
+			logger.Warn("🛡️ [FORK-SAFETY] No consensus timestamp AND no lastBlock — using genesis fallback 1000ms (GEI=%d)",
+				globalExecIndex)
+		}
 	}
 
 	// Get epoch from first block if available
@@ -268,13 +335,22 @@ EPOCH_BOUNDARY_FALLTHROUGH:
 		metrics.CurrentEpoch.Set(float64(epochNum))
 	}
 
-	// CRITICAL: Auto-advance Go epoch when incoming blocks have higher epoch
+	// CRITICAL: Auto-advance Go epoch when incoming blocks have higher epoch.
 	// For SyncOnly nodes, blocks arrive via Rust P2P sync, and the epoch field
 	// in each block indicates which epoch it belongs to. Without this check,
 	// Go epoch stays at 0 forever because no EndOfEpoch system transaction
 	// flows through the normal commit path.
-	if epochNum > 0 {
+	//
+	// EPOCH-INFLATION GUARD (May 2026): Only auto-advance epoch for LIVE blocks
+	// (GEI > persisted GEI). Replayed blocks whose GEI is already persisted
+	// should NOT trigger epoch advancement — their epoch metadata may be
+	// from a stale fork. This prevents the cascading epoch inflation seen
+	// at block 918 where m1 advanced from epoch 2 to epoch 22.
+	if epochNum > 0 && globalExecIndex > lastPersistedGEI {
 		bp.chainState.CheckAndUpdateEpochFromBlock(epochNum, commitTimestampMs)
+	} else if epochNum > 0 && globalExecIndex <= lastPersistedGEI {
+		logger.Debug("🛡️ [EPOCH-INFLATION-GUARD] Skipping CheckAndUpdateEpochFromBlock for replayed block (GEI=%d ≤ persisted=%d, epoch=%d)",
+			globalExecIndex, lastPersistedGEI, epochNum)
 	}
 
 	// 4. Process received data

@@ -171,9 +171,11 @@ pub fn validate_gei_continuity(
 /// with the local GEI. This catches cases where local state reconstruction
 /// produces different GEI than the rest of the cluster.
 ///
-/// # Non-blocking
-/// If peers are unreachable, logs a warning and returns Ok.
-/// Peer validation is best-effort — we don't want to block startup.
+/// # Behavior
+/// - If peers are unreachable, logs a warning and returns Ok (best-effort).
+/// - If 2+ peers report GEI delta > 5 at the same block height, returns Err
+///   (CRITICAL divergence — caller should halt to prevent fork propagation).
+/// - Small deltas are logged as warnings but not fatal (empty-commit jitter).
 pub async fn validate_gei_against_peers(
     local_gei: u64,
     local_block_number: u64,
@@ -190,9 +192,11 @@ pub async fn validate_gei_against_peers(
 
     let mut checked = 0u32;
     let mut matches = 0u32;
+    let mut critical_mismatches = 0u32;
+    const CRITICAL_GEI_DELTA: i64 = 5;
 
-    for peer_addr in peer_rpc_addresses.iter().take(2) {
-        // Only check 2 peers max
+    for peer_addr in peer_rpc_addresses.iter().take(3) {
+        // Check up to 3 peers for quorum
         match crate::network::peer_rpc::query_peer_info(peer_addr).await {
             Ok(info) => {
                 checked += 1;
@@ -201,29 +205,29 @@ pub async fn validate_gei_against_peers(
                 if info.last_block >= local_block_number {
                     let peer_gei = info.last_global_exec_index;
 
-                    // We can't compare GEI directly at a specific block number
-                    // because peers return their LATEST GEI, not GEI at a specific block.
-                    // Instead, compare block numbers as a sanity check.
                     if info.last_block == local_block_number {
-                        if peer_gei == local_gei {
+                        let delta = local_gei as i64 - peer_gei as i64;
+                        if delta == 0 {
                             matches += 1;
                             info!(
                                 "✅ [GEI-VALIDATOR] Peer {} confirms GEI={} at block={}",
                                 peer_addr, local_gei, local_block_number
                             );
+                        } else if delta.abs() > CRITICAL_GEI_DELTA {
+                            critical_mismatches += 1;
+                            error!(
+                                "🚨 [GEI-VALIDATOR] CRITICAL PEER MISMATCH! \
+                                 local_gei={} vs peer_gei={} at block={} (peer={}, delta={}). \
+                                 This indicates GEI inflation or state corruption.",
+                                local_gei, peer_gei, local_block_number, peer_addr, delta
+                            );
                         } else {
                             warn!(
-                                "⚠️ [GEI-VALIDATOR] PEER MISMATCH! \
-                                 local_gei={} vs peer_gei={} at block={} (peer={}). \
-                                 Delta={}. This often indicates different amounts of empty-commits.",
-                                local_gei,
-                                peer_gei,
-                                local_block_number,
-                                peer_addr,
-                                local_gei as i64 - peer_gei as i64
+                                "⚠️ [GEI-VALIDATOR] Minor peer mismatch: \
+                                 local_gei={} vs peer_gei={} at block={} (peer={}, delta={}). \
+                                 Likely from empty-commit jitter — monitoring.",
+                                local_gei, peer_gei, local_block_number, peer_addr, delta
                             );
-                            // We do NOT return Err here anymore because empty blocks
-                            // naturally cause GEI divergence at the same block height.
                         }
                     } else {
                         // Peer is at a different block — can only do rough comparison
@@ -275,10 +279,31 @@ pub async fn validate_gei_against_peers(
 
     if checked > 0 {
         info!(
-            "🔍 [GEI-VALIDATOR] Startup cross-check: checked={} peers, matches={} \
+            "🔍 [GEI-VALIDATOR] Startup cross-check: checked={} peers, matches={}, critical_mismatches={} \
              (local_gei={}, block={})",
-            checked, matches, local_gei, local_block_number
+            checked, matches, critical_mismatches, local_gei, local_block_number
         );
+    }
+
+    // HARD HALT: If 2+ peers confirm critical GEI divergence, this node is forked.
+    // Continuing would propagate the fork to the network.
+    if critical_mismatches >= 2 {
+        error!(
+            "🚨 [GEI-VALIDATOR] HALTING: {} peers confirm GEI divergence > {} at block {}. \
+             Local GEI={} is inconsistent with cluster. Node must be re-synced from snapshot.",
+            critical_mismatches, CRITICAL_GEI_DELTA, local_block_number, local_gei
+        );
+        let diagnostics = GeiDiagnostics {
+            computed_gei: local_gei,
+            go_last_gei: 0,
+            epoch: 0,
+            epoch_base_index: 0,
+            commit_index: 0,
+            fragment_offset: 0,
+            expected_gei: 0,
+            delta: 0,
+        };
+        return Err(GeiValidationError::Discontinuity { diagnostics });
     }
 
     Ok(())
