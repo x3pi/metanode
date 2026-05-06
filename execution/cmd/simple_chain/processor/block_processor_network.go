@@ -353,9 +353,8 @@ PROCESS_LOOP:
 						// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 						// use the same atomic counter. Previously used Rust's hint GEI
 						// directly, which could diverge from GEIAuthority's counter.
-						bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+						bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex)
 						nextExpectedGlobalExecIndex = highestGEI + 1
-						bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
 							bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
@@ -381,12 +380,11 @@ PROCESS_LOOP:
 			}
 			drainTimeout.Stop()
 
-			// Persist only the final GEI (1 DB write for entire batch)
+			// Persist only the final GEI and CommitIndex (1 atomic DB write for entire batch)
 			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 			// use the same atomic counter, preventing +1 offset divergence.
-			bp.updateAndPersistLastGlobalExecIndex(highestGEI)
+			bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex)
 			nextExpectedGlobalExecIndex = highestGEI + 1
-			bp.updateAndPersistLastHandledCommitIndex(highestCommitIndex)
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
 			}

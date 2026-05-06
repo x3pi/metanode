@@ -28,9 +28,8 @@ func (bp *BlockProcessor) commitWorker() {
 	logger.Info("✅ Commit Worker initiated")
 	for job := range bp.commitChannel {
 		if job.Block == nil {
-			if job.GlobalExecIndex > 0 {
-				bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
-				bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
+			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
+				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
@@ -109,9 +108,8 @@ func (bp *BlockProcessor) commitWorker() {
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.
 		// Ensures block data is safely on disk before GEI advances,
 		// preventing the Rust consensus from skipping un-saved blocks after a restart.
-		if job.GlobalExecIndex > 0 {
-			bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
-			bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
+		if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
+			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 		}
 
 		logger.Debug("[PERF] Block Commit phase 1 (Save DB): %v, block: %v", saveDuration, blockNum)

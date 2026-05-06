@@ -277,11 +277,64 @@ Bước 8: Authority starts
 | Consensus produce commits TRƯỚC khi sync xong | Block với metadata sai (leader, timestamp, GEI) | STARTUP-SYNC gate |
 | `initialize_from_go()` chạy async | CommitProcessor bypass replay guard | Chạy đồng bộ |
 | Dùng `max()` để inflate GEI | GEI mapping sai → block number lệch | Đọc trực tiếp từ Go |
+| Timeout trong `stop_authority_and_poll_go` dùng Go's trailing GEI | GEI overlap, bỏ sót block epoch mới | Dùng `synced_global_exec_index` từ callback |
 | Go import P2P blocks song song với consensus | Trie state bị overwrite bởi foreign data | Disabled trên Master |
+| Update GEI và CommitIndex rời rạc | Sequence shifting, duplicate blocks sau khi restart | Dùng `BatchPut` lưu atomic (Atomic Consensus Persistence) |
 
 ---
 
-## 7. Module Dependencies
+## 7. Atomic Consensus Persistence & Crash Recovery
+
+**Vấn đề cốt lõi:**
+Khi Go xử lý xong block từ Rust, hệ thống phải cập nhật 2 giá trị vào ổ đĩa (`BackupDb` - PebbleDB) để đánh dấu tiến độ: `last_global_exec_index` (GEI) và `last_handled_commit_index`.
+
+Nếu 2 thao tác này diễn ra rời rạc (non-atomic), một sự cố sập nguồn (crash) xảy ra giữa chừng sẽ đẩy DB vào trạng thái bất nhất: **GEI đã nhảy số, nhưng CommitIndex thì chưa**.
+
+**Quá trình gây Fork:**
+1. Khi khởi động lại, Rust đọc lại tiến độ. Do CommitIndex cũ, Rust lôi Commit cũ ra bắt Go chạy lại (Replay).
+2. Khi cấp GEI cho block chạy lại này, Rust thấy GEI đã nâng lên, nên cấp GEI mới toanh (X+1).
+3. Do GEI X+1 lớn hơn GEI cũ X trên blockchain của Go, `GEI-REGRESSION GUARD` của Go bị đánh lừa! Nó tưởng đây là khối mới, tạo ra bản duplicate của block cũ nhưng với GEI mới!
+4. **Hệ quả:** Toàn bộ chuỗi sau đó bị đẩy lùi 1 GEI. `txRoot`, `receiptsRoot`, `leaderAddress` và `timestamp` của các block sau đó lệch hoàn toàn giữa các node (do node sập có thêm một block rác chen vào giữa). Dù GEI giống nhau, nhưng nó ánh xạ tới một Commit khác biệt (thời gian trễ hơn, leader khác), tạo ra Fork hệ thống.
+
+**Giải Pháp Kiến Trúc:**
+Từ phiên bản tối ưu, quá trình này **bắt buộc** phải sử dụng `BatchPut` để đóng gói `GlobalExecIndex`, `CommitIndex`, và `Epoch` vào một transaction Atomic duy nhất (`updateAndPersistConsensusState`). Đảm bảo một là ghi đủ, hai là không ghi gì cả.
+
+---
+
+## 8. CommitSyncer Gap Handling & Consumer Monitor Synchronization
+
+**Vấn đề cốt lõi:**
+Khi CommitSyncer nhận thấy `local_commit_index` (của DAG) vượt xa tiến độ xử lý `highest_handled_commit` (của Go) quá 10 commit (Gap > 10), nó sẽ kích hoạt cơ chế kéo lùi `synced_commit_index` về vị trí `highest_handled_commit` để ưu tiên fetch lại block cho Go đuổi kịp.
+
+**Quá trình gây lặp fetch và fork state:**
+1. Trong các thiết kế trước, `highest_handled_commit` **chỉ được cập nhật duy nhất 1 lần** trong quá trình `STARTUP-SYNC` ở Phase 1. Trong suốt thời gian consensus hoạt động (Healthy/CatchingUp), biến này **không hề nhúc nhích**.
+2. Vì `highest_handled_commit` bị kẹt ở chỉ số cũ (ví dụ: 967), khoảng cách (Gap) giữa nó và tiến độ tạo block của DAG (ví dụ: 1803) sẽ ngày càng giãn rộng ra.
+3. Khi Gap > 10, CommitSyncer lôi ngược `synced_commit_index` từ 1803 về 967.
+4. CommitSyncer đi hỏi P2P để kéo lại các commit từ 968 -> 1803. Khi kéo về, nó ném vào `Core`.
+5. `Core` đẩy các commit này sang `CommitProcessor`. Tuy nhiên, `CommitProcessor` lại đang có `next_expected_index` = 1804. Nó thấy commit 968 < 1804 nên nó drop toàn bộ!
+6. Vòng lặp trên diễn ra liên tục. Trong khi đó, Go Master không nhận được block mới (kể cả empty commits cũng bị drop). State bị kẹt. Node rơi vào trạng thái fork với state root cũ kỹ so với leader.
+
+**Giải Pháp Kiến Trúc (Synchronous Consumer Monitor):**
+`CommitProcessor` nay được cấp quyền truy cập trực tiếp vào `CommitConsumerMonitor` thông qua callback (`create_commit_index_callback`).
+Bất kể commit đó có chứa transaction hay là empty commit (bị `dispatch_commit` skip qua FAST-PATH), ngay sau khi xử lý xong, `CommitProcessor` sẽ đồng thời:
+1. Cập nhật `current_commit_index`
+2. Cập nhật `highest_handled_commit` trong Monitor
+
+Từ đó, `highest_handled_commit` luôn bám sát nút `local_commit` của DAG. Gap luôn được giữ mức ~0-1 (trừ khi Go thực sự treo do IO/Backpressure), ngăn chặn hoàn toàn việc CommitSyncer bị ảo giác về tiến trình và kéo lùi sync network một cách mù quáng.
+
+---
+
+## 7. Epoch Transition Timestamp Determinism
+
+Quá trình chuyển giao Epoch (Epoch Transition) tiềm ẩn rủi ro fork lớn nhất nếu xử lý không cẩn thận.
+Nguyên tắc bất biến:
+1. **Timestamp**: Phải dùng `boundary_timestamp_ms` (lấy từ commit chứa EndOfEpoch). Go tuyệt đối **KHÔNG ĐƯỢC** dùng `time.Now()` hay tự fallback timestamp cho block chuyển giao epoch.
+2. **Deterministic GEI Base**: Khi epoch mới bắt đầu, GEI phải được nối tiếp chính xác từ GEI của block chuyển giao epoch (`synced_global_exec_index` từ `epoch_transition_callback`).
+3. **Go Processing Lag**: Trong lúc Rust đã sẵn sàng sang epoch mới, Go có thể đang xử lý các commit cuối của epoch cũ trong pipeline (Go lag). Rust **phải** dùng `synced_global_exec_index` làm `effective_synced` thay vì dùng giá trị GEI mà Go trả về lúc đó (`get_last_global_exec_index`). Nếu dùng GEI trả về từ Go khi Go chưa xử lý xong, epoch mới sẽ bị gán đè GEI lên các commit đang chờ xử lý của epoch cũ, dẫn đến mất transactions và fork (do GEI-REGRESSION guard của Go sẽ skip).
+
+---
+
+## 8. Module Dependencies
 
 ```
                     ┌─────────────────────┐
@@ -325,7 +378,7 @@ Bước 8: Authority starts
 
 ---
 
-## 8. Anti-Patterns (Tránh Over-Engineering)
+## 9. Anti-Patterns (Tránh Over-Engineering)
 
 | ❌ Không làm | ✅ Thay thế |
 |-------------|------------|

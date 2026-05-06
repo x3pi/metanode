@@ -146,7 +146,7 @@ pub async fn transition_to_epoch_from_system_tx(
     // STEP 4: Stop old authority, flush blocks, poll Go
     // =========================================================================
     let synced_index =
-        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source).await?;
+        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source, synced_global_exec_index).await?;
 
     // =========================================================================
     // STEP 5: Disk cleanup + state update
@@ -160,16 +160,16 @@ pub async fn transition_to_epoch_from_system_tx(
     node.current_commit_index.store(0, Ordering::SeqCst);
     node.coordination_hub.reset_quorum_commit_index(0);
 
-    // CRITICAL FIX (2026-05-05): Use Go's actual synced_index, NOT max() with Rust's
-    // synced_global_exec_index. Rust's GEI tracks dispatched commits, but Go may not
-    // have processed them yet. Using max() here inflates the new epoch's base GEI,
-    // causing nodes with different Go lag to assign different GEIs to the same block.
-    // This was the root cause of the fork at block 1199 where m1/m4 had GEI=1208
-    // while m0/m2/m3 had GEI=1205 — a 3 GEI difference from the inflated baseline.
-    let effective_synced = synced_index;
+    // CRITICAL FIX: We MUST strictly use synced_global_exec_index as the base GEI
+    // for the new epoch. synced_global_exec_index is mathematically deterministic 
+    // because it comes directly from the EndOfEpoch commit's exact sequence position.
+    // If we use Go's actual synced_index (which may lag due to timeouts), we risk 
+    // overlapping GEIs with commits still in Go's pipeline, causing the new epoch's 
+    // commits to be dropped by the GEI-REGRESSION GUARD.
+    let effective_synced = synced_global_exec_index;
     if synced_global_exec_index > synced_index {
         warn!(
-            "⚠️ [SYNC GAP] Rust GEI ({}) > Go GEI ({}). Using Go's actual state to prevent fork.",
+            "⚠️ [SYNC GAP] Rust GEI ({}) > Go GEI ({}). Go is lagging, but we MUST use Rust GEI to prevent overlaps.",
             synced_global_exec_index, synced_index
         );
     }
@@ -437,12 +437,9 @@ async fn stop_authority_and_poll_go(
     new_epoch: u64,
     executor_client: &ExecutorClient,
     committee_source: &crate::node::committee_source::CommitteeSource,
+    synced_global_exec_index: u64,
 ) -> Result<u64> {
-    let expected_last_block = {
-        let gei_arc = node.coordination_hub.get_global_exec_index_ref();
-        let shared_index = gei_arc.lock().await;
-        *shared_index
-    };
+    let expected_last_block = synced_global_exec_index;
     info!(
         "🛑 [TRANSITION] Stopping old authority (expected_gei={})",
         expected_last_block

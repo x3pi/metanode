@@ -9,9 +9,11 @@ use tracing::{info, warn};
 /// Creates a commit index callback that updates the shared commit index
 pub fn create_commit_index_callback(
     current_commit_index: Arc<AtomicU32>,
+    commit_consumer_monitor: Arc<consensus_core::CommitConsumerMonitor>,
 ) -> impl Fn(u32) + Send + Sync + 'static {
     move |index| {
         current_commit_index.store(index, Ordering::SeqCst);
+        commit_consumer_monitor.set_highest_handled_commit(index);
     }
 }
 
