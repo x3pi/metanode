@@ -2023,52 +2023,6 @@ impl ConsensusNode {
             coordination_hub.set_startup_go_sync_completed(true);
 
             // ═══════════════════════════════════════════════════════════════
-            // PROGRESS-BASED DAG GATE (May 2026 — FLEXIBLE WAIT FIX):
-            //
-            // Previous bug: Hard 30s timeout released proposals even when
-            // CommitSyncer was still actively catching up, causing forks.
-            //
-            // Fix: Remove fixed timeouts. We rely on the `coordination_hub`
-            // phase which is managed by `CommitSyncer`. `CommitSyncer` has
-            // a global view of the network (quorum) and its own catch-up
-            // state (`lag`). We wait until the node is officially `Healthy`
-            // or `quorum` is fully caught up, ensuring perfectly smooth
-            // transitions regardless of network latency.
-            // ═══════════════════════════════════════════════════════════════
-            let dag_gate_poll = std::time::Duration::from_millis(200);
-            const DAG_GATE_TOLERANCE: u32 = 3;
-
-            loop {
-                let quorum = coordination_hub.get_quorum_commit_index();
-                let handled = commit_consumer.monitor().highest_handled_commit();
-                let phase = coordination_hub.get_phase();
-
-                // Flexible Gate: Break out if the node has officially reached Healthy
-                // (lag == 0) OR if the DAG is provably caught up to the quorum.
-                if phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy {
-                    tracing::info!(
-                        "✅ [DAG-GATE] Node reached Healthy phase (handled={}, quorum={}). Releasing proposals.",
-                        handled, quorum
-                    );
-                    break;
-                }
-
-                if quorum == 0 {
-                    tracing::debug!(
-                        "⏳ [DAG-GATE] Bootstrapping... Waiting for CommitSyncer to establish quorum from peers (handled={}).",
-                        handled
-                    );
-                } else {
-                    tracing::debug!(
-                        "⏳ [DAG-GATE] Catching up... handled={}, quorum={}, gap={}, phase={:?}",
-                        handled, quorum, quorum.saturating_sub(handled), phase
-                    );
-                }
-
-                tokio::time::sleep(dag_gate_poll).await;
-            }
-
-            // ═══════════════════════════════════════════════════════════════
             // POST-GATE BLOCK HASH VERIFICATION:
             // Before releasing proposals, verify that recent blocks match
             // peers. This catches cases where Go sync completed but the
@@ -2121,7 +2075,6 @@ impl ConsensusNode {
                     _ => {}
                 }
             }
-        }
         coordination_hub.set_startup_sync_active(false);
 
         // ═══════════════════════════════════════════════════════════════════
