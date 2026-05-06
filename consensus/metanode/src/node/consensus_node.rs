@@ -2001,8 +2001,67 @@ impl ConsensusNode {
         //   1. All gap blocks have been synced from peers → Go state is current
         //   2. initialize_from_go() has updated CommitProcessor guards
         //   3. GEI cross-check has verified consistency
-        // It is now safe for Core to produce new commits.
+        //
+        // CRITICAL (May 2026): Even though Go state is current, the Rust DAG
+        // was wiped by snapshot restore. CommitSyncer must replay commits from
+        // peers to reconstruct the DAG (leader schedule, etc.) BEFORE we allow
+        // proposals. Otherwise, the node creates its own blocks (different
+        // timestamp/txRoot) instead of replaying the cluster's committed blocks.
+        //
+        // Gate: Wait for quorum_commit_index to be non-zero and for the DAG's
+        // local_commit to approach quorum. Timeout 30s to avoid deadlock.
         // ═══════════════════════════════════════════════════════════════════
+        if startup_total_synced_blocks > 0 {
+            let dag_gate_timeout = std::time::Duration::from_secs(30);
+            let dag_gate_start = std::time::Instant::now();
+            let dag_gate_poll = std::time::Duration::from_millis(200);
+            const DAG_GATE_TOLERANCE: u32 = 3;
+
+            loop {
+                let quorum = coordination_hub.get_quorum_commit_index();
+                // Read highest_handled from commit_consumer_monitor as proxy for DAG progress
+                let handled = commit_consumer.monitor().highest_handled_commit();
+
+                if quorum == 0 {
+                    // Quorum not yet established — CommitSyncer is still bootstrapping
+                    if dag_gate_start.elapsed() > dag_gate_timeout {
+                        tracing::warn!(
+                            "⚠️ [DAG-GATE] Timeout waiting for quorum (still 0 after {:?}). \
+                             Releasing proposals to avoid deadlock.",
+                            dag_gate_timeout
+                        );
+                        break;
+                    }
+                    tracing::debug!(
+                        "⏳ [DAG-GATE] Waiting for quorum (currently 0, handled={}, elapsed={:.1}s)...",
+                        handled,
+                        dag_gate_start.elapsed().as_secs_f64()
+                    );
+                } else if handled + DAG_GATE_TOLERANCE >= quorum {
+                    tracing::info!(
+                        "✅ [DAG-GATE] DAG caught up: handled={}, quorum={}, tolerance={}. \
+                         Releasing proposals.",
+                        handled, quorum, DAG_GATE_TOLERANCE
+                    );
+                    break;
+                } else if dag_gate_start.elapsed() > dag_gate_timeout {
+                    tracing::warn!(
+                        "⚠️ [DAG-GATE] Timeout: handled={}, quorum={} (gap={}). \
+                         Releasing proposals to avoid deadlock.",
+                        handled, quorum, quorum - handled
+                    );
+                    break;
+                } else {
+                    tracing::debug!(
+                        "⏳ [DAG-GATE] DAG catching up: handled={}, quorum={}, gap={}, elapsed={:.1}s",
+                        handled, quorum, quorum - handled,
+                        dag_gate_start.elapsed().as_secs_f64()
+                    );
+                }
+
+                tokio::time::sleep(dag_gate_poll).await;
+            }
+        }
         coordination_hub.set_startup_sync_active(false);
 
         // ═══════════════════════════════════════════════════════════════════

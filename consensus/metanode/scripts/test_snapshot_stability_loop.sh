@@ -332,17 +332,37 @@ run_single_round() {
     fi
     log "| GEI | ${src_gei:-?} | ${dst_gei:-?} | $gei_match |"
 
+    # ── State Root: Compare at the SAME block number ──
+    # CRITICAL FIX (May 2026): peer_info returns real-time state. Between two
+    # curl calls, nodes advance to different heights → different state_root
+    # → FALSE POSITIVE fork detection. Instead, compare at the SAME block.
+    local compare_block=$((src_blk < dst_blk ? src_blk : dst_blk))
+    local compare_hex=$(printf "0x%x" "$compare_block")
+    local src_result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$src_port" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$compare_hex\", false],\"id\":1}" 2>/dev/null)
+    local dst_result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$dst_port" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$compare_hex\", false],\"id\":1}" 2>/dev/null)
+    local src_hash=$(echo "$src_result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    local dst_hash=$(echo "$dst_result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    src_sr=$(echo "$src_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    dst_sr=$(echo "$dst_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+
     local sr_match="✅"
-    if [ "$src_blk" = "$dst_blk" ]; then
-        [ "$src_sr" != "$dst_sr" ] && sr_match="❌"
+    if [ -n "$src_hash" ] && [ -n "$dst_hash" ]; then
+        if [ "$src_hash" != "$dst_hash" ]; then
+            sr_match="❌"
+        fi
     else
-        sr_match="⚠️ (Khác khối)"
+        sr_match="⚠️ (RPC error)"
     fi
-    log "| State Root | ${src_sr:0:20}... | ${dst_sr:0:20}... | $sr_match |"
+    log "| State Root (block #$compare_block) | ${src_sr:0:20}... | ${dst_sr:0:20}... | $sr_match |"
     log ""
 
     if [ "$sr_match" = "❌" ]; then
-        log "- 🚨 **LỆCH STATE ROOT CÙNG KHỐI — PHÁT HIỆN FORK**"
+        log "- 🚨 **LỆCH STATE ROOT CÙNG KHỐI #$compare_block — PHÁT HIỆN FORK**"
+        log "- src_hash=\`$src_hash\` dst_hash=\`$dst_hash\`"
         return 1
     fi
     if [ "$gei_match" = "❌" ]; then

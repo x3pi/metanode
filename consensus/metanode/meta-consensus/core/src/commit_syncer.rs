@@ -398,9 +398,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // ════════════════════════════════════════════════════════════════════
         let catching_up_enter_threshold = 5;
         let is_currently_catching_up = current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp;
+        // FORK-PREVENTION (May 2026): During post-startup alignment (startup_sync_active),
+        // ANY lag should keep the node in CatchingUp. Without this, the node can transition
+        // to Healthy while the DAG is still empty after snapshot restore, causing it to
+        // produce its own blocks instead of replaying the cluster's committed blocks.
+        let startup_sync_active = self.coordination_hub.is_startup_sync_active();
 
         let next_phase = if lag > 50_000 {
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
+        } else if startup_sync_active && lag > 0 {
+            // Post-startup: stay in CatchingUp until fully synced to prevent fork
+            crate::coordination_hub::NodeConsensusPhase::CatchingUp
         } else if is_currently_catching_up && lag > 0 {
             // Already catching up — stay until fully synced
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
