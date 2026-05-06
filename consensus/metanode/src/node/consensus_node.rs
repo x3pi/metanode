@@ -151,50 +151,41 @@ impl ConsensusNode {
         // Go now has an explicit blockchainInitDone flag. is_ready=true means the block
         // number is the FINAL authoritative value — no transient metadata.json values.
         let latest_block_number = {
-            let max_retries = 30;
             let retry_interval = std::time::Duration::from_millis(500);
-            let mut block_num = 0u64;
-
-            for attempt in 1..=max_retries {
+            let mut attempt = 1;
+            let block_num = loop {
                 match executor_client.get_last_block_number().await {
                     Ok((n, _, true, _, _)) => {
-                        block_num = n;
                         info!(
                             "✅ [STARTUP] Got block number {} from Go (is_ready=true) (attempt {})",
                             n, attempt
                         );
-                        break;
+                        break n;
                     }
                     Ok((n, _, false, _, _)) => {
-                        info!(
-                            "⏳ [STARTUP] Go not ready (block={}) (attempt {}/{}). Waiting for blockchain init...",
-                            n, attempt, max_retries
-                        );
-                        if attempt < max_retries {
-                            tokio::time::sleep(retry_interval).await;
+                        if attempt % 10 == 0 {
+                            info!(
+                                "⏳ [STARTUP] Go not ready (block={}) (attempt {}). Retrying indefinitely to guarantee state parity...",
+                                n, attempt
+                            );
                         }
+                        tokio::time::sleep(retry_interval).await;
                     }
                     Err(e) => {
-                        if attempt < max_retries {
+                        if attempt % 10 == 0 {
                             warn!(
-                                "⚠️ [STARTUP] Failed to fetch block from Go (attempt {}/{}): {}. Retrying...",
-                                attempt, max_retries, e
+                                "⚠️ [STARTUP] Failed to fetch block from Go (attempt {}): {}. Retrying indefinitely to prevent starting with stale data...",
+                                attempt, e
                             );
-                            tokio::time::sleep(retry_interval).await;
-                        } else {
-                            warn!("⚠️ [STARTUP] Failed to fetch latest block from Go after {} attempts: {}. Attempting to read persisted value.", max_retries, e);
-                            block_num = super::executor_client::read_last_block_number(
-                                &config.storage_path,
-                            )
-                            .await
-                            .unwrap_or(0);
                         }
+                        tokio::time::sleep(retry_interval).await;
                     }
                 }
-            }
+                attempt += 1;
+            };
 
             if block_num == 0 {
-                warn!("⚠️ [STARTUP] Go still reporting block=0 after {} retries. This may be a fresh node or Go failed to load snapshot data.", max_retries);
+                warn!("⚠️ [STARTUP] Go reporting block=0 natively (is_ready=true). This is a fresh node.");
             }
 
             block_num
@@ -222,18 +213,18 @@ impl ConsensusNode {
                     e
                 }
                 Err(e) => {
-                    // Retry a few times for transient RPC errors only
-                    let max_retries = 5;
+                    // Retry indefinitely
                     let retry_interval = std::time::Duration::from_millis(500);
-                    let mut final_epoch = 0u64;
+                    let mut attempt = 2;
                     let mut last_err = e;
-                    let mut resolved = false;
 
-                    for attempt in 2..=max_retries {
-                        warn!(
-                            "⚠️ [STARTUP] Failed to get epoch (attempt {}/{}): {}. Retrying...",
-                            attempt, max_retries, last_err
-                        );
+                    loop {
+                        if attempt % 10 == 0 {
+                            warn!(
+                                "⚠️ [STARTUP] Failed to get epoch (attempt {}): {}. Retrying indefinitely...",
+                                attempt, last_err
+                            );
+                        }
                         tokio::time::sleep(retry_interval).await;
                         match executor_client.get_current_epoch().await {
                             Ok(e) => {
@@ -241,23 +232,14 @@ impl ConsensusNode {
                                     "✅ [STARTUP] Got epoch {} from Go (attempt {}, block={})",
                                     e, attempt, latest_block_number
                                 );
-                                final_epoch = e;
-                                resolved = true;
-                                break;
+                                break e;
                             }
                             Err(e) => {
                                 last_err = e;
+                                attempt += 1;
                             }
                         }
                     }
-                    if !resolved {
-                        return Err(anyhow::anyhow!(
-                            "Failed to fetch epoch from Go after {} attempts: {}",
-                            max_retries,
-                            last_err
-                        ));
-                    }
-                    final_epoch
                 }
             };
 
@@ -1382,13 +1364,13 @@ impl ConsensusNode {
             // FIX: Loop the sync until gap ≤ 2 blocks (network jitter).
             // Max 5 retries to prevent infinite loops.
             // ═══════════════════════════════════════════════════════════════
-            const MAX_SYNC_RETRIES: u32 = 15;
             const ACCEPTABLE_GAP: u64 = 2;
             const INITIAL_RETRY_DELAY_MS: u64 = 500;
             const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
-            for sync_round in 0..MAX_SYNC_RETRIES {
+            let mut sync_round = 0;
+            loop {
                 // Re-query peers for their latest block
                 let mut max_peer_block = 0u64;
                 let mut max_peer_gei = 0u64;
@@ -1407,8 +1389,13 @@ impl ConsensusNode {
                 }
 
                 if max_peer_block == 0 {
-                    tracing::warn!("⚠️ [STARTUP-SYNC] Could not reach any peers (round {}). Retrying...", sync_round);
+                    if sync_round % 12 == 0 {
+                        tracing::error!("🚨 [STARTUP-SYNC] Could not reach any peers (round {}). Node is ISOLATED and BLOCKED pending peer discovery...", sync_round);
+                    } else {
+                        tracing::warn!("⚠️ [STARTUP-SYNC] Could not reach any peers (round {}). Retrying...", sync_round);
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                    sync_round += 1;
                     continue;
                 }
 
@@ -1429,7 +1416,13 @@ impl ConsensusNode {
                 let from_block = local_block + 1;
                 let to_block = max_peer_block;
 
-                match crate::network::peer_rpc::fetch_blocks_from_peer(&barrier_peers, from_block, to_block).await {
+                // Shuffle peers to prevent getting stuck in an infinite loop
+                // if the first peer in the list returns cryptographically invalid blocks
+                use rand::seq::SliceRandom;
+                let mut shuffled_peers = barrier_peers.clone();
+                shuffled_peers.shuffle(&mut rand::thread_rng());
+
+                match crate::network::peer_rpc::fetch_blocks_from_peer(&shuffled_peers, from_block, to_block).await {
                     Ok(blocks) if !blocks.is_empty() => {
                         tracing::info!(
                             "🔄 [STARTUP-SYNC] Round {}: Fetched {} blocks ({}-{}). Validating cryptographic stream...",
@@ -1455,8 +1448,9 @@ impl ConsensusNode {
                         }
 
                         if !is_valid {
-                            tracing::error!("🚨 [ANTI-FORK] Aborting sync round due to invalid block chain from peer.");
+                            tracing::error!("🚨 [ANTI-FORK] Aborting sync round due to invalid block chain from peer. Node BLOCKED until valid data is received.");
                             tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                            sync_round += 1;
                             continue;
                         }
 
@@ -1498,8 +1492,9 @@ impl ConsensusNode {
                         }
                         
                         if chunk_sync_failed {
-                            tracing::warn!("⚠️ [STARTUP-SYNC] Halting sync round due to chunk failure.");
+                            tracing::error!("🚨 [STARTUP-SYNC] Halting sync round due to chunk failure. Node BLOCKED pending successful Go sync.");
                             tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                            sync_round += 1;
                             continue;
                         }
 
@@ -1575,19 +1570,21 @@ impl ConsensusNode {
                         tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Fetched 0 blocks from peers. Retrying...", sync_round);
                     }
                     Err(e) => {
-                        tracing::error!("❌ [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}", sync_round, e);
-                        break;
+                        if sync_round % 12 == 0 {
+                            tracing::error!("🚨 [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}. Node is BLOCKED pending network sync...", sync_round, e);
+                        } else {
+                            tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}. Retrying...", sync_round, e);
+                        }
                     }
                 }
 
                 // Small delay before retry to let the cluster produce more blocks
-                if sync_round < MAX_SYNC_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
-                        MAX_RETRY_DELAY_MS
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                }
+                let delay = std::cmp::min(
+                    INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
+                    MAX_RETRY_DELAY_MS
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                sync_round += 1;
             }
 
             // ═══════════════════════════════════════════════════════════════
