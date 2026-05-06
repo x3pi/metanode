@@ -2017,7 +2017,7 @@ impl ConsensusNode {
         // Gate: Wait for quorum_commit_index to be non-zero and for the DAG's
         // local_commit to approach quorum. Timeout 30s to avoid deadlock.
         // ═══════════════════════════════════════════════════════════════════
-        if startup_total_synced_blocks > 0 || startup_local_block > 0 {
+
             // Signal to CommitSyncer that Go has finished syncing/verifying with peers.
             // This safely breaks the Bootstrapping deadlock without relying on time.
             coordination_hub.set_startup_go_sync_completed(true);
@@ -2049,14 +2049,6 @@ impl ConsensusNode {
                     tracing::info!(
                         "✅ [DAG-GATE] Node reached Healthy phase (handled={}, quorum={}). Releasing proposals.",
                         handled, quorum
-                    );
-                    break;
-                }
-
-                if quorum > 0 && handled + DAG_GATE_TOLERANCE >= quorum {
-                    tracing::info!(
-                        "✅ [DAG-GATE] DAG caught up: handled={}, quorum={}, tolerance={}. Releasing proposals.",
-                        handled, quorum, DAG_GATE_TOLERANCE
                     );
                     break;
                 }

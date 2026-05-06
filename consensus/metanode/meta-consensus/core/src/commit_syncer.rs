@@ -678,14 +678,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // ════════════════════════════════════════════════════════
                         // STALL DETECTOR 4: Cluster Cold Start Deadlock
                         // If local_commit == 0 (DAG wiped) and we are stuck in CatchingUp
-                        // for 15s without fetching, it means the ENTIRE cluster wiped
+                        // for 5s without fetching, it means the ENTIRE cluster wiped
                         // its DAG. No one has the past commits. Force fast-forward.
                         // ════════════════════════════════════════════════════════
                         let catching_up_stall = now.duration_since(self.last_quorum_change_at);
                         if self.coordination_hub.is_catching_up()
                             && local_commit == 0
                             && highest_handled > 0
-                            && catching_up_stall >= Duration::from_secs(15)
+                            && catching_up_stall >= Duration::from_secs(5)
                         {
                             tracing::error!(
                                 "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s. \
