@@ -154,15 +154,15 @@ impl Linearizer {
                 .cloned()
                 .collect::<Vec<_>>();
             let parent_blocks = dag_state.get_blocks(&parent_refs);
-            let missing_recent = parent_refs.iter().zip(parent_blocks.iter()).filter(|(pref, pblock)| {
-                pblock.is_none() && pref.round > dag_state.last_commit_round()
+            let missing_parents = parent_refs.iter().zip(parent_blocks.iter()).filter(|(_pref, pblock)| {
+                pblock.is_none()
             }).count();
-            if missing_recent > 0 {
+            if missing_parents > 0 {
                 tracing::warn!(
                     "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
                      {}/{} recent ancestor blocks missing. Deferring to prevent timestamp divergence.",
                     leader_block.reference(),
-                    missing_recent,
+                    missing_parents,
                     parent_refs.len()
                 );
                 return None;
