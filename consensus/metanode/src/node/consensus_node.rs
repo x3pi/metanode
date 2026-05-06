@@ -2018,87 +2018,58 @@ impl ConsensusNode {
         // local_commit to approach quorum. Timeout 30s to avoid deadlock.
         // ═══════════════════════════════════════════════════════════════════
         if startup_total_synced_blocks > 0 || startup_local_block > 0 {
+            // Signal to CommitSyncer that Go has finished syncing/verifying with peers.
+            // This safely breaks the Bootstrapping deadlock without relying on time.
+            coordination_hub.set_startup_go_sync_completed(true);
+
             // ═══════════════════════════════════════════════════════════════
-            // PROGRESS-BASED DAG GATE (May 2026 — ROOT CAUSE FIX):
+            // PROGRESS-BASED DAG GATE (May 2026 — FLEXIBLE WAIT FIX):
             //
             // Previous bug: Hard 30s timeout released proposals even when
-            // CommitSyncer was still actively catching up (commit 699→733).
-            // The restored node then created its own blocks (different
-            // timestamp/txRoot) instead of replaying the cluster's committed
-            // blocks → permanent fork.
+            // CommitSyncer was still actively catching up, causing forks.
             //
-            // Fix: Track progress (quorum/handled changes). Only timeout
-            // when NO progress has been made for 30s. NEVER release
-            // proposals while gap > tolerance, even on timeout — just
-            // log and keep waiting. The system recovers automatically
-            // when the network reconnects.
+            // Fix: Remove fixed timeouts. We rely on the `coordination_hub`
+            // phase which is managed by `CommitSyncer`. `CommitSyncer` has
+            // a global view of the network (quorum) and its own catch-up
+            // state (`lag`). We wait until the node is officially `Healthy`
+            // or `quorum` is fully caught up, ensuring perfectly smooth
+            // transitions regardless of network latency.
             // ═══════════════════════════════════════════════════════════════
-            let stall_timeout = std::time::Duration::from_secs(30);
             let dag_gate_poll = std::time::Duration::from_millis(200);
             const DAG_GATE_TOLERANCE: u32 = 3;
-
-            let mut last_progress_time = std::time::Instant::now();
-            let mut last_progress_quorum: u32 = 0;
-            let mut last_progress_handled: u32 = 0;
-            let mut stall_logged = false;
 
             loop {
                 let quorum = coordination_hub.get_quorum_commit_index();
                 let handled = commit_consumer.monitor().highest_handled_commit();
+                let phase = coordination_hub.get_phase();
 
-                // Track progress — reset stall timer when anything advances
-                if quorum != last_progress_quorum || handled != last_progress_handled {
-                    last_progress_time = std::time::Instant::now();
-                    last_progress_quorum = quorum;
-                    last_progress_handled = handled;
-                    stall_logged = false;
+                // Flexible Gate: Break out if the node has officially reached Healthy
+                // (lag == 0) OR if the DAG is provably caught up to the quorum.
+                if phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy {
+                    tracing::info!(
+                        "✅ [DAG-GATE] Node reached Healthy phase (handled={}, quorum={}). Releasing proposals.",
+                        handled, quorum
+                    );
+                    break;
                 }
 
-                if quorum == 0 {
-                    // Quorum not yet established — CommitSyncer is still bootstrapping
-                    if last_progress_time.elapsed() > stall_timeout {
-                        tracing::warn!(
-                            "⚠️ [DAG-GATE] No progress for {:?} and quorum still 0. \
-                             Releasing proposals (likely genesis or isolated node).",
-                            stall_timeout
-                        );
-                        break;
-                    }
-                    tracing::debug!(
-                        "⏳ [DAG-GATE] Waiting for quorum (currently 0, handled={}, \
-                         stall={:.1}s)...",
-                        handled,
-                        last_progress_time.elapsed().as_secs_f64()
-                    );
-                } else if handled + DAG_GATE_TOLERANCE >= quorum {
-                    // DAG caught up — safe to release
+                if quorum > 0 && handled + DAG_GATE_TOLERANCE >= quorum {
                     tracing::info!(
-                        "✅ [DAG-GATE] DAG caught up: handled={}, quorum={}, tolerance={}. \
-                         Releasing proposals.",
+                        "✅ [DAG-GATE] DAG caught up: handled={}, quorum={}, tolerance={}. Releasing proposals.",
                         handled, quorum, DAG_GATE_TOLERANCE
                     );
                     break;
-                } else if last_progress_time.elapsed() > stall_timeout {
-                    // No progress but gap still large — DO NOT release!
-                    // This prevents the fork. Keep waiting; the system
-                    // will recover when CommitSyncer makes progress.
-                    if !stall_logged {
-                        tracing::warn!(
-                            "⚠️ [DAG-GATE] No progress for {:?} but gap still large \
-                             (handled={}, quorum={}, gap={}). Keeping proposals LOCKED \
-                             to prevent fork. Will release when DAG catches up.",
-                            stall_timeout, handled, quorum, quorum - handled
-                        );
-                        stall_logged = true;
-                    }
-                    // Reset timer to avoid log spam — check again after another stall period
-                    last_progress_time = std::time::Instant::now();
+                }
+
+                if quorum == 0 {
+                    tracing::debug!(
+                        "⏳ [DAG-GATE] Bootstrapping... Waiting for CommitSyncer to establish quorum from peers (handled={}).",
+                        handled
+                    );
                 } else {
                     tracing::debug!(
-                        "⏳ [DAG-GATE] DAG catching up: handled={}, quorum={}, gap={}, \
-                         stall={:.1}s",
-                        handled, quorum, quorum - handled,
-                        last_progress_time.elapsed().as_secs_f64()
+                        "⏳ [DAG-GATE] Catching up... handled={}, quorum={}, gap={}, phase={:?}",
+                        handled, quorum, quorum.saturating_sub(handled), phase
                     );
                 }
 

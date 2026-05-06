@@ -144,13 +144,6 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
 
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
-
-    // --- bootstrap timing ---
-    /// Timestamp when Bootstrapping phase started.
-    /// Used to implement a timeout before assuming genuine genesis (highest_handled=0).
-    /// After DAG wipe, the CommitConsumerMonitor might not be properly aligned,
-    /// causing false genesis detection. Waiting allows quorum data to arrive.
-    bootstrap_start_time: tokio::time::Instant,
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -202,7 +195,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_local_commit_change_at: tokio::time::Instant::now(),
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
-            bootstrap_start_time: tokio::time::Instant::now(),
         }
     }
 
@@ -454,21 +446,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     );
                     self.transition_phase_and_kick(next_phase);
                 } else {
-                    let elapsed = self.bootstrap_start_time.elapsed();
-                    if elapsed >= Duration::from_secs(5) {
-                        // Timeout: No quorum after 5s → treat as genuine genesis
+                    let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
+                    if is_network_polled {
+                        // FIX: No more fixed 5s timeout. We only assume genuine genesis
+                        // when STARTUP-SYNC explicitly confirms peers have been polled.
                         tracing::info!(
-                            "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after {:?}). \
+                            "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after network poll). \
                              Transitioning to {:?} to allow block 1 proposal.",
-                            elapsed, next_phase
+                            next_phase
                         );
                         self.transition_phase_and_kick(next_phase);
                     } else {
-                        // Still waiting for quorum — stay in Bootstrapping
+                        // Still waiting for network poll to finish — stay in Bootstrapping
                         tracing::trace!(
-                            "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for quorum \
-                             ({:.1}s elapsed, 5s timeout)...",
-                            elapsed.as_secs_f64()
+                            "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for network poll..."
                         );
                     }
                 }
@@ -495,28 +486,27 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 );
                 self.transition_phase_and_kick(safe_phase);
             } else {
-                let elapsed = self.bootstrap_start_time.elapsed();
-                if elapsed >= Duration::from_secs(5) {
+                let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
+                if is_network_polled {
                     // ════════════════════════════════════════════════════════
                     // QUORUM SEED: Go has state at highest_handled but Rust
                     // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
-                    // Wait 5s to ensure we are actually isolated or all nodes
-                    // restarted together, then seed CommitVoteMonitor so quorum becomes > 0.
+                    // Instead of a dangerous 5s timeout, we now wait until
+                    // STARTUP-SYNC officially confirms the network has been polled.
+                    // This perfectly prevents "slow network" forks!
                     // ════════════════════════════════════════════════════════
                     let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
                     if seeded {
                         tracing::warn!(
                             "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
-                             (commit_index={}) after 5s timeout to break bootstrap deadlock.",
+                             (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
                             highest_handled_index
                         );
                     }
                 } else {
                     tracing::trace!(
-                        "⏳ [BOOTSTRAP] highest_handled={}, quorum=0, waiting for quorum \
-                         ({:.1}s elapsed, 5s timeout before seeding)...",
-                        highest_handled_index,
-                        elapsed.as_secs_f64()
+                        "⏳ [BOOTSTRAP] highest_handled={}, quorum=0, waiting for network poll...",
+                        highest_handled_index
                     );
                 }
             }

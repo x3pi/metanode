@@ -80,6 +80,10 @@ pub struct ConsensusCoordinationHub {
     /// The highest quorum commit index observed by CommitVoteMonitor.
     /// Used by Core to prevent the local committer from diverging when missing network commits.
     quorum_commit_index: Arc<std::sync::atomic::AtomicU32>,
+
+    /// When true, Go has successfully synchronized with peers (or determined it is isolated).
+    /// Used to safely break Bootstrapping deadlocks without relying on fixed timeouts.
+    startup_go_sync_completed: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -90,6 +94,7 @@ impl ConsensusCoordinationHub {
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -220,6 +225,16 @@ impl ConsensusCoordinationHub {
     pub fn is_startup_sync_active(&self) -> bool {
         self.startup_sync_active.load(Ordering::Acquire)
     }
+
+    /// Sets whether Go has completed its startup peer-sync.
+    pub fn set_startup_go_sync_completed(&self, completed: bool) {
+        self.startup_go_sync_completed.store(completed, Ordering::Release);
+    }
+
+    /// Returns whether Go has completed its startup peer-sync.
+    pub fn is_startup_go_sync_completed(&self) -> bool {
+        self.startup_go_sync_completed.load(Ordering::Acquire)
+    }
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -239,6 +254,7 @@ impl ConsensusCoordinationHub {
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
         }
     }
 
