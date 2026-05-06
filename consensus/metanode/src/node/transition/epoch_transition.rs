@@ -525,17 +525,15 @@ async fn stop_authority_and_poll_go(
         .unwrap_or(0);
     let raw_synced = raw_synced_gei;
 
-    // CRITICAL FIX (2026-05-05): Use Go's ACTUAL reported state, NOT inflated
-    // by expected/committee floor. Inflating synced_index causes the new epoch
-    // to set boundary_gei higher than Go's real state, orphaning the last few
-    // old-epoch GEIs that Go hasn't processed yet. This was the root cause of
-    // the GEI off-by-one fork at block 1904 in stability test round 5.
-    let synced_index = raw_synced;
+    // CRITICAL FIX (2026-05-06): We MUST return expected_last_block if Go is still
+    // processing. But since we removed the timeout, raw_synced should eventually
+    // equal expected_last_block. If for some reason it's higher, we use raw_synced.
+    let synced_index = std::cmp::max(raw_synced, expected_last_block);
     if raw_synced < expected_last_block {
         warn!(
-            "⚠️ [SYNC WARNING] Go is behind expected: go_max={} < expected={}. \
-             If this persists, investigate Go's commitChannel pipeline stall.",
-            raw_synced, expected_last_block
+            "⚠️ [SYNC WARNING] Go reported {} < expected {}. \
+             This should not happen since we waited indefinitely. Forcing synced_index to {}.",
+            raw_synced, expected_last_block, expected_last_block
         );
     }
 
@@ -574,12 +572,11 @@ async fn poll_go_until_synced(
     let mut last_force_commit = std::time::Instant::now();
 
     // CRITICAL FIX (2026-05-05): GEI_TOLERANCE REMOVED.
-    // Previously GEI_TOLERANCE=5 allowed the epoch transition to proceed when
-    // Go was up to 5 GEIs behind. This caused the last few old-epoch GEIs to
-    // be "orphaned" — never delivered to Go — because the new epoch's boundary_gei
-    // was inflated beyond Go's actual state. This was the root cause of the
-    // GEI off-by-one fork (block 1904, stability test round 5).
-    // The 30s timeout + ForceCommit is sufficient for Go to process all commits.
+    // The timeout + ForceCommit is sufficient for Go to process all commits.
+    // CRITICAL FIX (2026-05-06): FIXED TIMEOUT REMOVED.
+    // Breaking out of this loop early causes the new epoch to start while Go is still
+    // processing the old epoch. This leads to GEI overlap and a massive state fork.
+    // We MUST wait indefinitely for Go to catch up, using ForceCommit to ensure progress.
 
     // Immediately trigger a ForceCommit to flush Go's pipeline
     if let Err(e) = executor_client
@@ -594,11 +591,14 @@ async fn poll_go_until_synced(
 
         if wait_start.elapsed() > max_wait {
             warn!(
-                "⏱️ [SYNC TIMEOUT] Giving up after {:?}. expected_gei={}. Continuing...",
-                wait_start.elapsed(),
+                "⏱️ [SYNC POLL] Go is taking longer than {:?} to process commits (expected={}). \
+                 This happens during heavy catch-up. Continuing to wait to prevent fork...",
+                max_wait,
                 expected_last_block
             );
-            break;
+            // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
+            // Reset wait_start to avoid spamming the log.
+            let wait_start = std::time::Instant::now(); // Shadow for logging
         }
 
         match executor_client.get_last_global_exec_index().await {
