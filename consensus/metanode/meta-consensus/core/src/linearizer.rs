@@ -22,6 +22,8 @@ pub(crate) trait BlockStoreAPI {
     fn get_blocks(&self, refs: &[BlockRef]) -> Vec<Option<VerifiedBlock>>;
 
     fn gc_round(&self) -> Round;
+    
+    fn last_commit_round(&self) -> Round;
 
     fn set_committed(&mut self, block_ref: &BlockRef) -> bool;
 
@@ -43,6 +45,10 @@ impl BlockStoreAPI
 
     fn gc_round(&self) -> Round {
         DagState::gc_round(self)
+    }
+
+    fn last_commit_round(&self) -> Round {
+        DagState::last_commit_round(self)
     }
 
     fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
@@ -148,13 +154,15 @@ impl Linearizer {
                 .cloned()
                 .collect::<Vec<_>>();
             let parent_blocks = dag_state.get_blocks(&parent_refs);
-            let missing = parent_blocks.iter().filter(|b| b.is_none()).count();
-            if missing > 0 {
+            let missing_recent = parent_refs.iter().zip(parent_blocks.iter()).filter(|(pref, pblock)| {
+                pblock.is_none() && pref.round > dag_state.last_commit_round()
+            }).count();
+            if missing_recent > 0 {
                 tracing::warn!(
                     "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
-                     {}/{} ancestor blocks missing. Deferring to prevent timestamp divergence.",
+                     {}/{} recent ancestor blocks missing. Deferring to prevent timestamp divergence.",
                     leader_block.reference(),
-                    missing,
+                    missing_recent,
                     parent_refs.len()
                 );
                 return None;
@@ -328,6 +336,16 @@ impl Linearizer {
                     },
                     None => {
                         let missing_ref = uncommitted_ancestors[idx];
+                        
+                        // MISSING BLOCK HEURISTIC FOR SNAPSHOT RECOVERY:
+                        // If the missing ancestor's round is <= the last committed leader's round,
+                        // it MUST have been committed in a prior subdag that was wiped during snapshot recovery.
+                        // We safely assume it is committed and ignore it instead of aborting.
+                        if missing_ref.round <= dag_state.last_commit_round() {
+                            tracing::debug!("Assuming ancient missing block {:?} is already committed due to snapshot sparse DAG", missing_ref);
+                            continue;
+                        }
+                        
                         tracing::warn!(
                             "⚠️ [LINEARIZER] FORK PREVENTION: Missing uncommitted ancestor block {:?} during linearization! \
                              Aborting sub-dag collection to prevent state divergence. Will retry when block arrives.", missing_ref

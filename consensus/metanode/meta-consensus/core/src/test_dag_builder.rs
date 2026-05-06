@@ -168,6 +168,14 @@ impl DagBuilder {
                 self.gc_round
             }
 
+            fn last_commit_round(&self) -> Round {
+                self.blocks
+                    .iter()
+                    .filter_map(|(block_ref, (_, committed))| if *committed { Some(block_ref.round) } else { None })
+                    .max()
+                    .unwrap_or(0)
+            }
+
             fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
                 let Some((_block, committed)) = self.blocks.get_mut(block_ref) else {
                     panic!("Block {:?} should be found in store", block_ref);
