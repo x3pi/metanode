@@ -567,7 +567,7 @@ async fn poll_go_until_synced(
 ) {
     let poll_interval = Duration::from_millis(100);
     let max_wait = Duration::from_secs(30);
-    let wait_start = std::time::Instant::now();
+    let mut wait_start = std::time::Instant::now();
     let mut attempt = 0u64;
     let mut last_force_commit = std::time::Instant::now();
 
@@ -598,7 +598,7 @@ async fn poll_go_until_synced(
             );
             // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
             // Reset wait_start to avoid spamming the log.
-            let wait_start = std::time::Instant::now(); // Shadow for logging
+            wait_start = std::time::Instant::now();
         }
 
         match executor_client.get_last_global_exec_index().await {
