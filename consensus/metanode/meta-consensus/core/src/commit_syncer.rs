@@ -480,18 +480,28 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 );
                 self.transition_phase_and_kick(next_phase);
             } else {
-                // ════════════════════════════════════════════════════════
-                // QUORUM SEED: Go has state at highest_handled but Rust
-                // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
-                // Seed CommitVoteMonitor so quorum becomes > 0, allowing
-                // bootstrap to complete on next tick.
-                // ════════════════════════════════════════════════════════
-                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
-                if seeded {
-                    tracing::warn!(
-                        "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
-                         (commit_index={}) to break bootstrap deadlock. Quorum will resolve on next tick.",
-                        highest_handled_index
+                let elapsed = self.bootstrap_start_time.elapsed();
+                if elapsed >= Duration::from_secs(5) {
+                    // ════════════════════════════════════════════════════════
+                    // QUORUM SEED: Go has state at highest_handled but Rust
+                    // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
+                    // Wait 5s to ensure we are actually isolated or all nodes
+                    // restarted together, then seed CommitVoteMonitor so quorum becomes > 0.
+                    // ════════════════════════════════════════════════════════
+                    let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
+                    if seeded {
+                        tracing::warn!(
+                            "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
+                             (commit_index={}) after 5s timeout to break bootstrap deadlock.",
+                            highest_handled_index
+                        );
+                    }
+                } else {
+                    tracing::trace!(
+                        "⏳ [BOOTSTRAP] highest_handled={}, quorum=0, waiting for quorum \
+                         ({:.1}s elapsed, 5s timeout before seeding)...",
+                        highest_handled_index,
+                        elapsed.as_secs_f64()
                     );
                 }
             }

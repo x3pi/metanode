@@ -1406,7 +1406,13 @@ impl ConsensusNode {
                     }
                 }
 
-                if max_peer_block == 0 || local_block + ACCEPTABLE_GAP >= max_peer_block {
+                if max_peer_block == 0 {
+                    tracing::warn!("⚠️ [STARTUP-SYNC] Could not reach any peers (round {}). Retrying...", sync_round);
+                    tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                    continue;
+                }
+
+                if local_block + ACCEPTABLE_GAP >= max_peer_block {
                     tracing::info!(
                         "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}, round={}). Starting consensus...",
                         local_block, max_peer_block, sync_round
@@ -2011,7 +2017,7 @@ impl ConsensusNode {
         // Gate: Wait for quorum_commit_index to be non-zero and for the DAG's
         // local_commit to approach quorum. Timeout 30s to avoid deadlock.
         // ═══════════════════════════════════════════════════════════════════
-        if startup_total_synced_blocks > 0 {
+        if startup_total_synced_blocks > 0 || local_block > 0 {
             let dag_gate_timeout = std::time::Duration::from_secs(30);
             let dag_gate_start = std::time::Instant::now();
             let dag_gate_poll = std::time::Duration::from_millis(200);
