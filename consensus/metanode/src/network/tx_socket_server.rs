@@ -6,7 +6,7 @@ use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -44,16 +44,7 @@ impl TxSocketServer {
         self
     }
 
-    pub async fn start(self) -> Result<()> {
-        let (ffi_tx_sender, mut ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
-        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.lock() {
-            *sender_guard = Some(ffi_tx_sender);
-            crate::ffi::FFI_TX_CONDVAR.notify_all();
-            info!("🔌 FFI Transaction Receiver initialized and Condvar notified");
-        } else {
-            warn!("⚠️ [FFI TX SENDER] Failed to acquire lock for initialization!");
-        }
-
+    pub async fn start(self, mut ffi_tx_receiver: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Result<()> {
         let client = self.transaction_client;
         let node = self.node;
         let is_transitioning = self.is_transitioning;

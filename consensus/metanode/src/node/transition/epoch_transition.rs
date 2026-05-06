@@ -146,7 +146,7 @@ pub async fn transition_to_epoch_from_system_tx(
     // STEP 4: Stop old authority, flush blocks, poll Go
     // =========================================================================
     let synced_index =
-        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source, synced_global_exec_index).await?;
+        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source, synced_global_exec_index, config).await?;
 
     // =========================================================================
     // STEP 5: Disk cleanup + state update
@@ -438,6 +438,7 @@ async fn stop_authority_and_poll_go(
     executor_client: &ExecutorClient,
     committee_source: &crate::node::committee_source::CommitteeSource,
     synced_global_exec_index: u64,
+    config: &crate::config::NodeConfig,
 ) -> Result<u64> {
     let expected_last_block = synced_global_exec_index;
     info!(
@@ -510,7 +511,7 @@ async fn stop_authority_and_poll_go(
             expected_last_block
         );
     } else {
-        poll_go_until_synced(executor_client, expected_last_block, new_epoch).await;
+        poll_go_until_synced(executor_client, expected_last_block, new_epoch, config).await;
     }
 
     // Fetch final synced_index from Go
@@ -564,6 +565,7 @@ async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
     expected_last_block: u64,
     _new_epoch: u64,
+    config: &crate::config::NodeConfig,
 ) {
     let poll_interval = Duration::from_millis(100);
     let max_wait = Duration::from_secs(30);
@@ -592,12 +594,44 @@ async fn poll_go_until_synced(
         if wait_start.elapsed() > max_wait {
             warn!(
                 "⏱️ [SYNC POLL] Go is taking longer than {:?} to process commits (expected={}). \
-                 This happens during heavy catch-up. Continuing to wait to prevent fork...",
+                 This happens during heavy catch-up or if Go missed blocks. Attempting active peer sync...",
                 max_wait,
                 expected_last_block
             );
+
+            // Active Fallback: If Go is stuck, fetch the missing blocks from peers and force-feed them!
+            match executor_client.get_last_block_number().await {
+                Ok((go_block, _, _, _, _)) => {
+                    if go_block < expected_last_block && !config.peer_rpc_addresses.is_empty() {
+                        use rand::seq::SliceRandom;
+                        let mut shuffled_peers = config.peer_rpc_addresses.clone();
+                        shuffled_peers.shuffle(&mut rand::thread_rng());
+
+                        warn!("🔄 [SYNC POLL] Fetching blocks {}-{} from peers to unblock Go...", go_block + 1, expected_last_block);
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &shuffled_peers,
+                            go_block + 1,
+                            expected_last_block,
+                        ).await {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                warn!("✅ [SYNC POLL] Fetched {} missing blocks. Injecting to Go...", blocks.len());
+                                if let Err(e) = executor_client.sync_and_execute_blocks(blocks).await {
+                                    error!("❌ [SYNC POLL] sync_and_execute_blocks failed: {}", e);
+                                } else {
+                                    info!("✅ [SYNC POLL] Successfully injected missing blocks! Go should advance now.");
+                                }
+                            }
+                            _ => warn!("⚠️ [SYNC POLL] Failed to fetch missing blocks from peers."),
+                        }
+                    } else if config.peer_rpc_addresses.is_empty() {
+                        warn!("⚠️ [SYNC POLL] No peer addresses configured. Cannot fetch missing blocks.");
+                    }
+                }
+                Err(e) => warn!("⚠️ [SYNC POLL] Could not get last block number from Go: {}", e),
+            }
+
             // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
-            // Reset wait_start to avoid spamming the log.
+            // Reset wait_start to avoid spamming the log and retry logic.
             wait_start = std::time::Instant::now();
         }
 

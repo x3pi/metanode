@@ -1243,6 +1243,32 @@ impl ConsensusNode {
             // Give Go a moment to finish its own initialization
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+            // ═══════════════════════════════════════════════════════════════
+            // EARLY PEER RPC SERVER (May 2026 FIX):
+            // Start a lightweight, isolated Peer RPC server before STARTUP-SYNC.
+            // If we don't start this, all nodes block waiting for peers to respond,
+            // but peers are also blocked in STARTUP-SYNC without their servers running.
+            // This prevents a global deadlock in fresh clusters.
+            // ═══════════════════════════════════════════════════════════════
+            let mut early_peer_server_handle = None;
+            if let Some(peer_port) = config.peer_rpc_port {
+                if peer_port > 0 {
+                    let peer_server = crate::network::peer_rpc::PeerRpcServer::new(
+                        config.node_id,
+                        peer_port,
+                        config.network_address.clone(),
+                        executor_client_for_proc.clone(),
+                        shared_last_global_exec_index.clone(),
+                    );
+                    tracing::info!("📡 [PEER RPC] Starting EARLY server on 0.0.0.0:{} to prevent STARTUP-SYNC deadlock", peer_port);
+                    early_peer_server_handle = Some(tokio::spawn(async move {
+                        if let Err(e) = peer_server.start().await {
+                            tracing::error!("Early Peer RPC server error: {}", e);
+                        }
+                    }));
+                }
+            }
+
             // CRITICAL FIX: Use the verified latest_block_number from setup_storage()
             // instead of re-querying Go. Re-querying with a new ExecutorClient can race
             // with Go's internal state and return a stale/wrong value (e.g., 40 instead of 51).
@@ -1374,9 +1400,11 @@ impl ConsensusNode {
                 // Re-query peers for their latest block
                 let mut max_peer_block = 0u64;
                 let mut max_peer_gei = 0u64;
+                let mut reached_peers = 0;
                 for peer_addr in &barrier_peers {
                     match crate::network::peer_rpc::query_peer_info(peer_addr).await {
                         Ok(info) => {
+                            reached_peers += 1;
                             if info.last_block > max_peer_block {
                                 max_peer_block = info.last_block;
                                 max_peer_gei = info.last_global_exec_index;
@@ -1388,7 +1416,7 @@ impl ConsensusNode {
                     }
                 }
 
-                if max_peer_block == 0 {
+                if reached_peers == 0 {
                     if sync_round % 12 == 0 {
                         tracing::error!("🚨 [STARTUP-SYNC] Could not reach any peers (round {}). Node is ISOLATED and BLOCKED pending peer discovery...", sync_round);
                     } else {
@@ -1397,6 +1425,13 @@ impl ConsensusNode {
                     tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
                     sync_round += 1;
                     continue;
+                }
+
+                // If we reached at least one peer and the network's highest block is 0,
+                // the cluster is at Genesis. We must break out of sync and start consensus!
+                if max_peer_block == 0 {
+                    tracing::info!("✅ [STARTUP-SYNC] Network is at Genesis (highest block is 0). Starting consensus...");
+                    break;
                 }
 
                 if local_block + ACCEPTABLE_GAP >= max_peer_block {
@@ -1774,6 +1809,16 @@ impl ConsensusNode {
 
             startup_total_synced_blocks = total_synced_blocks;
             startup_local_block = local_block;
+
+            // ═══════════════════════════════════════════════════════════════
+            // SHUTDOWN EARLY SERVER
+            // ═══════════════════════════════════════════════════════════════
+            if let Some(handle) = early_peer_server_handle {
+                tracing::info!("📡 [PEER RPC] Stopping early server. Handing over to full server in startup.rs...");
+                handle.abort();
+                // Brief pause to ensure the socket is fully released by the OS
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
         }
         // ═══════════════════════════════════════════════════════════════
         // PHASE-2 CONSISTENCY CHECK (May 2026 — ROOT CAUSE FIX):
