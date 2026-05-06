@@ -2198,12 +2198,14 @@ impl ConsensusNode {
             
             for attempt in 1..=max_committee_retries {
                 match executor_client_for_proc.get_epoch_boundary_data(storage.current_epoch).await {
-                    Ok((_, _, _, v, _, _)) if !v.is_empty() => {
+                    Ok((_, timestamp_ms, _, v, _, boundary_gei)) if !v.is_empty() => {
                         tracing::info!(
-                            "✅ [STARTUP] Got {} validators from Go for epoch {} (attempt {})",
-                            v.len(), storage.current_epoch, attempt
+                            "✅ [STARTUP] Got {} validators from Go for epoch {} (attempt {}) with timestamp {}ms, boundary_gei {}",
+                            v.len(), storage.current_epoch, attempt, timestamp_ms, boundary_gei
                         );
                         validators_opt = Some(v);
+                        storage.epoch_timestamp_ms = timestamp_ms;
+                        storage.epoch_base_exec_index = boundary_gei;
                         break;
                     }
                     Ok((_, _, _, v, _, _)) => {
@@ -2231,12 +2233,14 @@ impl ConsensusNode {
                 match executor_client_for_proc.get_safe_epoch_boundary_data_with_force(
                     storage.current_epoch, &config.peer_rpc_addresses, true
                 ).await {
-                    Ok((_, _, _, v, _, _)) if !v.is_empty() => {
+                    Ok((_, timestamp_ms, _, v, _, boundary_gei)) if !v.is_empty() => {
                         tracing::info!(
-                            "✅ [STARTUP] Got {} validators from peers for epoch {}",
-                            v.len(), storage.current_epoch
+                            "✅ [STARTUP] Got {} validators from peers for epoch {} with timestamp {}ms, boundary_gei {}",
+                            v.len(), storage.current_epoch, timestamp_ms, boundary_gei
                         );
                         validators_opt = Some(v);
+                        storage.epoch_timestamp_ms = timestamp_ms;
+                        storage.epoch_base_exec_index = boundary_gei;
                     }
                     Ok((_, _, _, v, _, _)) => {
                         tracing::error!(
