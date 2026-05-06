@@ -2075,7 +2075,6 @@ impl ConsensusNode {
                     _ => {}
                 }
             }
-        coordination_hub.set_startup_sync_active(false);
 
         // ═══════════════════════════════════════════════════════════════════
         // RUNTIME FORK GUARD (May 2026):
@@ -2384,6 +2383,28 @@ impl ConsensusNode {
             coordination_hub.set_phase(
                 consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
             );
+
+            // ═══════════════════════════════════════════════════════════════════
+            // DYNAMIC DAG-GATE (Fix for GUARD 5 Timeout Fork)
+            // Wait asynchronously for CommitSyncer to perfectly reconstruct the DAG
+            // (CatchingUp → Healthy) before unlocking proposals.
+            // ═══════════════════════════════════════════════════════════════════
+            let guard_hub = coordination_hub.clone();
+            tokio::spawn(async move {
+                tracing::info!("🛡️ [DAG-GATE] Waiting for consensus DAG to fully catch up to Go state (phase == Healthy)...");
+                loop {
+                    if guard_hub.is_healthy_stable() {
+                        tracing::info!("✅ [DAG-GATE] Consensus DAG is fully synced! Releasing startup_sync_active lock.");
+                        guard_hub.set_startup_sync_active(false);
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+            });
+        } else {
+            // SyncOnly nodes don't run CommitSyncer, so they don't care about this lock,
+            // but we unlock it anyway for cleanliness.
+            coordination_hub.set_startup_sync_active(false);
         }
 
         let (authority, commit_consumer_holder) = if start_as_validator {
