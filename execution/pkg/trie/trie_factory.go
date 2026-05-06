@@ -279,8 +279,13 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	// If the 'wal' directory was empty on the source node, wget won't create it locally.
 	// nomt_ffi.Open will then fail with "os error 2" when it tries to read the WAL dir
 	// of an existing database. We must ensure the 'wal' directory exists.
-	if err := os.MkdirAll(filepath.Join(dbPath, "wal"), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create NOMT wal directory at %s: %w", dbPath, err)
+	// HOWEVER, we must ONLY do this if it's an existing database (i.e. 'meta' exists).
+	// If it's a fresh database, creating 'wal' will make the directory non-empty,
+	// confusing NOMT into thinking it's an existing DB, causing it to crash when reading 'meta'.
+	if _, err := os.Stat(filepath.Join(dbPath, "meta")); err == nil {
+		if err := os.MkdirAll(filepath.Join(dbPath, "wal"), 0755); err != nil {
+			return nil, fmt.Errorf("failed to create NOMT wal directory at %s: %w", dbPath, err)
+		}
 	}
 
 	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
