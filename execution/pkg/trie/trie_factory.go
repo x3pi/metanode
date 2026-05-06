@@ -275,18 +275,7 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 		return nil, fmt.Errorf("failed to create NOMT database directory at %s: %w", dbPath, err)
 	}
 
-	// CRITICAL FIX: wget skips empty directories during snapshot download.
-	// If the 'wal' directory was empty on the source node, wget won't create it locally.
-	// nomt_ffi.Open will then fail with "os error 2" when it tries to read the WAL dir
-	// of an existing database. We must ensure the 'wal' directory exists.
-	// HOWEVER, we must ONLY do this if it's an existing database (i.e. 'meta' exists).
-	// If it's a fresh database, creating 'wal' will make the directory non-empty,
-	// confusing NOMT into thinking it's an existing DB, causing it to crash when reading 'meta'.
-	if _, err := os.Stat(filepath.Join(dbPath, "meta")); err == nil {
-		if err := os.MkdirAll(filepath.Join(dbPath, "wal"), 0755); err != nil {
-			return nil, fmt.Errorf("failed to create NOMT wal directory at %s: %w", dbPath, err)
-		}
-	}
+
 
 	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
 	if err != nil {
@@ -342,8 +331,8 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 
 		entry.handle.CloseForSnapshot()
 
-		if mkdirErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkdirErr != nil {
-			return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", mkdirErr)
+		if mkdirErr := os.MkdirAll(destPath, 0755); mkdirErr != nil {
+			return fmt.Errorf("failed to create dest dir for NOMT snapshot: %w", mkdirErr)
 		}
 
 		var copyErr error
@@ -383,7 +372,7 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 // copyDirReflink performs a fast O(1) Copy-On-Write clone using cp --reflink=auto
 func copyDirReflink(src, dst string) error {
 	// The trailing slash in src/. is important for cp to copy contents into dst
-	cmd := exec.Command("cp", "-a", "--reflink=auto", src+"/.", dst+"/")
+	cmd := exec.Command("cp", "-a", "--reflink=always", src+"/.", dst+"/")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cp reflink failed: %v, output: %s", err, string(out))
 	}

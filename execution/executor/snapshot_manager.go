@@ -1131,9 +1131,9 @@ func reflinkCopyDir(src, dst string) error {
 		return fmt.Errorf("failed to create parent dir: %w", err)
 	}
 
-	// cp -a --reflink=auto: CoW nếu hỗ trợ, fallback sang copy thường nếu không
+	// cp -a --reflink=always: CoW bắt buộc, nếu filesystem không hỗ trợ sẽ báo lỗi rõ ràng.
 	// -a = archive (recursive, preserve permissions, timestamps, symlinks)
-	cmd := exec.Command("cp", "-a", "--reflink=auto", src, dst)
+	cmd := exec.Command("cp", "-a", "--reflink=always", src, dst)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cp --reflink failed: %v, output: %s", err, string(output))
