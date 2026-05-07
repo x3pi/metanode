@@ -256,9 +256,13 @@ run_single_round() {
     rm -rf "$dl_dir"; mkdir -p "$dl_dir"
     wget -q -c -r -np -nH --cut-dirs=2 -P "$dl_dir" --reject="index.html*" "${snap_url}/files/${snap_name}/" 2>/dev/null
     if [ ! -d "$dl_dir" ] || [ -z "$(ls -A "$dl_dir" 2>/dev/null)" ]; then
-        log "- ❌ Snapshot download failed"
+        log "- ❌ Snapshot download failed from ${snap_url}"
         return 1
     fi
+    # Diagnostic: Verify NOMT binary files were downloaded correctly via HTTP
+    local dl_total=$(find "$dl_dir" -type f 2>/dev/null | wc -l)
+    local dl_nomt=$(find "$dl_dir/nomt_db" -type f 2>/dev/null | wc -l)
+    log "- 📦 Downloaded $dl_total files total ($dl_nomt in nomt_db/) from HTTP server"
 
     mkdir -p "$dst_data/data/data" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
     for dir_name in $LEVELDB_DIRS; do
