@@ -325,10 +325,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-    /// STATE MACHINE: Update sync state based on current metrics
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
-        let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
+        let quorum_commit = std::cmp::max(
+            self.inner.commit_vote_monitor.quorum_commit_index(),
+            self.coordination_hub.get_quorum_commit_index(),
+        );
         let _local_commit = self.inner.dag_state.read().last_commit_index();
         
         // FIX: DAG sparsity detection must use last_commit().is_none() because 
@@ -742,6 +744,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         "✅ [DEADLOCK-RECOVERY] A peer has commit {} > {}. We are just lagging. Will not unlock.",
                                         max_peer_commit, my_commit
                                     );
+                                    // FIX FOR 'nghẽn các node luôn hỏi nhau' (congestion):
+                                    // If we are lagging but CommitVoteMonitor hasn't received P2P votes,
+                                    // our phase is incorrectly stuck in Healthy. This causes STALL DETECTOR 6
+                                    // to poll every 5 seconds infinitely.
+                                    // By updating the quorum commit index, we force the lag > 0, transitioning
+                                    // the node to CatchingUp phase. This STOPS the polling and triggers fetching.
+                                    hub.update_quorum_commit_index(max_peer_commit as u32);
                                 }
                             });
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
@@ -849,7 +858,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
-        let quorum_commit_index = self.inner.commit_vote_monitor.quorum_commit_index();
+        let quorum_commit_index = std::cmp::max(
+            self.inner.commit_vote_monitor.quorum_commit_index(),
+            self.coordination_hub.get_quorum_commit_index(),
+        );
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
         
         // Update CoordinationHub so Core can read it to prevent divergent local commits
