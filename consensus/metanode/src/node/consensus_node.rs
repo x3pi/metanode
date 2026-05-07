@@ -1022,11 +1022,23 @@ impl ConsensusNode {
 
         let go_replay_after = if config.executor_read_enabled {
             if let Some(commit_index) = storage.last_handled_commit_index {
-                info!(
-                    "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
+                // FORK-SAFETY FIX v5: Detect snapshot at epoch boundary!
+                // If we restored a snapshot at an epoch boundary, Go's last_handled_commit_index
+                // is the index from the PREVIOUS epoch. We must reset it to 0 so the new
+                // epoch's CommitSyncer starts fresh and doesn't fetch old epoch commits.
+                if !dag_has_history && storage.last_global_exec_index == storage.epoch_base_exec_index {
+                    info!(
+                        "🔑 [GO-AUTH GEI] Snapshot at epoch boundary detected (GEI=Base={}). Resetting go_replay_after=0",
+                        storage.last_global_exec_index
+                    );
+                    0
+                } else {
+                    info!(
+                        "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
+                        commit_index
+                    );
                     commit_index
-                );
-                commit_index
+                }
             } else {
                 warn!(
                     "⚠️ [GO-AUTH GEI] LastHandledCommitIndex not available from StorageSetup. \
