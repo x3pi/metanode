@@ -1055,8 +1055,19 @@ impl<C: NetworkClient> CommitSyncer<C> {
     async fn patch_baseline_if_needed(&mut self) {
         if self.synced_commit_index == 0 { return; }
         
-        let last_commit_index = self.inner.dag_state.read().last_commit_index();
-        if self.synced_commit_index <= last_commit_index { return; }
+        // A synthetic baseline needs patching if it has a MIN digest.
+        // We only patch if synced_commit_index matches the baseline index.
+        let is_synthetic_baseline = {
+            let dag = self.inner.dag_state.read();
+            if let Some(last_commit) = dag.last_commit() {
+                last_commit.index() == self.synced_commit_index && 
+                last_commit.reference().digest == crate::commit::CommitDigest::MIN
+            } else {
+                false
+            }
+        };
+
+        if !is_synthetic_baseline { return; }
         
         let prev_index = self.synced_commit_index;
         let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
