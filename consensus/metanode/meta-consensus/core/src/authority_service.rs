@@ -603,7 +603,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         &self,
         _peer: AuthorityIndex,
         commit_range: CommitRange,
-    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>)> {
+    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>, Vec<crate::commit::CommitInfo>)> {
         fail_point_async!("consensus-rpc-response");
 
         // Compute an inclusive end index and bound the maximum number of commits scanned.
@@ -703,7 +703,28 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                 .flatten()
                 .collect()
         };
-        Ok((commits, certifier_blocks))
+        let mut commit_infos = vec![];
+        if !is_legacy {
+            for c in &commits {
+                if let Ok(Some(info)) = self.store.read_commit_info(c.index(), c.digest()) {
+                    commit_infos.push(info);
+                } else {
+                    commit_infos.push(crate::commit::CommitInfo {
+                        reputation_scores: Default::default(),
+                        committed_rounds: vec![],
+                    });
+                }
+            }
+        } else {
+            for _ in &commits {
+                commit_infos.push(crate::commit::CommitInfo {
+                    reputation_scores: Default::default(),
+                    committed_rounds: vec![],
+                });
+            }
+        }
+
+        Ok((commits, certifier_blocks, commit_infos))
     }
 
     /// Handles fetch_commits_by_global_range - searches current epoch
@@ -1346,7 +1367,7 @@ mod tests {
             _peer: AuthorityIndex,
             _commit_range: CommitRange,
             _timeout: Duration,
-        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>)> {
+        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)> {
             unimplemented!("Unimplemented")
         }
 

@@ -211,7 +211,7 @@ impl NetworkClient for TonicClient {
         peer: AuthorityIndex,
         commit_range: CommitRange,
         timeout: Duration,
-    ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>)> {
+    ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)> {
         let mut client = self.get_client(peer, timeout).await?;
         let mut request = Request::new(FetchCommitsRequest {
             start: commit_range.start(),
@@ -223,7 +223,7 @@ impl NetworkClient for TonicClient {
             .await
             .map_err(|e| ConsensusError::NetworkRequest(format!("fetch_commits failed: {e:?}")))?;
         let response = response.into_inner();
-        Ok((response.commits, response.certifier_blocks))
+        Ok((response.commits, response.certifier_blocks, response.commit_infos))
     }
 
     async fn fetch_commits_by_global_range(
@@ -655,7 +655,7 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
                 AuthorityIndex::new_for_test(0)
             }); // Use dummy index if PeerInfo missing
         let request = request.into_inner();
-        let (commits, certifier_blocks) = self
+        let (commits, certifier_blocks, commit_infos) = self
             .service
             .handle_fetch_commits(peer_index, (request.start..=request.end).into())
             .await
@@ -668,9 +668,14 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
             .into_iter()
             .map(|b| b.serialized().clone())
             .collect();
+        let commit_infos = commit_infos
+            .into_iter()
+            .map(|info| bcs::to_bytes(&info).unwrap().into())
+            .collect();
         Ok(Response::new(FetchCommitsResponse {
             commits,
             certifier_blocks,
+            commit_infos,
         }))
     }
 
@@ -1293,10 +1298,13 @@ pub(crate) struct FetchCommitsRequest {
 pub(crate) struct FetchCommitsResponse {
     // Serialized consecutive Commit.
     #[prost(bytes = "bytes", repeated, tag = "1")]
-    commits: Vec<Bytes>,
+    pub commits: Vec<Bytes>,
     // Serialized SignedBlock that certify the last commit from above.
     #[prost(bytes = "bytes", repeated, tag = "2")]
-    certifier_blocks: Vec<Bytes>,
+    pub certifier_blocks: Vec<Bytes>,
+    // Serialized CommitInfo for each commit (optional, for LeaderSchedule recovery)
+    #[prost(bytes = "bytes", repeated, tag = "3")]
+    pub commit_infos: Vec<Bytes>,
 }
 
 /// Request to fetch commits by global execution index range.

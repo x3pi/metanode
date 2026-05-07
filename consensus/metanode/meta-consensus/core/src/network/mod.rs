@@ -88,7 +88,7 @@ pub trait NetworkClient: Send + Sync + Sized + 'static {
         peer: AuthorityIndex,
         commit_range: CommitRange,
         timeout: Duration,
-    ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>)>;
+    ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)>;
 
     /// Fetches commits by global execution index range.
     /// This is epoch-agnostic and will return commits across multiple epochs.
@@ -191,7 +191,7 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
         &self,
         peer: AuthorityIndex,
         commit_range: CommitRange,
-    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>)>;
+    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>, Vec<crate::commit::CommitInfo>)>;
 
     /// Handles the request to fetch commits by global execution index range.
     /// Searches across all epochs to find commits in the requested global range.

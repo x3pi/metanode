@@ -381,6 +381,15 @@ impl Store for RocksDBStore {
         Ok(Some((CommitRef::new(key.0, key.1), commit_info)))
     }
 
+    fn read_commit_info(
+        &self,
+        commit_index: CommitIndex,
+        commit_digest: CommitDigest,
+    ) -> ConsensusResult<Option<CommitInfo>> {
+        let result = self.commit_info.get(&(commit_index, commit_digest))?;
+        Ok(result)
+    }
+
     fn read_last_finalized_commit(&self) -> ConsensusResult<Option<CommitRef>> {
         let Some(result) = self
             .finalized_commits

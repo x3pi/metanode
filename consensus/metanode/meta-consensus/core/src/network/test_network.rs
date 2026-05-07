@@ -95,9 +95,9 @@ impl NetworkService for Mutex<TestService> {
         &self,
         peer: AuthorityIndex,
         commit_range: CommitRange,
-    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>)> {
+    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>, Vec<crate::commit::CommitInfo>)> {
         self.lock().handle_fetch_commits.push((peer, commit_range));
-        Ok((vec![], vec![]))
+        Ok((vec![], vec![], vec![]))
     }
 
     async fn handle_fetch_latest_blocks(
