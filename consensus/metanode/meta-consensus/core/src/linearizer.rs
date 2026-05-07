@@ -251,66 +251,21 @@ impl Linearizer {
     /// timestamps by stake. To ensure that commit timestamp monotonicity is respected it is compared against the `last_commit_timestamp_ms`
     /// and the maximum of the two is returned.
     pub(crate) fn calculate_commit_timestamp(
-        context: &Context,
-        dag_state: &mut impl BlockStoreAPI,
+        _context: &Context,
+        _dag_state: &mut impl BlockStoreAPI,
         leader_block: &VerifiedBlock,
         last_commit_timestamp_ms: BlockTimestampMs,
     ) -> BlockTimestampMs {
-        let timestamp_ms = {
-            // Select leaders' parent blocks.
-            let block_refs = leader_block
-                .ancestors()
-                .iter()
-                .filter(|block_ref| block_ref.round == leader_block.round() - 1)
-                .cloned()
-                .collect::<Vec<_>>();
-            let expected_count = block_refs.len();
-            // Get the blocks from dag state - filter out any missing blocks gracefully.
-            // During commit sync, some ancestor blocks might not be in dag_state yet.
-            // This prevents panic during epoch transitions when syncing from peers.
-            let mut missing_count = 0usize;
-            let blocks: Vec<_> = dag_state
-                .get_blocks(&block_refs)
-                .into_iter()
-                .filter_map(|block_opt| {
-                    if block_opt.is_none() {
-                        missing_count += 1;
-                    }
-                    block_opt
-                })
-                .collect();
-            if missing_count > 0 {
-                // ANTI-FORK DIAGNOSTIC: Missing parent blocks cause
-                // median_timestamp_by_stake to compute a different median than
-                // nodes with the full set, resulting in timestamp divergence.
-                tracing::warn!(
-                    "⚠️ [LINEARIZER] Missing {}/{} ancestor blocks for leader {:?} at round {} \
-                     during commit timestamp calculation. This WILL cause timestamp divergence \
-                     if the local committer is producing this commit!",
-                    missing_count,
-                    expected_count,
-                    leader_block.reference(),
-                    leader_block.round(),
-                );
-            }
-            median_timestamp_by_stake(context, blocks.into_iter()).unwrap_or_else(|e| {
-                // DEFENSIVE FIX: During commit sync, ALL ancestor blocks may be missing if
-                // genesis blocks don't match between nodes (due to validator ordering differences
-                // during epoch transitions). Instead of panicking, use the leader block's own
-                // timestamp as fallback. This allows the node to continue syncing commits.
-                // The timestamp will still be monotonic due to the .max(last_commit_timestamp_ms) check below.
-                tracing::error!(
-                    "❌ [LINEARIZER] Cannot compute median timestamp for leader block {:?} - {}. \
-                     All ancestors missing. Using last commit timestamp as stable anchor fallback.",
-                    leader_block.reference(), e
-                );
-                // Use the previous commit's timestamp as a deterministic anchor-based fallback
-                last_commit_timestamp_ms
-            })
-        };
-
-        // Always make sure that commit timestamps are monotonic, so override if necessary.
-        timestamp_ms.max(last_commit_timestamp_ms)
+        // ═══════════════════════════════════════════════════════════════════════════
+        // FORK-SAFETY CRITICAL FIX (May 2026):
+        // Previously used median_timestamp_by_stake which required ancestor blocks.
+        // During snapshot recovery, missing ancestor blocks caused returning nodes
+        // to compute different median timestamps from active nodes → hash divergence.
+        // We now STRICTLY use the leader's embedded timestamp. It is deterministic,
+        // universally agreed upon, and immune to DAG sparsity.
+        // Monotonicity is maintained via .max() against last_commit_timestamp_ms.
+        // ═══════════════════════════════════════════════════════════════════════════
+        leader_block.timestamp_ms().max(last_commit_timestamp_ms)
     }
 
     pub(crate) fn linearize_sub_dag(
@@ -533,6 +488,7 @@ impl Linearizer {
 /// Computes the median timestamp of the blocks weighted by the stake of their authorities.
 /// This function assumes each block comes from a different authority of the same round.
 /// Error is returned if no blocks are provided or total stake is less than quorum threshold.
+#[allow(dead_code)]
 pub(crate) fn median_timestamp_by_stake(
     context: &Context,
     blocks: impl Iterator<Item = VerifiedBlock>,
@@ -560,6 +516,7 @@ pub(crate) fn median_timestamp_by_stake(
     Ok(median_timestamps_by_stake_inner(timestamps, total_stake))
 }
 
+#[allow(dead_code)]
 fn median_timestamps_by_stake_inner(
     mut timestamps: Vec<(BlockTimestampMs, Stake)>,
     total_stake: Stake,

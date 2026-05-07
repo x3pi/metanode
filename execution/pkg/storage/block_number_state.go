@@ -146,7 +146,21 @@ func UpdateLastHandledCommitIndex(index uint32) {
 	for {
 		current := atomic.LoadUint32(&lastHandledCommitIndex)
 		if index <= current {
-			return // Don't go backwards
+			// ═══════════════════════════════════════════════════════════════════════════
+			// FORK-SAFETY CRITICAL FIX (May 2026):
+			// Rust resets commit_index to 1 at the start of every new epoch.
+			// Go previously ignored this reset because `1 <= current (e.g. 480)`
+			// which caused Node 0 to never persist epoch transitions properly, leading
+			// to go_replay_after=481 on snapshot restore -> permanently stalled nodes!
+			// We MUST allow resetting the index during an epoch transition.
+			// ═══════════════════════════════════════════════════════════════════════════
+			if index <= 5 && current > 50 {
+				logger.Info("🔄 [GEI-AUTHORITY] Epoch transition reset detected in UpdateLastHandledCommitIndex: %d -> %d", current, index)
+			} else if index == 0 {
+				logger.Info("🔄 [GEI-AUTHORITY] Explicit reset to 0 detected in UpdateLastHandledCommitIndex: %d -> %d", current, index)
+			} else {
+				return // Normal monotonic guard: don't go backwards within the same epoch
+			}
 		}
 		if atomic.CompareAndSwapUint32(&lastHandledCommitIndex, current, index) {
 			return
