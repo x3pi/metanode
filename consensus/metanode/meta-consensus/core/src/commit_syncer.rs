@@ -1059,7 +1059,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // We only patch if synced_commit_index matches the baseline index.
         let is_synthetic_baseline = {
             let dag = self.inner.dag_state.read();
-            if let Some(last_commit) = dag.last_commit() {
+            if let Some(ref last_commit) = dag.last_commit {
                 last_commit.index() == self.synced_commit_index && 
                 last_commit.reference().digest == crate::commit::CommitDigest::MIN
             } else {
