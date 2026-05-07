@@ -22,8 +22,6 @@ pub(crate) trait BlockStoreAPI {
     fn get_blocks(&self, refs: &[BlockRef]) -> Vec<Option<VerifiedBlock>>;
 
     fn gc_round(&self) -> Round;
-    
-    fn last_commit_round(&self) -> Round;
 
     fn set_committed(&mut self, block_ref: &BlockRef) -> bool;
 
@@ -45,10 +43,6 @@ impl BlockStoreAPI
 
     fn gc_round(&self) -> Round {
         DagState::gc_round(self)
-    }
-
-    fn last_commit_round(&self) -> Round {
-        DagState::last_commit_round(self)
     }
 
     fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
