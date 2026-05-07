@@ -270,6 +270,24 @@ run_single_round() {
     [ -d "$dl_dir/data-write" ] && cp -r "$dl_dir/data-write/"* "$dst_data/data-write/" 2>/dev/null || true
     [ -d "$dl_dir/back_up_write" ] && cp -r "$dl_dir/back_up_write/"* "$dst_data/back_up_write/" 2>/dev/null || true
     find "$dst_data" -name "LOCK" -delete 2>/dev/null || true
+    # CRITICAL: Remove NOMT .lock files — these contain the PID of the snapshot source process
+    # and will prevent nomt_open from working correctly on a different node process.
+    find "$dst_data" -name ".lock" -path "*/nomt_db/*" -delete 2>/dev/null || true
+    # CRITICAL: Remove dirty rust_consensus inherited from snapshot to avoid split-brain.
+    # Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a stale DAG.
+    rm -rf "$dst_data/data/data/rust_consensus" 2>/dev/null || true
+    # Verify NOMT stake_db has actual data files (stakeRoot=0x00 fork guard)
+    local nomt_stake_dir="$dst_data/data/data/nomt_db/stake_db"
+    if [ -d "$nomt_stake_dir" ]; then
+        local stake_file_count=$(find "$nomt_stake_dir" -type f 2>/dev/null | wc -l)
+        if [ "$stake_file_count" -eq 0 ]; then
+            log "- ⚠️  NOMT stake_db directory is EMPTY! stakeRoot fork likely."
+        else
+            log "- ✅ NOMT stake_db verified: $stake_file_count files"
+        fi
+    else
+        log "- ❌ NOMT stake_db directory MISSING after restore!"
+    fi
     mkdir -p "$LOG_BASE/node_$dst" "$RUST_DIR/config/storage/node_$dst"
     rm -rf "$dl_dir"
     log "- ✅ Snapshot restored to Node $dst"
