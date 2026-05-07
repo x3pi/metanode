@@ -795,6 +795,45 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         }
 
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 5: Post-Epoch-Transition Recovery
+                        //
+                        // After epoch transition, the new AuthorityNode creates a
+                        // fresh CommitConsumerMonitor with highest_handled=0 and
+                        // a fresh DAG with local_commit=0. The node discovers
+                        // quorum from peers (e.g. 1101) and enters CatchingUp.
+                        //
+                        // Stall Detector 4 requires highest_handled > 0, which
+                        // is FALSE here because the new epoch starts from commit 0.
+                        // Result: the node is permanently stuck in CatchingUp.
+                        //
+                        // Recovery: When CatchingUp with empty DAG, quorum > 0,
+                        // and highest_handled == 0, fast-forward the DAG baseline
+                        // to quorum_commit. This lets the node transition to
+                        // Healthy and start proposing/committing new blocks.
+                        // ════════════════════════════════════════════════════════
+                        if self.coordination_hub.is_catching_up()
+                            && is_dag_empty
+                            && highest_handled == 0
+                            && quorum_commit > 0
+                            && catching_up_stall >= Duration::from_secs(5)
+                        {
+                            tracing::error!(
+                                "🚨 [STALL-DETECTOR-5] Post-epoch-transition stall: CatchingUp for {:.0}s \
+                                 with empty DAG, highest_handled=0, quorum={}. \
+                                 New epoch has no local state. Fast-forwarding to quorum.",
+                                catching_up_stall.as_secs_f64(),
+                                quorum_commit
+                            );
+                            self.inner.dag_state.write().reset_to_network_baseline(
+                                0, quorum_commit,
+                                crate::commit::CommitDigest::MIN,
+                                0, None
+                            );
+                            self.synced_commit_index = quorum_commit;
+                            self.last_quorum_change_at = now;
+                        }
+
                         info!(
                             "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",
                             new_state, local_commit, quorum_commit, lag,
