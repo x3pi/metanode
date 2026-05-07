@@ -226,7 +226,6 @@ sequenceDiagram
 
     Auth->>Hub: startup_sync_active = true
     Note over Auth: Proposals BLOCKED
-    Gate->>Gate: Wait 10s (Network Discovery)
     CS->>CS: Replay DAG from peers
     CS->>Hub: Phase = Healthy
     Gate->>Hub: startup_sync_active = false
@@ -598,4 +597,90 @@ flowchart TD
 | Multiple source of truth | Go = state truth, Rust = consensus truth |
 | Reset epoch_start = now() (FIX 6) | Suppress EndOfEpoch, chờ cluster quyết định (FIX 7) |
 | Node vừa restore tự trigger EndOfEpoch | Node THEO cluster, không tự DẪN epoch transition |
+| Dùng timeout (vd: 10s) để chặn local committer | Dùng flag deterministic, unlock bằng sự kiện (CertifiedCommit) |
 
+---
+
+## 14. Local Committer Guard Architecture (Anti-Fork Defense-in-Depth)
+
+`Core::try_commit()` trong `commit_manager.rs` chứa **6 lớp bảo vệ** chống fork, được đánh giá tuần tự trước khi local committer được phép chạy. Tất cả đều **event-driven** (không timeout).
+
+```mermaid
+flowchart TD
+    START(["try_commit() — local path"]) --> G1
+    
+    G1{"1. is_healthy_stable?"}
+    G1 -->|No| SKIP1["⏭️ SKIP: Chưa Healthy"]
+    G1 -->|Yes| G2
+    
+    G2{"2. local_commit < quorum_commit?"}
+    G2 -->|Yes| SKIP2["⏳ ANTI-FORK: Tụt hậu"]
+    G2 -->|No| G3
+    
+    G3{"3. Snapshot Recovery?\n(last_decided=0 AND commit>0)"}
+    G3 -->|Yes| G3B{"is_local_commit_unlocked?"}
+    G3B -->|No| SKIP3["🔒 RECOVERY-GUARD"]
+    G3B -->|Yes| G4
+    G3 -->|No (Genesis/Normal)| G4
+    
+    G4{"4. is_catching_up OR\nis_state_syncing?"}
+    G4 -->|Yes| SKIP4["🛡️ PHASE-GUARD"]
+    G4 -->|No| G5
+    
+    G5{"5. is_schedule_confirmed?"}
+    G5 -->|No| SKIP5["🛡️ SCHEDULE-GUARD"]
+    G5 -->|Yes| G6
+    
+    G6(["✅ Local committer chạy:\ntry_decide() → linearize → commit"])
+```
+
+### Chi tiết từng Guard
+
+| # | Guard | File | Điều kiện Block | Unlock bằng | Phạm vi |
+|---|-------|------|-----------------|-------------|--------|
+| 1 | **HEALTHY-STABLE** | `commit_manager.rs:231` | `!is_healthy_stable()` | Phase transition → Healthy | Mọi lúc |
+| 2 | **ANTI-FORK** | `commit_manager.rs:247` | `local_commit < quorum_commit` | CommitSyncer fetch + process commits | Mọi lúc |
+| 3 | **RECOVERY-GUARD** | `commit_manager.rs:265` | `last_decided==0 AND commit>0 AND !unlocked` | `add_certified_commits()` nhận CertifiedCommit | Chỉ snapshot recovery |
+| 4 | **PHASE-GUARD** | `commit_manager.rs:327` | `is_catching_up() \|\| is_state_syncing()` | CommitSyncer → phase = Healthy | CatchingUp/StateSyncing |
+| 5 | **SCHEDULE-GUARD** | `commit_manager.rs:345` | `!is_schedule_confirmed()` | 300-commit scoring cycle hoặc baseline injection | Sau restart thiếu CommitInfo |
+| 6 | **COLD-START-GUARD** | `linearizer.rs:160` | Missing parent blocks | Blocks arrive from peers | Defense-in-depth (linearizer) |
+
+### Tại sao KHÔNG dùng Timeout?
+
+Tất cả guards đều dùng **sự kiện xác định** (CertifiedCommit, phase transition, block arrival) thay vì timeout. Lý do:
+
+| Timeout (❌) | Event-driven (✅) |
+|---|---|
+| Quá ngắn → fork vẫn xảy ra | Chờ đến khi có bằng chứng xác thực |
+| Quá dài → liveness stall | Tự động unlock ngay khi điều kiện đúng |
+| Phụ thuộc tốc độ mạng | Hoạt động đúng bất kể latency |
+| Node không biết trạng thái đích | CertifiedCommit = trạng thái chuẩn (2f+1) |
+
+### Trường hợp đặc biệt: Genesis (commit=0, block=0)
+
+**RECOVERY-GUARD** có điều kiện `local_commit_index > 0` để **bỏ qua** Genesis:
+- Ở Genesis, chưa có bất kỳ CertifiedCommit nào trên mạng
+- Nếu guard áp dụng cho Genesis → toàn bộ cluster deadlock vĩnh viễn
+- `local_commit_index == 0` chứng tỏ node chưa từng commit → không phải snapshot recovery
+
+### ConsensusCoordinationHub — State Machine
+
+```
+Fields:
+├── phase: NodeConsensusPhase          — Initializing → Bootstrapping → CatchingUp → Healthy
+├── recovery_local_commit_unlocked     — false khi khởi tạo, true sau CertifiedCommit đầu tiên
+├── startup_sync_active                — true trong STARTUP-SYNC, false sau khi sync xong  
+├── quorum_commit_index                — cập nhật từ CommitVoteMonitor qua CommitSyncer
+├── startup_go_sync_completed          — true khi Go đã poll peers xong
+├── global_exec_index                  — GEI hiện tại
+└── is_transitioning                   — true khi đang chuyển epoch
+```
+
+**Phase transitions** (managed by CommitSyncer::update_state):
+```
+Initializing → Bootstrapping → CatchingUp ⇄ Healthy
+                                    ↓
+                               StateSyncing → (restart)
+```
+
+Hysteresis: Enter CatchingUp khi lag > 5, stay khi lag > 0, exit khi lag == 0.
