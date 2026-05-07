@@ -337,15 +337,6 @@ impl Linearizer {
                     None => {
                         let missing_ref = uncommitted_ancestors[idx];
                         
-                        // MISSING BLOCK HEURISTIC FOR SNAPSHOT RECOVERY:
-                        // If the missing ancestor's round is <= the last committed leader's round,
-                        // it MUST have been committed in a prior subdag that was wiped during snapshot recovery.
-                        // We safely assume it is committed and ignore it instead of aborting.
-                        if missing_ref.round <= dag_state.last_commit_round() {
-                            tracing::debug!("Assuming ancient missing block {:?} is already committed due to snapshot sparse DAG", missing_ref);
-                            continue;
-                        }
-                        
                         tracing::warn!(
                             "⚠️ [LINEARIZER] FORK PREVENTION: Missing uncommitted ancestor block {:?} during linearization! \
                              Aborting sub-dag collection to prevent state divergence. Will retry when block arrives.", missing_ref
