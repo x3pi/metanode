@@ -610,12 +610,21 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 	cs.epochMutex.Lock()
 	defer cs.epochMutex.Unlock()
 
-	if blockEpoch > cs.currentEpoch {
+	if blockEpoch != cs.currentEpoch {
 		logger.Warn("🚨 [SNAPSHOT FIX] Epoch alignment: ChainState.currentEpoch=%d but lastBlock.epoch=%d. "+
 			"Forcing epoch to %d to prevent fork. (block=%d, ts=%d)",
 			cs.currentEpoch, blockEpoch, blockEpoch, blockNumber, blockTimestamp)
-		cs.advanceEpochLocked(blockEpoch, blockTimestamp*1000, blockNumber, 0)
-	} else if blockEpoch == cs.currentEpoch {
+			
+		alignTimestampMs := blockTimestamp * 1000
+		if blockEpoch == 0 {
+			if genesisTs, ok := cs.epochStartTimestamps[0]; ok && genesisTs > 0 {
+				logger.Info("✅ [SNAPSHOT FIX] Using cached genesis timestamp %d for epoch 0 instead of block timestamp %d", genesisTs, alignTimestampMs)
+				alignTimestampMs = genesisTs
+			}
+		}
+			
+		cs.advanceEpochLocked(blockEpoch, alignTimestampMs, blockNumber, 0)
+	} else {
 		logger.Info("✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=%d matches lastBlock.epoch=%d",
 			cs.currentEpoch, blockEpoch)
 	}

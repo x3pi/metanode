@@ -153,7 +153,7 @@ func (app *App) initBlockchain() error {
 					app.chainState, _ = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
 
 					// FORK-SAFETY: Also align epoch in the recovery path
-					if app.startLastBlock.Header().Epoch() > 0 {
+					if app.startLastBlock.Header().Epoch() >= 0 {
 						app.chainState.ForceAlignEpochFromBlockHeader(
 							app.startLastBlock.Header().Epoch(),
 							app.startLastBlock.Header().TimeStamp(),
@@ -375,7 +375,7 @@ func (app *App) initBlockchain() error {
 		// after snapshot restore where LoadEpochData() returns stale epoch data.
 		// Block headers contain authoritative epoch — the snapshot's blocks are the
 		// ground truth for what epoch the node should be in.
-		if app.startLastBlock != nil && app.startLastBlock.Header().Epoch() > 0 {
+		if app.startLastBlock != nil {
 			app.chainState.ForceAlignEpochFromBlockHeader(
 				app.startLastBlock.Header().Epoch(),
 				app.startLastBlock.Header().TimeStamp(),
