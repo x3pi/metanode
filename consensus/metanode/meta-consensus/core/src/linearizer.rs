@@ -137,10 +137,22 @@ impl Linearizer {
         } else {
             let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
 
-            // DEFENSE-IN-DEPTH: For locally-decided commits, verify that ALL ancestor
-            // blocks needed for timestamp calculation are present in the DAG.
-            // If any are missing (sparse DAG after fast-forward), we MUST defer this
-            // commit to prevent producing a divergent timestamp.
+            // ═══════════════════════════════════════════════════════════════════════════
+            // COLD-START-GUARD v2: Full Ancestor Verification for Local Commits
+            //
+            // After snapshot recovery, the local committer may fire before the DAG is
+            // fully populated. Even if all round-1 parent blocks are present, they may
+            // carry different timestamps than what the rest of the cluster agreed on
+            // (e.g., m1's block was re-proposed with a fresh wall-clock timestamp after
+            // recovery, while the cluster committed a version with the old timestamp).
+            //
+            // FIX: Verify TWO conditions before allowing local commit:
+            //   1. ALL round-1 parent blocks are present (existing check)
+            //   2. The number of DISTINCT validators represented in the parent set
+            //      must equal the full committee size. If any validator's block at
+            //      round-1 is missing, the median_timestamp_by_stake will compute
+            //      a different result than nodes that have the full set.
+            // ═══════════════════════════════════════════════════════════════════════════
             let parent_refs = leader_block
                 .ancestors()
                 .iter()
@@ -158,6 +170,46 @@ impl Linearizer {
                     leader_block.reference(),
                     missing_parents,
                     parent_refs.len()
+                );
+                return None;
+            }
+
+            // GUARD v2 ADDITION: Verify full committee representation.
+            // Even when all referenced parents are present, the leader block might not
+            // reference ALL validators at round-1 (e.g. it missed a validator's block).
+            // If fewer than committee_size parents are available, the median calculation
+            // uses a smaller input set, which can produce a different median than nodes
+            // whose leader block DID reference that validator's block.
+            let committee_size = self.context.committee.size();
+            let actual_parent_count = parent_refs.len();
+            if actual_parent_count < committee_size {
+                tracing::warn!(
+                    "🛡️ [COLD-START-GUARD-v2] Local commit for leader {:?} has only {}/{} \
+                     round-{} ancestors (incomplete committee coverage). \
+                     Deferring to prevent median_timestamp_by_stake divergence.",
+                    leader_block.reference(),
+                    actual_parent_count,
+                    committee_size,
+                    leader_block.round() - 1,
+                );
+                return None;
+            }
+
+            // GUARD v2 ADDITION: Deep ancestor verification.
+            // Check ALL ancestors referenced by the leader block (not just round-1).
+            // Some ancestors at older rounds feed into linearize_sub_dag ordering.
+            // If any are missing, the sub-dag may differ from the network's version.
+            let all_ancestor_refs: Vec<_> = leader_block.ancestors().to_vec();
+            let all_ancestor_blocks = dag_state.get_blocks(&all_ancestor_refs);
+            let missing_any = all_ancestor_blocks.iter().filter(|b| b.is_none()).count();
+            if missing_any > 0 {
+                tracing::warn!(
+                    "🛡️ [COLD-START-GUARD-v2] ABORTING local commit for leader {:?}: \
+                     {}/{} total ancestor blocks missing from DAG. \
+                     Deferring until DAG is fully populated.",
+                    leader_block.reference(),
+                    missing_any,
+                    all_ancestor_refs.len()
                 );
                 return None;
             }

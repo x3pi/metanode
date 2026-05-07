@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -1683,6 +1684,30 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx)
 			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d)", lastExecutedGEI, lastCommitIdx)
+
+			// ═══════════════════════════════════════════════════════════════════════════
+			// CRITICAL FIX: SYNCHRONOUSLY PERSIST LAST HANDLED COMMIT INDEX AND EPOCH
+			// Rust will immediately query HandleGetLastHandledCommitIndexRequest after sync.
+			// Since PushAsyncGEIUpdate is asynchronous, it races with Rust's query.
+			// We MUST synchronously update the storage and BackupDb here to prevent Rust
+			// from starting at commitIndex=0 and causing an epoch mismatch fork.
+			// ═══════════════════════════════════════════════════════════════════════════
+			if lastCommitIdx > 0 {
+				currentEpoch := rh.chainState.GetCurrentEpoch()
+				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
+				storage.UpdateLastHandledCommitEpoch(currentEpoch)
+				
+				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
+					var batch [][2][]byte
+					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
+					batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
+					if err := rh.storageManager.GetStorageBackupDb().BatchPut(batch); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to persist LastHandledCommitIndex to BackupDb: %v", err)
+					} else {
+						logger.Info("✅ [STARTUP-SYNC] Synchronously persisted LastHandledCommitIndex=%d, Epoch=%d for immediate Rust consensus initialization", lastCommitIdx, currentEpoch)
+					}
+				}
+			}
 		}
 	}
 

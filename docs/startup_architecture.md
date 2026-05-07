@@ -378,6 +378,7 @@ Bước 8: Authority starts
 | Go import P2P blocks song song với consensus | Trie state bị overwrite bởi foreign data | Disabled trên Master |
 | Update GEI và CommitIndex rời rạc | Sequence shifting, duplicate blocks sau khi restart | Dùng `BatchPut` lưu atomic (Atomic Consensus Persistence) |
 | Local DAG rỗng nhưng `local_commit` pre-seeded > 0 | Node bị lọt qua SCHEDULE-RECOVERY-GUARD, tạo block với leader schedule rỗng → Fork | Dùng `dag_state.last_commit.is_none()` (DAG Sparseness Detection) thay vì kiểm tra số học |
+| Local committer chạy trên DAG thiếu ancestor blocks | `median_timestamp_by_stake()` tính từ tập con → timestamp lệch 1-5 giây → txRoot/receiptsRoot lệch → Fork (Block 1000 bug) | COLD-START-GUARD v2: kiểm tra full committee coverage + deep ancestor verification trước khi cho phép local commit |
 
 ---
 
@@ -646,7 +647,9 @@ flowchart TD
 | 3 | **RECOVERY-GUARD** | `commit_manager.rs:265` | `last_decided==0 AND commit>0 AND !unlocked` | `add_certified_commits()` nhận CertifiedCommit | Chỉ snapshot recovery |
 | 4 | **PHASE-GUARD** | `commit_manager.rs:327` | `is_catching_up() \|\| is_state_syncing()` | CommitSyncer → phase = Healthy | CatchingUp/StateSyncing |
 | 5 | **SCHEDULE-GUARD** | `commit_manager.rs:345` | `!is_schedule_confirmed()` | 300-commit scoring cycle hoặc baseline injection | Sau restart thiếu CommitInfo |
-| 6 | **COLD-START-GUARD** | `linearizer.rs:160` | Missing parent blocks | Blocks arrive from peers | Defense-in-depth (linearizer) |
+| 6 | **COLD-START-GUARD v2** | `linearizer.rs:140` | Missing round-1 parent blocks | Blocks arrive from peers | Defense-in-depth (linearizer) |
+| 6a | **COMMITTEE-COVERAGE** | `linearizer.rs:177` | `parent_count < committee_size` | Leader block references full committee | Phòng chống median lệch do thiếu validator |
+| 6b | **DEEP-ANCESTOR** | `linearizer.rs:198` | ANY ancestor block missing (all rounds) | Full DAG populated from peers | Phòng chống sub-dag ordering lệch |
 
 ### Tại sao KHÔNG dùng Timeout?
 
