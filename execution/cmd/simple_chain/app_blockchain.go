@@ -132,6 +132,7 @@ func (app *App) initBlockchain() error {
 					// Now verify NOMT roots match header — BEFORE ChainState is created
 					if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						headerRoot := app.startLastBlock.Header().AccountStatesRoot()
+						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=account_state nomtRoot=%s headerRoot=%s", nomtAccountRoot.Hex(), headerRoot.Hex())
 						if nomtAccountRoot != headerRoot {
 							logger.Warn("⚠️ [SNAPSHOT] AccountState NOMT root MISMATCH: nomt=%s header=%s → patching header",
 								nomtAccountRoot.Hex(), headerRoot.Hex())
@@ -140,6 +141,7 @@ func (app *App) initBlockchain() error {
 					}
 					if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
 						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=stake_db nomtRoot=%s headerRoot=%s", nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 						if nomtStakeRoot != headerStakeRoot {
 							logger.Warn("⚠️ [SNAPSHOT] StakeState NOMT root MISMATCH: nomt=%s header=%s → patching header",
 								nomtStakeRoot.Hex(), headerStakeRoot.Hex())

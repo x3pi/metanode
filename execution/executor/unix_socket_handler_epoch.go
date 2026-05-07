@@ -1633,6 +1633,25 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
+	// CRITICAL FIX: Synchronous persistence of the last synced block.
+	// If the node crashes/restarts immediately after STARTUP-SYNC finishes, we MUST
+	// guarantee that the last block hash (lastBlockHashKey) is fully flushed to disk.
+	// Without this, the node falls back to the pre-sync block or Genesis.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if executedCount > 0 {
+		hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock)
+		if ok {
+			lastBlk, err := blockDatabase.GetBlockByHash(hash)
+			if err == nil && lastBlk != nil {
+				logger.Info("💾 [STARTUP-SYNC] Forcing synchronous flush of last synced block #%d to disk", lastExecutedBlock)
+				if syncErr := blockDatabase.SaveLastBlockSync(lastBlk); syncErr != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to force-sync last block #%d: %v", lastExecutedBlock, syncErr)
+				}
+			}
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
 	// RUST CONTROL (Apr 2026 Architectural Fix):
 	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
 	// this EXECUTE command explicitly governs memory state advancement.
