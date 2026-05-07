@@ -722,7 +722,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     }
                                 }
                                 
-                                if polled_peers > 0 && max_peer_commit <= my_commit {
+                                if polled_peers > 0 && max_peer_commit <= my_commit && !hub.is_startup_sync_active() {
                                     tracing::warn!(
                                         "🚨 [DEADLOCK-RECOVERY] Polled {} peers. Max peer commit is {}. We are at {}. \
                                          Network is truly deadlocked. Unlocking local committer unilaterally!",

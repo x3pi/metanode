@@ -75,7 +75,9 @@ impl Core {
         // unlock the local committer. This ensures the node observes at least one
         // network-agreed commit after catching up, healing any DAG sparseness
         // before evaluating local timestamps.
-        if commits_count > 0 && self.coordination_hub.is_healthy() {
+        // FORK-PREVENTION: Do NOT unlock if STARTUP-SYNC is active. The DAG is still
+        // accumulating historical blocks and is too sparse to safely evaluate local commits.
+        if commits_count > 0 && self.coordination_hub.is_healthy() && !self.coordination_hub.is_startup_sync_active() {
             self.coordination_hub.unlock_local_commit();
         }
 
@@ -332,11 +334,14 @@ impl Core {
                 // The DAG is sparse (missing ancestor blocks) so local commit evaluation
                 // would produce divergent timestamps and leader addresses.
                 // Only CertifiedCommits (network-verified) are safe to process during catch-up.
-                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() {
+                // FORK-PREVENTION: Also block if STARTUP-SYNC is active, even if lag=0 (Healthy),
+                // because the historical DAG is still sparse and under construction.
+                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() || self.coordination_hub.is_startup_sync_active() {
                     tracing::info!(
-                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase. \
-                         Waiting for node to become Healthy.",
-                        self.coordination_hub.get_phase()
+                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase (startup_sync_active={}). \
+                         Waiting for DAG to fully catch up.",
+                        self.coordination_hub.get_phase(),
+                        self.coordination_hub.is_startup_sync_active()
                     );
                     break;
                 }
