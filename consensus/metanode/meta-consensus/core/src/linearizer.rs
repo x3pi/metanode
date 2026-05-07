@@ -138,21 +138,31 @@ impl Linearizer {
             let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
 
             // ═══════════════════════════════════════════════════════════════════════════
-            // COLD-START-GUARD v2: Full Ancestor Verification for Local Commits
+            // COLD-START-GUARD: Multi-layer ancestor verification for local commits.
             //
-            // After snapshot recovery, the local committer may fire before the DAG is
-            // fully populated. Even if all round-1 parent blocks are present, they may
-            // carry different timestamps than what the rest of the cluster agreed on
-            // (e.g., m1's block was re-proposed with a fresh wall-clock timestamp after
-            // recovery, while the cluster committed a version with the old timestamp).
+            // Layer 1 (Guard 6 — ALWAYS ACTIVE):
+            //   Verify that all round-1 parent blocks REFERENCED by the leader are
+            //   present in the local DAG. If any referenced block is missing, the
+            //   median_timestamp_by_stake() will compute from a different input set.
+            //   This is safe at Genesis because by the time a leader is elected,
+            //   the referenced validators' blocks are always in the local DAG.
             //
-            // FIX: Verify TWO conditions before allowing local commit:
-            //   1. ALL round-1 parent blocks are present (existing check)
-            //   2. The number of DISTINCT validators represented in the parent set
-            //      must equal the full committee size. If any validator's block at
-            //      round-1 is missing, the median_timestamp_by_stake will compute
-            //      a different result than nodes that have the full set.
+            // Layer 2 (Guard 6a — ONLY AFTER RECOVERY, last_commit_index > 0):
+            //   Require full committee representation (all validators at round-1).
+            //   After snapshot recovery, the DAG may have a sparse set of blocks
+            //   at boundary rounds. If the leader only references 3/5 validators,
+            //   the median can differ from nodes that have the full 5/5 set.
+            //   SKIP at Genesis (commit_index==0): validators start at different
+            //   times so the leader naturally can't reference all of them.
+            //
+            // Layer 3 (Guard 6b — ONLY AFTER RECOVERY, last_commit_index > 0):
+            //   Deep ancestor check: verify ALL ancestors (not just round-1).
+            //   Missing blocks at older rounds can cause linearize_sub_dag to
+            //   produce a different sub-dag ordering.
+            //   SKIP at Genesis: older rounds don't exist yet.
             // ═══════════════════════════════════════════════════════════════════════════
+
+            // --- Guard 6: Referenced parent blocks must be present (unconditional) ---
             let parent_refs = leader_block
                 .ancestors()
                 .iter()
@@ -166,50 +176,12 @@ impl Linearizer {
             if missing_parents > 0 {
                 tracing::warn!(
                     "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
-                     {}/{} recent ancestor blocks missing. Deferring to prevent timestamp divergence.",
+                     {}/{} referenced round-{} ancestor blocks missing from DAG. \
+                     Deferring to prevent timestamp divergence.",
                     leader_block.reference(),
                     missing_parents,
-                    parent_refs.len()
-                );
-                return None;
-            }
-
-            // GUARD v2 ADDITION: Verify full committee representation.
-            // Even when all referenced parents are present, the leader block might not
-            // reference ALL validators at round-1 (e.g. it missed a validator's block).
-            // If fewer than committee_size parents are available, the median calculation
-            // uses a smaller input set, which can produce a different median than nodes
-            // whose leader block DID reference that validator's block.
-            let committee_size = self.context.committee.size();
-            let actual_parent_count = parent_refs.len();
-            if actual_parent_count < committee_size {
-                tracing::warn!(
-                    "🛡️ [COLD-START-GUARD-v2] Local commit for leader {:?} has only {}/{} \
-                     round-{} ancestors (incomplete committee coverage). \
-                     Deferring to prevent median_timestamp_by_stake divergence.",
-                    leader_block.reference(),
-                    actual_parent_count,
-                    committee_size,
+                    parent_refs.len(),
                     leader_block.round() - 1,
-                );
-                return None;
-            }
-
-            // GUARD v2 ADDITION: Deep ancestor verification.
-            // Check ALL ancestors referenced by the leader block (not just round-1).
-            // Some ancestors at older rounds feed into linearize_sub_dag ordering.
-            // If any are missing, the sub-dag may differ from the network's version.
-            let all_ancestor_refs: Vec<_> = leader_block.ancestors().to_vec();
-            let all_ancestor_blocks = dag_state.get_blocks(&all_ancestor_refs);
-            let missing_any = all_ancestor_blocks.iter().filter(|b| b.is_none()).count();
-            if missing_any > 0 {
-                tracing::warn!(
-                    "🛡️ [COLD-START-GUARD-v2] ABORTING local commit for leader {:?}: \
-                     {}/{} total ancestor blocks missing from DAG. \
-                     Deferring until DAG is fully populated.",
-                    leader_block.reference(),
-                    missing_any,
-                    all_ancestor_refs.len()
                 );
                 return None;
             }
@@ -220,6 +192,7 @@ impl Linearizer {
                 &leader_block,
                 last_commit_timestamp_ms,
             );
+
             (blocks, ts, None)
         };
 

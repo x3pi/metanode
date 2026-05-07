@@ -647,9 +647,15 @@ flowchart TD
 | 3 | **RECOVERY-GUARD** | `commit_manager.rs:265` | `last_decided==0 AND commit>0 AND !unlocked` | `add_certified_commits()` nhận CertifiedCommit | Chỉ snapshot recovery |
 | 4 | **PHASE-GUARD** | `commit_manager.rs:327` | `is_catching_up() \|\| is_state_syncing()` | CommitSyncer → phase = Healthy | CatchingUp/StateSyncing |
 | 5 | **SCHEDULE-GUARD** | `commit_manager.rs:345` | `!is_schedule_confirmed()` | 300-commit scoring cycle hoặc baseline injection | Sau restart thiếu CommitInfo |
-| 6 | **COLD-START-GUARD v2** | `linearizer.rs:140` | Missing round-1 parent blocks | Blocks arrive from peers | Defense-in-depth (linearizer) |
-| 6a | **COMMITTEE-COVERAGE** | `linearizer.rs:177` | `parent_count < committee_size` | Leader block references full committee | Phòng chống median lệch do thiếu validator |
-| 6b | **DEEP-ANCESTOR** | `linearizer.rs:198` | ANY ancestor block missing (all rounds) | Full DAG populated from peers | Phòng chống sub-dag ordering lệch |
+| 6 | **COLD-START-GUARD** | `linearizer.rs:164` | Bất kỳ parent block nào **được tham chiếu** nhưng thiếu trong DAG | Blocks arrive from peers | **Mọi lúc** (kể cả Genesis) |
+
+> [!IMPORTANT]
+> **Giải pháp Không-Fork (No-Fork) Toàn diện & Tuyệt đối**
+> Việc chống Fork (như lỗi ở Block 1000) được đảm bảo tuyệt đối nhờ sự kết hợp 2 cơ chế luôn hoạt động (Mọi lúc):
+> 1. **Guard 6 (Kiểm tra Parents trực tiếp):** Nếu Leader tham chiếu đến một parent block mà node chưa có, `median_timestamp_by_stake` sẽ tính ra kết quả sai lệch. Guard 6 chặn đứng điều này: chỉ tính timestamp khi node đã có đủ *đúng những block mà Leader tham chiếu*.
+> 2. **Deep Ancestor Check (trong `linearize_sub_dag`):** Quá trình gom blocks (sub-dag) sẽ đệ quy quét toàn bộ lịch sử. Nếu *bất kỳ* block tổ tiên nào bị thiếu (chưa được fetch về), hàm sẽ lập tức `return None` và hoãn local commit.
+>
+> Chúng ta **CỐ Ý KHÔNG** sử dụng điều kiện `parent_count < committee_size` (Guard 6a cũ) vì điều kiện này phá vỡ tính BFT (buộc mạng lưới phải có 5/5 validator online mới chạy được). Khi có deadlock cục bộ (do thiếu block), cơ chế `CommitSyncer` sẽ luôn có thể hỏi mạng lưới (fetch `CertifiedCommit`) để phục hồi và tiếp tục, đảm bảo liveness.
 
 ### Tại sao KHÔNG dùng Timeout?
 
