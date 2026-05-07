@@ -133,7 +133,9 @@ Rust                    Peers                   Go
   │  Lặp lại cho đến khi local >= peer           │
 ```
 
-**Gate**: STARTUP-SYNC phải hoàn thành **TRƯỚC KHI** Authority bắt đầu produce commits.
+**Gate (Partial Commit Prevention Guard)**: Go Master (peer) **sẽ từ chối (break loop)** phục vụ các blocks thuộc một commit chưa được xử lý hoàn tất (`header.CommitIndex() > lastHandledCommit`). Điều này ngăn chặn việc node đang sync tải về một phần của commit, dẫn đến sai lệch `lastHandledCommitIndex` và bỏ sót transaction khi Rust tiếp tục chạy.
+
+**Gate (Execution Complete)**: STARTUP-SYNC phải hoàn thành toàn bộ **TRƯỚC KHI** Authority bắt đầu produce commits.
 
 #### 3.2.2 initialize_from_go() — Đồng Bộ Cuối Cùng
 
@@ -375,6 +377,7 @@ Bước 8: Authority starts
 | Timeout trong `stop_authority_and_poll_go` dùng Go's trailing GEI | GEI overlap, bỏ sót block epoch mới | Dùng `synced_global_exec_index` từ callback |
 | Go import P2P blocks song song với consensus | Trie state bị overwrite bởi foreign data | Disabled trên Master |
 | Update GEI và CommitIndex rời rạc | Sequence shifting, duplicate blocks sau khi restart | Dùng `BatchPut` lưu atomic (Atomic Consensus Persistence) |
+| Local DAG rỗng nhưng `local_commit` pre-seeded > 0 | Node bị lọt qua SCHEDULE-RECOVERY-GUARD, tạo block với leader schedule rỗng → Fork | Dùng `dag_state.last_commit.is_none()` (DAG Sparseness Detection) thay vì kiểm tra số học |
 
 ---
 
@@ -684,3 +687,17 @@ Initializing → Bootstrapping → CatchingUp ⇄ Healthy
 ```
 
 Hysteresis: Enter CatchingUp khi lag > 5, stay khi lag > 0, exit khi lag == 0.
+
+---
+
+## 15. Cluster Cold-Start Deadlock Recovery (Stall Detector 6)
+
+**Vấn đề cốt lõi:**
+Khi **toàn bộ cluster** bị crash và khởi động lại cùng lúc (Cold Start), mọi node đều chuyển sang phase `Healthy` nhưng `local_commit_unlocked` lại đang bị khoá (do RECOVERY-GUARD đòi hỏi phải nhận được ít nhất 1 `CertifiedCommit` từ mạng lưới để xác nhận state). Vì tất cả các node đều khoá committer để đợi nhau, không có node nào sinh ra `CertifiedCommit` → Mạng lưới bị deadlock hoàn toàn.
+
+**Giải Pháp Kiến Trúc (Stall Detector 6):**
+`CommitSyncer` tích hợp cơ chế phát hiện deadlock chủ động:
+1. Nếu node đang `Healthy` nhưng bị khoá committer trong hơn 5 giây.
+2. Nó sẽ kích hoạt một async task đi hỏi trạng thái (RPC `get_epoch_status`) của tất cả các peers trong committee.
+3. Nếu `max_peer_commit <= my_commit` (không có peer nào tiến xa hơn node hiện tại), chứng tỏ mạng lưới đang bị deadlock cục bộ, không phải do node bị tụt hậu.
+4. Node sẽ **đơn phương mở khoá committer** (`hub.unlock_local_commit()`), tự động thoát khỏi deadlock và bắt đầu tạo block mới, kích hoạt lại guồng quay đồng thuận toàn cụm một cách an toàn nhất.

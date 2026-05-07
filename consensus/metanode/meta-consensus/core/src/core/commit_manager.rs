@@ -71,10 +71,11 @@ impl Core {
         }
 
         // DETERMINISTIC RECOVERY GUARD:
-        // After successfully processing CertifiedCommits from the network,
-        // unlock the local committer. This proves the DAG has real consensus
-        // data and is safe for local evaluation.
-        if commits_count > 0 {
+        // After successfully processing CertifiedCommits from the network WHILE HEALTHY,
+        // unlock the local committer. This ensures the node observes at least one
+        // network-agreed commit after catching up, healing any DAG sparseness
+        // before evaluating local timestamps.
+        if commits_count > 0 && self.coordination_hub.is_healthy() {
             self.coordination_hub.unlock_local_commit();
         }
 
@@ -153,6 +154,13 @@ impl Core {
 
                 self.leader_schedule
                     .update_leader_schedule_v2(&self.dag_state);
+
+                // FORK-SAFETY: After a full 300-commit scoring cycle completes,
+                // the LeaderSwapTable is now built from actual network-verified
+                // CertifiedCommit data. Clear the snapshot recovery guard.
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    self.coordination_hub.set_schedule_recovery_pending(false);
+                }
 
                 let propagation_scores = self
                     .leader_schedule
@@ -346,6 +354,20 @@ impl Core {
                     tracing::info!(
                         "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
                          Waiting for 300-commit scoring cycle or network baseline scores."
+                    );
+                    break;
+                }
+
+                // SCHEDULE-RECOVERY GUARD: After snapshot recovery, from_store() auto-confirms
+                // the schedule because last_commit_index < 300 (looks like Genesis). But the
+                // network has progressed far beyond commit 300 with reputation swaps active.
+                // The default (empty) LeaderSwapTable produces WRONG leader elections.
+                // Block until a full scoring cycle completes with network-verified data.
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    tracing::info!(
+                        "🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, \
+                         LeaderSchedule needs re-confirmation from network. \
+                         Waiting for 300-commit scoring cycle with CertifiedCommits."
                     );
                     break;
                 }

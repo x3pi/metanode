@@ -44,8 +44,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-REPORT_FILE="$SCRIPT_DIR/stability_report_${TIMESTAMP}.md"
+TMP_DIR=$(mktemp -d)
+GLOBAL_LOG="$TMP_DIR/global.log"
+ROUND_LOG="$GLOBAL_LOG"
 AVAILABLE_DST_NODES=(1 2 3 4)
 
 # ─── Colors ─────────────────────────────────────────────────────
@@ -57,8 +58,8 @@ RPC_PORTS=(8757 10747 10749 10750 10748)
 NUM_NODES=5
 
 # ─── Utility Functions ──────────────────────────────────────────
-log() { echo -e "$1"; echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$REPORT_FILE"; }
-log_raw() { echo "$1"; echo "$1" >> "$REPORT_FILE"; }
+log() { echo -e "$1"; echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$ROUND_LOG"; }
+log_raw() { echo "$1"; echo "$1" >> "$ROUND_LOG"; }
 
 get_block_number() {
     local port=$1
@@ -96,6 +97,7 @@ stop_tx_pump() {
 
 cleanup_and_exit() {
     stop_tx_pump
+    [ -n "${TMP_DIR:-}" ] && rm -rf "$TMP_DIR" 2>/dev/null || true
     exit "${1:-1}"
 }
 trap 'cleanup_and_exit' INT TERM
@@ -445,7 +447,7 @@ echo -e "${BOLD}╚════════════════════�
 echo ""
 
 # Initialize report
-cat > "$REPORT_FILE" <<EOF
+cat > "$GLOBAL_LOG" <<EOF
 
 | Parameter | Value |
 |-----------|-------|
@@ -469,6 +471,7 @@ FAILED_ROUND=0
 FAIL_REASON=""
 
 for round in $(seq 1 $MAX_ROUNDS); do
+    ROUND_LOG="$TMP_DIR/round_${round}.log"
     # Rotate destination node if requested
     current_dst=$DST_NODE
     if [ "$ROTATE_DST" = true ]; then
@@ -501,6 +504,7 @@ done
 TOTAL_DURATION=$((SECONDS - TOTAL_START))
 
 # ── Final Summary ──
+ROUND_LOG="$TMP_DIR/final_summary.log"
 log ""
 log "---"
 log ""
@@ -517,6 +521,8 @@ log "| Total Duration | ${TOTAL_DURATION}s |"
 log ""
 
 if [ "$FAILED_ROUND" -gt 0 ]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    REPORT_FILE="$SCRIPT_DIR/stability_report_${TIMESTAMP}.md"
     log "> 🚨 **STABILITY TEST FAILED at round $FAILED_ROUND/$MAX_ROUNDS.**"
     log "> Gửi file \`$REPORT_FILE\` cho AI agent để phân tích và fix lỗi."
     log ""
@@ -542,15 +548,37 @@ fi
 log ""
 log "**Report generated:** $(date)"
 
+if [ "$FAILED_ROUND" -gt 0 ]; then
+    cat "$GLOBAL_LOG" > "$REPORT_FILE"
+    
+    start_round=$((FAILED_ROUND - 2))
+    [ "$start_round" -lt 1 ] && start_round=1
+    
+    if [ "$start_round" -gt 1 ]; then
+        echo -e "\n*(... skipping logs for rounds 1 to $((start_round-1)) ...)*\n" >> "$REPORT_FILE"
+    fi
+    
+    for r in $(seq $start_round $FAILED_ROUND); do
+        if [ -f "$TMP_DIR/round_${r}.log" ]; then
+            cat "$TMP_DIR/round_${r}.log" >> "$REPORT_FILE"
+        fi
+    done
+    
+    if [ -f "$TMP_DIR/final_summary.log" ]; then
+        cat "$TMP_DIR/final_summary.log" >> "$REPORT_FILE"
+    fi
+fi
+
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
 if [ "$FAILED_ROUND" -gt 0 ]; then
     echo -e "${RED}${BOLD}║  ❌ FAILED at round $FAILED_ROUND/$MAX_ROUNDS                            ║${NC}"
+    echo -e "${BOLD}╠══════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${BOLD}║  📁 Report: ${NC}${CYAN}$REPORT_FILE${NC}"
 else
     echo -e "${GREEN}${BOLD}║  ✅ ALL $MAX_ROUNDS ROUNDS PASSED                               ║${NC}"
 fi
-echo -e "${BOLD}╠══════════════════════════════════════════════════════════╣${NC}"
-echo -e "${BOLD}║  📁 Report: ${NC}${CYAN}$REPORT_FILE${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
+rm -rf "$TMP_DIR"
 [ "$FAILED_ROUND" -gt 0 ] && exit 1 || exit 0

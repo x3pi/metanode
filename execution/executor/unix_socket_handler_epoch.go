@@ -1116,6 +1116,10 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	if upperBound > lastBlockNumber {
 		upperBound = lastBlockNumber
 	}
+	
+	lastHandledCommit := storage.GetLastHandledCommitIndex()
+	lastHandledEpoch := storage.GetLastHandledCommitEpoch()
+	
 	for blockNum := startBlock; blockNum <= upperBound; blockNum++ {
 		if uint64(len(blocks)) >= maxBatch {
 			break
@@ -1135,6 +1139,19 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		header := blk.Header()
+		
+		// ═══════════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY (May 2026): Prevent serving partial commits!
+		// m1 uses these blocks to set its lastHandledCommitIndex. If we send blocks
+		// from a commit that m0 is STILL processing, m1 will skip the rest of the
+		// commit when consensus resumes.
+		// ═══════════════════════════════════════════════════════════════════
+		if header.Epoch() > lastHandledEpoch || (header.Epoch() == lastHandledEpoch && header.CommitIndex() > uint64(lastHandledCommit)) {
+			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)", 
+				blockNum, header.CommitIndex(), lastHandledCommit, lastHandledEpoch)
+			break
+		}
+
 		blockData := &pb.BlockData{
 			BlockNumber:      header.BlockNumber(),
 			BlockHash:        header.Hash().Bytes(),

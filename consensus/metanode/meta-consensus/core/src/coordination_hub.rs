@@ -90,6 +90,15 @@ pub struct ConsensusCoordinationHub {
     /// When true, Go has successfully synchronized with peers (or determined it is isolated).
     /// Used to safely break Bootstrapping deadlocks without relying on fixed timeouts.
     startup_go_sync_completed: Arc<AtomicBool>,
+
+    /// FORK-SAFETY: When true, the node has detected a snapshot recovery scenario
+    /// (local_commit=0 but Go has executed commits). The LeaderSchedule was auto-confirmed
+    /// by from_store() because last_commit_index < 300 (looks like Genesis), but the network
+    /// has progressed far beyond commit 300 with reputation swaps active.
+    /// The local committer MUST be blocked until a full 300-commit scoring cycle completes
+    /// with network-verified CertifiedCommits, ensuring the LeaderSwapTable matches the network.
+    /// Set by CommitSyncer, cleared by CommitSyncer after update_leader_schedule_v2 completes.
+    schedule_recovery_pending: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -102,6 +111,7 @@ impl ConsensusCoordinationHub {
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
+            schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -261,6 +271,30 @@ impl ConsensusCoordinationHub {
     pub fn is_startup_go_sync_completed(&self) -> bool {
         self.startup_go_sync_completed.load(Ordering::Acquire)
     }
+
+    /// Marks that a snapshot recovery is in progress and the LeaderSchedule
+    /// needs re-confirmation from the network before local commit evaluation.
+    pub fn set_schedule_recovery_pending(&self, pending: bool) {
+        let was_pending = self.schedule_recovery_pending.swap(pending, Ordering::Release);
+        if pending && !was_pending {
+            tracing::warn!(
+                "🔒 [SCHEDULE-RECOVERY] LeaderSchedule recovery PENDING: \
+                 auto-confirmed schedule is stale (snapshot recovery detected). \
+                 Local committer blocked until 300-commit scoring cycle completes."
+            );
+        } else if !pending && was_pending {
+            tracing::info!(
+                "🔓 [SCHEDULE-RECOVERY] LeaderSchedule recovery CLEARED: \
+                 scoring cycle completed with network-verified data. \
+                 Local committer may now use the confirmed schedule."
+            );
+        }
+    }
+
+    /// Returns true if the LeaderSchedule needs re-confirmation after snapshot recovery.
+    pub fn is_schedule_recovery_pending(&self) -> bool {
+        self.schedule_recovery_pending.load(Ordering::Acquire)
+    }
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -282,6 +316,7 @@ impl ConsensusCoordinationHub {
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
+            schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 

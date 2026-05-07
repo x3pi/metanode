@@ -329,22 +329,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
     fn update_state(&mut self) {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
-        let local_commit = self.inner.dag_state.read().last_commit_index();
+        let _local_commit = self.inner.dag_state.read().last_commit_index();
+        
+        // FIX: DAG sparsity detection must use last_commit().is_none() because 
+        // with_go_last_commit_index can pre-seed local_commit > 0 even when DAG is wiped.
+        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
 
         // ════════════════════════════════════════════════════════════════════════
         // SNAPSHOT RESTORE FAST-FORWARD
-        // If Rust DAG is empty (local_commit == 0) BUT Go executor has restored state
+        // If Rust DAG is empty (is_dag_empty == true) BUT Go executor has restored state
         // up to highest_handled_index > 0, we fast-forward the baseline.
         // CRITICAL FIX: We must NOT fast-forward all the way to highest_handled_index.
         // We MUST preserve the past 300 commits to allow `update_leader_schedule_v2`
         // to compute the correct LeaderSchedule based on identical past state.
         // Otherwise, Node 1 will compute a divergent LeaderSchedule and fork the network.
         // ════════════════════════════════════════════════════════════════════════
-        if local_commit == 0 && highest_handled_index > 0 {
+        if is_dag_empty && highest_handled_index > 0 {
             // Find the last schedule boundary. num_commits matches LeaderSchedule::new
             let num_commits = 300;
             let last_boundary = (highest_handled_index / num_commits) * num_commits;
             let baseline_target = last_boundary.saturating_sub(num_commits);
+
+            // FORK-SAFETY: If the network has progressed beyond 300 commits, reputation
+            // swaps are active in the LeaderSwapTable. But from_store() auto-confirmed
+            // the schedule because last_commit_index=0 < 300 (looks like Genesis).
+            // The default (empty) LeaderSwapTable will produce WRONG leader elections.
+            // Block the local committer until a full scoring cycle re-confirms the schedule.
+            if highest_handled_index >= num_commits {
+                self.coordination_hub.set_schedule_recovery_pending(true);
+            }
 
             if baseline_target > 0 {
                 tracing::info!(
@@ -654,7 +667,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // Once any proposal achieves quorum, normal consensus
                         // resumes and this detector stops firing.
                         // ════════════════════════════════════════════════════════
-                        if local_commit == 0
+                        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
+                        if is_dag_empty
                             && quorum_commit == 0
                             && self.coordination_hub.is_healthy()
                             && liveness_stall_duration >= Duration::from_secs(10)
@@ -676,14 +690,73 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 6: Local Committer Deadlock Recovery
+                        // If we are Healthy but the local committer is locked, and we
+                        // haven't received a network commit for 5 seconds, the ENTIRE
+                        // cluster might be locked waiting for each other.
+                        // We must unilaterally unlock to allow local evaluation and
+                        // generation of the next CertifiedCommit.
+                        // ════════════════════════════════════════════════════════
+                        if self.coordination_hub.is_healthy()
+                            && !self.coordination_hub.is_local_commit_unlocked()
+                            && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
+                        {
+                            let inner = self.inner.clone();
+                            let hub = self.coordination_hub.clone();
+                            let my_commit = local_commit;
+                            tokio::spawn(async move {
+                                tracing::warn!("🔍 [DEADLOCK-RECOVERY] Node is Healthy but locked for 5s. Polling peers for their commit state...");
+                                let mut max_peer_commit = 0;
+                                let mut polled_peers = 0;
+                                let timeout = Duration::from_secs(2);
+                                
+                                for authority in inner.context.committee.authorities().map(|(i, _)| i) {
+                                    if authority == inner.context.own_index {
+                                        continue;
+                                    }
+                                    if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
+                                        max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                        polled_peers += 1;
+                                    }
+                                }
+                                
+                                if polled_peers > 0 && max_peer_commit <= my_commit {
+                                    tracing::warn!(
+                                        "🚨 [DEADLOCK-RECOVERY] Polled {} peers. Max peer commit is {}. We are at {}. \
+                                         Network is truly deadlocked. Unlocking local committer unilaterally!",
+                                        polled_peers, max_peer_commit, my_commit
+                                    );
+                                    hub.unlock_local_commit();
+                                    
+                                    // Kick the core to evaluate the committer immediately
+                                    let core_dispatcher = inner.core_thread_dispatcher.clone();
+                                    if let Err(e) = core_dispatcher.new_block(
+                                        consensus_types::block::Round::MAX, true
+                                    ).await {
+                                        tracing::warn!("Failed to kick Core for deadlock recovery: {:?}", e);
+                                    }
+                                } else if polled_peers == 0 {
+                                    tracing::warn!("⚠️ [DEADLOCK-RECOVERY] Failed to reach any peers. Will not unilaterally unlock yet.");
+                                } else {
+                                    tracing::info!(
+                                        "✅ [DEADLOCK-RECOVERY] A peer has commit {} > {}. We are just lagging. Will not unlock.",
+                                        max_peer_commit, my_commit
+                                    );
+                                }
+                            });
+                            self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
+                        }
+
+                        // ════════════════════════════════════════════════════════
                         // STALL DETECTOR 4: Cluster Cold Start Deadlock
                         // If local_commit == 0 (DAG wiped) and we are stuck in CatchingUp
                         // for 5s without fetching, it means the ENTIRE cluster wiped
                         // its DAG. No one has the past commits. Force fast-forward.
                         // ════════════════════════════════════════════════════════
+                        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
                         let catching_up_stall = now.duration_since(self.last_quorum_change_at);
                         if self.coordination_hub.is_catching_up()
-                            && local_commit == 0
+                            && is_dag_empty
                             && highest_handled > 0
                             && catching_up_stall >= Duration::from_secs(5)
                         {
