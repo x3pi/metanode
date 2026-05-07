@@ -276,11 +276,11 @@ impl Linearizer {
                 // The timestamp will still be monotonic due to the .max(last_commit_timestamp_ms) check below.
                 tracing::error!(
                     "❌ [LINEARIZER] Cannot compute median timestamp for leader block {:?} - {}. \
-                     All ancestors missing (genesis mismatch?). Using leader timestamp as fallback.",
+                     All ancestors missing. Using last commit timestamp as stable anchor fallback.",
                     leader_block.reference(), e
                 );
-                // Use leader block's timestamp as fallback - it's better than panicking
-                leader_block.timestamp_ms()
+                // Use the previous commit's timestamp as a deterministic anchor-based fallback
+                last_commit_timestamp_ms
             })
         };
 
