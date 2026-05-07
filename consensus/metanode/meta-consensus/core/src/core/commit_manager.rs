@@ -70,6 +70,14 @@ impl Core {
             }
         }
 
+        // DETERMINISTIC RECOVERY GUARD:
+        // After successfully processing CertifiedCommits from the network,
+        // unlock the local committer. This proves the DAG has real consensus
+        // data and is safe for local evaluation.
+        if commits_count > 0 {
+            self.coordination_hub.unlock_local_commit();
+        }
+
         // Try to propose now since there are new blocks accepted.
         self.try_propose(false)?;
 
@@ -243,6 +251,28 @@ impl Core {
                         quorum_commit_index
                     );
                     break;
+                }
+
+                // DETERMINISTIC RECOVERY GUARD (replaces timeout-based DAG-GAP-GUARD):
+                // After snapshot recovery (last_decided_leader = 0 but local_commit > 0), 
+                // the local committer is LOCKED until the node processes a real CertifiedCommit 
+                // from the network (2f+1 verified).
+                // This is purely event-driven — no timeouts. The node can query peers
+                // for any commit via CommitSyncer::fetch_commits(), and will unlock
+                // as soon as it receives authoritative consensus data.
+                // NOTE: This MUST NOT apply to Genesis (local_commit == 0) or normal restarts
+                // (last_decided_leader > 0), otherwise the entire cluster could deadlock.
+                if self.last_decided_leader.round == 0 && local_commit_index > 0 {
+                    if !self.coordination_hub.is_local_commit_unlocked() {
+                        tracing::info!(
+                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for first \
+                             CertifiedCommit from network to confirm DAG consistency. \
+                             (local_commit={}, quorum_commit={})",
+                            local_commit_index,
+                            quorum_commit_index
+                        );
+                        break;
+                    }
                 }
 
                 // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`

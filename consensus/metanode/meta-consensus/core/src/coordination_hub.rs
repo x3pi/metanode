@@ -62,6 +62,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct ConsensusCoordinationHub {
     phase: Arc<RwLock<NodeConsensusPhase>>,
     
+    /// Deterministic recovery guard for the local committer.
+    /// After snapshot recovery, this is `false`. It is set to `true` ONLY when
+    /// the node processes a real CertifiedCommit from the network (via `add_certified_commits`).
+    /// This replaces the timeout-based DAG-GAP-GUARD with event-driven safety.
+    recovery_local_commit_unlocked: Arc<AtomicBool>,
+    
     /// Global flag indicating if the epoch is currently transitioning.
     /// Mutated during Start/End of epoch transition.
     /// Read by TX Receivers (UDS) to reject transactions, and by Executors to pause execution.
@@ -90,6 +96,7 @@ impl ConsensusCoordinationHub {
     pub fn new() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
+            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(false)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -177,6 +184,25 @@ impl ConsensusCoordinationHub {
         self.is_healthy()
     }
 
+    /// Returns true if the local committer is allowed to run.
+    /// After snapshot recovery, this is false until the node processes
+    /// a real CertifiedCommit from the network, proving DAG consistency.
+    pub fn is_local_commit_unlocked(&self) -> bool {
+        self.recovery_local_commit_unlocked.load(Ordering::Acquire)
+    }
+
+    /// Unlock the local committer after receiving a real CertifiedCommit.
+    /// Called from `Core::add_certified_commits()` when processing succeeds.
+    /// Once unlocked, it stays unlocked for the remainder of this epoch.
+    pub fn unlock_local_commit(&self) {
+        if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
+            tracing::info!(
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: received CertifiedCommit from network. \
+                 DAG consistency confirmed. Local commit evaluation is now permitted."
+            );
+        }
+    }
+
     /// Convenience check for whether the node is explicitly catching up.
     pub fn is_catching_up(&self) -> bool {
         matches!(*self.phase.read(), NodeConsensusPhase::CatchingUp)
@@ -250,6 +276,7 @@ impl ConsensusCoordinationHub {
     pub fn new_for_testing() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
+            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(true)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
