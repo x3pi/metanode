@@ -137,6 +137,19 @@ impl Core {
                     self.last_decided_leader.round, current_dag_leader.round
                 );
                 self.last_decided_leader = current_dag_leader;
+                
+                // CRITICAL FIX: Restore LeaderSchedule from the baseline if available.
+                // We MUST do this here before `commits_until_update` is calculated so that
+                // the synced commits evaluate against the correct pre-calculated schedule 
+                // instead of an empty default schedule.
+                if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
+                    tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
+                    self.leader_schedule.update_from_baseline_scores(
+                        self.context.clone(),
+                        self.dag_state.read().last_commit_index(),
+                        scores
+                    );
+                }
             }
 
             // LeaderSchedule has a limit to how many sequenced leaders can be committed
@@ -300,16 +313,6 @@ impl Core {
                         dag_last_decided
                     );
                     self.last_decided_leader = dag_last_decided;
-
-                    // CRITICAL FIX: Restore LeaderSchedule from the baseline if available
-                    if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
-                        tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
-                        self.leader_schedule.update_from_baseline_scores(
-                            self.context.clone(),
-                            self.dag_state.read().last_commit_index(),
-                            scores
-                        );
-                    }
                 }
 
                 // DAG DENSITY CHECK AND LIVENESS SKIP REMOVED (v5):

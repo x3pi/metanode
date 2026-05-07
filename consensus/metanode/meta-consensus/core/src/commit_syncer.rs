@@ -535,6 +535,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.synced_commit_index,
             self.poll_interval().as_millis()
         );
+
+        // CRITICAL RECOVERY GUARD:
+        // Synchronously patch the baseline (fetching digest + reputation_scores) BEFORE
+        // entering the loop and allowing any fetches! If we don't block here, `try_schedule_once`
+        // might fetch commits and send them to `commit_manager` before the scores are restored,
+        // causing `commit_manager` to evaluate synced commits with an empty default schedule.
+        self.patch_baseline_if_needed().await;
+
+        // CRITICAL FIX FOR DAG-GATE RACE CONDITION:
+        // Passively waiting for CommitVoteMonitor to receive votes fails if the cluster
+        // is idle (no new commits being produced). This causes local `quorum_commit` to stay 0,
+        // tricking the node into transitioning to `Healthy` prematurely and causing forks.
+        // We must ACTIVELY discover the true quorum commit from peers before starting.
+        self.discover_quorum_commit().await;
+
         // STATE MACHINE: Get initial interval from current state
         let initial_interval = self.poll_interval();
         let mut current_interval_duration = initial_interval;
@@ -1140,20 +1155,56 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             }
                             
                             self.inner.dag_state.write().reset_to_network_baseline(
-                                leader_round,
                                 prev_index,
+                                leader_round,
                                 digest,
                                 timestamp_ms,
-                                reputation_scores
+                                reputation_scores,
                             );
-                            tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={}, leader_round={})", prev_index, digest, timestamp_ms, leader_round);
+                            tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
                             return;
                         }
                     }
                 }
             }
-            tracing::warn!("⚠️ Failed to fetch baseline digest for commit #{}. Retrying in 2 seconds...", prev_index);
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tracing::warn!("⚠️ Failed to fetch baseline commit #{} from network. Retrying in 1s...", prev_index);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Actively polls peers to establish the true quorum commit index before starting.
+    /// This prevents the node from prematurely transitioning to Healthy phase when the cluster
+    /// is idle and no P2P votes are being broadcasted.
+    async fn discover_quorum_commit(&self) {
+        tracing::info!("🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...");
+        let mut max_peer_commit = 0;
+        let mut polled_peers = 0;
+        let timeout = Duration::from_secs(3);
+        
+        // Try up to 3 times to get responses from peers
+        for attempt in 1..=3 {
+            for authority in self.inner.context.committee.authorities().map(|(i, _)| i) {
+                if authority == self.inner.context.own_index {
+                    continue;
+                }
+                if let Ok(status) = self.inner.network_client.get_epoch_status(authority, timeout).await {
+                    max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                    polled_peers += 1;
+                }
+            }
+            
+            if polled_peers > 0 {
+                break;
+            }
+            tracing::warn!("⚠️ [BOOTSTRAP] Attempt {}/3: Failed to reach peers for quorum discovery. Retrying...", attempt);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        
+        if polled_peers > 0 {
+            tracing::info!("✅ [BOOTSTRAP] Discovered max peer commit: {}. Updating quorum_commit_index.", max_peer_commit);
+            self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
+        } else {
+            tracing::warn!("⚠️ [BOOTSTRAP] Could not reach any peers. Proceeding with initial quorum=0.");
         }
     }
 

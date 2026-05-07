@@ -2506,8 +2506,6 @@ impl ConsensusNode {
             let guard_hub = coordination_hub.clone();
             let guard_stp = system_transaction_provider.clone();
             tokio::spawn(async move {
-                tracing::info!("🛡️ [DAG-GATE] Allowing 10s Network Discovery Window for CommitVoteMonitor to establish true quorum_commit...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 tracing::info!("🛡️ [DAG-GATE] Waiting for consensus DAG to fully catch up to Go state (phase == Healthy)...");
                 loop {
                     if guard_hub.is_healthy_stable() {
