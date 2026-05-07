@@ -63,11 +63,13 @@ handle_error() {
     
     echo -e "\n[2] RPC PROXY LATEST LOG (Last 50 lines):" >> "$report_file"
     echo "--------------------------------------------------" >> "$report_file"
-    LATEST_RPC_LOG=$(find "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client/logs" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
+    # Tìm log trong thư mục node0_data/logs (của riêng node 0)
+    LATEST_RPC_LOG=$(find "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client" -maxdepth 3 -path "*/node0_data/logs/*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
     if [ -n "$LATEST_RPC_LOG" ]; then
+        echo "  (Log file: $LATEST_RPC_LOG)" >> "$report_file"
         tail -n 50 "$LATEST_RPC_LOG" >> "$report_file"
     else
-        echo "No RPC Proxy log found." >> "$report_file"
+        echo "No RPC Proxy log found (searched in $PROJECT_ROOT/cmd/rpc/cmd/rpc-client/node0_data/logs/)." >> "$report_file"
     fi
 
     echo -e "\n[3] METANODE 0 LATEST LOG (Last 100 lines):" >> "$report_file"
@@ -152,7 +154,7 @@ if should_run 2; then
         cd "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client"
         # Nếu session đã tồn tại thì tắt đi trước khi tạo mới
         tmux kill-session -t rpc-proxy 2>/dev/null || true
-        tmux new-session -d -s rpc-proxy 'go run main.go'
+        tmux new-session -d -s rpc-proxy 'go run main.go --config config-rpc-node0.json --tcp-config config-client-tcp-node0.json'
         
         echo "  -> Đang chờ RPC proxy khởi động (tối đa 15s)..."
         for i in {1..15}; do
@@ -170,15 +172,15 @@ if should_run 2; then
             tmux capture-pane -p -t rpc-proxy || echo "Cannot capture tmux pane"
             echo "--------------------------------------------------"
             
-            # Tìm file log mới nhất
-            LATEST_LOG=$(find "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client/logs" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
+            # Tìm file log mới nhất trong node0_data/logs
+            LATEST_LOG=$(find "$PROJECT_ROOT/cmd/rpc/cmd/rpc-client" -maxdepth 3 -path "*/node0_data/logs/*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
             if [ -n "$LATEST_LOG" ]; then
                 echo "  📄 File log: $LATEST_LOG"
                 echo "--------------------------------------------------"
                 tail -n 30 "$LATEST_LOG"
                 echo "--------------------------------------------------"
             else
-                echo "  ⚠️ Không tìm thấy file log nào."
+                echo "  ⚠️ Không tìm thấy file log nào trong $PROJECT_ROOT/cmd/rpc/cmd/rpc-client/node0_data/logs/"
             fi
             exit 1
         else

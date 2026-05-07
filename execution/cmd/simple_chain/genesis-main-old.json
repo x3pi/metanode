@@ -8,27 +8,27 @@
   },
   "validators": [
     {
-      "accumulated_rewards_per_share": "0",
-      "address": "0x781E6EC6EBDCA11Be4B53865a34C0c7f10b6da6e",
-      "authority_key": "kUYrYvf/fDUygF8+nIdNATAAlnQU3BZSD3aGuHNoAZQv3OJOIZKW+Uw+UbH/1LWCAlbyWnQra9vUSDJfFVIxlV4XlraaNkLsZSb3HMJJQK3qEc1L20Yqb5YM8uGRXvnB",
+      "address": "0xccc7f510435a99aefb619ba58bde2771dfef9308",
+      "primary_address": "127.0.0.1:4000",
+      "worker_address": "127.0.0.1:4012",
+      "p2p_address": "/ip4/127.0.0.1/tcp/9000",
+      "description": "Validator node-0 from committee",
+      "website": "https://validator-0.com",
+      "image": "https://example.com/validator-0.png",
       "commission_rate": 5,
+      "min_self_delegation": "1000000000000000000",
+      "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x781E6EC6EBDCA11Be4B53865a34C0c7f10b6da6e",
+          "address": "0xccc7f510435a99aefb619ba58bde2771dfef9308",
           "amount": "1000000000000000000000"
         }
       ],
-      "description": "Validator node-0 from committee",
-      "hostname": "node-0",
-      "image": "https://example.com/validator-0.png",
-      "min_self_delegation": "1000000000000000000",
-      "network_key": "jZ/kDNNPBsZXUD28FcxMLLZ+vCZCbEJoUvdB8zgRvug=",
-      "p2p_address": "/ip4/127.0.0.1/tcp/9000",
-      "primary_address": "127.0.0.1:4000",
-      "protocol_key": "fN/BNA8PFyjE3hclyjxnkYgjFlR6M27jpbocq7X847Y=",
       "total_staked_amount": "1000000000000000000000",
-      "website": "https://validator-0.com",
-      "worker_address": "127.0.0.1:4012"
+      "network_key": "jZ/kDNNPBsZXUD28FcxMLLZ+vCZCbEJoUvdB8zgRvug=",
+      "hostname": "node-0",
+      "authority_key": "kUYrYvf/fDUygF8+nIdNATAAlnQU3BZSD3aGuHNoAZQv3OJOIZKW+Uw+UbH/1LWCAlbyWnQra9vUSDJfFVIxlV4XlraaNkLsZSb3HMJJQK3qEc1L20Yqb5YM8uGRXvnB",
+      "protocol_key": "fN/BNA8PFyjE3hclyjxnkYgjFlR6M27jpbocq7X847Y="
     },
     {
       "address": "0xb7c5c52407962d289bbd3729bc1c8eb154dc8f0f",

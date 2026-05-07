@@ -36,6 +36,7 @@ type ValidatorState interface {
 	AccumulatedRewardsPerShare() *big.Int
 	ResetRewardDebt(delegatorAddress common.Address)
 	GetDelegation(delegatorAddress common.Address) (amount *big.Int, rewardDebt *big.Int)
+	ListDelegatorAddresses() []common.Address // Trả về tất cả địa chỉ đang có stake > 0
 
 	SetDelegate(delegatorAddress common.Address, amount *big.Int)
 	SetUndelegate(delegatorAddress common.Address, amount *big.Int) error
@@ -221,6 +222,18 @@ func (vs *validatorStateImpl) TotalStakedAmount() *big.Int {
 		totalStake.Add(totalStake, amount)
 	}
 	return totalStake
+}
+
+// ListDelegatorAddresses trả về tất cả địa chỉ delegator đang có stake > 0.
+func (vs *validatorStateImpl) ListDelegatorAddresses() []common.Address {
+	var result []common.Address
+	for _, pair := range vs.Delegators {
+		amount, ok := new(big.Int).SetString(pair.Value, 10)
+		if ok && amount.Sign() > 0 {
+			result = append(result, common.HexToAddress(pair.Key))
+		}
+	}
+	return result
 }
 
 func (vs *validatorStateImpl) GetDelegation(delegatorAddress common.Address) (amount *big.Int, rewardDebt *big.Int) {

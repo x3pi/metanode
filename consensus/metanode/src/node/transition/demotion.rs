@@ -125,6 +125,7 @@ pub async fn demote_to_synconly_and_catchup(
     }
 
     // STEP 6: Start epoch monitor for future transitions
+    crate::node::epoch_monitor::stop_epoch_monitor(node.epoch_monitor_handle.take()).await;
     if let Ok(Some(handle)) =
         crate::node::epoch_monitor::start_unified_epoch_monitor(&node.executor_client, config)
     {

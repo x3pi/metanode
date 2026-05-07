@@ -65,13 +65,28 @@ impl RustSyncNode {
             let rust_epoch = self.current_epoch.load(Ordering::SeqCst);
             let epoch_behind = rust_epoch < go_epoch;
 
-            let new_turbo = catching_up || epoch_behind || startup_time.elapsed() < Duration::from_secs(30);
+            // FIX: Also check network epoch from peers.
+            // When validators advance to epoch N+1 but SyncOnly's local Go is still at N,
+            // go_epoch == rust_epoch → epoch_behind = false → turbo OFF → lag at boundary.
+            // By querying peers, we detect the real network epoch and keep turbo ON
+            // until local Go fully catches up — eliminating the persistent 1-epoch lag.
+            let network_behind = if !self.config.peer_rpc_addresses.is_empty() {
+                match crate::network::peer_rpc::query_peer_epochs_network(&self.config.peer_rpc_addresses).await {
+                    Ok((network_epoch, _, _, _)) => network_epoch > go_epoch,
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+
+            let new_turbo = catching_up || epoch_behind || network_behind || startup_time.elapsed() < Duration::from_secs(30);
             if new_turbo != is_turbo_mode {
                 is_turbo_mode = new_turbo;
                 if is_turbo_mode {
                     info!(
-                        "🚀 [RUST-SYNC] TURBO MODE ENABLED - interval={}ms, batch_size={}",
-                        self.config.turbo_fetch_interval_ms, self.config.turbo_batch_size
+                        "🚀 [RUST-SYNC] TURBO MODE ENABLED - interval={}ms, batch_size={} (network_behind={}, epoch_behind={})",
+                        self.config.turbo_fetch_interval_ms, self.config.turbo_batch_size,
+                        network_behind, epoch_behind
                     );
                 } else {
                     info!(

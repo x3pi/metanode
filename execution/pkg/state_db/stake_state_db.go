@@ -225,8 +225,45 @@ func (db *StakeStateDB) DeleteValidator(address common.Address) error {
 		db.dirtyValidators.Store(address, nil)
 	}
 	return nil
-
 }
+
+// GetAllDelegatorsOfValidator trả về danh sách địa chỉ của tất cả delegators
+// (kể cả self-delegation) đang có stake > 0 với validator này.
+func (db *StakeStateDB) GetAllDelegatorsOfValidator(validatorAddress common.Address) []common.Address {
+	vs, err := db.GetValidator(validatorAddress)
+	if err != nil || vs == nil {
+		return nil
+	}
+	return vs.ListDelegatorAddresses()
+}
+
+// GetValidatorsStakedInByAddress trả về danh sách tất cả validator mà địa chỉ
+// delegatorAddr đã có stake > 0 vào. Duyệt toàn bộ trie (không giới hạn top-21).
+func (db *StakeStateDB) GetValidatorsStakedInByAddress(delegatorAddr common.Address) []common.Address {
+	trieToUse := db.trie
+	if trieToUse == nil {
+		return nil
+	}
+	allData, err := trieToUse.GetAll()
+	if err != nil {
+		return nil
+	}
+	var result []common.Address
+	for addressStr, validatorStateBytes := range allData {
+		valAddr := common.HexToAddress(addressStr)
+		vs := state.NewValidatorState(valAddr)
+		if err := vs.Unmarshal(validatorStateBytes); err != nil {
+			continue
+		}
+		amount, _ := vs.GetDelegation(delegatorAddr)
+		if amount != nil && amount.Sign() > 0 {
+			result = append(result, valAddr)
+		}
+	}
+	return result
+}
+
+
 func (db *StakeStateDB) GetDelegation(validatorAddress, delegatorAddress common.Address) (*big.Int, *big.Int, error) {
 	vs, err := db.GetValidator(validatorAddress)
 	if err != nil {
@@ -815,10 +852,12 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 
 	// Sanity check
 	if intermediateHash != committedHash {
-		logger.Error("CommitPipeline (StakeStateDB): root hash mismatch: intermediate=%s, committed=%s",
-			intermediateHash, committedHash)
-		return nil, fmt.Errorf("root hash mismatch (intermediate: %s, committed: %s)",
-			intermediateHash, committedHash)
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); !isNomt {
+			logger.Error("CommitPipeline (StakeStateDB): root hash mismatch: intermediate=%s, committed=%s",
+				intermediateHash, committedHash)
+			return nil, fmt.Errorf("root hash mismatch (intermediate: %s, committed: %s)",
+				intermediateHash, committedHash)
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════

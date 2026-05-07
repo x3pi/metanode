@@ -134,11 +134,11 @@ func (h *ValidatorHandler) handleRegisterValidator(
 	stakeStateDB := chainState.GetStakeStateDB()
 	args, err := method.Inputs.Unpack(inputData)
 	if err != nil {
-		return nil, fmt.Errorf("Lỗi khi unpack input data: %v", err)
+		return nil, fmt.Errorf("error unpacking input data: %v", err)
 	}
 	if len(args) != 13 {
-		logger.Error("số lượng tham số không đúng cho registerValidator, expected 13, got %d", len(args))
-		return nil, fmt.Errorf("số lượng tham số không đúng cho registerValidator: expected 13, got %d", len(args))
+		logger.Error("invalid number of arguments for registerValidator, expected 13, got %d", len(args))
+		return nil, fmt.Errorf("invalid number of arguments for registerValidator: expected 13, got %d", len(args))
 	}
 	primaryAddress, _ := args[0].(string)
 	workerAddress, _ := args[1].(string)
@@ -156,14 +156,31 @@ func (h *ValidatorHandler) handleRegisterValidator(
 
 	validator, err := stakeStateDB.GetValidator(tx.FromAddress())
 	if err != nil {
-		return nil, fmt.Errorf("Lỗi khi kiểm tra validator tồn tại: %v", err)
+		return nil, fmt.Errorf("error checking validator existence: %v", err)
 	}
 	if validator != nil {
-		return nil, fmt.Errorf("Validator already exists")
+		return nil, fmt.Errorf("validator already exists")
 	}
 	if commissionRate > 10000 {
 		return nil, fmt.Errorf("Commission rate too high")
 	}
+
+	// Kiểm tra trùng lặp các keys (Authority, Protocol, Network)
+	allValidators, errGetAll := stakeStateDB.GetAllValidators()
+	if errGetAll == nil {
+		for _, v := range allValidators {
+			if v.AuthorityKey() == authorityKey {
+				return nil, fmt.Errorf("Authority key already in use")
+			}
+			if v.ProtocolKey() == protocolKey {
+				return nil, fmt.Errorf("Protocol key already in use")
+			}
+			if v.NetworkKey() == networkKey {
+				return nil, fmt.Errorf("Network key already in use")
+			}
+		}
+	}
+
 	// CRITICAL FIX: Use authorityKey (Base64 format) for both PubKeyBls and AuthorityKey
 	// This ensures consistency when building committee for epoch transition.
 	// Previously, pubKeyBls was retrieved from account state as hex, causing format mismatch.
@@ -214,47 +231,125 @@ func (h *ValidatorHandler) handleRegisterValidator(
 	return eventLogs, nil
 }
 
+// handleDeregisterValidator: Hủy đăng ký validator trong 1 transaction.
+// Tự động:
+//  1. Rút hết tiền đã delegate vào B, C, ... trả về ví validator.
+//  2. Kiểm tra không còn external delegators (nếu còn → từ chối).
+//  3. Hoàn trả self-stake về ví (bypass minSelfDelegation).
+//  4. Xóa validator khỏi mạng + notify Rust consensus.
 func (h *ValidatorHandler) handleDeregisterValidator(
 	chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64,
 ) ([]types.EventLog, error) {
 	validatorAddr := tx.FromAddress()
 	stakeStateDB := chainState.GetStakeStateDB()
-	validator, err := stakeStateDB.GetValidator(tx.FromAddress())
+	contractAcc, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
+	validatorAcc, _ := chainState.GetAccountStateDB().AccountState(validatorAddr)
+
+	validator, err := stakeStateDB.GetValidator(validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("Lỗi khi kiểm tra validator tồn tại: %v", err)
+		return nil, fmt.Errorf("error checking validator existence: %v", err)
 	}
 	if validator == nil {
-		return nil, fmt.Errorf("Validator không tồn tại")
+		return nil, fmt.Errorf("validator does not exist")
 	}
-	if validator.TotalStakedAmount().Sign() > 0 {
-		return nil, fmt.Errorf("Validator still has staked tokens")
+
+	var eventLogs []types.EventLog
+
+	// ── Bước 1: Tự động rút tiền đã delegate vào các validator khác (B, C, ...) ──
+	// Tìm tất cả validator mà validatorAddr đã stake vào (trừ self)
+	stakedInValidators := stakeStateDB.GetValidatorsStakedInByAddress(validatorAddr)
+	for _, targetValAddr := range stakedInValidators {
+		if targetValAddr == validatorAddr {
+			continue // self-stake xử lý riêng ở bước 2
+		}
+		amount, _, errD := stakeStateDB.GetDelegation(targetValAddr, validatorAddr)
+		if errD != nil || amount == nil || amount.Sign() == 0 {
+			continue
+		}
+		if errU := stakeStateDB.Undelegate(validatorAddr, targetValAddr, amount); errU != nil {
+			logger.Error("[deregisterValidator] error undelegating from %s: %v", targetValAddr.Hex(), errU)
+			continue
+		}
+		if errT := chainState.TransferFrom(contractAcc, validatorAcc, amount); errT != nil {
+			logger.Error("[deregisterValidator] error refunding from %s: %v", targetValAddr.Hex(), errT)
+			continue
+		}
+		logger.Info("[deregisterValidator] withdrew %s wei from validator %s to wallet %s",
+			amount.String(), targetValAddr.Hex(), validatorAddr.Hex())
 	}
+
+	// ── Bước 2: Tự động hoàn trả tiền cho external delegators (Bob, Carol...) ──
+	// Duyệt qua danh sách người đã stake vào mình (vs.Delegators)
+	externalDelegators := stakeStateDB.GetAllDelegatorsOfValidator(validatorAddr)
+	for _, delegatorAddr := range externalDelegators {
+		if delegatorAddr == validatorAddr {
+			continue // self-stake xử lý riêng ở bước 3
+		}
+		amount, _, errD := stakeStateDB.GetDelegation(validatorAddr, delegatorAddr)
+		if errD != nil || amount == nil || amount.Sign() == 0 {
+			continue
+		}
+		// Undelegate and refund to delegator's wallet
+		if errU := stakeStateDB.Undelegate(delegatorAddr, validatorAddr, amount); errU != nil {
+			logger.Error("[deregisterValidator] error undelegating for delegator %s: %v", delegatorAddr.Hex(), errU)
+			continue
+		}
+		delegatorAcc, _ := chainState.GetAccountStateDB().AccountState(delegatorAddr)
+		if errT := chainState.TransferFrom(contractAcc, delegatorAcc, amount); errT != nil {
+			logger.Error("[deregisterValidator] error refunding to delegator %s: %v", delegatorAddr.Hex(), errT)
+			continue
+		}
+		logger.Info("[deregisterValidator] refunded %s wei to delegator %s", amount.String(), delegatorAddr.Hex())
+	}
+
+	// ── Bước 3: Hoàn trả self-stake về ví (bypass minSelfDelegation) ──
+	selfDelegated, _, err := stakeStateDB.GetDelegation(validatorAddr, validatorAddr)
+	if err != nil {
+		return nil, fmt.Errorf("error getting self-delegation: %w", err)
+	}
+	if selfDelegated == nil {
+		selfDelegated = big.NewInt(0)
+	}
+
+	if selfDelegated.Sign() > 0 {
+		if errU := stakeStateDB.Undelegate(validatorAddr, validatorAddr, selfDelegated); errU != nil {
+			return nil, fmt.Errorf("error undelegating self-stake: %w", errU)
+		}
+		if errT := chainState.TransferFrom(contractAcc, validatorAcc, selfDelegated); errT != nil {
+			return nil, fmt.Errorf("error refunding self-stake to wallet: %w", errT)
+		}
+		logger.Info("[deregisterValidator] refunded %s wei self-stake to wallet %s",
+			selfDelegated.String(), validatorAddr.Hex())
+	}
+
+	// ── Bước 4: Xóa validator khỏi danh sách ──
 	err = stakeStateDB.DeleteValidator(validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("Lỗi khi xóa validator: %v", err)
+		return nil, fmt.Errorf("error deleting validator: %v", err)
 	}
+
 	event, ok := h.abi.Events["ValidatorDeregistered"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event 'ValidatorDeregistered' trong ABI")
+		return nil, fmt.Errorf("event ValidatorDeregistered not found in ABI")
 	}
 	eventLog := smart_contract.NewEventLog(
 		tx.Hash(),
 		tx.ToAddress(),
 		nil,
-		[][]byte{
-			event.ID.Bytes(),
-			validatorAddr.Bytes(),
-		},
+		[][]byte{event.ID.Bytes(), validatorAddr.Bytes()},
 	)
-	eventLogs := []types.EventLog{eventLog}
+	eventLogs = []types.EventLog{eventLog}
 
 	// 📢 Notify Rust Metanode about committee change
 	validatorCount, _ := stakeStateDB.GetValidatorCount()
 	executor.NotifyValidatorDeregistered(0, validatorAddr.Hex(), uint64(validatorCount))
+	logger.Info("[deregisterValidator] validator %s has left the network, %d validators remaining",
+		validatorAddr.Hex(), validatorCount)
 
 	return eventLogs, nil
 }
+
 func (h *ValidatorHandler) handleSetCommissionRate(
 	inputData []byte, method *abi.Method, chainState *blockchain.ChainState,
 	tx types.Transaction, blockTime uint64,
@@ -263,14 +358,14 @@ func (h *ValidatorHandler) handleSetCommissionRate(
 	stakeStateDB := chainState.GetStakeStateDB()
 	validator, err := stakeStateDB.GetValidator(validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi kiểm tra validator: %w", err)
+		return nil, fmt.Errorf("error checking validator: %w", err)
 	}
 	if validator == nil {
 		return nil, fmt.Errorf("not a validator")
 	}
 	args, err := method.Inputs.Unpack(inputData)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi unpack input: %w", err)
+		return nil, fmt.Errorf("error unpacking input: %w", err)
 	}
 	newRate, _ := args[0].(uint64)
 
@@ -278,12 +373,12 @@ func (h *ValidatorHandler) handleSetCommissionRate(
 
 	event, ok := h.abi.Events["CommissionRateUpdated"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event CommissionRateUpdated")
+		return nil, fmt.Errorf("event CommissionRateUpdated not found")
 	}
 
 	eventData, err := event.Inputs.NonIndexed().Pack(newRate)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi pack event: %w", err)
+		return nil, fmt.Errorf("error packing event: %w", err)
 	}
 
 	eventLog := smart_contract.NewEventLog(
@@ -301,7 +396,7 @@ func (h *ValidatorHandler) handleUpdateValidatorInfo(
 	stakeStateDB := chainState.GetStakeStateDB()
 	validator, err := stakeStateDB.GetValidator(validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi kiểm tra validator: %w", err)
+		return nil, fmt.Errorf("error checking validator: %w", err)
 	}
 	if validator == nil {
 		return nil, fmt.Errorf("not a validator")
@@ -309,7 +404,7 @@ func (h *ValidatorHandler) handleUpdateValidatorInfo(
 
 	args, err := method.Inputs.Unpack(inputData)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi unpack input: %w", err)
+		return nil, fmt.Errorf("error unpacking input: %w", err)
 	}
 
 	name, _ := args[0].(string)
@@ -321,7 +416,7 @@ func (h *ValidatorHandler) handleUpdateValidatorInfo(
 
 	event, ok := h.abi.Events["ValidatorInfoUpdated"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event ValidatorInfoUpdated")
+		return nil, fmt.Errorf("event ValidatorInfoUpdated not found")
 	}
 
 	eventLog := smart_contract.NewEventLog(
@@ -339,7 +434,7 @@ func (h *ValidatorHandler) handleDelegate(
 	delegatorAddr := tx.FromAddress()
 	args, err := method.Inputs.Unpack(inputData)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi unpack input: %w", err)
+		return nil, fmt.Errorf("error unpacking input: %w", err)
 	}
 	acc, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
 	delegator, _ := chainState.GetAccountStateDB().AccountState(delegatorAddr)
@@ -352,14 +447,14 @@ func (h *ValidatorHandler) handleDelegate(
 	}
 	validator, err := stakeStateDB.GetValidator(_validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi kiểm tra validator: %w", err)
+		return nil, fmt.Errorf("error checking validator: %w", err)
 	}
 	if validator == nil {
 		return nil, fmt.Errorf("validator does not exist")
 	}
 	withdrawEvent, err := h._withdrawRewards(tx, chainState, validator, delegatorAddr, big.NewInt(0))
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi rút thưởng tự động: %w", err)
+		return nil, fmt.Errorf("error automatically withdrawing rewards: %w", err)
 	}
 	err = chainState.TransferFrom(delegator, acc, tx.Amount())
 	if err != nil {
@@ -367,16 +462,16 @@ func (h *ValidatorHandler) handleDelegate(
 	}
 	err = stakeStateDB.Delegate(_validatorAddr, delegatorAddr, tx.Amount())
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi delegate: %w", err)
+		return nil, fmt.Errorf("error delegating: %w", err)
 	}
 	event, ok := h.abi.Events["Delegated"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event Delegated")
+		return nil, fmt.Errorf("event Delegated not found")
 	}
 
 	eventData, err := event.Inputs.NonIndexed().Pack(tx.Amount())
 	if err != nil {
-		return nil, fmt.Errorf("lỗi pack event Delegated: %w", err)
+		return nil, fmt.Errorf("error packing Delegated event: %w", err)
 	}
 	eventLog := smart_contract.NewEventLog(
 		tx.Hash(), tx.ToAddress(), eventData,
@@ -398,14 +493,14 @@ func (h *ValidatorHandler) handleUnDelegate(
 
 	args, err := method.Inputs.Unpack(inputData)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi unpack input: %w", err)
+		return nil, fmt.Errorf("error unpacking input: %w", err)
 	}
 
 	_validatorAddr, _ := args[0].(common.Address)
 	amount, _ := args[1].(*big.Int)
 	validator, err := stakeStateDB.GetValidator(_validatorAddr)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi lấy validator: %w", err)
+		return nil, fmt.Errorf("error getting validator: %w", err)
 	}
 	if validator == nil {
 		return nil, fmt.Errorf("validator does not exist")
@@ -415,22 +510,27 @@ func (h *ValidatorHandler) handleUnDelegate(
 		return nil, fmt.Errorf("error fetching delegation: %w", err)
 	}
 	if amountDelegated.Cmp(amount) < 0 {
-		return nil, fmt.Errorf("insufficient delegated amount")
+		return nil, fmt.Errorf("insufficient delegated amount %s < amount %s", amountDelegated.String(), amount.String())
 	}
 	amountDelegated.Sub(amountDelegated, amount)
 	if tx.FromAddress() == _validatorAddr {
+		// Self-stake sau khi rút phải >= minSelfDelegation
+		// Tiền external delegators đã an toàn trong contract — không cần link ở đây
 		if amountDelegated.Cmp(validator.MinSelfDelegation()) < 0 {
-			return nil, fmt.Errorf("self-delegation cannot be less than minimum self-delegation")
+			return nil, fmt.Errorf(
+				"self-delegation cannot be less than minimum self-delegation %s",
+				validator.MinSelfDelegation().String(),
+			)
 		}
 	}
 	// RÚT THƯỞNG
 	withdrawEvent, err := h._withdrawRewards(tx, chainState, validator, delegatorAddr, amount)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi rút thưởng tự động: %w", err)
+		return nil, fmt.Errorf("error automatically withdrawing rewards: %w", err)
 	}
 	err = stakeStateDB.Undelegate(delegatorAddr, _validatorAddr, amount)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi undelegate: %w", err)
+		return nil, fmt.Errorf("error undelegating: %w", err)
 	}
 	// RÚT TIỀN CHO USER
 	logger.Info("Amount to undelegate: %s", amount.String())
@@ -438,16 +538,16 @@ func (h *ValidatorHandler) handleUnDelegate(
 	delegator, _ := chainState.GetAccountStateDB().AccountState(delegatorAddr)
 	err = chainState.TransferFrom(acc, delegator, amount)
 	if err != nil {
-		return nil, fmt.Errorf("Lỗi chuyển tiền: %w", err)
+		return nil, fmt.Errorf("error transferring funds: %w", err)
 	}
 	eventDef, ok := h.abi.Events["Undelegated"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event Undelegated")
+		return nil, fmt.Errorf("event Undelegated not found")
 	}
 
 	eventData, err := eventDef.Inputs.NonIndexed().Pack(amount)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi pack event: %w", err)
+		return nil, fmt.Errorf("error packing event: %w", err)
 	}
 	eventLog := smart_contract.NewEventLog(
 		tx.Hash(), tx.ToAddress(), eventData,
@@ -484,11 +584,11 @@ func (h *ValidatorHandler) _withdrawRewards(tx types.Transaction, chainState *bl
 	}
 	eventDef, ok := h.abi.Events["RewardWithdrawn"]
 	if !ok {
-		return nil, fmt.Errorf("không tìm thấy event 'RewardWithdrawn' trong ABI")
+		return nil, fmt.Errorf("event 'RewardWithdrawn' not found in ABI")
 	}
 	eventData, err := eventDef.Inputs.NonIndexed().Pack(rewardAmount)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi khi pack dữ liệu event RewardWithdrawn: %w", err)
+		return nil, fmt.Errorf("error packing data for event RewardWithdrawn: %w", err)
 	}
 	eventLog := smart_contract.NewEventLog(tx.Hash(), tx.ToAddress(), eventData, [][]byte{
 		eventDef.ID.Bytes(),         // topic0: signature

@@ -155,13 +155,21 @@ pub async fn start_sync_task(node: &mut ConsensusNode, _config: &NodeConfig) -> 
         committee.size()
     );
 
+    // Compute the correct db_path for the current epoch to avoid RocksDB locks
+    let mut parameters = node.parameters.clone();
+    parameters.db_path = node
+        .storage_path
+        .join("epochs")
+        .join(format!("epoch_{}", epoch))
+        .join("consensus_db");
+
     // Create Context for P2P networking
     let sync_metrics = consensus_core::initialise_metrics(prometheus::Registry::new());
     let sync_context = std::sync::Arc::new(consensus_core::Context::new(
         epoch_timestamp,
         consensus_config::AuthorityIndex::new_for_test(0), // SyncOnly uses dummy index
         committee.clone(),
-        node.parameters.clone(),
+        parameters,
         node.protocol_config.clone(),
         sync_metrics,
         node.clock.clone(),

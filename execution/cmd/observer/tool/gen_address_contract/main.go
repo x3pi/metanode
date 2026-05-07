@@ -19,7 +19,7 @@ func GetAddressSelector(methodSignature string) common.Address {
 }
 
 func main() {
-	method := "letuannhat"
+	method := "module:stake"
 	addr := GetAddressSelector(method)
 
 	fmt.Printf("Method Signature: %s\n", method)

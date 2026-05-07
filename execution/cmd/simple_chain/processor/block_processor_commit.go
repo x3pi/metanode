@@ -71,7 +71,7 @@ func (bp *BlockProcessor) commitWorker() {
 				isCall := tx.IsCallContract()
 				isDeploy := tx.IsDeployContract()
 
-				if (isCall || isDeploy) && !tx.GetReadOnly() && tx.GetNonce() != 0 && tx.ToAddress() != utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT) && tx.ToAddress() != utils.GetAddressSelector(p_common.IDENTIFIER_STAKE) {
+				if (isCall || isDeploy) && !tx.GetReadOnly() && tx.GetNonce() != 0 && tx.ToAddress() != utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT) && tx.ToAddress() != utils.GetAddressSelector(p_common.IDENTIFIER_STAKE) && tx.ToAddress() != p_common.VALIDATOR_CONTRACT_ADDRESS && tx.ToAddress() != p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
 					mvmId, exists := job.ProcessResults.MvmIdMap[tx.Hash()]
 					if !exists {
 						if isCall {

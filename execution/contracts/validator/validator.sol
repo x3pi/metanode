@@ -94,22 +94,42 @@ contract ValidatorActions {
         emit ValidatorRegistered(msg.sender, _name);
     }
 
+    /**
+     * @dev Hủy đăng ký validator và tự động hoàn trả toàn bộ self-stake về ví.
+     * Bypass minSelfDelegation vì đây là exit hoàn toàn.
+     * Từ chối nếu còn external delegators.
+     */
     function deregisterValidator() external {
         Validator storage validator = validators[msg.sender];
         require(validator.owner != address(0), "Not a validator");
-        require(validator.totalStakedAmount == 0, "Validator still has staked tokens");
-        
+
+        Delegation storage selfDelegation = delegations[msg.sender][msg.sender];
+        uint256 selfStake = selfDelegation.amount;
+
+        // Từ chối nếu còn external delegators
+        uint256 externalStake = validator.totalStakedAmount.sub(selfStake);
+        require(externalStake == 0, "External delegators still staking — ask them to undelegate first");
+
+        // Rút thưởng nếu có
+        _withdrawReward(msg.sender);
+
+        // Hoàn trả toàn bộ self-stake về ví (bypass minSelfDelegation)
+        if (selfStake > 0) {
+            selfDelegation.amount = 0;
+            validator.totalStakedAmount = validator.totalStakedAmount.sub(selfStake);
+            (bool sent, ) = msg.sender.call{value: selfStake}("");
+            require(sent, "Failed to send native coin");
+        }
+
+        // Xóa validator
         uint256 indexToRemove = validatorIndexes[msg.sender];
         address lastValidator = validatorAddresses[validatorAddresses.length - 1];
-        
         validatorAddresses[indexToRemove] = lastValidator;
         validatorIndexes[lastValidator] = indexToRemove;
-
         validatorAddresses.pop();
-        
         delete validatorIndexes[msg.sender];
         delete validators[msg.sender];
-        
+
         emit ValidatorDeregistered(msg.sender);
     }
 

@@ -798,8 +798,19 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 					validatorAddress.Hex(), delegatorAddress.Hex(), err)
 				return fmt.Errorf("failed to set initial stake for validator %s: %v", validatorAddress.Hex(), err)
 			}
+
+			// CRITICAL: Fund contract account with the staked amount.
+			// When users delegate via tx, ETH moves: user wallet → contract (0x1001).
+			// Genesis sets up stake state DB directly (no tx), so contract balance stays 0.
+			// Without this, deregister/undelegate will fail with "invalid sub balance amount".
+			contractAddr := e_common.HexToAddress("0x0000000000000000000000000000000000001001")
+			contractAcc, _ := app.chainState.GetAccountStateDB().AccountState(contractAddr)
+			contractAcc.AddBalance(stakeAmount)
+			app.chainState.GetAccountStateDB().SetState(contractAcc)
+
 			logger.Info("✅ Set initial stake for validator %s: delegator=%s, amount=%s",
 				validatorAddress.Hex(), delegatorAddress.Hex(), stakeAmount.String())
+
 		}
 
 		// Verify total stake after all delegations

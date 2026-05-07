@@ -284,12 +284,20 @@ pub(super) async fn setup_synconly_sync(
     rust_sync_executor.initialize_from_go().await;
 
     // Create Context for P2P networking (SyncOnly uses dummy own_index)
+    // Compute the correct db_path for the current epoch to avoid RocksDB locks
+    let mut parameters = node.parameters.clone();
+    parameters.db_path = node
+        .storage_path
+        .join("epochs")
+        .join(format!("epoch_{}", new_epoch))
+        .join("consensus_db");
+
     let sync_metrics = consensus_core::initialise_metrics(Registry::new());
     let sync_context = std::sync::Arc::new(consensus_core::Context::new(
         epoch_timestamp,
         consensus_config::AuthorityIndex::new_for_test(0),
         committee.clone(),
-        node.parameters.clone(),
+        parameters,
         node.protocol_config.clone(),
         sync_metrics,
         node.clock.clone(),

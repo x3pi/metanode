@@ -68,9 +68,9 @@ pub fn start_unified_epoch_monitor(
         // ═══════════════════════════════════════════════════════════════
         let mut stall_last_go_block: u64 = 0;
         let mut stall_count: u32 = 0;
-        const STALL_THRESHOLD: u32 = 3;       // 3 consecutive stalls → trigger recovery (30s at 10s poll)
-        const STALL_MIN_GAP: u64 = 10;        // Minimum block gap to consider "stalled"
-        const STALL_FETCH_BATCH: u64 = 500;   // Max blocks to fetch per recovery cycle
+        const STALL_THRESHOLD: u32 = 3; // 3 consecutive stalls → trigger recovery (30s at 10s poll)
+        const STALL_MIN_GAP: u64 = 10; // Minimum block gap to consider "stalled"
+        const STALL_FETCH_BATCH: u64 = 500; // Max blocks to fetch per recovery cycle
 
         loop {
             // T3-4: Use adaptive interval
@@ -138,7 +138,17 @@ pub fn start_unified_epoch_monitor(
 
             // 4. Check if transition needed (NETWORK epoch ahead of Rust)
             // Use network_epoch instead of local_go_epoch!
-            if network_epoch <= rust_epoch {
+            //
+            // CRITICAL FIX for SyncOnly nodes:
+            // For SyncOnly nodes, `rust_epoch` can equal `network_epoch` while
+            // `local_go_epoch` is still behind by 1. This happens because the
+            // Rust internal epoch is updated via a different code path than Go.
+            // If we only check `rust_epoch`, the SyncOnly block below (line ~254)
+            // is NEVER reached, so Go epoch never advances. We must also check
+            // local_go_epoch for SyncOnly mode.
+            let synconly_go_behind = matches!(current_mode, crate::node::NodeMode::SyncOnly)
+                && local_go_epoch < network_epoch;
+            if network_epoch <= rust_epoch && !synconly_go_behind {
                 // ═══════════════════════════════════════════════════════════
                 // SAME-EPOCH: No epoch transition needed.
                 //
@@ -175,10 +185,8 @@ pub fn start_unified_epoch_monitor(
                         stall_last_go_block = go_block;
 
                         if stall_count >= STALL_THRESHOLD {
-                            let fetch_to = std::cmp::min(
-                                go_block + STALL_FETCH_BATCH,
-                                peer_best_block,
-                            );
+                            let fetch_to =
+                                std::cmp::min(go_block + STALL_FETCH_BATCH, peer_best_block);
                             warn!(
                                 "🚨 [STALL RECOVERY] Validator blocks stalled! go_block={}, peer_block={}, stall_count={}. Fetching blocks {}→{} from peers...",
                                 go_block, peer_best_block, stall_count, go_block + 1, fetch_to
@@ -219,10 +227,7 @@ pub fn start_unified_epoch_monitor(
                                     );
                                 }
                                 Err(e) => {
-                                    warn!(
-                                        "⚠️ [STALL RECOVERY] Block fetch failed: {}",
-                                        e
-                                    );
+                                    warn!("⚠️ [STALL RECOVERY] Block fetch failed: {}", e);
                                 }
                             }
 
@@ -294,33 +299,71 @@ pub fn start_unified_epoch_monitor(
                                 );
 
                                 // Fetch blocks up to boundary from peers
-                                let (go_block, _, _go_ready, _, _) = client_arc
+                                let (go_block, go_last_gei, _go_ready, _, _) = client_arc
                                     .get_last_block_number()
                                     .await
                                     .unwrap_or((0, 0, false, [0; 32], 0));
-                                if go_block < data.boundary_block {
-                                    // Fetch missing blocks
-                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                                        &peer_rpc,
-                                        go_block + 1,
-                                        data.boundary_block,
-                                    )
-                                    .await
-                                    {
-                                        Ok(blocks) if !blocks.is_empty() => {
-                                            match client_arc.sync_blocks(blocks).await {
-                                                Ok((synced, last)) => {
-                                                    info!(
-                                                        "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
-                                                        synced, last
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    warn!("⚠️ [EPOCH MONITOR] SyncOnly: sync_blocks failed: {}", e);
+                                
+                                if go_block < data.boundary_block || go_last_gei < data.boundary_gei {
+                                    // First try fetching normal blocks
+                                    let mut synced_blocks = false;
+                                    if go_block < data.boundary_block {
+                                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                            &peer_rpc,
+                                            go_block + 1,
+                                            data.boundary_block,
+                                        )
+                                        .await
+                                        {
+                                            Ok(blocks) if !blocks.is_empty() => {
+                                                match client_arc.sync_and_execute_blocks(blocks).await {
+                                                    Ok((synced, last, _)) => {
+                                                        info!(
+                                                            "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
+                                                            synced, last
+                                                        );
+                                                        synced_blocks = true;
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("⚠️ [EPOCH MONITOR] SyncOnly: sync_blocks failed: {}", e);
+                                                    }
                                                 }
                                             }
+                                            _ => {}
                                         }
-                                        _ => {}
+                                    }
+
+                                    // If we still haven't reached the boundary GEI, fetch empty executable blocks (empty commits)
+                                    let (_, current_go_gei, _, _, _) = client_arc
+                                        .get_last_block_number()
+                                        .await
+                                        .unwrap_or((0, 0, false, [0; 32], 0));
+
+                                    if current_go_gei < data.boundary_gei {
+                                        info!("🚀 [EPOCH MONITOR] SyncOnly: fetching empty commits from GEI {} to boundary GEI {}", current_go_gei + 1, data.boundary_gei);
+                                        // Pick the first peer
+                                        let best_peer = peer_rpc.first().unwrap().clone();
+                                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], current_go_gei + 1, data.boundary_gei).await {
+                                            Ok(exec_blocks) if !exec_blocks.is_empty() => {
+                                                let mut sent = 0;
+                                                if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                                                    for (gei, data) in exec_blocks {
+                                                        if c_fn(data.as_ptr(), data.len()) {
+                                                            sent += 1;
+                                                        } else {
+                                                            warn!("⚠️ [EPOCH MONITOR] SyncOnly: C_FN failed to push GEI {}", gei);
+                                                            break;
+                                                        }
+                                                    }
+                                                    info!("✅ [EPOCH MONITOR] SyncOnly: Successfully pushed {} empty commits to Go.", sent);
+                                                } else {
+                                                    warn!("⚠️ [EPOCH MONITOR] SyncOnly: GO_CALLBACKS not initialized!");
+                                                }
+                                            }
+                                            _ => {
+                                                warn!("⚠️ [EPOCH MONITOR] SyncOnly: Failed to fetch executable blocks to reach boundary GEI.");
+                                            }
+                                        }
                                     }
                                 }
 

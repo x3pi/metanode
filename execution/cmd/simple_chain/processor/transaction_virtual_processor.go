@@ -35,7 +35,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 	}
 	// tx.SetIsDebug(true)
 	logger.Info("_virtual_ %v", tx)
-	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
+	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) || tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
 		updatedTx := tx
 		updatedTx.AddRelatedAddress(tx.FromAddress())
 		return updatedTx, nil, nil
@@ -45,7 +45,6 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
 		updatedTx := tx
 		updatedTx.AddRelatedAddress(tx.FromAddress())
-		updatedTx.AddRelatedAddress(tx.ToAddress())
 
 		inputData := tx.CallData().Input()
 
