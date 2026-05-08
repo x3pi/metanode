@@ -380,11 +380,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // Furthermore, we MUST ensure the quorum is not STALE (quorum < highest_handled)
             // due to delays in CommitVoteMonitor initialization.
             let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+            let is_schedule_pending = self.coordination_hub.is_schedule_recovery_pending();
             
             if lag == 0 && quorum_commit > 0 && quorum_commit >= highest_handled {
-                tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}). Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
-                self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
-                crate::coordination_hub::NodeConsensusPhase::Healthy
+                if is_schedule_pending {
+                    tracing::warn!("⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), but LeaderSchedule recovery is still pending! Node MUST NOT exit CatchingUp yet to prevent fork.", self.synced_commit_index, quorum_commit);
+                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                } else {
+                    tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}) and LeaderSchedule is fully recovered. Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
+                    self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
+                    crate::coordination_hub::NodeConsensusPhase::Healthy
+                }
             } else {
                 // Stay in CatchingUp even if lag is 0 but quorum is stale or 0
                 crate::coordination_hub::NodeConsensusPhase::CatchingUp
@@ -646,11 +652,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
                         if is_dag_empty
                             && quorum_commit == 0
+                            && highest_handled == 0
                             && self.coordination_hub.is_healthy()
-                            && liveness_stall_duration >= Duration::from_secs(10)
+                            && liveness_stall_duration >= Duration::from_secs(30)
                         {
                             tracing::error!(
-                                "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, phase=Healthy). \
+                                "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, highest_handled=0, phase=Healthy). \
                                  Kicking Core to force block proposal.",
                                 liveness_stall_duration.as_secs_f64()
                             );
@@ -772,49 +779,27 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 // elections → fork. Instead, ACTIVELY fetch CertifiedCommits
                                 // from peers to rebuild the schedule.
                                 //
-                                // LIVENESS ESCAPE VALVE: After 12 retries (60s), if no peer
-                                // has provided new commits, this is evidence of genuine
-                                // cluster-wide deadlock (e.g. ALL nodes restored simultaneously).
-                                // 60s accounts for internet latency, slow bootstrapping, and
-                                // packet loss in distributed deployments.
-                                // Escalate to Case C to prevent permanent stall.
+                                // We NEVER unlock based on timeout here. The system MUST wait 
+                                // until it successfully receives the commits to reconstruct the DAG.
                                 if is_schedule_pending {
-                                    if retry_count < 12 {
-                                        let num_commits: u32 = 300;
-                                        let last_boundary = (my_commit / num_commits) * num_commits;
-                                        let fetch_from = last_boundary.saturating_sub(num_commits);
-                                        tracing::warn!(
-                                            "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}/12): Peers at same commit ({}) \
-                                             but schedule_recovery_pending=true. LeaderSwapTable is stale. \
-                                             NOT unlocking (would cause fork). \
-                                             Triggering active fetch of commits {}→{} to rebuild schedule.",
-                                            retry_count + 1, my_commit, fetch_from, my_commit
-                                        );
-                                        // Trigger CommitSyncer to re-fetch the scoring range.
-                                        // By updating quorum slightly above my_commit, the
-                                        // CommitSyncer's try_schedule_once will detect lag and
-                                        // schedule fetches. The fetched CertifiedCommits will
-                                        // flow through the normal pipeline, rebuilding the
-                                        // LeaderSwapTable via update_leader_schedule_v2().
-                                        hub.update_quorum_commit_index(my_commit.saturating_add(1));
-                                        return;
-                                    }
-                                    // Case B exhausted: 12 retries × 5s = 60s of asking peers.
-                                    // Nobody has new commits. This is evidence of genuine
-                                    // cluster-wide deadlock (all nodes restored simultaneously).
-                                    // Escalate to Case C — unlock is safe because ALL nodes
-                                    // are in the same state with identical data.
+                                    let num_commits: u32 = 300;
+                                    let last_boundary = (my_commit / num_commits) * num_commits;
+                                    let fetch_from = last_boundary.saturating_sub(num_commits);
                                     tracing::warn!(
-                                        "🚨 [ACTIVE-SYNC-RECOVERY] Case B exhausted ({} retries, 60s). \
-                                         Network confirmed unable to provide commits. \
-                                         Escalating to Case C: genuine deadlock. \
-                                         Disabling reputation swaps for the epoch to prevent non-deterministic LeaderSchedule forks, \
-                                         and unlocking local committer.",
-                                        retry_count
+                                        "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}): Peers at same commit ({}) \
+                                         but schedule_recovery_pending=true. LeaderSwapTable is stale. \
+                                         NOT unlocking (would cause fork). \
+                                         Triggering active fetch of commits {}→{} to rebuild schedule.",
+                                        retry_count + 1, my_commit, fetch_from, my_commit
                                     );
-                                    inner.context.reputation_swaps_disabled_for_epoch.store(true, std::sync::atomic::Ordering::Release);
-                                    hub.set_schedule_recovery_pending(false);
-                                    // Fall through to Case C below
+                                    // Trigger CommitSyncer to re-fetch the scoring range.
+                                    // By updating quorum slightly above my_commit, the
+                                    // CommitSyncer's try_schedule_once will detect lag and
+                                    // schedule fetches. The fetched CertifiedCommits will
+                                    // flow through the normal pipeline, rebuilding the
+                                    // LeaderSwapTable via update_leader_schedule_v2().
+                                    hub.update_quorum_commit_index(my_commit.saturating_add(1));
+                                    return;
                                 }
 
                                 // ── Case C: Peers SAME + schedule IS confirmed ──
