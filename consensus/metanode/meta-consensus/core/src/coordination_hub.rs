@@ -170,9 +170,36 @@ impl ConsensusCoordinationHub {
     }
 
     /// Transition to a new consensus phase.
+    /// 
+    /// FORK-SAFETY (May 2026): This is the **choke-point guard** for ALL transitions
+    /// to Healthy. Rather than guarding each individual code path in CommitSyncer's
+    /// update_state() (which has 6+ branches that can resolve to Healthy), we block
+    /// the transition here at the single point where ALL paths converge.
+    /// 
+    /// If `startup_sync_active` is true, the node has NOT yet proven network parity
+    /// (no certified commits fetched from peers). Transitioning to Healthy would allow
+    /// the node to propose blocks with a diverged DAG view → consensus fork.
     pub fn set_phase(&self, new_phase: NodeConsensusPhase) {
         let mut w = self.phase.write();
         if *w != new_phase {
+            // ═══════════════════════════════════════════════════════════════
+            // CHOKE-POINT GUARD: Block ANY transition to Healthy if
+            // startup_sync is still active. This catches ALL code paths
+            // including bootstrap exit, update_state non-startup branch,
+            // and any future paths that might be added.
+            // ═══════════════════════════════════════════════════════════════
+            if new_phase == NodeConsensusPhase::Healthy 
+                && self.startup_sync_active.load(Ordering::Acquire) 
+            {
+                tracing::warn!(
+                    "🚫 [HUB] BLOCKED {:?} → Healthy: startup_sync still active! \
+                     Node must sync certified commits from peers before transitioning. \
+                     This prevents premature proposal generation with diverged DAG.",
+                    *w
+                );
+                return; // Refuse the transition
+            }
+
             let old_phase = *w;
             tracing::info!(
                 "🔄 [HUB] Phase transition: {:?} -> {:?}",
