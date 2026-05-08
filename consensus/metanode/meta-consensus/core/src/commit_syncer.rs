@@ -1056,9 +1056,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
         // Track synced commits: use the max of local DAG commit and current synced.
-        // FORK-SAFETY: During startup sync, don't advance from DAG state alone —
-        // the DAG can be reconstructed from peers before Go processes the commits.
-        if !self.coordination_hub.is_startup_sync_active() {
+        // FORK-SAFETY: During startup sync OR catch-up, don't advance from DAG state alone —
+        // the DAG can be reconstructed/populated from peers before Go processes the commits.
+        // Only advance when Healthy (all commits already delivered to Core).
+        if !self.coordination_hub.is_startup_sync_active() && !self.coordination_hub.is_catching_up() {
             self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
         }
 
@@ -1428,25 +1429,30 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             if local_commit > self.synced_commit_index {
                 // ═══════════════════════════════════════════════════════════
-                // FORK-SAFETY (May 2026): During startup sync after snapshot
-                // restore, the DAG is reconstructed from peers in ~200ms,
-                // causing local_commit to jump from 0 to ~1300+ instantly.
-                // If we advance synced_commit_index here, lag becomes 0,
-                // the node transitions to Healthy, and starts proposing
-                // blocks BEFORE Go Master has processed those commits.
-                // This causes the node to produce blocks with different
-                // timestamps and transaction ordering → PERMANENT FORK.
+                // FORK-SAFETY (May 2026): The DAG can be populated by peer
+                // sync MUCH faster than Go can process commits. If we advance
+                // synced_commit_index from DAG state, lag becomes 0, the node
+                // transitions to Healthy, and starts proposing blocks BEFORE
+                // Go has processed those commits → PERMANENT FORK.
                 //
-                // Fix: Only advance synced_commit_index from DAG state
-                // AFTER startup sync is complete. During startup sync,
-                // synced_commit_index is only advanced when commits are
-                // actually delivered to Go via the try_send_commits path.
+                // This happens in TWO scenarios:
+                // 1. startup_sync_active: DAG reconstructed from 0 → 1300+
+                // 2. CatchingUp: DAG fetches 51 commits in <100ms via peers
+                //
+                // Fix: Only advance synced_commit_index from DAG state when
+                // the node is Healthy (not catching up or startup syncing).
+                // During catch-up, synced_commit_index is only advanced via
+                // the try_send_commits path (line ~1597) after commits are
+                // actually delivered to Core.
                 // ═══════════════════════════════════════════════════════════
-                if self.coordination_hub.is_startup_sync_active() {
+                let is_catching_up = self.coordination_hub.is_catching_up();
+                let is_startup = self.coordination_hub.is_startup_sync_active();
+                
+                if is_startup || is_catching_up {
                     tracing::debug!(
                         "[COMMIT-SYNCER] BLOCKED synced_commit_index advance {} → {} \
-                         (startup_sync_active=true, waiting for Go to process commits)",
-                        self.synced_commit_index, local_commit
+                         (startup_sync={}, catching_up={}, waiting for commits to be delivered to Core)",
+                        self.synced_commit_index, local_commit, is_startup, is_catching_up
                     );
                 } else if local_handled_gap > 10 {
                     tracing::info!(
