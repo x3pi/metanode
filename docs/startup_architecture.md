@@ -734,11 +734,12 @@ Node phục hồi snapshot → schedule_recovery_pending = true
 → schedule_recovery_pending = false → unlock tự nhiên
 ```
 
-**Case B Exhaustion (Liveness Escape Valve):**
+**Case B Exhaustion (Liveness Escape Valve & Anti-Fork):**
 Nếu hệ thống gặp kịch bản **tất cả** các node cùng phục hồi snapshot đồng thời (ALL nodes snapshot restore):
 - Node sẽ thực hiện Case B retry (hỏi peers nhưng không ai có dữ liệu mới).
-- Sau **12 lần retry (60s)**, hệ thống coi đây là bằng chứng cluster-wide deadlock (đủ thời gian cho network bootstrap, internet latency, packet loss).
-- Node tự động xoá `schedule_recovery_pending`, escalate lên **Case C**, và an toàn unlock.
+- Sau **12 lần retry (60s)**, hệ thống coi đây là bằng chứng cluster-wide deadlock (mất vĩnh viễn dữ liệu lịch sử).
+- **Rủi ro Fork:** Nếu chỉ đơn thuần unlock, các node sẽ tự tái tạo DAG trong quá khứ một cách đồng thời, sinh ra các điểm uy tín (reputation scores) ngẫu nhiên do độ trễ mạng. Khi dùng điểm số này để cập nhật `LeaderSwapTable`, mỗi node sẽ bầu một leader khác nhau → FORK.
+- **Giải pháp (Deterministic Fallback):** Node sẽ gọi `hub.set_reputation_swaps_disabled_for_epoch(true)`, xoá `schedule_recovery_pending`, escalate lên **Case C**, và an toàn unlock. Việc vô hiệu hóa hoán đổi uy tín ép toàn bộ cụm sử dụng thuật toán `elect_leader_stake_based` (chỉ phụ thuộc vào vòng và lượng stake, 100% deterministic), triệt tiêu hoàn toàn rủi ro fork ở chu kỳ cập nhật lịch trình tiếp theo.
 
 ### 9 Kịch Bản Liveness Đã Kiểm Chứng
 
@@ -754,7 +755,7 @@ Hệ thống được thiết kế đảm bảo **luôn phục hồi và không 
 | 6 | Genesis (fresh cluster) | Stall Detector 3 (Core kick) | ✅ Kick every 10s |
 | 7 | Post-epoch transition | Stall Detector 5 (fast-forward) | ✅ Fast-forward |
 | 8 | 2 nodes snapshot restore | Case A (3 nodes quorum) | ✅ Fetch → catch up |
-| 9 | ALL 5 nodes snapshot restore | Case B × 12 → Case C (exhaustion) | ✅ Unlock ~60s |
+| 9 | ALL 5 nodes snapshot restore | Case B × 12 → Case C (disable swaps, unlock) | ✅ Unlock ~60s (No Fork) |
 
 ---
 

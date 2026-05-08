@@ -99,6 +99,10 @@ pub struct ConsensusCoordinationHub {
     /// with network-verified CertifiedCommits, ensuring the LeaderSwapTable matches the network.
     /// Set by CommitSyncer, cleared by CommitSyncer after update_leader_schedule_v2 completes.
     schedule_recovery_pending: Arc<AtomicBool>,
+    
+    /// Tracks whether reputation swaps are disabled for the remainder of this epoch.
+    /// Set to true during Case C (deadlock exhaustion) to prevent non-deterministic leader divergence.
+    reputation_swaps_disabled_for_epoch: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -112,6 +116,7 @@ impl ConsensusCoordinationHub {
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
+            reputation_swaps_disabled_for_epoch: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -295,6 +300,19 @@ impl ConsensusCoordinationHub {
     pub fn is_schedule_recovery_pending(&self) -> bool {
         self.schedule_recovery_pending.load(Ordering::Acquire)
     }
+
+    /// Disables reputation swaps for the remainder of this epoch.
+    pub fn set_reputation_swaps_disabled_for_epoch(&self, disabled: bool) {
+        let was_disabled = self.reputation_swaps_disabled_for_epoch.swap(disabled, Ordering::Release);
+        if disabled && !was_disabled {
+            tracing::warn!("⛔ [FORK-SAFETY] Reputation swaps DISABLED for the remainder of this epoch due to Case C deadlock exhaustion.");
+        }
+    }
+
+    /// Returns true if reputation swaps are disabled for the current epoch.
+    pub fn is_reputation_swaps_disabled_for_epoch(&self) -> bool {
+        self.reputation_swaps_disabled_for_epoch.load(Ordering::Acquire)
+    }
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -317,6 +335,7 @@ impl ConsensusCoordinationHub {
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
+            reputation_swaps_disabled_for_epoch: Arc::new(AtomicBool::new(false)),
         }
     }
 

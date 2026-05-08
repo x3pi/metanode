@@ -856,9 +856,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         "🚨 [ACTIVE-SYNC-RECOVERY] Case B exhausted ({} retries, 60s). \
                                          Network confirmed unable to provide commits. \
                                          Escalating to Case C: genuine deadlock. \
-                                         Clearing schedule_recovery_pending and unlocking.",
+                                         Disabling reputation swaps for the epoch to prevent non-deterministic LeaderSchedule forks, \
+                                         and unlocking local committer.",
                                         retry_count
                                     );
+                                    hub.set_reputation_swaps_disabled_for_epoch(true);
                                     hub.set_schedule_recovery_pending(false);
                                     // Fall through to Case C below
                                 }
