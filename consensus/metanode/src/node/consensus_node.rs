@@ -1121,7 +1121,7 @@ impl ConsensusNode {
         let shared_last_global_exec_index = coordination_hub.get_global_exec_index_ref();
         
         // Initialize GEI in the Hub
-        coordination_hub.set_initial_global_exec_index(storage.epoch_base_exec_index).await;
+        coordination_hub.set_initial_global_exec_index(storage.last_global_exec_index).await;
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
