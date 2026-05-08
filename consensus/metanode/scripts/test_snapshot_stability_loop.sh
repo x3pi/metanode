@@ -340,7 +340,6 @@ collect_diagnostics() {
             log '```'
             log ""
         fi
-    fi
 
         log "### Các Cột Mốc Đồng Bộ/Phục Hồi của Node $dst"
         log ""

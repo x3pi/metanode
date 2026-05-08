@@ -102,12 +102,12 @@ impl ExecutorClient {
         // Go handles dedup internally via is_authoritative_gei + GEIAuthority.
         if global_exec_index > 0 {
             let next_expected = self.next_expected_index.lock().await;
-            if global_exec_index < *next_expected {
+            if global_exec_index + expected_fragments <= *next_expected {
                 // Only log periodically or for non-empty blocks to avoid noise during replay
                 if total_tx_before > 0 || global_exec_index.is_multiple_of(1000) {
                     info!(
-                        "♻️ [REPLAY] Discarding already processed block: global={}, expected={}",
-                        global_exec_index, *next_expected
+                        "♻️ [REPLAY] Discarding already processed block: global={}..{}, expected={}",
+                        global_exec_index, global_exec_index + expected_fragments - 1, *next_expected
                     );
                 }
                 return Ok(expected_fragments);
@@ -166,13 +166,15 @@ impl ExecutorClient {
                 let fragment_txs: Vec<TransactionExe> = all_proto_txs[start..end].to_vec();
                 let fragment_gei = global_exec_index + frag_idx as u64;
 
+                let next_expected = { *self.next_expected_index.lock().await };
+                if fragment_gei < next_expected {
+                    trace!("⏭️  [REPLAY PROTECTION] Fragment GEI={} is already processed (expected={}), skipping entirely.", fragment_gei, next_expected);
+                    continue;
+                }
+
                 let block_number = {
-                    let next_expected_guard = self.next_expected_index.lock().await;
-                    if fragment_gei < *next_expected_guard {
-                        // REPLAY PROTECTION: Skip incrementing block number for already-processed fragment
-                        trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already processed, keeping BN=0", fragment_gei);
-                        0
-                    } else if self.send_buffer.lock().await.contains_key(&fragment_gei) {
+                    let _next_expected_guard = self.next_expected_index.lock().await;
+                    if self.send_buffer.lock().await.contains_key(&fragment_gei) {
                         trace!("⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0", fragment_gei);
                         0
                     } else {

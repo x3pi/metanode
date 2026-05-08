@@ -488,6 +488,7 @@ SKIP_GENESIS:
 				storage.ForceSetLastBlockNumber(metadata.BlockNumber)
 				// ALSO align the commit index to avoid Rust skipping/re-running commits
 				storage.ForceSetLastHandledCommitIndex(uint32(metadata.LastHandledCommitIdx))
+				storage.UpdateLastHandledCommitEpoch(uint64(metadata.Epoch))
 
 				// NOTE: GEIAuthority singleton is not initialized yet at this point in startup.
 				// ForceSet calls above update the storage globals, which the singleton will

@@ -1022,17 +1022,17 @@ impl ConsensusNode {
 
         // ═══════════════════════════════════════════════════════════════
         // ARCHITECTURAL FIX: Synchronous Phase-Gating
-        // Instead of letting CommitSyncer asynchronously guess if we are
-        // recovering from a snapshot, we use the authoritative Go state here.
-        // If the DAG is empty but Go has handled commits, we lock the
-        // local committer immediately before any consensus threads start.
+        // Reputation swaps are permanently disabled in Metanode (FORK-SAFETY),
+        // so we DO NOT need to lock the committer for schedule recovery.
         // ═══════════════════════════════════════════════════════════════
         if !dag_has_history {
             let handled_commits = storage.last_handled_commit_index.unwrap_or(0);
             if handled_commits >= 300 {
-                coordination_hub.set_schedule_recovery_pending(true);
+                // REMOVED: coordination_hub.set_schedule_recovery_pending(true);
+                // The schedule is 100% deterministic based on stake, so no recovery is needed.
                 info!(
-                    "🛡️ [SNAPSHOT-RECOVERY] DAG is empty but Go has handled {} commits. Pre-emptively locking local committer.",
+                    "🛡️ [SNAPSHOT-RECOVERY] DAG is empty but Go has handled {} commits. \
+                     Reputation swaps are disabled, skipping schedule recovery lock.",
                     handled_commits
                 );
             }
@@ -1126,8 +1126,13 @@ impl ConsensusNode {
 
         let shared_last_global_exec_index = coordination_hub.get_global_exec_index_ref();
         
-        // Initialize GEI in the Hub
-        coordination_hub.set_initial_global_exec_index(storage.last_global_exec_index).await;
+        let initial_gei_for_hub = if go_replay_after == 0 {
+            info!("📊 [FORK-SAFETY] go_replay_after is 0. Initializing shared_gei to epoch_base_exec_index={} for mathematical reconstruction.", storage.epoch_base_exec_index);
+            storage.epoch_base_exec_index
+        } else {
+            storage.last_global_exec_index
+        };
+        coordination_hub.set_initial_global_exec_index(initial_gei_for_hub).await;
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
