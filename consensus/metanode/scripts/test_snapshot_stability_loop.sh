@@ -31,7 +31,7 @@ CATCHUP_TIMEOUT=90
 LIVENESS_WAIT=30
 SETTLE_TIME=15
 TX_PUMP_PID=""
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node"
+LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -268,7 +268,6 @@ run_single_round() {
     for dir_name in $LEVELDB_DIRS; do
         [ -d "$dl_dir/$dir_name" ] && mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
     done
-    [ -d "$dl_dir/nomt_db" ] && mv "$dl_dir/nomt_db" "$dst_data/back_up/nomt_db"
     [ -d "$dl_dir/chaindata" ] && mv "$dl_dir/chaindata" "$dst_data/data/data/chaindata"
     [ -f "$dl_dir/metadata.json" ] && mv "$dl_dir/metadata.json" "$dst_data/data/data/metadata.json"
     [ -d "$dl_dir/back_up" ] && cp -r "$dl_dir/back_up/"* "$dst_data/back_up/" 2>/dev/null || true
@@ -282,7 +281,7 @@ run_single_round() {
     # Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a stale DAG.
     rm -rf "$dst_data/data/data/rust_consensus" 2>/dev/null || true
     # Verify NOMT stake_db has actual data files (stakeRoot=0x00 fork guard)
-    local nomt_stake_dir="$dst_data/back_up/nomt_db/stake_db"
+    local nomt_stake_dir="$dst_data/data/data/nomt_db/stake_db"
     if [ -d "$nomt_stake_dir" ]; then
         local stake_file_count=$(find "$nomt_stake_dir" -type f 2>/dev/null | wc -l)
         if [ "$stake_file_count" -eq 0 ]; then
