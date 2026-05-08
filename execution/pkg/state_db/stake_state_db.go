@@ -324,6 +324,16 @@ func (db *StakeStateDB) GetPendingRewards(validatorAddress, delegatorAddress com
 	return rewardAmount, nil
 }
 
+// RebuildKnownKeysFromValidatorList recovers knownKeys for NOMT from a cached list.
+func (db *StakeStateDB) RebuildKnownKeysFromValidatorList(validators []string) {
+	if nomtTrie, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+		for _, addrStr := range validators {
+			addr := common.HexToAddress(addrStr)
+			nomtTrie.RegisterKnownKey(addr.Bytes())
+		}
+	}
+}
+
 // --- Các hàm truy vấn ---
 
 func (db *StakeStateDB) GetAllValidators() ([]state.ValidatorState, error) {

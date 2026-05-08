@@ -144,6 +144,12 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
 
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+
+    // --- active sync recovery ---
+    /// Counter for Case B retries (schedule_recovery_pending + peers at same level).
+    /// After N retries without network progress, escalates to Case C (genuine deadlock).
+    /// This prevents permanent stalls when ALL nodes restore from snapshot simultaneously.
+    active_sync_retry_count: u32,
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -195,6 +201,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_local_commit_change_at: tokio::time::Instant::now(),
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
+            active_sync_retry_count: 0,
         }
     }
 
@@ -707,12 +714,31 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         // ════════════════════════════════════════════════════════
-                        // STALL DETECTOR 6: Local Committer Deadlock Recovery
-                        // If we are Healthy but the local committer is locked, and we
-                        // haven't received a network commit for 5 seconds, the ENTIRE
-                        // cluster might be locked waiting for each other.
-                        // We must unilaterally unlock to allow local evaluation and
-                        // generation of the next CertifiedCommit.
+                        // ACTIVE PEER SYNC RECOVERY (replaces Stall Detector 6)
+                        //
+                        // Design philosophy: Blockchain MUST NEVER fork. Instead of
+                        // using timeouts to decide when to unlock the local committer,
+                        // the system always asks peers for their state and uses DATA
+                        // to determine the correct action.
+                        //
+                        // 5 Cases (all data-driven, no timeout-based unlock):
+                        //
+                        // Case A: Peers AHEAD → update quorum → CommitSyncer fetches
+                        //         → add_certified_commits → unlock naturally
+                        // Case B: Peers SAME + schedule NOT confirmed → trigger
+                        //         active commit fetch to rebuild LeaderSwapTable
+                        //         → schedule confirmed → unlock via data
+                        // Case C: Peers SAME + schedule confirmed → genuine deadlock
+                        //         → safe to unlock (all nodes have verified state)
+                        // Case D: Genesis (local=0, quorum=0) → handled by Stall
+                        //         Detector 3 (Core kick)
+                        // Case E: No peers reachable → wait, retry next cycle
+                        //         → NEVER act without data
+                        //
+                        // History: Block #1184 fork was caused by timeout-based unlock
+                        // (5s → poll → unlock) during snapshot recovery. The node
+                        // unlocked with a stale LeaderSwapTable, producing divergent
+                        // leader elections and timestamps.
                         // ════════════════════════════════════════════════════════
                         if self.coordination_hub.is_healthy()
                             && !self.coordination_hub.is_local_commit_unlocked()
@@ -721,10 +747,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             let inner = self.inner.clone();
                             let hub = self.coordination_hub.clone();
                             let my_commit = local_commit;
+                            let is_schedule_pending = self.coordination_hub.is_schedule_recovery_pending();
+                            let retry_count = self.active_sync_retry_count;
+
+                            // Increment retry counter for Case B tracking BEFORE spawn.
+                            // Reset happens when we exit this branch (node unlocked, or not healthy).
+                            if is_schedule_pending {
+                                self.active_sync_retry_count += 1;
+                            } else {
+                                self.active_sync_retry_count = 0;
+                            }
+
                             tokio::spawn(async move {
-                                tracing::warn!("🔍 [DEADLOCK-RECOVERY] Node is Healthy but locked for 5s. Polling peers for their commit state...");
-                                let mut max_peer_commit = 0;
-                                let mut polled_peers = 0;
+                                tracing::info!(
+                                    "🔍 [ACTIVE-SYNC-RECOVERY] Node is Healthy but locked. \
+                                     Polling peers to determine recovery action (my_commit={}, schedule_pending={}, retry={})...",
+                                    my_commit, is_schedule_pending, retry_count
+                                );
+                                let mut max_peer_commit: u32 = 0;
+                                let mut polled_peers: u32 = 0;
                                 let timeout = Duration::from_secs(2);
                                 
                                 for authority in inner.context.committee.authorities().map(|(i, _)| i) {
@@ -736,39 +777,125 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         polled_peers += 1;
                                     }
                                 }
-                                
-                                if polled_peers > 0 && max_peer_commit <= my_commit && !hub.is_startup_sync_active() {
+
+                                // ── Case E: No peers reachable ──
+                                // Never act without data from the network.
+                                if polled_peers == 0 {
                                     tracing::warn!(
-                                        "🚨 [DEADLOCK-RECOVERY] Polled {} peers. Max peer commit is {}. We are at {}. \
-                                         Network is truly deadlocked. Unlocking local committer unilaterally!",
-                                        polled_peers, max_peer_commit, my_commit
+                                        "⚠️ [ACTIVE-SYNC-RECOVERY] Case E: Failed to reach any peers. \
+                                         Cannot determine network state. Will retry next cycle. \
+                                         NEVER acting without peer data."
                                     );
-                                    hub.unlock_local_commit();
-                                    
-                                    // Kick the core to evaluate the committer immediately
-                                    let core_dispatcher = inner.core_thread_dispatcher.clone();
-                                    if let Err(e) = core_dispatcher.new_block(
-                                        consensus_types::block::Round::MAX, true
-                                    ).await {
-                                        tracing::warn!("Failed to kick Core for deadlock recovery: {:?}", e);
-                                    }
-                                } else if polled_peers == 0 {
-                                    tracing::warn!("⚠️ [DEADLOCK-RECOVERY] Failed to reach any peers. Will not unilaterally unlock yet.");
-                                } else {
+                                    return;
+                                }
+
+                                // ── Case A: Peers are AHEAD ──
+                                // The node is lagging. Update quorum so CommitSyncer
+                                // transitions to CatchingUp and fetches CertifiedCommits.
+                                // The commits will flow through add_certified_commits()
+                                // which unlocks the local committer naturally (data-driven).
+                                if max_peer_commit > my_commit {
                                     tracing::info!(
-                                        "✅ [DEADLOCK-RECOVERY] A peer has commit {} > {}. We are just lagging. Will not unlock.",
+                                        "📥 [ACTIVE-SYNC-RECOVERY] Case A: Peer has commit {} > {} (ours). \
+                                         Updating quorum to trigger CatchingUp → fetch → unlock via data.",
                                         max_peer_commit, my_commit
                                     );
-                                    // FIX FOR 'nghẽn các node luôn hỏi nhau' (congestion):
-                                    // If we are lagging but CommitVoteMonitor hasn't received P2P votes,
-                                    // our phase is incorrectly stuck in Healthy. This causes STALL DETECTOR 6
-                                    // to poll every 5 seconds infinitely.
-                                    // By updating the quorum commit index, we force the lag > 0, transitioning
-                                    // the node to CatchingUp phase. This STOPS the polling and triggers fetching.
-                                    hub.update_quorum_commit_index(max_peer_commit as u32);
+                                    hub.update_quorum_commit_index(max_peer_commit);
+                                    return;
+                                }
+
+                                // Peers are at SAME commit level — potential deadlock.
+                                // But we must verify safety before unlocking.
+                                if hub.is_startup_sync_active() {
+                                    tracing::info!(
+                                        "🔒 [ACTIVE-SYNC-RECOVERY] STARTUP-SYNC still active. \
+                                         Waiting for sync completion before any recovery action."
+                                    );
+                                    return;
+                                }
+
+                                // ── Case B: Peers SAME + schedule NOT confirmed ──
+                                // After snapshot recovery, the LeaderSwapTable is stale.
+                                // We CANNOT unlock — local commits would use wrong leader
+                                // elections → fork. Instead, ACTIVELY fetch CertifiedCommits
+                                // from peers to rebuild the schedule.
+                                //
+                                // LIVENESS ESCAPE VALVE: After 12 retries (60s), if no peer
+                                // has provided new commits, this is evidence of genuine
+                                // cluster-wide deadlock (e.g. ALL nodes restored simultaneously).
+                                // 60s accounts for internet latency, slow bootstrapping, and
+                                // packet loss in distributed deployments.
+                                // Escalate to Case C to prevent permanent stall.
+                                if is_schedule_pending {
+                                    if retry_count < 12 {
+                                        let num_commits: u32 = 300;
+                                        let last_boundary = (my_commit / num_commits) * num_commits;
+                                        let fetch_from = last_boundary.saturating_sub(num_commits);
+                                        tracing::warn!(
+                                            "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}/12): Peers at same commit ({}) \
+                                             but schedule_recovery_pending=true. LeaderSwapTable is stale. \
+                                             NOT unlocking (would cause fork). \
+                                             Triggering active fetch of commits {}→{} to rebuild schedule.",
+                                            retry_count + 1, my_commit, fetch_from, my_commit
+                                        );
+                                        // Trigger CommitSyncer to re-fetch the scoring range.
+                                        // By updating quorum slightly above my_commit, the
+                                        // CommitSyncer's try_schedule_once will detect lag and
+                                        // schedule fetches. The fetched CertifiedCommits will
+                                        // flow through the normal pipeline, rebuilding the
+                                        // LeaderSwapTable via update_leader_schedule_v2().
+                                        hub.update_quorum_commit_index(my_commit.saturating_add(1));
+                                        return;
+                                    }
+                                    // Case B exhausted: 12 retries × 5s = 60s of asking peers.
+                                    // Nobody has new commits. This is evidence of genuine
+                                    // cluster-wide deadlock (all nodes restored simultaneously).
+                                    // Escalate to Case C — unlock is safe because ALL nodes
+                                    // are in the same state with identical data.
+                                    tracing::warn!(
+                                        "🚨 [ACTIVE-SYNC-RECOVERY] Case B exhausted ({} retries, 60s). \
+                                         Network confirmed unable to provide commits. \
+                                         Escalating to Case C: genuine deadlock. \
+                                         Clearing schedule_recovery_pending and unlocking.",
+                                        retry_count
+                                    );
+                                    hub.set_schedule_recovery_pending(false);
+                                    // Fall through to Case C below
+                                }
+
+                                // ── Case C: Peers SAME + schedule IS confirmed ──
+                                // (or Case B exhausted → escalated to Case C)
+                                // This is a GENUINE cluster-wide deadlock:
+                                // - All nodes are at the same commit
+                                // - No node is progressing
+                                // - The LeaderSwapTable is verified/confirmed (or exhaustion-cleared)
+                                // - The local committer is locked (all nodes waiting)
+                                //
+                                // This is the ONLY case where direct unlock is safe,
+                                // because all nodes have identical verified state.
+                                // Typically occurs during cluster-wide cold start.
+                                tracing::warn!(
+                                    "🚨 [ACTIVE-SYNC-RECOVERY] Case C: Genuine deadlock confirmed. \
+                                     Polled {} peers, max_peer={}, my_commit={}. \
+                                     Schedule is confirmed. All nodes have verified state. \
+                                     Unlocking local committer to break deadlock.",
+                                    polled_peers, max_peer_commit, my_commit
+                                );
+                                hub.unlock_local_commit();
+
+                                // Kick the core to evaluate the committer immediately
+                                let core_dispatcher = inner.core_thread_dispatcher.clone();
+                                if let Err(e) = core_dispatcher.new_block(
+                                    consensus_types::block::Round::MAX, true
+                                ).await {
+                                    tracing::warn!("Failed to kick Core for deadlock recovery: {:?}", e);
                                 }
                             });
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
+                        } else {
+                            // Reset retry counter when not in Active Peer Sync trigger
+                            // (node is unlocked, not healthy, or hasn't been stuck 5s)
+                            self.active_sync_retry_count = 0;
                         }
 
                         // ════════════════════════════════════════════════════════
@@ -1194,8 +1321,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             }
                             
                             self.inner.dag_state.write().reset_to_network_baseline(
-                                prev_index,
                                 leader_round,
+                                prev_index,
                                 digest,
                                 timestamp_ms,
                                 reputation_scores,

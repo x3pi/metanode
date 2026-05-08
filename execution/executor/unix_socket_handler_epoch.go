@@ -301,6 +301,24 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
 		logger.Info("🔍 [EPOCH] Using LIVE StakeStateDB for NOMT backend (block=%d, NOMT has no historical roots)", blockNumber)
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// CRITICAL FIX: Rebuild NOMT knownKeys from the authoritative epoch cache
+		// before calling GetAllValidators(). This guarantees that even if the node
+		// restarted and NOMT knownKeys was cleared, we recover all validators from
+		// the epoch boundary backup, preventing consensus forks.
+		// ═══════════════════════════════════════════════════════════════════════════
+		if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
+			cachedList := &pb.ValidatorInfoList{}
+			if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+				addrs := make([]string, 0, len(cachedList.Validators))
+				for _, v := range cachedList.Validators {
+					addrs = append(addrs, v.Address)
+				}
+				rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+			}
+		}
+
 		validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
 	} else {
 		// MPT/Flat/Verkle: Create historical ChainState at specific block root

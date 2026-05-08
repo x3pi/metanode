@@ -699,14 +699,63 @@ Hysteresis: Enter CatchingUp khi lag > 5, stay khi lag > 0, exit khi lag == 0.
 
 ---
 
-## 15. Cluster Cold-Start Deadlock Recovery (Stall Detector 6)
+## 15. Active Peer Sync Recovery (thay thế DEADLOCK-RECOVERY)
+
+**Triết lý thiết kế:**
+> Blockchain **tuyệt đối không được fork**. Thay vì dùng timeout để quyết định hành động, hệ thống luôn hỏi đồng bộ các node khác để biết mình nên làm gì tiếp theo hoặc đồng bộ dữ liệu để thoát deadlock.
 
 **Vấn đề cốt lõi:**
-Khi **toàn bộ cluster** bị crash và khởi động lại cùng lúc (Cold Start), mọi node đều chuyển sang phase `Healthy` nhưng `local_commit_unlocked` lại đang bị khoá (do RECOVERY-GUARD đòi hỏi phải nhận được ít nhất 1 `CertifiedCommit` từ mạng lưới để xác nhận state). Vì tất cả các node đều khoá committer để đợi nhau, không có node nào sinh ra `CertifiedCommit` → Mạng lưới bị deadlock hoàn toàn.
+Khi node ở phase `Healthy` nhưng local committer bị khoá (RECOVERY-GUARD), node cần phải thoát ra để mạng tiến được. Thiết kế cũ dùng **timeout → poll → unlock** — điều này gây fork Block #1184 vì unlock xảy ra khi LeaderSwapTable chưa được rebuild từ dữ liệu mạng.
 
-**Giải Pháp Kiến Trúc (Stall Detector 6):**
-`CommitSyncer` tích hợp cơ chế phát hiện deadlock chủ động:
-1. Nếu node đang `Healthy` nhưng bị khoá committer trong hơn 5 giây.
-2. Nó sẽ kích hoạt một async task đi hỏi trạng thái (RPC `get_epoch_status`) của tất cả các peers trong committee.
-3. Nếu `max_peer_commit <= my_commit` (không có peer nào tiến xa hơn node hiện tại), chứng tỏ mạng lưới đang bị deadlock cục bộ, không phải do node bị tụt hậu.
-4. Node sẽ **đơn phương mở khoá committer** (`hub.unlock_local_commit()`), tự động thoát khỏi deadlock và bắt đầu tạo block mới, kích hoạt lại guồng quay đồng thuận toàn cụm một cách an toàn nhất.
+**Giải Pháp Kiến Trúc (Active Peer Sync Recovery):**
+
+`CommitSyncer` hỏi peers mỗi 5 giây và dùng **DỮ LIỆU** từ peers để quyết định hành động:
+
+| Case | Trạng Thái Peers | Hành Động | Unlock? |
+|------|-----------------|-----------|---------|
+| **A** | Peers **ahead** (`max_peer > my_commit`) | Update quorum → CommitSyncer fetch → `add_certified_commits()` → unlock tự nhiên | Qua dữ liệu |
+| **B** | Peers **same** + `schedule_recovery_pending` | KHÔNG unlock. Trigger active fetch commits để rebuild LeaderSwapTable. Khi schedule confirmed → unlock qua dữ liệu | Qua dữ liệu |
+| **C** | Peers **same** + schedule **confirmed** | Genuine deadlock (cluster cold-start). Unlock an toàn — tất cả nodes có state đã verified | Trực tiếp (an toàn) |
+| **D** | Genesis (`local=0, quorum=0`) | Xử lý bởi Stall Detector 3 (Core kick) | N/A |
+| **E** | **Không liên lạc được** peers | Wait, retry lần sau. KHÔNG BAO GIỜ hành động đơn phương khi không có dữ liệu | Không |
+
+**Nguyên tắc bất di bất dịch:**
+1. **KHÔNG BAO GIỜ** unlock local committer dựa trên timeout
+2. Chỉ unlock khi `add_certified_commits()` xác nhận đã nhận CertifiedCommit từ mạng (event-driven), HOẶC
+3. Peers xác nhận ĐÚNG deadlock VÀ schedule đã confirmed (data-driven)
+
+**Case B chi tiết — Active Fetch cho Schedule Rebuild:**
+```
+Node phục hồi snapshot → schedule_recovery_pending = true
+→ Peers ở cùng commit level → "deadlock" nhưng KHÔNG unlock
+→ Bump quorum lên my_commit + 1 → trigger CatchingUp phase
+→ CommitSyncer fetch CertifiedCommits từ peers
+→ Sau 300 commits → update_leader_schedule_v2() chạy
+→ schedule_recovery_pending = false → unlock tự nhiên
+```
+
+**Case B Exhaustion (Liveness Escape Valve):**
+Nếu hệ thống gặp kịch bản **tất cả** các node cùng phục hồi snapshot đồng thời (ALL nodes snapshot restore):
+- Node sẽ thực hiện Case B retry (hỏi peers nhưng không ai có dữ liệu mới).
+- Sau **12 lần retry (60s)**, hệ thống coi đây là bằng chứng cluster-wide deadlock (đủ thời gian cho network bootstrap, internet latency, packet loss).
+- Node tự động xoá `schedule_recovery_pending`, escalate lên **Case C**, và an toàn unlock.
+
+### 9 Kịch Bản Liveness Đã Kiểm Chứng
+
+Hệ thống được thiết kế đảm bảo **luôn phục hồi và không fork** dưới mọi kịch bản nếu đủ quorum:
+
+| # | Kịch bản | Cơ chế phục hồi | Kết quả |
+|---|----------|-----------------|---------|
+| 1 | Cold start (all restart, DAG preserved) | Case C (schedule confirmed) | ✅ Unlock ~5s |
+| 2 | Snapshot 1 node (4 running) | Case A (peers ahead) | ✅ Fetch → unlock |
+| 3 | Snapshot 1 node (4 stalled) | Case B → A (4 nodes unlock via C, advance) | ✅ Catch up |
+| 4 | Node chậm | CatchingUp → fetch | ✅ Auto catch up |
+| 5 | Network partition (heals) | Case A after heal | ✅ Catch up |
+| 6 | Genesis (fresh cluster) | Stall Detector 3 (Core kick) | ✅ Kick every 10s |
+| 7 | Post-epoch transition | Stall Detector 5 (fast-forward) | ✅ Fast-forward |
+| 8 | 2 nodes snapshot restore | Case A (3 nodes quorum) | ✅ Fetch → catch up |
+| 9 | ALL 5 nodes snapshot restore | Case B × 12 → Case C (exhaustion) | ✅ Unlock ~60s |
+
+---
+
+

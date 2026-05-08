@@ -238,6 +238,20 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 	}
 }
 
+// RegisterKnownKey safely adds a key to the registry map.
+// This is used for recovering missing validators from the authoritative epoch cache.
+func (n *NomtStateTrie) RegisterKnownKey(key []byte) {
+	n.knownKeysMu.Lock()
+	defer n.knownKeysMu.Unlock()
+	if n.knownKeys == nil {
+		n.knownKeys = make(map[string][]byte)
+	}
+	hexKey := hex.EncodeToString(key)
+	n.knownKeys[hexKey] = key
+	logger.Debug("[NomtStateTrie] Registered recovered known key: %s", hexKey)
+}
+
+
 // NewNomtStateTrie creates a new NomtStateTrie backed by the given NOMT handle.
 // namespace isolates keys: different callers (AccountState, StakeState) MUST use
 // different namespaces to prevent data corruption.
