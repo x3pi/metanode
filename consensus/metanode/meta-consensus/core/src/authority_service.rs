@@ -633,54 +633,14 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             );
         }
 
-        // If current store is empty, try legacy stores (for lagging node sync)
-        let mut is_legacy = false;
-        let mut legacy_certifier_blocks = vec![];
-        if commits.is_empty() {
-            if let Some(ref legacy_manager) = self.legacy_store_manager {
-                for (epoch, legacy_store) in legacy_manager.get_all_stores() {
-                    if let Ok(legacy_commits) =
-                        legacy_store.scan_commits((commit_range.start()..=inclusive_end).into())
-                    {
-                        if !legacy_commits.is_empty() {
-                            info!(
-                                "📦 [LEGACY SYNC] Found {} commits in epoch {} store for range {:?}",
-                                legacy_commits.len(),
-                                epoch,
-                                commit_range
-                            );
-                            if let Some(c) = legacy_commits.last() {
-                                if let Ok(votes) =
-                                    legacy_store.read_commit_votes(c.index(), c.digest())
-                                {
-                                    if let Ok(blocks) = legacy_store.read_blocks(&votes) {
-                                        legacy_certifier_blocks =
-                                            blocks.into_iter().flatten().collect();
-                                    }
-                                }
-                            }
-                            commits = legacy_commits;
-                            is_legacy = true; // Mark as legacy to skip current-committee validation
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
         let mut certifier_block_refs = vec![];
 
-        // CRITICAL FIX: Skip quorum validation for Legacy commits
-        // Legacy commits were finalized in a previous epoch and verified against THAT epoch's committee.
-        // Validating them against the CURRENT committee (self.context.committee) will fail (different keys/weights).
-        if !is_legacy {
-            'commit: while let Some(c) = commits.last() {
-                let index = c.index();
-                let votes = self.store.read_commit_votes(index, c.digest())?;
-                // Bypass quorum validation for FETCH-COMMITS to fix deadlock
-                certifier_block_refs = votes;
-                break 'commit;
-            }
+        'commit: while let Some(c) = commits.last() {
+            let index = c.index();
+            let votes = self.store.read_commit_votes(index, c.digest())?;
+            // Bypass quorum validation for FETCH-COMMITS to fix deadlock
+            certifier_block_refs = votes;
+            break 'commit;
         }
 
         // Log final commits being returned
@@ -694,29 +654,18 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         } else {
             info!("⚠️ [FETCH-COMMITS] No commits to return after quorum check");
         }
-        let certifier_blocks = if is_legacy {
-            legacy_certifier_blocks
-        } else {
-            self.store
-                .read_blocks(&certifier_block_refs)?
-                .into_iter()
-                .flatten()
-                .collect()
-        };
+        
+        let certifier_blocks = self.store
+            .read_blocks(&certifier_block_refs)?
+            .into_iter()
+            .flatten()
+            .collect();
+            
         let mut commit_infos = vec![];
-        if !is_legacy {
-            for c in &commits {
-                if let Ok(Some(info)) = self.store.read_commit_info(c.index(), c.digest()) {
-                    commit_infos.push(info);
-                } else {
-                    commit_infos.push(crate::commit::CommitInfo {
-                        reputation_scores: Default::default(),
-                        committed_rounds: vec![],
-                    });
-                }
-            }
-        } else {
-            for _ in &commits {
+        for c in &commits {
+            if let Ok(Some(info)) = self.store.read_commit_info(c.index(), c.digest()) {
+                commit_infos.push(info);
+            } else {
                 commit_infos.push(crate::commit::CommitInfo {
                     reputation_scores: Default::default(),
                     committed_rounds: vec![],
