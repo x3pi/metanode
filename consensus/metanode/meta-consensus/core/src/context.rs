@@ -31,6 +31,8 @@ pub struct Context {
     pub metrics: Arc<Metrics>,
     /// Access to local clock
     pub clock: Arc<Clock>,
+    /// FORK-SAFETY: Global flag to disable reputation swaps when recovering from Case C deadlock
+    pub reputation_swaps_disabled_for_epoch: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Context {
@@ -51,6 +53,7 @@ impl Context {
             protocol_config,
             metrics,
             clock,
+            reputation_swaps_disabled_for_epoch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

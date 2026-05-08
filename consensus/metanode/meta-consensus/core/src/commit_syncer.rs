@@ -860,7 +860,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                          and unlocking local committer.",
                                         retry_count
                                     );
-                                    hub.set_reputation_swaps_disabled_for_epoch(true);
+                                    inner.context.reputation_swaps_disabled_for_epoch.store(true, std::sync::atomic::Ordering::Release);
                                     hub.set_schedule_recovery_pending(false);
                                     // Fall through to Case C below
                                 }

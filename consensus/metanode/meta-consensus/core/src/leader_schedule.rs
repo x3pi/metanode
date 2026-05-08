@@ -211,7 +211,7 @@ impl LeaderSchedule {
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {
         let is_reputation_swaps_disabled = std::env::var("DISABLE_REPUTATION_SWAPS").is_ok()
             || std::env::var("SINGLE_NODE_DEBUG").is_ok()
-            || self.context.coordination_hub.is_reputation_swaps_disabled_for_epoch();
+            || self.context.reputation_swaps_disabled_for_epoch.load(std::sync::atomic::Ordering::Acquire);
             
         cfg_if::cfg_if! {
             // TODO: we need to differentiate the leader strategy in tests, so for
