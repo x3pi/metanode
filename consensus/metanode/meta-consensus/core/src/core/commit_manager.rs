@@ -71,13 +71,13 @@ impl Core {
         }
 
         // DETERMINISTIC RECOVERY GUARD:
-        // After successfully processing CertifiedCommits from the network WHILE HEALTHY,
+        // After successfully processing CertifiedCommits from the network,
         // unlock the local committer. This ensures the node observes at least one
         // network-agreed commit after catching up, healing any DAG sparseness
         // before evaluating local timestamps.
         // FORK-PREVENTION: Do NOT unlock if STARTUP-SYNC is active. The DAG is still
         // accumulating historical blocks and is too sparse to safely evaluate local commits.
-        if commits_count > 0 && self.coordination_hub.is_healthy() && !self.coordination_hub.is_startup_sync_active() {
+        if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
             self.coordination_hub.unlock_local_commit();
         }
 

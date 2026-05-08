@@ -407,9 +407,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         let next_phase = if lag > 50_000 {
             crate::coordination_hub::NodeConsensusPhase::StateSyncing
-        } else if startup_sync_active && lag > 0 {
-            // Post-startup: stay in CatchingUp until fully synced to prevent fork
-            crate::coordination_hub::NodeConsensusPhase::CatchingUp
+        } else if startup_sync_active {
+            // [BREAKTHROUGH FIX]: STRICT MATHEMATICAL PHASE-GATE
+            // Node is recovering from snapshot. We MUST NOT enter Healthy unless
+            // we have absolute mathematical proof that synced_commit matches a REAL quorum.
+            if lag == 0 && quorum_commit > 0 {
+                tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} == quorum={}). Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
+                self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
+                crate::coordination_hub::NodeConsensusPhase::Healthy
+            } else {
+                // Stay in CatchingUp even if lag is 0 but quorum is 0 (waiting for discovery/seed)
+                crate::coordination_hub::NodeConsensusPhase::CatchingUp
+            }
         } else if is_currently_catching_up && lag > 0 {
             // Already catching up — stay until fully synced
             crate::coordination_hub::NodeConsensusPhase::CatchingUp
@@ -457,13 +466,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 } else {
                     let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
                     if is_network_polled {
-                        // FIX: No more fixed 5s timeout. We only assume genuine genesis
-                        // when STARTUP-SYNC explicitly confirms peers have been polled.
                         tracing::info!(
                             "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after network poll). \
                              Transitioning to {:?} to allow block 1 proposal.",
                             next_phase
                         );
+                        if self.coordination_hub.is_startup_sync_active() {
+                            self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF for Genesis
+                        }
                         self.transition_phase_and_kick(next_phase);
                     } else {
                         // Still waiting for network poll to finish — stay in Bootstrapping
@@ -474,26 +484,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             } else if quorum_commit > 0 {
                 // Snapshot restart: Go has state, wait for quorum detection
-                // FORK-PREVENTION (May 2026): During snapshot restore, force
-                // CatchingUp (not Healthy) even if lag appears to be 0.
-                // The DAG may have fast-forwarded synced_commit_index but
-                // blocks haven't been replayed through Go yet. Going directly
-                // to Healthy would enable proposals prematurely → fork.
-                let safe_phase = if startup_sync_active && lag > 0 {
-                    tracing::info!(
-                        "🛡️ [BOOTSTRAP] Snapshot restore: forcing CatchingUp (lag={}) \
-                         instead of {:?} to prevent premature proposals.",
-                        lag, next_phase
-                    );
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                } else {
-                    next_phase
-                };
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
-                    quorum_commit, safe_phase
+                    quorum_commit, next_phase
                 );
-                self.transition_phase_and_kick(safe_phase);
+                self.transition_phase_and_kick(next_phase);
             } else {
                 let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
                 if is_network_polled {

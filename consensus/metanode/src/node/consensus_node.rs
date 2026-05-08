@@ -2578,17 +2578,16 @@ impl ConsensusNode {
             let guard_hub = coordination_hub.clone();
             let guard_stp = system_transaction_provider.clone();
             tokio::spawn(async move {
-                tracing::info!("🛡️ [DAG-GATE] Waiting for consensus DAG to fully catch up to Go state (phase == Healthy)...");
+                tracing::info!("🛡️ [DAG-GATE] Waiting for CommitSyncer to explicitly complete historical sync...");
                 loop {
-                    if guard_hub.is_healthy_stable() {
-                        tracing::info!("✅ [DAG-GATE] Consensus DAG is fully synced! Releasing startup_sync_active lock.");
-                        guard_hub.set_startup_sync_active(false);
+                    // [BREAKTHROUGH FIX]: Passive Observer Mode
+                    // We no longer read is_healthy_stable() which causes a polling race condition.
+                    // Instead, CommitSyncer will EXPLICITLY set startup_sync_active to false
+                    // only when exact mathematical parity is achieved (synced == quorum).
+                    if !guard_hub.is_startup_sync_active() {
+                        tracing::info!("✅ [DAG-GATE] CommitSyncer explicitly unlocked node! Notifying SystemTransactionProvider.");
                         // FIX 7: Notify SystemTransactionProvider that node is Healthy.
                         // This starts the auto-unsuppress timer (2*epoch_duration).
-                        // If cluster has other healthy nodes → they trigger EndOfEpoch → 
-                        // update_epoch() clears suppression BEFORE auto-unsuppress fires.
-                        // If ALL nodes restart simultaneously → auto-unsuppress kicks in after
-                        // 2*epoch_duration → at least one node triggers EndOfEpoch → others follow.
                         guard_stp.notify_healthy();
                         break;
                     }
