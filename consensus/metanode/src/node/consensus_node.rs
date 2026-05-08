@@ -1670,6 +1670,24 @@ impl ConsensusNode {
                                         );
                                         storage.current_epoch = post_sync_epoch;
                                         commit_processor.update_epoch(post_sync_epoch);
+
+                                        // CRITICAL FIX: Fetch and populate the committee for the new epoch!
+                                        // Without this, CommitProcessor's `epoch_eth_addresses` map is missing
+                                        // the committee for the new epoch, causing `resolve_leader_address`
+                                        // to return an empty leader address for subsequent blocks, which
+                                        // alters the ExtraData and causes a block hash fork.
+                                        if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(post_sync_epoch).await {
+                                            if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, post_sync_epoch) {
+                                                let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                                let mut map = epoch_eth_addresses_arc.write().await;
+                                                map.insert(post_sync_epoch, new_eth_addrs);
+                                                tracing::info!("🔄 [STARTUP-SYNC] Populated epoch_eth_addresses for epoch {}", post_sync_epoch);
+                                            } else {
+                                                tracing::error!("🚨 [STARTUP-SYNC] Failed to build committee ETH addresses for epoch {}", post_sync_epoch);
+                                            }
+                                        } else {
+                                            tracing::error!("🚨 [STARTUP-SYNC] Failed to fetch epoch boundary data for epoch {}", post_sync_epoch);
+                                        }
                                     }
                                     }
                                 }
