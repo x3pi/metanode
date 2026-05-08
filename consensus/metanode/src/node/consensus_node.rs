@@ -1021,24 +1021,45 @@ impl ConsensusNode {
         };
 
         let go_replay_after = if config.executor_read_enabled {
-            if let Some(commit_index) = storage.last_handled_commit_index {
-                // FORK-SAFETY FIX v5: Detect snapshot at epoch boundary!
-                // If we restored a snapshot at an epoch boundary, Go's last_handled_commit_index
-                // is the index from the PREVIOUS epoch. We must reset it to 0 so the new
-                // epoch's CommitSyncer starts fresh and doesn't fetch old epoch commits.
-                if !dag_has_history && storage.last_global_exec_index == storage.epoch_base_exec_index {
-                    info!(
-                        "🔑 [GO-AUTH GEI] Snapshot at epoch boundary detected (GEI=Base={}). Resetting go_replay_after=0",
-                        storage.last_global_exec_index
-                    );
-                    0
-                } else {
-                    info!(
-                        "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
-                        commit_index
-                    );
+            // ═══════════════════════════════════════════════════════════════
+            // FORK-SAFETY FIX v6: ALWAYS reset go_replay_after=0 when DAG
+            // is wiped (snapshot restore), regardless of epoch boundary.
+            //
+            // ROOT CAUSE (May 2026): Go's last_handled_commit_index is a
+            // CUMULATIVE value across ALL epochs (e.g., 1425 from epoch 1).
+            // After snapshot restore into epoch 2, the new DAG starts with
+            // commit_index=1. CommitProcessor was set to expect commit 1426,
+            // which will NEVER arrive in epoch 2 (~400 commits max).
+            // This caused a permanent DEADLOCK: CommitProcessor skips all
+            // incoming commits, Go block number freezes, State Root diverges.
+            //
+            // The old condition (!dag_has_history && GEI == epoch_base) only
+            // caught epoch-boundary snapshots. Mid-epoch snapshots (the common
+            // case) were missed entirely.
+            //
+            // FIX: When DAG is empty, we are in a snapshot restore scenario.
+            // Always set go_replay_after=0. The CommitProcessor's FAST-FORWARD
+            // guard (commit_index <= go_last_commit_index) and the executor's
+            // GEI REPLAY PROTECTION (next_expected_index) will correctly skip
+            // commits that Go has already executed.
+            // ═══════════════════════════════════════════════════════════════
+            if !dag_has_history && storage.current_epoch > 0 {
+                info!(
+                    "🔑 [GO-AUTH GEI] Snapshot restore detected (empty DAG, epoch={}). \
+                     Resetting go_replay_after=0 to prevent cross-epoch commit index deadlock. \
+                     Go last_handled_commit_index={:?}, GEI={}, epoch_base={}",
+                    storage.current_epoch,
+                    storage.last_handled_commit_index,
+                    storage.last_global_exec_index,
+                    storage.epoch_base_exec_index,
+                );
+                0
+            } else if let Some(commit_index) = storage.last_handled_commit_index {
+                info!(
+                    "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
                     commit_index
-                }
+                );
+                commit_index
             } else {
                 warn!(
                     "⚠️ [GO-AUTH GEI] LastHandledCommitIndex not available from StorageSetup. \
@@ -1926,6 +1947,27 @@ impl ConsensusNode {
                             "✅ [CONSISTENCY CHECK] Post-sync state OK: block={}, gei={}, commit_index={}, epoch={}",
                             block_num, gei, commit_idx, go_epoch
                         );
+                    }
+
+                    // ═══════════════════════════════════════════════════════════════
+                    // SAFETY NET (May 2026): Detect cross-epoch deadlock.
+                    // If go_replay_after is impossibly high for the current epoch,
+                    // CommitProcessor will never receive a matching commit_index.
+                    // This catches edge cases missed by the primary go_replay_after fix.
+                    // ═══════════════════════════════════════════════════════════════
+                    if commit_processor.go_last_commit_index > 0 && commit_idx > 0 {
+                        // If CommitProcessor's go_last_commit_index >> Go's actual commit_index,
+                        // we have a cross-epoch mismatch. Force reset.
+                        if commit_processor.go_last_commit_index > commit_idx + 100 {
+                            tracing::error!(
+                                "🚨 [SAFETY NET] Cross-epoch deadlock detected! \
+                                 CommitProcessor.go_last_commit_index={} >> Go.commit_index={}. \
+                                 Resetting to prevent permanent block stall.",
+                                commit_processor.go_last_commit_index, commit_idx
+                            );
+                            commit_processor.go_last_commit_index = commit_idx;
+                            commit_processor.next_expected_index = commit_idx + 1;
+                        }
                     }
                 }
                 Err(e) => {
