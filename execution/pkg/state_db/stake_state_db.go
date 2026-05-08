@@ -679,10 +679,23 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		logger.Debug("Calculated new intermediate hash for stake state", "newHash", newHash)
 		fileLogger.Info("IntermediateRoot: hasChanges", newHash)
 
+		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
+		if newHash == (common.Hash{}) {
+			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 AFTER changes! "+
+				"NOMT stake_db handle is likely corrupted. batchKeys=%d",
+				len(batchKeys))
+		}
+
 		return newHash, nil
 	} else {
 		nHash := db.trie.Hash()
 		fileLogger.Info("IntermediateRoot: nHash", nHash)
+
+		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
+		if nHash == (common.Hash{}) {
+			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 (no changes). "+
+				"NOMT stake_db handle is uninitialized or corrupted.")
+		}
 
 		return nHash, nil // Return current hash if no changes
 	}

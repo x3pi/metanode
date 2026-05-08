@@ -1606,6 +1606,15 @@ impl ConsensusNode {
                                 if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
                                     coordination_hub.set_initial_global_exec_index(new_gei).await;
                                     
+                                    // CRITICAL FIX: Also update the shared GEI tracker used by CommitProcessor.
+                                    // Without this, CommitProcessor starts incrementing GEI from its stale pre-sync value,
+                                    // passing incorrect GEIs to Go, which Go blindly accepts → hashes diverge across nodes.
+                                    {
+                                        let mut gei_guard = shared_last_global_exec_index.lock().await;
+                                        *gei_guard = new_gei;
+                                        tracing::info!("🔄 [STARTUP-SYNC] Updated shared_last_global_exec_index to {}", new_gei);
+                                    }
+                                    
                                     // CRITICAL FIX: Query Go DIRECTLY for the updated lastHandledCommitIndex
                                     // instead of reading stale Rust persistence files.
                                     //

@@ -381,6 +381,7 @@ cmd_start() {
         fi
         log_warn "Chế độ --fresh: Dừng tất cả session cũ + kill orphan processes..."
         cmd_stop
+        pkill -9 -f "simple_chain" 2>/dev/null || true
         echo ""
     fi
 
@@ -520,7 +521,7 @@ cmd_stop() {
         local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
         if [ $remaining -gt 0 ]; then
             log_warn "⚠️  Vẫn còn ${remaining} orphan → SIGKILL"
-            pkill -KILL -f "simple_chain.*config-" 2>/dev/null || true
+            pkill -9 -f "simple_chain.*config-" 2>/dev/null || true
             sleep 1
         fi
         log_info "✅ Đã dọn sạch orphan processes"

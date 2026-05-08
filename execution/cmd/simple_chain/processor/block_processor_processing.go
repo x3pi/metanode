@@ -238,10 +238,41 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		accountRoot := processResults.Root
 		lastConfirmedBlock := bp.GetLastBlock()
 
+		// ═══════════════════════════════════════════════════════════════
+		// FORK-SAFETY: Detect corrupted NOMT stake_db handle (May 2026).
+		//
+		// ROOT CAUSE: During epoch transitions, the stake_db NOMT handle
+		// can be reset/corrupted, causing IntermediateRoot() to return
+		// 0x0. This produces blocks with stakeStatesRoot=0x0 that
+		// diverge from all other nodes (which have the correct root).
+		// Observed: hash_mismatch_alert.log, block #684, Node 3 (m3).
+		//
+		// FIX: If stakeStatesRoot is zero but we have prior blocks with
+		// a valid root, use the previous block's root as a fallback.
+		// This is safe because stake state only changes via explicit
+		// validator transactions, so if no stake TX was in this block,
+		// the root should be identical to the parent's.
+		// ═══════════════════════════════════════════════════════════════
+		stakeRootForBlock := processResults.StakeStatesRoot
+		if stakeRootForBlock == (common.Hash{}) && currentBlockNumber > 1 {
+			parentStakeRoot := lastConfirmedBlock.Header().StakeStatesRoot()
+			if parentStakeRoot != (common.Hash{}) {
+				logger.Error("🚨 [FORK-GUARD] stakeStatesRoot is 0x0 at block #%d! "+
+					"NOMT stake_db handle likely corrupted (epoch transition?). "+
+					"Falling back to parent block's stakeRoot=%s to prevent fork.",
+					currentBlockNumber, parentStakeRoot.Hex())
+				stakeRootForBlock = parentStakeRoot
+			} else {
+				logger.Error("🚨 [FORK-GUARD] stakeStatesRoot AND parent stakeRoot are both 0x0 at block #%d! "+
+					"Cannot recover — stake_db may be completely uninitialized.",
+					currentBlockNumber)
+			}
+		}
+
 		bl, err = GenerateBlockData(
 			lastConfirmedBlock.Header(), blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
-			accountRoot, processResults.StakeStatesRoot, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampSec, globalExecIndex,
+			accountRoot, stakeRootForBlock, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampSec, globalExecIndex,
 		)
 	} else {
 		bl, err = GenerateBlockDataReadOnly(

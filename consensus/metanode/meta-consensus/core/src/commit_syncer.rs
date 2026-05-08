@@ -150,6 +150,15 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// After N retries without network progress, escalates to Case C (genuine deadlock).
     /// This prevents permanent stalls when ALL nodes restore from snapshot simultaneously.
     active_sync_retry_count: u32,
+
+    // --- FORK-SAFETY: network-validated commit gate (May 2026) ---
+    /// Counts the number of certified commits actually fetched and processed from
+    /// the network since the last time startup_sync_active was set. This prevents
+    /// a premature CatchingUp→Healthy transition where synced_commit_index is
+    /// seeded from baseline (matching quorum_commit on first check) but no actual
+    /// network sync has occurred. The node MUST have processed at least 1 real
+    /// commit from peers before it can clear startup_sync_active.
+    network_synced_commits: u64,
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -202,6 +211,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
             active_sync_retry_count: 0,
+            network_synced_commits: 0,
         }
     }
 
@@ -383,11 +393,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let is_schedule_pending = self.coordination_hub.is_schedule_recovery_pending();
             
             if lag == 0 && quorum_commit > 0 && quorum_commit >= highest_handled {
-                if is_schedule_pending {
+                // ════════════════════════════════════════════════════════════════
+                // FORK-SAFETY GATE (May 2026): Require network-validated commits.
+                //
+                // ROOT CAUSE: After snapshot restore + baseline fast-forward,
+                // synced_commit_index is seeded from the DAG baseline to match
+                // quorum_commit. This makes lag=0 on the VERY FIRST check
+                // (200ms after entering CatchingUp), even though zero actual
+                // commits were fetched from the network. The node transitions
+                // to Healthy with a diverged DAG view → fork.
+                //
+                // FIX: Require at least 1 certified commit to have been
+                // actually fetched and processed from peers before allowing
+                // the transition. This ensures the DAG has real network data.
+                // ════════════════════════════════════════════════════════════════
+                if self.network_synced_commits == 0 {
+                    tracing::warn!(
+                        "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
+                         but network_synced_commits=0 — no actual commits fetched from peers yet. \
+                         Blocking CatchingUp→Healthy to prevent baseline-only false parity.",
+                        self.synced_commit_index, quorum_commit
+                    );
+                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
+                } else if is_schedule_pending {
                     tracing::warn!("⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), but LeaderSchedule recovery is still pending! Node MUST NOT exit CatchingUp yet to prevent fork.", self.synced_commit_index, quorum_commit);
                     crate::coordination_hub::NodeConsensusPhase::CatchingUp
                 } else {
-                    tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}) and LeaderSchedule is fully recovered. Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
+                    tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, network_synced={}) and LeaderSchedule is fully recovered. Explicitly unlocking node.", self.synced_commit_index, quorum_commit, self.network_synced_commits);
                     self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
                     crate::coordination_hub::NodeConsensusPhase::Healthy
                 }
@@ -1552,9 +1584,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             // Once commits and blocks are sent to Core, ratchet up synced_commit_index
             self.synced_commit_index = self.synced_commit_index.max(fetched_commit_range.end());
+            // FORK-SAFETY: Track that we fetched REAL commits from the network.
+            // This counter gates the CatchingUp→Healthy transition to prevent
+            // false parity from baseline-only synced_commit_index.
+            let commits_in_range = fetched_commit_range.end().saturating_sub(fetched_commit_range.start()) + 1;
+            self.network_synced_commits += commits_in_range as u64;
             info!(
-                "[NODE4-DEBUG] synced_commit_index advanced to {}",
-                self.synced_commit_index
+                "[NODE4-DEBUG] synced_commit_index advanced to {} (network_synced_commits={})",
+                self.synced_commit_index, self.network_synced_commits
             );
         }
 
