@@ -738,8 +738,26 @@ Node phục hồi snapshot → schedule_recovery_pending = true
 Nếu hệ thống gặp kịch bản **tất cả** các node cùng phục hồi snapshot đồng thời (ALL nodes snapshot restore):
 - Node sẽ thực hiện Case B retry (hỏi peers nhưng không ai có dữ liệu mới).
 - Sau **12 lần retry (60s)**, hệ thống coi đây là bằng chứng cluster-wide deadlock (mất vĩnh viễn dữ liệu lịch sử).
-- **Rủi ro Fork:** Nếu chỉ đơn thuần unlock, các node sẽ tự tái tạo DAG trong quá khứ một cách đồng thời, sinh ra các điểm uy tín (reputation scores) ngẫu nhiên do độ trễ mạng. Khi dùng điểm số này để cập nhật `LeaderSwapTable`, mỗi node sẽ bầu một leader khác nhau → FORK.
-- **Giải pháp (Deterministic Fallback):** Node sẽ gọi `hub.set_reputation_swaps_disabled_for_epoch(true)`, xoá `schedule_recovery_pending`, escalate lên **Case C**, và an toàn unlock. Việc vô hiệu hóa hoán đổi uy tín ép toàn bộ cụm sử dụng thuật toán `elect_leader_stake_based` (chỉ phụ thuộc vào vòng và lượng stake, 100% deterministic), triệt tiêu hoàn toàn rủi ro fork ở chu kỳ cập nhật lịch trình tiếp theo.
+- Quá trình này sẽ unlock an toàn vì mọi node đều chuyển sang sử dụng thuật toán `elect_leader_stake_based` (được bảo vệ bởi cơ chế Strict Deterministic Leader Election) mà không sợ rủi ro fork.
+
+---
+
+## 16. Strict Deterministic Leader Election (Anti-Fork v5)
+
+**Vấn đề cốt lõi:**
+Trong cơ chế nguyên thủy của Mysticeti, `Reputation-based Leader Swaps` được dùng để đổi leader khi một node hoạt động kém. Điểm uy tín (reputation) được tính toán thuần túy dựa trên **lịch sử DAG cục bộ**.
+Khi hệ thống có cơ chế Snapshot, node vừa phục hồi (vd: m3) sẽ **bị xóa sạch lịch sử DAG** trước thời điểm snapshot. Trong khi đó, các node chạy liên tục (vd: m0) vẫn giữ nguyên lịch sử DAG.
+Hậu quả: 
+1. Node phục hồi tính ra điểm uy tín khác với node liên tục.
+2. Từ đó, hai node bầu ra **hai Leader khác nhau** cho cùng một vòng (Round).
+3. Khi Leader bị lệch, `CommittedSubDag` sẽ bao gồm các tập hợp giao dịch hoàn toàn khác nhau.
+4. Dẫn đến Block Hash và State Root phân kỳ hoàn toàn tại cùng một Global Execution Index (GEI).
+
+**Giải Pháp Kiến Trúc:**
+Metanode ưu tiên "Sự an toàn tuyệt đối (Zero-Fork) hơn là Tối ưu hóa độ trễ nhỏ".
+Tất cả các cơ chế Reputation-based Leader Swaps bị **vô hiệu hóa hoàn toàn**. 
+Thuật toán `elect_leader` luôn luôn trả về `elect_leader_stake_based` - một thuật toán 100% Deterministic phụ thuộc duy nhất vào số vòng (Round) và lượng Stake của Validators.
+Điều này đảm bảo cho dù node vừa khởi động lại hay đã chạy 1 năm, chúng đều luôn thống nhất một Leader duy nhất cho mạng lưới, triệt tiêu hoàn toàn rủi ro Fork do Snapshot.
 
 ### 9 Kịch Bản Liveness Đã Kiểm Chứng
 
