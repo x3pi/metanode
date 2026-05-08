@@ -613,7 +613,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         );
 
         // First try to get commits from current store
-        let mut commits = self
+        let commits = self
             .store
             .scan_commits((commit_range.start()..=inclusive_end).into())?;
 
