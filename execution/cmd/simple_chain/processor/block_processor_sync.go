@@ -776,6 +776,38 @@ PROCESS_BLOCK:
 		logger.Error("❌ [TX FLOW] Failed to process transactions for block #%d: %v", *currentBlockNumber, err)
 		return // Skip this commit, wait for next one
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LATE SILENT DROP (May 2026): If all transactions were duplicates, we must
+	// drop the block here to maintain deterministic parity with continuous nodes
+	// that dropped it early via Rust tx_recycler.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
+		logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
+		
+		// Invalidate state to ensure next block reads fresh from NOMT
+		bp.chainState.InvalidateAllState()
+		
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+		
+		if globalExecIndex > 0 {
+			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			// Process any pending blocks that are now in order
+			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+				logger.Info("✅ [FORK-SAFETY] Processing pending block with global_exec_index=%d", *nextExpectedGlobalExecIndex)
+				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+				epochData = pendingBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
+			} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+				logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+				epochData = skippedBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
+			}
+		}
+		return
+	}
+
 	logger.Debug("[PERF] ProcessTransactions: %d txs in %v (%.0f tx/s) for block #%d",
 		len(allTransactions), processTxDuration, float64(len(allTransactions))/processTxDuration.Seconds(), *currentBlockNumber)
 

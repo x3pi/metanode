@@ -276,7 +276,9 @@ impl ExecutorClient {
             // CRITICAL FORK-SAFETY v7: Only increment block number if the commit 
             // will actually result in a Go block (has txs, is epoch boundary, or has system txs).
             // This prevents artificial block inflation during STARTUP-SYNC replay.
-            if total_after_dedup > 0 || is_epoch_boundary || !all_system_txs.is_empty() {
+            // We use total_tx_before because it's deterministic across all nodes regardless
+            // of tx_recycler deduplication state.
+            if total_tx_before > 0 || is_epoch_boundary || !all_system_txs.is_empty() {
                 let bn = *next_bn;
                 *next_bn += 1;
                 bn
