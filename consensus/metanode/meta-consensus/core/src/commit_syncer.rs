@@ -161,6 +161,65 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     network_synced_commits: u64,
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// STATE MACHINE TYPES (May 2026 Refactor)
+//
+// These types formalize the phase determination logic:
+//   - PhaseStateInput: immutable snapshot of all state needed for decisions
+//   - PhaseTransitionDecision: describes WHAT to do (no side effects)
+//   - CATCHING_UP_ENTER_THRESHOLD: hysteresis constant
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Hysteresis threshold for entering CatchingUp from Healthy.
+/// Prevents rapid CatchingUp↔Healthy oscillation when the node is
+/// perpetually 1-2 commits behind:
+///   - Enter CatchingUp: lag > CATCHING_UP_ENTER_THRESHOLD
+///   - Stay in CatchingUp: lag > 0
+///   - Enter Healthy: lag == 0
+const CATCHING_UP_ENTER_THRESHOLD: u32 = 5;
+
+/// All inputs needed for phase determination — gathered once, used immutably.
+/// This struct intentionally captures a snapshot of all state so that
+/// `determine_phase()` is a pure function with no side effects.
+#[derive(Debug, Clone, Copy)]
+struct PhaseStateInput {
+    /// Current phase of the node.
+    current_phase: crate::coordination_hub::NodeConsensusPhase,
+    /// How far behind the network quorum (quorum_commit - synced_commit_index).
+    lag: u32,
+    /// Highest commit index confirmed by network quorum.
+    quorum_commit: u32,
+    /// Highest commit index the Go execution layer has processed.
+    highest_handled: u32,
+    /// Highest commit index the CommitSyncer has synced to.
+    synced_commit_index: u32,
+    /// Number of certified commits actually fetched from network peers.
+    /// Zero means only baseline-seeded, not real network data.
+    network_synced_commits: u64,
+    /// Whether STARTUP-SYNC is active (post-snapshot recovery in progress).
+    startup_sync_active: bool,
+    /// Whether Go has completed its startup peer-sync.
+    go_sync_completed: bool,
+    /// Whether the LeaderSchedule needs re-confirmation after snapshot recovery.
+    schedule_recovery_pending: bool,
+}
+
+/// Result of phase determination — describes WHAT should happen, not HOW.
+/// The `apply_transition()` method handles all side effects.
+#[derive(Debug)]
+enum PhaseTransitionDecision {
+    /// Stay in current phase, no action needed.
+    Hold { reason: &'static str },
+    /// Transition to a new phase.
+    Transition { to: crate::coordination_hub::NodeConsensusPhase },
+    /// Transition to new phase AND clear startup_sync_active first.
+    /// Used when all startup recovery gates have been passed.
+    TransitionAndUnlock { to: crate::coordination_hub::NodeConsensusPhase },
+    /// Seed the CommitVoteMonitor with execution state to break bootstrap deadlock.
+    /// Used when Go has state but Rust DAG is empty and quorum == 0.
+    SeedQuorum { commit_index: u32 },
+}
+
 impl<C: NetworkClient> CommitSyncer<C> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -342,187 +401,264 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-    fn update_state(&mut self) {
-        let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
+    // ═══════════════════════════════════════════════════════════════════════
+    // STATE MACHINE: Refactored May 2026
+    //
+    // The phase determination logic is structured as a clean state machine:
+    //
+    //   update_state()                    — orchestrator
+    //     ├── gather_state_input()        — snapshot all state (pure, no side effects)
+    //     ├── determine_phase()           — match-based logic → TransitionDecision
+    //     │     ├── bootstrap_exit()      — Initializing/Bootstrapping exit rules
+    //     │     └── startup_sync_exit()   — CatchingUp exit during startup recovery
+    //     └── apply_transition()          — execute side effects
+    //
+    // Design principles:
+    //   1. gather → decide → apply (no side effects during decision)
+    //   2. Every path is a named match arm (auditable, no hidden fallthrough)
+    //   3. TransitionDecision describes WHAT, apply_transition() does HOW
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// All inputs needed for phase determination — gathered once, used immutably.
+    fn gather_state_input(&self) -> PhaseStateInput {
+        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
         let quorum_commit = std::cmp::max(
             self.inner.commit_vote_monitor.quorum_commit_index(),
             self.coordination_hub.get_quorum_commit_index(),
         );
-        let _local_commit = self.inner.dag_state.read().last_commit_index();
-
         let current_phase = self.coordination_hub.get_phase();
-
-        // Phase is determined by how far the CommitSyncer has synced with the network,
-        // rather than the physical local_commit. During snapshot restore, local_commit
-        // stays at 0 until the next commit triggers a fast-forward, but synced_commit_index
-        // is eagerly advanced. Using synced_commit_index prevents an infinite CatchingUp deadlock.
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
 
-        // ════════════════════════════════════════════════════════════════════
-        // HYSTERESIS: Prevent rapid CatchingUp↔Healthy oscillation.
-        //
-        // Without hysteresis, a recovering node perpetually 1-2 commits behind
-        // oscillates phase every ~20ms:
-        //   Healthy → new commit → lag=1 → CatchingUp → fetch 1 → lag=0 → Healthy → repeat
-        //
-        // Each Healthy transition fires transition_phase_and_kick() which spawns
-        // a Core kick task, creating a thundering herd that overwhelms the system.
-        //
-        // Fix: Use different thresholds for entering vs leaving CatchingUp:
-        //   - Enter CatchingUp: lag > 5 (tolerate small jitter during live consensus)
-        //   - Stay in CatchingUp: lag > 0 (once catching up, finish completely)
-        //   - Enter Healthy: lag == 0 (only when fully synced)
-        // ════════════════════════════════════════════════════════════════════
-        let catching_up_enter_threshold = 5;
-        let is_currently_catching_up = current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp;
-        // FORK-PREVENTION (May 2026): During post-startup alignment (startup_sync_active),
-        // ANY lag should keep the node in CatchingUp. Without this, the node can transition
-        // to Healthy while the DAG is still empty after snapshot restore, causing it to
-        // produce its own blocks instead of replaying the cluster's committed blocks.
-        let startup_sync_active = self.coordination_hub.is_startup_sync_active();
+        PhaseStateInput {
+            current_phase,
+            lag,
+            quorum_commit,
+            highest_handled,
+            synced_commit_index: self.synced_commit_index,
+            network_synced_commits: self.network_synced_commits,
+            startup_sync_active: self.coordination_hub.is_startup_sync_active(),
+            go_sync_completed: self.coordination_hub.is_startup_go_sync_completed(),
+            schedule_recovery_pending: self.coordination_hub.is_schedule_recovery_pending(),
+        }
+    }
 
-        let next_phase = if lag > 50_000 {
-            crate::coordination_hub::NodeConsensusPhase::StateSyncing
-        } else if startup_sync_active {
-            // [BREAKTHROUGH FIX]: STRICT MATHEMATICAL PHASE-GATE
-            // Node is recovering from snapshot. We MUST NOT enter Healthy unless
-            // we have absolute mathematical proof that synced_commit matches a REAL quorum.
-            // Furthermore, we MUST ensure the quorum is not STALE (quorum < highest_handled)
-            // due to delays in CommitVoteMonitor initialization.
-            let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
-            let is_schedule_pending = self.coordination_hub.is_schedule_recovery_pending();
-            
-            if lag == 0 && quorum_commit > 0 && quorum_commit >= highest_handled {
-                // ════════════════════════════════════════════════════════════════
-                // FORK-SAFETY GATE (May 2026): Require network-validated commits.
-                //
-                // ROOT CAUSE: After snapshot restore + baseline fast-forward,
-                // synced_commit_index is seeded from the DAG baseline to match
-                // quorum_commit. This makes lag=0 on the VERY FIRST check
-                // (200ms after entering CatchingUp), even though zero actual
-                // commits were fetched from the network. The node transitions
-                // to Healthy with a diverged DAG view → fork.
-                //
-                // FIX: Require at least 1 certified commit to have been
-                // actually fetched and processed from peers before allowing
-                // the transition. This ensures the DAG has real network data.
-                // ════════════════════════════════════════════════════════════════
-                if self.network_synced_commits == 0 {
-                    tracing::warn!(
-                        "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
-                         but network_synced_commits=0 — no actual commits fetched from peers yet. \
-                         Blocking CatchingUp→Healthy to prevent baseline-only false parity.",
-                        self.synced_commit_index, quorum_commit
-                    );
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                } else if is_schedule_pending {
-                    tracing::warn!("⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), but LeaderSchedule recovery is still pending! Node MUST NOT exit CatchingUp yet to prevent fork.", self.synced_commit_index, quorum_commit);
-                    crate::coordination_hub::NodeConsensusPhase::CatchingUp
-                } else {
-                    tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, network_synced={}) and LeaderSchedule is fully recovered. Explicitly unlocking node.", self.synced_commit_index, quorum_commit, self.network_synced_commits);
-                    self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
-                    crate::coordination_hub::NodeConsensusPhase::Healthy
-                }
-            } else {
-                // Stay in CatchingUp even if lag is 0 but quorum is stale or 0
-                crate::coordination_hub::NodeConsensusPhase::CatchingUp
+    /// Pure logic: determine what phase transition should happen.
+    /// Returns a TransitionDecision describing the action, with NO side effects.
+    fn determine_phase(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        use crate::coordination_hub::NodeConsensusPhase::*;
+
+        // ═══ INITIALIZING / BOOTSTRAPPING: Special exit logic ═══
+        if matches!(input.current_phase, Initializing | Bootstrapping) {
+            return Self::determine_bootstrap_exit(input);
+        }
+
+        // ═══ ALIGNING: Managed externally, don't touch ═══
+        if matches!(input.current_phase, Aligning) {
+            return PhaseTransitionDecision::Hold {
+                reason: "Phase managed externally (Aligning)",
+            };
+        }
+
+        // ═══ STATE SYNCING: Deep lag detected ═══
+        if input.lag > 50_000 {
+            return PhaseTransitionDecision::Transition { to: StateSyncing };
+        }
+
+        match input.current_phase {
+            // ─── CATCHING UP during startup recovery ───
+            CatchingUp if input.startup_sync_active => {
+                Self::determine_startup_sync_exit(input)
             }
-        } else if is_currently_catching_up && lag > 0 {
-            // Already catching up — stay until fully synced
-            crate::coordination_hub::NodeConsensusPhase::CatchingUp
-        } else if !is_currently_catching_up && lag > catching_up_enter_threshold {
-            // Not catching up yet — only enter when lag is significant
-            crate::coordination_hub::NodeConsensusPhase::CatchingUp
-        } else {
-            crate::coordination_hub::NodeConsensusPhase::Healthy
-        };
 
-        if current_phase != next_phase
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Initializing
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Aligning
-        {
-            self.transition_phase_and_kick(next_phase);
-        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-            || current_phase == crate::coordination_hub::NodeConsensusPhase::Initializing
-        {
-            // ════════════════════════════════════════════════════════════════
-            // BOOTSTRAPPING EXIT LOGIC — two distinct scenarios:
-            //
-            // 1. GENESIS START (highest_handled == 0, no quorum after timeout):
-            //    Go has no state, DAG is empty. Node MUST propose block 1 to
-            //    bootstrap consensus. → Transition to Healthy after timeout.
-            //
-            // 2. SNAPSHOT RESTART (highest_handled > 0):
-            //    Go has state at index N, DAG was wiped. Must wait for
-            //    CommitSyncer to fast-forward baseline, then detect quorum
-            //    before allowing proposals. → Only exit when quorum > 0.
-            //
-            // FORK-SAFETY: highest_handled == 0 could mean either genuine
-            // genesis OR a CommitConsumerMonitor alignment failure after DAG
-            // wipe. Wait up to 15s for quorum before assuming genesis.
-            // ════════════════════════════════════════════════════════════════
-            if highest_handled_index == 0 {
-                if quorum_commit > 0 {
-                    // NOT genesis — quorum exists, fast-forward and catch up
-                    tracing::info!(
-                        "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
-                         NOT genesis — DAG wipe detected. Transitioning to {:?}.",
-                        quorum_commit, next_phase
-                    );
-                    self.transition_phase_and_kick(next_phase);
-                } else {
-                    let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
-                    if is_network_polled {
-                        tracing::info!(
-                            "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after network poll). \
-                             Transitioning to {:?} to allow block 1 proposal.",
-                            next_phase
-                        );
-                        if self.coordination_hub.is_startup_sync_active() {
-                            self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF for Genesis
-                        }
-                        self.transition_phase_and_kick(next_phase);
-                    } else {
-                        // Still waiting for network poll to finish — stay in Bootstrapping
-                        tracing::trace!(
-                            "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for network poll..."
-                        );
-                    }
-                }
-            } else if quorum_commit > 0 {
-                // Snapshot restart: Go has state, wait for quorum detection
+            // ─── CATCHING UP (normal): Stay until lag=0 ───
+            CatchingUp if input.lag > 0 => PhaseTransitionDecision::Hold {
+                reason: "CatchingUp — lag > 0, still syncing",
+            },
+
+            // ─── CATCHING UP (normal): Lag resolved → Healthy ───
+            CatchingUp => PhaseTransitionDecision::Transition { to: Healthy },
+
+            // ─── HEALTHY: Enter CatchingUp if significant lag ───
+            Healthy if input.lag > CATCHING_UP_ENTER_THRESHOLD => {
+                PhaseTransitionDecision::Transition { to: CatchingUp }
+            }
+
+            // ─── HEALTHY: Stay healthy (lag within tolerance) ───
+            Healthy => PhaseTransitionDecision::Hold {
+                reason: "Healthy — lag within threshold",
+            },
+
+            // ─── Catch-all: StateSyncing stays (managed by external trigger) ───
+            _ => PhaseTransitionDecision::Hold {
+                reason: "Phase managed externally",
+            },
+        }
+    }
+
+    /// Bootstrap exit logic — determines when to leave Initializing/Bootstrapping.
+    ///
+    /// Two distinct scenarios:
+    ///   1. GENESIS START: Go has no state, DAG empty → propose block 1
+    ///   2. SNAPSHOT RESTART: Go has state, DAG wiped → wait for quorum then catch up
+    fn determine_bootstrap_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        use crate::coordination_hub::NodeConsensusPhase::*;
+
+        let next_phase_for_lag = if input.lag > 0 { CatchingUp } else { Healthy };
+
+        match (input.highest_handled, input.quorum_commit, input.go_sync_completed) {
+            // ── Case 1: No local state, quorum exists → NOT genesis, DAG wipe ──
+            (0, quorum, _) if quorum > 0 => {
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
+                     NOT genesis — DAG wipe detected. Transitioning to {:?}.",
+                    quorum, next_phase_for_lag
+                );
+                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+            }
+
+            // ── Case 2: No local state, no quorum, network polled → GENESIS ──
+            (0, 0, true) => {
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after network poll). \
+                     Transitioning to {:?} to allow block 1 proposal.",
+                    next_phase_for_lag
+                );
+                PhaseTransitionDecision::TransitionAndUnlock { to: next_phase_for_lag }
+            }
+
+            // ── Case 3: No local state, no quorum, still polling → WAIT ──
+            (0, 0, false) => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: highest_handled=0, quorum=0, waiting for network poll",
+            },
+
+            // ── Case 4: Has local state, quorum exists → SNAPSHOT RESTART ──
+            (_, quorum, _) if quorum > 0 => {
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
-                    quorum_commit, next_phase
+                    quorum, next_phase_for_lag
                 );
-                self.transition_phase_and_kick(next_phase);
-            } else {
-                let is_network_polled = self.coordination_hub.is_startup_go_sync_completed();
-                if is_network_polled {
-                    // ════════════════════════════════════════════════════════
-                    // QUORUM SEED: Go has state at highest_handled but Rust
-                    // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
-                    // Instead of a dangerous 5s timeout, we now wait until
-                    // STARTUP-SYNC officially confirms the network has been polled.
-                    // This perfectly prevents "slow network" forks!
-                    // ════════════════════════════════════════════════════════
-                    let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
-                    if seeded {
-                        tracing::warn!(
-                            "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
-                             (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
-                            highest_handled_index
-                        );
-                    }
-                } else {
-                    tracing::trace!(
-                        "⏳ [BOOTSTRAP] highest_handled={}, quorum=0, waiting for network poll...",
-                        highest_handled_index
+                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+            }
+
+            // ── Case 5: Has local state, no quorum, network polled → SEED ──
+            (handled, 0, true) => PhaseTransitionDecision::SeedQuorum {
+                commit_index: handled,
+            },
+
+            // ── Case 6: Has local state, no quorum, still polling → WAIT ──
+            (_, 0, false) => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: has state but quorum=0, waiting for network poll",
+            },
+
+            // ── Unreachable: quorum can't be negative ──
+            _ => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: unexpected state",
+            },
+        }
+    }
+
+    /// Startup sync exit logic — determines when CatchingUp can transition to Healthy
+    /// during post-snapshot recovery (startup_sync_active=true).
+    ///
+    /// Guards (all must pass):
+    ///   1. lag == 0 (mathematical parity with quorum)
+    ///   2. quorum_commit > 0 (real quorum, not stale)
+    ///   3. quorum_commit >= highest_handled (quorum not behind execution)
+    ///   4. network_synced_commits > 0 (real commits fetched, not baseline-seeded)
+    ///   5. schedule_recovery_pending == false (LeaderSchedule confirmed)
+    fn determine_startup_sync_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        // Gate 1: Mathematical parity
+        let has_parity = input.lag == 0
+            && input.quorum_commit > 0
+            && input.quorum_commit >= input.highest_handled;
+
+        if !has_parity {
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: parity not reached (lag > 0 or quorum stale)",
+            };
+        }
+
+        // Gate 2: Network-validated commits (prevent baseline-only false parity)
+        if input.network_synced_commits == 0 {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
+                 but network_synced_commits=0 — no actual commits fetched from peers yet. \
+                 Blocking CatchingUp→Healthy to prevent baseline-only false parity.",
+                input.synced_commit_index, input.quorum_commit
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: no network-validated commits yet",
+            };
+        }
+
+        // Gate 3: LeaderSchedule confirmed
+        if input.schedule_recovery_pending {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
+                 but LeaderSchedule recovery is still pending! \
+                 Node MUST NOT exit CatchingUp yet to prevent fork.",
+                input.synced_commit_index, input.quorum_commit
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: LeaderSchedule recovery pending",
+            };
+        }
+
+        // All gates passed — safe to unlock
+        tracing::info!(
+            "✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, \
+             network_synced={}) and LeaderSchedule is fully recovered. \
+             Explicitly unlocking node.",
+            input.synced_commit_index, input.quorum_commit, input.network_synced_commits
+        );
+        PhaseTransitionDecision::TransitionAndUnlock {
+            to: crate::coordination_hub::NodeConsensusPhase::Healthy,
+        }
+    }
+
+    /// Execute the side effects of a transition decision.
+    /// This is the ONLY place where state is mutated during update_state().
+    fn apply_transition(&mut self, decision: PhaseTransitionDecision, input: &PhaseStateInput) {
+        match decision {
+            PhaseTransitionDecision::Hold { reason: _ } => {
+                // No action needed — stay in current phase.
+                // The reason is available for debug logging if needed.
+            }
+
+            PhaseTransitionDecision::Transition { to } => {
+                if input.current_phase != to {
+                    self.transition_phase_and_kick(to);
+                }
+            }
+
+            PhaseTransitionDecision::TransitionAndUnlock { to } => {
+                // Clear startup_sync BEFORE transitioning (so choke-point guard allows it)
+                if self.coordination_hub.is_startup_sync_active() {
+                    self.coordination_hub.set_startup_sync_active(false);
+                }
+                if input.current_phase != to {
+                    self.transition_phase_and_kick(to);
+                }
+            }
+
+            PhaseTransitionDecision::SeedQuorum { commit_index } => {
+                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(commit_index);
+                if seeded {
+                    tracing::warn!(
+                        "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
+                         (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
+                        commit_index
                     );
                 }
             }
         }
+    }
+
+    /// Main state update — orchestrates the gather → decide → apply cycle.
+    fn update_state(&mut self) {
+        let input = self.gather_state_input();
+        let decision = Self::determine_phase(&input);
+        self.apply_transition(decision, &input);
     }
 
     async fn schedule_loop(mut self, mut rx_shutdown: oneshot::Receiver<()>) {
