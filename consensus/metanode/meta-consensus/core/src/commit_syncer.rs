@@ -348,43 +348,30 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // SNAPSHOT RESTORE FAST-FORWARD
         // If Rust DAG is empty (is_dag_empty == true) BUT Go executor has restored state
         // up to highest_handled_index > 0, we fast-forward the baseline.
-        // CRITICAL FIX: We must NOT fast-forward all the way to highest_handled_index.
-        // We MUST preserve the past 300 commits to allow `update_leader_schedule_v2`
-        // to compute the correct LeaderSchedule based on identical past state.
-        // Otherwise, Node 1 will compute a divergent LeaderSchedule and fork the network.
+        // ════════════════════════════════════════════════════════════════════════
+        // FORK-SAFETY FIX (May 2026): We must NOT fast-forward the DAG at all.
+        // LeaderSchedule calculation is recursively dependent on ALL past commits
+        // in the current epoch.
+        // Schedule for [1200..1500] depends on Reputation [900..1200].
+        // Reputation [900..1200] depends on Schedule [900..1200].
+        // Schedule [900..1200] depends on Reputation [600..900]...
+        // Therefore, we CANNOT safely truncate the DAG inside an epoch without
+        // causing a divergent LeaderSchedule and a hard fork.
+        // We MUST fetch ALL commits from index 1 to reconstruct the LeaderSchedule.
+        // The application layer (CommitProcessor) will skip executing these commits
+        // in Go because `go_last_commit_index` handles deduplication.
         // ════════════════════════════════════════════════════════════════════════
         if is_dag_empty && highest_handled_index > 0 {
-            // Find the last schedule boundary. num_commits matches LeaderSchedule::new
             let num_commits = 300;
-            let last_boundary = (highest_handled_index / num_commits) * num_commits;
-            let baseline_target = last_boundary.saturating_sub(num_commits);
-
-            // FORK-SAFETY: If the network has progressed beyond 300 commits, reputation
-            // swaps are active in the LeaderSwapTable. But from_store() auto-confirmed
-            // the schedule because last_commit_index=0 < 300 (looks like Genesis).
-            // The default (empty) LeaderSwapTable will produce WRONG leader elections.
-            // Block the local committer until a full scoring cycle re-confirms the schedule.
             if highest_handled_index >= num_commits {
                 self.coordination_hub.set_schedule_recovery_pending(true);
             }
 
-            if baseline_target > 0 {
-                tracing::info!(
-                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG but Go execution is at {}. \
-                     Fast-forwarding DAG baseline to {} (preserving last {} commits for LeaderSchedule).",
-                    highest_handled_index, baseline_target, highest_handled_index - baseline_target
-                );
-                
-                // Fast-forward DAG state to match the boundary
-                self.inner.dag_state.write().reset_to_network_baseline(0, baseline_target, crate::commit::CommitDigest::MIN, 0, None);
-                self.synced_commit_index = baseline_target;
-            } else {
-                tracing::info!(
-                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG. Go is at {}. \
-                     No fast-forward needed (fetching all from Genesis to reconstruct LeaderSchedule).",
-                    highest_handled_index
-                );
-            }
+            tracing::info!(
+                "🚀 [COLD-START/RESTORE] Node initialized with empty DAG. Go is at {}. \
+                 No fast-forwarding allowed inside an epoch. Fetching all commits from Genesis to reconstruct LeaderSchedule exactly.",
+                highest_handled_index
+            );
         }
 
         let current_phase = self.coordination_hub.get_phase();
@@ -908,13 +895,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // ════════════════════════════════════════════════════════
                         let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
                         let catching_up_stall = now.duration_since(self.last_quorum_change_at);
+                        let is_fetching = !self.inflight_fetches.is_empty();
+                        
                         if self.coordination_hub.is_catching_up()
                             && is_dag_empty
                             && highest_handled > 0
                             && catching_up_stall >= Duration::from_secs(5)
+                            && !is_fetching
                         {
                             tracing::error!(
-                                "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s. \
+                                "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s and NOT fetching. \
                                  No peers have the past commits. Forcing fast-forward to highest_handled={}.",
                                 catching_up_stall.as_secs_f64(),
                                 highest_handled
@@ -946,10 +936,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && highest_handled == 0
                             && quorum_commit > 0
                             && catching_up_stall >= Duration::from_secs(5)
+                            && !is_fetching
                         {
                             tracing::error!(
                                 "🚨 [STALL-DETECTOR-5] Post-epoch-transition stall: CatchingUp for {:.0}s \
-                                 with empty DAG, highest_handled=0, quorum={}. \
+                                 with empty DAG, highest_handled=0, quorum={}, and NOT fetching. \
                                  New epoch has no local state. Fast-forwarding to quorum.",
                                 catching_up_stall.as_secs_f64(),
                                 quorum_commit
