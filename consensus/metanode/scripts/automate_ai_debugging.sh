@@ -90,13 +90,27 @@ if [ -n "$LATEST_REPORT" ]; then
     echo "- Đã sao chép Stability Report: $(basename "$LATEST_REPORT")"
 fi
 
-# Copy 500 dòng cuối cùng của Node Logs
+# Tìm block fork từ Stability Report
+FORK_BLOCK=$(grep "BLOCK ĐẦU TIÊN BỊ FORK: #" "$LATEST_REPORT" | grep -o '#[0-9]*' | tr -d '#' || echo "")
+
 LOG_DIR="$PACKAGE_DIR/node_logs"
 mkdir -p "$LOG_DIR"
 for i in 0 1 2 3 4; do
     NODE_LOG="$BASE_DIR/consensus/metanode/logs/node_$i/go-master-stdout.log"
     if [ -f "$NODE_LOG" ]; then
-        tail -n 1000 "$NODE_LOG" > "$LOG_DIR/node_${i}_tail1000.log"
+        if [ -n "$FORK_BLOCK" ]; then
+            BLOCK_LINE=$(grep -n -E "(LastBlockNumber: $FORK_BLOCK|block=$FORK_BLOCK|commit=$FORK_BLOCK|index=$FORK_BLOCK)" "$NODE_LOG" | tail -1 | cut -d: -f1 || echo "")
+            if [ -n "$BLOCK_LINE" ]; then
+                START_LINE=$((BLOCK_LINE - 500))
+                [ "$START_LINE" -lt 1 ] && START_LINE=1
+                END_LINE=$((BLOCK_LINE + 500))
+                sed -n "${START_LINE},${END_LINE}p" "$NODE_LOG" > "$LOG_DIR/node_${i}_around_fork_${FORK_BLOCK}.log"
+            else
+                tail -n 1000 "$NODE_LOG" > "$LOG_DIR/node_${i}_tail1000.log"
+            fi
+        else
+            tail -n 1000 "$NODE_LOG" > "$LOG_DIR/node_${i}_tail1000.log"
+        fi
     fi
 done
 echo "- Đã trích xuất Node Logs."

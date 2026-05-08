@@ -1020,6 +1020,24 @@ impl ConsensusNode {
                     .unwrap_or(false)
         };
 
+        // ═══════════════════════════════════════════════════════════════
+        // ARCHITECTURAL FIX: Synchronous Phase-Gating
+        // Instead of letting CommitSyncer asynchronously guess if we are
+        // recovering from a snapshot, we use the authoritative Go state here.
+        // If the DAG is empty but Go has handled commits, we lock the
+        // local committer immediately before any consensus threads start.
+        // ═══════════════════════════════════════════════════════════════
+        if !dag_has_history {
+            let handled_commits = storage.last_handled_commit_index.unwrap_or(0);
+            if handled_commits >= 300 {
+                coordination_hub.set_schedule_recovery_pending(true);
+                info!(
+                    "🛡️ [SNAPSHOT-RECOVERY] DAG is empty but Go has handled {} commits. Pre-emptively locking local committer.",
+                    handled_commits
+                );
+            }
+        }
+
         let go_replay_after = if config.executor_read_enabled {
             if let Some(commit_index) = storage.last_handled_commit_index {
                 info!(

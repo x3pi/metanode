@@ -316,12 +316,31 @@ collect_diagnostics() {
     # Recent logs from failed node
     local dst_log="$LOG_BASE/node_${dst}/go-master-stdout.log"
     if [ -f "$dst_log" ]; then
-        log "### Nhật ký gần đây của Node $dst (60 dòng cuối)"
-        log ""
-        log '```text'
-        tail -n 60 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
-        log '```'
-        log ""
+        if [ "$fork_point" -gt 0 ]; then
+            log "### Nhật ký của Node $dst quanh block #$fork_point"
+            log ""
+            log '```text'
+            # Look for the fork block in the logs.
+            local block_line=$(grep -n -E "(LastBlockNumber: $fork_point|block=$fork_point|commit=$fork_point|index=$fork_point)" "$dst_log" | tail -1 | cut -d: -f1 || echo "")
+            if [ -n "$block_line" ]; then
+                local start_line=$((block_line - 50))
+                [ "$start_line" -lt 1 ] && start_line=1
+                local end_line=$((block_line + 50))
+                sed -n "${start_line},${end_line}p" "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            else
+                tail -n 100 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            fi
+            log '```'
+            log ""
+        else
+            log "### Nhật ký gần đây của Node $dst (60 dòng cuối)"
+            log ""
+            log '```text'
+            tail -n 60 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            log '```'
+            log ""
+        fi
+    fi
 
         log "### Các Cột Mốc Đồng Bộ/Phục Hồi của Node $dst"
         log ""

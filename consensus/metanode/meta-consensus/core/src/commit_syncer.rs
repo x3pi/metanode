@@ -339,40 +339,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.coordination_hub.get_quorum_commit_index(),
         );
         let _local_commit = self.inner.dag_state.read().last_commit_index();
-        
-        // FIX: DAG sparsity detection must use last_commit().is_none() because 
-        // with_go_last_commit_index can pre-seed local_commit > 0 even when DAG is wiped.
-        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
-
-        // ════════════════════════════════════════════════════════════════════════
-        // SNAPSHOT RESTORE FAST-FORWARD
-        // If Rust DAG is empty (is_dag_empty == true) BUT Go executor has restored state
-        // up to highest_handled_index > 0, we fast-forward the baseline.
-        // ════════════════════════════════════════════════════════════════════════
-        // FORK-SAFETY FIX (May 2026): We must NOT fast-forward the DAG at all.
-        // LeaderSchedule calculation is recursively dependent on ALL past commits
-        // in the current epoch.
-        // Schedule for [1200..1500] depends on Reputation [900..1200].
-        // Reputation [900..1200] depends on Schedule [900..1200].
-        // Schedule [900..1200] depends on Reputation [600..900]...
-        // Therefore, we CANNOT safely truncate the DAG inside an epoch without
-        // causing a divergent LeaderSchedule and a hard fork.
-        // We MUST fetch ALL commits from index 1 to reconstruct the LeaderSchedule.
-        // The application layer (CommitProcessor) will skip executing these commits
-        // in Go because `go_last_commit_index` handles deduplication.
-        // ════════════════════════════════════════════════════════════════════════
-        if is_dag_empty && highest_handled_index > 0 {
-            let num_commits = 300;
-            if highest_handled_index >= num_commits {
-                self.coordination_hub.set_schedule_recovery_pending(true);
-            }
-
-            tracing::info!(
-                "🚀 [COLD-START/RESTORE] Node initialized with empty DAG. Go is at {}. \
-                 No fast-forwarding allowed inside an epoch. Fetching all commits from Genesis to reconstruct LeaderSchedule exactly.",
-                highest_handled_index
-            );
-        }
 
         let current_phase = self.coordination_hub.get_phase();
 
