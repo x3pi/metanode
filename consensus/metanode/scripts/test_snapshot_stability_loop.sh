@@ -129,20 +129,169 @@ collect_diagnostics() {
         local epoch=$(echo "$info" | grep -o '"current_epoch":[0-9]*' | cut -d: -f2)
         if [ "$block" != "-1" ]; then
             log "- **Node $i**: block=\`$block\` gei=\`${gei:-?}\` epoch=\`${epoch:-?}\` state_root=\`${sr:0:20}...\`"
+        else
             log "- **Node $i**: \`NGOẠI TUYẾN (OFFLINE)\`"
         fi
     done
     log ""
 
-    # Hash comparison at recent blocks
-    log "### So sánh Mã Băm Khối (5 khối chung gần nhất)"
+    # ═══════════════════════════════════════════════════════════════════
+    # FORK POINT FINDER: Binary search for the FIRST divergent block.
+    # This is the most critical diagnostic — knowing exactly which block
+    # first diverged reveals the root cause (timestamp diff, txRoot diff, etc.)
+    # ═══════════════════════════════════════════════════════════════════
+    log "### 🔍 Tìm Block Đầu Tiên Bị Fork (Fork Point)"
     log ""
+
+    # Find the range: snapshot block (known good) to current block
     local min_block=999999999
+    local max_block=0
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local b=$(get_block_number "${RPC_PORTS[$i]}")
-        [ "$b" != "-1" ] && [ "$b" -lt "$min_block" ] && min_block=$b
+        [ "$b" = "-1" ] && continue
+        [ "$b" -lt "$min_block" ] && min_block=$b
+        [ "$b" -gt "$max_block" ] && max_block=$b
     done
 
+    # Helper: check if all nodes agree on a block hash
+    check_block_consensus() {
+        local bn=$1
+        local hex=$(printf "0x%x" "$bn")
+        local ref_hash=""
+        for j in $(seq 0 $((NUM_NODES - 1))); do
+            local port=${RPC_PORTS[$j]}
+            local b=$(get_block_number "$port")
+            [ "$b" = "-1" ] || [ "$b" -lt "$bn" ] && continue
+            local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$hex\", false],\"id\":1}" 2>/dev/null)
+            local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            [ -z "$hash" ] || [ "$hash" = "null" ] && continue
+            if [ -z "$ref_hash" ]; then
+                ref_hash="$hash"
+            elif [ "$hash" != "$ref_hash" ]; then
+                echo "FORK"
+                return 0
+            fi
+        done
+        echo "OK"
+        return 0
+    }
+
+    # Binary search for first fork block
+    local lo=1
+    local hi=$min_block
+    local fork_point=-1
+    local search_steps=0
+
+    # Quick check: if the lowest common block is already forked, search from 1
+    # Otherwise, skip blocks that are definitely before snapshot
+    if [ "$min_block" -gt 0 ] && [ "$min_block" -lt 999999999 ]; then
+        # Start from a reasonable lower bound (e.g. snapshot block ~500)
+        # Check block 1 as a sanity check
+        if [ "$(check_block_consensus 1)" = "OK" ]; then
+            lo=1
+        fi
+        hi=$min_block
+
+        while [ $lo -le $hi ]; do
+            local mid=$(( (lo + hi) / 2 ))
+            search_steps=$((search_steps + 1))
+            local status=$(check_block_consensus $mid)
+            if [ "$status" = "FORK" ]; then
+                fork_point=$mid
+                hi=$((mid - 1))
+            else
+                lo=$((mid + 1))
+            fi
+            # Safety: max 20 iterations
+            [ $search_steps -ge 20 ] && break
+        done
+    fi
+
+    if [ "$fork_point" -gt 0 ]; then
+        log "- 🚨 **BLOCK ĐẦU TIÊN BỊ FORK: #$fork_point** (tìm thấy sau $search_steps bước tìm kiếm)"
+        log ""
+
+        # Show detailed comparison of the fork point block across all nodes
+        local fork_hex=$(printf "0x%x" "$fork_point")
+        log "### 📊 Chi Tiết Block Fork Point (#$fork_point)"
+        log ""
+        log '```'
+        for j in $(seq 0 $((NUM_NODES - 1))); do
+            local port=${RPC_PORTS[$j]}
+            local b=$(get_block_number "$port")
+            [ "$b" = "-1" ] || [ "$b" -lt "$fork_point" ] && { log "  Node $j: OFFLINE or behind"; continue; }
+            local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+            local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local parentHash=$(echo "$result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local stateRoot=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local txRoot=$(echo "$result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local receiptsRoot=$(echo "$result" | grep -o '"receiptsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local timestamp=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local miner=$(echo "$result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            log "  Node $j: hash=$hash"
+            log "           parentHash=$parentHash"
+            log "           stateRoot=$stateRoot"
+            log "           txRoot=$txRoot"
+            log "           receiptsRoot=$receiptsRoot"
+            log "           timestamp=$timestamp"
+            log "           miner(leader)=$miner"
+        done
+        log '```'
+        log ""
+
+        # Also show the block BEFORE fork point (should be identical across all)
+        if [ "$fork_point" -gt 1 ]; then
+            local pre_fork=$((fork_point - 1))
+            local pre_hex=$(printf "0x%x" "$pre_fork")
+            local pre_status=$(check_block_consensus $pre_fork)
+            log "- ✅ Block #$pre_fork (trước fork): $pre_status — tất cả node đồng thuận"
+        fi
+
+        # Identify which fields diverge
+        log ""
+        log "### 🔎 Phân Tích Nguyên Nhân Fork"
+        log ""
+        # Collect fork point data from node 0 (reference) vs dst node
+        local ref_result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:${RPC_PORTS[0]}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+        local dst_result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:${RPC_PORTS[$dst]}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+
+        local ref_ts=$(echo "$ref_result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_ts=$(echo "$dst_result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_tx=$(echo "$ref_result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_tx=$(echo "$dst_result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_sr=$(echo "$ref_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_sr_val=$(echo "$dst_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_ph=$(echo "$ref_result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_ph=$(echo "$dst_result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_miner=$(echo "$ref_result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_miner=$(echo "$dst_result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+
+        [ "$ref_ph" != "$dst_ph" ] && log "- ⚠️ **parentHash khác** → fork xảy ra TRƯỚC block #$fork_point (binary search có thể chưa chính xác)"
+        [ "$ref_ts" != "$dst_ts" ] && log "- 🕐 **timestamp khác** → Node $dst nhận commit từ round/leader khác (consensus divergence)"
+        [ "$ref_tx" != "$dst_tx" ] && log "- 📦 **txRoot khác** → Giao dịch trong block khác nhau (commit ordering khác)"
+        [ "$ref_sr" != "$dst_sr_val" ] && log "- 🌳 **stateRoot khác** → Trạng thái thực thi khác (hậu quả của txRoot/timestamp khác)"
+        [ "$ref_miner" != "$dst_miner" ] && log "- 👷 **leader/miner khác** → LeaderSchedule divergence (bảng hoán đổi lãnh đạo khác)"
+        [ "$ref_ph" = "$dst_ph" ] && [ "$ref_ts" = "$dst_ts" ] && [ "$ref_tx" != "$dst_tx" ] && \
+            log "- 💡 **KẾT LUẬN**: Cùng parent, cùng timestamp nhưng khác txRoot → Node $dst xử lý commit đúng nhưng nhận giao dịch khác"
+        [ "$ref_ph" = "$dst_ph" ] && [ "$ref_ts" != "$dst_ts" ] && \
+            log "- 💡 **KẾT LUẬN**: Cùng parent nhưng khác timestamp → Node $dst nhận commit từ consensus round khác (DAG divergence / premature Healthy transition)"
+        log ""
+    else
+        log "- ℹ️ Không tìm thấy fork point (có thể tất cả block đều khớp hoặc node offline)"
+        log ""
+    fi
+
+    # Hash comparison at recent blocks (keep original behavior)
+    log "### So sánh Mã Băm Khối (5 khối chung gần nhất)"
+    log ""
     if [ "$min_block" -gt 0 ] && [ "$min_block" -lt 999999999 ]; then
         log "| Khối | $(for i in $(seq 0 $((NUM_NODES-1))); do printf "Node %d | " $i; done)"
         log "|-------|$(for i in $(seq 0 $((NUM_NODES-1))); do printf "------|"; done)"

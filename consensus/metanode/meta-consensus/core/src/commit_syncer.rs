@@ -1055,9 +1055,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
-        // Track synced commits: ALWAYS use the max of local DAG commit and
-        // Go execution progress.
-        self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
+        // Track synced commits: use the max of local DAG commit and current synced.
+        // FORK-SAFETY: During startup sync, don't advance from DAG state alone —
+        // the DAG can be reconstructed from peers before Go processes the commits.
+        if !self.coordination_hub.is_startup_sync_active() {
+            self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
+        }
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
         if let Some(scheduled) = self.highest_scheduled_index {
@@ -1424,12 +1427,34 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let local_handled_gap = local_commit.saturating_sub(highest_handled);
 
             if local_commit > self.synced_commit_index {
-                if local_handled_gap > 10 {
+                // ═══════════════════════════════════════════════════════════
+                // FORK-SAFETY (May 2026): During startup sync after snapshot
+                // restore, the DAG is reconstructed from peers in ~200ms,
+                // causing local_commit to jump from 0 to ~1300+ instantly.
+                // If we advance synced_commit_index here, lag becomes 0,
+                // the node transitions to Healthy, and starts proposing
+                // blocks BEFORE Go Master has processed those commits.
+                // This causes the node to produce blocks with different
+                // timestamps and transaction ordering → PERMANENT FORK.
+                //
+                // Fix: Only advance synced_commit_index from DAG state
+                // AFTER startup sync is complete. During startup sync,
+                // synced_commit_index is only advanced when commits are
+                // actually delivered to Go via the try_send_commits path.
+                // ═══════════════════════════════════════════════════════════
+                if self.coordination_hub.is_startup_sync_active() {
+                    tracing::debug!(
+                        "[COMMIT-SYNCER] BLOCKED synced_commit_index advance {} → {} \
+                         (startup_sync_active=true, waiting for Go to process commits)",
+                        self.synced_commit_index, local_commit
+                    );
+                } else if local_handled_gap > 10 {
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} despite handled gap {} \
                          (Go Master will catch up via batch-drain, CommitProcessor handles ordering)",
                         self.synced_commit_index, local_commit, local_handled_gap
                     );
+                    self.synced_commit_index = local_commit;
                 } else {
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
@@ -1437,8 +1462,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         local_commit,
                         self.coordination_hub.get_phase()
                     );
+                    self.synced_commit_index = local_commit;
                 }
-                self.synced_commit_index = local_commit;
             }
         }
         info!(

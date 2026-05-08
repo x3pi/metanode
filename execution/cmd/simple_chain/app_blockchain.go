@@ -541,39 +541,27 @@ SKIP_GENESIS:
 				}
 			}
 		}
-
 		// ═══════════════════════════════════════════════════════════════
-		// STRICT STARTUP VERIFICATION & ALIGNMENT
-		// Even if metadata.json wasn't used, the startLastBlock header is the
-		// absolute ground truth. If Go's BackupDb (GEI/CommitIndex) is out of sync
-		// with the last block header, we MUST align them before answering Rust.
+		// STARTUP DIAGNOSTIC: Read-only validation of GEI/CommitIndex alignment.
+		// Upstream paths (lines 267-322 for normal boot, 487-490 for metadata boot)
+		// already set these values authoritatively. This block only WARNS on mismatch.
 		// ═══════════════════════════════════════════════════════════════
 		if app.startLastBlock != nil {
 			headerGEI := app.startLastBlock.Header().GlobalExecIndex()
 			storageGEI := storage.GetLastGlobalExecIndex()
-			
-			if headerGEI != storageGEI {
-				logger.Error("🚨 [STARTUP] CRITICAL GEI MISMATCH! Header GEI=%d, Storage GEI=%d. Patching storage to match header.", 
-					headerGEI, storageGEI)
-				storage.ForceSetLastGlobalExecIndex(headerGEI)
-			} else {
-				logger.Info("✅ [STARTUP] GEI aligned: %d", headerGEI)
-			}
-
-			// We also need to align CommitIndex to prevent fork/skipping commits
 			headerCommit := app.startLastBlock.Header().CommitIndex()
 			storageCommit := storage.GetLastHandledCommitIndex()
-			if headerCommit > 0 && uint32(headerCommit) != storageCommit {
-				logger.Error("🚨 [STARTUP] CRITICAL COMMIT_INDEX MISMATCH! Header=%d, Storage=%d. Patching storage.",
-					headerCommit, storageCommit)
-				storage.ForceSetLastHandledCommitIndex(uint32(headerCommit))
-			} else if headerCommit == 0 && storageCommit > 0 {
-				// Block header from older version or metadata fallback doesn't have CommitIndex set.
-				// Trust the storageCommit which was either restored from backup_db or metadata.json.
-				logger.Info("✅ [STARTUP] Header has no CommitIndex (0), trusting Storage CommitIndex: %d", storageCommit)
-			} else if uint32(headerCommit) == storageCommit {
-				logger.Info("✅ [STARTUP] CommitIndex aligned: %d", headerCommit)
+
+			if headerGEI != storageGEI {
+				logger.Warn("⚠️ [STARTUP-DIAG] GEI alignment note: header=%d storage=%d (upstream should have handled this)",
+					headerGEI, storageGEI)
 			}
+			if headerCommit > 0 && uint32(headerCommit) != storageCommit {
+				logger.Warn("⚠️ [STARTUP-DIAG] CommitIndex alignment note: header=%d storage=%d (upstream should have handled this)",
+					headerCommit, storageCommit)
+			}
+			logger.Info("✅ [STARTUP-DIAG] Final state: GEI=%d, CommitIndex=%d, Block=%d, Epoch=%d",
+				storageGEI, storageCommit, app.startLastBlock.Header().BlockNumber(), app.startLastBlock.Header().Epoch())
 		}
 	}
 
