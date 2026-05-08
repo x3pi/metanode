@@ -209,6 +209,8 @@ for folder in "$SNAP_DIR"/*; do
   folder_name=$(basename "$folder")
   if [ "$folder_name" = "back_up" ]; then
       cp -a "$folder"/* "$NODE_DATA/back_up/" 2>/dev/null || true
+  elif [ "$folder_name" = "nomt_db" ]; then
+      cp -a "$folder" "$NODE_DATA/back_up/"
   elif [ "$folder_name" = "metadata.json" ] || [ "$folder_name" = "index.html" ]; then
       continue
   elif [ -d "$folder" ]; then
