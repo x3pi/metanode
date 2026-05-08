@@ -1021,40 +1021,7 @@ impl ConsensusNode {
         };
 
         let go_replay_after = if config.executor_read_enabled {
-            // ═══════════════════════════════════════════════════════════════
-            // FORK-SAFETY FIX v6: ALWAYS reset go_replay_after=0 when DAG
-            // is wiped (snapshot restore), regardless of epoch boundary.
-            //
-            // ROOT CAUSE (May 2026): Go's last_handled_commit_index is a
-            // CUMULATIVE value across ALL epochs (e.g., 1425 from epoch 1).
-            // After snapshot restore into epoch 2, the new DAG starts with
-            // commit_index=1. CommitProcessor was set to expect commit 1426,
-            // which will NEVER arrive in epoch 2 (~400 commits max).
-            // This caused a permanent DEADLOCK: CommitProcessor skips all
-            // incoming commits, Go block number freezes, State Root diverges.
-            //
-            // The old condition (!dag_has_history && GEI == epoch_base) only
-            // caught epoch-boundary snapshots. Mid-epoch snapshots (the common
-            // case) were missed entirely.
-            //
-            // FIX: When DAG is empty, we are in a snapshot restore scenario.
-            // Always set go_replay_after=0. The CommitProcessor's FAST-FORWARD
-            // guard (commit_index <= go_last_commit_index) and the executor's
-            // GEI REPLAY PROTECTION (next_expected_index) will correctly skip
-            // commits that Go has already executed.
-            // ═══════════════════════════════════════════════════════════════
-            if !dag_has_history && storage.current_epoch > 0 {
-                info!(
-                    "🔑 [GO-AUTH GEI] Snapshot restore detected (empty DAG, epoch={}). \
-                     Resetting go_replay_after=0 to prevent cross-epoch commit index deadlock. \
-                     Go last_handled_commit_index={:?}, GEI={}, epoch_base={}",
-                    storage.current_epoch,
-                    storage.last_handled_commit_index,
-                    storage.last_global_exec_index,
-                    storage.epoch_base_exec_index,
-                );
-                0
-            } else if let Some(commit_index) = storage.last_handled_commit_index {
+            if let Some(commit_index) = storage.last_handled_commit_index {
                 info!(
                     "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
                     commit_index

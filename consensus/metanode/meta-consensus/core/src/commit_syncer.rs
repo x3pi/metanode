@@ -1056,33 +1056,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
         // Track synced commits: ALWAYS use the max of local DAG commit and
-        // Go execution progress, regardless of phase. Using only
-        // highest_handled_index during CatchingUp caused synced to lag behind
-        // local_commit, creating permanent gaps with fetched ranges.
-        // Track synced commits: ALWAYS use the max of local DAG commit and
-        // Go execution progress... EXCEPT when we detect a large unbridgeable gap
-        // between the Go engine (highest_handled_index) and the local DAG
-        // (local_commit_index). A large gap (e.g. > 10) indicates a restart
-        // where the DAG recovered its state from disk, but Core will NOT re-emit
-        // the past commits. In this case, we MUST fetch them from peers to bridge
-        // the Go engine.
-        let local_handled_gap = local_commit_index.saturating_sub(highest_handled_index);
-        self.synced_commit_index = if local_handled_gap > 10 && self.highest_scheduled_index.unwrap_or(0) < local_commit_index {
-            // Unbridgeable DAG gap detected! Focus on catching up Go Master.
-            // Force synced_commit_index down to highest_handled_index (or highest scheduled)
-            // to ensure we fetch the missing commits from the network.
-            highest_handled_index.max(self.highest_scheduled_index.unwrap_or(0))
-        } else {
-            // Normal operation: use local_commit_index to prevent redundant peer fetches.
-            // FORK-SAFETY: DO NOT max with highest_handled_index!
-            // If Go is at 400 but DAG is at 0, we WANT synced_commit_index to be 0 so
-            // we fetch commits 1..400 and reconstruct the LeaderSchedule!
-            self.synced_commit_index.max(local_commit_index)
-        };
+        // Go execution progress.
+        self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
         if let Some(scheduled) = self.highest_scheduled_index {
-            if scheduled > self.synced_commit_index && local_handled_gap > 10 {
+            if scheduled > self.synced_commit_index && local_commit_index > self.inner.commit_consumer_monitor.highest_handled_commit() + 10 {
                 self.highest_scheduled_index = Some(self.synced_commit_index);
             }
         }
