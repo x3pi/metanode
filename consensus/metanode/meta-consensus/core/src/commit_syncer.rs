@@ -411,12 +411,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // [BREAKTHROUGH FIX]: STRICT MATHEMATICAL PHASE-GATE
             // Node is recovering from snapshot. We MUST NOT enter Healthy unless
             // we have absolute mathematical proof that synced_commit matches a REAL quorum.
-            if lag == 0 && quorum_commit > 0 {
-                tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} == quorum={}). Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
+            // Furthermore, we MUST ensure the quorum is not STALE (quorum < highest_handled)
+            // due to delays in CommitVoteMonitor initialization.
+            let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+            
+            if lag == 0 && quorum_commit > 0 && quorum_commit >= highest_handled {
+                tracing::info!("✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}). Explicitly unlocking node.", self.synced_commit_index, quorum_commit);
                 self.coordination_hub.set_startup_sync_active(false); // EXPLICIT HANDOFF
                 crate::coordination_hub::NodeConsensusPhase::Healthy
             } else {
-                // Stay in CatchingUp even if lag is 0 but quorum is 0 (waiting for discovery/seed)
+                // Stay in CatchingUp even if lag is 0 but quorum is stale or 0
                 crate::coordination_hub::NodeConsensusPhase::CatchingUp
             }
         } else if is_currently_catching_up && lag > 0 {
