@@ -109,6 +109,7 @@ func (app *App) initBlockchain() error {
 							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), stakeRoot, e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
 							nil, nil,
 						)
+						app.startLastBlock.Header().SetCommitIndex(md.LastHandledCommitIdx)
 					}
 				}
 				if app.startLastBlock != nil {
@@ -562,11 +563,15 @@ SKIP_GENESIS:
 			// We also need to align CommitIndex to prevent fork/skipping commits
 			headerCommit := app.startLastBlock.Header().CommitIndex()
 			storageCommit := storage.GetLastHandledCommitIndex()
-			if uint32(headerCommit) != storageCommit {
+			if headerCommit > 0 && uint32(headerCommit) != storageCommit {
 				logger.Error("🚨 [STARTUP] CRITICAL COMMIT_INDEX MISMATCH! Header=%d, Storage=%d. Patching storage.",
 					headerCommit, storageCommit)
 				storage.ForceSetLastHandledCommitIndex(uint32(headerCommit))
-			} else {
+			} else if headerCommit == 0 && storageCommit > 0 {
+				// Block header from older version or metadata fallback doesn't have CommitIndex set.
+				// Trust the storageCommit which was either restored from backup_db or metadata.json.
+				logger.Info("✅ [STARTUP] Header has no CommitIndex (0), trusting Storage CommitIndex: %d", storageCommit)
+			} else if uint32(headerCommit) == storageCommit {
 				logger.Info("✅ [STARTUP] CommitIndex aligned: %d", headerCommit)
 			}
 		}
