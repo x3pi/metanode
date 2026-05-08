@@ -242,9 +242,15 @@ impl ConsensusCoordinationHub {
     }
 
     /// Returns true if proposals are forbidden in the current phase.
-    /// Proposals are only allowed in Healthy phase AND when STARTUP-SYNC is not active.
+    /// Proposals are only allowed in Healthy phase AND when STARTUP-SYNC is not active
+    /// AND when the LeaderSchedule is not pending recovery from snapshot restore.
+    /// FORK-SAFETY: If schedule_recovery_pending is true, the node's LeaderSwapTable
+    /// is stale. Proposing blocks would inject divergent leader opinions into the DAG,
+    /// causing all nodes that process those blocks to see conflicting commits.
     pub fn should_skip_proposal(&self) -> bool {
-        !self.is_healthy() || self.startup_sync_active.load(Ordering::Acquire)
+        !self.is_healthy()
+            || self.startup_sync_active.load(Ordering::Acquire)
+            || self.schedule_recovery_pending.load(Ordering::Acquire)
     }
 
     /// Signal that STARTUP-SYNC has started/finished. While active, proposals are blocked.
