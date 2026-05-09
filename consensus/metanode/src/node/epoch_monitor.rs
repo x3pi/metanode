@@ -303,8 +303,9 @@ pub fn start_unified_epoch_monitor(
                                     .get_last_block_number()
                                     .await
                                     .unwrap_or((0, 0, false, [0; 32], 0));
-                                
-                                if go_block < data.boundary_block || go_last_gei < data.boundary_gei {
+
+                                if go_block < data.boundary_block || go_last_gei < data.boundary_gei
+                                {
                                     // First try fetching normal blocks
                                     if go_block < data.boundary_block {
                                         match crate::network::peer_rpc::fetch_blocks_from_peer(
@@ -315,7 +316,10 @@ pub fn start_unified_epoch_monitor(
                                         .await
                                         {
                                             Ok(blocks) if !blocks.is_empty() => {
-                                                match client_arc.sync_and_execute_blocks(blocks).await {
+                                                match client_arc
+                                                    .sync_and_execute_blocks(blocks)
+                                                    .await
+                                                {
                                                     Ok((synced, last, _)) => {
                                                         info!(
                                                             "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
@@ -440,15 +444,23 @@ pub fn start_unified_epoch_monitor(
                             );
 
                             // Fetch committee to pass to check_and_update_node_mode
-                            let committee_source = match crate::node::committee_source::CommitteeSource::discover(&config_clone).await {
-                                Ok(source) => source,
-                                Err(e) => {
-                                    warn!("⚠️ [EPOCH MONITOR] Cannot discover committee source for promotion: {}", e);
-                                    continue;
-                                }
-                            };
+                            let committee_source =
+                                match crate::node::committee_source::CommitteeSource::discover(
+                                    &config_clone,
+                                )
+                                .await
+                                {
+                                    Ok(source) => source,
+                                    Err(e) => {
+                                        warn!("⚠️ [EPOCH MONITOR] Cannot discover committee source for promotion: {}", e);
+                                        continue;
+                                    }
+                                };
                             let (committee, _eth_addresses) = match committee_source
-                                .fetch_committee(&config_clone.executor_send_socket_path, network_epoch)
+                                .fetch_committee(
+                                    &config_clone.executor_send_socket_path,
+                                    network_epoch,
+                                )
                                 .await
                             {
                                 Ok(c) => c,

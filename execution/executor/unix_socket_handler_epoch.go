@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -1136,10 +1137,10 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	if upperBound > lastBlockNumber {
 		upperBound = lastBlockNumber
 	}
-	
+
 	lastHandledCommit := storage.GetLastHandledCommitIndex()
 	lastHandledEpoch := storage.GetLastHandledCommitEpoch()
-	
+
 	for blockNum := startBlock; blockNum <= upperBound; blockNum++ {
 		if uint64(len(blocks)) >= maxBatch {
 			break
@@ -1159,7 +1160,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		header := blk.Header()
-		
+
 		// ═══════════════════════════════════════════════════════════════════
 		// CRITICAL FORK-SAFETY (May 2026): Prevent serving partial commits!
 		// m1 uses these blocks to set its lastHandledCommitIndex. If we send blocks
@@ -1167,7 +1168,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 		// commit when consensus resumes.
 		// ═══════════════════════════════════════════════════════════════════
 		if header.Epoch() > lastHandledEpoch || (header.Epoch() == lastHandledEpoch && header.CommitIndex() > uint64(lastHandledCommit)) {
-			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)", 
+			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)",
 				blockNum, header.CommitIndex(), lastHandledCommit, lastHandledEpoch)
 			break
 		}
@@ -1361,7 +1362,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				commitIdx32 := uint32(header.CommitIndex())
 				currentEpoch := header.Epoch()
 				lastEpoch := storage.GetLastHandledCommitEpoch()
-				
+
 				if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 					storage.ForceSetLastHandledCommitIndex(commitIdx32)
 					storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1397,7 +1398,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			commitIdx32 := uint32(header.CommitIndex())
 			currentEpoch := header.Epoch()
 			lastEpoch := storage.GetLastHandledCommitEpoch()
-			
+
 			if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 				storage.ForceSetLastHandledCommitIndex(commitIdx32)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1771,7 +1772,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				currentEpoch := rh.chainState.GetCurrentEpoch()
 				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
-				
+
 				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
 					var batch [][2][]byte
 					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
