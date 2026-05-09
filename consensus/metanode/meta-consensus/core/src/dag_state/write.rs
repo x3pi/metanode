@@ -8,7 +8,7 @@ use std::{
 };
 
 use itertools::Itertools as _;
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 use consensus_types::block::{BlockRef, Round, TransactionIndex};
 

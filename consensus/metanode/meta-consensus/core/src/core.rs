@@ -83,6 +83,10 @@ pub(crate) struct Core {
     pub(crate) block_signer: ProtocolKeyPair,
     /// Keeping track of state of the DAG, including blocks, commits and last committed rounds.
     pub(crate) dag_state: Arc<RwLock<DagState>>,
+    /// Single-writer actor handle for DagState mutations on the critical recovery path.
+    /// All baseline score injection and network reset operations go through this channel
+    /// to eliminate write-side RwLock deadlocks.
+    pub(crate) dag_state_writer: crate::dag_state_actor::DagStateWriter,
     /// The last known round for which the node has proposed. Any proposal should be for a round > of this.
     /// This is currently being used to avoid equivocations during a node recovering from amnesia. When value is None it means that
     /// the last block sync mechanism is enabled, but it hasn't been initialised yet.
@@ -118,6 +122,7 @@ impl Core {
         signals: CoreSignals,
         block_signer: ProtocolKeyPair,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         sync_last_known_own_block: bool,
         round_tracker: Arc<RwLock<PeerRoundTracker>>,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
@@ -177,6 +182,7 @@ impl Core {
             signals,
             block_signer,
             dag_state,
+            dag_state_writer,
             last_known_proposed_round: min_propose_round,
             ancestor_state_manager,
             round_tracker,

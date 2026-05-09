@@ -22,6 +22,7 @@ mod core;
 mod core_signals;
 mod core_thread;
 mod dag_state;
+pub(crate) mod dag_state_actor;
 mod epoch_change;
 pub mod epoch_change_provider;
 mod error;

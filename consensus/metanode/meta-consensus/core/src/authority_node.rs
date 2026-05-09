@@ -40,6 +40,7 @@ use crate::{
     transaction_certifier::TransactionCertifier,
     CommitConsumerArgs,
 };
+use crate::dag_state_actor::DagStateActor;
 
 /// ConsensusAuthority is used by Sui to manage the lifetime of AuthorityNode.
 /// It hides the details of the implementation from the caller, MysticetiManager.
@@ -336,6 +337,11 @@ where
         // (commits from peers) to determine the correct baseline.
         let dag_state = Arc::new(RwLock::new(dag_state));
 
+        // Spawn the DagState single-writer actor.
+        // All critical writes (baseline injection, network reset) go through this channel
+        // instead of calling dag_state.write() directly — eliminating write-side deadlocks.
+        let dag_state_writer = DagStateActor::spawn(dag_state.clone());
+
         let block_verifier = Arc::new(SignedBlockVerifier::new(
             context.clone(),
             transaction_verifier,
@@ -403,6 +409,7 @@ where
             core_signals,
             protocol_keypair,
             dag_state.clone(),
+            dag_state_writer.clone(),
             sync_last_known_own_block,
             round_tracker.clone(),
             Some(adaptive_delay_state.clone()),
@@ -440,6 +447,7 @@ where
             dag_state.clone(),
             coordination_hub,
             Some(adaptive_delay_state.clone()),
+            dag_state_writer,
         );
 
         let round_prober_handle = RoundProber::new(

@@ -151,6 +151,13 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// This prevents permanent stalls when ALL nodes restore from snapshot simultaneously.
     active_sync_retry_count: u32,
 
+    /// Guards the ACTIVE-SYNC-RECOVERY force-lower from re-triggering every 150ms.
+    /// Set to true after the first force-lower; reset to false when an inflight
+    /// fetch completes (handle_fetch_result) or when schedule_recovery clears.
+    /// This prevents the infinite `1395 → 900 → 1395 → 900` loop that causes
+    /// PANIC in ScoringSubdag or DAG fork.
+    schedule_recovery_fetch_pending: bool,
+
     // --- FORK-SAFETY: network-validated commit gate (May 2026) ---
     /// Counts the number of certified commits actually fetched and processed from
     /// the network since the last time startup_sync_active was set. This prevents
@@ -239,6 +246,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         dag_state: Arc<RwLock<DagState>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
     ) -> Self {
         let inner = Arc::new(Inner {
             context,
@@ -249,6 +257,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             transaction_certifier,
             network_client,
             dag_state,
+            dag_state_writer,
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
         // FORK-SAFETY: DO NOT initialize with `handled_commit`!
@@ -276,6 +285,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
             active_sync_retry_count: 0,
+            schedule_recovery_fetch_pending: false,
             network_synced_commits: 0,
         }
     }
@@ -307,6 +317,7 @@ impl CommitSyncerSupervisor {
         dag_state: Arc<RwLock<DagState>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
     ) -> CommitSyncerHandle {
         let (tx_shutdown, mut rx_shutdown) = oneshot::channel();
         
@@ -341,6 +352,7 @@ impl CommitSyncerSupervisor {
                         dag_state.clone(),
                         coordination_hub.clone(),
                         adaptive_delay_state.clone(),
+                        dag_state_writer.clone(),
                     );
                     
                     let mut handle = syncer.start();
@@ -1102,7 +1114,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 catching_up_stall.as_secs_f64(),
                                 highest_handled
                             );
-                            self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled, crate::commit::CommitDigest::MIN, 0, None);
+                            self.inner.dag_state_writer.reset_to_network_baseline(0, highest_handled, crate::commit::CommitDigest::MIN, 0, None);
                             self.synced_commit_index = highest_handled;
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         }
@@ -1138,7 +1150,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 catching_up_stall.as_secs_f64(),
                                 quorum_commit
                             );
-                            self.inner.dag_state.write().reset_to_network_baseline(
+                            self.inner.dag_state_writer.reset_to_network_baseline(
                                 0, quorum_commit,
                                 crate::commit::CommitDigest::MIN,
                                 0, None
@@ -1232,34 +1244,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
 
         // ═══════════════════════════════════════════════════════════════════════
-        // ACTIVE SYNC RECOVERY: If we are stuck in CatchingUp with lag=0, but we
-        // still need schedule recovery, we MUST re-fetch the past commits to
-        // reconstruct the LeaderSwapTable. We forcibly lower synced_commit_index.
+        // ACTIVE SYNC RECOVERY: Removed. We no longer forcibly lower synced_commit_index
+        // because fetching historical commits fails if their blocks are pruned.
+        // Instead, we recover the LeaderSwapTable by fetching baseline reputation scores
+        // directly from peers via `patch_baseline_if_needed()`.
         // ═══════════════════════════════════════════════════════════════════════
-        if self.coordination_hub.is_catching_up()
-            && self.coordination_hub.is_schedule_recovery_pending()
-            && self.synced_commit_index > 0
-            && quorum_commit_index > 0
-            && self.synced_commit_index >= quorum_commit_index
-            && self.pending_fetches.is_empty()
-            && self.inflight_fetches.is_empty()
-        {
-            let num_commits: u32 = 300;
-            let last_boundary = (self.synced_commit_index / num_commits) * num_commits;
-            let fetch_from = last_boundary.saturating_sub(num_commits);
-            
-            tracing::warn!(
-                "🔄 [ACTIVE-SYNC-RECOVERY] Node is in CatchingUp with lag=0, but schedule_recovery_pending=true. \
-                 Forcibly lowering synced_commit_index {} → {} to rebuild LeaderSwapTable.",
-                self.synced_commit_index, fetch_from
-            );
-            self.synced_commit_index = fetch_from;
-            if let Some(scheduled) = self.highest_scheduled_index {
-                if scheduled > fetch_from {
-                    self.highest_scheduled_index = Some(fetch_from);
-                }
-            }
-        }
         
         // Update CoordinationHub so Core can read it to prevent divergent local commits
         self.coordination_hub.update_quorum_commit_index(quorum_commit_index);
@@ -1463,7 +1452,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
         };
 
-        if !is_synthetic_baseline { return; }
+        let needs_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0;
+
+        if !is_synthetic_baseline && !needs_schedule_recovery { return; }
         
         let prev_index = self.synced_commit_index;
         let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
@@ -1527,14 +1518,24 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 );
                             }
                             
-                            self.inner.dag_state.write().reset_to_network_baseline(
-                                leader_round,
-                                prev_index,
-                                digest,
-                                timestamp_ms,
-                                reputation_scores,
-                            );
-                            tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
+                            if is_synthetic_baseline {
+                                self.inner.dag_state_writer.reset_to_network_baseline(
+                                    leader_round,
+                                    prev_index,
+                                    digest,
+                                    timestamp_ms,
+                                    reputation_scores,
+                                );
+                                tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
+                            } else if needs_schedule_recovery {
+                                if let Some(scores) = reputation_scores {
+                                    tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
+                                    self.inner.dag_state_writer.inject_baseline_scores(scores);
+                                    // Send empty commits list to trigger Core to process the new baseline
+                                    let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                }
+                            }
+                            
                             return;
                         }
                     }
@@ -1838,6 +1839,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // false parity from baseline-only synced_commit_index.
             let commits_in_range = fetched_commit_range.end().saturating_sub(fetched_commit_range.start()) + 1;
             self.network_synced_commits += commits_in_range as u64;
+
+            // RATE-LIMIT RESET: Removed active-sync schedule recovery rate limiter
+            if self.schedule_recovery_fetch_pending {
+                self.schedule_recovery_fetch_pending = false;
+            }
+
             info!(
                 "[NODE4-DEBUG] synced_commit_index advanced to {} (network_synced_commits={})",
                 self.synced_commit_index, self.network_synced_commits
@@ -2322,6 +2329,7 @@ struct Inner<C: NetworkClient> {
     transaction_certifier: TransactionCertifier,
     network_client: Arc<C>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
 }
 
 impl<C: NetworkClient> Inner<C> {
@@ -2565,6 +2573,7 @@ mod tests {
         );
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
         let mut commit_syncer = CommitSyncer::new(
             context,
             core_thread_dispatcher,
@@ -2574,7 +2583,9 @@ mod tests {
             transaction_certifier,
             network_client,
             dag_state.clone(),
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
             None,
+            dag_state_writer,
         );
 
         // Check initial state.

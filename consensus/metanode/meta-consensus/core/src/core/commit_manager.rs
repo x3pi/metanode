@@ -137,27 +137,35 @@ impl Core {
                     self.last_decided_leader.round, current_dag_leader.round
                 );
                 self.last_decided_leader = current_dag_leader;
+            }
                 
-                // CRITICAL FIX: Restore LeaderSchedule from the baseline if available.
-                // We MUST do this here before `commits_until_update` is calculated so that
-                // the synced commits evaluate against the correct pre-calculated schedule 
-                // instead of an empty default schedule.
-                if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
-                    tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
-                    self.leader_schedule.update_from_baseline_scores(
-                        self.context.clone(),
-                        self.dag_state.read().last_commit_index(),
-                        scores
-                    );
-                    
-                    // Since the schedule is now fully restored and correct based on the network's 
-                    // baseline, we DO NOT need to wait for a 300-commit cycle to verify it.
-                    // We can tell the RecoveryBarrier to bypass the ScheduleVerifying phase!
-                    self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
-                    
-                    if self.coordination_hub.is_schedule_recovery_pending() {
-                        self.coordination_hub.set_schedule_recovery_pending(false);
-                    }
+            // CRITICAL FIX: Restore LeaderSchedule from the baseline if available.
+            // We MUST do this here before `commits_until_update` is calculated so that
+            // the synced commits evaluate against the correct pre-calculated schedule 
+            // instead of an empty default schedule.
+            // Note: This must run independently of the `last_decided_leader` check,
+            // because during snapshot restore, last_decided_leader starts equal to current_dag_leader!
+            //
+            // ARCHITECTURE (May 2026 — Phase 1 Lock→Channel):
+            // The take operation goes through DagStateWriter (channel → DagStateActor thread)
+            // instead of calling dag_state.write() directly. This eliminates the RwLock
+            // deadlock that occurred when the write-guard lifetime leaked into the if-let body.
+            let baseline_scores = self.dag_state_writer.take_baseline_scores();
+            if let Some(scores) = baseline_scores {
+                tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
+                self.leader_schedule.update_from_baseline_scores(
+                    self.context.clone(),
+                    self.dag_state.read().last_commit_index(),
+                    scores
+                );
+                
+                // Since the schedule is now fully restored and correct based on the network's 
+                // baseline, we DO NOT need to wait for a 300-commit cycle to verify it.
+                // We can tell the RecoveryBarrier to bypass the ScheduleVerifying phase!
+                self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    self.coordination_hub.set_schedule_recovery_pending(false);
                 }
             }
 
@@ -517,10 +525,23 @@ impl Core {
         let last_commit_index = self.dag_state.read().last_commit_index();
         let is_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending();
 
+        // FORK-SAFETY (May 2026): During schedule recovery, we need historical commits
+        // for ScoringSubdag to rebuild the LeaderSwapTable. But we MUST limit the bypass
+        // to the 300-commit scoring window — blanket pass of ALL old commits causes
+        // CommitRange::extend_to() PANIC when commits arrive non-monotonically.
+        let scoring_window: u32 = 300;
+        let min_scoring_index = last_commit_index.saturating_sub(scoring_window);
+
         let commits = commits
             .iter()
             .filter(|commit| {
-                if commit.index() > last_commit_index || is_schedule_recovery {
+                if commit.index() > last_commit_index {
+                    true
+                } else if is_schedule_recovery && commit.index() >= min_scoring_index {
+                    tracing::debug!(
+                        "🔄 [SCHEDULE-RECOVERY] Allowing historical commit {} (within scoring window {}..={}) for LeaderSwapTable rebuild",
+                        commit.index(), min_scoring_index, last_commit_index
+                    );
                     true
                 } else {
                     tracing::debug!(
