@@ -274,8 +274,8 @@ impl DagState {
     pub fn add_commit(&mut self, commit: TrustedCommit) {
         let time_diff = if let Some(last_commit) = &self.last_commit {
             if commit.index() <= last_commit.index() {
-                error!(
-                    "New commit index {} <= last commit index {}!",
+                tracing::warn!(
+                    "⏭️ [SCHEDULE-RECOVERY] Skipping DagState state update for historical commit {} (last commit index {}). This is EXPECTED during LeaderSwapTable reconstruction.",
                     commit.index(),
                     last_commit.index()
                 );

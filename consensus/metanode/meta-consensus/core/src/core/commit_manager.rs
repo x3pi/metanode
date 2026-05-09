@@ -515,10 +515,12 @@ impl Core {
     ) -> ConsensusResult<Vec<CertifiedCommit>> {
         // Filter out the commits that have been already locally committed and keep only anything that is above the last committed index.
         let last_commit_index = self.dag_state.read().last_commit_index();
+        let is_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending();
+
         let commits = commits
             .iter()
             .filter(|commit| {
-                if commit.index() > last_commit_index {
+                if commit.index() > last_commit_index || is_schedule_recovery {
                     true
                 } else {
                     tracing::debug!(

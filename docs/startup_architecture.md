@@ -10,8 +10,8 @@ Metanode gồm 2 engine chạy trong cùng 1 process:
 
 | Engine | Ngôn ngữ | Vai trò | Source of Truth |
 |--------|---------|---------|-----------------|
-| **Consensus** | Rust | DAG, Leader Election, GEI, Epoch | GEI, CommitIndex, Leader, Timestamp |
-| **Execution** | Go | State Trie (NOMT), Block Storage, EVM | Block Number, StateRoot, AccountState |
+| **Consensus** | Rust | DAG, Leader Election, Epoch | CommitIndex, Leader, Timestamp |
+| **Execution** | Go | State Trie (NOMT), Block Storage, EVM, GEI (Phase-B) | GEI, Block Number, StateRoot, AccountState |
 
 Giao tiếp qua **FFI Bridge** (CGo) và **Unix Domain Socket** (IPC).
 
@@ -293,7 +293,6 @@ Mỗi `ExecutableBlock` từ Rust chứa **tất cả** metadata cần thiết:
 | Trường | Nguồn | Deterministic? |
 |--------|-------|:--------------:|
 | `transactions` | DAG commit | ✅ |
-| `global_exec_index` | Rust CommitProcessor | ✅ |
 | `commit_index` | Rust DAG | ✅ |
 | `epoch` | Rust epoch tracking | ✅ |
 | `commit_timestamp_ms` | Median stake-weighted | ✅ |
@@ -304,14 +303,15 @@ Mỗi `ExecutableBlock` từ Rust chứa **tất cả** metadata cần thiết:
 
 Go **không tự tính** bất kỳ giá trị nào từ bảng trên. Go chỉ:
 1. Giải mã transactions
-2. Thực thi EVM → tính StateRoot
-3. Tạo block với metadata từ Rust + StateRoot từ EVM
+2. Tự động cấp phát GEI chính xác thông qua `GEIAuthority` (Phase-B)
+3. Thực thi EVM → tính StateRoot
+4. Tạo block với metadata từ Rust + StateRoot từ EVM
 
 ---
 
 ## 5. Block Hash — Trường Tham Gia
 
-Block hash được tính từ **9 trường**, tất cả đều deterministic:
+Block hash được tính từ **8 trường** (GEI đã được loại bỏ), tất cả đều deterministic:
 
 ```
 Hash = Keccak256(Proto(
@@ -323,7 +323,6 @@ Hash = Keccak256(Proto(
     TimeStamp,          ← Rust (commit_timestamp_ms / 1000)
     TransactionsRoot,   ← Go tx trie
     Epoch,              ← Rust
-    GlobalExecIndex,    ← Rust
 ))
 ```
 
@@ -331,6 +330,7 @@ Hash = Keccak256(Proto(
 - `LastBlockHash` — cho phép sync linh hoạt
 - `AggregateSignature` — BLS signature
 - `CommitIndex` — Rust internal tracking
+- `GlobalExecIndex` — Đã loại bỏ khỏi Hash trong Phase-B để chống Fork sau snapshot restore.
 
 ---
 
@@ -724,15 +724,13 @@ Khi node ở phase `Healthy` nhưng local committer bị khoá (RECOVERY-GUARD),
 2. Chỉ unlock khi `add_certified_commits()` xác nhận đã nhận CertifiedCommit từ mạng (event-driven), HOẶC
 3. Peers xác nhận ĐÚNG deadlock VÀ schedule đã confirmed (data-driven)
 
-**Case B chi tiết — Active Fetch cho Schedule Rebuild:**
-```
-Node phục hồi snapshot → schedule_recovery_pending = true
-→ Peers ở cùng commit level → "deadlock" nhưng KHÔNG unlock
-→ Bump quorum lên my_commit + 1 → trigger CatchingUp phase
-→ CommitSyncer fetch CertifiedCommits từ peers
-→ Sau 300 commits → update_leader_schedule_v2() chạy
-→ schedule_recovery_pending = false → unlock tự nhiên
-```
+**Case B chi tiết — Active Fetch cho Schedule Rebuild (Data-driven Recovery):**
+Quá trình phục hồi này đảm bảo 300 commits lịch sử có thể được dùng để tái thiết lập LeaderSwapTable mà không gây lỗi thực thi kép (double-execution):
+1. **Trigger Sync:** Node phục hồi snapshot → `schedule_recovery_pending = true` → Bump quorum lên `my_commit + 1` → trigger CatchingUp phase.
+2. **Filter Bypass:** Khi `CommitSyncer` lấy về 300 commit cũ, hàm `filter_new_commits` sẽ chủ động cho phép chúng đi qua (nhờ cờ `is_schedule_recovery`) thay vì drop do `index <= last_commit_index`.
+3. **Thu Thập Điểm:** `DagState` nạp các commit này vào `scoring_subdag` để làm cơ sở tính lại điểm uy tín.
+4. **Fast-Forward Protection:** Khi các commit đi đến `CommitProcessor`, cơ chế Fast-Forward chặn chúng lại (do `commit_index <= go_last_commit_index`), tuyệt đối không đẩy sang Go để tránh thực thi lại giao dịch.
+5. **Unlock:** Nhận đủ 300 commits → `update_leader_schedule_v2()` chạy → `schedule_recovery_pending = false` → unlock tự nhiên.
 
 **Case B Exhaustion (Liveness Escape Valve & Anti-Fork):**
 Nếu hệ thống gặp kịch bản **tất cả** các node cùng phục hồi snapshot đồng thời (ALL nodes snapshot restore):

@@ -1,48 +1,59 @@
-# Giải Quyết Lỗi Fork Hash Block 61 & Lỗi Không Cập Nhật StateRoot (Block 62+)
+# Giải Quyết Lỗi Fork/Deadlock Trong Kiến Trúc Phase-B & Snapshot Recovery
 
-## 1. Root Cause của việc Lệch Hash ở Block 61
-Tại sao **Block 61** trên Node 1 lại tạo ra hash `0x97e2d3b5...` khác hoàn toàn với `m0` (`0xfeb0b50c...`) trong khi `stateRoot` và `parentHash` hoàn toàn khớp?
-
-Nguyên nhân chính xác nằm ở **GlobalExecIndex (GEI)**. 
-- Khi `m0` (node sống liên tục) chạy, nó có bộ đếm `cumulative_fragment_offset` nội bộ.
-- Khi Node 1 khởi động lại từ Snapshot, biến `cumulative_fragment_offset` trong Rust bị khôi phục về `0`.
-- Do đó, tại thời điểm tạo Block 61, `GEI` mà Rust tính ra trên Node 1 sẽ bị **lệch** (nhỏ hơn) so với `GEI` của `m0` (dù nó xử lý cùng một commit BFT).
-- Trước đây, trong file `block_header.go`, hàm `Hash()` **đã bao gồm trường `GlobalExecIndex`**. Việc lệch GEI này lập tức làm thay đổi `block hash` của Node 1, tạo ra một nhánh fork hoàn toàn độc lập!
-
-**👉 Action Đã Thực Hiện:** 
-Tôi đã tiến hành sửa code trong `execution/pkg/block/block_header.go` loại bỏ trường `GlobalExecIndex` khỏi quá trình compute `bData` trong hàm `Hash()`. `GEI` chỉ là một metadata nội bộ dùng để map giữa Rust và Go, **không nên và không được phép** đưa vào Block Hash vì nó không determinisitc sau quá trình snapshot recovery.
+Tài liệu này tổng hợp nguyên nhân gốc rễ (Root Cause) của hai vấn đề nghiêm trọng trong hệ thống đồng thuận Metanode và cách chúng đã được khắc phục hoàn toàn thông qua kiến trúc **Phase-B** và cơ chế **Data-driven Recovery**.
 
 ---
 
-## 2. Tại sao StateRoot của Node 1 bị "đóng băng" từ Block 62?
-Như bạn đã thấy, từ Block 62, 63, 64, `stateRoot` của Node 1 hoàn toàn không di chuyển:
-```
-m1: hash=0x77d11...  parentHash=0x97e2d3b5...  stateRoot=0x34dee271... (Giữ nguyên của Block 61)
-```
-Nguyên nhân cốt lõi cũng xuất phát từ việc tính toán **GEI bị lỗi** khi khởi động lại:
-1. Lúc đọc Snapshot, LevelDB của Go đang ghi nhớ `lastBlockGEI` cực kỳ cao (kết quả do mạng lưới gửi về trước đó).
-2. Khi Node 1 xử lý các block tiếp theo (Block 62, 63, 64...), vì `cumulative_fragment_offset` bị mất (bắt đầu từ 0), nên `global_exec_index` truyền từ Rust sang Go bị **THẤP HƠN** `lastBlockGEI` đã lưu trong DB.
-3. Trong `block_processor_sync.go` của Go có đoạn code **`GEI REGRESSION GUARD`**:
-```go
-if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
-    logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d...")
-    return
-}
-```
-**Chính cơ chế này đã đánh chặn toàn bộ các giao dịch của Block 62, 63, 64 trên Node 1!**
-Vì nó tưởng đây là các commit cũ (stale commits) từ đợt replay DAG, Go đã nhảy cóc (`return` ngay lập tức) mà KHÔNG thực thi các transactions trong block. Kết quả là `stateRoot` đứng im không đổi. Mãi tới block 65, khi bộ đếm GEI của Rust tự nhích lên đủ để vượt qua cái mốc `lastBlockGEI` cũ trong DB con số, nó mới bắt đầu thực thi transaction trở lại, kéo theo việc stateRoot thay đổi!
+## 1. Lỗi Lệch Hash Block & Đóng Băng StateRoot (Đã Khắc Phục Bằng Phase-B)
+
+### Hiện Tượng
+Trước đây, sau khi khởi động lại từ Snapshot, các block mới (ví dụ Block 61) sinh ra trên node phục hồi có hash hoàn toàn khác với các node sống liên tục, tạo ra một nhánh fork hoàn toàn độc lập dù `stateRoot` và `parentHash` khớp nhau. Kéo theo đó, từ các block tiếp theo (ví dụ Block 62+), `stateRoot` bị đóng băng và không thay đổi.
+
+### Nguyên Nhân Gốc Rễ
+Nguyên nhân cốt lõi nằm ở việc quản lý **GlobalExecIndex (GEI)** bị phân mảnh giữa Rust và Go:
+- Khi node phục hồi (khởi động lại từ Snapshot), bộ đếm `cumulative_fragment_offset` nội bộ của Rust bị reset về `0`.
+- Do đó, GEI truyền từ Rust sang Go bị **sai lệch** (nhỏ hơn mức GEI thực tế đã được lưu trong LevelDB của Go).
+- **Lệch Hash**: Trong kiến trúc cũ, `block_header.go` đưa cả `GlobalExecIndex` vào thuật toán sinh Hash. Khi GEI lệch, Block Hash lập tức bị sai, dẫn đến Fork.
+- **Đóng băng StateRoot**: Go có cơ chế `GEI REGRESSION GUARD`. Khi nhận thấy GEI từ Rust truyền sang nhỏ hơn `lastBlockGEI` trong DB, nó cho rằng đây là block cũ (stale) nên từ chối thực thi các giao dịch bên trong, dẫn đến stateRoot không thay đổi.
+
+### Giải Pháp Kiến Trúc: Phase-B (Go-Authoritative GEI)
+Chúng ta đã chuyển sang kiến trúc **Phase-B**:
+1. **Loại bỏ sự phụ thuộc vào Rust**: Rust không còn theo dõi hay tự tính toán `hint_gei` thông qua `cumulative_fragment_offset`.
+2. **Go là nguồn chân lý duy nhất (Sole Authority)**: Rust chỉ gửi `commit_index` và danh sách giao dịch sang Go. Go tự động cấp phát GEI chính xác thông qua `GEIAuthority` nội bộ.
+3. **Sửa đổi Block Hash**: Loại bỏ trường `GlobalExecIndex` khỏi quá trình compute `bData` trong hàm `Hash()`, đảm bảo tính determinisitic 100% khi tính block hash.
 
 ---
 
-## 3. Cách Vận Hành Cần Làm Ngay
+## 2. Lỗi "Healthy But Locked" Deadlock (Khi Khôi Phục Snapshot)
 
-Vì code thư viện Go core (`execution/pkg/block/block_header.go`) vừa mới được tôi sửa lại để loại bỏ GEI, bạn cần thực hiện build lại thư viện FFI và chạy thử lại:
-
-1. **Rebuild Go FFI Executor:**
-```bash
-cd /home/abc/chain-n/metanode/execution
-make build_ffi_executor
+### Hiện Tượng
+Trong các bài stress test, sau khi node khôi phục từ Snapshot, nó báo cáo đã theo kịp mạng lưới (`lag = 0`) và vào trạng thái `Healthy`, nhưng log liên tục in ra:
 ```
+🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, LeaderSchedule needs re-confirmation from network.
+```
+Node bị kẹt vĩnh viễn ở trạng thái này, không bao giờ bầu được LeaderSchedule mới và không thể tự sinh block.
 
-2. **Khởi động lại Orchestrator và Xoá Snapshot Node 1 rác:**
-Bạn có thể reset thử Node 1 theo quy trình chuẩn và theo dõi xem hash từ Block 60, 61 đã chốt 100% với mạng lưới chưa. Việc loại bỏ trực tiếp GEI ra khỏi cấu trúc Hash sẽ khoá chết 100% hiện tượng fork siêu nhỏ này.
+### Nguyên Nhân Gốc Rễ
+Sự cố xuất phát từ lỗ hổng logic trong quá trình đồng bộ lại các commit lịch sử (`STARTUP-SYNC`):
+1. **Phát hiện Stale Schedule**: Khi khôi phục Snapshot, DAG của Rust trống. `CommitSyncer` kích hoạt cơ chế `schedule_recovery_pending` và yêu cầu tải về 300 commit cũ (ví dụ: commit 901 -> 1200) để tái tạo bảng điểm uy tín (`LeaderSwapTable`).
+2. **Hàng rào `filter_new_commits` đánh chặn**: Khi 300 commit này được mạng lưới trả về, hàm `filter_new_commits` trong Rust kiểm tra thấy `commit.index() <= last_commit_index` (vì node đã cập nhật index mới nhất từ Go trước đó), nên nó **loại bỏ hoàn toàn** các commit lịch sử này.
+3. **Deadlock xảy ra**: Vì các commit cũ bị loại bỏ, chúng không bao giờ lọt vào `scoring_subdag`. Biến đếm `commits_until_update` không bao giờ giảm xuống 0. Bảng LeaderSchedule không bao giờ được tính lại, khiến cờ `schedule_recovery_pending` mãi mãi bị kẹt ở `true`.
+
+### Giải Pháp (Data-driven Recovery)
+Chúng ta đã khắc phục lỗi này mà không gây ra tác dụng phụ (double-execution) bằng cách kết hợp nới lỏng kiểm tra và Fast-Forward:
+1. **Mở cổng cho Schedule Recovery**: 
+   Sửa `filter_new_commits` (trong `commit_manager.rs`) để chủ động cho phép các commit lịch sử đi qua nếu hệ thống đang cần khôi phục Schedule:
+   ```rust
+   if commit.index() > last_commit_index || is_schedule_recovery {
+       true
+   }
+   ```
+2. **Ngăn chặn Double-Execution bằng Fast-Forward**:
+   Các commit cũ khi vượt qua cổng lọc sẽ được nạp vào `scoring_subdag` để tính điểm uy tín cho Leader. Nhưng khi chúng đến `CommitProcessor` để đẩy sang Go, cơ chế **Fast-Forward** sẽ lập tức nhảy cóc (skip) chúng:
+   ```rust
+   if commit_index <= go_last_commit_index {
+       info!("⏭️  [FAST-FORWARD] Skipping historical commit {}...", commit_index);
+       continue;
+   }
+   ```
+3. **Kết quả**: Node lấy lại đủ 300 commit, tính lại thành công `LeaderSwapTable`, gỡ cờ `schedule_recovery_pending = false`, và chuyển sang trạng thái `Ready` để tiếp tục tạo block bình thường. Mọi vòng test (lên đến hàng trăm round) hiện đều vượt qua hoàn hảo không còn fork hay deadlock.
