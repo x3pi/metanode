@@ -77,7 +77,8 @@ impl CoreTextFixture {
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    
+        let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let leader_schedule = Arc::new(
             LeaderSchedule::from_store(context.clone(), dag_state.clone())
                 .with_num_commits_per_schedule(10),
@@ -102,6 +103,7 @@ impl CoreTextFixture {
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             0,
@@ -111,7 +113,7 @@ impl CoreTextFixture {
         let block_signer = signers.remove(own_index.value()).1;
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
         let core = Core::new(
             context,
             leader_schedule,
@@ -218,7 +220,8 @@ async fn test_core_recover_from_store_for_full_round() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -262,7 +265,7 @@ async fn test_core_recover_from_store_for_full_round() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let _core = Core::new(
         context.clone(),
         leader_schedule,
@@ -364,7 +367,8 @@ async fn test_core_recover_from_store_for_partial_round() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -408,7 +412,7 @@ async fn test_core_recover_from_store_for_partial_round() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -513,7 +517,7 @@ async fn test_core_propose_after_genesis() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -767,7 +771,7 @@ async fn test_commit_and_notify_for_block_status() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let _core = Core::new(
         context.clone(),
         leader_schedule,
@@ -939,7 +943,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -1024,7 +1028,7 @@ async fn test_core_set_min_propose_round() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -1386,7 +1390,7 @@ async fn test_smart_ancestor_selection() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -1684,7 +1688,7 @@ async fn test_excluded_ancestor_limit() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -1785,7 +1789,7 @@ async fn test_core_set_propagation_delay_per_authority() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -2239,7 +2243,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     .await;
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
     let mut core = Core::new(
         context.clone(),
         leader_schedule,

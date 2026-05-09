@@ -376,7 +376,7 @@ where
                 .is_zero();
         info!("Sync last known own block: {sync_last_known_own_block}");
 
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
@@ -388,6 +388,7 @@ where
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             epoch_base_index,

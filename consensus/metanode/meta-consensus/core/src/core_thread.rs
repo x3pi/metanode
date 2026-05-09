@@ -540,6 +540,7 @@ mod test {
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             0,

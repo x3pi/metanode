@@ -185,7 +185,7 @@ impl Core {
                 );
 
                 self.leader_schedule
-                    .update_leader_schedule_v2(&self.dag_state);
+                    .update_leader_schedule_v2(&self.dag_state, &self.dag_state_writer);
 
                 // UNIFIED RECOVERY BARRIER (May 2026):
                 // After a full 300-commit scoring cycle completes, advance the barrier.

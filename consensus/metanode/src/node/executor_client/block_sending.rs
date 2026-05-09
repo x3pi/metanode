@@ -276,16 +276,15 @@ impl ExecutorClient {
             }
             
             // CRITICAL FORK-SAFETY v7: Only increment block number if the commit 
-            // will actually result in a Go block (has txs, is epoch boundary, or has system txs).
-            // This prevents artificial block inflation during STARTUP-SYNC replay.
-            // We use total_tx_before because it's deterministic across all nodes regardless
-            // of tx_recycler deduplication state.
-            if total_tx_before > 0 || is_epoch_boundary || !all_system_txs.is_empty() {
+            // will actually result in a Go block (has txs or is epoch boundary).
+            // Empty commits with system txs are saved to the previous block in Go's fast-path,
+            // so they MUST NOT increment next_bn, otherwise it creates a permanent "ghost block" gap.
+            if total_tx_before > 0 || is_epoch_boundary {
                 let bn = *next_bn;
                 *next_bn += 1;
                 bn
             } else {
-                trace!("⏭️  [BLOCK-NUM] Commit is empty and not epoch boundary, keeping BN=0");
+                trace!("⏭️  [BLOCK-NUM] Commit is empty and not epoch boundary, keeping BN=0 (SystemTxs attach to previous block in Go)");
                 0
             }
         };

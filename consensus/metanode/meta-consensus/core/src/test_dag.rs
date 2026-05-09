@@ -63,7 +63,8 @@ pub(crate) fn build_dag(
                 (block.reference(), block)
             })
             .unzip();
-        dag_state.write().accept_blocks(blocks);
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        dag_state_writer.accept_blocks(blocks);
         ancestors = references;
     }
 
@@ -87,7 +88,8 @@ pub(crate) fn build_dag_layer(
                 .build(),
         );
         references.push(block.reference());
-        dag_state.write().accept_block(block);
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        dag_state_writer.accept_block(block);
     }
     references
 }

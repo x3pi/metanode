@@ -155,7 +155,7 @@ impl LeaderSchedule {
         dag_state.read().is_scoring_subdag_empty()
     }
 
-    pub(crate) fn update_leader_schedule_v2(&self, dag_state: &RwLock<DagState>) {
+    pub(crate) fn update_leader_schedule_v2(&self, dag_state: &RwLock<DagState>, dag_state_writer: &crate::dag_state_actor::DagStateWriter) {
         let _s = self
             .context
             .metrics
@@ -173,13 +173,7 @@ impl LeaderSchedule {
             (reputation_scores, last_commit_index)
         };
 
-        {
-            let mut dag_state = dag_state.write();
-            // Clear scoring subdag as we have updated the leader schedule
-            dag_state.clear_scoring_subdag();
-            // Buffer score and last commit rounds in dag state to be persisted later
-            dag_state.add_commit_info(reputation_scores.clone());
-        }
+        dag_state_writer.update_scoring_info(reputation_scores.clone());
 
         self.update_leader_swap_table(LeaderSwapTable::new(
             self.context.clone(),
@@ -872,7 +866,8 @@ mod tests {
             AuthorityIndex::new_for_test(0)
         );
 
-        leader_schedule.update_leader_schedule_v2(&dag_state);
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        leader_schedule.update_leader_schedule_v2(&dag_state, &dag_state_writer);
 
         let leader_swap_table = leader_schedule.leader_swap_table.read();
         assert_eq!(leader_swap_table.good_nodes.len(), 1);

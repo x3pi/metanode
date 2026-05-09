@@ -451,7 +451,8 @@ mod test {
             })
             .collect::<Vec<_>>();
 
-        dag_state.write().accept_blocks(blocks);
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        dag_state_writer.accept_blocks(blocks);
 
         // Compute quorum rounds and propagation delay based on last proposed round = 110,
         // and highest received rounds:
