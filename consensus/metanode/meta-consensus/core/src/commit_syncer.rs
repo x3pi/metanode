@@ -181,7 +181,7 @@ const CATCHING_UP_ENTER_THRESHOLD: u32 = 5;
 /// All inputs needed for phase determination — gathered once, used immutably.
 /// This struct intentionally captures a snapshot of all state so that
 /// `determine_phase()` is a pure function with no side effects.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PhaseStateInput {
     /// Current phase of the node.
     current_phase: crate::coordination_hub::NodeConsensusPhase,
@@ -202,6 +202,10 @@ struct PhaseStateInput {
     go_sync_completed: bool,
     /// Whether the LeaderSchedule needs re-confirmation after snapshot recovery.
     schedule_recovery_pending: bool,
+    /// Whether the RecoveryBarrier allows proposals (Inactive or Ready).
+    recovery_barrier_can_propose: bool,
+    /// Current RecoveryBarrier phase (for logging).
+    recovery_barrier_phase: String,
 }
 
 /// Result of phase determination — describes WHAT should happen, not HOW.
@@ -439,6 +443,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             startup_sync_active: self.coordination_hub.is_startup_sync_active(),
             go_sync_completed: self.coordination_hub.is_startup_go_sync_completed(),
             schedule_recovery_pending: self.coordination_hub.is_schedule_recovery_pending(),
+            recovery_barrier_can_propose: self.coordination_hub.recovery_barrier().can_propose(),
+            recovery_barrier_phase: format!("{}", self.coordination_hub.recovery_barrier().phase()),
         }
     }
 
@@ -475,7 +481,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 reason: "CatchingUp — lag > 0, still syncing",
             },
 
-            // ─── CATCHING UP (normal): Lag resolved → Healthy ───
+            // ─── CATCHING UP (normal): Lag resolved but barrier still active → Hold ───
+            CatchingUp if !input.recovery_barrier_can_propose => {
+                tracing::debug!(
+                    "🛡️ [STATE-MACHINE] CatchingUp lag=0 but RecoveryBarrier={}. Holding.",
+                    input.recovery_barrier_phase
+                );
+                PhaseTransitionDecision::Hold {
+                    reason: "CatchingUp — lag=0 but RecoveryBarrier not ready",
+                }
+            }
+
+            // ─── CATCHING UP (normal): Lag resolved + barrier clear → Healthy ───
             CatchingUp => PhaseTransitionDecision::Transition { to: Healthy },
 
             // ─── HEALTHY: Enter CatchingUp if significant lag ───
@@ -503,7 +520,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
     fn determine_bootstrap_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
         use crate::coordination_hub::NodeConsensusPhase::*;
 
-        let next_phase_for_lag = if input.lag > 0 { CatchingUp } else { Healthy };
+        // SAFETY: If recovery barrier is active, ALWAYS go to CatchingUp (never Healthy)
+        // regardless of lag. The barrier ensures the node stays in CatchingUp until
+        // all recovery phases complete.
+        let next_phase_for_lag = if input.lag > 0 || !input.recovery_barrier_can_propose {
+            CatchingUp
+        } else {
+            Healthy
+        };
 
         match (input.highest_handled, input.quorum_commit, input.go_sync_completed) {
             // ── Case 1: No local state, quorum exists → NOT genesis, DAG wipe ──
@@ -591,7 +615,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             };
         }
 
-        // Gate 3: LeaderSchedule confirmed
+        // Gate 3: LeaderSchedule confirmed (legacy check)
         if input.schedule_recovery_pending {
             tracing::warn!(
                 "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
@@ -604,10 +628,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
             };
         }
 
+        // Gate 4 (NEW — DEFINITIVE): Recovery Barrier must be Ready or Inactive.
+        // This is the ARCHITECTURAL INVARIANT — it cannot be bypassed by any
+        // edge case (epoch resets, threshold checks, etc.) because it tracks
+        // the ACTUAL phase progression, not derived conditions.
+        if !input.recovery_barrier_can_propose {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached and schedule confirmed, \
+                 but RecoveryBarrier is NOT ready (phase={}). \
+                 Node MUST NOT exit CatchingUp — recovery is still in progress.",
+                input.recovery_barrier_phase
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: RecoveryBarrier not ready",
+            };
+        }
+
         // All gates passed — safe to unlock
         tracing::info!(
             "✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, \
-             network_synced={}) and LeaderSchedule is fully recovered. \
+             network_synced={}) and RecoveryBarrier=Ready. \
              Explicitly unlocking node.",
             input.synced_commit_index, input.quorum_commit, input.network_synced_commits
         );
@@ -1729,6 +1769,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 "[NODE4-DEBUG] synced_commit_index advanced to {} (network_synced_commits={})",
                 self.synced_commit_index, self.network_synced_commits
             );
+
+            // UNIFIED RECOVERY BARRIER: Check if DAG has caught up to quorum.
+            // If so, advance the barrier from DagCatchingUp → ScheduleVerifying.
+            // This is safe to call repeatedly — compare_exchange ensures only
+            // the DagCatchingUp → ScheduleVerifying transition happens.
+            let quorum_commit = std::cmp::max(
+                self.inner.commit_vote_monitor.quorum_commit_index(),
+                self.coordination_hub.get_quorum_commit_index(),
+            );
+            if self.synced_commit_index >= quorum_commit && quorum_commit > 0 {
+                self.coordination_hub.recovery_barrier().dag_caught_up();
+            }
         }
 
         metrics

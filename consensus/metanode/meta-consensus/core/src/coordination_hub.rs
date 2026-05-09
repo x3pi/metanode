@@ -24,6 +24,7 @@
 
 use std::sync::Arc;
 use parking_lot::RwLock;
+use crate::recovery_barrier::RecoveryBarrier;
 
 /// Represents the global operational phase of the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct ConsensusCoordinationHub {
     phase: Arc<RwLock<NodeConsensusPhase>>,
     
+    /// ═══════════════════════════════════════════════════════════════
+    /// UNIFIED RECOVERY BARRIER (May 2026 — Architectural Fix)
+    ///
+    /// Single source of truth for post-snapshot recovery safety.
+    /// Replaces the interaction of: startup_sync_active, schedule_recovery_pending,
+    /// go_sync_completed, network_synced_commits, and is_local_commit_unlocked.
+    ///
+    /// Phase progression: Inactive → GoSyncing → DagCatchingUp → ScheduleVerifying → Ready
+    /// Only Ready or Inactive allows proposals.
+    /// ═══════════════════════════════════════════════════════════════
+    recovery_barrier: Arc<RecoveryBarrier>,
+
     /// Deterministic recovery guard for the local committer.
     /// After snapshot recovery, this is `false`. It is set to `true` ONLY when
     /// the node processes a real CertifiedCommit from the network (via `add_certified_commits`).
@@ -76,6 +89,7 @@ pub struct ConsensusCoordinationHub {
     /// When true, STARTUP-SYNC is actively importing blocks from peers.
     /// Proposals are blocked regardless of phase to prevent fork from stale DAG metadata.
     /// Set by consensus_node.rs STARTUP-SYNC section.
+    /// LEGACY: Now shadowed by recovery_barrier.is_go_syncing() — kept for backward compat.
     startup_sync_active: Arc<AtomicBool>,
 
     /// The highest Global Execution Index (GEI) that Go has executed or skipped.
@@ -91,13 +105,7 @@ pub struct ConsensusCoordinationHub {
     /// Used to safely break Bootstrapping deadlocks without relying on fixed timeouts.
     startup_go_sync_completed: Arc<AtomicBool>,
 
-    /// FORK-SAFETY: When true, the node has detected a snapshot recovery scenario
-    /// (local_commit=0 but Go has executed commits). The LeaderSchedule was auto-confirmed
-    /// by from_store() because last_commit_index < 300 (looks like Genesis), but the network
-    /// has progressed far beyond commit 300 with reputation swaps active.
-    /// The local committer MUST be blocked until a full 300-commit scoring cycle completes
-    /// with network-verified CertifiedCommits, ensuring the LeaderSwapTable matches the network.
-    /// Set by CommitSyncer, cleared by CommitSyncer after update_leader_schedule_v2 completes.
+    /// LEGACY: Now shadowed by recovery_barrier.is_schedule_pending() — kept for backward compat.
     schedule_recovery_pending: Arc<AtomicBool>,
 }
 
@@ -105,6 +113,7 @@ impl ConsensusCoordinationHub {
     pub fn new() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
+            recovery_barrier: Arc::new(RecoveryBarrier::new()),
             recovery_local_commit_unlocked: Arc::new(AtomicBool::new(false)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
@@ -184,18 +193,26 @@ impl ConsensusCoordinationHub {
         if *w != new_phase {
             // ═══════════════════════════════════════════════════════════════
             // CHOKE-POINT GUARD: Block ANY transition to Healthy if
-            // startup_sync is still active. This catches ALL code paths
-            // including bootstrap exit, update_state non-startup branch,
-            // and any future paths that might be added.
+            // startup_sync is still active OR if the RecoveryBarrier
+            // indicates recovery is still in progress.
+            // This catches ALL code paths including bootstrap exit,
+            // update_state non-startup branch, and any future paths.
+            //
+            // DEFENSE-IN-DEPTH: Even if startup_sync_active is somehow
+            // cleared early (bug), the barrier provides a second layer
+            // of protection since it tracks the ACTUAL recovery phase.
             // ═══════════════════════════════════════════════════════════════
             if new_phase == NodeConsensusPhase::Healthy 
-                && self.startup_sync_active.load(Ordering::Acquire) 
+                && (self.startup_sync_active.load(Ordering::Acquire)
+                    || !self.recovery_barrier.can_propose())
             {
                 tracing::warn!(
-                    "🚫 [HUB] BLOCKED {:?} → Healthy: startup_sync still active! \
-                     Node must sync certified commits from peers before transitioning. \
-                     This prevents premature proposal generation with diverged DAG.",
-                    *w
+                    "🚫 [HUB] BLOCKED {:?} → Healthy: recovery not complete! \
+                     startup_sync={}, barrier_phase={}. \
+                     Node must complete all recovery phases before transitioning.",
+                    *w,
+                    self.startup_sync_active.load(Ordering::Acquire),
+                    self.recovery_barrier.phase()
                 );
                 return; // Refuse the transition
             }
@@ -269,15 +286,15 @@ impl ConsensusCoordinationHub {
     }
 
     /// Returns true if proposals are forbidden in the current phase.
-    /// Proposals are only allowed in Healthy phase AND when STARTUP-SYNC is not active
-    /// AND when the LeaderSchedule is not pending recovery from snapshot restore.
-    /// FORK-SAFETY: If schedule_recovery_pending is true, the node's LeaderSwapTable
-    /// is stale. Proposing blocks would inject divergent leader opinions into the DAG,
-    /// causing all nodes that process those blocks to see conflicting commits.
+    ///
+    /// UNIFIED CHECK (May 2026): Uses RecoveryBarrier as the single source of truth.
+    /// Proposals are blocked if:
+    ///   1. Node is not in Healthy phase, OR
+    ///   2. Recovery barrier is active (any phase except Inactive/Ready)
+    ///
+    /// This replaces the fragmented check of startup_sync_active + schedule_recovery_pending.
     pub fn should_skip_proposal(&self) -> bool {
-        !self.is_healthy()
-            || self.startup_sync_active.load(Ordering::Acquire)
-            || self.schedule_recovery_pending.load(Ordering::Acquire)
+        !self.is_healthy() || !self.recovery_barrier.can_propose()
     }
 
     /// Signal that STARTUP-SYNC has started/finished. While active, proposals are blocked.
@@ -298,6 +315,11 @@ impl ConsensusCoordinationHub {
     /// Sets whether Go has completed its startup peer-sync.
     pub fn set_startup_go_sync_completed(&self, completed: bool) {
         self.startup_go_sync_completed.store(completed, Ordering::Release);
+        if completed {
+            // When Go completes its peer sync, advance the barrier from GoSyncing → DagCatchingUp
+            self.recovery_barrier.go_sync_done();
+            tracing::info!("✅ [STARTUP-SYNC] Go sync completed, advancing barrier to DagCatchingUp");
+        }
     }
 
     /// Returns whether Go has completed its startup peer-sync.
@@ -325,8 +347,28 @@ impl ConsensusCoordinationHub {
     }
 
     /// Returns true if the LeaderSchedule needs re-confirmation after snapshot recovery.
+    /// UPDATED (May 2026): Checks BOTH legacy flag AND recovery barrier for compatibility.
     pub fn is_schedule_recovery_pending(&self) -> bool {
         self.schedule_recovery_pending.load(Ordering::Acquire)
+            || self.recovery_barrier.is_schedule_pending()
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Recovery Barrier API
+    // ════════════════════════════════════════════════════════════════
+
+    /// Get a reference to the recovery barrier.
+    pub fn recovery_barrier(&self) -> &RecoveryBarrier {
+        &self.recovery_barrier
+    }
+
+    /// Activate the recovery barrier for snapshot recovery.
+    /// Called from consensus_node.rs when snapshot detection is epoch-agnostic.
+    /// This replaces the fragmented `handled_commits >= 300` check.
+    pub fn activate_recovery_barrier(&self) {
+        self.recovery_barrier.activate();
+        // Also set legacy flags for backward compatibility
+        self.schedule_recovery_pending.store(true, Ordering::Release);
     }
 
 }
@@ -344,6 +386,7 @@ impl ConsensusCoordinationHub {
     pub fn new_for_testing() -> Self {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
+            recovery_barrier: Arc::new(RecoveryBarrier::new()), // Inactive = can propose
             recovery_local_commit_unlocked: Arc::new(AtomicBool::new(true)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),

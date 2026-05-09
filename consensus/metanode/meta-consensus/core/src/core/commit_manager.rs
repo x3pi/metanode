@@ -170,9 +170,19 @@ impl Core {
                 self.leader_schedule
                     .update_leader_schedule_v2(&self.dag_state);
 
-                // FORK-SAFETY: After a full 300-commit scoring cycle completes,
-                // the LeaderSwapTable is now built from actual network-verified
-                // CertifiedCommit data. Clear the snapshot recovery guard.
+                // UNIFIED RECOVERY BARRIER (May 2026):
+                // After a full 300-commit scoring cycle completes, advance the barrier.
+                // The barrier only transitions ScheduleVerifying → Ready (via compare_exchange),
+                // so this is safe to call unconditionally — it's a no-op if the barrier
+                // is in any other phase (Inactive, GoSyncing, DagCatchingUp, or Ready).
+                //
+                // This replaces the fragmented logic that checked is_sync_mode, local vs quorum
+                // commit, and handled_commits >= 300. All those edge cases are now handled by
+                // the barrier's strict phase progression:
+                //   Inactive → GoSyncing → DagCatchingUp → ScheduleVerifying → Ready
+                // Only ScheduleVerifying → Ready happens here.
+                self.coordination_hub.recovery_barrier().schedule_verified();
+                // Also clear legacy flag for backward compatibility
                 if self.coordination_hub.is_schedule_recovery_pending() {
                     self.coordination_hub.set_schedule_recovery_pending(false);
                 }
@@ -376,6 +386,20 @@ impl Core {
                         "🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, \
                          LeaderSchedule needs re-confirmation from network. \
                          Waiting for 300-commit scoring cycle with CertifiedCommits."
+                    );
+                    break;
+                }
+
+                // UNIFIED RECOVERY BARRIER GUARD (May 2026):
+                // Defense-in-depth — even if legacy flags are somehow not set
+                // (e.g., epoch 2 commit index reset bypasses handled >= 300),
+                // the barrier will still block the committer until all recovery
+                // phases complete.
+                if !self.coordination_hub.recovery_barrier().can_propose() {
+                    tracing::info!(
+                        "🛡️ [RECOVERY-BARRIER-GUARD] Blocking local committer: \
+                         RecoveryBarrier phase={}. Recovery is still in progress.",
+                        self.coordination_hub.recovery_barrier().phase()
                     );
                     break;
                 }

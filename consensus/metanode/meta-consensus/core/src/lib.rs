@@ -33,6 +33,7 @@ mod linearizer;
 mod metrics;
 pub mod network; // Made public for SyncOnlyNode
 mod proposed_block_handler;
+pub mod recovery_barrier;
 mod reconfiguration;
 mod round_prober;
 mod round_tracker;

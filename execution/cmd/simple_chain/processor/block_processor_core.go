@@ -414,6 +414,10 @@ func NewBlockProcessor(
 		
 		// Set callback to fetch atomic StateRoot during snapshot
 		snapshotManager.SetStateRootCallback(func() string {
+			if root, ok := mt_trie.GetNomtHandleRoot("account_state"); ok {
+				return root.Hex()
+			}
+			// Fallback to flat trie if NOMT isn't active
 			if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
 				return bp.chainState.GetAccountStateDB().Trie().Hash().Hex()
 			}

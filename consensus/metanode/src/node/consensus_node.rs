@@ -1021,29 +1021,36 @@ impl ConsensusNode {
         };
 
         // ═══════════════════════════════════════════════════════════════
-        // ARCHITECTURAL FIX: Synchronous Phase-Gating
+        // UNIFIED RECOVERY BARRIER (May 2026 — Architectural Fix)
+        //
+        // EPOCH-AGNOSTIC SNAPSHOT DETECTION:
+        // If the DAG is empty but Go has blocks, this is a snapshot recovery
+        // regardless of epoch number or commit count.
+        //
+        // OLD BUG: The previous check `handled_commits >= 300` failed on epoch 2+
+        // because epoch-scoped commit indices reset to 0, always failing the threshold.
+        // This caused the schedule_recovery_pending guard to never activate,
+        // allowing premature Healthy transitions with stale LeaderSwapTables.
+        //
+        // NEW: Detect snapshot recovery by checking if Go has already executed blocks
+        // (go_replay_after > 0 OR go_block > 0) while the DAG is empty. This works
+        // across all epochs.
         // ═══════════════════════════════════════════════════════════════
         if !dag_has_history {
-            let handled_commits = storage.last_handled_commit_index.unwrap_or(0);
-            if handled_commits >= 300 {
-                // ════════════════════════════════════════════════════════════
-                // FORK-SAFETY FIX: Must lock committer and force schedule recovery.
-                // If a node recovers from a snapshot, its local DAG is empty.
-                // It will quickly fetch the latest commits (e.g., 590-600) and
-                // transition to Healthy. However, the ReputationScores for the
-                // 301..=600 window will only be based on the 10 fetched commits,
-                // producing wildly inaccurate scores compared to peers who scored
-                // all 300 commits. This causes the LeaderSwapTable to diverge,
-                // leading to a split-brain on leader elections.
-                //
-                // Setting this to `true` forces CommitSyncer's ACTIVE-SYNC-RECOVERY
-                // to actively fetch the entire scoring window before unlocking.
-                // ════════════════════════════════════════════════════════════
-                coordination_hub.set_schedule_recovery_pending(true);
+            // Check if Go has state (any evidence of prior execution)
+            let go_has_state = storage.last_handled_commit_index.map_or(false, |c| c > 0);
+            if go_has_state {
+                coordination_hub.activate_recovery_barrier();
                 info!(
-                    "🛡️ [SNAPSHOT-RECOVERY] DAG is empty but Go has handled {} commits. \
-                     Locking committer for LeaderSchedule recovery to prevent reputation score divergence.",
-                    handled_commits
+                    "🛡️ [RECOVERY-BARRIER] DAG is empty but Go has state (last_handled={:?}). \
+                     Activating unified recovery barrier for snapshot recovery. \
+                     ALL proposals blocked until GoSyncing → DagCatchingUp → ScheduleVerifying → Ready.",
+                    storage.last_handled_commit_index
+                );
+            } else {
+                info!(
+                    "ℹ️ [RECOVERY-BARRIER] DAG is empty and Go has no state. \
+                     This is a fresh start (genesis). Recovery barrier NOT activated."
                 );
             }
         }
