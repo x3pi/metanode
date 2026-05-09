@@ -306,7 +306,6 @@ pub fn start_unified_epoch_monitor(
                                 
                                 if go_block < data.boundary_block || go_last_gei < data.boundary_gei {
                                     // First try fetching normal blocks
-                                    let mut synced_blocks = false;
                                     if go_block < data.boundary_block {
                                         match crate::network::peer_rpc::fetch_blocks_from_peer(
                                             &peer_rpc,
@@ -322,7 +321,6 @@ pub fn start_unified_epoch_monitor(
                                                             "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
                                                             synced, last
                                                         );
-                                                        synced_blocks = true;
                                                     }
                                                     Err(e) => {
                                                         warn!("⚠️ [EPOCH MONITOR] SyncOnly: sync_blocks failed: {}", e);
@@ -413,6 +411,71 @@ pub fn start_unified_epoch_monitor(
                             target_epoch, current_go_epoch
                         );
                         break;
+                    }
+                }
+
+                // ═══════════════════════════════════════════════════════════════
+                // PROMOTION CHECK: After advancing Go epoch, check if this node
+                // is now in the new committee (e.g., user registered as validator).
+                // Without this check, SyncOnly nodes never discover they should
+                // become Validators because the code path above only syncs blocks
+                // and advances Go epoch — it never loads the new committee list.
+                // ═══════════════════════════════════════════════════════════════
+                if let Some(node_arc) = crate::node::get_transition_handler_node().await {
+                    let node_guard = node_arc.lock().await;
+                    let own_protocol_pubkey = node_guard.protocol_keypair.public();
+                    drop(node_guard); // Release lock before async calls
+
+                    match crate::node::transition::demotion::determine_role_for_epoch(
+                        network_epoch,
+                        &own_protocol_pubkey,
+                        &config_clone,
+                    )
+                    .await
+                    {
+                        Ok(crate::node::NodeMode::Validator) => {
+                            info!(
+                                "🚀 [EPOCH MONITOR] SyncOnly node detected in committee for epoch {}! Triggering promotion...",
+                                network_epoch
+                            );
+
+                            // Fetch committee to pass to check_and_update_node_mode
+                            let committee_source = match crate::node::committee_source::CommitteeSource::discover(&config_clone).await {
+                                Ok(source) => source,
+                                Err(e) => {
+                                    warn!("⚠️ [EPOCH MONITOR] Cannot discover committee source for promotion: {}", e);
+                                    continue;
+                                }
+                            };
+                            let (committee, _eth_addresses) = match committee_source
+                                .fetch_committee(&config_clone.executor_send_socket_path, network_epoch)
+                                .await
+                            {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!("⚠️ [EPOCH MONITOR] Cannot fetch committee for promotion: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            // Re-acquire lock and trigger mode transition
+                            let mut node_guard = node_arc.lock().await;
+                            if let Err(e) = node_guard
+                                .check_and_update_node_mode(&committee, &config_clone, false)
+                                .await
+                            {
+                                warn!("⚠️ [EPOCH MONITOR] Promotion check failed: {}", e);
+                            }
+                        }
+                        Ok(crate::node::NodeMode::SyncOnly) => {
+                            // Not in committee — stay SyncOnly, nothing to do
+                        }
+                        Err(e) => {
+                            debug!(
+                                "⚠️ [EPOCH MONITOR] Could not determine role for epoch {}: {}",
+                                network_epoch, e
+                            );
+                        }
                     }
                 }
 
