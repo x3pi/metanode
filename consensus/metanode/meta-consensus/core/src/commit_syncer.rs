@@ -1417,7 +1417,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
             
             for authority in target_authorities.clone() {
-                if let Ok(Ok((serialized_commits, _, commit_infos))) = tokio::time::timeout(
+                if let Ok(Ok((serialized_commits, _, _))) = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
                 ).await {
@@ -1428,13 +1428,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             let leader_round = commit.leader().round;
                             let digest = crate::commit::TrustedCommit::compute_digest(serialized);
                             
-                            // Extract reputation scores from commit_infos if present
+                            // Extract reputation scores from the last schedule change boundary
                             let mut reputation_scores: Option<Vec<(AuthorityIndex, u64)>> = None;
-                            if let Some(info_bytes) = commit_infos.first() {
-                                if let Ok(info) = bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes) {
-                                    if !info.reputation_scores.scores_per_authority.is_empty() {
-                                        let context_arc = self.inner.context.clone();
-                                        reputation_scores = Some(info.reputation_scores.authorities_by_score(context_arc));
+                            if last_schedule_change_index > 0 {
+                                let schedule_range: crate::commit::CommitRange = (last_schedule_change_index..=last_schedule_change_index).into();
+                                if let Ok(Ok((_, _, schedule_infos))) = tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    self.inner.network_client.fetch_commits(authority, schedule_range, Duration::from_secs(4))
+                                ).await {
+                                    if let Some(info_bytes) = schedule_infos.first() {
+                                        if let Ok(info) = bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes) {
+                                            if !info.reputation_scores.scores_per_authority.is_empty() {
+                                                let context_arc = self.inner.context.clone();
+                                                reputation_scores = Some(info.reputation_scores.authorities_by_score(context_arc));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1442,7 +1450,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             if last_schedule_change_index > 0 && reputation_scores.is_none() {
                                 tracing::info!(
                                     "ℹ️ [BASELINE] Schedule boundary at commit #{} noted, but reputation scores \
-                                     cannot be extracted from serialized Commit. COLD-START-GUARD will prevent \
+                                     cannot be extracted from network. COLD-START-GUARD will prevent \
                                      local committer from using stale leader schedule.",
                                     last_schedule_change_index
                                 );

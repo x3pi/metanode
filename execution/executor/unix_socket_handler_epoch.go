@@ -1343,6 +1343,31 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			if blockGEI > lastExecutedGEI {
 				lastExecutedGEI = blockGEI
 			}
+
+			// CRITICAL FIX: Even if the block was fully executed previously (from LevelDB),
+			// we MUST update the in-memory pointers so that Rust's initialize_from_go()
+			// query reads the correct last_block_number. Otherwise, Rust will use a stale
+			// block_number for the next consensus commit, overwriting this block.
+			storage.UpdateLastBlockNumber(blockNum)
+			if blockGEI > 0 {
+				storage.UpdateLastGlobalExecIndex(blockGEI)
+			}
+
+			// CRITICAL FIX: Restore lastHandledCommitIndex even for skipped blocks!
+			// If a node crashes or is restored from a corrupted rsync backup, lastHandledCommitIndex
+			// might be out of sync. We must restore it from the highest synced block header.
+			if header.CommitIndex() > 0 {
+				commitIdx32 := uint32(header.CommitIndex())
+				currentEpoch := header.Epoch()
+				lastEpoch := storage.GetLastHandledCommitEpoch()
+				
+				if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
+					storage.ForceSetLastHandledCommitIndex(commitIdx32)
+					storage.UpdateLastHandledCommitEpoch(currentEpoch)
+					logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d (epoch %d) from fully-executed block #%d", commitIdx32, currentEpoch, blockNum)
+				}
+			}
+
 			// Still persist backup data for Sub nodes
 			if len(backupBytes) > 0 {
 				rh.persistBackupForSub(backupBytes, blockNum)
