@@ -2,6 +2,7 @@
 // @markdown processor/block_processor_sync.go - GEI ordering, fork-safety, and block sync processing
 package processor
 
+// Go build cache invalidation comment: Force relink of Rust FFI library
 import (
 	"fmt"
 	"time"
