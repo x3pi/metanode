@@ -236,6 +236,18 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			}
 		}
 
+		// ═══════════════════════════════════════════════════════════════
+		// GHOST-BLOCK-GUARD: If Rust explicitly assigned a block number
+		// for this 0-tx commit, we MUST create an empty block to prevent
+		// sequence gaps in the Go chain.
+		// ═══════════════════════════════════════════════════════════════
+		if epochData.GetBlockNumber() > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Rust assigned block_number=%d for 0-tx commit (GEI=%d). Creating empty block to prevent sequence gap.",
+				epochData.GetBlockNumber(), globalExecIndex)
+			*nextExpectedGlobalExecIndex = globalExecIndex
+			goto EPOCH_BOUNDARY_FALLTHROUGH
+		}
+
 		// Drain pending blocks
 		if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
 			delete(pendingBlocks, *nextExpectedGlobalExecIndex)

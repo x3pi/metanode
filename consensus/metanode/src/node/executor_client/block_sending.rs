@@ -275,18 +275,12 @@ impl ExecutorClient {
                 *last_ep = epoch;
             }
             
-            // CRITICAL FORK-SAFETY v7: Only increment block number if the commit 
-            // will actually result in a Go block (has txs or is epoch boundary).
-            // Empty commits with system txs are saved to the previous block in Go's fast-path,
-            // so they MUST NOT increment next_bn, otherwise it creates a permanent "ghost block" gap.
-            if total_tx_before > 0 || is_epoch_boundary {
-                let bn = *next_bn;
-                *next_bn += 1;
-                bn
-            } else {
-                trace!("⏭️  [BLOCK-NUM] Commit is empty and not epoch boundary, keeping BN=0 (SystemTxs attach to previous block in Go)");
-                0
-            }
+            // CRITICAL FORK-SAFETY v7: Always increment block number for every commit,
+            // even if empty. This ensures Go receives a sequential block_number and can
+            // explicitly create an empty block to prevent "Ghost block" sequence gaps.
+            let bn = *next_bn;
+            *next_bn += 1;
+            bn
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
