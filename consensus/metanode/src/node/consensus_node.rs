@@ -1022,17 +1022,27 @@ impl ConsensusNode {
 
         // ═══════════════════════════════════════════════════════════════
         // ARCHITECTURAL FIX: Synchronous Phase-Gating
-        // Reputation swaps are permanently disabled in Metanode (FORK-SAFETY),
-        // so we DO NOT need to lock the committer for schedule recovery.
         // ═══════════════════════════════════════════════════════════════
         if !dag_has_history {
             let handled_commits = storage.last_handled_commit_index.unwrap_or(0);
             if handled_commits >= 300 {
-                // REMOVED: coordination_hub.set_schedule_recovery_pending(true);
-                // The schedule is 100% deterministic based on stake, so no recovery is needed.
+                // ════════════════════════════════════════════════════════════
+                // FORK-SAFETY FIX: Must lock committer and force schedule recovery.
+                // If a node recovers from a snapshot, its local DAG is empty.
+                // It will quickly fetch the latest commits (e.g., 590-600) and
+                // transition to Healthy. However, the ReputationScores for the
+                // 301..=600 window will only be based on the 10 fetched commits,
+                // producing wildly inaccurate scores compared to peers who scored
+                // all 300 commits. This causes the LeaderSwapTable to diverge,
+                // leading to a split-brain on leader elections.
+                //
+                // Setting this to `true` forces CommitSyncer's ACTIVE-SYNC-RECOVERY
+                // to actively fetch the entire scoring window before unlocking.
+                // ════════════════════════════════════════════════════════════
+                coordination_hub.set_schedule_recovery_pending(true);
                 info!(
                     "🛡️ [SNAPSHOT-RECOVERY] DAG is empty but Go has handled {} commits. \
-                     Reputation swaps are disabled, skipping schedule recovery lock.",
+                     Locking committer for LeaderSchedule recovery to prevent reputation score divergence.",
                     handled_commits
                 );
             }

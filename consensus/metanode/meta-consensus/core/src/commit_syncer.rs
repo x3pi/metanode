@@ -620,9 +620,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// This is the ONLY place where state is mutated during update_state().
     fn apply_transition(&mut self, decision: PhaseTransitionDecision, input: &PhaseStateInput) {
         match decision {
-            PhaseTransitionDecision::Hold { reason: _ } => {
+            PhaseTransitionDecision::Hold { reason } => {
                 // No action needed — stay in current phase.
-                // The reason is available for debug logging if needed.
+                tracing::trace!("🛡️ [STATE-MACHINE] PhaseTransitionDecision::Hold - reason: {}", reason);
             }
 
             PhaseTransitionDecision::Transition { to } => {
