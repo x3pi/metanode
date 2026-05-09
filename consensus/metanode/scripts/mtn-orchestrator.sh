@@ -349,6 +349,11 @@ cmd_start() {
     if $build_rust; then
         log_info "🛠  Đang build Rust (metanode)..."
         (cd "$RUST_DIR" && cargo +nightly build --release) || exit 1
+        
+        # CRITICAL FIX: Force Go to relink the new libmetanode.a by updating the modification time
+        # of the Go file that imports it via CGO. Without this, go build's cache may use the old binary.
+        log_info "🧹  Đang ép Go xóa cache cho FFI bridge..."
+        touch "$GO_DIR/executor/ffi_bridge.go" 2>/dev/null || true
     fi
     if $build_go; then
         log_info "🛠  Đang build Protobuf cho Go (simple_chain)..."
