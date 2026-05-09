@@ -97,6 +97,7 @@ impl std::fmt::Display for RecoveryPhase {
 #[derive(Debug)]
 pub struct RecoveryBarrier {
     phase: AtomicU8,
+    is_pre_verified: std::sync::atomic::AtomicBool,
 }
 
 impl RecoveryBarrier {
@@ -104,6 +105,7 @@ impl RecoveryBarrier {
     pub fn new() -> Self {
         Self {
             phase: AtomicU8::new(RecoveryPhase::Inactive as u8),
+            is_pre_verified: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -199,23 +201,37 @@ impl RecoveryBarrier {
         }
     }
 
-    /// DAG has caught up to quorum — advance to schedule verification.
+    /// DAG has caught up to quorum — advance to schedule verification (or Ready if pre-verified).
     /// Called when: `local_commit >= quorum_commit && quorum_commit > 0`.
     ///
-    /// Transitions: `DagCatchingUp → ScheduleVerifying`
+    /// Transitions: `DagCatchingUp → ScheduleVerifying` (or `DagCatchingUp → Ready`)
     pub fn dag_caught_up(&self) {
+        let next_phase = if self.is_pre_verified.load(Ordering::Acquire) {
+            RecoveryPhase::Ready as u8
+        } else {
+            RecoveryPhase::ScheduleVerifying as u8
+        };
+        
         let result = self.phase.compare_exchange(
             RecoveryPhase::DagCatchingUp as u8,
-            RecoveryPhase::ScheduleVerifying as u8,
+            next_phase,
             Ordering::Release,
             Ordering::Acquire,
         );
         match result {
             Ok(_) => {
-                tracing::info!(
-                    "✅ [RECOVERY-BARRIER] DagCatchingUp → ScheduleVerifying. \
-                     DAG reached quorum. Waiting for a full 300-commit LeaderSchedule scoring cycle."
-                );
+                if next_phase == RecoveryPhase::Ready as u8 {
+                    tracing::info!(
+                        "✅ [RECOVERY-BARRIER] DagCatchingUp → Ready. \
+                         DAG reached quorum AND schedule was pre-verified via baseline reputation scores. \
+                         Node is now safe to propose blocks."
+                    );
+                } else {
+                    tracing::info!(
+                        "✅ [RECOVERY-BARRIER] DagCatchingUp → ScheduleVerifying. \
+                         DAG reached quorum. Waiting for a full 300-commit LeaderSchedule scoring cycle."
+                    );
+                }
             }
             Err(current) => {
                 let current_phase = RecoveryPhase::from_u8(current);
@@ -226,6 +242,22 @@ impl RecoveryBarrier {
                 );
             }
         }
+    }
+
+    /// Mark the schedule as pre-verified.
+    /// Called when the node successfully injects reputation scores from a network baseline.
+    /// This allows `dag_caught_up()` to bypass the `ScheduleVerifying` phase and go straight to `Ready`.
+    pub fn set_schedule_pre_verified(&self) {
+        self.is_pre_verified.store(true, Ordering::Release);
+        tracing::info!("🛡️ [RECOVERY-BARRIER] Schedule marked as PRE-VERIFIED via baseline.");
+        
+        // If we are ALREADY in ScheduleVerifying when this is called, we can jump to Ready!
+        let _ = self.phase.compare_exchange(
+            RecoveryPhase::ScheduleVerifying as u8,
+            RecoveryPhase::Ready as u8,
+            Ordering::Release,
+            Ordering::Acquire,
+        );
     }
 
     /// LeaderSchedule scoring cycle completed — recovery is complete.
@@ -262,6 +294,7 @@ impl RecoveryBarrier {
     /// Reset the barrier to Inactive (for epoch transitions or testing).
     pub fn reset(&self) {
         let prev = self.phase.swap(RecoveryPhase::Inactive as u8, Ordering::Release);
+        self.is_pre_verified.store(false, Ordering::Release);
         let prev_phase = RecoveryPhase::from_u8(prev);
         if prev_phase != RecoveryPhase::Inactive {
             tracing::info!(
@@ -282,6 +315,7 @@ impl Clone for RecoveryBarrier {
     fn clone(&self) -> Self {
         Self {
             phase: AtomicU8::new(self.phase.load(Ordering::Acquire)),
+            is_pre_verified: std::sync::atomic::AtomicBool::new(self.is_pre_verified.load(Ordering::Acquire)),
         }
     }
 }

@@ -149,6 +149,15 @@ impl Core {
                         self.dag_state.read().last_commit_index(),
                         scores
                     );
+                    
+                    // Since the schedule is now fully restored and correct based on the network's 
+                    // baseline, we DO NOT need to wait for a 300-commit cycle to verify it.
+                    // We can tell the RecoveryBarrier to bypass the ScheduleVerifying phase!
+                    self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                    
+                    if self.coordination_hub.is_schedule_recovery_pending() {
+                        self.coordination_hub.set_schedule_recovery_pending(false);
+                    }
                 }
             }
 

@@ -689,6 +689,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                          (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
                         commit_index
                     );
+                    
+                    // CRITICAL FIX: If we are seeding the quorum, it means the entire cluster
+                    // was wiped or is starting fresh. There are no peers to fetch a LeaderSchedule
+                    // from, and no peers to generate 300 commits. We MUST bypass ScheduleVerifying
+                    // to prevent a permanent cluster deadlock.
+                    self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                    if self.coordination_hub.is_schedule_recovery_pending() {
+                        self.coordination_hub.set_schedule_recovery_pending(false);
+                    }
                 }
             }
         }
