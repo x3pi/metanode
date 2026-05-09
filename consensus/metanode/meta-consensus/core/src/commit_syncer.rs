@@ -145,12 +145,92 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
 
-    // --- bootstrap timing ---
-    /// Timestamp when Bootstrapping phase started.
-    /// Used to implement a timeout before assuming genuine genesis (highest_handled=0).
-    /// After DAG wipe, the CommitConsumerMonitor might not be properly aligned,
-    /// causing false genesis detection. Waiting allows quorum data to arrive.
-    bootstrap_start_time: tokio::time::Instant,
+    // --- active sync recovery ---
+    /// Counter for Case B retries (schedule_recovery_pending + peers at same level).
+    /// After N retries without network progress, escalates to Case C (genuine deadlock).
+    /// This prevents permanent stalls when ALL nodes restore from snapshot simultaneously.
+    active_sync_retry_count: u32,
+
+    /// Guards the ACTIVE-SYNC-RECOVERY force-lower from re-triggering every 150ms.
+    /// Set to true after the first force-lower; reset to false when an inflight
+    /// fetch completes (handle_fetch_result) or when schedule_recovery clears.
+    /// This prevents the infinite `1395 → 900 → 1395 → 900` loop that causes
+    /// PANIC in ScoringSubdag or DAG fork.
+    schedule_recovery_fetch_pending: bool,
+
+    // --- FORK-SAFETY: network-validated commit gate (May 2026) ---
+    /// Counts the number of certified commits actually fetched and processed from
+    /// the network since the last time startup_sync_active was set. This prevents
+    /// a premature CatchingUp→Healthy transition where synced_commit_index is
+    /// seeded from baseline (matching quorum_commit on first check) but no actual
+    /// network sync has occurred. The node MUST have processed at least 1 real
+    /// commit from peers before it can clear startup_sync_active.
+    network_synced_commits: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATE MACHINE TYPES (May 2026 Refactor)
+//
+// These types formalize the phase determination logic:
+//   - PhaseStateInput: immutable snapshot of all state needed for decisions
+//   - PhaseTransitionDecision: describes WHAT to do (no side effects)
+//   - CATCHING_UP_ENTER_THRESHOLD: hysteresis constant
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Hysteresis threshold for entering CatchingUp from Healthy.
+/// Prevents rapid CatchingUp↔Healthy oscillation when the node is
+/// perpetually 1-2 commits behind:
+///   - Enter CatchingUp: lag > CATCHING_UP_ENTER_THRESHOLD
+///   - Stay in CatchingUp: lag > 0
+///   - Enter Healthy: lag == 0
+const CATCHING_UP_ENTER_THRESHOLD: u32 = 5;
+
+/// All inputs needed for phase determination — gathered once, used immutably.
+/// This struct intentionally captures a snapshot of all state so that
+/// `determine_phase()` is a pure function with no side effects.
+#[derive(Debug, Clone)]
+struct PhaseStateInput {
+    /// Current phase of the node.
+    current_phase: crate::coordination_hub::NodeConsensusPhase,
+    /// How far behind the network quorum (quorum_commit - synced_commit_index).
+    lag: u32,
+    /// Highest commit index confirmed by network quorum.
+    quorum_commit: u32,
+    /// Highest commit index the Go execution layer has processed.
+    highest_handled: u32,
+    /// Highest commit index the CommitSyncer has synced to.
+    synced_commit_index: u32,
+    /// Highest commit index in the local DAG.
+    local_commit: u32,
+    /// Number of certified commits actually fetched from network peers.
+    /// Zero means only baseline-seeded, not real network data.
+    network_synced_commits: u64,
+    /// Whether STARTUP-SYNC is active (post-snapshot recovery in progress).
+    startup_sync_active: bool,
+    /// Whether Go has completed its startup peer-sync.
+    go_sync_completed: bool,
+    /// Whether the LeaderSchedule needs re-confirmation after snapshot recovery.
+    schedule_recovery_pending: bool,
+    /// Whether the RecoveryBarrier allows proposals (Inactive or Ready).
+    recovery_barrier_can_propose: bool,
+    /// Current RecoveryBarrier phase (for logging).
+    recovery_barrier_phase: String,
+}
+
+/// Result of phase determination — describes WHAT should happen, not HOW.
+/// The `apply_transition()` method handles all side effects.
+#[derive(Debug)]
+enum PhaseTransitionDecision {
+    /// Stay in current phase, no action needed.
+    Hold { reason: &'static str },
+    /// Transition to a new phase.
+    Transition { to: crate::coordination_hub::NodeConsensusPhase },
+    /// Transition to new phase AND clear startup_sync_active first.
+    /// Used when all startup recovery gates have been passed.
+    TransitionAndUnlock { to: crate::coordination_hub::NodeConsensusPhase },
+    /// Seed the CommitVoteMonitor with execution state to break bootstrap deadlock.
+    /// Used when Go has state but Rust DAG is empty and quorum == 0.
+    SeedQuorum { commit_index: u32 },
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
@@ -166,6 +246,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         dag_state: Arc<RwLock<DagState>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
     ) -> Self {
         let inner = Arc::new(Inner {
             context,
@@ -176,6 +257,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             transaction_certifier,
             network_client,
             dag_state,
+            dag_state_writer,
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
         // FORK-SAFETY: DO NOT initialize with `handled_commit`!
@@ -202,7 +284,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_local_commit_change_at: tokio::time::Instant::now(),
             last_known_local_commit: synced_commit_index,
             adaptive_delay_state,
-            bootstrap_start_time: tokio::time::Instant::now(),
+            active_sync_retry_count: 0,
+            schedule_recovery_fetch_pending: false,
+            network_synced_commits: 0,
         }
     }
 
@@ -233,6 +317,7 @@ impl CommitSyncerSupervisor {
         dag_state: Arc<RwLock<DagState>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
     ) -> CommitSyncerHandle {
         let (tx_shutdown, mut rx_shutdown) = oneshot::channel();
         
@@ -267,6 +352,7 @@ impl CommitSyncerSupervisor {
                         dag_state.clone(),
                         coordination_hub.clone(),
                         adaptive_delay_state.clone(),
+                        dag_state_writer.clone(),
                     );
                     
                     let mut handle = syncer.start();
@@ -333,161 +419,328 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-    /// STATE MACHINE: Update sync state based on current metrics
-    fn update_state(&mut self) {
-        let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
-        let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
-        let local_commit = self.inner.dag_state.read().last_commit_index();
+    // ═══════════════════════════════════════════════════════════════════════
+    // STATE MACHINE: Refactored May 2026
+    //
+    // The phase determination logic is structured as a clean state machine:
+    //
+    //   update_state()                    — orchestrator
+    //     ├── gather_state_input()        — snapshot all state (pure, no side effects)
+    //     ├── determine_phase()           — match-based logic → TransitionDecision
+    //     │     ├── bootstrap_exit()      — Initializing/Bootstrapping exit rules
+    //     │     └── startup_sync_exit()   — CatchingUp exit during startup recovery
+    //     └── apply_transition()          — execute side effects
+    //
+    // Design principles:
+    //   1. gather → decide → apply (no side effects during decision)
+    //   2. Every path is a named match arm (auditable, no hidden fallthrough)
+    //   3. TransitionDecision describes WHAT, apply_transition() does HOW
+    // ═══════════════════════════════════════════════════════════════════════
 
-        // ════════════════════════════════════════════════════════════════════════
-        // SNAPSHOT RESTORE FAST-FORWARD
-        // If Rust DAG is empty (local_commit == 0) BUT Go executor has restored state
-        // up to highest_handled_index > 0, we fast-forward the baseline.
-        // CRITICAL FIX: We must NOT fast-forward all the way to highest_handled_index.
-        // We MUST preserve the past 300 commits to allow `update_leader_schedule_v2`
-        // to compute the correct LeaderSchedule based on identical past state.
-        // Otherwise, Node 1 will compute a divergent LeaderSchedule and fork the network.
-        // ════════════════════════════════════════════════════════════════════════
-        if local_commit == 0 && highest_handled_index > 0 {
-            // Find the last schedule boundary. num_commits matches LeaderSchedule::new
-            let num_commits = 300;
-            let last_boundary = (highest_handled_index / num_commits) * num_commits;
-            let baseline_target = last_boundary.saturating_sub(num_commits);
-
-            if baseline_target > 0 {
-                tracing::info!(
-                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG but Go execution is at {}. \
-                     Fast-forwarding DAG baseline to {} (preserving last {} commits for LeaderSchedule).",
-                    highest_handled_index, baseline_target, highest_handled_index - baseline_target
-                );
-                
-                // Fast-forward DAG state to match the boundary
-                self.inner.dag_state.write().reset_to_network_baseline(0, baseline_target, crate::commit::CommitDigest::MIN, 0, None);
-                self.synced_commit_index = baseline_target;
-            } else {
-                tracing::info!(
-                    "🚀 [COLD-START/RESTORE] Node initialized with empty DAG. Go is at {}. \
-                     No fast-forward needed (fetching all from Genesis to reconstruct LeaderSchedule).",
-                    highest_handled_index
-                );
-            }
-        }
-
+    /// All inputs needed for phase determination — gathered once, used immutably.
+    fn gather_state_input(&self) -> PhaseStateInput {
+        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+        let quorum_commit = std::cmp::max(
+            self.inner.commit_vote_monitor.quorum_commit_index(),
+            self.coordination_hub.get_quorum_commit_index(),
+        );
         let current_phase = self.coordination_hub.get_phase();
-
-        // Phase is determined by how far the CommitSyncer has synced with the network,
-        // rather than the physical local_commit. During snapshot restore, local_commit
-        // stays at 0 until the next commit triggers a fast-forward, but synced_commit_index
-        // is eagerly advanced. Using synced_commit_index prevents an infinite CatchingUp deadlock.
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
 
-        // ════════════════════════════════════════════════════════════════════
-        // HYSTERESIS: Prevent rapid CatchingUp↔Healthy oscillation.
-        //
-        // Without hysteresis, a recovering node perpetually 1-2 commits behind
-        // oscillates phase every ~20ms:
-        //   Healthy → new commit → lag=1 → CatchingUp → fetch 1 → lag=0 → Healthy → repeat
-        //
-        // Each Healthy transition fires transition_phase_and_kick() which spawns
-        // a Core kick task, creating a thundering herd that overwhelms the system.
-        //
-        // Fix: Use different thresholds for entering vs leaving CatchingUp:
-        //   - Enter CatchingUp: lag > 5 (tolerate small jitter during live consensus)
-        //   - Stay in CatchingUp: lag > 0 (once catching up, finish completely)
-        //   - Enter Healthy: lag == 0 (only when fully synced)
-        // ════════════════════════════════════════════════════════════════════
-        let catching_up_enter_threshold = 5;
-        let is_currently_catching_up = current_phase == crate::coordination_hub::NodeConsensusPhase::CatchingUp;
+        PhaseStateInput {
+            current_phase,
+            lag,
+            quorum_commit,
+            highest_handled,
+            synced_commit_index: self.synced_commit_index,
+            local_commit: self.inner.dag_state.read().last_commit_index(),
+            network_synced_commits: self.network_synced_commits,
+            startup_sync_active: self.coordination_hub.is_startup_sync_active(),
+            go_sync_completed: self.coordination_hub.is_startup_go_sync_completed(),
+            schedule_recovery_pending: self.coordination_hub.is_schedule_recovery_pending(),
+            recovery_barrier_can_propose: self.coordination_hub.recovery_barrier().can_propose(),
+            recovery_barrier_phase: format!("{}", self.coordination_hub.recovery_barrier().phase()),
+        }
+    }
 
-        let next_phase = if lag > 50_000 {
-            crate::coordination_hub::NodeConsensusPhase::StateSyncing
-        } else if is_currently_catching_up && lag > 0 {
-            // Already catching up — stay until fully synced
-            crate::coordination_hub::NodeConsensusPhase::CatchingUp
-        } else if !is_currently_catching_up && lag > catching_up_enter_threshold {
-            // Not catching up yet — only enter when lag is significant
-            crate::coordination_hub::NodeConsensusPhase::CatchingUp
+    /// Pure logic: determine what phase transition should happen.
+    /// Returns a TransitionDecision describing the action, with NO side effects.
+    fn determine_phase(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        use crate::coordination_hub::NodeConsensusPhase::*;
+
+        // ═══ INITIALIZING / BOOTSTRAPPING: Special exit logic ═══
+        if matches!(input.current_phase, Initializing | Bootstrapping) {
+            return Self::determine_bootstrap_exit(input);
+        }
+
+        // ═══ ALIGNING: Managed externally, don't touch ═══
+        if matches!(input.current_phase, Aligning) {
+            return PhaseTransitionDecision::Hold {
+                reason: "Phase managed externally (Aligning)",
+            };
+        }
+
+        // ═══ STATE SYNCING: Deep lag detected ═══
+        if input.lag > 50_000 {
+            return PhaseTransitionDecision::Transition { to: StateSyncing };
+        }
+
+        match input.current_phase {
+            // ─── CATCHING UP during startup recovery ───
+            CatchingUp if input.startup_sync_active => {
+                Self::determine_startup_sync_exit(input)
+            }
+
+            // ─── CATCHING UP (normal): Stay until lag=0 ───
+            CatchingUp if input.lag > 0 => PhaseTransitionDecision::Hold {
+                reason: "CatchingUp — lag > 0, still syncing",
+            },
+
+            // ─── CATCHING UP (normal): Lag resolved but barrier still active → Hold ───
+            CatchingUp if !input.recovery_barrier_can_propose => {
+                tracing::debug!(
+                    "🛡️ [STATE-MACHINE] CatchingUp lag=0 but RecoveryBarrier={}. Holding.",
+                    input.recovery_barrier_phase
+                );
+                PhaseTransitionDecision::Hold {
+                    reason: "CatchingUp — lag=0 but RecoveryBarrier not ready",
+                }
+            }
+
+            // ─── CATCHING UP (normal): Lag resolved + barrier clear → Healthy ───
+            CatchingUp => PhaseTransitionDecision::Transition { to: Healthy },
+
+            // ─── HEALTHY: Enter CatchingUp if significant lag ───
+            Healthy if input.lag > CATCHING_UP_ENTER_THRESHOLD => {
+                PhaseTransitionDecision::Transition { to: CatchingUp }
+            }
+
+            // ─── HEALTHY: Stay healthy (lag within tolerance) ───
+            Healthy => PhaseTransitionDecision::Hold {
+                reason: "Healthy — lag within threshold",
+            },
+
+            // ─── Catch-all: StateSyncing stays (managed by external trigger) ───
+            _ => PhaseTransitionDecision::Hold {
+                reason: "Phase managed externally",
+            },
+        }
+    }
+
+    /// Bootstrap exit logic — determines when to leave Initializing/Bootstrapping.
+    ///
+    /// Two distinct scenarios:
+    ///   1. GENESIS START: Go has no state, DAG empty → propose block 1
+    ///   2. SNAPSHOT RESTART: Go has state, DAG wiped → wait for quorum then catch up
+    fn determine_bootstrap_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        use crate::coordination_hub::NodeConsensusPhase::*;
+
+        // SAFETY: If recovery barrier is active, ALWAYS go to CatchingUp (never Healthy)
+        // regardless of lag. The barrier ensures the node stays in CatchingUp until
+        // all recovery phases complete.
+        let next_phase_for_lag = if input.lag > 0 || !input.recovery_barrier_can_propose {
+            CatchingUp
         } else {
-            crate::coordination_hub::NodeConsensusPhase::Healthy
+            Healthy
         };
 
-        if current_phase != next_phase
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Initializing
-            && current_phase != crate::coordination_hub::NodeConsensusPhase::Aligning
-        {
-            self.transition_phase_and_kick(next_phase);
-        } else if current_phase == crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-            || current_phase == crate::coordination_hub::NodeConsensusPhase::Initializing
-        {
-            // ════════════════════════════════════════════════════════════════
-            // BOOTSTRAPPING EXIT LOGIC — two distinct scenarios:
-            //
-            // 1. GENESIS START (highest_handled == 0, no quorum after timeout):
-            //    Go has no state, DAG is empty. Node MUST propose block 1 to
-            //    bootstrap consensus. → Transition to Healthy after timeout.
-            //
-            // 2. SNAPSHOT RESTART (highest_handled > 0):
-            //    Go has state at index N, DAG was wiped. Must wait for
-            //    CommitSyncer to fast-forward baseline, then detect quorum
-            //    before allowing proposals. → Only exit when quorum > 0.
-            //
-            // FORK-SAFETY: highest_handled == 0 could mean either genuine
-            // genesis OR a CommitConsumerMonitor alignment failure after DAG
-            // wipe. Wait up to 15s for quorum before assuming genesis.
-            // ════════════════════════════════════════════════════════════════
-            if highest_handled_index == 0 {
-                if quorum_commit > 0 {
-                    // NOT genesis — quorum exists, fast-forward and catch up
-                    tracing::info!(
-                        "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
-                         NOT genesis — DAG wipe detected. Transitioning to {:?}.",
-                        quorum_commit, next_phase
-                    );
-                    self.transition_phase_and_kick(next_phase);
-                } else {
-                    let elapsed = self.bootstrap_start_time.elapsed();
-                    if elapsed >= Duration::from_secs(5) {
-                        // Timeout: No quorum after 5s → treat as genuine genesis
-                        tracing::info!(
-                            "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after {:?}). \
-                             Transitioning to {:?} to allow block 1 proposal.",
-                            elapsed, next_phase
-                        );
-                        self.transition_phase_and_kick(next_phase);
-                    } else {
-                        // Still waiting for quorum — stay in Bootstrapping
-                        tracing::trace!(
-                            "⏳ [BOOTSTRAP] highest_handled=0, quorum=0, waiting for quorum \
-                             ({:.1}s elapsed, 5s timeout)...",
-                            elapsed.as_secs_f64()
-                        );
-                    }
-                }
-            } else if quorum_commit > 0 {
-                // Snapshot restart: Go has state, wait for quorum detection
+        match (input.highest_handled, input.quorum_commit, input.go_sync_completed) {
+            // ── Case 1: No local state, quorum exists → NOT genesis, DAG wipe ──
+            (0, quorum, _) if quorum > 0 => {
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
+                     NOT genesis — DAG wipe detected. Transitioning to {:?}.",
+                    quorum, next_phase_for_lag
+                );
+                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+            }
+
+            // ── Case 2: No local state, no quorum, network polled → GENESIS ──
+            (0, 0, true) => {
+                tracing::info!(
+                    "🚀 [BOOTSTRAP] Genesis detected (highest_handled=0, no quorum after network poll). \
+                     Transitioning to {:?} to allow block 1 proposal.",
+                    next_phase_for_lag
+                );
+                PhaseTransitionDecision::TransitionAndUnlock { to: next_phase_for_lag }
+            }
+
+            // ── Case 3: No local state, no quorum, still polling → WAIT ──
+            (0, 0, false) => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: highest_handled=0, quorum=0, waiting for network poll",
+            },
+
+            // ── Case 4: Has local state, quorum exists → SNAPSHOT RESTART ──
+            (_, quorum, _) if quorum > 0 => {
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
-                    quorum_commit, next_phase
+                    quorum, next_phase_for_lag
                 );
-                self.transition_phase_and_kick(next_phase);
-            } else {
-                // ════════════════════════════════════════════════════════
-                // QUORUM SEED: Go has state at highest_handled but Rust
-                // DAG is empty AND quorum == 0 → chicken-and-egg deadlock.
-                // Seed CommitVoteMonitor so quorum becomes > 0, allowing
-                // bootstrap to complete on next tick.
-                // ════════════════════════════════════════════════════════
-                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(highest_handled_index);
+                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+            }
+
+            // ── Case 5: Has local state, no quorum, network polled → SEED ──
+            (handled, 0, true) => PhaseTransitionDecision::SeedQuorum {
+                commit_index: handled,
+            },
+
+            // ── Case 6: Has local state, no quorum, still polling → WAIT ──
+            (_, 0, false) => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: has state but quorum=0, waiting for network poll",
+            },
+
+            // ── Unreachable: quorum can't be negative ──
+            _ => PhaseTransitionDecision::Hold {
+                reason: "Bootstrap: unexpected state",
+            },
+        }
+    }
+
+    /// Startup sync exit logic — determines when CatchingUp can transition to Healthy
+    /// during post-snapshot recovery (startup_sync_active=true).
+    ///
+    /// Guards (all must pass):
+    ///   1. lag == 0 (mathematical parity with quorum)
+    ///   2. quorum_commit > 0 (real quorum, not stale)
+    ///   3. quorum_commit >= highest_handled (quorum not behind execution)
+    ///   4. network_synced_commits > 0 (real commits fetched, not baseline-seeded)
+    ///   5. schedule_recovery_pending == false (LeaderSchedule confirmed)
+    fn determine_startup_sync_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        // DETECT EMPTY NETWORK / WIPE:
+        // If quorum is 0 but we've successfully polled the network (go_sync_completed),
+        // it means all peers are starting fresh. We must bypass standard $>0$ checks.
+        let is_empty_network = input.quorum_commit == 0 && input.go_sync_completed;
+
+        // Gate 1: Mathematical parity
+        let has_parity = input.lag == 0
+            && (input.quorum_commit > 0 || is_empty_network)
+            && input.quorum_commit >= input.highest_handled;
+
+        if !has_parity {
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: parity not reached (lag > 0 or quorum stale)",
+            };
+        }
+
+        // Gate 2: Network-validated commits (prevent baseline-only false parity)
+        // We bypass this requirement if:
+        // 1. The network is completely empty (no commits exist to fetch).
+        // 2. We already had the full DAG locally before starting (local_commit == quorum_commit).
+        let needs_network_sync = !is_empty_network && input.local_commit < input.quorum_commit;
+        
+        if needs_network_sync && input.network_synced_commits == 0 {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
+                 but network_synced_commits=0 — no actual commits fetched from peers yet. \
+                 Blocking CatchingUp→Healthy to prevent baseline-only false parity.",
+                input.synced_commit_index, input.quorum_commit
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: no network-validated commits yet",
+            };
+        }
+
+        // Gate 3: LeaderSchedule confirmed (legacy check)
+        if input.schedule_recovery_pending {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
+                 but LeaderSchedule recovery is still pending! \
+                 Node MUST NOT exit CatchingUp yet to prevent fork.",
+                input.synced_commit_index, input.quorum_commit
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: LeaderSchedule recovery pending",
+            };
+        }
+
+        // Gate 4 (NEW — DEFINITIVE): Recovery Barrier must be Ready or Inactive.
+        // This is the ARCHITECTURAL INVARIANT — it cannot be bypassed by any
+        // edge case (epoch resets, threshold checks, etc.) because it tracks
+        // the ACTUAL phase progression, not derived conditions.
+        if !input.recovery_barrier_can_propose {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] Mathematical parity reached and schedule confirmed, \
+                 but RecoveryBarrier is NOT ready (phase={}). \
+                 Node MUST NOT exit CatchingUp — recovery is still in progress.",
+                input.recovery_barrier_phase
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: RecoveryBarrier not ready",
+            };
+        }
+
+        // All gates passed — safe to unlock
+        tracing::info!(
+            "✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, \
+             network_synced={}) and RecoveryBarrier=Ready. \
+             Explicitly unlocking node.",
+            input.synced_commit_index, input.quorum_commit, input.network_synced_commits
+        );
+        PhaseTransitionDecision::TransitionAndUnlock {
+            to: crate::coordination_hub::NodeConsensusPhase::Healthy,
+        }
+    }
+
+    /// Execute the side effects of a transition decision.
+    /// This is the ONLY place where state is mutated during update_state().
+    fn apply_transition(&mut self, decision: PhaseTransitionDecision, input: &PhaseStateInput) {
+        match decision {
+            PhaseTransitionDecision::Hold { reason } => {
+                // No action needed — stay in current phase.
+                tracing::trace!("🛡️ [STATE-MACHINE] PhaseTransitionDecision::Hold - reason: {}", reason);
+            }
+
+            PhaseTransitionDecision::Transition { to } => {
+                if input.current_phase != to {
+                    self.transition_phase_and_kick(to);
+                }
+            }
+
+            PhaseTransitionDecision::TransitionAndUnlock { to } => {
+                // Clear startup_sync BEFORE transitioning (so choke-point guard allows it)
+                if self.coordination_hub.is_startup_sync_active() {
+                    self.coordination_hub.set_startup_sync_active(false);
+                }
+                
+                // CRITICAL FIX: We must explicitly unlock the local committer here!
+                // During CatchingUp, commits processed by Core have startup_sync_active=true,
+                // so they DO NOT unlock the committer (Anti-Fork guard). Once CatchingUp
+                // successfully completes and we transition to Healthy, we must manually
+                // unlock so the node can start proposing blocks.
+                self.coordination_hub.unlock_local_commit();
+                
+                if input.current_phase != to {
+                    self.transition_phase_and_kick(to);
+                }
+            }
+
+            PhaseTransitionDecision::SeedQuorum { commit_index } => {
+                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(commit_index);
                 if seeded {
                     tracing::warn!(
                         "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
-                         (commit_index={}) to break bootstrap deadlock. Quorum will resolve on next tick.",
-                        highest_handled_index
+                         (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
+                        commit_index
                     );
+                    
+                    // CRITICAL FIX: If we are seeding the quorum, it means the entire cluster
+                    // was wiped or is starting fresh. There are no peers to fetch a LeaderSchedule
+                    // from, and no peers to generate 300 commits. We MUST bypass ScheduleVerifying
+                    // to prevent a permanent cluster deadlock.
+                    self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                    if self.coordination_hub.is_schedule_recovery_pending() {
+                        self.coordination_hub.set_schedule_recovery_pending(false);
+                    }
                 }
             }
         }
+    }
+
+    /// Main state update — orchestrates the gather → decide → apply cycle.
+    fn update_state(&mut self) {
+        let input = self.gather_state_input();
+        let decision = Self::determine_phase(&input);
+        self.apply_transition(decision, &input);
     }
 
     async fn schedule_loop(mut self, mut rx_shutdown: oneshot::Receiver<()>) {
@@ -497,6 +750,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.synced_commit_index,
             self.poll_interval().as_millis()
         );
+
+        // CRITICAL RECOVERY GUARD:
+        // Synchronously patch the baseline (fetching digest + reputation_scores) BEFORE
+        // entering the loop and allowing any fetches! If we don't block here, `try_schedule_once`
+        // might fetch commits and send them to `commit_manager` before the scores are restored,
+        // causing `commit_manager` to evaluate synced commits with an empty default schedule.
+        self.patch_baseline_if_needed().await;
+
+        // CRITICAL FIX FOR DAG-GATE RACE CONDITION:
+        // Passively waiting for CommitVoteMonitor to receive votes fails if the cluster
+        // is idle (no new commits being produced). This causes local `quorum_commit` to stay 0,
+        // tricking the node into transitioning to `Healthy` prematurely and causing forks.
+        // We must ACTIVELY discover the true quorum commit from peers before starting.
+        self.discover_quorum_commit().await;
+
         // STATE MACHINE: Get initial interval from current state
         let initial_interval = self.poll_interval();
         let mut current_interval_duration = initial_interval;
@@ -631,13 +899,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // Once any proposal achieves quorum, normal consensus
                         // resumes and this detector stops firing.
                         // ════════════════════════════════════════════════════════
-                        if local_commit == 0
+                        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
+                        if is_dag_empty
                             && quorum_commit == 0
+                            && highest_handled == 0
                             && self.coordination_hub.is_healthy()
-                            && liveness_stall_duration >= Duration::from_secs(10)
+                            && liveness_stall_duration >= Duration::from_secs(30)
                         {
                             tracing::error!(
-                                "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, phase=Healthy). \
+                                "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, highest_handled=0, phase=Healthy). \
                                  Kicking Core to force block proposal.",
                                 liveness_stall_duration.as_secs_f64()
                             );
@@ -653,26 +923,240 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         // ════════════════════════════════════════════════════════
+                        // ACTIVE PEER SYNC RECOVERY (replaces Stall Detector 6)
+                        //
+                        // Design philosophy: Blockchain MUST NEVER fork. Instead of
+                        // using timeouts to decide when to unlock the local committer,
+                        // the system always asks peers for their state and uses DATA
+                        // to determine the correct action.
+                        //
+                        // 5 Cases (all data-driven, no timeout-based unlock):
+                        //
+                        // Case A: Peers AHEAD → update quorum → CommitSyncer fetches
+                        //         → add_certified_commits → unlock naturally
+                        // Case B: Peers SAME + schedule NOT confirmed → trigger
+                        //         active commit fetch to rebuild LeaderSwapTable
+                        //         → schedule confirmed → unlock via data
+                        // Case C: Peers SAME + schedule confirmed → genuine deadlock
+                        //         → safe to unlock (all nodes have verified state)
+                        // Case D: Genesis (local=0, quorum=0) → handled by Stall
+                        //         Detector 3 (Core kick)
+                        // Case E: No peers reachable → wait, retry next cycle
+                        //         → NEVER act without data
+                        //
+                        // History: Block #1184 fork was caused by timeout-based unlock
+                        // (5s → poll → unlock) during snapshot recovery. The node
+                        // unlocked with a stale LeaderSwapTable, producing divergent
+                        // leader elections and timestamps.
+                        // ════════════════════════════════════════════════════════
+                        let is_healthy_but_locked = self.coordination_hub.is_healthy()
+                            && !self.coordination_hub.is_local_commit_unlocked();
+                            
+                        let is_catching_up_but_schedule_pending = self.coordination_hub.is_catching_up()
+                            && lag == 0
+                            && self.coordination_hub.is_schedule_recovery_pending();
+
+                        let needs_active_sync_recovery = is_healthy_but_locked || is_catching_up_but_schedule_pending;
+
+                        if needs_active_sync_recovery
+                            && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
+                        {
+                            let inner = self.inner.clone();
+                            let hub = self.coordination_hub.clone();
+                            let my_commit = local_commit;
+                            let is_schedule_pending = self.coordination_hub.is_schedule_recovery_pending();
+                            let retry_count = self.active_sync_retry_count;
+
+                            // Increment retry counter for Case B tracking BEFORE spawn.
+                            // Reset happens when we exit this branch (node unlocked, or not healthy).
+                            if is_schedule_pending {
+                                self.active_sync_retry_count += 1;
+                            } else {
+                                self.active_sync_retry_count = 0;
+                            }
+
+                            tokio::spawn(async move {
+                                tracing::info!(
+                                    "🔍 [ACTIVE-SYNC-RECOVERY] Node requires recovery (Healthy/Locked or CatchingUp/SchedulePending). \
+                                     Polling peers to determine recovery action (my_commit={}, schedule_pending={}, retry={})...",
+                                    my_commit, is_schedule_pending, retry_count
+                                );
+                                let mut max_peer_commit: u32 = 0;
+                                let mut polled_peers: u32 = 0;
+                                let timeout = Duration::from_secs(2);
+                                
+                                for authority in inner.context.committee.authorities().map(|(i, _)| i) {
+                                    if authority == inner.context.own_index {
+                                        continue;
+                                    }
+                                    if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
+                                        max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                        polled_peers += 1;
+                                    }
+                                }
+
+                                // ── Case E: No peers reachable ──
+                                // Never act without data from the network.
+                                if polled_peers == 0 {
+                                    tracing::warn!(
+                                        "⚠️ [ACTIVE-SYNC-RECOVERY] Case E: Failed to reach any peers. \
+                                         Cannot determine network state. Will retry next cycle. \
+                                         NEVER acting without peer data."
+                                    );
+                                    return;
+                                }
+
+                                // ── Case A: Peers are AHEAD ──
+                                // The node is lagging. Update quorum so CommitSyncer
+                                // transitions to CatchingUp and fetches CertifiedCommits.
+                                // The commits will flow through add_certified_commits()
+                                // which unlocks the local committer naturally (data-driven).
+                                if max_peer_commit > my_commit {
+                                    tracing::info!(
+                                        "📥 [ACTIVE-SYNC-RECOVERY] Case A: Peer has commit {} > {} (ours). \
+                                         Updating quorum to trigger CatchingUp → fetch → unlock via data.",
+                                        max_peer_commit, my_commit
+                                    );
+                                    hub.update_quorum_commit_index(max_peer_commit);
+                                    return;
+                                }
+
+                                // Peers are at SAME commit level — potential deadlock.
+                                // But we must verify safety before unlocking.
+                                if hub.is_startup_sync_active() {
+                                    tracing::info!(
+                                        "🔒 [ACTIVE-SYNC-RECOVERY] STARTUP-SYNC still active. \
+                                         Waiting for sync completion before any recovery action."
+                                    );
+                                    return;
+                                }
+
+                                // ── Case B: Peers SAME + schedule NOT confirmed ──
+                                // After snapshot recovery, the LeaderSwapTable is stale.
+                                // We CANNOT unlock — local commits would use wrong leader
+                                // elections → fork. Instead, ACTIVELY fetch CertifiedCommits
+                                // from peers to rebuild the schedule.
+                                //
+                                // We NEVER unlock based on timeout here. The system MUST wait 
+                                // until it successfully receives the commits to reconstruct the DAG.
+                                if is_schedule_pending {
+                                    let num_commits: u32 = 300;
+                                    let last_boundary = (my_commit / num_commits) * num_commits;
+                                    let fetch_from = last_boundary.saturating_sub(num_commits);
+                                    tracing::warn!(
+                                        "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}): Peers at same commit ({}) \
+                                         but schedule_recovery_pending=true. LeaderSwapTable is stale. \
+                                         NOT unlocking (would cause fork). \
+                                         Triggering active fetch of commits {}→{} to rebuild schedule.",
+                                        retry_count + 1, my_commit, fetch_from, my_commit
+                                    );
+                                    // Trigger CommitSyncer to re-fetch the scoring range.
+                                    // The fetch itself is now handled natively in try_schedule_once
+                                    // which detects CatchingUp + schedule_recovery_pending and
+                                    // automatically lowers synced_commit_index to fetch_from.
+                                    return;
+                                }
+
+                                // ── Case C: Peers SAME + schedule IS confirmed ──
+                                // (or Case B exhausted → escalated to Case C)
+                                // This is a GENUINE cluster-wide deadlock:
+                                // - All nodes are at the same commit
+                                // - No node is progressing
+                                // - The LeaderSwapTable is verified/confirmed (or exhaustion-cleared)
+                                // - The local committer is locked (all nodes waiting)
+                                //
+                                // This is the ONLY case where direct unlock is safe,
+                                // because all nodes have identical verified state.
+                                // Typically occurs during cluster-wide cold start.
+                                tracing::warn!(
+                                    "🚨 [ACTIVE-SYNC-RECOVERY] Case C: Genuine deadlock confirmed. \
+                                     Polled {} peers, max_peer={}, my_commit={}. \
+                                     Schedule is confirmed. All nodes have verified state. \
+                                     Unlocking local committer to break deadlock.",
+                                    polled_peers, max_peer_commit, my_commit
+                                );
+                                hub.unlock_local_commit();
+
+                                // Kick the core to evaluate the committer immediately
+                                let core_dispatcher = inner.core_thread_dispatcher.clone();
+                                if let Err(e) = core_dispatcher.new_block(
+                                    consensus_types::block::Round::MAX, true
+                                ).await {
+                                    tracing::warn!("Failed to kick Core for deadlock recovery: {:?}", e);
+                                }
+                            });
+                            self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
+                        } else {
+                            // Reset retry counter when not in Active Peer Sync trigger
+                            // (node is unlocked, not healthy, or hasn't been stuck 5s)
+                            self.active_sync_retry_count = 0;
+                        }
+
+                        // ════════════════════════════════════════════════════════
                         // STALL DETECTOR 4: Cluster Cold Start Deadlock
                         // If local_commit == 0 (DAG wiped) and we are stuck in CatchingUp
-                        // for 15s without fetching, it means the ENTIRE cluster wiped
+                        // for 5s without fetching, it means the ENTIRE cluster wiped
                         // its DAG. No one has the past commits. Force fast-forward.
                         // ════════════════════════════════════════════════════════
+                        let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
                         let catching_up_stall = now.duration_since(self.last_quorum_change_at);
+                        let is_fetching = !self.inflight_fetches.is_empty();
+                        
                         if self.coordination_hub.is_catching_up()
-                            && local_commit == 0
+                            && is_dag_empty
                             && highest_handled > 0
-                            && catching_up_stall >= Duration::from_secs(15)
+                            && catching_up_stall >= Duration::from_secs(5)
+                            && !is_fetching
                         {
                             tracing::error!(
-                                "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s. \
+                                "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s and NOT fetching. \
                                  No peers have the past commits. Forcing fast-forward to highest_handled={}.",
                                 catching_up_stall.as_secs_f64(),
                                 highest_handled
                             );
-                            self.inner.dag_state.write().reset_to_network_baseline(0, highest_handled, crate::commit::CommitDigest::MIN, 0, None);
+                            self.inner.dag_state_writer.reset_to_network_baseline(0, highest_handled, crate::commit::CommitDigest::MIN, 0, None);
                             self.synced_commit_index = highest_handled;
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 5: Post-Epoch-Transition Recovery
+                        //
+                        // After epoch transition, the new AuthorityNode creates a
+                        // fresh CommitConsumerMonitor with highest_handled=0 and
+                        // a fresh DAG with local_commit=0. The node discovers
+                        // quorum from peers (e.g. 1101) and enters CatchingUp.
+                        //
+                        // Stall Detector 4 requires highest_handled > 0, which
+                        // is FALSE here because the new epoch starts from commit 0.
+                        // Result: the node is permanently stuck in CatchingUp.
+                        //
+                        // Recovery: When CatchingUp with empty DAG, quorum > 0,
+                        // and highest_handled == 0, fast-forward the DAG baseline
+                        // to quorum_commit. This lets the node transition to
+                        // Healthy and start proposing/committing new blocks.
+                        // ════════════════════════════════════════════════════════
+                        if self.coordination_hub.is_catching_up()
+                            && is_dag_empty
+                            && highest_handled == 0
+                            && quorum_commit > 0
+                            && catching_up_stall >= Duration::from_secs(5)
+                            && !is_fetching
+                        {
+                            tracing::error!(
+                                "🚨 [STALL-DETECTOR-5] Post-epoch-transition stall: CatchingUp for {:.0}s \
+                                 with empty DAG, highest_handled=0, quorum={}, and NOT fetching. \
+                                 New epoch has no local state. Fast-forwarding to quorum.",
+                                catching_up_stall.as_secs_f64(),
+                                quorum_commit
+                            );
+                            self.inner.dag_state_writer.reset_to_network_baseline(
+                                0, quorum_commit,
+                                crate::commit::CommitDigest::MIN,
+                                0, None
+                            );
+                            self.synced_commit_index = quorum_commit;
+                            self.last_quorum_change_at = now;
                         }
 
                         info!(
@@ -753,8 +1237,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
-        let quorum_commit_index = self.inner.commit_vote_monitor.quorum_commit_index();
+        let quorum_commit_index = std::cmp::max(
+            self.inner.commit_vote_monitor.quorum_commit_index(),
+            self.coordination_hub.get_quorum_commit_index(),
+        );
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // ACTIVE SYNC RECOVERY: Removed. We no longer forcibly lower synced_commit_index
+        // because fetching historical commits fails if their blocks are pruned.
+        // Instead, we recover the LeaderSwapTable by fetching baseline reputation scores
+        // directly from peers via `patch_baseline_if_needed()`.
+        // ═══════════════════════════════════════════════════════════════════════
         
         // Update CoordinationHub so Core can read it to prevent divergent local commits
         self.coordination_hub.update_quorum_commit_index(quorum_commit_index);
@@ -774,34 +1268,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let highest_handled_index = self.inner.commit_consumer_monitor.highest_handled_commit();
         let _highest_scheduled_index = self.highest_scheduled_index.unwrap_or(0);
 
-        // Track synced commits: ALWAYS use the max of local DAG commit and
-        // Go execution progress, regardless of phase. Using only
-        // highest_handled_index during CatchingUp caused synced to lag behind
-        // local_commit, creating permanent gaps with fetched ranges.
-        // Track synced commits: ALWAYS use the max of local DAG commit and
-        // Go execution progress... EXCEPT when we detect a large unbridgeable gap
-        // between the Go engine (highest_handled_index) and the local DAG
-        // (local_commit_index). A large gap (e.g. > 10) indicates a restart
-        // where the DAG recovered its state from disk, but Core will NOT re-emit
-        // the past commits. In this case, we MUST fetch them from peers to bridge
-        // the Go engine.
-        let local_handled_gap = local_commit_index.saturating_sub(highest_handled_index);
-        self.synced_commit_index = if local_handled_gap > 10 && self.highest_scheduled_index.unwrap_or(0) < local_commit_index {
-            // Unbridgeable DAG gap detected! Focus on catching up Go Master.
-            // Force synced_commit_index down to highest_handled_index (or highest scheduled)
-            // to ensure we fetch the missing commits from the network.
-            highest_handled_index.max(self.highest_scheduled_index.unwrap_or(0))
-        } else {
-            // Normal operation: use local_commit_index to prevent redundant peer fetches.
-            // FORK-SAFETY: DO NOT max with highest_handled_index!
-            // If Go is at 400 but DAG is at 0, we WANT synced_commit_index to be 0 so
-            // we fetch commits 1..400 and reconstruct the LeaderSchedule!
-            self.synced_commit_index.max(local_commit_index)
-        };
+        // Track synced commits: use the max of local DAG commit and current synced.
+        // FORK-SAFETY: During startup sync OR catch-up, don't advance from DAG state alone —
+        // the DAG can be reconstructed/populated from peers before Go processes the commits.
+        // Only advance when Healthy (all commits already delivered to Core).
+        if !self.coordination_hub.is_startup_sync_active() && !self.coordination_hub.is_catching_up() {
+            self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
+        }
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
         if let Some(scheduled) = self.highest_scheduled_index {
-            if scheduled > self.synced_commit_index && local_handled_gap > 10 {
+            if scheduled > self.synced_commit_index && local_commit_index > self.inner.commit_consumer_monitor.highest_handled_commit() + 10 {
                 self.highest_scheduled_index = Some(self.synced_commit_index);
             }
         }
@@ -959,8 +1436,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
     async fn patch_baseline_if_needed(&mut self) {
         if self.synced_commit_index == 0 { return; }
         
-        let last_commit_index = self.inner.dag_state.read().last_commit_index();
-        if self.synced_commit_index <= last_commit_index { return; }
+        // A synthetic baseline needs patching if it was created by reset_to_network_baseline
+        // with CommitDigest::MIN as previous_digest and BlockDigest::MIN as leader block digest.
+        // We check previous_digest (the field we explicitly set to MIN) rather than
+        // reference().digest (which is a computed hash of the serialized commit — never MIN).
+        let is_synthetic_baseline = {
+            let dag = self.inner.dag_state.read();
+            if let Some(ref last_commit) = dag.last_commit {
+                use crate::commit::CommitAPI;
+                last_commit.index() == self.synced_commit_index
+                    && last_commit.previous_digest() == crate::commit::CommitDigest::MIN
+                    && last_commit.leader().digest == consensus_types::block::BlockDigest::MIN
+            } else {
+                false
+            }
+        };
+
+        let needs_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0;
+
+        if !is_synthetic_baseline && !needs_schedule_recovery { return; }
         
         let prev_index = self.synced_commit_index;
         let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
@@ -979,7 +1473,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
             
             for authority in target_authorities.clone() {
-                if let Ok(Ok((serialized_commits, _))) = tokio::time::timeout(
+                if let Ok(Ok((serialized_commits, _, _))) = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
                 ).await {
@@ -990,37 +1484,101 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             let leader_round = commit.leader().round;
                             let digest = crate::commit::TrustedCommit::compute_digest(serialized);
                             
-                            // Try to fetch the reputation scores from the last schedule boundary if applicable
-                            // NOTE: Reputation scores are stored in CommitInfo (separate from Commit)
-                            // and cannot be extracted from peer-fetched serialized Commits.
-                            // This is safe because the COLD-START-GUARD in commit_manager.rs
-                            // blocks the local committer until CertifiedCommits arrive, which
-                            // carry the correct leader schedule via the normal scoring pipeline.
-                            let reputation_scores: Option<Vec<(AuthorityIndex, u64)>> = None;
+                            // Extract reputation scores from the last schedule change boundary
+                            let mut reputation_scores: Option<Vec<(AuthorityIndex, u64)>> = None;
                             if last_schedule_change_index > 0 {
+                                let schedule_range: crate::commit::CommitRange = (last_schedule_change_index..=last_schedule_change_index).into();
+                                if let Ok(Ok((_, _, schedule_infos))) = tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    self.inner.network_client.fetch_commits(authority, schedule_range, Duration::from_secs(4))
+                                ).await {
+                                    if let Some(info_bytes) = schedule_infos.first() {
+                                        if let Ok(info) = bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes) {
+                                            if !info.reputation_scores.scores_per_authority.is_empty() {
+                                                let context_arc = self.inner.context.clone();
+                                                reputation_scores = Some(info.reputation_scores.authorities_by_score(context_arc));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if last_schedule_change_index > 0 && reputation_scores.is_none() {
                                 tracing::info!(
                                     "ℹ️ [BASELINE] Schedule boundary at commit #{} noted, but reputation scores \
-                                     cannot be extracted from serialized Commit. COLD-START-GUARD will prevent \
+                                     cannot be extracted from network. COLD-START-GUARD will prevent \
                                      local committer from using stale leader schedule.",
+                                    last_schedule_change_index
+                                );
+                            } else if reputation_scores.is_some() {
+                                tracing::info!(
+                                    "ℹ️ [BASELINE] Schedule boundary at commit #{} noted, and reputation scores \
+                                     were successfully extracted from network. Node can compute LeaderSchedule.",
                                     last_schedule_change_index
                                 );
                             }
                             
-                            self.inner.dag_state.write().reset_to_network_baseline(
-                                leader_round,
-                                prev_index,
-                                digest,
-                                timestamp_ms,
-                                reputation_scores
-                            );
-                            tracing::info!("✅ Successfully patched baseline digest for commit {}: {} (timestamp={}, leader_round={})", prev_index, digest, timestamp_ms, leader_round);
+                            if is_synthetic_baseline {
+                                self.inner.dag_state_writer.reset_to_network_baseline(
+                                    leader_round,
+                                    prev_index,
+                                    digest,
+                                    timestamp_ms,
+                                    reputation_scores,
+                                );
+                                tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
+                            } else if needs_schedule_recovery {
+                                if let Some(scores) = reputation_scores {
+                                    tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
+                                    self.inner.dag_state_writer.inject_baseline_scores(scores);
+                                    // Send empty commits list to trigger Core to process the new baseline
+                                    let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                }
+                            }
+                            
                             return;
                         }
                     }
                 }
             }
-            tracing::warn!("⚠️ Failed to fetch baseline digest for commit #{}. Retrying in 2 seconds...", prev_index);
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tracing::warn!("⚠️ Failed to fetch baseline commit #{} from network. Retrying in 1s...", prev_index);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Actively polls peers to establish the true quorum commit index before starting.
+    /// This prevents the node from prematurely transitioning to Healthy phase when the cluster
+    /// is idle and no P2P votes are being broadcasted.
+    async fn discover_quorum_commit(&self) {
+        tracing::info!("🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...");
+        let mut max_peer_commit = 0;
+        let mut polled_peers = 0;
+        let timeout = Duration::from_secs(3);
+        
+        // Try up to 3 times to get responses from peers
+        for attempt in 1..=3 {
+            for authority in self.inner.context.committee.authorities().map(|(i, _)| i) {
+                if authority == self.inner.context.own_index {
+                    continue;
+                }
+                if let Ok(status) = self.inner.network_client.get_epoch_status(authority, timeout).await {
+                    max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                    polled_peers += 1;
+                }
+            }
+            
+            if polled_peers > 0 {
+                break;
+            }
+            tracing::warn!("⚠️ [BOOTSTRAP] Attempt {}/3: Failed to reach peers for quorum discovery. Retrying...", attempt);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        
+        if polled_peers > 0 {
+            tracing::info!("✅ [BOOTSTRAP] Discovered max peer commit: {}. Updating quorum_commit_index.", max_peer_commit);
+            self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
+        } else {
+            tracing::warn!("⚠️ [BOOTSTRAP] Could not reach any peers. Proceeding with initial quorum=0.");
         }
     }
 
@@ -1103,12 +1661,39 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let local_handled_gap = local_commit.saturating_sub(highest_handled);
 
             if local_commit > self.synced_commit_index {
-                if local_handled_gap > 10 {
+                // ═══════════════════════════════════════════════════════════
+                // FORK-SAFETY (May 2026): The DAG can be populated by peer
+                // sync MUCH faster than Go can process commits. If we advance
+                // synced_commit_index from DAG state, lag becomes 0, the node
+                // transitions to Healthy, and starts proposing blocks BEFORE
+                // Go has processed those commits → PERMANENT FORK.
+                //
+                // This happens in TWO scenarios:
+                // 1. startup_sync_active: DAG reconstructed from 0 → 1300+
+                // 2. CatchingUp: DAG fetches 51 commits in <100ms via peers
+                //
+                // Fix: Only advance synced_commit_index from DAG state when
+                // the node is Healthy (not catching up or startup syncing).
+                // During catch-up, synced_commit_index is only advanced via
+                // the try_send_commits path (line ~1597) after commits are
+                // actually delivered to Core.
+                // ═══════════════════════════════════════════════════════════
+                let is_catching_up = self.coordination_hub.is_catching_up();
+                let is_startup = self.coordination_hub.is_startup_sync_active();
+                
+                if is_startup || is_catching_up {
+                    tracing::debug!(
+                        "[COMMIT-SYNCER] BLOCKED synced_commit_index advance {} → {} \
+                         (startup_sync={}, catching_up={}, waiting for commits to be delivered to Core)",
+                        self.synced_commit_index, local_commit, is_startup, is_catching_up
+                    );
+                } else if local_handled_gap > 10 {
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} despite handled gap {} \
                          (Go Master will catch up via batch-drain, CommitProcessor handles ordering)",
                         self.synced_commit_index, local_commit, local_handled_gap
                     );
+                    self.synced_commit_index = local_commit;
                 } else {
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
@@ -1116,8 +1701,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         local_commit,
                         self.coordination_hub.get_phase()
                     );
+                    self.synced_commit_index = local_commit;
                 }
-                self.synced_commit_index = local_commit;
             }
         }
         info!(
@@ -1249,10 +1834,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             // Once commits and blocks are sent to Core, ratchet up synced_commit_index
             self.synced_commit_index = self.synced_commit_index.max(fetched_commit_range.end());
+            // FORK-SAFETY: Track that we fetched REAL commits from the network.
+            // This counter gates the CatchingUp→Healthy transition to prevent
+            // false parity from baseline-only synced_commit_index.
+            let commits_in_range = fetched_commit_range.end().saturating_sub(fetched_commit_range.start()) + 1;
+            self.network_synced_commits += commits_in_range as u64;
+
+            // RATE-LIMIT RESET: Removed active-sync schedule recovery rate limiter
+            if self.schedule_recovery_fetch_pending {
+                self.schedule_recovery_fetch_pending = false;
+            }
+
             info!(
-                "[NODE4-DEBUG] synced_commit_index advanced to {}",
-                self.synced_commit_index
+                "[NODE4-DEBUG] synced_commit_index advanced to {} (network_synced_commits={})",
+                self.synced_commit_index, self.network_synced_commits
             );
+
+            // UNIFIED RECOVERY BARRIER: Check if DAG has caught up to quorum.
+            // If so, advance the barrier from DagCatchingUp → ScheduleVerifying.
+            // This is safe to call repeatedly — compare_exchange ensures only
+            // the DagCatchingUp → ScheduleVerifying transition happens.
+            let quorum_commit = std::cmp::max(
+                self.inner.commit_vote_monitor.quorum_commit_index(),
+                self.coordination_hub.get_quorum_commit_index(),
+            );
+            if self.synced_commit_index >= quorum_commit && quorum_commit > 0 {
+                self.coordination_hub.recovery_barrier().dag_caught_up();
+            }
         }
 
         metrics
@@ -1497,7 +2105,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
 
         // 2. Fetch commits in the commit range from the target authority.
-        let (serialized_commits, serialized_blocks) = inner
+        let (serialized_commits, serialized_blocks, _commit_infos) = inner
             .network_client
             .fetch_commits(target_authority, commit_range.clone(), timeout)
             .await?;
@@ -1721,6 +2329,7 @@ struct Inner<C: NetworkClient> {
     transaction_certifier: TransactionCertifier,
     network_client: Arc<C>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
 }
 
 impl<C: NetworkClient> Inner<C> {
@@ -1964,6 +2573,7 @@ mod tests {
         );
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
         let mut commit_syncer = CommitSyncer::new(
             context,
             core_thread_dispatcher,
@@ -1973,7 +2583,9 @@ mod tests {
             transaction_certifier,
             network_client,
             dag_state.clone(),
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
             None,
+            dag_state_writer,
         );
 
         // Check initial state.

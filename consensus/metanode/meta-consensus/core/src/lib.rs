@@ -22,6 +22,7 @@ mod core;
 mod core_signals;
 mod core_thread;
 mod dag_state;
+pub(crate) mod dag_state_actor;
 mod epoch_change;
 pub mod epoch_change_provider;
 mod error;
@@ -33,6 +34,7 @@ mod linearizer;
 mod metrics;
 pub mod network; // Made public for SyncOnlyNode
 mod proposed_block_handler;
+pub mod recovery_barrier;
 mod reconfiguration;
 mod round_prober;
 mod round_tracker;

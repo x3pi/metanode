@@ -29,9 +29,8 @@ func (bp *BlockProcessor) commitWorker() {
 	logger.Info("✅ Commit Worker initiated")
 	for job := range bp.commitChannel {
 		if job.Block == nil {
-			if job.GlobalExecIndex > 0 {
-				bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
-				bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
+			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
+				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
@@ -110,9 +109,8 @@ func (bp *BlockProcessor) commitWorker() {
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.
 		// Ensures block data is safely on disk before GEI advances,
 		// preventing the Rust consensus from skipping un-saved blocks after a restart.
-		if job.GlobalExecIndex > 0 {
-			bp.updateAndPersistLastGlobalExecIndex(job.GlobalExecIndex)
-			bp.updateAndPersistLastHandledCommitIndex(job.CommitIndex)
+		if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
+			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 		}
 
 		logger.Debug("[PERF] Block Commit phase 1 (Save DB): %v, block: %v", saveDuration, blockNum)
@@ -197,6 +195,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// This uses a coalescing queue to skip intermediate backups when catching up.
 		// ══════════════════════════════════════════════════════════════════
 		if bp.serviceType == p_common.ServiceTypeMaster && bp.storageManager.GetStorageBackupDb() != nil {
+			bp.backupDbWg.Add(1)
 			select {
 			case bp.backupDbChannel <- job:
 				// enqueued successfully
@@ -204,12 +203,14 @@ func (bp *BlockProcessor) commitWorker() {
 				// queue full, drop oldest and try again
 				select {
 				case <-bp.backupDbChannel:
+					bp.backupDbWg.Done() // The dropped job will never be processed
 				default:
 				}
 				// push newest
 				select {
 				case bp.backupDbChannel <- job:
 				default:
+					bp.backupDbWg.Done() // If still full (rare), we drop it
 				}
 			}
 		}
@@ -476,6 +477,7 @@ func (bp *BlockProcessor) backupDbWorker() {
 		go func() {
 			for job := range workChan {
 				bp.persistBackupDbAsync(job)
+				bp.backupDbWg.Done()
 			}
 		}()
 	}
@@ -490,6 +492,7 @@ func (bp *BlockProcessor) backupDbWorker() {
 			// All workers busy — serialize inline to prevent data loss
 			logger.Warn("⚠️ [BACKUP] All %d workers busy, serializing block #%d inline", numWorkers, job.Block.Header().BlockNumber())
 			bp.persistBackupDbAsync(job)
+			bp.backupDbWg.Done()
 		}
 	}
 	close(workChan)

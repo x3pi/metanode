@@ -425,3 +425,4 @@ venv/
 .vscode/
 **/*.xz
 **/*.zip
+.gitnexus

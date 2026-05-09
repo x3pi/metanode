@@ -20,7 +20,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
-	"github.com/meta-node-blockchain/meta-node/types"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -302,6 +302,24 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
 		logger.Info("🔍 [EPOCH] Using LIVE StakeStateDB for NOMT backend (block=%d, NOMT has no historical roots)", blockNumber)
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// CRITICAL FIX: Rebuild NOMT knownKeys from the authoritative epoch cache
+		// before calling GetAllValidators(). This guarantees that even if the node
+		// restarted and NOMT knownKeys was cleared, we recover all validators from
+		// the epoch boundary backup, preventing consensus forks.
+		// ═══════════════════════════════════════════════════════════════════════════
+		if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
+			cachedList := &pb.ValidatorInfoList{}
+			if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+				addrs := make([]string, 0, len(cachedList.Validators))
+				for _, v := range cachedList.Validators {
+					addrs = append(addrs, v.Address)
+				}
+				rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+			}
+		}
+
 		validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
 	} else {
 		// MPT/Flat/Verkle: Create historical ChainState at specific block root
@@ -823,7 +841,7 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 			logger.Error("❌ [EPOCH BOUNDARY] PRIORITY 2: NOMT query failed at boundary block %d: %v", boundaryBlock, err)
 		} else if len(validators.Validators) == 0 && epoch > 0 {
 			logger.Warn("⚠️ [EPOCH BOUNDARY] PRIORITY 2: NOMT returned 0 validators for epoch %d (knownKeys likely empty after snapshot restore)", epoch)
-			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty)", epoch, boundaryBlock)
+			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty). Rust MUST fallback to peers.", epoch, boundaryBlock)
 		}
 	} else {
 		// Sync incomplete — boundary block not available
@@ -1118,6 +1136,10 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	if upperBound > lastBlockNumber {
 		upperBound = lastBlockNumber
 	}
+	
+	lastHandledCommit := storage.GetLastHandledCommitIndex()
+	lastHandledEpoch := storage.GetLastHandledCommitEpoch()
+	
 	for blockNum := startBlock; blockNum <= upperBound; blockNum++ {
 		if uint64(len(blocks)) >= maxBatch {
 			break
@@ -1137,6 +1159,19 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		header := blk.Header()
+		
+		// ═══════════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY (May 2026): Prevent serving partial commits!
+		// m1 uses these blocks to set its lastHandledCommitIndex. If we send blocks
+		// from a commit that m0 is STILL processing, m1 will skip the rest of the
+		// commit when consensus resumes.
+		// ═══════════════════════════════════════════════════════════════════
+		if header.Epoch() > lastHandledEpoch || (header.Epoch() == lastHandledEpoch && header.CommitIndex() > uint64(lastHandledCommit)) {
+			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)", 
+				blockNum, header.CommitIndex(), lastHandledCommit, lastHandledEpoch)
+			break
+		}
+
 		blockData := &pb.BlockData{
 			BlockNumber:      header.BlockNumber(),
 			BlockHash:        header.Hash().Bytes(),
@@ -1264,6 +1299,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
+		shouldCommitState := isLastBlock || (i > 0 && i%50 == 0)
 
 		rawBytes := blockData.GetRawBlockBytes()
 		backupBytes := blockData.GetBackupData()
@@ -1308,6 +1344,31 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			if blockGEI > lastExecutedGEI {
 				lastExecutedGEI = blockGEI
 			}
+
+			// CRITICAL FIX: Even if the block was fully executed previously (from LevelDB),
+			// we MUST update the in-memory pointers so that Rust's initialize_from_go()
+			// query reads the correct last_block_number. Otherwise, Rust will use a stale
+			// block_number for the next consensus commit, overwriting this block.
+			storage.UpdateLastBlockNumber(blockNum)
+			if blockGEI > 0 {
+				storage.UpdateLastGlobalExecIndex(blockGEI)
+			}
+
+			// CRITICAL FIX: Restore lastHandledCommitIndex even for skipped blocks!
+			// If a node crashes or is restored from a corrupted rsync backup, lastHandledCommitIndex
+			// might be out of sync. We must restore it from the highest synced block header.
+			if header.CommitIndex() > 0 {
+				commitIdx32 := uint32(header.CommitIndex())
+				currentEpoch := header.Epoch()
+				lastEpoch := storage.GetLastHandledCommitEpoch()
+				
+				if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
+					storage.ForceSetLastHandledCommitIndex(commitIdx32)
+					storage.UpdateLastHandledCommitEpoch(currentEpoch)
+					logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d (epoch %d) from fully-executed block #%d", commitIdx32, currentEpoch, blockNum)
+				}
+			}
+
 			// Still persist backup data for Sub nodes
 			if len(backupBytes) > 0 {
 				rh.persistBackupForSub(backupBytes, blockNum)
@@ -1334,9 +1395,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// This prevents Go from double-executing these commits when Rust resumes consensus.
 		if header.CommitIndex() > 0 {
 			commitIdx32 := uint32(header.CommitIndex())
-			if commitIdx32 > storage.GetLastHandledCommitIndex() {
-				storage.UpdateLastHandledCommitIndex(commitIdx32)
-				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d from synced block #%d", commitIdx32, blockNum)
+			currentEpoch := header.Epoch()
+			lastEpoch := storage.GetLastHandledCommitEpoch()
+			
+			if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
+				storage.ForceSetLastHandledCommitIndex(commitIdx32)
+				storage.UpdateLastHandledCommitEpoch(currentEpoch)
+				logger.Info("🔄 [STARTUP-SYNC] Restored lastHandledCommitIndex to %d (epoch %d) from synced block #%d", commitIdx32, currentEpoch, blockNum)
 			}
 		}
 
@@ -1430,7 +1495,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		var commitOpts []blockchain.CommitOption
 		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
 
-		if isLastBlock {
+		if shouldCommitState {
 			// ═══════════════════════════════════════════════════════════════
 			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
 			//
@@ -1461,7 +1526,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
-		} else if isLastBlock {
+		} else if shouldCommitState {
 			// ═══════════════════════════════════════════════════════════════
 			// STATE ROOT VERIFICATION (May 2026):
 			// After applying all backup batches + WithRebuildTries(), verify
@@ -1644,6 +1709,25 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
+	// CRITICAL FIX: Synchronous persistence of the last synced block.
+	// If the node crashes/restarts immediately after STARTUP-SYNC finishes, we MUST
+	// guarantee that the last block hash (lastBlockHashKey) is fully flushed to disk.
+	// Without this, the node falls back to the pre-sync block or Genesis.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if executedCount > 0 {
+		hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock)
+		if ok {
+			lastBlk, err := blockDatabase.GetBlockByHash(hash)
+			if err == nil && lastBlk != nil {
+				logger.Info("💾 [STARTUP-SYNC] Forcing synchronous flush of last synced block #%d to disk", lastExecutedBlock)
+				if syncErr := blockDatabase.SaveLastBlockSync(lastBlk); syncErr != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to force-sync last block #%d: %v", lastExecutedBlock, syncErr)
+				}
+			}
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
 	// RUST CONTROL (Apr 2026 Architectural Fix):
 	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
 	// this EXECUTE command explicitly governs memory state advancement.
@@ -1675,6 +1759,30 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx)
 			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d)", lastExecutedGEI, lastCommitIdx)
+
+			// ═══════════════════════════════════════════════════════════════════════════
+			// CRITICAL FIX: SYNCHRONOUSLY PERSIST LAST HANDLED COMMIT INDEX AND EPOCH
+			// Rust will immediately query HandleGetLastHandledCommitIndexRequest after sync.
+			// Since PushAsyncGEIUpdate is asynchronous, it races with Rust's query.
+			// We MUST synchronously update the storage and BackupDb here to prevent Rust
+			// from starting at commitIndex=0 and causing an epoch mismatch fork.
+			// ═══════════════════════════════════════════════════════════════════════════
+			if lastCommitIdx > 0 {
+				currentEpoch := rh.chainState.GetCurrentEpoch()
+				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
+				storage.UpdateLastHandledCommitEpoch(currentEpoch)
+				
+				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
+					var batch [][2][]byte
+					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
+					batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
+					if err := rh.storageManager.GetStorageBackupDb().BatchPut(batch); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to persist LastHandledCommitIndex to BackupDb: %v", err)
+					} else {
+						logger.Info("✅ [STARTUP-SYNC] Synchronously persisted LastHandledCommitIndex=%d, Epoch=%d for immediate Rust consensus initialization", lastCommitIdx, currentEpoch)
+					}
+				}
+			}
 		}
 	}
 

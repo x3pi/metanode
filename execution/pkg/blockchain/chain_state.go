@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // EpochData chứa thông tin epoch để persist vào database
@@ -621,12 +622,21 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 	cs.epochMutex.Lock()
 	defer cs.epochMutex.Unlock()
 
-	if blockEpoch > cs.currentEpoch {
+	if blockEpoch != cs.currentEpoch {
 		logger.Warn("🚨 [SNAPSHOT FIX] Epoch alignment: ChainState.currentEpoch=%d but lastBlock.epoch=%d. "+
 			"Forcing epoch to %d to prevent fork. (block=%d, ts=%d)",
 			cs.currentEpoch, blockEpoch, blockEpoch, blockNumber, blockTimestamp)
-		cs.advanceEpochLocked(blockEpoch, blockTimestamp*1000, blockNumber, 0)
-	} else if blockEpoch == cs.currentEpoch {
+			
+		alignTimestampMs := blockTimestamp * 1000
+		if blockEpoch == 0 {
+			if genesisTs, ok := cs.epochStartTimestamps[0]; ok && genesisTs > 0 {
+				logger.Info("✅ [SNAPSHOT FIX] Using cached genesis timestamp %d for epoch 0 instead of block timestamp %d", genesisTs, alignTimestampMs)
+				alignTimestampMs = genesisTs
+			}
+		}
+			
+		cs.advanceEpochLocked(blockEpoch, alignTimestampMs, blockNumber, 0)
+	} else {
 		logger.Info("✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=%d matches lastBlock.epoch=%d",
 			cs.currentEpoch, blockEpoch)
 	}
@@ -770,6 +780,63 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 		if cs.epochNotificationCallback != nil {
 			logger.Info("📣 [AUTO-EPOCH SYNC] Triggering epoch notification callback for epoch %d", cs.currentEpoch)
 			go cs.epochNotificationCallback(cs.currentEpoch, cs.epochStartTimestampMs, boundaryBlock)
+		}
+
+		// AGGRESSIVE CACHING: Proactively cache validators for the new epoch
+		// Run in a goroutine to avoid deadlocking on epochMutex and not block execution
+		if boundaryBlock > 0 {
+			targetEpoch := blockEpoch
+			go func(e uint64, bBlock uint64, tsMs uint64, bGei uint64) {
+				logger.Info("🔄 [AUTO-EPOCH SYNC] Proactively caching validators for epoch %d at boundary block %d", e, bBlock)
+				stakeDB := cs.GetStakeStateDB()
+				if stakeDB == nil {
+					return
+				}
+				validators, err := stakeDB.GetAllValidators()
+				if err != nil || len(validators) == 0 {
+					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to actively cache validators: %v (len=%d) - NOMT knownKeys amnesia likely.", err, len(validators))
+					return
+				}
+
+				validatorInfoList := &pb.ValidatorInfoList{
+					EpochTimestampMs:    tsMs,
+					LastGlobalExecIndex: bGei,
+				}
+
+				for _, v := range validators {
+					stakeNormalized := big.NewInt(1000000)
+					if totalStake := v.TotalStakedAmount(); totalStake != nil && totalStake.Sign() > 0 {
+						stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(1_000_000_000_000_000_000))
+						if stakeNormalized.Sign() <= 0 {
+							stakeNormalized = big.NewInt(1)
+						}
+					}
+					
+					val := &pb.ValidatorInfo{
+						Address:                    v.Address().Hex(),
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               v.AuthorityKey(),
+						ProtocolKey:                v.ProtocolKey(),
+						NetworkKey:                 v.NetworkKey(),
+						Name:                       v.Name(),
+						Description:                v.Description(),
+						Website:                    v.Website(),
+						Image:                      v.Image(),
+						CommissionRate:             v.CommissionRate(),
+						MinSelfDelegation:          v.MinSelfDelegation().String(),
+						AccumulatedRewardsPerShare: v.AccumulatedRewardsPerShare().String(),
+						P2PAddress:                 v.P2PAddress(),
+					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				}
+
+				if serializedData, err := json.Marshal(validatorInfoList); err == nil {
+					cs.SetEpochValidators(e, serializedData)
+					logger.Info("✅ [AUTO-EPOCH SYNC] Successfully cached %d validators for epoch %d", len(validatorInfoList.Validators), e)
+				} else {
+					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to serialize validators for cache: %v", err)
+				}
+			}(targetEpoch, boundaryBlock, epochTimestampMs, boundaryGei)
 		}
 
 		return true // Epoch was updated

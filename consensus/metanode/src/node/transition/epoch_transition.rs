@@ -146,7 +146,7 @@ pub async fn transition_to_epoch_from_system_tx(
     // STEP 4: Stop old authority, flush blocks, poll Go
     // =========================================================================
     let synced_index =
-        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source).await?;
+        stop_authority_and_poll_go(node, new_epoch, &executor_client, &committee_source, synced_global_exec_index, config).await?;
 
     // =========================================================================
     // STEP 5: Disk cleanup + state update
@@ -160,10 +160,16 @@ pub async fn transition_to_epoch_from_system_tx(
     node.current_commit_index.store(0, Ordering::SeqCst);
     node.coordination_hub.reset_quorum_commit_index(0);
 
-    let effective_synced = std::cmp::max(synced_index, synced_global_exec_index);
-    if effective_synced > synced_index {
-        info!(
-            "📊 [SYNC FLOOR] Using catch-up boundary {} instead of Go-reported {}",
+    // CRITICAL FIX: We MUST strictly use synced_global_exec_index as the base GEI
+    // for the new epoch. synced_global_exec_index is mathematically deterministic 
+    // because it comes directly from the EndOfEpoch commit's exact sequence position.
+    // If we use Go's actual synced_index (which may lag due to timeouts), we risk 
+    // overlapping GEIs with commits still in Go's pipeline, causing the new epoch's 
+    // commits to be dropped by the GEI-REGRESSION GUARD.
+    let effective_synced = synced_global_exec_index;
+    if synced_global_exec_index > synced_index {
+        warn!(
+            "⚠️ [SYNC GAP] Rust GEI ({}) > Go GEI ({}). Go is lagging, but we MUST use Rust GEI to prevent overlaps.",
             synced_global_exec_index, synced_index
         );
     }
@@ -431,12 +437,10 @@ async fn stop_authority_and_poll_go(
     new_epoch: u64,
     executor_client: &ExecutorClient,
     committee_source: &crate::node::committee_source::CommitteeSource,
+    synced_global_exec_index: u64,
+    config: &crate::config::NodeConfig,
 ) -> Result<u64> {
-    let expected_last_block = {
-        let gei_arc = node.coordination_hub.get_global_exec_index_ref();
-        let shared_index = gei_arc.lock().await;
-        *shared_index
-    };
+    let expected_last_block = synced_global_exec_index;
     info!(
         "🛑 [TRANSITION] Stopping old authority (expected_gei={})",
         expected_last_block
@@ -507,7 +511,7 @@ async fn stop_authority_and_poll_go(
             expected_last_block
         );
     } else {
-        poll_go_until_synced(executor_client, expected_last_block, new_epoch).await;
+        poll_go_until_synced(executor_client, expected_last_block, new_epoch, config).await;
     }
 
     // Fetch final synced_index from Go
@@ -520,26 +524,25 @@ async fn stop_authority_and_poll_go(
         .await
         .map(|(b, _, _, _, _)| b)
         .unwrap_or(0);
-    let raw_synced = std::cmp::max(raw_synced_gei, raw_synced_block);
+    let raw_synced = raw_synced_gei;
 
-    // Committee floor
+    // CRITICAL FIX (2026-05-06): We MUST return expected_last_block if Go is still
+    // processing. But since we removed the timeout, raw_synced should eventually
+    // equal expected_last_block. If for some reason it's higher, we use raw_synced.
+    let synced_index = std::cmp::max(raw_synced, expected_last_block);
+    if raw_synced < expected_last_block {
+        warn!(
+            "⚠️ [SYNC WARNING] Go reported {} < expected {}. \
+             This should not happen since we waited indefinitely. Forcing synced_index to {}.",
+            raw_synced, expected_last_block, expected_last_block
+        );
+    }
+
     let committee_floor = if committee_source.last_block > 0 {
         committee_source.last_block
     } else {
         0
     };
-
-    // SAFETY FLOOR: Never let synced_index go below expected
-    let synced_index = *[raw_synced, expected_last_block, committee_floor]
-        .iter()
-        .max()
-        .unwrap();
-    if synced_index > raw_synced {
-        warn!(
-            "🚨 [SYNC SAFETY] Go returned max(gei,block)={} < floor={}. Using floor!",
-            raw_synced, synced_index
-        );
-    }
 
     info!(
         "📊 Final synced: {} (gei={}, block={}, expected={}, committee={})",
@@ -562,16 +565,20 @@ async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
     expected_last_block: u64,
     _new_epoch: u64,
+    config: &crate::config::NodeConfig,
 ) {
     let poll_interval = Duration::from_millis(100);
     let max_wait = Duration::from_secs(30);
-    let wait_start = std::time::Instant::now();
+    let mut wait_start = std::time::Instant::now();
     let mut attempt = 0u64;
     let mut last_force_commit = std::time::Instant::now();
 
-    // Tolerance: Accept if Go is within this many GEIs of expected.
-    // In-flight empty commits in Go's async pipeline don't affect state.
-    const GEI_TOLERANCE: u64 = 5;
+    // CRITICAL FIX (2026-05-05): GEI_TOLERANCE REMOVED.
+    // The timeout + ForceCommit is sufficient for Go to process all commits.
+    // CRITICAL FIX (2026-05-06): FIXED TIMEOUT REMOVED.
+    // Breaking out of this loop early causes the new epoch to start while Go is still
+    // processing the old epoch. This leads to GEI overlap and a massive state fork.
+    // We MUST wait indefinitely for Go to catch up, using ForceCommit to ensure progress.
 
     // Immediately trigger a ForceCommit to flush Go's pipeline
     if let Err(e) = executor_client
@@ -586,11 +593,46 @@ async fn poll_go_until_synced(
 
         if wait_start.elapsed() > max_wait {
             warn!(
-                "⏱️ [SYNC TIMEOUT] Giving up after {:?}. expected_gei={}. Continuing...",
-                wait_start.elapsed(),
+                "⏱️ [SYNC POLL] Go is taking longer than {:?} to process commits (expected={}). \
+                 This happens during heavy catch-up or if Go missed blocks. Attempting active peer sync...",
+                max_wait,
                 expected_last_block
             );
-            break;
+
+            // Active Fallback: If Go is stuck, fetch the missing blocks from peers and force-feed them!
+            match executor_client.get_last_block_number().await {
+                Ok((go_block, _, _, _, _)) => {
+                    if go_block < expected_last_block && !config.peer_rpc_addresses.is_empty() {
+                        use rand::seq::SliceRandom;
+                        let mut shuffled_peers = config.peer_rpc_addresses.clone();
+                        shuffled_peers.shuffle(&mut rand::thread_rng());
+
+                        warn!("🔄 [SYNC POLL] Fetching blocks {}-{} from peers to unblock Go...", go_block + 1, expected_last_block);
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &shuffled_peers,
+                            go_block + 1,
+                            expected_last_block,
+                        ).await {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                warn!("✅ [SYNC POLL] Fetched {} missing blocks. Injecting to Go...", blocks.len());
+                                if let Err(e) = executor_client.sync_and_execute_blocks(blocks).await {
+                                    error!("❌ [SYNC POLL] sync_and_execute_blocks failed: {}", e);
+                                } else {
+                                    info!("✅ [SYNC POLL] Successfully injected missing blocks! Go should advance now.");
+                                }
+                            }
+                            _ => warn!("⚠️ [SYNC POLL] Failed to fetch missing blocks from peers."),
+                        }
+                    } else if config.peer_rpc_addresses.is_empty() {
+                        warn!("⚠️ [SYNC POLL] No peer addresses configured. Cannot fetch missing blocks.");
+                    }
+                }
+                Err(e) => warn!("⚠️ [SYNC POLL] Could not get last block number from Go: {}", e),
+            }
+
+            // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
+            // Reset wait_start to avoid spamming the log and retry logic.
+            wait_start = std::time::Instant::now();
         }
 
         match executor_client.get_last_global_exec_index().await {
@@ -603,15 +645,7 @@ async fn poll_go_until_synced(
                     break;
                 }
 
-                // TOLERANCE: Accept if gap is small (in-flight empty commits)
                 let remaining = expected_last_block.saturating_sub(go_last_gei);
-                if remaining <= GEI_TOLERANCE && wait_start.elapsed() > Duration::from_secs(5) {
-                    info!(
-                        "✅ [SYNC CLOSE-ENOUGH] gei={}, expected={}, gap={} <= tolerance={}. Proceeding. ({:?})",
-                        go_last_gei, expected_last_block, remaining, GEI_TOLERANCE, wait_start.elapsed()
-                    );
-                    break;
-                }
 
                 // Trigger ForceCommit every 3 seconds to flush Go's pipeline
                 if last_force_commit.elapsed() > Duration::from_secs(3) {

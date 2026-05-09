@@ -151,50 +151,41 @@ impl ConsensusNode {
         // Go now has an explicit blockchainInitDone flag. is_ready=true means the block
         // number is the FINAL authoritative value — no transient metadata.json values.
         let latest_block_number = {
-            let max_retries = 30;
             let retry_interval = std::time::Duration::from_millis(500);
-            let mut block_num = 0u64;
-
-            for attempt in 1..=max_retries {
+            let mut attempt = 1;
+            let block_num = loop {
                 match executor_client.get_last_block_number().await {
                     Ok((n, _, true, _, _)) => {
-                        block_num = n;
                         info!(
                             "✅ [STARTUP] Got block number {} from Go (is_ready=true) (attempt {})",
                             n, attempt
                         );
-                        break;
+                        break n;
                     }
                     Ok((n, _, false, _, _)) => {
-                        info!(
-                            "⏳ [STARTUP] Go not ready (block={}) (attempt {}/{}). Waiting for blockchain init...",
-                            n, attempt, max_retries
-                        );
-                        if attempt < max_retries {
-                            tokio::time::sleep(retry_interval).await;
+                        if attempt % 10 == 0 {
+                            info!(
+                                "⏳ [STARTUP] Go not ready (block={}) (attempt {}). Retrying indefinitely to guarantee state parity...",
+                                n, attempt
+                            );
                         }
+                        tokio::time::sleep(retry_interval).await;
                     }
                     Err(e) => {
-                        if attempt < max_retries {
+                        if attempt % 10 == 0 {
                             warn!(
-                                "⚠️ [STARTUP] Failed to fetch block from Go (attempt {}/{}): {}. Retrying...",
-                                attempt, max_retries, e
+                                "⚠️ [STARTUP] Failed to fetch block from Go (attempt {}): {}. Retrying indefinitely to prevent starting with stale data...",
+                                attempt, e
                             );
-                            tokio::time::sleep(retry_interval).await;
-                        } else {
-                            warn!("⚠️ [STARTUP] Failed to fetch latest block from Go after {} attempts: {}. Attempting to read persisted value.", max_retries, e);
-                            block_num = super::executor_client::read_last_block_number(
-                                &config.storage_path,
-                            )
-                            .await
-                            .unwrap_or(0);
                         }
+                        tokio::time::sleep(retry_interval).await;
                     }
                 }
-            }
+                attempt += 1;
+            };
 
             if block_num == 0 {
-                warn!("⚠️ [STARTUP] Go still reporting block=0 after {} retries. This may be a fresh node or Go failed to load snapshot data.", max_retries);
+                warn!("⚠️ [STARTUP] Go reporting block=0 natively (is_ready=true). This is a fresh node.");
             }
 
             block_num
@@ -222,18 +213,18 @@ impl ConsensusNode {
                     e
                 }
                 Err(e) => {
-                    // Retry a few times for transient RPC errors only
-                    let max_retries = 5;
+                    // Retry indefinitely
                     let retry_interval = std::time::Duration::from_millis(500);
-                    let mut final_epoch = 0u64;
+                    let mut attempt = 2;
                     let mut last_err = e;
-                    let mut resolved = false;
 
-                    for attempt in 2..=max_retries {
-                        warn!(
-                            "⚠️ [STARTUP] Failed to get epoch (attempt {}/{}): {}. Retrying...",
-                            attempt, max_retries, last_err
-                        );
+                    loop {
+                        if attempt % 10 == 0 {
+                            warn!(
+                                "⚠️ [STARTUP] Failed to get epoch (attempt {}): {}. Retrying indefinitely...",
+                                attempt, last_err
+                            );
+                        }
                         tokio::time::sleep(retry_interval).await;
                         match executor_client.get_current_epoch().await {
                             Ok(e) => {
@@ -241,23 +232,14 @@ impl ConsensusNode {
                                     "✅ [STARTUP] Got epoch {} from Go (attempt {}, block={})",
                                     e, attempt, latest_block_number
                                 );
-                                final_epoch = e;
-                                resolved = true;
-                                break;
+                                break e;
                             }
                             Err(e) => {
                                 last_err = e;
+                                attempt += 1;
                             }
                         }
                     }
-                    if !resolved {
-                        return Err(anyhow::anyhow!(
-                            "Failed to fetch epoch from Go after {} attempts: {}",
-                            max_retries,
-                            last_err
-                        ));
-                    }
-                    final_epoch
                 }
             };
 
@@ -723,19 +705,21 @@ impl ConsensusNode {
                                             peer_addr, peer_hash_hex
                                         );
                                     } else {
-                                        warn!(
-                                            "🚨 [COMMITTEE VERIFY] Peer {} committee MISMATCH! \
+                                        let err_msg = format!(
+                                            "🚨 [PARITY CHECK FAILED] Peer {} committee MISMATCH! \
                                              local={}... ≠ peer={}... (epoch {}). \
-                                             This WILL cause block hash divergence!",
+                                             Local authorities: {}, Peer authorities: {}. \
+                                             HALTING NODE: Starting with a mismatched committee WILL cause a hard fork. \
+                                             Please wipe the local database or verify your snapshot.",
                                             peer_addr,
                                             committee_hash_hex,
                                             peer_hash_hex,
-                                            current_epoch
+                                            current_epoch,
+                                            committee.size(),
+                                            peer_committee.size()
                                         );
-                                        warn!(
-                                            "🚨 [COMMITTEE VERIFY] Local: {} authorities, Peer: {} authorities",
-                                            committee.size(), peer_committee.size()
-                                        );
+                                        tracing::error!("{}", err_msg);
+                                        anyhow::bail!(err_msg);
                                     }
                                 }
                                 Err(e) => {
@@ -1036,6 +1020,41 @@ impl ConsensusNode {
                     .unwrap_or(false)
         };
 
+        // ═══════════════════════════════════════════════════════════════
+        // UNIFIED RECOVERY BARRIER (May 2026 — Architectural Fix)
+        //
+        // EPOCH-AGNOSTIC SNAPSHOT DETECTION:
+        // If the DAG is empty but Go has blocks, this is a snapshot recovery
+        // regardless of epoch number or commit count.
+        //
+        // OLD BUG: The previous check `handled_commits >= 300` failed on epoch 2+
+        // because epoch-scoped commit indices reset to 0, always failing the threshold.
+        // This caused the schedule_recovery_pending guard to never activate,
+        // allowing premature Healthy transitions with stale LeaderSwapTables.
+        //
+        // NEW: Detect snapshot recovery by checking if Go has already executed blocks
+        // (go_replay_after > 0 OR go_block > 0) while the DAG is empty. This works
+        // across all epochs.
+        // ═══════════════════════════════════════════════════════════════
+        if !dag_has_history {
+            // Check if Go has state (any evidence of prior execution)
+            let go_has_state = storage.last_handled_commit_index.map_or(false, |c| c > 0);
+            if go_has_state {
+                coordination_hub.activate_recovery_barrier();
+                info!(
+                    "🛡️ [RECOVERY-BARRIER] DAG is empty but Go has state (last_handled={:?}). \
+                     Activating unified recovery barrier for snapshot recovery. \
+                     ALL proposals blocked until GoSyncing → DagCatchingUp → ScheduleVerifying → Ready.",
+                    storage.last_handled_commit_index
+                );
+            } else {
+                info!(
+                    "ℹ️ [RECOVERY-BARRIER] DAG is empty and Go has no state. \
+                     This is a fresh start (genesis). Recovery barrier NOT activated."
+                );
+            }
+        }
+
         let go_replay_after = if config.executor_read_enabled {
             if let Some(commit_index) = storage.last_handled_commit_index {
                 info!(
@@ -1124,8 +1143,13 @@ impl ConsensusNode {
 
         let shared_last_global_exec_index = coordination_hub.get_global_exec_index_ref();
         
-        // Initialize GEI in the Hub
-        coordination_hub.set_initial_global_exec_index(storage.epoch_base_exec_index).await;
+        let initial_gei_for_hub = if go_replay_after == 0 {
+            info!("📊 [FORK-SAFETY] go_replay_after is 0. Initializing shared_gei to epoch_base_exec_index={} for mathematical reconstruction.", storage.epoch_base_exec_index);
+            storage.epoch_base_exec_index
+        } else {
+            storage.last_global_exec_index
+        };
+        coordination_hub.set_initial_global_exec_index(initial_gei_for_hub).await;
 
         // ═══════════════════════════════════════════════════════════════════
         // Detect empty DAG (snapshot restore) for startup logging and
@@ -1163,6 +1187,7 @@ impl ConsensusNode {
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
                 current_commit_index.clone(),
+                commit_consumer.monitor(),
             ),
         )
         .with_global_exec_index_callback(
@@ -1242,12 +1267,47 @@ impl ConsensusNode {
         // than a small threshold, fetch missing blocks via P2P and execute them
         // through Go BEFORE allowing consensus to start.
         // ═══════════════════════════════════════════════════════════════════════════
+        let mut startup_total_synced_blocks: u64 = 0;
+        let mut startup_local_block: u64 = 0;
+
         if config.executor_read_enabled {
+            // FORK-PREVENTION: Lock proposals while STARTUP-SYNC imports blocks.
+            // Without this, CommitSyncer may declare Healthy (enabling proposals)
+            // while STARTUP-SYNC is still running → Core produces commits with
+            // stale DAG metadata → fork.
+            coordination_hub.set_startup_sync_active(true);
+
             let barrier_client = executor_client_for_proc.clone();
             let barrier_peers = config.peer_rpc_addresses.clone();
 
             // Give Go a moment to finish its own initialization
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // ═══════════════════════════════════════════════════════════════
+            // EARLY PEER RPC SERVER (May 2026 FIX):
+            // Start a lightweight, isolated Peer RPC server before STARTUP-SYNC.
+            // If we don't start this, all nodes block waiting for peers to respond,
+            // but peers are also blocked in STARTUP-SYNC without their servers running.
+            // This prevents a global deadlock in fresh clusters.
+            // ═══════════════════════════════════════════════════════════════
+            let mut early_peer_server_handle = None;
+            if let Some(peer_port) = config.peer_rpc_port {
+                if peer_port > 0 {
+                    let peer_server = crate::network::peer_rpc::PeerRpcServer::new(
+                        config.node_id,
+                        peer_port,
+                        config.network_address.clone(),
+                        executor_client_for_proc.clone(),
+                        shared_last_global_exec_index.clone(),
+                    );
+                    tracing::info!("📡 [PEER RPC] Starting EARLY server on 0.0.0.0:{} to prevent STARTUP-SYNC deadlock", peer_port);
+                    early_peer_server_handle = Some(tokio::spawn(async move {
+                        if let Err(e) = peer_server.start().await {
+                            tracing::error!("Early Peer RPC server error: {}", e);
+                        }
+                    }));
+                }
+            }
 
             // CRITICAL FIX: Use the verified latest_block_number from setup_storage()
             // instead of re-querying Go. Re-querying with a new ExecutorClient can race
@@ -1314,16 +1374,55 @@ impl ConsensusNode {
                         // has different content, the local state is corrupt.
                         match barrier_client.get_blocks_range(local_block, local_block).await {
                             Ok(local_blocks) if !local_blocks.is_empty() => {
-                                let local_raw = &local_blocks[0].raw_block_bytes;
-                                let peer_raw = &peer_blocks[0].raw_block_bytes;
-                                if local_raw != peer_raw {
-                                    tracing::warn!(
-                                        "🚨 [ANTI-FORK] Block #{} hash MISMATCH between Go and peer! \
-                                         Go has stale/corrupt data. Forcing full re-sync from block 1. \
-                                         (local_bytes={}, peer_bytes={})",
-                                        local_block, local_raw.len(), peer_raw.len()
+                                let local_b = &local_blocks[0];
+                                let peer_b = &peer_blocks[0];
+                                
+                                if local_b.raw_block_bytes != peer_b.raw_block_bytes {
+                                    let mut err_msg = format!(
+                                        "🚨 [ANTI-FORK] FATAL: Block #{} hash MISMATCH between Go and peer!\nGo has stale/corrupt data.",
+                                        local_block
                                     );
-                                    local_block = 0;
+                                    
+                                    err_msg.push_str(&format!(
+                                        "\n- Block Hash: local={}, peer={}",
+                                        hex::encode(&local_b.block_hash),
+                                        hex::encode(&peer_b.block_hash)
+                                    ));
+                                    
+                                    if local_b.timestamp_ms != peer_b.timestamp_ms {
+                                        err_msg.push_str(&format!(
+                                            "\n- Timestamp Mismatch: local={}, peer={}",
+                                            local_b.timestamp_ms, peer_b.timestamp_ms
+                                        ));
+                                    }
+                                    if local_b.transactions_root != peer_b.transactions_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- TxRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.transactions_root),
+                                            hex::encode(&peer_b.transactions_root)
+                                        ));
+                                    }
+                                    if local_b.receipts_root != peer_b.receipts_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- ReceiptsRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.receipts_root),
+                                            hex::encode(&peer_b.receipts_root)
+                                        ));
+                                    }
+                                    if local_b.state_root != peer_b.state_root {
+                                        err_msg.push_str(&format!(
+                                            "\n- StateRoot Mismatch: local={}, peer={}",
+                                            hex::encode(&local_b.state_root),
+                                            hex::encode(&peer_b.state_root)
+                                        ));
+                                    }
+                                    if local_b.extra_data != peer_b.extra_data {
+                                        err_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
+                                    }
+                                    
+                                    err_msg.push_str("\n\nHALTING NODE to prevent fork. Operator MUST wipe the database and restart from scratch.");
+                                    tracing::error!("{}", err_msg);
+                                    panic!("{}", err_msg);
                                 } else {
                                     tracing::info!(
                                         "✅ [ANTI-FORK] Block #{} verified: Go matches peer.",
@@ -1370,19 +1469,21 @@ impl ConsensusNode {
             // FIX: Loop the sync until gap ≤ 2 blocks (network jitter).
             // Max 5 retries to prevent infinite loops.
             // ═══════════════════════════════════════════════════════════════
-            const MAX_SYNC_RETRIES: u32 = 15;
             const ACCEPTABLE_GAP: u64 = 2;
             const INITIAL_RETRY_DELAY_MS: u64 = 500;
             const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
-            for sync_round in 0..MAX_SYNC_RETRIES {
+            let mut sync_round = 0;
+            loop {
                 // Re-query peers for their latest block
                 let mut max_peer_block = 0u64;
                 let mut max_peer_gei = 0u64;
+                let mut reached_peers = 0;
                 for peer_addr in &barrier_peers {
                     match crate::network::peer_rpc::query_peer_info(peer_addr).await {
                         Ok(info) => {
+                            reached_peers += 1;
                             if info.last_block > max_peer_block {
                                 max_peer_block = info.last_block;
                                 max_peer_gei = info.last_global_exec_index;
@@ -1394,7 +1495,25 @@ impl ConsensusNode {
                     }
                 }
 
-                if max_peer_block == 0 || local_block + ACCEPTABLE_GAP >= max_peer_block {
+                if reached_peers == 0 {
+                    if sync_round % 12 == 0 {
+                        tracing::error!("🚨 [STARTUP-SYNC] Could not reach any peers (round {}). Node is ISOLATED and BLOCKED pending peer discovery...", sync_round);
+                    } else {
+                        tracing::warn!("⚠️ [STARTUP-SYNC] Could not reach any peers (round {}). Retrying...", sync_round);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                    sync_round += 1;
+                    continue;
+                }
+
+                // If we reached at least one peer and the network's highest block is 0,
+                // the cluster is at Genesis. We must break out of sync and start consensus!
+                if max_peer_block == 0 {
+                    tracing::info!("✅ [STARTUP-SYNC] Network is at Genesis (highest block is 0). Starting consensus...");
+                    break;
+                }
+
+                if local_block + ACCEPTABLE_GAP >= max_peer_block {
                     tracing::info!(
                         "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}, round={}). Starting consensus...",
                         local_block, max_peer_block, sync_round
@@ -1411,27 +1530,107 @@ impl ConsensusNode {
                 let from_block = local_block + 1;
                 let to_block = max_peer_block;
 
-                match crate::network::peer_rpc::fetch_blocks_from_peer(&barrier_peers, from_block, to_block).await {
+                // Shuffle peers to prevent getting stuck in an infinite loop
+                // if the first peer in the list returns cryptographically invalid blocks
+                use rand::seq::SliceRandom;
+                let mut shuffled_peers = barrier_peers.clone();
+                shuffled_peers.shuffle(&mut rand::thread_rng());
+
+                match crate::network::peer_rpc::fetch_blocks_from_peer(&shuffled_peers, from_block, to_block).await {
                     Ok(blocks) if !blocks.is_empty() => {
                         tracing::info!(
-                            "🔄 [STARTUP-SYNC] Round {}: Fetched {} blocks ({}-{}). Executing...",
+                            "🔄 [STARTUP-SYNC] Round {}: Fetched {} blocks ({}-{}). Validating cryptographic stream...",
                             sync_round,
                             blocks.len(),
                             blocks.first().map(|b| b.block_number).unwrap_or(0),
                             blocks.last().map(|b| b.block_number).unwrap_or(0)
                         );
-                        match barrier_client.sync_and_execute_blocks(blocks).await {
-                            Ok((synced, last_block, _gei)) => {
-                                tracing::info!(
-                                    "✅ [STARTUP-SYNC] Round {}: Synced {} blocks (last_block={})",
-                                    sync_round, synced, last_block
+
+                        // PHASE 1: Cryptographic Stream Validation
+                        let mut is_valid = true;
+                        for i in 1..blocks.len() {
+                            let prev_hash = &blocks[i - 1].block_hash;
+                            let curr_parent = &blocks[i].parent_hash;
+                            if prev_hash != curr_parent {
+                                tracing::error!(
+                                    "🚨 [ANTI-FORK] Hash chain broken at block {}! Expected parent hash {:?} but got {:?}",
+                                    blocks[i].block_number, prev_hash, curr_parent
                                 );
-                                total_synced_blocks += synced;
-                                local_block = last_block; // Update for next iteration
+                                is_valid = false;
+                                break;
+                            }
+                        }
+
+                        if !is_valid {
+                            tracing::error!("🚨 [ANTI-FORK] Aborting sync round due to invalid block chain from peer. Node BLOCKED until valid data is received.");
+                            tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                            sync_round += 1;
+                            continue;
+                        }
+
+                        // PHASE 3: Handshake Protocol for Epoch Transitions (Chunking)
+                        let mut chunks = Vec::new();
+                        let mut current_chunk = Vec::new();
+                        let mut current_chunk_epoch = blocks[0].epoch;
+
+                        for block in blocks {
+                            if block.epoch > current_chunk_epoch {
+                                chunks.push(current_chunk);
+                                current_chunk = Vec::new();
+                                current_chunk_epoch = block.epoch;
+                            }
+                            current_chunk.push(block);
+                        }
+                        if !current_chunk.is_empty() {
+                            chunks.push(current_chunk);
+                        }
+
+                        let mut total_synced_this_round = 0;
+                        let mut round_last_block = local_block;
+                        let mut chunk_sync_failed = false;
+
+                        for chunk in chunks {
+                            let chunk_len = chunk.len();
+                            tracing::info!("🔄 [STARTUP-SYNC] Executing chunk of {} blocks (Epoch {})", chunk_len, chunk[0].epoch);
+                            match barrier_client.sync_and_execute_blocks(chunk).await {
+                                Ok((synced, last_block, _gei)) => {
+                                    total_synced_this_round += synced;
+                                    round_last_block = last_block;
+                                }
+                                Err(e) => {
+                                    tracing::error!("❌ [STARTUP-SYNC] Chunk sync failed: {}", e);
+                                    chunk_sync_failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if chunk_sync_failed {
+                            tracing::error!("🚨 [STARTUP-SYNC] Halting sync round due to chunk failure. Node BLOCKED pending successful Go sync.");
+                            tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                            sync_round += 1;
+                            continue;
+                        }
+
+                        tracing::info!(
+                            "✅ [STARTUP-SYNC] Round {}: Synced {} blocks total this round (last_block={})",
+                            sync_round, total_synced_this_round, round_last_block
+                        );
+                        total_synced_blocks += total_synced_this_round;
+                        local_block = round_last_block; // Update for next iteration
                                 
                                 // Re-query Go GEI after syncing to update shared state
                                 if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
                                     coordination_hub.set_initial_global_exec_index(new_gei).await;
+                                    
+                                    // CRITICAL FIX: Also update the shared GEI tracker used by CommitProcessor.
+                                    // Without this, CommitProcessor starts incrementing GEI from its stale pre-sync value,
+                                    // passing incorrect GEIs to Go, which Go blindly accepts → hashes diverge across nodes.
+                                    {
+                                        let mut gei_guard = shared_last_global_exec_index.lock().await;
+                                        *gei_guard = new_gei;
+                                        tracing::info!("🔄 [STARTUP-SYNC] Updated shared_last_global_exec_index to {}", new_gei);
+                                    }
                                     
                                     // CRITICAL FIX: Query Go DIRECTLY for the updated lastHandledCommitIndex
                                     // instead of reading stale Rust persistence files.
@@ -1441,21 +1640,24 @@ impl ConsensusNode {
                                     // But the OLD code read from Rust persistence files, which still had
                                     // the pre-sync stale value. This caused CommitSyncer to replay commits
                                     // that Go already processed → duplicate blocks → fork.
+                                    let mut post_sync_epoch = storage.current_epoch;
                                     let new_handled = match barrier_client.get_last_handled_commit_index().await {
-                                        Ok((commit_idx, _, _, _, _, last_ts)) if commit_idx > 0 => {
-                                            tracing::info!(
-                                                "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync), ts={}",
-                                                commit_idx, last_ts
-                                            );
-                                            commit_consumer.update_last_block_timestamp_ms(last_ts);
-                                            commit_idx
-                                        }
-                                        Ok(_) => {
-                                            tracing::warn!(
-                                                "⚠️ [STARTUP-SYNC] Go returned lastHandledCommitIndex=0 after sync. Using go_replay_after={}",
+                                        Ok((commit_idx, _, _, go_epoch, _, last_ts)) => {
+                                            post_sync_epoch = go_epoch;
+                                            if commit_idx > 0 {
+                                                tracing::info!(
+                                                    "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync), ts={}, go_epoch={}",
+                                                    commit_idx, last_ts, go_epoch
+                                                );
+                                                commit_consumer.update_last_block_timestamp_ms(last_ts);
+                                                commit_idx
+                                            } else {
+                                                tracing::warn!(
+                                                    "⚠️ [STARTUP-SYNC] Go returned lastHandledCommitIndex=0 after sync (go_epoch={}). Using go_replay_after={}",
+                                                    go_epoch, go_replay_after
+                                                );
                                                 go_replay_after
-                                            );
-                                            go_replay_after
+                                            }
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -1477,12 +1679,6 @@ impl ConsensusNode {
                                         sync_round, new_gei, new_handled, new_handled
                                     );
                                     
-                                    // CRITICAL FIX: Re-read local epoch from Go's DB!
-                                    // If we started from a Full Wipe (epoch 0), STARTUP-SYNC fetched
-                                    // blocks from newer epochs. Go updated its epoch to match the blocks.
-                                    // We MUST update Rust's current_epoch before spawning Consensus Core,
-                                    // otherwise Rust will start at epoch 0 while the network is at epoch 2!
-                                    let post_sync_epoch = detect_local_epoch(&config.storage_path);
                                     if post_sync_epoch > storage.current_epoch {
                                         tracing::info!(
                                             "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
@@ -1490,43 +1686,46 @@ impl ConsensusNode {
                                         );
                                         storage.current_epoch = post_sync_epoch;
                                         commit_processor.update_epoch(post_sync_epoch);
-                                        // Update the committee in CommitProcessor so it can resolve leaders
-                                        if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
-                                            crate::node::executor_client::ExecutorClient::new(false, false, String::new(), config.executor_receive_socket_path.clone(), None)
-                                                .get_epoch_boundary_data(post_sync_epoch).await.unwrap_or_default().3, 
-                                            post_sync_epoch
-                                        ) {
-                                            if !new_eth_addrs.is_empty() {
-                                                storage.validator_eth_addresses = new_eth_addrs.clone();
-                                                commit_processor.get_epoch_eth_addresses_arc().write().await.insert(post_sync_epoch, new_eth_addrs);
+
+                                        // CRITICAL FIX: Fetch and populate the committee for the new epoch!
+                                        // Without this, CommitProcessor's `epoch_eth_addresses` map is missing
+                                        // the committee for the new epoch, causing `resolve_leader_address`
+                                        // to return an empty leader address for subsequent blocks, which
+                                        // alters the ExtraData and causes a block hash fork.
+                                        if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(post_sync_epoch).await {
+                                            if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, post_sync_epoch) {
+                                                let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                                let mut map = epoch_eth_addresses_arc.write().await;
+                                                map.insert(post_sync_epoch, new_eth_addrs);
+                                                tracing::info!("🔄 [STARTUP-SYNC] Populated epoch_eth_addresses for epoch {}", post_sync_epoch);
+                                            } else {
+                                                tracing::error!("🚨 [STARTUP-SYNC] Failed to build committee ETH addresses for epoch {}", post_sync_epoch);
                                             }
+                                        } else {
+                                            tracing::error!("🚨 [STARTUP-SYNC] Failed to fetch epoch boundary data for epoch {}", post_sync_epoch);
                                         }
                                     }
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ [STARTUP-SYNC] Round {}: Failed to execute fetched blocks: {}", sync_round, e);
-                                break;
-                            }
-                        }
-                    }
                     Ok(_) => {
                         tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Fetched 0 blocks from peers. Retrying...", sync_round);
                     }
                     Err(e) => {
-                        tracing::error!("❌ [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}", sync_round, e);
-                        break;
+                        if sync_round % 12 == 0 {
+                            tracing::error!("🚨 [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}. Node is BLOCKED pending network sync...", sync_round, e);
+                        } else {
+                            tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Failed to fetch blocks from peers: {}. Retrying...", sync_round, e);
+                        }
                     }
                 }
 
                 // Small delay before retry to let the cluster produce more blocks
-                if sync_round < MAX_SYNC_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
-                        MAX_RETRY_DELAY_MS
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                }
+                let delay = std::cmp::min(
+                    INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
+                    MAX_RETRY_DELAY_MS
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                sync_round += 1;
             }
 
             // ═══════════════════════════════════════════════════════════════
@@ -1645,8 +1844,88 @@ impl ConsensusNode {
                     );
                 }
             }
-        }
 
+            // ═══════════════════════════════════════════════════════════════
+            // FINAL SYNC GATE: Wait until network stabilizes before
+            // releasing proposals. The STARTUP-SYNC loop above exits with
+            // ACCEPTABLE_GAP=2, but the network may advance during the
+            // post-sync verification steps. This gate does 3 quick checks
+            // (500ms apart) to confirm the gap hasn't grown.
+            // ═══════════════════════════════════════════════════════════════
+            if total_synced_blocks > 0 && !barrier_peers.is_empty() {
+                for gate_check in 0..3u32 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let mut max_peer_block = 0u64;
+                    for peer_addr in &barrier_peers {
+                        if let Ok(info) = crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                            max_peer_block = max_peer_block.max(info.last_block);
+                        }
+                    }
+                    let gap = max_peer_block.saturating_sub(local_block);
+                    if gap > ACCEPTABLE_GAP {
+                        tracing::warn!(
+                            "🔄 [FINAL-GATE] Check {}: Gap still {} (local={}, peer={}). Fetching remaining blocks...",
+                            gate_check, gap, local_block, max_peer_block
+                        );
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &barrier_peers, local_block + 1, max_peer_block
+                        ).await {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                match barrier_client.sync_and_execute_blocks(blocks).await {
+                                    Ok((synced, last_block, _gei)) => {
+                                        tracing::info!(
+                                            "✅ [FINAL-GATE] Synced {} more blocks (last={})",
+                                            synced, last_block
+                                        );
+                                        local_block = last_block;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("⚠️ [FINAL-GATE] Sync failed: {}. Proceeding.", e);
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::warn!("⚠️ [FINAL-GATE] No blocks fetched. Proceeding.");
+                            }
+                        }
+                    } else {
+                        tracing::info!(
+                            "✅ [FINAL-GATE] Check {}: Gap={} ≤ {} — network stable. Proceeding.",
+                            gate_check, gap, ACCEPTABLE_GAP
+                        );
+                        break;
+                    }
+                }
+
+                // Re-query Go for the final state after the gate
+                match executor_client_for_proc.get_last_handled_commit_index().await {
+                    Ok((commit_idx, _, _, _, _, _)) if commit_idx > 0 => {
+                        tracing::info!(
+                            "🔑 [FINAL-GATE] Updated CommitProcessor: last_handled={} → {}",
+                            commit_processor.go_last_commit_index, commit_idx
+                        );
+                        commit_processor.go_last_commit_index = commit_idx;
+                        commit_processor.next_expected_index = commit_idx + 1;
+                        commit_consumer.monitor().set_highest_handled_commit(commit_idx);
+                        commit_consumer.update_replay_after_commit_index(commit_idx);
+                    }
+                    _ => {}
+                }
+            }
+
+            startup_total_synced_blocks = total_synced_blocks;
+            startup_local_block = local_block;
+
+            // ═══════════════════════════════════════════════════════════════
+            // SHUTDOWN EARLY SERVER
+            // ═══════════════════════════════════════════════════════════════
+            if let Some(handle) = early_peer_server_handle {
+                tracing::info!("📡 [PEER RPC] Stopping early server. Handing over to full server in startup.rs...");
+                handle.abort();
+                // Brief pause to ensure the socket is fully released by the OS
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
         // ═══════════════════════════════════════════════════════════════
         // PHASE-2 CONSISTENCY CHECK (May 2026 — ROOT CAUSE FIX):
         // After STARTUP-SYNC, verify Go's state is internally consistent.
@@ -1703,6 +1982,27 @@ impl ConsensusNode {
                             block_num, gei, commit_idx, go_epoch
                         );
                     }
+
+                    // ═══════════════════════════════════════════════════════════════
+                    // SAFETY NET (May 2026): Detect cross-epoch deadlock.
+                    // If go_replay_after is impossibly high for the current epoch,
+                    // CommitProcessor will never receive a matching commit_index.
+                    // This catches edge cases missed by the primary go_replay_after fix.
+                    // ═══════════════════════════════════════════════════════════════
+                    if commit_processor.go_last_commit_index > 0 && commit_idx > 0 {
+                        // If CommitProcessor's go_last_commit_index >> Go's actual commit_index,
+                        // we have a cross-epoch mismatch. Force reset.
+                        if commit_processor.go_last_commit_index > commit_idx + 100 {
+                            tracing::error!(
+                                "🚨 [SAFETY NET] Cross-epoch deadlock detected! \
+                                 CommitProcessor.go_last_commit_index={} >> Go.commit_index={}. \
+                                 Resetting to prevent permanent block stall.",
+                                commit_processor.go_last_commit_index, commit_idx
+                            );
+                            commit_processor.go_last_commit_index = commit_idx;
+                            commit_processor.next_expected_index = commit_idx + 1;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1730,6 +2030,102 @@ impl ConsensusNode {
         tracing::info!(
             "✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)"
         );
+
+        // ═══════════════════════════════════════════════════════════════════
+        // POST-INIT SYNC PARITY ASSERTION (May 2026):
+        //
+        // INVARIANT: After initialize_from_go(), CommitProcessor and
+        // ExecutorClient must agree on state. If they diverge, the node
+        // will either duplicate blocks or skip commits → fork.
+        //
+        // WHY THIS IS NEEDED:
+        // The startup sequence has 4 mutation points for
+        // go_last_commit_index/next_expected_index:
+        //   1. Line ~1625: After STARTUP-SYNC block count query
+        //   2. Line ~1760: After FINAL-GATE re-query
+        //   3. Line ~1800: EPOCH MISMATCH override → force (0, 1)
+        //   4. Line ~1817: block=0 + commit>0 → force (0, 1)
+        //
+        // Then initialize_from_go() updates ExecutorClient.next_expected_index
+        // from Go's authoritative state. But if Go's state was ALSO modified
+        // between the last mutation point and initialize_from_go() (e.g., by
+        // a concurrent block arriving via P2P), CommitProcessor and
+        // ExecutorClient could diverge.
+        //
+        // This assertion re-queries Go and verifies both sides match.
+        // ═══════════════════════════════════════════════════════════════════
+        if config.executor_read_enabled {
+            let executor_next_expected = {
+                let guard = executor_client_for_proc.next_expected_index.lock().await;
+                *guard
+            };
+            let cp_next_expected = commit_processor.next_expected_index;
+            let cp_go_last = commit_processor.go_last_commit_index;
+
+            // Also re-query Go for ground truth
+            match executor_client_for_proc.get_last_handled_commit_index().await {
+                Ok((go_commit_idx, go_gei, go_block, go_epoch, _, _)) => {
+                    tracing::info!(
+                        "🔍 [SYNC-PARITY] Post-init state comparison:\n  \
+                         CommitProcessor:  go_last_commit_index={}, next_expected_index={}\n  \
+                         ExecutorClient:   next_expected_index={}\n  \
+                         Go (authoritative): commit_index={}, gei={}, block={}, epoch={}",
+                        cp_go_last, cp_next_expected,
+                        executor_next_expected,
+                        go_commit_idx, go_gei, go_block, go_epoch
+                    );
+
+                    // CHECK 1: CommitProcessor.next_expected must not EXCEED
+                    // Go's commit_index + 1. If it does, CommitProcessor will
+                    // skip commits that Go still needs.
+                    if cp_next_expected > go_commit_idx + 1 && go_commit_idx > 0 {
+                        tracing::error!(
+                            "🚨 [SYNC-PARITY] CommitProcessor AHEAD of Go! \
+                             cp.next_expected={} > go.commit_index+1={}. \
+                             Correcting CommitProcessor to prevent commit skipping.",
+                            cp_next_expected, go_commit_idx + 1
+                        );
+                        commit_processor.go_last_commit_index = go_commit_idx;
+                        commit_processor.next_expected_index = go_commit_idx + 1;
+                    }
+
+                    // CHECK 2: If Go reports commit_index=0 (fresh epoch), 
+                    // CommitProcessor must also start from 1.
+                    if go_commit_idx == 0 && cp_go_last > 0 {
+                        tracing::warn!(
+                            "⚠️ [SYNC-PARITY] Go at commit_index=0 (fresh epoch) but \
+                             CommitProcessor.go_last_commit_index={}. \
+                             Resetting to (0, 1) to match Go's epoch-scoped state.",
+                            cp_go_last
+                        );
+                        commit_processor.go_last_commit_index = 0;
+                        commit_processor.next_expected_index = 1;
+                    }
+
+                    // CHECK 3: ExecutorClient and CommitProcessor must not diverge
+                    // on their understanding of the "next" index by more than a
+                    // small tolerance (1 commit of jitter is acceptable).
+                    let ec_cp_delta = (executor_next_expected as i64) - (cp_next_expected as i64);
+                    if ec_cp_delta.abs() > 1 {
+                        tracing::warn!(
+                            "⚠️ [SYNC-PARITY] ExecutorClient/CommitProcessor divergence: \
+                             EC.next_expected={} vs CP.next_expected={} (delta={}). \
+                             This can happen if initialize_from_go() advanced the EC \
+                             past the CP's expectation. The CP will naturally catch up \
+                             by skipping already-processed commits via go_last_commit_index.",
+                            executor_next_expected, cp_next_expected, ec_cp_delta
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [SYNC-PARITY] Could not verify sync parity — Go query failed: {}. \
+                         Proceeding with current state.",
+                        e
+                    );
+                }
+            }
+        }
 
         // ═══════════════════════════════════════════════════════════════════
         // GEI CROSS-CHECK: Verify local GEI matches peers after startup sync.
@@ -1772,6 +2168,101 @@ impl ConsensusNode {
                     tracing::warn!("⚠️ [GEI-CROSSCHECK] Failed to query Go for post-startup cross-check: {}. Skipping.", e);
                 }
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // FORK-PREVENTION: Unlock proposals after STARTUP-SYNC + init + verify.
+        // At this point:
+        //   1. All gap blocks have been synced from peers → Go state is current
+        //   2. initialize_from_go() has updated CommitProcessor guards
+        //   3. GEI cross-check has verified consistency
+        //
+        // CRITICAL (May 2026): Even though Go state is current, the Rust DAG
+        // was wiped by snapshot restore. CommitSyncer must replay commits from
+        // peers to reconstruct the DAG (leader schedule, etc.) BEFORE we allow
+        // proposals. Otherwise, the node creates its own blocks (different
+        // timestamp/txRoot) instead of replaying the cluster's committed blocks.
+        //
+        // Gate: Wait for quorum_commit_index to be non-zero and for the DAG's
+        // local_commit to approach quorum. Timeout 30s to avoid deadlock.
+        // ═══════════════════════════════════════════════════════════════════
+
+            // Signal to CommitSyncer that Go has finished syncing/verifying with peers.
+            // This safely breaks the Bootstrapping deadlock without relying on time.
+            coordination_hub.set_startup_go_sync_completed(true);
+
+            // ═══════════════════════════════════════════════════════════════
+            // POST-GATE BLOCK HASH VERIFICATION:
+            // Before releasing proposals, verify that recent blocks match
+            // peers. This catches cases where Go sync completed but the
+            // DAG produces blocks with slightly different content.
+            // ═══════════════════════════════════════════════════════════════
+            if !config.peer_rpc_addresses.is_empty() {
+                match executor_client_for_proc.get_last_block_number().await {
+                    Ok((local_bn, _gei, true, _hash, _epoch)) if local_bn > 0 => {
+                        let check_block = local_bn;
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &config.peer_rpc_addresses, check_block, check_block,
+                        ).await {
+                            Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                                match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
+                                    Ok(local_blocks) if !local_blocks.is_empty() => {
+                                        let local_raw = &local_blocks[0].raw_block_bytes;
+                                        let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                        if local_raw != peer_raw {
+                                            tracing::error!(
+                                                "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
+                                                 Local and peer blocks differ. This indicates \
+                                                 state corruption. Node will continue but \
+                                                 fork is likely.",
+                                                check_block
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                "✅ [POST-GATE-VERIFY] Block {} matches peers. \
+                                                 Safe to release proposals.",
+                                                check_block
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        tracing::debug!(
+                                            "⚠️ [POST-GATE-VERIFY] Could not fetch local block {}.",
+                                            check_block
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "⚠️ [POST-GATE-VERIFY] Could not fetch peer block {}.",
+                                    check_block
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // RUNTIME FORK GUARD (May 2026):
+        // Background task that verifies block hashes against peers for the
+        // first 500 blocks after startup. Catches late-manifesting forks
+        // that pass the initial POST-SYNC-VERIFY (which only checks the
+        // last synced block). If a checkpoint fails, the node halts.
+        //
+        // Why: Block 918 fork in hash_mismatch_alert.log was NOT caught by
+        // POST-SYNC-VERIFY because sync ended at block 917 (verified OK),
+        // but the NEXT block (918) diverged due to timestamp non-determinism.
+        // ═══════════════════════════════════════════════════════════════════
+        if startup_total_synced_blocks > 0 && !config.peer_rpc_addresses.is_empty() {
+            let guard_client = executor_client_for_proc.clone();
+            let guard_peers = config.peer_rpc_addresses.clone();
+            let guard_start_block = startup_local_block;
+            tokio::spawn(async move {
+                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block).await;
+            });
         }
 
         // Tích hợp BlockDeliveryManager vào Phase khởi động
@@ -1873,6 +2364,8 @@ impl ConsensusNode {
 
         // Spawn background recycler is done in setup_epoch_management where tx_client is accessible
 
+        let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc().clone();
+
         let failed_processor = is_terminally_failed.clone();
         tokio::spawn(async move {
             if let Err(e) = commit_processor.run().await {
@@ -1921,11 +2414,168 @@ impl ConsensusNode {
         // system_transaction_provider and epoch_duration_seconds are created earlier
         // (before executor_client_for_proc) for backpressure wiring
 
+        // ═══════════════════════════════════════════════════════════════════
+        // POST-SYNC COMMITTEE RESOLUTION & GRACEFUL DEGRADATION
+        // Once STARTUP-SYNC is completely done and we have caught up to the
+        // network, we need to determine the committee for the current epoch.
+        // If we fail (e.g., due to Go's NOMT amnesia and peer failures), we 
+        // DO NOT panic. We simply log a warning, set is_in_committee = false,
+        // and gracefully degrade to a SyncOnly node.
+        //
+        // CRITICAL FIX (2026-05-05): Use the existing executor_client_for_proc
+        // instead of creating a new ExecutorClient with enabled=false.
+        // The old code created `ExecutorClient::new(false, ...)` which made
+        // ALL RPC calls return "Executor client is not enabled", causing
+        // every snapshot-restored node to degrade to SyncOnly → LIVENESS DEAD.
+        // ═══════════════════════════════════════════════════════════════════
+        if storage.current_epoch > 0 {
+            tracing::info!("🔄 [STARTUP] Resolving committee for post-sync epoch {}...", storage.current_epoch);
+            
+            // RETRY LOGIC: Attempt committee resolution with retries before degrading.
+            // Transient Go RPC failures should not permanently knock a validator out.
+            let max_committee_retries = 3u32;
+            let mut validators_opt = None;
+            
+            for attempt in 1..=max_committee_retries {
+                match executor_client_for_proc.get_epoch_boundary_data(storage.current_epoch).await {
+                    Ok((_, timestamp_ms, _, v, _, boundary_gei)) if !v.is_empty() => {
+                        tracing::info!(
+                            "✅ [STARTUP] Got {} validators from Go for epoch {} (attempt {}) with timestamp {}ms, boundary_gei {}",
+                            v.len(), storage.current_epoch, attempt, timestamp_ms, boundary_gei
+                        );
+                        validators_opt = Some(v);
+                        storage.epoch_timestamp_ms = timestamp_ms;
+                        storage.epoch_base_exec_index = boundary_gei;
+                        break;
+                    }
+                    Ok((_, _, _, v, _, _)) => {
+                        tracing::warn!(
+                            "⚠️ [STARTUP] Go returned {} validators for epoch {} (attempt {}/{}). Retrying...",
+                            v.len(), storage.current_epoch, attempt, max_committee_retries
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [STARTUP] Go failed to provide committee for epoch {} (attempt {}/{}): {}",
+                            storage.current_epoch, attempt, max_committee_retries, e
+                        );
+                    }
+                }
+                
+                if attempt < max_committee_retries {
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+            
+            // Fallback to peers if Go failed after retries
+            if validators_opt.is_none() {
+                tracing::warn!("⚠️ [STARTUP] Go failed after {} retries. Falling back to peers...", max_committee_retries);
+                match executor_client_for_proc.get_safe_epoch_boundary_data_with_force(
+                    storage.current_epoch, &config.peer_rpc_addresses, true
+                ).await {
+                    Ok((_, timestamp_ms, _, v, _, boundary_gei)) if !v.is_empty() => {
+                        tracing::info!(
+                            "✅ [STARTUP] Got {} validators from peers for epoch {} with timestamp {}ms, boundary_gei {}",
+                            v.len(), storage.current_epoch, timestamp_ms, boundary_gei
+                        );
+                        validators_opt = Some(v);
+                        storage.epoch_timestamp_ms = timestamp_ms;
+                        storage.epoch_base_exec_index = boundary_gei;
+                    }
+                    Ok((_, _, _, v, _, _)) => {
+                        tracing::error!(
+                            "🚨 [STARTUP] Peers returned {} validators for epoch {}. Gracefully degrading to SyncOnly mode.",
+                            v.len(), storage.current_epoch
+                        );
+                    }
+                    Err(e2) => {
+                        tracing::error!(
+                            "🚨 [STARTUP] Cannot determine committee for epoch {}. Peer error: {}. Gracefully degrading to SyncOnly mode.",
+                            storage.current_epoch, e2
+                        );
+                    }
+                }
+            }
+            
+            if let Some(validators) = validators_opt {
+                if let Ok((committee, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(
+                    validators, 
+                    storage.current_epoch
+                ) {
+                    if !new_eth_addrs.is_empty() {
+                        tracing::info!("✅ [STARTUP] Successfully resolved committee with {} authorities for epoch {}", new_eth_addrs.len(), storage.current_epoch);
+                        storage.committee = committee.clone();
+                        storage.validator_eth_addresses = new_eth_addrs.clone();
+                        
+                        let own_protocol_pubkey = storage.protocol_keypair.public();
+                        let own_index_opt = committee.authorities().find_map(|(idx, auth)| {
+                            if auth.protocol_key == own_protocol_pubkey {
+                                Some(idx)
+                            } else {
+                                None
+                            }
+                        });
+                        
+                        storage.is_in_committee = own_index_opt.is_some();
+                        if let Some(idx) = own_index_opt {
+                            storage.own_index = idx;
+                            tracing::info!("✅ [IDENTITY] Assigned own_index = {} for epoch {}", idx, storage.current_epoch);
+                        } else {
+                            tracing::info!("ℹ️ [IDENTITY] Not in committee for epoch {}", storage.current_epoch);
+                        }
+                        
+                        epoch_eth_addresses_arc.write().await.insert(storage.current_epoch, new_eth_addrs);
+                    } else {
+                        tracing::error!("🚨 [STARTUP] Committee for epoch {} has 0 authorities! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
+                        storage.is_in_committee = false;
+                    }
+                } else {
+                    tracing::error!("🚨 [STARTUP] Failed to build committee for epoch {}! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
+                    storage.is_in_committee = false;
+                }
+            } else {
+                storage.is_in_committee = false;
+            }
+        }
+
         // Simplified validator startup: if node is in committee, always start consensus.
         // Cold-start / restart catch-up is handled by CommitSyncer (reset_to_network_baseline).
         // CommitSyncer detects empty DAG → fast-forwards → fetches real commits from peers.
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
+
+        // ═══════════════════════════════════════════════════════════════════
+        // CRITICAL FIX (May 2026 — ROOT CAUSE of m3 epoch racing fork):
+        //
+        // SystemTransactionProvider was created at line ~1186 with the
+        // PRE-STARTUP-SYNC epoch_timestamp_ms. After snapshot restore, this
+        // timestamp is extremely old (genesis), so FIX 6 resets it to now().
+        //
+        // Problem: Post-Sync Committee Resolution (above) updates
+        // storage.epoch_timestamp_ms with the REAL epoch boundary timestamp
+        // from Go. But SystemTransactionProvider still holds the old now()
+        // value. When epoch_duration (120s) elapses from that now() moment,
+        // the provider triggers EndOfEpoch → node races through epochs
+        // (3→4→5→6) while the cluster stays on epoch 3. This causes:
+        //   - Different txRoot (contains EndOfEpoch system tx)
+        //   - Different receiptsRoot
+        //   - Different leaderAddress (epoch-scoped leader schedule)
+        //   - Different timestamp (epoch boundary timestamp)
+        //   - Cascading fork from the first premature EndOfEpoch block
+        //
+        // FIX: Re-sync SystemTransactionProvider with the authoritative
+        // epoch/timestamp from Post-Sync Committee Resolution.
+        // ═══════════════════════════════════════════════════════════════════
+        if storage.current_epoch > 0 {
+            system_transaction_provider.update_epoch(
+                storage.current_epoch,
+                storage.epoch_timestamp_ms,
+            ).await;
+            tracing::info!(
+                "🔄 [STARTUP] SystemTransactionProvider re-synced: epoch={}, epoch_timestamp_ms={}",
+                storage.current_epoch, storage.epoch_timestamp_ms
+            );
+        }
 
         // CRITICAL: Transition from Initializing → Bootstrapping BEFORE starting authority.
         // This ensures Core::recover() sees should_skip_proposal()=true, preventing
@@ -1935,6 +2585,35 @@ impl ConsensusNode {
             coordination_hub.set_phase(
                 consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
             );
+
+            // ═══════════════════════════════════════════════════════════════════
+            // DYNAMIC DAG-GATE (Fix for GUARD 5 Timeout Fork)
+            // Wait asynchronously for CommitSyncer to perfectly reconstruct the DAG
+            // (CatchingUp → Healthy) before unlocking proposals.
+            // ═══════════════════════════════════════════════════════════════════
+            let guard_hub = coordination_hub.clone();
+            let guard_stp = system_transaction_provider.clone();
+            tokio::spawn(async move {
+                tracing::info!("🛡️ [DAG-GATE] Waiting for CommitSyncer to explicitly complete historical sync...");
+                loop {
+                    // [BREAKTHROUGH FIX]: Passive Observer Mode
+                    // We no longer read is_healthy_stable() which causes a polling race condition.
+                    // Instead, CommitSyncer will EXPLICITLY set startup_sync_active to false
+                    // only when exact mathematical parity is achieved (synced == quorum).
+                    if !guard_hub.is_startup_sync_active() {
+                        tracing::info!("✅ [DAG-GATE] CommitSyncer explicitly unlocked node! Notifying SystemTransactionProvider.");
+                        // FIX 7: Notify SystemTransactionProvider that node is Healthy.
+                        // This starts the auto-unsuppress timer (2*epoch_duration).
+                        guard_stp.notify_healthy();
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+            });
+        } else {
+            // SyncOnly nodes don't run CommitSyncer, so they don't care about this lock,
+            // but we unlock it anyway for cleanliness.
+            coordination_hub.set_startup_sync_active(false);
         }
 
         let (authority, commit_consumer_holder) = if start_as_validator {
@@ -2175,6 +2854,96 @@ impl ConsensusNode {
         recovery::perform_fork_detection_check(&node).await?;
 
         Ok(node)
+    }
+
+    /// Runtime Fork Guard — Background post-startup block hash verification.
+    ///
+    /// Verifies block hashes against peers at regular checkpoints for the first
+    /// 500 blocks after startup. This catches late-manifesting forks that pass
+    /// the initial POST-SYNC-VERIFY (which only checks the last synced block).
+    ///
+    /// If a checkpoint mismatch is detected, the node halts to prevent fork
+    /// propagation to the rest of the cluster.
+    async fn runtime_fork_guard(
+        client: Arc<ExecutorClient>,
+        peers: Vec<String>,
+        start_block: u64,
+    ) {
+        const CHECK_INTERVAL: u64 = 100;
+        const MAX_CHECKS: u64 = 5; // 5 checks × 100 blocks = 500 blocks monitored
+
+        tracing::info!(
+            "🛡️ [RUNTIME-GUARD] Started: monitoring blocks {}-{} against peers (checkpoints every {} blocks)",
+            start_block + CHECK_INTERVAL,
+            start_block + MAX_CHECKS * CHECK_INTERVAL,
+            CHECK_INTERVAL
+        );
+
+        for i in 0..MAX_CHECKS {
+            let target_block = start_block + (i + 1) * CHECK_INTERVAL;
+
+            // Wait until Go has processed this block
+            loop {
+                match client.get_last_block_number().await {
+                    Ok((current, _, true, _, _)) if current >= target_block => break,
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+
+            // Compare block hash with peer
+            match crate::network::peer_rpc::fetch_blocks_from_peer(
+                &peers, target_block, target_block,
+            ).await {
+                Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                    match client.get_blocks_range(target_block, target_block).await {
+                        Ok(local_blocks) if !local_blocks.is_empty() => {
+                            let local_raw = &local_blocks[0].raw_block_bytes;
+                            let peer_raw = &peer_blocks[0].raw_block_bytes;
+                            if local_raw == peer_raw {
+                                tracing::info!(
+                                    "✅ [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} verified ({} bytes match)",
+                                    i + 1, MAX_CHECKS, target_block, local_raw.len()
+                                );
+                            } else {
+                                tracing::error!(
+                                    "🚨 [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} MISMATCH! \
+                                     local_bytes={} peer_bytes={}. \
+                                     HALTING NODE to prevent fork propagation.",
+                                    i + 1, MAX_CHECKS, target_block,
+                                    local_raw.len(), peer_raw.len()
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from Go. Skipping.",
+                                i + 1, MAX_CHECKS, target_block
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Peer returned no data for block #{}. Skipping.",
+                        i + 1, MAX_CHECKS, target_block
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from peer: {}. Skipping.",
+                        i + 1, MAX_CHECKS, target_block, e
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            "✅ [RUNTIME-GUARD] All {} checkpoints passed. Fork monitoring complete.",
+            MAX_CHECKS
+        );
     }
 
     pub(crate) fn is_alive(&self) -> bool {

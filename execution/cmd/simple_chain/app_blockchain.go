@@ -109,6 +109,7 @@ func (app *App) initBlockchain() error {
 							block.NewBlockHeader(e_common.HexToHash(""), md.BlockNumber, e_common.HexToHash(md.StateRoot), stakeRoot, e_common.HexToHash(""), e_common.Address{}, 0, trie.EmptyRootHash, uint64(md.Epoch), md.GlobalExecIndex),
 							nil, nil,
 						)
+						app.startLastBlock.Header().SetCommitIndex(md.LastHandledCommitIdx)
 					}
 				}
 				if app.startLastBlock != nil {
@@ -132,6 +133,7 @@ func (app *App) initBlockchain() error {
 					// Now verify NOMT roots match header — BEFORE ChainState is created
 					if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						headerRoot := app.startLastBlock.Header().AccountStatesRoot()
+						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=account_state nomtRoot=%s headerRoot=%s", nomtAccountRoot.Hex(), headerRoot.Hex())
 						if nomtAccountRoot != headerRoot {
 							logger.Warn("⚠️ [SNAPSHOT] AccountState NOMT root MISMATCH: nomt=%s header=%s → patching header",
 								nomtAccountRoot.Hex(), headerRoot.Hex())
@@ -140,6 +142,7 @@ func (app *App) initBlockchain() error {
 					}
 					if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
 						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=stake_db nomtRoot=%s headerRoot=%s", nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 						if nomtStakeRoot != headerStakeRoot {
 							logger.Warn("⚠️ [SNAPSHOT] StakeState NOMT root MISMATCH: nomt=%s header=%s → patching header",
 								nomtStakeRoot.Hex(), headerStakeRoot.Hex())
@@ -151,7 +154,7 @@ func (app *App) initBlockchain() error {
 					app.chainState, _ = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
 
 					// FORK-SAFETY: Also align epoch in the recovery path
-					if app.startLastBlock.Header().Epoch() > 0 {
+					if app.startLastBlock.Header().Epoch() >= 0 {
 						app.chainState.ForceAlignEpochFromBlockHeader(
 							app.startLastBlock.Header().Epoch(),
 							app.startLastBlock.Header().TimeStamp(),
@@ -373,7 +376,7 @@ func (app *App) initBlockchain() error {
 		// after snapshot restore where LoadEpochData() returns stale epoch data.
 		// Block headers contain authoritative epoch — the snapshot's blocks are the
 		// ground truth for what epoch the node should be in.
-		if app.startLastBlock != nil && app.startLastBlock.Header().Epoch() > 0 {
+		if app.startLastBlock != nil {
 			app.chainState.ForceAlignEpochFromBlockHeader(
 				app.startLastBlock.Header().Epoch(),
 				app.startLastBlock.Header().TimeStamp(),
@@ -485,6 +488,7 @@ SKIP_GENESIS:
 				storage.ForceSetLastBlockNumber(metadata.BlockNumber)
 				// ALSO align the commit index to avoid Rust skipping/re-running commits
 				storage.ForceSetLastHandledCommitIndex(uint32(metadata.LastHandledCommitIdx))
+				storage.UpdateLastHandledCommitEpoch(uint64(metadata.Epoch))
 
 				// NOTE: GEIAuthority singleton is not initialized yet at this point in startup.
 				// ForceSet calls above update the storage globals, which the singleton will
@@ -538,35 +542,27 @@ SKIP_GENESIS:
 				}
 			}
 		}
-
 		// ═══════════════════════════════════════════════════════════════
-		// STRICT STARTUP VERIFICATION & ALIGNMENT
-		// Even if metadata.json wasn't used, the startLastBlock header is the
-		// absolute ground truth. If Go's BackupDb (GEI/CommitIndex) is out of sync
-		// with the last block header, we MUST align them before answering Rust.
+		// STARTUP DIAGNOSTIC: Read-only validation of GEI/CommitIndex alignment.
+		// Upstream paths (lines 267-322 for normal boot, 487-490 for metadata boot)
+		// already set these values authoritatively. This block only WARNS on mismatch.
 		// ═══════════════════════════════════════════════════════════════
 		if app.startLastBlock != nil {
 			headerGEI := app.startLastBlock.Header().GlobalExecIndex()
 			storageGEI := storage.GetLastGlobalExecIndex()
-			
-			if headerGEI != storageGEI {
-				logger.Error("🚨 [STARTUP] CRITICAL GEI MISMATCH! Header GEI=%d, Storage GEI=%d. Patching storage to match header.", 
-					headerGEI, storageGEI)
-				storage.ForceSetLastGlobalExecIndex(headerGEI)
-			} else {
-				logger.Info("✅ [STARTUP] GEI aligned: %d", headerGEI)
-			}
-
-			// We also need to align CommitIndex to prevent fork/skipping commits
 			headerCommit := app.startLastBlock.Header().CommitIndex()
 			storageCommit := storage.GetLastHandledCommitIndex()
-			if uint32(headerCommit) != storageCommit {
-				logger.Error("🚨 [STARTUP] CRITICAL COMMIT_INDEX MISMATCH! Header=%d, Storage=%d. Patching storage.",
-					headerCommit, storageCommit)
-				storage.ForceSetLastHandledCommitIndex(uint32(headerCommit))
-			} else {
-				logger.Info("✅ [STARTUP] CommitIndex aligned: %d", headerCommit)
+
+			if headerGEI != storageGEI {
+				logger.Warn("⚠️ [STARTUP-DIAG] GEI alignment note: header=%d storage=%d (upstream should have handled this)",
+					headerGEI, storageGEI)
 			}
+			if headerCommit > 0 && uint32(headerCommit) != storageCommit {
+				logger.Warn("⚠️ [STARTUP-DIAG] CommitIndex alignment note: header=%d storage=%d (upstream should have handled this)",
+					headerCommit, storageCommit)
+			}
+			logger.Info("✅ [STARTUP-DIAG] Final state: GEI=%d, CommitIndex=%d, Block=%d, Epoch=%d",
+				storageGEI, storageCommit, app.startLastBlock.Header().BlockNumber(), app.startLastBlock.Header().Epoch())
 		}
 	}
 

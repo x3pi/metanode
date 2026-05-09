@@ -6,7 +6,7 @@ use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -44,16 +44,7 @@ impl TxSocketServer {
         self
     }
 
-    pub async fn start(self) -> Result<()> {
-        let (ffi_tx_sender, mut ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
-        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.lock() {
-            *sender_guard = Some(ffi_tx_sender);
-            crate::ffi::FFI_TX_CONDVAR.notify_all();
-            info!("🔌 FFI Transaction Receiver initialized and Condvar notified");
-        } else {
-            warn!("⚠️ [FFI TX SENDER] Failed to acquire lock for initialization!");
-        }
-
+    pub async fn start(self, mut ffi_tx_receiver: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Result<()> {
         let client = self.transaction_client;
         let node = self.node;
         let is_transitioning = self.is_transitioning;
@@ -194,12 +185,8 @@ impl TxSocketServer {
                 if transitioning.load(Ordering::SeqCst) {
                     warn!("⚡ [FFI TX FLOW] Epoch transition in progress. Delaying {} TXs internally.", transactions_to_submit.len());
                     attempt += 1;
-                    if attempt >= 120 {
-                        error!(
-                            "❌ [FFI TX FLOW] Dropped {} TXs after 120 retries during transition",
-                            transactions_to_submit.len()
-                        );
-                        return;
+                    if attempt % 60 == 0 {
+                        warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                     continue;
@@ -247,11 +234,9 @@ impl TxSocketServer {
                                     warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
                                     drop(node_guard);
                                     attempt += 1;
-                                    if attempt >= 300 {
-                                        // Allow 5 minutes during boot
-                                        error!("❌ [FFI TX FLOW] Dropped {} TXs after timeout waiting for sync", transactions_to_submit.len());
-                                        return;
-                                    }
+                                    if attempt % 60 == 0 {
+                                    warn!("⏳ [FFI TX FLOW] Node still catching up. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
+                                }
                                     tokio::time::sleep(std::time::Duration::from_millis(1000))
                                         .await;
                                     continue;
@@ -372,9 +357,8 @@ impl TxSocketServer {
 
             // If we broke out early due to transient transition error, sleep and retry
             attempt += 1;
-            if attempt >= 120 {
-                error!("❌ [FFI TX FLOW] Dropped remaining TXs after Max Retries reached");
-                return;
+            if attempt % 60 == 0 {
+                warn!("⏳ [FFI TX FLOW] Delayed TXs for {}s due to submission failure.", attempt);
             }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }

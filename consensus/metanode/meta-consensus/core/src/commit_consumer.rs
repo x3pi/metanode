@@ -81,6 +81,7 @@ impl CommitConsumerArgs {
     pub fn update_replay_after_commit_index(&mut self, new_index: CommitIndex) {
         self.replay_after_commit_index = new_index;
         self.consumer_last_processed_commit_index = new_index;
+        self.monitor.set_highest_handled_commit(new_index);
     }
 
     pub fn update_last_block_timestamp_ms(&mut self, timestamp: u64) {

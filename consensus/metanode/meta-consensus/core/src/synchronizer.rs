@@ -694,20 +694,43 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             }
 
             let (verified_block, reject_txn_votes) = match block_verifier
-                .verify_and_vote(signed_block, serialized_block)
+                .verify_and_vote(signed_block.clone(), serialized_block.clone())
             {
                 Ok(result) => result,
                 Err(ConsensusError::WrongEpoch { expected, actual }) => {
-                    // CROSS-EPOCH FIX: After snapshot restore, peers retain epoch N-1
-                    // blocks in their DAG. Rejecting them aborts the entire batch,
-                    // causing an infinite retry loop → liveness stall.
-                    // Skip these stale blocks silently — CommitSyncer handles the
-                    // actual cross-epoch catch-up via verify_for_commit_sync.
-                    debug!(
-                        "Skipping cross-epoch block from peer {} (expected epoch {}, got {})",
-                        peer_index, expected, actual
-                    );
-                    continue;
+                    // CROSS-EPOCH FIX: Ancestors from previous epochs are required
+                    // to complete the causal history of the current epoch's first blocks.
+                    // We must verify them without the epoch check using verify_for_commit_sync.
+                    if actual < expected {
+                        debug!(
+                            "Verifying cross-epoch ancestor block from peer {} (expected epoch {}, got {})",
+                            peer_index, expected, actual
+                        );
+                        match block_verifier.verify_for_commit_sync(signed_block, serialized_block) {
+                            Ok(result) => result,
+                            Err(e) => {
+                                let hostname = context.committee.authority(peer_index).hostname.clone();
+                                context
+                                    .metrics
+                                    .node_metrics
+                                    .invalid_blocks
+                                    .with_label_values(&[&hostname, "synchronizer_cross_epoch", e.clone().name()])
+                                    .inc();
+                                info!("Invalid cross-epoch block received from {}: {}", peer_index, e);
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        let hostname = context.committee.authority(peer_index).hostname.clone();
+                        context
+                            .metrics
+                            .node_metrics
+                            .invalid_blocks
+                            .with_label_values(&[&hostname, "synchronizer", "WrongEpoch"])
+                            .inc();
+                        info!("Invalid block received from {}: Block has wrong epoch: expected {}, actual {}", peer_index, expected, actual);
+                        return Err(ConsensusError::WrongEpoch { expected, actual });
+                    }
                 }
                 Err(e) => {
                     let hostname = context.committee.authority(peer_index).hostname.clone();
@@ -1408,7 +1431,7 @@ mod tests {
             _peer: AuthorityIndex,
             _commit_range: CommitRange,
             _timeout: Duration,
-        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>)> {
+        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)> {
             unimplemented!("Unimplemented")
         }
 

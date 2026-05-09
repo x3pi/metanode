@@ -550,6 +550,7 @@ mod test {
             dag_state.clone(),
         ));
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
         let core = Core::new(
             context.clone(),
             leader_schedule,
@@ -560,6 +561,7 @@ mod test {
             signals,
             key_pairs.remove(context.own_index.value()).1,
             dag_state.clone(),
+            dag_state_writer,
             false,
             round_tracker,
             None, // adaptive_delay_state - not used in tests

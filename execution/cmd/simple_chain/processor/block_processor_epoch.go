@@ -47,6 +47,46 @@ func (bp *BlockProcessor) updateAndPersistLastHandledCommitIndex(index uint32) {
 	}
 }
 
+// updateAndPersistConsensusState atomically persists GEI, CommitIndex, and Epoch to BackupDB
+// to prevent sequence shifting forks during crash recovery.
+func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex uint32) {
+	if gei == 0 && commitIndex == 0 {
+		return
+	}
+
+	var batch [][2][]byte
+
+	if gei > 0 {
+		storage.UpdateLastGlobalExecIndex(gei)
+		batch = append(batch, [2][]byte{storage.LastGlobalExecIndexHashKey.Bytes(), utils.Uint64ToBytes(gei)})
+	}
+
+	if commitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(commitIndex)
+
+		// Determine current epoch from last block
+		var currentEpoch uint64
+		lastBlock := bp.GetLastBlock()
+		if lastBlock != nil {
+			currentEpoch = lastBlock.Header().Epoch()
+		}
+
+		storage.UpdateLastHandledCommitEpoch(currentEpoch)
+
+		geiAuthority := GetGEIAuthority()
+		if geiAuthority != nil {
+			geiAuthority.RecordCommitIndexWithEpoch(commitIndex, currentEpoch)
+		}
+
+		batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(commitIndex)})
+		batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
+	}
+
+	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil && len(batch) > 0 {
+		bp.storageManager.GetStorageBackupDb().BatchPut(batch)
+	}
+}
+
 // updateAndPersistLastExecutedCommitHash updates the commit hash in memory and persists it
 func (bp *BlockProcessor) updateAndPersistLastExecutedCommitHash(hash []byte) {
 	if len(hash) == 0 {

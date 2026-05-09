@@ -86,17 +86,41 @@ impl CommitVoteMonitor {
             return false;
         }
         let mut highest_voted_commits = self.highest_voted_commits.lock();
-        // Only seed if ALL slots are at 0 — never overwrite real vote data
-        let all_zero = highest_voted_commits.iter().all(|&v| v == 0);
-        if !all_zero {
+        
+        // Calculate the current quorum directly from the locked state
+        let mut sorted_votes = highest_voted_commits
+            .iter()
+            .zip(self.context.committee.authorities())
+            .map(|(v, (_, a))| (*v, a.stake))
+            .collect::<Vec<_>>();
+        sorted_votes.sort_by(|a, b| a.cmp(b).reverse());
+        let mut total_stake = 0;
+        let mut current_quorum = GENESIS_COMMIT_INDEX;
+        for (v, stake) in sorted_votes {
+            total_stake += stake;
+            if total_stake >= self.context.committee.quorum_threshold() {
+                current_quorum = v;
+                break;
+            }
+        }
+
+        // Only seed if current quorum is 0. If it's > 0, we already have real network agreement.
+        if current_quorum > 0 {
             return false;
         }
+
+        let mut updated = false;
         for slot in highest_voted_commits.iter_mut() {
-            *slot = commit_index;
+            if *slot < commit_index {
+                *slot = commit_index;
+                updated = true;
+            }
         }
         drop(highest_voted_commits);
-        self.quorum_advanced_notify.notify_waiters();
-        true
+        if updated {
+            self.quorum_advanced_notify.notify_waiters();
+        }
+        updated
     }
 }
 

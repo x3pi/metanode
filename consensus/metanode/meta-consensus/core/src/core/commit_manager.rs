@@ -70,6 +70,17 @@ impl Core {
             }
         }
 
+        // DETERMINISTIC RECOVERY GUARD:
+        // After successfully processing CertifiedCommits from the network,
+        // unlock the local committer. This ensures the node observes at least one
+        // network-agreed commit after catching up, healing any DAG sparseness
+        // before evaluating local timestamps.
+        // FORK-PREVENTION: Do NOT unlock if STARTUP-SYNC is active. The DAG is still
+        // accumulating historical blocks and is too sparse to safely evaluate local commits.
+        if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
+            self.coordination_hub.unlock_local_commit();
+        }
+
         // Try to propose now since there are new blocks accepted.
         self.try_propose(false)?;
 
@@ -127,6 +138,36 @@ impl Core {
                 );
                 self.last_decided_leader = current_dag_leader;
             }
+                
+            // CRITICAL FIX: Restore LeaderSchedule from the baseline if available.
+            // We MUST do this here before `commits_until_update` is calculated so that
+            // the synced commits evaluate against the correct pre-calculated schedule 
+            // instead of an empty default schedule.
+            // Note: This must run independently of the `last_decided_leader` check,
+            // because during snapshot restore, last_decided_leader starts equal to current_dag_leader!
+            //
+            // ARCHITECTURE (May 2026 — Phase 1 Lock→Channel):
+            // The take operation goes through DagStateWriter (channel → DagStateActor thread)
+            // instead of calling dag_state.write() directly. This eliminates the RwLock
+            // deadlock that occurred when the write-guard lifetime leaked into the if-let body.
+            let baseline_scores = self.dag_state_writer.take_baseline_scores();
+            if let Some(scores) = baseline_scores {
+                tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
+                self.leader_schedule.update_from_baseline_scores(
+                    self.context.clone(),
+                    self.dag_state.read().last_commit_index(),
+                    scores
+                );
+                
+                // Since the schedule is now fully restored and correct based on the network's 
+                // baseline, we DO NOT need to wait for a 300-commit cycle to verify it.
+                // We can tell the RecoveryBarrier to bypass the ScheduleVerifying phase!
+                self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    self.coordination_hub.set_schedule_recovery_pending(false);
+                }
+            }
 
             // LeaderSchedule has a limit to how many sequenced leaders can be committed
             // before a change is triggered. Calling into leader schedule will get you
@@ -145,6 +186,23 @@ impl Core {
 
                 self.leader_schedule
                     .update_leader_schedule_v2(&self.dag_state);
+
+                // UNIFIED RECOVERY BARRIER (May 2026):
+                // After a full 300-commit scoring cycle completes, advance the barrier.
+                // The barrier only transitions ScheduleVerifying → Ready (via compare_exchange),
+                // so this is safe to call unconditionally — it's a no-op if the barrier
+                // is in any other phase (Inactive, GoSyncing, DagCatchingUp, or Ready).
+                //
+                // This replaces the fragmented logic that checked is_sync_mode, local vs quorum
+                // commit, and handled_commits >= 300. All those edge cases are now handled by
+                // the barrier's strict phase progression:
+                //   Inactive → GoSyncing → DagCatchingUp → ScheduleVerifying → Ready
+                // Only ScheduleVerifying → Ready happens here.
+                self.coordination_hub.recovery_barrier().schedule_verified();
+                // Also clear legacy flag for backward compatibility
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    self.coordination_hub.set_schedule_recovery_pending(false);
+                }
 
                 let propagation_scores = self
                     .leader_schedule
@@ -245,6 +303,28 @@ impl Core {
                     break;
                 }
 
+                // DETERMINISTIC RECOVERY GUARD (replaces timeout-based DAG-GAP-GUARD):
+                // After snapshot recovery (last_decided_leader = 0 but local_commit > 0), 
+                // the local committer is LOCKED until the node processes a real CertifiedCommit 
+                // from the network (2f+1 verified).
+                // This is purely event-driven — no timeouts. The node can query peers
+                // for any commit via CommitSyncer::fetch_commits(), and will unlock
+                // as soon as it receives authoritative consensus data.
+                // NOTE: This MUST NOT apply to Genesis (local_commit == 0) or normal restarts
+                // (last_decided_leader > 0), otherwise the entire cluster could deadlock.
+                if self.last_decided_leader.round == 0 && local_commit_index > 0 {
+                    if !self.coordination_hub.is_local_commit_unlocked() {
+                        tracing::info!(
+                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for first \
+                             CertifiedCommit from network to confirm DAG consistency. \
+                             (local_commit={}, quorum_commit={})",
+                            local_commit_index,
+                            quorum_commit_index
+                        );
+                        break;
+                    }
+                }
+
                 // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`
                 // before running the local committer. If `CommitSyncer` executed a cold-start
                 // fast-forward (`reset_to_network_baseline`), `Core`'s in-memory `last_decided_leader`
@@ -260,16 +340,6 @@ impl Core {
                         dag_last_decided
                     );
                     self.last_decided_leader = dag_last_decided;
-
-                    // CRITICAL FIX: Restore LeaderSchedule from the baseline if available
-                    if let Some(scores) = self.dag_state.write().take_baseline_reputation_scores() {
-                        tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
-                        self.leader_schedule.update_from_baseline_scores(
-                            self.context.clone(),
-                            self.dag_state.read().last_commit_index(),
-                            scores
-                        );
-                    }
                 }
 
                 // DAG DENSITY CHECK AND LIVENESS SKIP REMOVED (v5):
@@ -294,11 +364,14 @@ impl Core {
                 // The DAG is sparse (missing ancestor blocks) so local commit evaluation
                 // would produce divergent timestamps and leader addresses.
                 // Only CertifiedCommits (network-verified) are safe to process during catch-up.
-                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() {
+                // FORK-PREVENTION: Also block if STARTUP-SYNC is active, even if lag=0 (Healthy),
+                // because the historical DAG is still sparse and under construction.
+                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() || self.coordination_hub.is_startup_sync_active() {
                     tracing::info!(
-                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase. \
-                         Waiting for node to become Healthy.",
-                        self.coordination_hub.get_phase()
+                        "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase (startup_sync_active={}). \
+                         Waiting for DAG to fully catch up.",
+                        self.coordination_hub.get_phase(),
+                        self.coordination_hub.is_startup_sync_active()
                     );
                     break;
                 }
@@ -316,6 +389,34 @@ impl Core {
                     tracing::info!(
                         "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
                          Waiting for 300-commit scoring cycle or network baseline scores."
+                    );
+                    break;
+                }
+
+                // SCHEDULE-RECOVERY GUARD: After snapshot recovery, from_store() auto-confirms
+                // the schedule because last_commit_index < 300 (looks like Genesis). But the
+                // network has progressed far beyond commit 300 with reputation swaps active.
+                // The default (empty) LeaderSwapTable produces WRONG leader elections.
+                // Block until a full scoring cycle completes with network-verified data.
+                if self.coordination_hub.is_schedule_recovery_pending() {
+                    tracing::info!(
+                        "🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, \
+                         LeaderSchedule needs re-confirmation from network. \
+                         Waiting for 300-commit scoring cycle with CertifiedCommits."
+                    );
+                    break;
+                }
+
+                // UNIFIED RECOVERY BARRIER GUARD (May 2026):
+                // Defense-in-depth — even if legacy flags are somehow not set
+                // (e.g., epoch 2 commit index reset bypasses handled >= 300),
+                // the barrier will still block the committer until all recovery
+                // phases complete.
+                if !self.coordination_hub.recovery_barrier().can_propose() {
+                    tracing::info!(
+                        "🛡️ [RECOVERY-BARRIER-GUARD] Blocking local committer: \
+                         RecoveryBarrier phase={}. Recovery is still in progress.",
+                        self.coordination_hub.recovery_barrier().phase()
                     );
                     break;
                 }
@@ -422,10 +523,25 @@ impl Core {
     ) -> ConsensusResult<Vec<CertifiedCommit>> {
         // Filter out the commits that have been already locally committed and keep only anything that is above the last committed index.
         let last_commit_index = self.dag_state.read().last_commit_index();
+        let is_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending();
+
+        // FORK-SAFETY (May 2026): During schedule recovery, we need historical commits
+        // for ScoringSubdag to rebuild the LeaderSwapTable. But we MUST limit the bypass
+        // to the 300-commit scoring window — blanket pass of ALL old commits causes
+        // CommitRange::extend_to() PANIC when commits arrive non-monotonically.
+        let scoring_window: u32 = 300;
+        let min_scoring_index = last_commit_index.saturating_sub(scoring_window);
+
         let commits = commits
             .iter()
             .filter(|commit| {
                 if commit.index() > last_commit_index {
+                    true
+                } else if is_schedule_recovery && commit.index() >= min_scoring_index {
+                    tracing::debug!(
+                        "🔄 [SCHEDULE-RECOVERY] Allowing historical commit {} (within scoring window {}..={}) for LeaderSwapTable rebuild",
+                        commit.index(), min_scoring_index, last_commit_index
+                    );
                     true
                 } else {
                     tracing::debug!(

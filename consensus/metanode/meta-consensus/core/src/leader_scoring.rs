@@ -121,7 +121,19 @@ impl ScoringSubdag {
                     .commit_range
                     .as_mut()
                     .expect("commit_range checked Some above");
-                commit_range.extend_to(subdag.commit_ref.index);
+                // FORK-SAFETY (May 2026): During schedule recovery, historical commits
+                // arrive with indices LOWER than the current range end. extend_to()
+                // panics in this case. Instead, rebuild the range to encompass both
+                // the old start/end and the new (potentially older) commit index.
+                if subdag.commit_ref.index > commit_range.end() {
+                    commit_range.extend_to(subdag.commit_ref.index);
+                } else if subdag.commit_ref.index < commit_range.start() {
+                    // Historical commit — expand range start downward
+                    *commit_range = CommitRange::new(
+                        subdag.commit_ref.index..=commit_range.end(),
+                    );
+                }
+                // else: index already within range, no expansion needed
             }
 
             // Add the committed leader to the list of leaders we will be scoring.

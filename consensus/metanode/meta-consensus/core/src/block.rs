@@ -422,7 +422,7 @@ impl fmt::Debug for Slot {
 ///
 /// Note: `BlockDigest` is computed over this struct, so any added field (without `#[serde(skip)]`)
 /// will affect the values of `BlockDigest` and `BlockRef`.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SignedBlock {
     inner: Block,
     signature: Bytes,

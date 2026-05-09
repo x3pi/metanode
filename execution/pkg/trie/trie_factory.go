@@ -268,6 +268,15 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 		}
 	}
 
+	// Ensure the database directory exists before calling FFI.
+	// This prevents "os error 2" (No such file or directory) during snapshot restore
+	// if wget failed to download empty NOMT directories.
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create NOMT database directory at %s: %w", dbPath, err)
+	}
+
+
+
 	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize independent NOMT database at %s: %w", dbPath, err)
@@ -322,8 +331,8 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 
 		entry.handle.CloseForSnapshot()
 
-		if mkdirErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkdirErr != nil {
-			return fmt.Errorf("failed to create parent dir for NOMT snapshot: %w", mkdirErr)
+		if mkdirErr := os.MkdirAll(destPath, 0755); mkdirErr != nil {
+			return fmt.Errorf("failed to create dest dir for NOMT snapshot: %w", mkdirErr)
 		}
 
 		var copyErr error

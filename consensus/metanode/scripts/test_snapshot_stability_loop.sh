@@ -44,8 +44,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-REPORT_FILE="$SCRIPT_DIR/stability_report_${TIMESTAMP}.md"
+TMP_DIR=$(mktemp -d)
+GLOBAL_LOG="$TMP_DIR/global.log"
+ROUND_LOG="$GLOBAL_LOG"
 AVAILABLE_DST_NODES=(1 2 3 4)
 
 # ─── Colors ─────────────────────────────────────────────────────
@@ -57,8 +58,8 @@ RPC_PORTS=(8757 10747 10749 10750 10748)
 NUM_NODES=5
 
 # ─── Utility Functions ──────────────────────────────────────────
-log() { echo -e "$1"; echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$REPORT_FILE"; }
-log_raw() { echo "$1"; echo "$1" >> "$REPORT_FILE"; }
+log() { echo -e "$1"; echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$ROUND_LOG"; }
+log_raw() { echo "$1"; echo "$1" >> "$ROUND_LOG"; }
 
 get_block_number() {
     local port=$1
@@ -96,6 +97,7 @@ stop_tx_pump() {
 
 cleanup_and_exit() {
     stop_tx_pump
+    [ -n "${TMP_DIR:-}" ] && rm -rf "$TMP_DIR" 2>/dev/null || true
     exit "${1:-1}"
 }
 trap 'cleanup_and_exit' INT TERM
@@ -127,20 +129,169 @@ collect_diagnostics() {
         local epoch=$(echo "$info" | grep -o '"current_epoch":[0-9]*' | cut -d: -f2)
         if [ "$block" != "-1" ]; then
             log "- **Node $i**: block=\`$block\` gei=\`${gei:-?}\` epoch=\`${epoch:-?}\` state_root=\`${sr:0:20}...\`"
+        else
             log "- **Node $i**: \`NGOẠI TUYẾN (OFFLINE)\`"
         fi
     done
     log ""
 
-    # Hash comparison at recent blocks
-    log "### So sánh Mã Băm Khối (5 khối chung gần nhất)"
+    # ═══════════════════════════════════════════════════════════════════
+    # FORK POINT FINDER: Binary search for the FIRST divergent block.
+    # This is the most critical diagnostic — knowing exactly which block
+    # first diverged reveals the root cause (timestamp diff, txRoot diff, etc.)
+    # ═══════════════════════════════════════════════════════════════════
+    log "### 🔍 Tìm Block Đầu Tiên Bị Fork (Fork Point)"
     log ""
+
+    # Find the range: snapshot block (known good) to current block
     local min_block=999999999
+    local max_block=0
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local b=$(get_block_number "${RPC_PORTS[$i]}")
-        [ "$b" != "-1" ] && [ "$b" -lt "$min_block" ] && min_block=$b
+        [ "$b" = "-1" ] && continue
+        [ "$b" -lt "$min_block" ] && min_block=$b
+        [ "$b" -gt "$max_block" ] && max_block=$b
     done
 
+    # Helper: check if all nodes agree on a block hash
+    check_block_consensus() {
+        local bn=$1
+        local hex=$(printf "0x%x" "$bn")
+        local ref_hash=""
+        for j in $(seq 0 $((NUM_NODES - 1))); do
+            local port=${RPC_PORTS[$j]}
+            local b=$(get_block_number "$port")
+            [ "$b" = "-1" ] || [ "$b" -lt "$bn" ] && continue
+            local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$hex\", false],\"id\":1}" 2>/dev/null)
+            local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            [ -z "$hash" ] || [ "$hash" = "null" ] && continue
+            if [ -z "$ref_hash" ]; then
+                ref_hash="$hash"
+            elif [ "$hash" != "$ref_hash" ]; then
+                echo "FORK"
+                return 0
+            fi
+        done
+        echo "OK"
+        return 0
+    }
+
+    # Binary search for first fork block
+    local lo=1
+    local hi=$min_block
+    local fork_point=-1
+    local search_steps=0
+
+    # Quick check: if the lowest common block is already forked, search from 1
+    # Otherwise, skip blocks that are definitely before snapshot
+    if [ "$min_block" -gt 0 ] && [ "$min_block" -lt 999999999 ]; then
+        # Start from a reasonable lower bound (e.g. snapshot block ~500)
+        # Check block 1 as a sanity check
+        if [ "$(check_block_consensus 1)" = "OK" ]; then
+            lo=1
+        fi
+        hi=$min_block
+
+        while [ $lo -le $hi ]; do
+            local mid=$(( (lo + hi) / 2 ))
+            search_steps=$((search_steps + 1))
+            local status=$(check_block_consensus $mid)
+            if [ "$status" = "FORK" ]; then
+                fork_point=$mid
+                hi=$((mid - 1))
+            else
+                lo=$((mid + 1))
+            fi
+            # Safety: max 20 iterations
+            [ $search_steps -ge 20 ] && break
+        done
+    fi
+
+    if [ "$fork_point" -gt 0 ]; then
+        log "- 🚨 **BLOCK ĐẦU TIÊN BỊ FORK: #$fork_point** (tìm thấy sau $search_steps bước tìm kiếm)"
+        log ""
+
+        # Show detailed comparison of the fork point block across all nodes
+        local fork_hex=$(printf "0x%x" "$fork_point")
+        log "### 📊 Chi Tiết Block Fork Point (#$fork_point)"
+        log ""
+        log '```'
+        for j in $(seq 0 $((NUM_NODES - 1))); do
+            local port=${RPC_PORTS[$j]}
+            local b=$(get_block_number "$port")
+            [ "$b" = "-1" ] || [ "$b" -lt "$fork_point" ] && { log "  Node $j: OFFLINE or behind"; continue; }
+            local result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:$port" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+            local hash=$(echo "$result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local parentHash=$(echo "$result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local stateRoot=$(echo "$result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local txRoot=$(echo "$result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local receiptsRoot=$(echo "$result" | grep -o '"receiptsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local timestamp=$(echo "$result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            local miner=$(echo "$result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+            log "  Node $j: hash=$hash"
+            log "           parentHash=$parentHash"
+            log "           stateRoot=$stateRoot"
+            log "           txRoot=$txRoot"
+            log "           receiptsRoot=$receiptsRoot"
+            log "           timestamp=$timestamp"
+            log "           miner(leader)=$miner"
+        done
+        log '```'
+        log ""
+
+        # Also show the block BEFORE fork point (should be identical across all)
+        if [ "$fork_point" -gt 1 ]; then
+            local pre_fork=$((fork_point - 1))
+            local pre_hex=$(printf "0x%x" "$pre_fork")
+            local pre_status=$(check_block_consensus $pre_fork)
+            log "- ✅ Block #$pre_fork (trước fork): $pre_status — tất cả node đồng thuận"
+        fi
+
+        # Identify which fields diverge
+        log ""
+        log "### 🔎 Phân Tích Nguyên Nhân Fork"
+        log ""
+        # Collect fork point data from node 0 (reference) vs dst node
+        local ref_result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:${RPC_PORTS[0]}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+        local dst_result=$(curl -s --max-time 2 -X POST "http://127.0.0.1:${RPC_PORTS[$dst]}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$fork_hex\", false],\"id\":1}" 2>/dev/null)
+
+        local ref_ts=$(echo "$ref_result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_ts=$(echo "$dst_result" | grep -o '"timestamp":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_tx=$(echo "$ref_result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_tx=$(echo "$dst_result" | grep -o '"transactionsRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_sr=$(echo "$ref_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_sr_val=$(echo "$dst_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_ph=$(echo "$ref_result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_ph=$(echo "$dst_result" | grep -o '"parentHash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local ref_miner=$(echo "$ref_result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+        local dst_miner=$(echo "$dst_result" | grep -o '"miner":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+
+        [ "$ref_ph" != "$dst_ph" ] && log "- ⚠️ **parentHash khác** → fork xảy ra TRƯỚC block #$fork_point (binary search có thể chưa chính xác)"
+        [ "$ref_ts" != "$dst_ts" ] && log "- 🕐 **timestamp khác** → Node $dst nhận commit từ round/leader khác (consensus divergence)"
+        [ "$ref_tx" != "$dst_tx" ] && log "- 📦 **txRoot khác** → Giao dịch trong block khác nhau (commit ordering khác)"
+        [ "$ref_sr" != "$dst_sr_val" ] && log "- 🌳 **stateRoot khác** → Trạng thái thực thi khác (hậu quả của txRoot/timestamp khác)"
+        [ "$ref_miner" != "$dst_miner" ] && log "- 👷 **leader/miner khác** → LeaderSchedule divergence (bảng hoán đổi lãnh đạo khác)"
+        [ "$ref_ph" = "$dst_ph" ] && [ "$ref_ts" = "$dst_ts" ] && [ "$ref_tx" != "$dst_tx" ] && \
+            log "- 💡 **KẾT LUẬN**: Cùng parent, cùng timestamp nhưng khác txRoot → Node $dst xử lý commit đúng nhưng nhận giao dịch khác"
+        [ "$ref_ph" = "$dst_ph" ] && [ "$ref_ts" != "$dst_ts" ] && \
+            log "- 💡 **KẾT LUẬN**: Cùng parent nhưng khác timestamp → Node $dst nhận commit từ consensus round khác (DAG divergence / premature Healthy transition)"
+        log ""
+    else
+        log "- ℹ️ Không tìm thấy fork point (có thể tất cả block đều khớp hoặc node offline)"
+        log ""
+    fi
+
+    # Hash comparison at recent blocks (keep original behavior)
+    log "### So sánh Mã Băm Khối (5 khối chung gần nhất)"
+    log ""
     if [ "$min_block" -gt 0 ] && [ "$min_block" -lt 999999999 ]; then
         log "| Khối | $(for i in $(seq 0 $((NUM_NODES-1))); do printf "Node %d | " $i; done)"
         log "|-------|$(for i in $(seq 0 $((NUM_NODES-1))); do printf "------|"; done)"
@@ -165,12 +316,30 @@ collect_diagnostics() {
     # Recent logs from failed node
     local dst_log="$LOG_BASE/node_${dst}/go-master-stdout.log"
     if [ -f "$dst_log" ]; then
-        log "### Nhật ký gần đây của Node $dst (60 dòng cuối)"
-        log ""
-        log '```text'
-        tail -n 60 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
-        log '```'
-        log ""
+        if [ "$fork_point" -gt 0 ]; then
+            log "### Nhật ký của Node $dst quanh block #$fork_point"
+            log ""
+            log '```text'
+            # Look for the fork block in the logs.
+            local block_line=$(grep -n -E "(LastBlockNumber: $fork_point|block=$fork_point|commit=$fork_point|index=$fork_point)" "$dst_log" | tail -1 | cut -d: -f1 || echo "")
+            if [ -n "$block_line" ]; then
+                local start_line=$((block_line - 50))
+                [ "$start_line" -lt 1 ] && start_line=1
+                local end_line=$((block_line + 50))
+                sed -n "${start_line},${end_line}p" "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            else
+                tail -n 100 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            fi
+            log '```'
+            log ""
+        else
+            log "### Nhật ký gần đây của Node $dst (60 dòng cuối)"
+            log ""
+            log '```text'
+            tail -n 60 "$dst_log" 2>/dev/null | while IFS= read -r line; do log_raw "$line"; done
+            log '```'
+            log ""
+        fi
 
         log "### Các Cột Mốc Đồng Bộ/Phục Hồi của Node $dst"
         log ""
@@ -254,19 +423,42 @@ run_single_round() {
     rm -rf "$dl_dir"; mkdir -p "$dl_dir"
     wget -q -c -r -np -nH --cut-dirs=2 -P "$dl_dir" --reject="index.html*" "${snap_url}/files/${snap_name}/" 2>/dev/null
     if [ ! -d "$dl_dir" ] || [ -z "$(ls -A "$dl_dir" 2>/dev/null)" ]; then
-        log "- ❌ Snapshot download failed"
+        log "- ❌ Snapshot download failed from ${snap_url}"
         return 1
     fi
+    # Diagnostic: Verify NOMT binary files were downloaded correctly via HTTP
+    local dl_total=$(find "$dl_dir" -type f 2>/dev/null | wc -l)
+    local dl_nomt=$(find "$dl_dir/nomt_db" -type f 2>/dev/null | wc -l)
+    log "- 📦 Downloaded $dl_total files total ($dl_nomt in nomt_db/) from HTTP server"
 
     mkdir -p "$dst_data/data/data" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
     for dir_name in $LEVELDB_DIRS; do
         [ -d "$dl_dir/$dir_name" ] && mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
     done
+    [ -d "$dl_dir/chaindata" ] && mv "$dl_dir/chaindata" "$dst_data/data/data/chaindata"
     [ -f "$dl_dir/metadata.json" ] && mv "$dl_dir/metadata.json" "$dst_data/data/data/metadata.json"
     [ -d "$dl_dir/back_up" ] && cp -r "$dl_dir/back_up/"* "$dst_data/back_up/" 2>/dev/null || true
     [ -d "$dl_dir/data-write" ] && cp -r "$dl_dir/data-write/"* "$dst_data/data-write/" 2>/dev/null || true
     [ -d "$dl_dir/back_up_write" ] && cp -r "$dl_dir/back_up_write/"* "$dst_data/back_up_write/" 2>/dev/null || true
     find "$dst_data" -name "LOCK" -delete 2>/dev/null || true
+    # CRITICAL: Remove NOMT .lock files — these contain the PID of the snapshot source process
+    # and will prevent nomt_open from working correctly on a different node process.
+    find "$dst_data" -name ".lock" -path "*/nomt_db/*" -delete 2>/dev/null || true
+    # CRITICAL: Remove dirty rust_consensus inherited from snapshot to avoid split-brain.
+    # Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a stale DAG.
+    rm -rf "$dst_data/data/data/rust_consensus" 2>/dev/null || true
+    # Verify NOMT stake_db has actual data files (stakeRoot=0x00 fork guard)
+    local nomt_stake_dir="$dst_data/data/data/nomt_db/stake_db"
+    if [ -d "$nomt_stake_dir" ]; then
+        local stake_file_count=$(find "$nomt_stake_dir" -type f 2>/dev/null | wc -l)
+        if [ "$stake_file_count" -eq 0 ]; then
+            log "- ⚠️  NOMT stake_db directory is EMPTY! stakeRoot fork likely."
+        else
+            log "- ✅ NOMT stake_db verified: $stake_file_count files"
+        fi
+    else
+        log "- ❌ NOMT stake_db directory MISSING after restore!"
+    fi
     mkdir -p "$LOG_BASE/node_$dst" "$RUST_DIR/config/storage/node_$dst"
     rm -rf "$dl_dir"
     log "- ✅ Snapshot restored to Node $dst"
@@ -332,17 +524,37 @@ run_single_round() {
     fi
     log "| GEI | ${src_gei:-?} | ${dst_gei:-?} | $gei_match |"
 
+    # ── State Root: Compare at the SAME block number ──
+    # CRITICAL FIX (May 2026): peer_info returns real-time state. Between two
+    # curl calls, nodes advance to different heights → different state_root
+    # → FALSE POSITIVE fork detection. Instead, compare at the SAME block.
+    local compare_block=$((src_blk < dst_blk ? src_blk : dst_blk))
+    local compare_hex=$(printf "0x%x" "$compare_block")
+    local src_result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$src_port" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$compare_hex\", false],\"id\":1}" 2>/dev/null)
+    local dst_result=$(curl -s --max-time 3 -X POST "http://127.0.0.1:$dst_port" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$compare_hex\", false],\"id\":1}" 2>/dev/null)
+    local src_hash=$(echo "$src_result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    local dst_hash=$(echo "$dst_result" | grep -o '"hash":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    src_sr=$(echo "$src_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+    dst_sr=$(echo "$dst_result" | grep -o '"stateRoot":"0x[0-9a-fA-F]*"' | head -1 | cut -d'"' -f4)
+
     local sr_match="✅"
-    if [ "$src_blk" = "$dst_blk" ]; then
-        [ "$src_sr" != "$dst_sr" ] && sr_match="❌"
+    if [ -n "$src_hash" ] && [ -n "$dst_hash" ]; then
+        if [ "$src_hash" != "$dst_hash" ]; then
+            sr_match="❌"
+        fi
     else
-        sr_match="⚠️ (Khác khối)"
+        sr_match="⚠️ (RPC error)"
     fi
-    log "| State Root | ${src_sr:0:20}... | ${dst_sr:0:20}... | $sr_match |"
+    log "| State Root (block #$compare_block) | ${src_sr:0:20}... | ${dst_sr:0:20}... | $sr_match |"
     log ""
 
     if [ "$sr_match" = "❌" ]; then
-        log "- 🚨 **LỆCH STATE ROOT CÙNG KHỐI — PHÁT HIỆN FORK**"
+        log "- 🚨 **LỆCH STATE ROOT CÙNG KHỐI #$compare_block — PHÁT HIỆN FORK**"
+        log "- src_hash=\`$src_hash\` dst_hash=\`$dst_hash\`"
         return 1
     fi
     if [ "$gei_match" = "❌" ]; then
@@ -425,7 +637,7 @@ echo -e "${BOLD}╚════════════════════�
 echo ""
 
 # Initialize report
-cat > "$REPORT_FILE" <<EOF
+cat > "$GLOBAL_LOG" <<EOF
 
 | Parameter | Value |
 |-----------|-------|
@@ -449,6 +661,7 @@ FAILED_ROUND=0
 FAIL_REASON=""
 
 for round in $(seq 1 $MAX_ROUNDS); do
+    ROUND_LOG="$TMP_DIR/round_${round}.log"
     # Rotate destination node if requested
     current_dst=$DST_NODE
     if [ "$ROTATE_DST" = true ]; then
@@ -481,6 +694,7 @@ done
 TOTAL_DURATION=$((SECONDS - TOTAL_START))
 
 # ── Final Summary ──
+ROUND_LOG="$TMP_DIR/final_summary.log"
 log ""
 log "---"
 log ""
@@ -497,6 +711,8 @@ log "| Total Duration | ${TOTAL_DURATION}s |"
 log ""
 
 if [ "$FAILED_ROUND" -gt 0 ]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    REPORT_FILE="$SCRIPT_DIR/stability_report_${TIMESTAMP}.md"
     log "> 🚨 **STABILITY TEST FAILED at round $FAILED_ROUND/$MAX_ROUNDS.**"
     log "> Gửi file \`$REPORT_FILE\` cho AI agent để phân tích và fix lỗi."
     log ""
@@ -522,15 +738,37 @@ fi
 log ""
 log "**Report generated:** $(date)"
 
+if [ "$FAILED_ROUND" -gt 0 ]; then
+    cat "$GLOBAL_LOG" > "$REPORT_FILE"
+    
+    start_round=$((FAILED_ROUND - 2))
+    [ "$start_round" -lt 1 ] && start_round=1
+    
+    if [ "$start_round" -gt 1 ]; then
+        echo -e "\n*(... skipping logs for rounds 1 to $((start_round-1)) ...)*\n" >> "$REPORT_FILE"
+    fi
+    
+    for r in $(seq $start_round $FAILED_ROUND); do
+        if [ -f "$TMP_DIR/round_${r}.log" ]; then
+            cat "$TMP_DIR/round_${r}.log" >> "$REPORT_FILE"
+        fi
+    done
+    
+    if [ -f "$TMP_DIR/final_summary.log" ]; then
+        cat "$TMP_DIR/final_summary.log" >> "$REPORT_FILE"
+    fi
+fi
+
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
 if [ "$FAILED_ROUND" -gt 0 ]; then
     echo -e "${RED}${BOLD}║  ❌ FAILED at round $FAILED_ROUND/$MAX_ROUNDS                            ║${NC}"
+    echo -e "${BOLD}╠══════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${BOLD}║  📁 Report: ${NC}${CYAN}$REPORT_FILE${NC}"
 else
     echo -e "${GREEN}${BOLD}║  ✅ ALL $MAX_ROUNDS ROUNDS PASSED                               ║${NC}"
 fi
-echo -e "${BOLD}╠══════════════════════════════════════════════════════════╣${NC}"
-echo -e "${BOLD}║  📁 Report: ${NC}${CYAN}$REPORT_FILE${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
+rm -rf "$TMP_DIR"
 [ "$FAILED_ROUND" -gt 0 ] && exit 1 || exit 0

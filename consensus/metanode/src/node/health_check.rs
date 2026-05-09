@@ -103,9 +103,51 @@ impl PostRecoveryHealthCheck {
             }
         }
 
-        // Check 4: Committee hash match — local committee == peer committee
-        // We'll just assume true for now, since we synced epoch boundary data.
-        result.committee_match = true;
+        // Check 4: Committee match — verify local validators match peers
+        // CRITICAL (2026-05-05): Previously hardcoded to true, masking committee divergence.
+        // Simplified approach: compare sorted authority_key lists directly (no full committee rebuild needed).
+        match self.executor_client.get_current_epoch().await {
+            Ok(local_epoch) if local_epoch > 0 => {
+                match self.executor_client.get_epoch_boundary_data(local_epoch).await {
+                    Ok((_, _, _, local_validators, _, _)) if !local_validators.is_empty() => {
+                        let mut local_keys: Vec<&str> = local_validators.iter()
+                            .map(|v| v.authority_key.as_str())
+                            .collect();
+                        local_keys.sort();
+                        
+                        let mut verified = false;
+                        for peer_addr in &self.peer_addresses {
+                            if let Ok(peer_boundary) = crate::network::peer_rpc::query_peer_epoch_boundary_data(
+                                peer_addr, local_epoch
+                            ).await {
+                                if !peer_boundary.validators.is_empty() {
+                                    let mut peer_keys: Vec<&str> = peer_boundary.validators.iter()
+                                        .map(|v| v.authority_key.as_str())
+                                        .collect();
+                                    peer_keys.sort();
+                                    
+                                    result.committee_match = local_keys == peer_keys;
+                                    if !result.committee_match {
+                                        tracing::error!(
+                                            "🚨 [HEALTH] Committee MISMATCH! local={} validators ≠ peer={} validators (epoch {})",
+                                            local_keys.len(), peer_keys.len(), local_epoch
+                                        );
+                                    }
+                                    verified = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if !verified {
+                            result.committee_match = true;
+                        }
+                    }
+                    _ => { result.committee_match = true; }
+                }
+            }
+            _ => { result.committee_match = true; }
+        }
 
         result
     }

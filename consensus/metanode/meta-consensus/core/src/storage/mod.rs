@@ -63,6 +63,13 @@ pub trait Store: Send + Sync {
     /// Reads the last commit info, written atomically with the last commit.
     fn read_last_commit_info(&self) -> ConsensusResult<Option<(CommitRef, CommitInfo)>>;
 
+    /// Reads commit info for a specific commit.
+    fn read_commit_info(
+        &self,
+        commit_index: CommitIndex,
+        commit_digest: CommitDigest,
+    ) -> ConsensusResult<Option<CommitInfo>>;
+
     /// Reads the last finalized commit.
     fn read_last_finalized_commit(&self) -> ConsensusResult<Option<CommitRef>>;
 

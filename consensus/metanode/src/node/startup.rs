@@ -56,6 +56,21 @@ impl InitializedNode {
             registry_service,
         } = config;
 
+        // ═══════════════════════════════════════════════════════════════
+        // EARLY FFI TX CHANNEL INITIALIZATION:
+        // Initialize the FFI channel BEFORE starting STARTUP-SYNC or DAG.
+        // This prevents Go from deadlocking if it submits a transaction
+        // (e.g. during genesis) while Rust is still initializing.
+        // ═══════════════════════════════════════════════════════════════
+        let (ffi_tx_sender, ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
+        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.lock() {
+            *sender_guard = Some(ffi_tx_sender);
+            crate::ffi::FFI_TX_CONDVAR.notify_all();
+            tracing::info!("🔌 [STARTUP] Early FFI Transaction Channel initialized to prevent Go deadlocks.");
+        } else {
+            tracing::warn!("⚠️ [STARTUP] Failed to acquire lock for FFI TX SENDER initialization!");
+        }
+
         // Start metrics server if enabled
         let _metrics_addr = if node_config.enable_metrics {
             let metrics_addr = SocketAddr::from(([127, 0, 0, 1], node_config.metrics_port));
@@ -178,7 +193,7 @@ impl InitializedNode {
             }
 
             uds_server_handle = Some(tokio::spawn(async move {
-                if let Err(e) = uds_server.start().await {
+                if let Err(e) = uds_server.start(ffi_tx_receiver).await {
                     error!("FFI Transaction process error: {}", e);
                 }
             }));

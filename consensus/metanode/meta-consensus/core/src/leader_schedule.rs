@@ -209,8 +209,12 @@ impl LeaderSchedule {
     }
 
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {
-        let is_reputation_swaps_disabled = std::env::var("DISABLE_REPUTATION_SWAPS").is_ok()
-            || std::env::var("SINGLE_NODE_DEBUG").is_ok();
+        // FORK-SAFETY (May 2026): Reputation swaps are permanently disabled in Metanode.
+        // During mid-epoch snapshot recovery, restoring nodes lose historical DAG blocks 
+        // necessary to compute identical reputation scores as continuous nodes. If reputation 
+        // swaps are active, the resulting DAGs diverge completely, leading to fatal state forks.
+        // We strictly enforce 100% deterministic stake-based election based on the round number.
+        let is_reputation_swaps_disabled = true;
             
         cfg_if::cfg_if! {
             // TODO: we need to differentiate the leader strategy in tests, so for

@@ -104,27 +104,26 @@ pub async fn dispatch_commit(
         } else {
             0 // Don't filter between Go RPC checks — let REPLAY PROTECTION handle it
         };
-        if go_current_gei >= global_exec_index && global_exec_index > 0 {
+
+        let expected_fragments = if total_transactions > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {
+            total_transactions.div_ceil(crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK) as u64
+        } else {
+            1
+        };
+
+        if go_current_gei > 0 && global_exec_index > 0 && go_current_gei >= (global_exec_index + expected_fragments - 1) {
             let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();
             if !has_end_of_epoch {
                 trace!(
-                    "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit GEI={}.",
-                    commit_index, go_current_gei, global_exec_index
+                    "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit end GEI={}.",
+                    commit_index, go_current_gei, global_exec_index + expected_fragments - 1
                 );
-                // CRITICAL FORK-SAFETY v5: Do NOT return Ok(1) blindly!
-                // If a commit had 50001 TXs, it consumed 2 GEIs. If we skip it and return 1, 
-                // this node will permanently lose 1 GEI from its cumulative_fragment_offset!
-                let expected_fragments = if total_transactions > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {
-                    total_transactions.div_ceil(crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK) as u64
-                } else {
-                    1
-                };
                 return Ok(expected_fragments);
             } else {
                 info!(
-                    "⚠️ [GEI GUARD] Go GEI={} >= commit GEI={}, but commit #{} \
+                    "⚠️ [GEI GUARD] Go GEI={} >= commit end GEI={}, but commit #{} \
                          contains EndOfEpoch — processing for epoch transition safety.",
-                    go_current_gei, global_exec_index, commit_index
+                    go_current_gei, global_exec_index + expected_fragments - 1, commit_index
                 );
             }
         }

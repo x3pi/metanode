@@ -456,17 +456,32 @@ impl Core {
                     .parameters
                     .propagation_delay_stop_proposal_threshold
         {
-            debug!(
-                "Skip proposing for round {clock_round}, high propagation delay {} > {}.",
-                self.propagation_delay,
-                self.context
-                    .parameters
-                    .propagation_delay_stop_proposal_threshold
+            // FALLBACK MECHANISM: Allow slow proposals to break deadlocks when delay is high
+            let max_delay_timeout = Duration::from_millis(2000); // 2 seconds fallback
+            let time_since_last_proposal = Duration::from_millis(
+                self.context.clock.timestamp_utc_ms().saturating_sub(self.last_proposed_timestamp_ms())
             );
-            core_skipped_proposals
-                .with_label_values(&["high_propagation_delay"])
-                .inc();
-            return false;
+
+            if time_since_last_proposal > max_delay_timeout {
+                tracing::warn!(
+                    "High propagation delay {} > {}, but forcing proposal as {}ms elapsed since last proposal to maintain liveness",
+                    self.propagation_delay,
+                    self.context.parameters.propagation_delay_stop_proposal_threshold,
+                    time_since_last_proposal.as_millis()
+                );
+            } else {
+                debug!(
+                    "Skip proposing for round {clock_round}, high propagation delay {} > {}.",
+                    self.propagation_delay,
+                    self.context
+                        .parameters
+                        .propagation_delay_stop_proposal_threshold
+                );
+                core_skipped_proposals
+                    .with_label_values(&["high_propagation_delay"])
+                    .inc();
+                return false;
+            }
         }
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {

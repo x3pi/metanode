@@ -220,6 +220,18 @@ impl Store for MemStore {
             .map(|(k, v)| (CommitRef::new(k.0, k.1), v.clone())))
     }
 
+    fn read_commit_info(
+        &self,
+        commit_index: CommitIndex,
+        commit_digest: CommitDigest,
+    ) -> ConsensusResult<Option<CommitInfo>> {
+        let inner = self.inner.read();
+        Ok(inner
+            .commit_info
+            .get(&(commit_index, commit_digest))
+            .cloned())
+    }
+
     fn read_last_finalized_commit(&self) -> ConsensusResult<Option<CommitRef>> {
         let inner = self.inner.read();
         Ok(inner

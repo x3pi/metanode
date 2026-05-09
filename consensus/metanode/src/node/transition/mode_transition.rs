@@ -257,6 +257,7 @@ pub async fn transition_mode_only(
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
                 node.current_commit_index.clone(),
+                commit_consumer.monitor(),
             ),
         )
         .with_global_exec_index_callback(

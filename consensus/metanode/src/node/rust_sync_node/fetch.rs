@@ -150,11 +150,11 @@ impl RustSyncNode {
                          timeout: Duration| {
             async move {
                 match client.fetch_commits(peer_idx, range.clone(), timeout).await {
-                    Ok((commits, certs)) => {
+                    Ok((commits, certs, _commit_infos)) => {
                         if commits.is_empty() {
                             Err(anyhow::anyhow!("Empty response from {}", peer_idx))
                         } else {
-                            Ok((peer_idx, commits, certs))
+                            Ok((peer_idx, commits, certs, _commit_infos))
                         }
                     }
                     Err(e) => Err(anyhow::anyhow!("Peer {} failed: {:?}", peer_idx, e)),
@@ -194,7 +194,7 @@ impl RustSyncNode {
                 // Process results
                 res = fetch_futures.next() => {
                     match res {
-                        Some(Ok((peer_idx, commits, _))) => {
+                        Some(Ok((peer_idx, commits, _, _))) => {
                              if !commits.is_empty() {
                                 // Winner! Record health success
                                 {

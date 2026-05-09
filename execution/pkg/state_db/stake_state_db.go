@@ -361,6 +361,16 @@ func (db *StakeStateDB) GetPendingRewards(validatorAddress, delegatorAddress com
 	return rewardAmount, nil
 }
 
+// RebuildKnownKeysFromValidatorList recovers knownKeys for NOMT from a cached list.
+func (db *StakeStateDB) RebuildKnownKeysFromValidatorList(validators []string) {
+	if nomtTrie, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+		for _, addrStr := range validators {
+			addr := common.HexToAddress(addrStr)
+			nomtTrie.RegisterKnownKey(addr.Bytes())
+		}
+	}
+}
+
 // --- Các hàm truy vấn ---
 
 func (db *StakeStateDB) GetAllValidators() ([]state.ValidatorState, error) {
@@ -608,10 +618,11 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 	}
 
 	var (
-		updateErr   error
-		hasChanges  bool = false
-		batchKeys   [][]byte
-		batchValues [][]byte
+		updateErr      error
+		hasChanges     bool = false
+		batchKeys      [][]byte
+		batchValues    [][]byte
+		batchOldValues [][]byte
 	)
 
 	var dirtyAddresses []common.Address
@@ -652,6 +663,21 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 
 		batchKeys = append(batchKeys, address.Bytes())
 		batchValues = append(batchValues, bytesToStore)
+
+		// CRITICAL FIX: NOMT requires the OLD value to correctly compute the Merkle root.
+		// If we pass nil for oldValues, NOMT treats all updates as NEW leaf insertions,
+		// which corrupts the internal tree and results in `0x0` or wrong hashes!
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			var oldData []byte
+			if db.trie != nil {
+				oldData, _ = db.trie.Get(address.Bytes())
+			}
+			if len(oldData) == 0 {
+				batchOldValues = append(batchOldValues, nil)
+			} else {
+				batchOldValues = append(batchOldValues, oldData)
+			}
+		}
 	}
 
 	if updateErr != nil {
@@ -663,7 +689,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			isNOMT = true
 			<-db.persistReady // For NOMT, we MUST wait for the C++ CommitPayload to complete
-			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, nil); err != nil {
+			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 			}
 		} 
@@ -690,10 +716,23 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		logger.Debug("Calculated new intermediate hash for stake state", "newHash", newHash)
 		fileLogger.Info("IntermediateRoot: hasChanges", newHash)
 
+		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
+		if newHash == (common.Hash{}) {
+			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 AFTER changes! "+
+				"NOMT stake_db handle is likely corrupted. batchKeys=%d",
+				len(batchKeys))
+		}
+
 		return newHash, nil
 	} else {
 		nHash := db.trie.Hash()
 		fileLogger.Info("IntermediateRoot: nHash", nHash)
+
+		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
+		if nHash == (common.Hash{}) {
+			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 (no changes). "+
+				"NOMT stake_db handle is uninitialized or corrupted.")
+		}
 
 		return nHash, nil // Return current hash if no changes
 	}
