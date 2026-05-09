@@ -193,6 +193,8 @@ struct PhaseStateInput {
     highest_handled: u32,
     /// Highest commit index the CommitSyncer has synced to.
     synced_commit_index: u32,
+    /// Highest commit index in the local DAG.
+    local_commit: u32,
     /// Number of certified commits actually fetched from network peers.
     /// Zero means only baseline-seeded, not real network data.
     network_synced_commits: u64,
@@ -439,6 +441,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             quorum_commit,
             highest_handled,
             synced_commit_index: self.synced_commit_index,
+            local_commit: self.inner.dag_state.read().last_commit_index(),
             network_synced_commits: self.network_synced_commits,
             startup_sync_active: self.coordination_hub.is_startup_sync_active(),
             go_sync_completed: self.coordination_hub.is_startup_go_sync_completed(),
@@ -591,9 +594,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
     ///   4. network_synced_commits > 0 (real commits fetched, not baseline-seeded)
     ///   5. schedule_recovery_pending == false (LeaderSchedule confirmed)
     fn determine_startup_sync_exit(input: &PhaseStateInput) -> PhaseTransitionDecision {
+        // DETECT EMPTY NETWORK / WIPE:
+        // If quorum is 0 but we've successfully polled the network (go_sync_completed),
+        // it means all peers are starting fresh. We must bypass standard $>0$ checks.
+        let is_empty_network = input.quorum_commit == 0 && input.go_sync_completed;
+
         // Gate 1: Mathematical parity
         let has_parity = input.lag == 0
-            && input.quorum_commit > 0
+            && (input.quorum_commit > 0 || is_empty_network)
             && input.quorum_commit >= input.highest_handled;
 
         if !has_parity {
@@ -603,7 +611,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
 
         // Gate 2: Network-validated commits (prevent baseline-only false parity)
-        if input.network_synced_commits == 0 {
+        // We bypass this requirement if:
+        // 1. The network is completely empty (no commits exist to fetch).
+        // 2. We already had the full DAG locally before starting (local_commit == quorum_commit).
+        let needs_network_sync = !is_empty_network && input.local_commit < input.quorum_commit;
+        
+        if needs_network_sync && input.network_synced_commits == 0 {
             tracing::warn!(
                 "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
                  but network_synced_commits=0 — no actual commits fetched from peers yet. \
@@ -924,8 +937,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // unlocked with a stale LeaderSwapTable, producing divergent
                         // leader elections and timestamps.
                         // ════════════════════════════════════════════════════════
-                        if self.coordination_hub.is_healthy()
-                            && !self.coordination_hub.is_local_commit_unlocked()
+                        let is_healthy_but_locked = self.coordination_hub.is_healthy()
+                            && !self.coordination_hub.is_local_commit_unlocked();
+                            
+                        let is_catching_up_but_schedule_pending = self.coordination_hub.is_catching_up()
+                            && lag == 0
+                            && self.coordination_hub.is_schedule_recovery_pending();
+
+                        let needs_active_sync_recovery = is_healthy_but_locked || is_catching_up_but_schedule_pending;
+
+                        if needs_active_sync_recovery
                             && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
                         {
                             let inner = self.inner.clone();
@@ -944,7 +965,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
                             tokio::spawn(async move {
                                 tracing::info!(
-                                    "🔍 [ACTIVE-SYNC-RECOVERY] Node is Healthy but locked. \
+                                    "🔍 [ACTIVE-SYNC-RECOVERY] Node requires recovery (Healthy/Locked or CatchingUp/SchedulePending). \
                                      Polling peers to determine recovery action (my_commit={}, schedule_pending={}, retry={})...",
                                     my_commit, is_schedule_pending, retry_count
                                 );
@@ -1018,12 +1039,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         retry_count + 1, my_commit, fetch_from, my_commit
                                     );
                                     // Trigger CommitSyncer to re-fetch the scoring range.
-                                    // By updating quorum slightly above my_commit, the
-                                    // CommitSyncer's try_schedule_once will detect lag and
-                                    // schedule fetches. The fetched CertifiedCommits will
-                                    // flow through the normal pipeline, rebuilding the
-                                    // LeaderSwapTable via update_leader_schedule_v2().
-                                    hub.update_quorum_commit_index(my_commit.saturating_add(1));
+                                    // The fetch itself is now handled natively in try_schedule_once
+                                    // which detects CatchingUp + schedule_recovery_pending and
+                                    // automatically lowers synced_commit_index to fetch_from.
                                     return;
                                 }
 
@@ -1212,6 +1230,36 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.coordination_hub.get_quorum_commit_index(),
         );
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // ACTIVE SYNC RECOVERY: If we are stuck in CatchingUp with lag=0, but we
+        // still need schedule recovery, we MUST re-fetch the past commits to
+        // reconstruct the LeaderSwapTable. We forcibly lower synced_commit_index.
+        // ═══════════════════════════════════════════════════════════════════════
+        if self.coordination_hub.is_catching_up()
+            && self.coordination_hub.is_schedule_recovery_pending()
+            && self.synced_commit_index > 0
+            && quorum_commit_index > 0
+            && self.synced_commit_index >= quorum_commit_index
+            && self.pending_fetches.is_empty()
+            && self.inflight_fetches.is_empty()
+        {
+            let num_commits: u32 = 300;
+            let last_boundary = (self.synced_commit_index / num_commits) * num_commits;
+            let fetch_from = last_boundary.saturating_sub(num_commits);
+            
+            tracing::warn!(
+                "🔄 [ACTIVE-SYNC-RECOVERY] Node is in CatchingUp with lag=0, but schedule_recovery_pending=true. \
+                 Forcibly lowering synced_commit_index {} → {} to rebuild LeaderSwapTable.",
+                self.synced_commit_index, fetch_from
+            );
+            self.synced_commit_index = fetch_from;
+            if let Some(scheduled) = self.highest_scheduled_index {
+                if scheduled > fetch_from {
+                    self.highest_scheduled_index = Some(fetch_from);
+                }
+            }
+        }
         
         // Update CoordinationHub so Core can read it to prevent divergent local commits
         self.coordination_hub.update_quorum_commit_index(quorum_commit_index);
