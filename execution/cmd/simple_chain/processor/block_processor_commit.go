@@ -14,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -227,7 +228,7 @@ func (bp *BlockProcessor) commitWorker() {
 			for _, logs := range job.ProcessResults.EventLogs {
 				allEventLogs = append(allEventLogs, logs...)
 			}
-			
+
 			go func(wg *sync.WaitGroup, block types.Block, receipts []types.Receipt, events []types.EventLog) {
 				if wg != nil {
 					wg.Wait()
@@ -239,7 +240,6 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
 	}
 }
-
 
 // commitToMemoryParallel performs parallel memory commit operations.
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
@@ -511,7 +511,13 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 	}
 
 	var receiptBatchSerialized []byte
-	if job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
+	if job.Receipts != nil {
+		logger.Info("Re-serializing receipts for block %d , resutl %v", blockNum, job.ProcessResults)
+		if r, ok := job.Receipts.(*receipt.Receipts); ok {
+			receiptBatchSerialized = r.GetReceiptBatchPut()
+		}
+	}
+	if len(receiptBatchSerialized) <= 4 && job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
 		var rb [][2][]byte
 		for _, r := range job.ProcessResults.Receipts {
 			b, err := r.Marshal()
@@ -523,7 +529,10 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 	}
 
 	var txBatchSerialized []byte
-	if job.ProcessResults != nil && len(job.ProcessResults.Transactions) > 0 {
+	if job.TxDB != nil {
+		txBatchSerialized = job.TxDB.GetTxBatchPut()
+	}
+	if len(txBatchSerialized) <= 4 && job.ProcessResults != nil && len(job.ProcessResults.Transactions) > 0 {
 		var tb [][2][]byte
 		for _, tx := range job.ProcessResults.Transactions {
 			b, err := tx.Marshal()
@@ -546,7 +555,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		MapppingBatch:             job.MappingBatch,
 		StakeState:                job.StakeBatch,
 		TrieDatabaseBatchPut:      job.TrieBatchSnapshot,
-		FullDbLogs:                nil, 
+		FullDbLogs:                nil,
 	}
 
 	backupBytes, err := storage.SerializeBackupDb(backupData)

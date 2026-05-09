@@ -218,7 +218,9 @@ impl PeerRpcServer {
             }
         };
 
-        let last_block = match timeout(Duration::from_secs(5), executor.get_last_block_number()).await {
+        let last_block = match timeout(Duration::from_secs(5), executor.get_last_block_number())
+            .await
+        {
             Ok(Ok((b, _, _, _, _))) => b,
             Ok(Err(e)) => {
                 error!("🌐 [PEER RPC] Failed to get last block: {}", e);
@@ -318,8 +320,9 @@ impl PeerRpcServer {
         // Fetch from local Go Master with timeout
         let fetch_result = timeout(
             Duration::from_secs(5),
-            executor.get_epoch_boundary_data(target_epoch)
-        ).await;
+            executor.get_epoch_boundary_data(target_epoch),
+        )
+        .await;
 
         match fetch_result {
             Ok(Ok((epoch, timestamp_ms, boundary_block, validators, _, boundary_gei))) => {
@@ -585,8 +588,9 @@ impl PeerRpcServer {
         // if Go Master is busy or not responding.
         let fetch_result = timeout(
             Duration::from_secs(5),
-            executor.get_blocks_range(from, actual_to)
-        ).await;
+            executor.get_blocks_range(from, actual_to),
+        )
+        .await;
 
         match fetch_result {
             Ok(Ok(block_data_list)) => {

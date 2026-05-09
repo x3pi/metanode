@@ -565,3 +565,64 @@ async fn fetch_executable_block_batch(
     blocks.sort_by_key(|(gei, _)| *gei);
     Ok(blocks)
 }
+
+/// Forward transactions from SyncOnly node to a validator
+pub async fn forward_transaction_to_validators(
+    peer_addresses: &[String],
+    transactions: Vec<Vec<u8>>,
+) -> Result<usize> {
+    if peer_addresses.is_empty() || transactions.is_empty() {
+        return Ok(0);
+    }
+
+    use tokio::net::TcpStream;
+    use tokio::io::AsyncWriteExt;
+    
+    // Convert to hex
+    let transactions_hex: Vec<String> = transactions.iter().map(hex::encode).collect();
+    let req = SubmitTransactionRequest { transactions_hex };
+    let json_body = serde_json::to_string(&req)?;
+    
+    let mut last_err = None;
+    
+    // Try to find a validator to forward to
+    for peer_addr in peer_addresses {
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TcpStream::connect(peer_addr),
+        )
+        .await;
+
+        let mut stream = match connect_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                last_err = Some(e.to_string());
+                continue;
+            }
+            Err(_) => {
+                last_err = Some("Timeout connecting".to_string());
+                continue;
+            }
+        };
+
+        let request = format!(
+            "POST /submit_transaction HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            peer_addr,
+            json_body.len(),
+            json_body
+        );
+
+        if let Err(e) = stream.write_all(request.as_bytes()).await {
+            last_err = Some(e.to_string());
+            continue;
+        }
+
+        // We successfully forwarded the transaction to at least one validator.
+        // It's fire-and-forget for now, but we can read the response if needed.
+        // For performance, just assume success if write was OK.
+        info!("📡 [TX FORWARD] Forwarded {} TXs to validator {}", transactions.len(), peer_addr);
+        return Ok(transactions.len());
+    }
+
+    Err(anyhow::anyhow!("Failed to forward transactions. Last error: {:?}", last_err))
+}

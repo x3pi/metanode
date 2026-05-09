@@ -400,6 +400,18 @@ func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
 	return cs.stakeChangelogDB
 }
 
+// PauseStateReads acquires the write lock on stateMutex to prevent any reads
+// from GetAccountStateDB, GetSmartContractDB, and GetStakeStateDB.
+// This is used to prevent race conditions during batch state updates.
+func (cs *ChainState) PauseStateReads() {
+	cs.stateMutex.Lock()
+}
+
+// ResumeStateReads releases the write lock on stateMutex.
+func (cs *ChainState) ResumeStateReads() {
+	cs.stateMutex.Unlock()
+}
+
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
 	cs.stateMutex.RLock()
 	db := cs.accountStateDB

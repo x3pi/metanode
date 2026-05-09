@@ -26,6 +26,9 @@ impl ConsensusNode {
     }
 
     pub async fn check_transaction_acceptance(&self) -> (bool, bool, String) {
+        if self.node_mode == NodeMode::SyncOnly {
+            return (false, false, "SyncOnly mode".to_string());
+        }
         if self.authority.is_none() {
             return (false, false, "Node is still initializing".to_string());
         }
@@ -239,6 +242,7 @@ impl ConsensusNode {
                         auth.stop().await;
                         info!("✅ [TRANSITION] Authority stopped successfully");
                     }
+                    self.transaction_client_proxy = None;
 
                     // STEP 2: Update mode atomically (only after Go has caught up)
                     // Note: Go catch-up is ensured by the caller (stop_authority_and_poll_go in epoch_transition.rs)

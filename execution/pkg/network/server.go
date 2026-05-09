@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meta-node-blockchain/meta-node/cmd/observer/client-tcp/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -121,6 +122,18 @@ func (s *SocketServer) startWorkerPool() {
 								request.Message().Command(),
 								err,
 							)
+							
+							// Gửi lại lỗi cho client để client không bị treo chờ phản hồi
+							msgID := request.Message().ID()
+							errBytes := []byte(fmt.Sprintf("Server error: %v", err))
+							errorMsg := NewMessage(&pb.Message{
+								Header: &pb.Header{
+									Command: command.TransactionError,
+									ID:      msgID,
+								},
+								Body: errBytes,
+							})
+							_ = request.Connection().SendMessage(errorMsg)
 						}
 					}()
 				}

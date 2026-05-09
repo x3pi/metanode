@@ -90,7 +90,7 @@ impl TxSocketServer {
         client: Arc<dyn TransactionSubmitter>,
         node: Option<Arc<Mutex<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
-        _peer_rpc_addresses: Vec<String>,
+        peer_rpc_addresses: Vec<String>,
         _peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
     ) {
@@ -174,11 +174,14 @@ impl TxSocketServer {
         }
 
         if parse_error || individual_txs.is_empty() {
-            error!("❌ [FFI TX FLOW] Failed to decode Transactions message");
+            error!("❌ [FFI TX FLOW] No valid transactions found in FFI batch");
             return;
         }
 
-        debug!("✅ [FFI TX FLOW] Zero-copy extracted {} TXs", individual_txs.len());
+        debug!(
+            "✅ [FFI TX FLOW] Zero-copy extracted {} TXs",
+            individual_txs.len()
+        );
         let transactions_to_submit = individual_txs;
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
@@ -192,7 +195,10 @@ impl TxSocketServer {
                     warn!("⚡ [FFI TX FLOW] Epoch transition in progress. Delaying {} TXs internally.", transactions_to_submit.len());
                     attempt += 1;
                     if attempt >= 120 {
-                        error!("❌ [FFI TX FLOW] Dropped {} TXs after 120 retries during transition", transactions_to_submit.len());
+                        error!(
+                            "❌ [FFI TX FLOW] Dropped {} TXs after 120 retries during transition",
+                            transactions_to_submit.len()
+                        );
                         return;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -202,38 +208,62 @@ impl TxSocketServer {
 
             // Node acceptance check (takes node lock momentarily)
             if let Some(ref node_arc) = node {
-                let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_arc.lock()).await;
+                let lock_result =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), node_arc.lock())
+                        .await;
                 match lock_result {
                     Ok(node_guard) => {
-                        let (should_accept, should_queue, reason) = node_guard.check_transaction_acceptance().await;
-                        
+                        let (should_accept, should_queue, reason) =
+                            node_guard.check_transaction_acceptance().await;
+
                         // Update current_client just in case we transitioned recently
-                        if let Some(fresh_submitter) = node_guard.transaction_submitter() {
-                            current_client = fresh_submitter;
+                        match node_guard.transaction_submitter() {
+                            Some(fresh_submitter) => current_client = fresh_submitter,
+                            None => {
+                                current_client = std::sync::Arc::new(
+                                    crate::node::tx_submitter::NoOpTransactionSubmitter,
+                                )
+                            }
                         }
 
                         if should_queue {
-                            debug!("📨 [FFI TX FLOW] Queueing {} transactions for next epoch: {}", transactions_to_submit.len(), reason);
-                            let _ = node_guard.queue_transactions_for_next_epoch(transactions_to_submit.clone()).await;
+                            debug!(
+                                "📨 [FFI TX FLOW] Queueing {} transactions for next epoch: {}",
+                                transactions_to_submit.len(),
+                                reason
+                            );
+                            let _ = node_guard
+                                .queue_transactions_for_next_epoch(transactions_to_submit.clone())
+                                .await;
                             return; // Enqueued successfully
                         }
 
                         if !should_accept {
-                            let is_sync_only = reason.contains("Node is still initializing");
-                            if is_sync_only {
-                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
-                                drop(node_guard);
-                                attempt += 1;
-                                if attempt >= 300 { // Allow 5 minutes during boot
-                                    error!("❌ [FFI TX FLOW] Dropped {} TXs after timeout waiting for sync", transactions_to_submit.len());
-                                    return;
+                            if reason.contains("SyncOnly") {
+                                // Allow to proceed to submit_transactions, which will hit NoOpTransactionSubmitter and forward
+                            } else {
+                                let is_sync_only = reason.contains("Node is still initializing");
+                                if is_sync_only {
+                                    warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
+                                    drop(node_guard);
+                                    attempt += 1;
+                                    if attempt >= 300 {
+                                        // Allow 5 minutes during boot
+                                        error!("❌ [FFI TX FLOW] Dropped {} TXs after timeout waiting for sync", transactions_to_submit.len());
+                                        return;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(1000))
+                                        .await;
+                                    continue;
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                                continue;
-                            }
 
-                            warn!("🚫 [FFI TX FLOW] Rejecting {} TXs: {}", transactions_to_submit.len(), reason);
-                            return; // Permanent failure
+                                warn!(
+                                    "🚫 [FFI TX FLOW] Rejecting {} TXs: {}",
+                                    transactions_to_submit.len(),
+                                    reason
+                                );
+                                return; // Permanent failure
+                            }
                         }
                     }
                     Err(_) => {
@@ -259,13 +289,16 @@ impl TxSocketServer {
             let chunks_list: Vec<Vec<Vec<u8>>> = if total_tx_count <= MAX_BUNDLE_SIZE {
                 vec![transactions_to_submit.clone()]
             } else {
-                transactions_to_submit.chunks(MAX_BUNDLE_SIZE).map(|c| c.to_vec()).collect()
+                transactions_to_submit
+                    .chunks(MAX_BUNDLE_SIZE)
+                    .map(|c| c.to_vec())
+                    .collect()
             };
 
             let mut all_succeeded = true;
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
                 // let chunk_len = chunk_vec.len();
-                
+
                 let epoch_pending_ptr = if let Some(ref node_mutex) = node {
                     let node_guard = node_mutex.lock().await;
                     Some(node_guard.epoch_pending_transactions.clone())
@@ -282,14 +315,22 @@ impl TxSocketServer {
                     recycler.track_submitted(&chunk_vec).await;
                 }
 
-                match current_client.submit_no_wait(chunk_vec).await {
+                match current_client.submit_no_wait(chunk_vec.clone()).await {
                     Ok(included_in_block_rx) => {
                         // total_submitted += chunk_len;
                         tokio::spawn(async move {
-                            if let Ok((_block_ref, _indices, status_receiver)) = included_in_block_rx.await {
+                            if let Ok((_block_ref, _indices, status_receiver)) =
+                                included_in_block_rx.await
+                            {
                                 tokio::spawn(async move {
-                                    if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
-                                        warn!("♻️ [FFI TX STATUS] Block {:?} Garbage Collected.", gc_block);
+                                    if let Ok(consensus_core::BlockStatus::GarbageCollected(
+                                        gc_block,
+                                    )) = status_receiver.await
+                                    {
+                                        warn!(
+                                            "♻️ [FFI TX STATUS] Block {:?} Garbage Collected.",
+                                            gc_block
+                                        );
                                     }
                                 });
                             }
@@ -297,7 +338,23 @@ impl TxSocketServer {
                     }
                     Err(e) => {
                         let err_str = e.to_string();
-                        if err_str.contains("SyncOnly") || err_str.contains("shutting down") || err_str.contains("channel closed") {
+                        if err_str.contains("SyncOnly") {
+                            warn!("♻️ [FFI TX FLOW] Node is SyncOnly. Forwarding {} TXs to validators.", chunk_vec.len());
+                            if let Err(fwd_err) =
+                                crate::network::peer_rpc::forward_transaction_to_validators(
+                                    &peer_rpc_addresses,
+                                    chunk_vec,
+                                )
+                                .await
+                            {
+                                error!(
+                                    "❌ [FFI TX FLOW] Failed to forward TXs to validators: {}",
+                                    fwd_err
+                                );
+                            }
+                        } else if err_str.contains("shutting down")
+                            || err_str.contains("channel closed")
+                        {
                             warn!("♻️ [FFI TX FLOW] Transition context loss. Delaying internally. Error: {}", err_str);
                             all_succeeded = false;
                             break;

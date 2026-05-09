@@ -22,8 +22,8 @@ type RequestHandler struct {
 	messageSender       network.MessageSender
 	forceCommitCallback func()                                                                 // Callback to trigger ForceCommit in BlockProcessor
 	updateLastBlockCallback func(blk types.Block)                                              // Callback to let Rust explicitly update Go memory state
-	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
-	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte, commitIndex uint32)                                   // Callback to advance GEI asynchronously
+	broadcastCallback           func(receipts []types.Receipt, blk *block.Block)               // Callback to broadcast receipts and events
+	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte, commitIndex uint32)               // Callback to advance GEI asynchronously
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -55,8 +55,8 @@ func (rh *RequestHandler) SetUpdateLastBlockCallback(cb func(blk types.Block)) {
 	rh.updateLastBlockCallback = cb
 }
 
-// SetBroadcastCallback allows RequestHandler to trigger block broadcast during execute mode sync
-func (rh *RequestHandler) SetBroadcastCallback(cb func(blk *block.Block, backupData []byte, blockNum uint64, txCount int)) {
+// SetBroadcastCallback allows RequestHandler to trigger block and receipt broadcasting
+func (rh *RequestHandler) SetBroadcastCallback(cb func(receipts []types.Receipt, blk *block.Block)) {
 	rh.broadcastCallback = cb
 }
 
@@ -64,8 +64,6 @@ func (rh *RequestHandler) SetBroadcastCallback(cb func(blk *block.Block, backupD
 func (rh *RequestHandler) SetPushAsyncGEIUpdateCallback(cb func(gei uint64, hash []byte, commitIndex uint32)) {
 	rh.pushAsyncGEIUpdateCallback = cb
 }
-
-
 // NOTE (Sync Architecture Redesign, Apr 2026):
 // broadcastBackupToSub was REMOVED. Sub nodes now exclusively receive blocks
 // through the normal block_processor_broadcast.go pipeline AFTER Master executes

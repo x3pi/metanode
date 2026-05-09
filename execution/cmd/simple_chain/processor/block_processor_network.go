@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -56,6 +57,18 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// Inject PushAsyncGEIUpdate callback to prevent empty commit stalls
 	reqHandler.SetPushAsyncGEIUpdateCallback(bp.PushAsyncGEIUpdate)
+
+	// Inject BroadCast callback to broadcast receipts in SyncOnly mode
+	reqHandler.SetBroadcastCallback(func(receipts []types.Receipt, blk *block.Block) {
+		var allEventLogs []types.EventLog
+		for _, r := range receipts {
+			for _, e := range r.EventLogs() {
+				allEventLogs = append(allEventLogs, smart_contract.NewEventLogFromProto(e))
+			}
+		}
+		// Use broadcastEventsAndReceipts to ensure websocket / event listeners get triggered
+		go bp.broadcastEventsAndReceipts(blk, receipts, allEventLogs)
+	})
 
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel

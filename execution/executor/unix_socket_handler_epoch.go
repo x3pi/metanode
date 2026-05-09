@@ -16,9 +16,11 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -1342,9 +1344,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
 		// ═══════════════════════════════════════════════════════════════════════════
+		var backupDb storage.BackUpDb
+		var deserErr error
 		if len(backupBytes) > 0 {
-			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
+			// ═══════════════════════════════════════════════════════════════
+			// CRITICAL RACE FIX: Lock reads before mutating NOMT!
+			// If a TCP client calls GetAccountState while we are applying
+			// batches or swapping the NOMT handle, it will hit a read error.
+			// ═══════════════════════════════════════════════════════════════
+			// rh.chainState.PauseStateReads()
+
+			backupDb, deserErr = storage.DeserializeBackupDb(backupBytes)
 			if deserErr != nil {
+				// rh.chainState.ResumeStateReads()
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
@@ -1353,8 +1365,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 				// ═══════════════════════════════════════════════════════════════
 				// FORK-DIAG (May 2026): Log NOMT handle root after EACH block's
-				// batch apply during STARTUP-SYNC. This pinpoints the exact block
-				// where state drift begins (if any batch is incomplete/corrupted).
+				// batch apply during STARTUP-SYNC.
 				// ═══════════════════════════════════════════════════════════════
 				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
@@ -1370,6 +1381,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 							rootMatch)
 					}
 				}
+				// Note: ResumeStateReads() will be called after UpdateStateForNewHeader
 			}
 		}
 
@@ -1509,17 +1521,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// FORK-PREVENTION (May 2026): Force trie re-alignment from NOMT
 				// handle BEFORE returning to Rust for consensus.
 				//
-				// ROOT CAUSE: After batch-applying blocks during STARTUP-SYNC,
-				// the in-memory NomtStateTrie may hold a cached root that is
-				// stale relative to the NOMT handle's committed root. When
-				// consensus immediately sends the first new block, Go reads
-				// from this stale trie, producing a different AccountStatesRoot
-				// → different block hash → FORK (see block #2149 incident).
-				//
 				// FIX: Explicitly re-create the trie from the NOMT handle's
 				// actual root. This guarantees that ProcessTransactions on
 				// the first consensus block reads from the correct state.
 				// ═══════════════════════════════════════════════════════════════
+				// if hasNomtRoot
 				if hasNomtRoot && isPreConsensusSync {
 					logger.Info("🔧 [STARTUP-SYNC] Forcing trie re-alignment from NOMT handle root for block #%d", blockNum)
 					if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
@@ -1536,6 +1542,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
 					logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
 						blockNum, localRoot.Hex(), expectedRoot.Hex())
+					// if len(backupBytes) > 0 && deserErr == nil {
+					// 	rh.chainState.ResumeStateReads()
+					// }
 					return &pb.SyncBlocksResponse{
 						Error: fmt.Sprintf("stateRoot mismatch at block %d: local=%s expected=%s",
 							blockNum, localRoot.Hex()[:18], expectedRoot.Hex()[:18]),
@@ -1543,6 +1552,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				}
 				logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
 			}
+
+			// UNLOCK reads after the NOMT trie handle has been swapped
+			// if len(backupBytes) > 0 && deserErr == nil {
+			// 	rh.chainState.ResumeStateReads()
+			// }
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1591,10 +1605,29 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
+		}
 
-			// if rh.broadcastCallback != nil {
-			// 	rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
-			// }
+		// ═══════════════════════════════════════════════════════════════════════════
+		// BROADCAST RECEIPTS
+		// In SyncOnly mode, transactions are not executed locally. To ensure clients
+		// waiting on TCP receive their receipts, we must deserialize them from BackupDb
+		// and broadcast them here.
+		// ═══════════════════════════════════════════════════════════════════════════
+		if len(backupDb.ReceiptBatchPut) > 0 && rh.broadcastCallback != nil {
+			if deserializedReceipts, err := storage.DeserializeBatch(backupDb.ReceiptBatchPut); err == nil {
+				var receipts []types.Receipt
+				for _, kv := range deserializedReceipts {
+					if len(kv) == 2 {
+						rcp := &receipt.Receipt{}
+						if err := rcp.Unmarshal(kv[1]); err == nil {
+							receipts = append(receipts, rcp)
+						}
+					}
+				}
+				if len(receipts) > 0 {
+					rh.broadcastCallback(receipts, blk)
+				}
+			}
 		}
 
 		logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
