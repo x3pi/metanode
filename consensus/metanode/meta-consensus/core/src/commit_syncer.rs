@@ -676,6 +676,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 if self.coordination_hub.is_startup_sync_active() {
                     self.coordination_hub.set_startup_sync_active(false);
                 }
+                
+                // CRITICAL FIX: We must explicitly unlock the local committer here!
+                // During CatchingUp, commits processed by Core have startup_sync_active=true,
+                // so they DO NOT unlock the committer (Anti-Fork guard). Once CatchingUp
+                // successfully completes and we transition to Healthy, we must manually
+                // unlock so the node can start proposing blocks.
+                self.coordination_hub.unlock_local_commit();
+                
                 if input.current_phase != to {
                     self.transition_phase_and_kick(to);
                 }
