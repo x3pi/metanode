@@ -99,8 +99,9 @@ func (bp *BlockProcessor) commitWorker() {
 		// CRITICAL FIX: Use centralized CommitBlockState to atomically update ALL
 		// chain state components, including blockNumber→hash and tx→blockNumber mappings.
 		// Without this, eth_getBlockByNumber returns null for organically produced blocks.
-		// ══════════════════════════════════════════════════════════════════
-		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping()); err != nil {
+		// By adding WithCommitMappings(), we ensure dirtyStorage is flushed to LevelDB immediately
+		// AFTER it is populated, rather than asynchronously via commitToMemoryParallel.
+		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
 		}
 		saveDuration := time.Since(startSave)
@@ -272,8 +273,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		duration time.Duration
 	}
 
-	// Count total tasks: txDB + Receipts + BlockChain + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
-	totalTasks := 3
+	// Count total tasks: txDB + Receipts + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
+	totalTasks := 2
 	if isStateChanging {
 		// CRITICAL FIX: SmartContractDB MUST commit sequentially BEFORE AccountStateDB!
 		// SmartContractDB.Commit() computes the new StorageRoot for contracts and late-binds
@@ -291,8 +292,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	var wg sync.WaitGroup
 	resultsChan := make(chan taskResult, totalTasks)
 
-	// Always run txDB, Receipts, and BlockChain commits
-	wg.Add(3)
+	// Always run txDB and Receipts commits
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		start := time.Now()
@@ -305,12 +306,6 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		var err error
 		receiptPipelineResult, err = receipts.CommitPipeline()
 		resultsChan <- taskResult{name: "Receipts", err: err, duration: time.Since(start)}
-	}()
-	go func() {
-		defer wg.Done()
-		start := time.Now()
-		err := blockchain.GetBlockChainInstance().Commit()
-		resultsChan <- taskResult{name: "BlockChain", err: err, duration: time.Since(start)}
 	}()
 
 	if isStateChanging {

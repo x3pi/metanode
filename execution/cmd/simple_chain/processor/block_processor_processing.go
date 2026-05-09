@@ -16,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
@@ -345,20 +344,10 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
 	}
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
-	// TxHashMapBlockNumber is a non-critical in-memory index for TX lookup.
-	// Run it async but track via WaitGroup so commitWorker waits before broadcasting receipts.
-	var mappingWg sync.WaitGroup
-	if bp.serviceType == p_common.ServiceTypeMaster && isStateChanging {
-		txsCopy := processResults.Transactions // capture for goroutine
-		blockNum := currentBlockNumber
-		mappingWg.Add(1)
-		go func() {
-			defer mappingWg.Done()
-			for _, tx := range txsCopy {
-				blockchain.GetBlockChainInstance().SetTxHashMapBlockNumber(tx.Hash(), blockNum)
-			}
-		}()
-	}
+	// TxHashMapBlockNumber is now safely handled synchronously inside CommitBlockState
+	// to avoid race conditions with dirtyStorage flushing.
+	var mappingWg sync.WaitGroup // Keep this as dummy to satisfy Job signature if needed
+
 	phase31Elapsed := time.Since(phase3Start)
 
 	phase32Start := time.Now()
