@@ -272,8 +272,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		duration time.Duration
 	}
 
-	// Count total tasks: txDB + Receipts + (if stateChanging: AccountPipeline + StakePipeline + TrieDB + BlockChain)
-	totalTasks := 2
+	// Count total tasks: txDB + Receipts + BlockChain + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
+	totalTasks := 3
 	if isStateChanging {
 		// CRITICAL FIX: SmartContractDB MUST commit sequentially BEFORE AccountStateDB!
 		// SmartContractDB.Commit() computes the new StorageRoot for contracts and late-binds
@@ -285,14 +285,14 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 		logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
 
-		totalTasks += 4
+		totalTasks += 3
 	}
 
 	var wg sync.WaitGroup
 	resultsChan := make(chan taskResult, totalTasks)
 
-	// Always run txDB and Receipts commits
-	wg.Add(2)
+	// Always run txDB, Receipts, and BlockChain commits
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		start := time.Now()
@@ -306,10 +306,16 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		receiptPipelineResult, err = receipts.CommitPipeline()
 		resultsChan <- taskResult{name: "Receipts", err: err, duration: time.Since(start)}
 	}()
+	go func() {
+		defer wg.Done()
+		start := time.Now()
+		err := blockchain.GetBlockChainInstance().Commit()
+		resultsChan <- taskResult{name: "BlockChain", err: err, duration: time.Since(start)}
+	}()
 
 	if isStateChanging {
 		// Launch ALL state-changing commits in parallel
-		wg.Add(4)
+		wg.Add(3)
 
 		// AccountStateDB.CommitPipeline — the heaviest task (~600-900ms for 50k TXs)
 		go func() {
@@ -341,14 +347,6 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			start := time.Now()
 			err := trie_database.GetTrieDatabaseManager().CommitSnapshots(trieDBSnapshots)
 			resultsChan <- taskResult{name: "TrieDatabases", err: err, duration: time.Since(start)}
-		}()
-
-		// BlockChain
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-			err := blockchain.GetBlockChainInstance().Commit()
-			resultsChan <- taskResult{name: "BlockChain", err: err, duration: time.Since(start)}
 		}()
 	}
 
