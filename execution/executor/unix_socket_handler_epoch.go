@@ -1148,7 +1148,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		blk, err := blockDatabase.GetBlockByHash(blockHash)
-		if err != nil {
+		if err != nil || blk == nil {
 			continue
 		}
 

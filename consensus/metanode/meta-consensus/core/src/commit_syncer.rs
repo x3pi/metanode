@@ -734,7 +734,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 // so they DO NOT unlock the committer (Anti-Fork guard). Once CatchingUp
                 // successfully completes and we transition to Healthy, we must manually
                 // unlock so the node can start proposing blocks.
-                self.coordination_hub.unlock_local_commit();
+                self.coordination_hub.force_unlock_local_commit();
                 
                 if input.current_phase != to {
                     self.transition_phase_and_kick(to);
@@ -1755,19 +1755,39 @@ impl<C: NetworkClient> CommitSyncer<C> {
                          (startup_sync={}, catching_up={}, waiting for commits to be delivered to Core)",
                         self.synced_commit_index, local_commit, is_startup, is_catching_up
                     );
-                } else if local_handled_gap > 10 {
-                    tracing::info!(
-                        "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} despite handled gap {} \
-                         (Go Master will catch up via batch-drain, CommitProcessor handles ordering)",
-                        self.synced_commit_index, local_commit, local_handled_gap
+                } else if local_handled_gap > 50 {
+                    // ═══════════════════════════════════════════════════════════
+                    // FORK-SAFETY GATE (May 2026 — Structural Fix):
+                    // 
+                    // When a node restarts with a fresh DAG, the DAG syncs from
+                    // peers rapidly (local_commit grows to 400+ in seconds). But
+                    // the CommitProcessor is still at next_expected=197, processing
+                    // historical commits one by one. If we advance synced_commit_index
+                    // now, lag becomes 0 → node transitions to Healthy → starts
+                    // proposing new blocks → FORK (because Go execution is 500+
+                    // commits behind, and the fresh DAG may order transactions
+                    // differently than the network did historically).
+                    //
+                    // FIX: Do NOT advance synced_commit_index when Go execution
+                    // (highest_handled) is far behind DAG state (local_commit).
+                    // The node must stay in CatchingUp until the execution layer
+                    // has drained the historical commit backlog.
+                    // ═══════════════════════════════════════════════════════════
+                    tracing::warn!(
+                        "[COMMIT-SYNCER] ⚠️ BLOCKED synced_commit_index advance {} → {} \
+                         (execution parity gap={}, handled={}, local_commit={}). \
+                         Go execution layer is far behind DAG state. \
+                         Blocking to prevent premature Healthy transition and fork.",
+                        self.synced_commit_index, local_commit, local_handled_gap,
+                        highest_handled, local_commit
                     );
-                    self.synced_commit_index = local_commit;
                 } else {
                     tracing::info!(
-                        "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?})",
+                        "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
                         self.synced_commit_index,
                         local_commit,
-                        self.coordination_hub.get_phase()
+                        self.coordination_hub.get_phase(),
+                        local_handled_gap
                     );
                     self.synced_commit_index = local_commit;
                 }

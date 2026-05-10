@@ -606,6 +606,12 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 //
 // FIX: Block headers contain authoritative epoch information. If the last block
 // header has epoch > ChainState.currentEpoch, force-advance to match.
+//
+// ARCHITECTURAL INVARIANT: This function is called BEFORE InitBlockChain(),
+// so GetBlockChainInstance() will return nil. We MUST NOT depend on the
+// BlockChain singleton. Instead, use:
+//   1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
+//   2. BlockDatabase parent-chain traversal (always available)
 func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
 	cs.epochMutex.Lock()
 	defer cs.epochMutex.Unlock()
@@ -614,16 +620,83 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 		logger.Warn("🚨 [SNAPSHOT FIX] Epoch alignment: ChainState.currentEpoch=%d but lastBlock.epoch=%d. "+
 			"Forcing epoch to %d to prevent fork. (block=%d, ts=%d)",
 			cs.currentEpoch, blockEpoch, blockEpoch, blockNumber, blockTimestamp)
-			
-		alignTimestampMs := blockTimestamp * 1000
+
+		// ═══════════════════════════════════════════════════════════════════
+		// STRATEGY 1: Use already-loaded epoch boundary data.
+		// LoadEpochData() ran before us and populated epochBoundaryBlocks.
+		// If the target epoch's boundary was previously recorded, use it
+		// directly — no scanning needed. This is the common case for both
+		// epoch upgrade (stale backup) and epoch downgrade (snapshot from
+		// a node that was ahead).
+		// ═══════════════════════════════════════════════════════════════════
+		trueBoundaryBlock := blockNumber
+		var alignTimestampMs uint64
+
+		if cachedBoundary, ok := cs.epochBoundaryBlocks[blockEpoch]; ok && cachedBoundary > 0 {
+			trueBoundaryBlock = cachedBoundary
+			logger.Info("✅ [SNAPSHOT FIX] Using cached boundary block #%d for epoch %d (from LoadEpochData)",
+				trueBoundaryBlock, blockEpoch)
+
+			// Also use the cached timestamp if available
+			if cachedTs, ok := cs.epochStartTimestamps[blockEpoch]; ok && cachedTs > 0 {
+				alignTimestampMs = cachedTs
+				logger.Info("✅ [SNAPSHOT FIX] Using cached timestamp %d for epoch %d", alignTimestampMs, blockEpoch)
+			} else {
+				alignTimestampMs = blockTimestamp * 1000
+			}
+		} else {
+			// ═══════════════════════════════════════════════════════════════
+			// STRATEGY 2: Walk parent chain via BlockDatabase.
+			// No cached boundary exists. Walk backwards from the last block
+			// using the parent hash chain (Header.LastBlockHash) instead of
+			// the blockNumber→hash index (which requires BlockChain singleton).
+			// BlockDatabase is always available at this point.
+			// ═══════════════════════════════════════════════════════════════
+			logger.Info("🔍 [SNAPSHOT FIX] No cached boundary for epoch %d. Walking parent chain from block #%d to find true boundary.",
+				blockEpoch, blockNumber)
+
+			blockDB := cs.GetBlockDatabase()
+			if blockDB != nil {
+				lastBlk, err := blockDB.GetLastBlock()
+				if err == nil && lastBlk != nil {
+					walkBlk := lastBlk
+					scanned := 0
+					for walkBlk != nil && scanned < 1000 {
+						if walkBlk.Header().Epoch() < blockEpoch {
+							trueBoundaryBlock = walkBlk.Header().BlockNumber()
+							alignTimestampMs = walkBlk.Header().TimeStamp() * 1000
+							logger.Info("✅ [SNAPSHOT FIX] Found true boundary block #%d (epoch %d) via parent chain walk",
+								trueBoundaryBlock, walkBlk.Header().Epoch())
+							break
+						}
+						parentHash := walkBlk.Header().LastBlockHash()
+						if parentHash == (common.Hash{}) {
+							break // reached genesis
+						}
+						walkBlk, err = blockDB.GetBlockByHash(parentHash)
+						if err != nil {
+							break
+						}
+						scanned++
+					}
+				}
+			}
+
+			// If we still don't have a timestamp, derive from block header
+			if alignTimestampMs == 0 {
+				alignTimestampMs = blockTimestamp * 1000
+			}
+		}
+
+		// Genesis special case
 		if blockEpoch == 0 {
 			if genesisTs, ok := cs.epochStartTimestamps[0]; ok && genesisTs > 0 {
 				logger.Info("✅ [SNAPSHOT FIX] Using cached genesis timestamp %d for epoch 0 instead of block timestamp %d", genesisTs, alignTimestampMs)
 				alignTimestampMs = genesisTs
 			}
 		}
-			
-		cs.advanceEpochLocked(blockEpoch, alignTimestampMs, blockNumber, 0)
+
+		cs.advanceEpochLocked(blockEpoch, alignTimestampMs, trueBoundaryBlock, 0)
 	} else {
 		logger.Info("✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=%d matches lastBlock.epoch=%d",
 			cs.currentEpoch, blockEpoch)

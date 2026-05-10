@@ -194,7 +194,7 @@ start_go_master() {
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
-    cmd+="export GOMEMLIMIT=2GiB && "
+    cmd+="export GOMEMLIMIT=500MiB && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="exec ./simple_chain -config=${config} ${pprof_flag} "
