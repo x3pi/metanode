@@ -68,12 +68,27 @@ impl LeaderSchedule {
         for (authority, score) in &scores {
             scores_per_authority[authority.value()] = *score;
         }
+
+        let cycle = last_commit_index / self.num_commits_per_schedule as u32;
+        let mock_range = if cycle == 0 {
+            crate::commit::CommitRange::default()
+        } else {
+            let start = (cycle - 1) * self.num_commits_per_schedule as u32 + 1;
+            let end = cycle * self.num_commits_per_schedule as u32;
+            crate::commit::CommitRange::new(start..=end)
+        };
+
         let reputation_scores = crate::leader_scoring::ReputationScores::new(
-            crate::commit::CommitRange::new(1..=last_commit_index),
+            mock_range,
             scores_per_authority,
         );
         let table = LeaderSwapTable::new(context, last_commit_index, reputation_scores);
-        self.update_leader_swap_table(table);
+        
+        {
+            let mut write = self.leader_swap_table.write();
+            *write = table;
+        }
+        
         self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
         tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via baseline scores injection.");
     }
