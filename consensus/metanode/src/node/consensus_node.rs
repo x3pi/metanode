@@ -2192,57 +2192,122 @@ impl ConsensusNode {
             coordination_hub.set_startup_go_sync_completed(true);
 
             // ═══════════════════════════════════════════════════════════════
-            // POST-GATE BLOCK HASH VERIFICATION:
-            // Before releasing proposals, verify that recent blocks match
-            // peers. This catches cases where Go sync completed but the
-            // DAG produces blocks with slightly different content.
+            // POST-GATE BLOCK HASH VERIFICATION (STRUCTURAL FIX 2):
+            // Hard gate that HALTS the node if block hash at tip doesn't
+            // match peers. This is the definitive check that prevents
+            // ALL forms of premature Healthy transition.
+            //
+            // On SUCCESS: Sets coordination_hub.block_hash_verified = true,
+            // which unblocks Gate 5 in CommitSyncer's determine_startup_sync_exit().
+            //
+            // On FAILURE: PANICS to prevent consensus fork. The node must
+            // be re-snapshot'd or wiped before restart.
             // ═══════════════════════════════════════════════════════════════
             if !config.peer_rpc_addresses.is_empty() {
-                match executor_client_for_proc.get_last_block_number().await {
-                    Ok((local_bn, _gei, true, _hash, _epoch)) if local_bn > 0 => {
-                        let check_block = local_bn;
-                        match crate::network::peer_rpc::fetch_blocks_from_peer(
-                            &config.peer_rpc_addresses, check_block, check_block,
-                        ).await {
-                            Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                                match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
-                                    Ok(local_blocks) if !local_blocks.is_empty() => {
-                                        let local_raw = &local_blocks[0].raw_block_bytes;
-                                        let peer_raw = &peer_blocks[0].raw_block_bytes;
-                                        if local_raw != peer_raw {
-                                            tracing::error!(
-                                                "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
-                                                 Local and peer blocks differ. This indicates \
-                                                 state corruption. Node will continue but \
-                                                 fork is likely.",
-                                                check_block
+                tracing::info!("🛡️ [POST-GATE-VERIFY] Entering STRICT verification loop with trusted nodes.");
+                loop {
+                    match executor_client_for_proc.get_last_block_number().await {
+                        Ok((local_bn, _gei, true, _hash, _epoch)) => {
+                            let check_block = local_bn;
+                            
+                            // Query network for best block (Trusted Node logic)
+                            match crate::network::peer_rpc::query_peer_epochs_network(&config.peer_rpc_addresses).await {
+                                Ok((_peer_epoch, peer_block, peer_addr, _)) => {
+                                    // Scenario A: Both at genesis
+                                    if check_block == 0 && peer_block == 0 {
+                                        tracing::info!(
+                                            "✅ [POST-GATE-VERIFY] Local and Network both at genesis (block 0). Proceeding."
+                                        );
+                                        coordination_hub.set_block_hash_verified(true);
+                                        break;
+                                    }
+                                    
+                                    // Scenario B: Network is ahead, local is empty (sync not finished or failed)
+                                    if check_block == 0 && peer_block > 0 {
+                                        tracing::warn!(
+                                            "⏳ [POST-GATE-VERIFY] Local is at genesis (0) but trusted network is at {}. \
+                                             Waiting for CatchingUp / STARTUP-SYNC to fetch blocks...", 
+                                            peer_block
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                        continue;
+                                    }
+                                    
+                                    // Scenario C: Local has blocks, check hash against peer
+                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                        &[peer_addr.clone()], check_block, check_block,
+                                    ).await {
+                                        Ok(peer_blocks) if !peer_blocks.is_empty() => {
+                                            match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
+                                                Ok(local_blocks) if !local_blocks.is_empty() => {
+                                                    let local_raw = &local_blocks[0].raw_block_bytes;
+                                                    let peer_raw = &peer_blocks[0].raw_block_bytes;
+                                                    if local_raw != peer_raw {
+                                                        tracing::error!(
+                                                            "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
+                                                             Local and peer blocks differ. State is corrupted. \
+                                                             HALTING to prevent fork. Node must be re-snapshot'd.",
+                                                            check_block
+                                                        );
+                                                        panic!(
+                                                            "FORK-SAFETY: Block #{} hash mismatch after STARTUP-SYNC. \
+                                                             Node state is corrupted — must re-snapshot.",
+                                                            check_block
+                                                        );
+                                                    } else {
+                                                        tracing::info!(
+                                                            "✅ [POST-GATE-VERIFY] Block {} matches trusted peer {}. \
+                                                             State is bit-perfect. Setting block_hash_verified=true.",
+                                                            check_block, peer_addr
+                                                        );
+                                                        coordination_hub.set_block_hash_verified(true);
+                                                        break;
+                                                    }
+                                                }
+                                                _ => {
+                                                    tracing::warn!(
+                                                        "⏳ [POST-GATE-VERIFY] Could not fetch local block {}. Retrying in 5s...",
+                                                        check_block
+                                                    );
+                                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            tracing::warn!(
+                                                "⏳ [POST-GATE-VERIFY] Could not fetch block {} from trusted peer {}. Retrying in 5s...",
+                                                check_block, peer_addr
                                             );
-                                        } else {
-                                            tracing::info!(
-                                                "✅ [POST-GATE-VERIFY] Block {} matches peers. \
-                                                 Safe to release proposals.",
-                                                check_block
-                                            );
+                                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                            continue;
                                         }
                                     }
-                                    _ => {
-                                        tracing::debug!(
-                                            "⚠️ [POST-GATE-VERIFY] Could not fetch local block {}.",
-                                            check_block
-                                        );
-                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "⏳ [POST-GATE-VERIFY] Could not query network for trusted state: {}. Retrying in 5s...",
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                    continue;
                                 }
                             }
-                            _ => {
-                                tracing::debug!(
-                                    "⚠️ [POST-GATE-VERIFY] Could not fetch peer block {}.",
-                                    check_block
-                                );
-                            }
+                        }
+                        _ => {
+                            tracing::warn!("⏳ [POST-GATE-VERIFY] Go not ready. Retrying in 5s...");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
                         }
                     }
-                    _ => {}
                 }
+            } else {
+                // No peers configured — set verified to unblock Gate 5
+                tracing::info!(
+                    "ℹ️ [POST-GATE-VERIFY] No peers configured. \
+                     Setting block_hash_verified=true (single-node mode)."
+                );
+                coordination_hub.set_block_hash_verified(true);
             }
 
         // ═══════════════════════════════════════════════════════════════════

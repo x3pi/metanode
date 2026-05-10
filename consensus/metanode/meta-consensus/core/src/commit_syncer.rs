@@ -219,6 +219,10 @@ struct PhaseStateInput {
     recovery_barrier_can_propose: bool,
     /// Current RecoveryBarrier phase (for logging).
     recovery_barrier_phase: String,
+    /// Whether the block hash at tip has been verified against peers.
+    /// Gate 5 in determine_startup_sync_exit() prevents Healthy transition
+    /// until POST-GATE-VERIFY in consensus_node.rs confirms bit-perfect parity.
+    block_hash_verified: bool,
 }
 
 /// Result of phase determination — describes WHAT should happen, not HOW.
@@ -465,6 +469,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             schedule_recovery_pending: self.coordination_hub.is_schedule_recovery_pending(),
             recovery_barrier_can_propose: self.coordination_hub.recovery_barrier().can_propose(),
             recovery_barrier_phase: format!("{}", self.coordination_hub.recovery_barrier().phase()),
+            block_hash_verified: self.coordination_hub.is_block_hash_verified(),
         }
     }
 
@@ -671,6 +676,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
             );
             return PhaseTransitionDecision::Hold {
                 reason: "Startup sync: RecoveryBarrier not ready",
+            };
+        }
+
+        // Gate 5 (STRUCTURAL FIX — May 2026): Block hash at tip must be verified
+        // against peers. This prevents the node from transitioning to Healthy
+        // when its state has diverged from the network. Without this gate,
+        // a node can achieve mathematical parity (lag=0) but still have
+        // different block content at the same height — the root cause of
+        // ALL recurring fork patterns (timestamp/txRoot/leader divergence).
+        if !input.block_hash_verified {
+            tracing::warn!(
+                "⚠️ [COMMIT-SYNCER] All gates (1-4) passed but block hash NOT yet verified \
+                 against peers (Gate 5). Node MUST NOT exit CatchingUp until POST-GATE-VERIFY \
+                 in consensus_node.rs confirms bit-perfect block parity."
+            );
+            return PhaseTransitionDecision::Hold {
+                reason: "Startup sync: block hash not verified against peers",
             };
         }
 
