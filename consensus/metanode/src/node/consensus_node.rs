@@ -2853,14 +2853,13 @@ impl ConsensusNode {
             committed_transaction_hashes: consensus.committed_transaction_hashes,
             pending_epoch_transitions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             _commit_consumer_holder: consensus.commit_consumer_holder,
-            epoch_eth_addresses: {
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    storage.current_epoch,
-                    storage.validator_eth_addresses.clone(),
-                );
-                Arc::new(tokio::sync::RwLock::new(map))
-            },
+            // ARCHITECTURAL FIX: Reuse the SAME Arc as commit_processor.
+            // Previously, this created a new Arc initialized only with epoch 0 data,
+            // while commit_processor's Arc was properly updated through STARTUP-SYNC and
+            // POST-SYNC to contain all epochs (0, 1, 2...). After snapshot recovery,
+            // the ConsensusNode was resolving leader addresses from its stale cache →
+            // wrong miner field in block headers → fork.
+            epoch_eth_addresses: epoch_eth_addresses_arc.clone(),
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
