@@ -119,6 +119,10 @@ pub struct ConsensusCoordinationHub {
     /// Counter to track how many network commits we've processed since transitioning to Healthy.
     /// Used to prevent the local committer from evaluating a sparse DAG immediately after fast-forwarding.
     network_commits_since_healthy: Arc<AtomicUsize>,
+
+    /// The round at which the local committer should unlock even if no commits have been processed.
+    /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
+    healthy_unlock_round: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ConsensusCoordinationHub {
@@ -135,6 +139,7 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
+            healthy_unlock_round: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -242,6 +247,7 @@ impl ConsensusCoordinationHub {
             
             if new_phase == NodeConsensusPhase::Healthy {
                 self.reset_network_commits_since_healthy();
+                self.set_healthy_unlock_round(0);
             }
         }
     }
@@ -295,11 +301,31 @@ impl ConsensusCoordinationHub {
                 );
             }
         } else {
+            // Check if we are already unlocked, to avoid spamming logs
+            if !self.is_local_commit_unlocked() {
+                tracing::info!(
+                    "⏳ [RECOVERY-GUARD] Local committer remains locked. Processed {}/5 network commits in Healthy phase.",
+                    commits_processed
+                );
+            }
+        }
+    }
+
+    /// Explicitly force the local committer to unlock (used by round-based hybrid guard)
+    pub fn force_unlock_local_commit(&self) {
+        if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
             tracing::info!(
-                "⏳ [RECOVERY-GUARD] Local committer remains locked. Processed {}/5 network commits in Healthy phase.",
-                commits_processed
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted."
             );
         }
+    }
+
+    pub fn get_healthy_unlock_round(&self) -> u32 {
+        self.healthy_unlock_round.load(Ordering::Acquire)
+    }
+
+    pub fn set_healthy_unlock_round(&self, round: u32) {
+        self.healthy_unlock_round.store(round, Ordering::Release);
     }
 
     /// Convenience check for whether the node is explicitly catching up.

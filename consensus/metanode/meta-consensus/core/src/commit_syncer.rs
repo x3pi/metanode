@@ -778,6 +778,29 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.poll_interval().as_millis()
         );
 
+        // INITIAL STARTUP INJECTION:
+        // Cần thiết để đảm bảo patch_baseline_if_needed() có thể lấy được reputation scores
+        // TRƯỚC KHI bất kỳ commit nào được fetch và gửi xuống Core. Nếu không, Core sẽ
+        // đánh giá commit với LeaderSchedule mặc định và gây fork.
+        {
+            let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
+            let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+            if is_dag_empty && highest_handled > 0 {
+                tracing::info!(
+                    "🧹 [STARTUP] DAG is empty but Go is at commit {}. Injecting synthetic baseline immediately.",
+                    highest_handled
+                );
+                self.inner.dag_state_writer.reset_to_network_baseline(
+                    0, // target_round (sẽ được patch)
+                    highest_handled as u32,
+                    crate::commit::CommitDigest::MIN,
+                    0, // timestamp (sẽ được patch)
+                    None,
+                );
+                self.synced_commit_index = highest_handled as u32;
+            }
+        }
+
         // CRITICAL RECOVERY GUARD:
         // Synchronously patch the baseline (fetching digest + reputation_scores) BEFORE
         // entering the loop and allowing any fetches! If we don't block here, `try_schedule_once`
@@ -1102,7 +1125,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                      Unlocking local committer to break deadlock.",
                                     polled_peers, max_peer_commit, my_commit
                                 );
-                                hub.unlock_local_commit();
+                                hub.force_unlock_local_commit();
 
                                 // Kick the core to evaluate the committer immediately
                                 let core_dispatcher = inner.core_thread_dispatcher.clone();
@@ -1592,12 +1615,19 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// is idle and no P2P votes are being broadcasted.
     async fn discover_quorum_commit(&self) {
         tracing::info!("🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...");
-        let mut max_peer_commit = 0;
-        let mut polled_peers = 0;
         let timeout = Duration::from_secs(3);
         
-        // Try up to 3 times to get responses from peers
-        for attempt in 1..=3 {
+        let committee_size = self.inner.context.committee.authorities().count();
+        if committee_size <= 1 {
+            tracing::info!("ℹ️ [BOOTSTRAP] Single-node cluster detected. Skipping peer polling.");
+            return;
+        }
+
+        let mut max_peer_commit = 0;
+        let mut attempt = 1;
+        
+        loop {
+            let mut polled_peers = 0;
             for authority in self.inner.context.committee.authorities().map(|(i, _)| i) {
                 if authority == self.inner.context.own_index {
                     continue;
@@ -1609,17 +1639,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
             
             if polled_peers > 0 {
+                tracing::info!("✅ [BOOTSTRAP] Discovered max peer commit: {}. Updating quorum_commit_index.", max_peer_commit);
+                self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
                 break;
             }
-            tracing::warn!("⚠️ [BOOTSTRAP] Attempt {}/3: Failed to reach peers for quorum discovery. Retrying...", attempt);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        
-        if polled_peers > 0 {
-            tracing::info!("✅ [BOOTSTRAP] Discovered max peer commit: {}. Updating quorum_commit_index.", max_peer_commit);
-            self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
-        } else {
-            tracing::warn!("⚠️ [BOOTSTRAP] Could not reach any peers. Proceeding with initial quorum=0.");
+            
+            tracing::warn!("⚠️ [BOOTSTRAP] Attempt {}: Failed to reach peers for quorum discovery. Node CANNOT start safely. Retrying in 2s...", attempt);
+            attempt += 1;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 

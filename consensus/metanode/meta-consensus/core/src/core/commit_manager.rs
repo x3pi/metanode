@@ -305,25 +305,50 @@ impl Core {
                     break;
                 }
 
-                // DETERMINISTIC RECOVERY GUARD (replaces timeout-based DAG-GAP-GUARD):
-                // After snapshot recovery (last_decided_leader = 0 but local_commit > 0), 
-                // the local committer is LOCKED until the node processes a real CertifiedCommit 
-                // from the network (2f+1 verified).
-                // This is purely event-driven — no timeouts. The node can query peers
-                // for any commit via CommitSyncer::fetch_commits(), and will unlock
-                // as soon as it receives authoritative consensus data.
-                // NOTE: This MUST NOT apply to Genesis (local_commit == 0) or normal restarts
-                // (last_decided_leader > 0), otherwise the entire cluster could deadlock.
-                if self.last_decided_leader.round == 0 && local_commit_index > 0 {
+                // DETERMINISTIC RECOVERY GUARD & HYBRID UNLOCK (Cluster Deadlock Prevention):
+                // After node restart, the local committer is LOCKED until it proves DAG density.
+                // It can be unlocked in one of two ways:
+                // 1. EVENT-DRIVEN: The node processes 5 CertifiedCommits from the active network.
+                // 2. ROUND-DRIVEN: The node's threshold clock advances 5 rounds after entering Healthy phase.
+                // 
+                // We MUST check `local_commit_index > 0` to skip this at true genesis (fresh DAG).
+                // After snapshot recovery, the DAG starts empty (local_commit_index=0).
+                // Stall Detector 4 will inject a synthetic baseline after discover_quorum runs,
+                // at which point local_commit_index becomes > 0 and this guard activates.
+                // Combined with Case C force_unlock, this prevents permanent deadlock.
+                if local_commit_index > 0 {
                     if !self.coordination_hub.is_local_commit_unlocked() {
-                        tracing::info!(
-                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for first \
-                             CertifiedCommit from network to confirm DAG consistency. \
-                             (local_commit={}, quorum_commit={})",
-                            local_commit_index,
-                            quorum_commit_index
-                        );
-                        break;
+                        let current_round = self.dag_state.read().threshold_clock_round();
+                        let unlock_round = self.coordination_hub.get_healthy_unlock_round();
+                        
+                        if unlock_round == 0 {
+                            self.coordination_hub.set_healthy_unlock_round(current_round + 5);
+                            tracing::info!(
+                                "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for 5 network commits \
+                                 OR until cluster threshold clock advances to round {}. \
+                                 (current_round={}, local_commit={}, quorum_commit={})",
+                                current_round + 5,
+                                current_round,
+                                local_commit_index,
+                                quorum_commit_index
+                            );
+                            break;
+                        }
+                        
+                        if current_round >= unlock_round {
+                            tracing::info!(
+                                "✅ [RECOVERY-GUARD] Unlocking local committer via ROUND-DRIVEN fallback: \
+                                 cluster has actively advanced threshold clock to round {}.",
+                                current_round
+                            );
+                            self.coordination_hub.force_unlock_local_commit();
+                        } else {
+                            tracing::debug!(
+                                "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for round {} or 5 network commits.",
+                                unlock_round
+                            );
+                            break;
+                        }
                     }
                 }
 
