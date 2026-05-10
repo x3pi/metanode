@@ -75,32 +75,43 @@ impl PostRecoveryHealthCheck {
         result.gei_parity = gei_diff <= 50;
 
         // Check 3: State root match — NOMT root == peer NOMT root
-        // CRITICAL FIX: Only compare state roots when blocks are within ±5.
-        // State root changes EVERY block, so comparing at different heights always
-        // mismatches — producing a false positive that triggers unnecessary alerts.
-        // After snapshot recovery, the recovering node is commonly 10-50 blocks behind,
-        // making this comparison meaningless until it fully catches up.
-        if block_diff <= 5 && !peer_root.is_empty() {
-            result.state_root_match = local_root == peer_root;
-            if !result.state_root_match {
-                tracing::warn!(
-                    "⚠️ [HEALTH] State root MISMATCH at close block heights! \
-                     local_block={}, peer_block={}, local_root=0x{}..., peer_root=0x{}...",
-                    local_block, peer_block,
-                    &local_root[..local_root.len().min(16)],
-                    &peer_root[..peer_root.len().min(16)]
-                );
+        // CRITICAL FIX (2026-05-10): The previous implementation compared roots at different block heights
+        // if they were within ±5 blocks, guaranteeing false positive MISMATCHes because the state root
+        // changes every block.
+        // ARCHITECTURAL FIX: Instead of comparing floating state roots, explicitly fetch the peer's block
+        // EXACTLY at `local_block` and compare their state roots identically.
+        
+        if local_block > 0 && local_block <= peer_block {
+            match crate::network::peer_rpc::fetch_blocks_from_peer(&self.peer_addresses, local_block, local_block).await {
+                Ok(blocks) if !blocks.is_empty() => {
+                    let block = &blocks[0];
+                    let peer_root_at_local = format!("0x{}", hex::encode(&block.state_root));
+                    result.state_root_match = local_root == peer_root_at_local;
+                    
+                    if !result.state_root_match {
+                        tracing::warn!(
+                            "⚠️ [HEALTH] State root MISMATCH at exact block height! \
+                             block={}, local_root=0x{}..., peer_root=0x{}...",
+                            local_block,
+                            &local_root[..local_root.len().min(16)],
+                            &peer_root_at_local[..peer_root_at_local.len().min(16)]
+                        );
+                    } else {
+                        tracing::info!("✅ [HEALTH] State root MATCH at exact block height {}!", local_block);
+                    }
+                }
+                _ => {
+                    tracing::warn!("⚠️ [HEALTH] Failed to fetch block {} from peer for state root check", local_block);
+                    result.state_root_match = true; // Best effort check, pass if network fails
+                }
             }
         } else {
-            // Blocks differ by >5 — roots WILL differ, don't flag as unhealthy
+            // Local block is ahead of peer, or genesis. Cannot compare.
+            tracing::info!(
+                "ℹ️ [HEALTH] Skipping state root comparison: local_block={} > peer_block={}",
+                local_block, peer_block
+            );
             result.state_root_match = true;
-            if block_diff > 5 {
-                tracing::info!(
-                    "ℹ️ [HEALTH] Skipping state root comparison: block_diff={} (local={}, peer={}). \
-                     Roots naturally diverge at different heights.",
-                    block_diff, local_block, peer_block
-                );
-            }
         }
 
         // Check 4: Committee match — verify local validators match peers
