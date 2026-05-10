@@ -1518,17 +1518,24 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 );
                             }
                             
+                            let schedule_ready_to_recover = if last_schedule_change_index == 0 {
+                                true
+                            } else {
+                                reputation_scores.is_some()
+                            };
+                            
                             if is_synthetic_baseline {
                                 self.inner.dag_state_writer.reset_to_network_baseline(
                                     leader_round,
                                     prev_index,
                                     digest,
                                     timestamp_ms,
-                                    reputation_scores,
+                                    reputation_scores.clone(),
                                 );
                                 tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
                             } else if needs_schedule_recovery {
-                                if let Some(scores) = reputation_scores {
+                                if schedule_ready_to_recover {
+                                    let scores = reputation_scores.unwrap_or_default();
                                     tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
                                     self.inner.dag_state_writer.inject_baseline_scores(scores);
                                     // Send empty commits list to trigger Core to process the new baseline

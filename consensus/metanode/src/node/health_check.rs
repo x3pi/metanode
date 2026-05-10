@@ -76,30 +76,42 @@ impl PostRecoveryHealthCheck {
         // CRITICAL FIX (2026-05-10): The previous implementation compared roots at different block heights
         // if they were within ±5 blocks, guaranteeing false positive MISMATCHes because the state root
         // changes every block.
-        // ARCHITECTURAL FIX: Instead of comparing floating state roots, explicitly fetch the peer's block
-        // EXACTLY at `local_block` and compare their state roots identically.
+        // ARCHITECTURAL FIX: Instead of comparing floating state roots, explicitly fetch a window of
+        // blocks around `local_block` from the peer. During rapid startup sync, get_go_state_root() and
+        // get_last_block_number() are not strictly atomic. The local root might belong to a slightly older
+        // block. Checking a window guarantees that if the node is healthy, the state root MUST exist
+        // somewhere in the peer's canonical chain at that vicinity.
         
         if local_block > 0 && local_block <= peer_block {
-            match crate::network::peer_rpc::fetch_blocks_from_peer(&self.peer_addresses, local_block, local_block).await {
+            let fetch_start = local_block.saturating_sub(5);
+            let fetch_end = std::cmp::min(local_block + 5, peer_block);
+
+            match crate::network::peer_rpc::fetch_blocks_from_peer(&self.peer_addresses, fetch_start, fetch_end).await {
                 Ok(blocks) if !blocks.is_empty() => {
-                    let block = &blocks[0];
-                    let peer_root_at_local = format!("0x{}", hex::encode(&block.state_root));
-                    result.state_root_match = local_root == peer_root_at_local;
+                    let mut matched_block = None;
+                    for block in &blocks {
+                        let peer_root_encoded = format!("0x{}", hex::encode(&block.state_root));
+                        if local_root == peer_root_encoded {
+                            matched_block = Some(block.block_number);
+                            break;
+                        }
+                    }
                     
-                    if !result.state_root_match {
-                        tracing::warn!(
-                            "⚠️ [HEALTH] State root MISMATCH at exact block height! \
-                             block={}, local_root=0x{}..., peer_root=0x{}...",
-                            local_block,
-                            &local_root[..local_root.len().min(16)],
-                            &peer_root_at_local[..peer_root_at_local.len().min(16)]
-                        );
+                    if let Some(match_height) = matched_block {
+                        result.state_root_match = true;
+                        tracing::info!("✅ [HEALTH] State root MATCH within window! local_root matches peer's block {}", match_height);
                     } else {
-                        tracing::info!("✅ [HEALTH] State root MATCH at exact block height {}!", local_block);
+                        result.state_root_match = false;
+                        let display_root = if local_root.starts_with("0x") { &local_root[2..] } else { &local_root };
+                        tracing::warn!(
+                            "⚠️ [HEALTH] State root MISMATCH! local_root=0x{}... not found in peer's window [{}..{}]",
+                            &display_root[..display_root.len().min(16)],
+                            fetch_start, fetch_end
+                        );
                     }
                 }
                 _ => {
-                    tracing::warn!("⚠️ [HEALTH] Failed to fetch block {} from peer for state root check", local_block);
+                    tracing::warn!("⚠️ [HEALTH] Failed to fetch block window [{}..{}] from peer for state root check", fetch_start, fetch_end);
                     result.state_root_match = true; // Best effort check, pass if network fails
                 }
             }
