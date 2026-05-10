@@ -87,6 +87,8 @@ struct ConsensusSetup {
     transaction_verifier: Arc<NoopTransactionVerifier>,
     /// TX recycler for tracking and re-submitting uncommitted TXs
     tx_recycler: Arc<crate::consensus::tx_recycler::TxRecycler>,
+    /// Shared epoch_eth_addresses cache between CommitProcessor and ConsensusNode
+    epoch_eth_addresses_arc: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2738,6 +2740,7 @@ impl ConsensusNode {
             transaction_verifier,
             tx_recycler,
             is_terminally_failed,
+            epoch_eth_addresses_arc,
         })
     }
 
@@ -2859,7 +2862,7 @@ impl ConsensusNode {
             // POST-SYNC to contain all epochs (0, 1, 2...). After snapshot recovery,
             // the ConsensusNode was resolving leader addresses from its stale cache →
             // wrong miner field in block headers → fork.
-            epoch_eth_addresses: epoch_eth_addresses_arc.clone(),
+            epoch_eth_addresses: consensus.epoch_eth_addresses_arc.clone(),
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),
