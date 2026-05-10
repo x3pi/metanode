@@ -50,7 +50,6 @@ impl PostRecoveryHealthCheck {
 
         let mut peer_block = 0;
         let mut peer_gei = 0;
-        let mut peer_root = String::new();
 
         // Query peers to find max state
         for peer_addr in &self.peer_addresses {
@@ -58,7 +57,6 @@ impl PostRecoveryHealthCheck {
                 if info.last_block > peer_block {
                     peer_block = info.last_block;
                     peer_gei = info.last_global_exec_index;
-                    peer_root = info.state_root.clone();
                 }
             }
         }
