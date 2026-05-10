@@ -783,11 +783,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // TRƯỚC KHI bất kỳ commit nào được fetch và gửi xuống Core. Nếu không, Core sẽ
         // đánh giá commit với LeaderSchedule mặc định và gây fork.
         {
-            let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
+            // CRITICAL FIX: Use `self.synced_commit_index == 0` instead of checking `dag_state`
+            // because P2P network might have already started and populated DagState with Skip commits
+            // before this loop executes. `self.synced_commit_index` was captured atomically at
+            // Core creation time, making it a reliable indicator of node cold-start.
+            let is_initial_start = self.synced_commit_index == 0;
             let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
-            if is_dag_empty && highest_handled > 0 {
+            if is_initial_start && highest_handled > 0 {
                 tracing::info!(
-                    "🧹 [STARTUP] DAG is empty but Go is at commit {}. Injecting synthetic baseline immediately.",
+                    "🧹 [STARTUP] Node started from snapshot (Go at commit {}). Injecting synthetic baseline immediately.",
                     highest_handled
                 );
                 self.inner.dag_state_writer.reset_to_network_baseline(

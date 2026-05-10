@@ -120,9 +120,9 @@ pub struct ConsensusCoordinationHub {
     /// Used to prevent the local committer from evaluating a sparse DAG immediately after fast-forwarding.
     network_commits_since_healthy: Arc<AtomicUsize>,
 
-    /// The round at which the local committer should unlock even if no commits have been processed.
+    /// The time at which the local committer should unlock even if no commits have been processed.
     /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
-    healthy_unlock_round: Arc<std::sync::atomic::AtomicU32>,
+    healthy_unlock_time: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -139,7 +139,7 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
-            healthy_unlock_round: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            healthy_unlock_time: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -247,7 +247,7 @@ impl ConsensusCoordinationHub {
             
             if new_phase == NodeConsensusPhase::Healthy {
                 self.reset_network_commits_since_healthy();
-                self.set_healthy_unlock_round(0);
+                self.set_healthy_unlock_time(None);
             }
         }
     }
@@ -320,12 +320,12 @@ impl ConsensusCoordinationHub {
         }
     }
 
-    pub fn get_healthy_unlock_round(&self) -> u32 {
-        self.healthy_unlock_round.load(Ordering::Acquire)
+    pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
+        *self.healthy_unlock_time.read()
     }
 
-    pub fn set_healthy_unlock_round(&self, round: u32) {
-        self.healthy_unlock_round.store(round, Ordering::Release);
+    pub fn set_healthy_unlock_time(&self, time: Option<std::time::Instant>) {
+        *self.healthy_unlock_time.write() = time;
     }
 
     /// Convenience check for whether the node is explicitly catching up.
@@ -486,6 +486,8 @@ impl ConsensusCoordinationHub {
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
+            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
+            healthy_unlock_time: Arc::new(RwLock::new(None)),
         }
     }
 

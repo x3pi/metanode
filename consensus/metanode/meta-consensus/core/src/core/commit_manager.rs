@@ -309,44 +309,36 @@ impl Core {
                 // After node restart, the local committer is LOCKED until it proves DAG density.
                 // It can be unlocked in one of two ways:
                 // 1. EVENT-DRIVEN: The node processes 5 CertifiedCommits from the active network.
-                // 2. ROUND-DRIVEN: The node's threshold clock advances 5 rounds after entering Healthy phase.
+                // 2. TIME-DRIVEN: The node waits 15 seconds in the Healthy phase without receiving
+                //    enough commits. This breaks the deadlock in a full cluster-wide restart where
+                //    no node is producing commits.
                 // 
                 // We MUST check `local_commit_index > 0` to skip this at true genesis (fresh DAG).
-                // After snapshot recovery, the DAG starts empty (local_commit_index=0).
-                // Stall Detector 4 will inject a synthetic baseline after discover_quorum runs,
-                // at which point local_commit_index becomes > 0 and this guard activates.
-                // Combined with Case C force_unlock, this prevents permanent deadlock.
                 if local_commit_index > 0 {
                     if !self.coordination_hub.is_local_commit_unlocked() {
-                        let current_round = self.dag_state.read().threshold_clock_round();
-                        let unlock_round = self.coordination_hub.get_healthy_unlock_round();
+                        let unlock_time = self.coordination_hub.get_healthy_unlock_time();
                         
-                        if unlock_round == 0 {
-                            self.coordination_hub.set_healthy_unlock_round(current_round + 5);
+                        if unlock_time.is_none() {
+                            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                            self.coordination_hub.set_healthy_unlock_time(Some(deadline));
                             tracing::info!(
                                 "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for 5 network commits \
-                                 OR until cluster threshold clock advances to round {}. \
-                                 (current_round={}, local_commit={}, quorum_commit={})",
-                                current_round + 5,
-                                current_round,
+                                 OR 15 seconds for cluster deadlock timeout. \
+                                 (local_commit={}, quorum_commit={})",
                                 local_commit_index,
                                 quorum_commit_index
                             );
                             break;
                         }
                         
-                        if current_round >= unlock_round {
-                            tracing::info!(
-                                "✅ [RECOVERY-GUARD] Unlocking local committer via ROUND-DRIVEN fallback: \
-                                 cluster has actively advanced threshold clock to round {}.",
-                                current_round
+                        if std::time::Instant::now() >= unlock_time.unwrap() {
+                            tracing::warn!(
+                                "✅ [RECOVERY-GUARD] Unlocking local committer via TIME-DRIVEN fallback: \
+                                 15 seconds elapsed without network commits. Assuming cluster-wide restart deadlock."
                             );
                             self.coordination_hub.force_unlock_local_commit();
                         } else {
-                            tracing::debug!(
-                                "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for round {} or 5 network commits.",
-                                unlock_round
-                            );
+                            // Suppress logs to avoid spam
                             break;
                         }
                     }
