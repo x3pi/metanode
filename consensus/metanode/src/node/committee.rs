@@ -102,11 +102,24 @@ pub fn build_committee_from_validator_list(
 ) -> Result<Committee> {
     let mut sorted_validators: Vec<_> = validators.into_iter().collect();
     // CRITICAL FIX: Sort by authority_key (BLS public key) for DETERMINISTIC ordering
-    // Previously sorted by 'address' (P2P multiaddr like /ip4/127.0.0.1/tcp/9000)
-    // but Go sorts by 'Address().Hex()' (wallet address like 0x1234...)
-    // These are DIFFERENT fields causing different ordering → different genesis hashes → FORK!
-    // Now we sort by authority_key which is unique per validator and stable across contexts
-    sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
+    // We MUST decode the Base64 strings to bytes before comparing, because Base64
+    // character values do not monotonically map to the underlying byte values.
+    // This perfectly aligns with Go's `bytes.Compare` sorting in block_processor_core.go!
+    sorted_validators.sort_by(|a, b| {
+        let get_bytes = |k: &String| -> Vec<u8> {
+            if k.starts_with("0x") {
+                hex::decode(&k[2..]).unwrap_or_default()
+            } else {
+                match STANDARD.decode(k) {
+                    Ok(bytes) => bytes,
+                    Err(_) => hex::decode(k).unwrap_or_default(),
+                }
+            }
+        };
+        let bytes_a = get_bytes(&a.authority_key);
+        let bytes_b = get_bytes(&b.authority_key);
+        bytes_a.cmp(&bytes_b)
+    });
 
     let mut authorities = Vec::new();
 
@@ -183,8 +196,25 @@ pub fn build_committee_with_eth_addresses(
     epoch: u64,
 ) -> Result<(Committee, Vec<Vec<u8>>)> {
     let mut sorted_validators: Vec<_> = validators.into_iter().collect();
-    // CRITICAL: Sort by authority_key for DETERMINISTIC ordering (same as build_committee_from_validator_list)
-    sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
+    // CRITICAL FIX: Sort by authority_key (BLS public key) for DETERMINISTIC ordering
+    // We MUST decode the Base64 strings to bytes before comparing, because Base64
+    // character values do not monotonically map to the underlying byte values.
+    // This perfectly aligns with Go's `bytes.Compare` sorting in block_processor_core.go!
+    sorted_validators.sort_by(|a, b| {
+        let get_bytes = |k: &String| -> Vec<u8> {
+            if k.starts_with("0x") {
+                hex::decode(&k[2..]).unwrap_or_default()
+            } else {
+                match STANDARD.decode(k) {
+                    Ok(bytes) => bytes,
+                    Err(_) => hex::decode(k).unwrap_or_default(),
+                }
+            }
+        };
+        let bytes_a = get_bytes(&a.authority_key);
+        let bytes_b = get_bytes(&b.authority_key);
+        bytes_a.cmp(&bytes_b)
+    });
 
     let mut authorities = Vec::new();
     let mut eth_addresses = Vec::new(); // Collect eth addresses in same order as authorities

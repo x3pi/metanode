@@ -166,6 +166,10 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// network sync has occurred. The node MUST have processed at least 1 real
     /// commit from peers before it can clear startup_sync_active.
     network_synced_commits: u64,
+
+    /// Tracks the schedule cycle of the last successfully fetched network baseline scores.
+    /// This ensures we fetch the schedule info at EVERY boundary crossed during fast-forward.
+    last_fetched_schedule_cycle: Option<u32>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -287,6 +291,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             active_sync_retry_count: 0,
             schedule_recovery_fetch_pending: false,
             network_synced_commits: 0,
+            last_fetched_schedule_cycle: None,
         }
     }
 
@@ -1430,9 +1435,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-    /// Fetches the real digest and timestamp from the network for a synthetic baseline commit.
-    /// This ensures timestamp monotonicity calculations work correctly for subsequent commits
-    /// after a Node fast-forwards its DAG from an empty state to match Go's catchup sync progress.
+    /// Fetches the real digest and timestamp from the network for a synthetic baseline commit,
+    /// AND fetches network reputation scores whenever synced_commit_index crosses a schedule boundary.
     async fn patch_baseline_if_needed(&mut self) {
         if self.synced_commit_index == 0 { return; }
         
@@ -1452,15 +1456,22 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
         };
 
-        let needs_schedule_recovery = self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0;
+        let prev_index = self.synced_commit_index;
+        let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
+        let current_cycle = prev_index / interval;
+        let last_schedule_change_index = current_cycle * interval;
+
+        // If we crossed a schedule boundary during sync, we MUST fetch the schedule info.
+        // We track the last fetched cycle to avoid fetching the same cycle repeatedly.
+        let needs_schedule_recovery = if let Some(fetched) = self.last_fetched_schedule_cycle {
+            current_cycle > fetched && current_cycle > 0
+        } else {
+            self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0
+        };
 
         if !is_synthetic_baseline && !needs_schedule_recovery { return; }
         
-        let prev_index = self.synced_commit_index;
-        let interval = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
-        let last_schedule_change_index = (prev_index / interval) * interval;
-        
-        tracing::info!("🔗 Fetching network digest and timestamp for baseline commit #{}", prev_index);
+        tracing::info!("🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #{} (current cycle: {})", last_schedule_change_index, current_cycle);
         
         loop {
             let mut target_authorities = self.inner.context.committee.authorities()
@@ -1540,6 +1551,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     self.inner.dag_state_writer.inject_baseline_scores(scores);
                                     // Send empty commits list to trigger Core to process the new baseline
                                     let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                    self.last_fetched_schedule_cycle = Some(current_cycle);
                                 }
                             }
                             

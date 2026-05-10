@@ -743,7 +743,7 @@ impl ConsensusNode {
         }
 
         // EXECUTION INDEX SYNC
-        let (last_global_exec_index, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms) = Self::calculate_last_global_exec_index(
+        let (_local_go_block, last_global_exec_index, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms) = Self::calculate_last_global_exec_index(
             config,
             &executor_client,
             &best_socket,
@@ -888,9 +888,9 @@ impl ConsensusNode {
         executor_client: &Arc<ExecutorClient>,
         best_socket: &str,
         peer_last_block: u64,
-    ) -> (u64, [u8; 32], Option<u32>, u64) {
+    ) -> (u64, u64, [u8; 32], Option<u32>, u64) {
         if !config.executor_read_enabled {
-            return (0, [0; 32], None, 0);
+            return (0, 0, [0; 32], None, 0);
         }
 
         let (local_go_block, local_go_gei, _go_ready, last_executed_commit_hash) = loop {
@@ -954,7 +954,7 @@ impl ConsensusNode {
                 warn!("🚨 [STARTUP] STALE CHAIN DETECTED: Local ({}) is ahead of Peer ({})! Forcing resync from Peer.", 
                        local_go_block, peer_last_block);
                 // In recovery we just use the local GEI anyway because Go Master blocks handles actual rollback if needed
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else if local_go_block < peer_last_block.saturating_sub(5) {
                 let lag = peer_last_block - local_go_block;
                 info!(
@@ -962,13 +962,13 @@ impl ConsensusNode {
                     local_go_block, peer_last_block, lag, local_go_block
                 );
                 // Flag as lagging if behind by more than 50 blocks
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else {
                 info!(
                     "✅ [STARTUP] Local and Peer are in sync (LocalBlock={}, PeerBlock={}). Using Local Go GEI: {} as authoritative.",
                     local_go_block, peer_last_block, local_go_gei
                 );
-                (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             }
         } else {
             if persisted_index > local_go_gei {
@@ -979,7 +979,7 @@ impl ConsensusNode {
                 "📊 [STARTUP] No peer reference, using Local Go Last GEI: {} (Block: {})",
                 local_go_gei, local_go_block
             );
-            (local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+            (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
         }
     }
 
@@ -1038,7 +1038,7 @@ impl ConsensusNode {
         // ═══════════════════════════════════════════════════════════════
         if !dag_has_history {
             // Check if Go has state (any evidence of prior execution)
-            let go_has_state = storage.last_handled_commit_index.map_or(false, |c| c > 0);
+            let go_has_state = storage.latest_block_number > 0 || storage.last_handled_commit_index.map_or(false, |c| c > 0);
             if go_has_state {
                 coordination_hub.activate_recovery_barrier();
                 info!(

@@ -3,6 +3,8 @@
 package processor
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -677,8 +679,12 @@ func (bp *BlockProcessor) GetLeaderAddressByIndex(leaderAuthorIndex uint32) comm
 
 	// CRITICAL: Sort validators by AuthorityKey to match Rust committee ordering
 	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
+	// We MUST decode the Base64 strings to bytes before comparing, because Base64
+	// character values do not monotonically map to the underlying byte values.
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		aBytes, _ := base64.StdEncoding.DecodeString(validators[i].AuthorityKey())
+		bBytes, _ := base64.StdEncoding.DecodeString(validators[j].AuthorityKey())
+		return bytes.Compare(aBytes, bBytes) < 0
 	})
 
 	// Filter only active validators (not jailed, has stake > 0)
