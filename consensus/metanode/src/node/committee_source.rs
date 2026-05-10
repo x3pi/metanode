@@ -213,42 +213,11 @@ impl CommitteeSource {
                             epoch, timestamp_ms, boundary_block, validators.len()
                         );
 
-                        // Extract eth_addresses
-                        let mut sorted_validators: Vec<_> = validators.clone().into_iter().collect();
-                        sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-
-                        let mut eth_addresses = Vec::new();
-                        for validator in &sorted_validators {
-                            let eth_addr_bytes = if validator.address.starts_with("0x")
-                                && validator.address.len() == 42
-                            {
-                                match hex::decode(&validator.address[2..]) {
-                                    Ok(bytes) if bytes.len() == 20 => bytes,
-                                    _ => {
-                                        warn!(
-                                            "⚠️ [EPOCH ETH ADDRESSES] Invalid eth address: {}",
-                                            validator.address
-                                        );
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                warn!(
-                                    "⚠️ [EPOCH ETH ADDRESSES] Missing eth address: {}",
-                                    validator.address
-                                );
-                                vec![]
-                            };
-                            eth_addresses.push(eth_addr_bytes);
-                        }
-
-                        match crate::node::committee::build_committee_from_validator_info_list(
-                            &validators,
+                        match crate::node::committee::build_committee_with_eth_addresses(
+                            validators,
                             target_epoch,
-                        )
-                        .await
-                        {
-                            Ok(committee) => {
+                        ) {
+                            Ok((committee, eth_addresses)) => {
                                 info!(
                                     "✅ [COMMITTEE SOURCE] Built committee with {} authorities",
                                     committee.size()
@@ -314,23 +283,10 @@ impl CommitteeSource {
                                 }
                             }).collect();
 
-                        // Extract eth_addresses
-                        let mut sorted = proto_validators.clone();
-                        sorted.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-                        let mut eth_addresses = Vec::new();
-                        for validator in &sorted {
-                            let eth_addr_bytes = if validator.address.starts_with("0x") && validator.address.len() == 42 {
-                                hex::decode(&validator.address[2..]).unwrap_or_default()
-                            } else {
-                                vec![]
-                            };
-                            eth_addresses.push(eth_addr_bytes);
-                        }
-
-                        match crate::node::committee::build_committee_from_validator_info_list(
-                            &proto_validators, target_epoch,
-                        ).await {
-                            Ok(committee) => {
+                        match crate::node::committee::build_committee_with_eth_addresses(
+                            proto_validators, target_epoch,
+                        ) {
+                            Ok((committee, eth_addresses)) => {
                                 info!(
                                     "✅ [COMMITTEE SOURCE] PEER FALLBACK: Built committee with {} authorities from peer {}",
                                     committee.size(), peer_addr
@@ -430,23 +386,10 @@ impl CommitteeSource {
                                         }
                                     }).collect();
 
-                                // Extract eth_addresses
-                                let mut sorted = proto_validators.clone();
-                                sorted.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-                                let mut eth_addresses = Vec::new();
-                                for validator in &sorted {
-                                    let eth_addr_bytes = if validator.address.starts_with("0x") && validator.address.len() == 42 {
-                                        hex::decode(&validator.address[2..]).unwrap_or_default()
-                                    } else {
-                                        vec![]
-                                    };
-                                    eth_addresses.push(eth_addr_bytes);
-                                }
-
-                                match crate::node::committee::build_committee_from_validator_info_list(
-                                    &proto_validators, target_epoch,
-                                ).await {
-                                    Ok(committee) => {
+                                match crate::node::committee::build_committee_with_eth_addresses(
+                                    proto_validators, target_epoch,
+                                ) {
+                                    Ok((committee, eth_addresses)) => {
                                         info!(
                                             "✅ [UNIFIED TIMESTAMP] PEER FALLBACK: Built committee size={}, timestamp={} from peer {}",
                                             committee.size(), pb.timestamp_ms, peer_addr
@@ -487,43 +430,11 @@ impl CommitteeSource {
                             epoch, timestamp_ms, boundary_block, attempt
                         );
 
-                        // Extract eth_addresses atomically
-                        let mut sorted_validators: Vec<_> = validators.clone().into_iter().collect();
-                        sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key));
-
-                        let mut eth_addresses = Vec::new();
-                        for validator in &sorted_validators {
-                            let eth_addr_bytes = if validator.address.starts_with("0x")
-                                && validator.address.len() == 42
-                            {
-                                match hex::decode(&validator.address[2..]) {
-                                    Ok(bytes) if bytes.len() == 20 => bytes,
-                                    _ => {
-                                        warn!(
-                                            "⚠️ [EPOCH ETH ADDRESSES] Invalid eth address: {}",
-                                            validator.address
-                                        );
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                warn!(
-                                    "⚠️ [EPOCH ETH ADDRESSES] Missing eth address: {}",
-                                    validator.address
-                                );
-                                vec![]
-                            };
-                            eth_addresses.push(eth_addr_bytes);
-                        }
-
-                        // Build committee from validators
-                        match crate::node::committee::build_committee_from_validator_info_list(
-                            &validators,
+                        match crate::node::committee::build_committee_with_eth_addresses(
+                            validators,
                             target_epoch,
-                        )
-                        .await
-                        {
-                            Ok(committee) => {
+                        ) {
+                            Ok((committee, eth_addresses)) => {
                                 info!(
                                     "✅ [UNIFIED TIMESTAMP] Committee size={}, AUTHORITATIVE timestamp={} ms",
                                     committee.size(), timestamp_ms

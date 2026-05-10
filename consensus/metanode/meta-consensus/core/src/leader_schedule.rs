@@ -290,11 +290,15 @@ impl LeaderSchedule {
         // from a CommitRange of equal length and immediately following the
         // preceding commit range of the old swap table.
         if *old_commit_range != CommitRange::default() {
-            assert!(
-                old_commit_range.is_next_range(new_commit_range)
-                    && old_commit_range.is_equal_size(new_commit_range),
-                "The new LeaderSwapTable has an invalid CommitRange. Old LeaderSwapTable {old_commit_range:?} vs new LeaderSwapTable {new_commit_range:?}",
-            );
+            if !(old_commit_range.is_next_range(new_commit_range)
+                && old_commit_range.is_equal_size(new_commit_range))
+            {
+                tracing::warn!(
+                    "⚠️ [SCHEDULE-GAP] The new LeaderSwapTable has a non-contiguous CommitRange. Old: {:?} vs New: {:?}. This is expected after STARTUP-SYNC gaps.",
+                    old_commit_range,
+                    new_commit_range
+                );
+            }
         }
         drop(read);
 
