@@ -417,6 +417,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if current_phase != next_phase {
             self.coordination_hub.set_phase(next_phase);
             if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
+                // CRITICAL FORK-SAFETY FIX: Prevent Time-of-Check vs Time-of-Use deadlock detection bug.
+                // When finishing STARTUP-SYNC, up to 5 seconds may have elapsed since quorum_commit advanced.
+                // If we don't reset the timer here, STALL DETECTOR 1 triggers IMMEDIATELY upon entering Healthy,
+                // falsely concluding the network is deadlocked, and force-unlocking the local committer on a
+                // SPARSE DAG. We must reset it to give the active network 5 full seconds to send CertifiedCommits
+                // and naturally unlock the committer via the DAG Density Guard.
+                self.last_quorum_change_at = tokio::time::Instant::now();
+                
                 let core_dispatcher = self.inner.core_thread_dispatcher.clone();
                 tokio::spawn(async move {
                     tracing::info!("🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...");

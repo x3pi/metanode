@@ -1053,12 +1053,10 @@ impl ConsensusNode {
             let go_has_state = storage.latest_block_number > 0 || storage.last_handled_commit_index.map_or(false, |c| c > 0);
             if go_has_state {
                 coordination_hub.activate_recovery_barrier();
-                // CRITICAL FIX: If DAG is empty but Go has state, this is a snapshot restore.
-                // We MUST set schedule_recovery_pending=true so the node enters ScheduleVerifying
+                // CRITICAL FIX: We MUST set schedule_recovery_pending=true so the node enters ScheduleVerifying
                 // and naturally rebuilds its LeaderSchedule from the network instead of bypassing it.
-                if !dag_has_history {
-                    coordination_hub.set_schedule_recovery_pending(true);
-                }
+                // This applies to BOTH snapshot restores and normal restarts to ensure identical strictness.
+                coordination_hub.set_schedule_recovery_pending(true);
                 
                 info!(
                     "🛡️ [RECOVERY-BARRIER] Go has prior state (block={}, last_handled={:?}, dag_has_history={}). \

@@ -249,11 +249,20 @@ stop_session() {
     fi
 
     if [ -n "$real_pids" ]; then
-        # Gửi SIGTERM — Go sẽ gọi app.Stop() → StopWait() → FlushAll() → CloseAll()
+        # Lấy danh sách PGID duy nhất từ các PIDs
+        local pgids=""
         for p in $real_pids; do
-            kill -TERM "$p" 2>/dev/null || true
+            local pgid=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ' || true)
+            if [ -n "$pgid" ] && ! echo "$pgids" | grep -qw "$pgid"; then
+                pgids="$pgids $pgid"
+            fi
         done
-        log_step "SIGTERM → $label (PIDs: $real_pids)"
+
+        # Gửi SIGTERM đến toàn bộ Process Group
+        for pgid in $pgids; do
+            kill -TERM -- "-$pgid" 2>/dev/null || true
+        done
+        log_step "SIGTERM → $label (PGIDs: $pgids)"
 
         # Chờ process tự dừng (cần đủ thời gian để flush PebbleDB)
         local elapsed=0
@@ -278,8 +287,8 @@ stop_session() {
 
         if $still_running; then
             log_warn "  ⚠️  $label chưa dừng sau ${SHUTDOWN_TIMEOUT}s → SIGKILL (có thể mất dữ liệu!)"
-            for p in $real_pids; do
-                kill -KILL "$p" 2>/dev/null || true
+            for pgid in $pgids; do
+                kill -KILL -- "-$pgid" 2>/dev/null || true
             done
             sleep 1
         fi
