@@ -79,22 +79,37 @@ impl Core {
             // 1. Own Block Check
             for commit in certified_commits.commits().iter() {
                 for block in commit.blocks() {
-                    // FORK-PREVENTION (May 2026): Only count blocks proposed AFTER recovery!
-                    // If the block round is <= the round at which we started the node,
-                    // it was proposed before the crash and does NOT prove convergence.
+                    // FORK-PREVENTION v2 (May 2026): Only unlock when a block proposed
+                    // IN THIS SESSION is certified by the network.
+                    //
+                    // Why first_proposed_round_this_session and NOT last_known_proposed_round?
+                    //   - last_known_proposed_round = highest round peers knew about PRE-CRASH.
+                    //     CertifiedCommits always contain pre-crash blocks with round > this value,
+                    //     so they would ALWAYS trigger unlock → FORK.
+                    //   - first_proposed_round_this_session = the round of the FIRST block this
+                    //     node actually proposed AFTER recovery. Only blocks at or above this
+                    //     round prove genuine post-recovery DAG convergence.
+                    //
+                    // If node hasn't proposed yet (first_proposed_round_this_session == None),
+                    // we MUST NOT unlock — no block proposed → no convergence proof.
                     if block.author() == self.context.own_index {
-                        if let Some(min_round) = self.last_known_proposed_round {
-                            if block.round() > min_round {
+                        if let Some(post_recovery_round) = self.first_proposed_round_this_session {
+                            if block.round() >= post_recovery_round {
+                                tracing::info!(
+                                    "🛡️ [NETWORK-FIRST-GUARD] Certified block (author={}, round={}) \
+                                     is >= first_proposed_round_this_session ({}). \
+                                     This is a genuine post-recovery block!",
+                                    block.author(), block.round(), post_recovery_round
+                                );
                                 self.coordination_hub.mark_own_block_committed();
                             }
-                        } else {
-                            // If it's not set, we can't be sure, but we fall back to the old behavior
-                            self.coordination_hub.mark_own_block_committed();
                         }
+                        // else: node hasn't proposed yet → don't unlock
                     }
                 }
             }
         }
+
 
         // Try to propose now since there are new blocks accepted.
         self.try_propose(false)?;
@@ -516,20 +531,17 @@ impl Core {
                     sub_dag.blocks = certified_commit.blocks().to_vec();
                     sub_dag.commit_ref = certified_commit.reference();
                     
-                    // FORK-SAFETY: Ensure the entire SubDag is mathematically identical to the network
+                    // FORK-SAFETY (May 2026): Ensure the entire SubDag is mathematically identical to the network
                     // by copying the leader and execution metadata. The local Sparse DAG might have 
                     // picked a different leader block or missed the network's agreed global_exec_index.
                     sub_dag.leader = certified_commit.leader();
                     sub_dag.leader_address = certified_commit.leader_address().to_vec();
                     sub_dag.global_exec_index = certified_commit.global_exec_index();
                     
-                    // Recompute the correct deterministic timestamp from the real blocks
-                    sub_dag.timestamp_ms = sub_dag
-                        .blocks
-                        .iter()
-                        .map(|b| b.timestamp_ms())
-                        .max()
-                        .unwrap_or(0);
+                    // FORK-SAFETY (May 2026): The network's CertifiedCommit timestamp is authoritative.
+                    // If we recompute it from a Sparse DAG (snapshot recovery), we might use a subset 
+                    // of blocks and produce a DIFFERENT timestamp, leading to execution-layer fork divergence.
+                    sub_dag.timestamp_ms = certified_commit.timestamp_ms();
                 }
             }
         }

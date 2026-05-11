@@ -118,7 +118,16 @@ pub fn build_committee_from_validator_list(
         };
         let bytes_a = get_bytes(&a.authority_key);
         let bytes_b = get_bytes(&b.authority_key);
-        bytes_a.cmp(&bytes_b)
+        
+        let cmp = bytes_a.cmp(&bytes_b);
+        if cmp == std::cmp::Ordering::Equal {
+            // FORK-SAFETY (May 2026): If get_bytes fails (e.g. unexpected encoding) and returns empty vecs,
+            // or if keys are identical, fallback to sorting by ETH address (and then p2p_address)
+            // to guarantee a strictly deterministic sort order across all nodes.
+            a.address.cmp(&b.address).then_with(|| a.p2p_address.cmp(&b.p2p_address))
+        } else {
+            cmp
+        }
     });
 
     let mut authorities = Vec::new();
@@ -213,7 +222,16 @@ pub fn build_committee_with_eth_addresses(
         };
         let bytes_a = get_bytes(&a.authority_key);
         let bytes_b = get_bytes(&b.authority_key);
-        bytes_a.cmp(&bytes_b)
+        
+        let cmp = bytes_a.cmp(&bytes_b);
+        if cmp == std::cmp::Ordering::Equal {
+            // FORK-SAFETY (May 2026): If get_bytes fails (e.g. unexpected encoding) and returns empty vecs,
+            // or if keys are identical, fallback to sorting by ETH address (and then p2p_address)
+            // to guarantee a strictly deterministic sort order across all nodes.
+            a.address.cmp(&b.address).then_with(|| a.p2p_address.cmp(&b.p2p_address))
+        } else {
+            cmp
+        }
     });
 
     let mut authorities = Vec::new();

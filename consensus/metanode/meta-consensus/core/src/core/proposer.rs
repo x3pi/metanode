@@ -406,6 +406,18 @@ impl Core {
 
         info!("Created block {verified_block:?} for round {clock_round}");
 
+        // FORK-SAFETY (May 2026): Track the first block we propose in this session.
+        // The NETWORK-FIRST-GUARD uses this to distinguish pre-crash blocks (in CertifiedCommits)
+        // from genuine post-recovery blocks. Only blocks with round >= this value prove convergence.
+        if self.first_proposed_round_this_session.is_none() {
+            self.first_proposed_round_this_session = Some(clock_round);
+            tracing::info!(
+                "🛡️ [NETWORK-FIRST-GUARD] First post-recovery proposed round recorded: {}. \
+                 Only certified blocks at this round or higher will unlock the local committer.",
+                clock_round
+            );
+        }
+
         self.context
             .metrics
             .node_metrics
