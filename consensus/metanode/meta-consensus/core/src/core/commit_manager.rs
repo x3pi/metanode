@@ -354,17 +354,17 @@ impl Core {
                 // calculate divergent leader support and cause a FORK.
                 // We MUST rely purely on CertifiedCommits until the DAG is dense.
                 // ═══════════════════════════════════════════════════════════════════
-                if let Some(boundary_commit) = self.coordination_hub.sparse_dag_boundary() {
-                    let current_commit = self.dag_state.read().last_commit_index();
-                    if current_commit < boundary_commit {
+                if let Some(boundary_round) = self.coordination_hub.sparse_dag_boundary() {
+                    let gc_round = self.dag_state.read().gc_round();
+                    if gc_round <= boundary_round {
                         tracing::info!(
-                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: current_commit ({}) < boundary ({}). \
-                             Waiting for network CertifiedCommits to fill the sparse DAG history.",
-                            current_commit, boundary_commit
+                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: gc_round ({}) <= boundary_round ({}). \
+                             Waiting for network CertifiedCommits to push the DAG search space entirely past the sparse history.",
+                            gc_round, boundary_round
                         );
                         break;
                     } else {
-                        // The DAG has caught up to the dense region!
+                        // The DAG search space has caught up to the dense region!
                         self.coordination_hub.clear_sparse_dag_boundary();
                     }
                 }

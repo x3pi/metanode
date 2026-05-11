@@ -418,14 +418,14 @@ impl ConsensusCoordinationHub {
 
 
 
-    /// Sets the sparse DAG boundary based on CommitIndex.
-    pub fn set_sparse_dag_boundary(&self, commit_index: u32) {
+    /// Sets the sparse DAG boundary based on Round.
+    pub fn set_sparse_dag_boundary(&self, boundary_round: consensus_types::block::Round) {
         let mut lock = self.sparse_dag_boundary.write();
-        *lock = Some(commit_index);
+        *lock = Some(boundary_round);
         tracing::info!(
-            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to commit_index {}. \
-             Local committer will be BLOCKED until local DAG commits reach this index.",
-            commit_index
+            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to round {}. \
+             Local committer will be BLOCKED until gc_round > this boundary to prevent sparse DAG evaluation.",
+            boundary_round
         );
     }
 

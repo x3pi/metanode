@@ -211,11 +211,6 @@ impl LeaderSchedule {
         self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Returns true if the LeaderSchedule has been confirmed valid for local commit evaluation.
-    /// When false, the local committer MUST NOT run to prevent leader divergence.
-    pub(crate) fn is_schedule_confirmed(&self) -> bool {
-        self.schedule_confirmed.load(std::sync::atomic::Ordering::Acquire)
-    }
 
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {
         // FORK-SAFETY (May 2026): Reputation swaps are permanently disabled in Metanode.
