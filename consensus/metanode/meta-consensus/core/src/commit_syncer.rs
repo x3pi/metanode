@@ -766,6 +766,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// Main state update — orchestrates the gather → decide → apply cycle.
     fn update_state(&mut self) {
         let input = self.gather_state_input();
+
+        // RECOVERY BARRIER ADVANCEMENT:
+        // On normal restart (no state wipe), the barrier is activated but the DAG
+        // is already fully caught up (lag=0). Since no fetch-results arrive,
+        // handle_fetch_result never calls dag_caught_up(). We must advance the
+        // barrier here periodically when lag=0 to prevent a permanent stall.
+        if !input.recovery_barrier_can_propose && input.lag == 0 && input.quorum_commit > 0 {
+            self.coordination_hub.recovery_barrier().dag_caught_up();
+        }
+
         let decision = Self::determine_phase(&input);
         self.apply_transition(decision, &input);
     }
@@ -779,31 +789,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         );
 
         // INITIAL STARTUP INJECTION:
-        // Cần thiết để đảm bảo patch_baseline_if_needed() có thể lấy được reputation scores
-        // TRƯỚC KHI bất kỳ commit nào được fetch và gửi xuống Core. Nếu không, Core sẽ
-        // đánh giá commit với LeaderSchedule mặc định và gây fork.
-        {
-            // CRITICAL FIX: Use `self.synced_commit_index == 0` instead of checking `dag_state`
-            // because P2P network might have already started and populated DagState with Skip commits
-            // before this loop executes. `self.synced_commit_index` was captured atomically at
-            // Core creation time, making it a reliable indicator of node cold-start.
-            let is_initial_start = self.synced_commit_index == 0;
-            let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
-            if is_initial_start && highest_handled > 0 {
-                tracing::info!(
-                    "🧹 [STARTUP] Node started from snapshot (Go at commit {}). Injecting synthetic baseline immediately.",
-                    highest_handled
-                );
-                self.inner.dag_state_writer.reset_to_network_baseline(
-                    0, // target_round (sẽ được patch)
-                    highest_handled as u32,
-                    crate::commit::CommitDigest::MIN,
-                    0, // timestamp (sẽ được patch)
-                    None,
-                );
-                self.synced_commit_index = highest_handled as u32;
-            }
-        }
+        // CRITICAL RECOVERY GUARD:
+        // Synchronously fetch the baseline (digest + reputation_scores) BEFORE
+        // entering the loop and allowing any fetches! If we don't block here, `try_schedule_once`
+        // might fetch commits and send them to `commit_manager` before the scores are restored,
+        // causing `commit_manager` to evaluate synced commits with an empty default schedule.
+        // This single synchronous call prevents the DAG-Gate race condition.
 
         // CRITICAL RECOVERY GUARD:
         // Synchronously patch the baseline (fetching digest + reputation_scores) BEFORE
@@ -1484,15 +1475,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-    /// Fetches the real digest and timestamp from the network for a synthetic baseline commit,
+    /// Fetches the real digest and timestamp from the network for a baseline commit,
     /// AND fetches network reputation scores whenever synced_commit_index crosses a schedule boundary.
     async fn patch_baseline_if_needed(&mut self) {
-        if self.synced_commit_index == 0 { return; }
+        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+        let dag_commit = self.inner.dag_state.read().last_commit_index();
+        let is_recovery = self.coordination_hub.recovery_barrier().is_active();
         
-        // A synthetic baseline needs patching if it was created by reset_to_network_baseline
-        // with CommitDigest::MIN as previous_digest and BlockDigest::MIN as leader block digest.
-        // We check previous_digest (the field we explicitly set to MIN) rather than
-        // reference().digest (which is a computed hash of the serialized commit — never MIN).
+        let needs_baseline_injection = is_recovery && highest_handled > 0 && dag_commit < highest_handled as u32;
+
+        if needs_baseline_injection {
+            self.synced_commit_index = highest_handled as u32;
+        } else if self.synced_commit_index == 0 {
+            return;
+        }
+
         let is_synthetic_baseline = {
             let dag = self.inner.dag_state.read();
             if let Some(ref last_commit) = dag.last_commit {
@@ -1510,15 +1507,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let current_cycle = prev_index / interval;
         let last_schedule_change_index = current_cycle * interval;
 
-        // If we crossed a schedule boundary during sync, we MUST fetch the schedule info.
-        // We track the last fetched cycle to avoid fetching the same cycle repeatedly.
         let needs_schedule_recovery = if let Some(fetched) = self.last_fetched_schedule_cycle {
             current_cycle > fetched && current_cycle > 0
         } else {
             self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0
         };
 
-        if !is_synthetic_baseline && !needs_schedule_recovery { return; }
+        if !needs_baseline_injection && !is_synthetic_baseline && !needs_schedule_recovery { return; }
         
         tracing::info!("🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #{} (current cycle: {})", last_schedule_change_index, current_cycle);
         
@@ -1584,7 +1579,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 reputation_scores.is_some()
                             };
                             
-                            if is_synthetic_baseline {
+                            if needs_baseline_injection || is_synthetic_baseline {
+                                tracing::info!(
+                                    "🧹 [STARTUP] Injecting perfect baseline (commit #{}) with network digest {} and timestamp {}.",
+                                    prev_index, digest, timestamp_ms
+                                );
                                 self.inner.dag_state_writer.reset_to_network_baseline(
                                     leader_round,
                                     prev_index,
@@ -1592,7 +1591,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     timestamp_ms,
                                     reputation_scores.clone(),
                                 );
-                                tracing::info!("✅ Baseline commit #{} successfully patched with digest {} and timestamp {}", prev_index, digest, timestamp_ms);
+                                tracing::info!("✅ Baseline commit #{} successfully patched.", prev_index);
+                                // Core requires an empty batch to process the new baseline and update its internal schedule
+                                let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                self.last_fetched_schedule_cycle = Some(current_cycle);
                             } else if needs_schedule_recovery {
                                 if schedule_ready_to_recover {
                                     let scores = reputation_scores.unwrap_or_default();

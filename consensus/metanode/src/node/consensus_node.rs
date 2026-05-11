@@ -1038,20 +1038,30 @@ impl ConsensusNode {
         // (go_replay_after > 0 OR go_block > 0) while the DAG is empty. This works
         // across all epochs.
         // ═══════════════════════════════════════════════════════════════
-        if !dag_has_history {
-            // Check if Go has state (any evidence of prior execution)
+        // CRITICAL FIX (May 2026): The old check `!dag_has_history` was WRONG.
+        // After snapshot restore, the consensus_db from the previous epoch is
+        // PRESERVED as part of the snapshot data — so dag_has_history=true even
+        // though the node needs full recovery. This caused the recovery barrier
+        // to NEVER activate after snapshot restore, allowing premature Healthy
+        // transitions → fork.
+        //
+        // NEW: Activate the barrier whenever Go has prior execution state,
+        // REGARDLESS of whether the consensus_db exists. The barrier is harmless
+        // on normal restart (it will quickly reach Ready via existing DAG commits)
+        // but critical on snapshot restore.
+        {
             let go_has_state = storage.latest_block_number > 0 || storage.last_handled_commit_index.map_or(false, |c| c > 0);
             if go_has_state {
                 coordination_hub.activate_recovery_barrier();
                 info!(
-                    "🛡️ [RECOVERY-BARRIER] DAG is empty but Go has state (last_handled={:?}). \
-                     Activating unified recovery barrier for snapshot recovery. \
+                    "🛡️ [RECOVERY-BARRIER] Go has prior state (block={}, last_handled={:?}, dag_has_history={}). \
+                     Activating unified recovery barrier. \
                      ALL proposals blocked until GoSyncing → DagCatchingUp → ScheduleVerifying → Ready.",
-                    storage.last_handled_commit_index
+                    storage.latest_block_number, storage.last_handled_commit_index, dag_has_history
                 );
             } else {
                 info!(
-                    "ℹ️ [RECOVERY-BARRIER] DAG is empty and Go has no state. \
+                    "ℹ️ [RECOVERY-BARRIER] Go has no prior state (block=0). \
                      This is a fresh start (genesis). Recovery barrier NOT activated."
                 );
             }
