@@ -2219,7 +2219,7 @@ impl ConsensusNode {
                 tracing::info!("🛡️ [POST-GATE-VERIFY] Entering STRICT verification loop with trusted nodes.");
                 loop {
                     match executor_client_for_proc.get_last_block_number().await {
-                        Ok((local_bn, _gei, true, _hash, _epoch)) => {
+                        Ok((local_bn, _gei, true, local_hash, _epoch)) => {
                             let check_block = local_bn;
                             
                             // Query network for best block (Trusted Node logic)
@@ -2250,40 +2250,27 @@ impl ConsensusNode {
                                         &[peer_addr.clone()], check_block, check_block,
                                     ).await {
                                         Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                                            match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
-                                                Ok(local_blocks) if !local_blocks.is_empty() => {
-                                                    let local_raw = &local_blocks[0].raw_block_bytes;
-                                                    let peer_raw = &peer_blocks[0].raw_block_bytes;
-                                                    if local_raw != peer_raw {
-                                                        tracing::error!(
-                                                            "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
-                                                             Local and peer blocks differ. State is corrupted. \
-                                                             HALTING to prevent fork. Node must be re-snapshot'd.",
-                                                            check_block
-                                                        );
-                                                        panic!(
-                                                            "FORK-SAFETY: Block #{} hash mismatch after STARTUP-SYNC. \
-                                                             Node state is corrupted — must re-snapshot.",
-                                                            check_block
-                                                        );
-                                                    } else {
-                                                        tracing::info!(
-                                                            "✅ [POST-GATE-VERIFY] Block {} matches trusted peer {}. \
-                                                             State is bit-perfect. Setting block_hash_verified=true.",
-                                                            check_block, peer_addr
-                                                        );
-                                                        coordination_hub.set_block_hash_verified(true);
-                                                        break;
-                                                    }
-                                                }
-                                                _ => {
-                                                    tracing::warn!(
-                                                        "⏳ [POST-GATE-VERIFY] Could not fetch local block {}. Retrying in 5s...",
-                                                        check_block
-                                                    );
-                                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                                    continue;
-                                                }
+                                            let peer_hash = &peer_blocks[0].block_hash;
+                                            if local_hash.as_slice() != peer_hash.as_slice() {
+                                                tracing::error!(
+                                                    "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
+                                                     Local hash {} vs Peer hash {}. State is corrupted. \
+                                                     HALTING to prevent fork. Node must be re-snapshot'd.",
+                                                    check_block, hex::encode(local_hash), hex::encode(peer_hash)
+                                                );
+                                                panic!(
+                                                    "FORK-SAFETY: Block #{} hash mismatch after STARTUP-SYNC. \
+                                                     Node state is corrupted — must re-snapshot.",
+                                                    check_block
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    "✅ [POST-GATE-VERIFY] Block {} hash matches trusted peer {}. \
+                                                     State is bit-perfect. Setting block_hash_verified=true.",
+                                                    check_block, peer_addr
+                                                );
+                                                coordination_hub.set_block_hash_verified(true);
+                                                break;
                                             }
                                         }
                                         _ => {

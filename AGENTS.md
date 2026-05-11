@@ -1,43 +1,74 @@
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+# 🚀 Angel Operations Guide — Metanode Core
 
-This project is indexed by GitNexus as **metanode** (60966 symbols, 107755 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This guide integrates the **Angel Protocol** (Rules) and **Angel Workflow** (Processes) to manage complexity in asynchronous systems and prevent state drift or unauthorized forks.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+---
 
-## Always Do
+## 📜 PART 1: ANGEL PROTOCOL (THE RULES)
+*Non-negotiable constraints. Violation of these rules directly threatens system stability.*
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+### 🟢 1. Always Do
+*   **Multi-Directional Impact Analysis:** Before modifying any symbol, you MUST run:
+    *   `gitnexus_impact({target: "symbolName", direction: "upstream"})` to identify callers.
+    *   `gitnexus_impact({target: "symbolName", direction: "downstream"})` to predict side effects in async flows.
+*   **Guarantee Idempotency:** Ensure all state-changing logic can be retried safely without altering the final result.
+*   **Identify State Owner:** Verify which component holds the **Single Source of Truth** before modifying any write logic.
+*   **Maintain Correlation IDs:** Every new asynchronous process must inherit or generate a trace ID for cross-node debugging.
+*   **Verify Blast Radius:** Always run `gitnexus_detect_changes()` before committing.
+*   **🇻🇳 Post-Process Summary:** Upon completing any task, the Agent MUST provide a concise summary of the changes, impacts, and status **in Vietnamese** to ensure clear communication with the user.
 
-## Never Do
+### 🔴 2. Never Do
+*   **NEVER** modify code without understanding the downstream impact (async consequences).
+*   **NEVER** use regex or "find-and-replace" for renames. Use `gitnexus_rename` to maintain call-graph integrity.
+*   **NEVER** ignore Race Conditions. Always assume events or packets may arrive out of chronological order.
+*   **NEVER** create redundant local states that lead to **State Forking**.
+*   **NEVER** commit changes if `gitnexus_detect_changes()` shows unexpected impact on unrelated execution flows.
 
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+---
 
-## Resources
+## 🔄 PART 2: ANGEL WORKFLOW (THE PROCESSES)
+*Operational steps to execute the protocol.*
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/metanode/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/metanode/clusters` | All functional areas |
-| `gitnexus://repo/metanode/processes` | All execution flows |
-| `gitnexus://repo/metanode/process/{name}` | Step-by-step execution trace |
+### 2.1. Feature Development (The Safe-Change Loop)
+1.  **Discovery:** Use `gitnexus_query` to find execution flows and `gitnexus_impact` to map affected nodes.
+2.  **Conflict-Free Design:** Implement idempotent mechanisms (version checks/request IDs) if modifying the State Owner.
+3.  **Implementation & Verification:** Insert logs with `Correlation ID`. Run `gitnexus_detect_changes()`.
+4.  **Completion:** The Agent generates a **Vietnamese Summary** of the implementation.
 
-## CLI
+### 2.2. Conflict Resolution Workflow
+| Step | Action | Tool/Objective |
+| :--- | :--- | :--- |
+| **S1: Isolation** | Suspend write operations on the conflicting data segment. | Prevent further contamination. |
+| **S2: Trace** | Use `Correlation ID` to trace the event sequence. | Identify "Node Zero". |
+| **S3: Compare** | Compare state snapshots between forked nodes. | Determine the Source of Truth. |
+| **S4: Reconcile** | Apply Overwrite or Manual Merge logic. | Restore a unified state. |
+| **S5: Summary** | Provide a **Vietnamese Report** on how the conflict was resolved. | Communication & Records. |
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+---
 
-<!-- gitnexus:end -->
+## ⚡ PART 3: ASYNC & STATE MANAGEMENT (TECHNICAL)
+
+| Scenario | Handling Protocol |
+| :--- | :--- |
+| **Race Condition** | Use **Logic Clocks (Lamport)** or **State Machines** to block invalid transitions. |
+| **State Forking** | Apply conflict resolution strategies like *Last Write Wins* or *Deterministic Merging*. |
+| **Event Callbacks** | Always perform an **"Is Still Valid"** check at the start of the callback execution. |
+
+---
+
+## 📝 PART 4: ARCHITECTURE DECISION RECORDS (ADR)
+All changes to State Management architecture must document:
+*   **Context:** Why is the change necessary?
+*   **Decision:** What is the chosen solution?
+*   **Consequences:** Trade-offs (e.g., increased latency for guaranteed consistency).
+
+---
+
+## 🛠 PART 5: GITNEXUS QUICK COMMANDS
+*   **System Overview:** `gitnexus://repo/metanode/context`
+*   **Execution Flows:** `gitnexus://repo/metanode/processes`
+*   **Flow Trace:** `gitnexus://repo/metanode/process/{name}`
+*   **Re-index Index:** `npx gitnexus analyze`
+
+---
+> **Operational Philosophy:** "Better late than wrong." Prioritize **Consistency** over **Availability** in the Metanode core modules.
