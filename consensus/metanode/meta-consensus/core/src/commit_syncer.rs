@@ -422,7 +422,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 // We MUST set the boundary to the current network commit tip to prevent the
                 // local committer from evaluating sparse regions and forking.
                 if self.coordination_hub.was_recovery_activated() {
-                    let network_tip_round = self.inner.dag_state.read().last_commit_leader().round();
+                    let network_tip_round = self.inner.dag_state.read().last_commit_leader().round;
                     self.coordination_hub.set_sparse_dag_boundary(network_tip_round);
                 }
 
