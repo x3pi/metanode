@@ -772,10 +772,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // barrier here periodically when lag=0 to prevent a permanent stall.
         if !input.recovery_barrier_can_propose && input.lag == 0 && input.quorum_commit > 0 {
             // CRITICAL FIX: If lag is 0, our DAG is perfectly synced with the network.
-            // This means our local LeaderSchedule is already correct. We don't need
-            // to wait 300 commits in ScheduleVerifying to rebuild it. We can safely
-            // pre-verify the schedule to prevent deadlocking a healthy restarted node.
-            self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+            // For a normal restart, our local LeaderSchedule is already correct.
+            // BUT if schedule_recovery_pending is TRUE, we restored from a snapshot
+            // AND failed to fetch baseline reputation scores from peers. We MUST NOT bypass
+            // ScheduleVerifying, because our LeaderSchedule is default/stale. We must stay in
+            // ScheduleVerifying until we process 300 commits to naturally rebuild it.
+            if !input.schedule_recovery_pending {
+                self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+            } else {
+                tracing::warn!(
+                    "⚠️ [RECOVERY-BARRIER] Lag is 0, but schedule_recovery_pending=true. \
+                     Node restored from snapshot but failed to fetch baseline. \
+                     MUST enter ScheduleVerifying to rebuild LeaderSchedule naturally."
+                );
+            }
             self.coordination_hub.recovery_barrier().dag_caught_up();
         }
 
