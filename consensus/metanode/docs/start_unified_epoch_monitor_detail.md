@@ -31,7 +31,7 @@ Trong vòng lặp, hệ thống cần biết 3 con số Kỷ nguyên khác nhau 
 
 **Bước A: Lấy `local_go_epoch`** (Kỷ nguyên của CSDL Go)
 ```rust
-let local_go_epoch = client_arc.get_current_epoch().await.unwrap_or(0);
+let local_go_epoch = client_arc.get_current_epoch().await.unwrap_or(0); 
 ```
 - Hỏi phía CSDL Go xem hiện tại nó đang xử lý giao dịch ở Kỷ nguyên nào.
 

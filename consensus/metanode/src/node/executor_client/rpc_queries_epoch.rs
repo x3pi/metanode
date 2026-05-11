@@ -71,10 +71,10 @@ impl ExecutorClient {
             }
             Some(proto::response::Payload::GetCurrentEpochResponse(get_current_epoch_response)) => {
                 let current_epoch = get_current_epoch_response.epoch;
-                info!(
-                    "✅ [EXECUTOR-REQ] Received current epoch from Go FFI: {}",
-                    current_epoch
-                );
+                // info!(
+                //     "✅ [EXECUTOR-REQ] Received current epoch from Go FFI: {}",
+                //     current_epoch
+                // );
                 Ok(current_epoch)
             }
             Some(proto::response::Payload::Error(error_msg)) => {

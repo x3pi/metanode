@@ -314,6 +314,21 @@ impl RustSyncNode {
                 }
             };
 
+            // CRITICAL FORK-SAFETY FIX: NEVER execute blocks from a future epoch!
+            // If we execute a block from Epoch 3 while Go is still in Epoch 1, 
+            // the block will be stored in PebbleDB, but Go's LastHandledEpoch is still 1.
+            // When we eventually transition to Epoch 2, we will start CommitProcessor
+            // at the wrong GEI (ahead of the actual boundary), leading to a permanent fork.
+            let mut filtered_blocks = Vec::with_capacity(blocks_to_process.len());
+            for block in blocks_to_process {
+                if block.epoch > go_epoch {
+                    info!("🛑 [RUST-SYNC] Stopping block import: block {} has epoch {} > current go_epoch {}. Waiting for epoch_monitor to advance epoch.", block.block_number, block.epoch, go_epoch);
+                    break;
+                }
+                filtered_blocks.push(block);
+            }
+            let blocks_to_process = filtered_blocks;
+
             if !blocks_to_process.is_empty() {
                 let count = blocks_to_process.len();
                 let last_fetched_block = blocks_to_process.last().map(|b| b.block_number).unwrap_or(0);

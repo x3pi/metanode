@@ -202,14 +202,13 @@ pub async fn transition_to_epoch_from_system_tx(
     // =========================================================================
     // STEP 6: Advance Go epoch
     // =========================================================================
-    let go_boundary = match executor_client.get_last_block_number().await {
-        Ok(bn) => {
-            info!(
-                "✅ [EPOCH ADVANCE] Go's last_block_number={} (GEI={})",
-                bn.0, effective_synced
-            );
-            bn.0
-        }
+    // FORK-SAFETY FIX: In SyncOnly mode, Go already sent us the EXACT boundary block 
+    // via the notification callback. We MUST use it instead of get_last_block_number(),
+    // because Go might have synced many blocks ahead of the boundary.
+    // In Validator mode, boundary_block contains transition_commit_index, so we must
+    // still query get_last_block_number() which is accurate after flush_buffer().
+    let mut go_boundary = match executor_client.get_last_block_number().await {
+        Ok(bn) => bn.0,
         Err(e) => {
             warn!(
                 "⚠️ [EPOCH ADVANCE] Failed to get Go block: {}. Using effective_synced={}",
@@ -218,6 +217,13 @@ pub async fn transition_to_epoch_from_system_tx(
             effective_synced
         }
     };
+
+    if matches!(node.node_mode, NodeMode::SyncOnly) && boundary_block > 0 {
+        info!("✅ [EPOCH ADVANCE] SyncOnly mode detected. Using explicit boundary_block={} instead of Go's last_block_number={}", boundary_block, go_boundary);
+        go_boundary = boundary_block;
+    } else {
+        info!("✅ [EPOCH ADVANCE] Validator mode. Using Go's last_block_number={} (GEI={})", go_boundary, effective_synced);
+    }
 
     info!(
         "📤 [EPOCH ADVANCE] epoch {} (boundary: block={}, gei={})",

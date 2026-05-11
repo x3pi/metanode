@@ -239,6 +239,7 @@ impl DefaultSystemTransactionProvider {
             .write()
             .unwrap_or_else(|p| p.into_inner()) = 0;
 
+
         info!(
             "📅 SystemTransactionProvider::update_epoch: epoch={}, epoch_start_timestamp_ms={}ms, \
              now={}ms, suppressed={}",
@@ -343,24 +344,23 @@ impl DefaultSystemTransactionProvider {
             }
         }
 
-        // Only check once per commit index to avoid spam
         let last_checked = *self
             .last_checked_commit_index
             .read()
             .unwrap_or_else(|p| p.into_inner());
+
         if current_commit_index <= last_checked {
-            tracing::debug!(
-                "⏰ SystemTransactionProvider: Already checked commit_index {} (last_checked={}), skipping",
-                current_commit_index,
-                last_checked
-            );
             return false;
         }
 
-        // Check if enough time has elapsed
+        *self
+            .last_checked_commit_index
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = current_commit_index;
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("SystemTime before UNIX_EPOCH — clock is misconfigured")
+            .expect("SystemTime before UNIX_EPOCH")
             .as_millis() as u64;
 
         let epoch_start = *self
@@ -400,6 +400,7 @@ impl DefaultSystemTransactionProvider {
         let should_trigger = time_elapsed;
 
         if should_trigger {
+
             let current_go_lag = self.go_lag.load(Ordering::Relaxed);
             info!(
                 "⏰ SystemTransactionProvider: Epoch change triggered - epoch={}, elapsed={}s, duration={}s, commit_index={}, go_lag={} (backpressure disabled — Go lag handled during transition)",
@@ -442,21 +443,9 @@ impl SystemTransactionProvider for DefaultSystemTransactionProvider {
             self.time_based_enabled
         );
 
-        // Check if epoch transition should be triggered FIRST (before updating last_checked)
+        // Check if epoch transition should be triggered
         // This ensures we don't skip the check if commit_index hasn't increased
         let should_trigger = self.should_trigger_epoch_change(current_commit_index);
-
-        // Only update last_checked if we actually checked (not skipped due to already checked)
-        // This allows re-checking if commit_index increases
-        {
-            let mut last_checked = self
-                .last_checked_commit_index
-                .write()
-                .unwrap_or_else(|p| p.into_inner());
-            if current_commit_index > *last_checked {
-                *last_checked = current_commit_index;
-            }
-        }
 
         if !should_trigger {
             return None;

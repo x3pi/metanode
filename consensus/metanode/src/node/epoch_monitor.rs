@@ -199,27 +199,41 @@ pub fn start_unified_epoch_monitor(
                             )
                             .await
                             {
-                                Ok(blocks) if !blocks.is_empty() => {
-                                    let count = blocks.len();
-                                    match client_arc.sync_and_execute_blocks(blocks).await {
-                                        Ok((synced, last, _gei)) => {
-                                            info!(
-                                                "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",
-                                                synced, last
-                                            );
+                                Ok(mut blocks) if !blocks.is_empty() => {
+                                    // CRITICAL FORK-SAFETY FIX: NEVER execute blocks from a future epoch!
+                                    let mut valid_blocks = Vec::with_capacity(blocks.len());
+                                    for block in blocks {
+                                        if block.epoch > local_go_epoch {
+                                            warn!("🛑 [STALL RECOVERY] Stopping block import: block {} has epoch {} > current go_epoch {}.", block.block_number, block.epoch, local_go_epoch);
+                                            break;
                                         }
-                                        Err(e) => {
-                                            warn!(
-                                                "⚠️ [STALL RECOVERY] sync_and_execute_blocks failed: {}",
-                                                e
-                                            );
-                                        }
+                                        valid_blocks.push(block);
                                     }
-                                    let _ = count;
 
-                                    // Switch to fast polling to detect rapid recovery
-                                    fast_cycles_remaining = fast_cycles_max;
-                                }
+                                    if valid_blocks.is_empty() {
+                                        info!("ℹ️ [STALL RECOVERY] Fetched blocks are from future epoch. Waiting for epoch transition.");
+                                    } else {
+                                        let count = valid_blocks.len();
+                                        match client_arc.sync_and_execute_blocks(valid_blocks).await {
+                                            Ok((synced, last, _gei)) => {
+                                                info!(
+                                                    "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",
+                                                    synced, last
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "⚠️ [STALL RECOVERY] sync_and_execute_blocks failed: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                        let _ = count;
+
+                                        // Switch to fast polling to detect rapid recovery
+                                        fast_cycles_remaining = fast_cycles_max;
+                                    }
+                                },
                                 Ok(_) => {
                                     info!(
                                         "ℹ️ [STALL RECOVERY] No blocks available from peers (go_block={}, peer_block={})",
@@ -262,53 +276,56 @@ pub fn start_unified_epoch_monitor(
             // to serve blocks at the correct epoch to other nodes and to itself.
             // ═══════════════════════════════════════════════════════════════
             if matches!(current_mode, crate::node::NodeMode::SyncOnly) {
-                // Skip if Go is already caught up
-                if local_go_epoch >= network_epoch {
-                    continue;
-                }
-                info!(
-                    "🔄 [EPOCH MONITOR] SyncOnly mode: advancing Go epoch {} → {} (fetching blocks + advance_epoch)",
-                    local_go_epoch, network_epoch
-                );
-
-                // Fetch boundary data from peers
-                let peer_rpc = config_clone.peer_rpc_addresses.clone();
-                if peer_rpc.is_empty() {
-                    warn!(
-                        "[EPOCH MONITOR] SyncOnly: no peer_rpc_addresses, cannot advance Go epoch"
-                    );
-                    continue;
-                }
-
-                // Advance Go through each intermediate epoch sequentially
                 let mut current_go_epoch = local_go_epoch;
-                for target_epoch in (local_go_epoch + 1)..=network_epoch {
-                    // Get boundary data from peer for this epoch
-                    let mut boundary_found = false;
-                    for peer_addr in &peer_rpc {
-                        match crate::network::peer_rpc::query_peer_epoch_boundary_data(
-                            peer_addr,
-                            target_epoch,
-                        )
-                        .await
-                        {
-                            Ok(data) => {
-                                info!(
+
+                if local_go_epoch < network_epoch {
+                    info!(
+                        "🔄 [EPOCH MONITOR] SyncOnly mode: advancing Go epoch {} → {} (fetching blocks + advance_epoch)",
+                        local_go_epoch, network_epoch
+                    );
+
+                    // Fetch boundary data from peers
+                    let peer_rpc = config_clone.peer_rpc_addresses.clone();
+                    if peer_rpc.is_empty() {
+                        warn!(
+                            "[EPOCH MONITOR] SyncOnly: no peer_rpc_addresses, cannot advance Go epoch"
+                        );
+                    } else {
+                        // Advance Go through each intermediate epoch sequentially
+                        for target_epoch in (local_go_epoch + 1)..=network_epoch {
+                            // Get boundary data from peer for this epoch
+                            let mut boundary_found = false;
+                            for peer_addr in &peer_rpc {
+                                match crate::network::peer_rpc::query_peer_epoch_boundary_data(
+                                    peer_addr,
+                                    target_epoch,
+                                )
+                                .await
+                                {
+                                    Ok(data) => {
+                                        info!(
                                     "📦 [EPOCH MONITOR] SyncOnly: epoch {} boundary={}, timestamp={}ms (from {})",
                                     target_epoch, data.boundary_block, data.timestamp_ms, peer_addr
                                 );
 
-                                // Fetch blocks up to boundary from peers
-                                let (go_block, go_last_gei, _go_ready, _, _) = client_arc
-                                    .get_last_block_number()
-                                    .await
-                                    .unwrap_or((0, 0, false, [0; 32], 0));
+                                        // Fetch blocks up to boundary from peers
+                                        let (go_block, go_last_gei, _go_ready, go_hash, _) =
+                                            client_arc
+                                                .get_last_block_number()
+                                                .await
+                                                .unwrap_or((0, 0, false, [0; 32], 0));
 
-                                if go_block < data.boundary_block || go_last_gei < data.boundary_gei
-                                {
-                                    // First try fetching normal blocks
-                                    if go_block < data.boundary_block {
-                                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                        info!(
+                                    "🔍 [EPOCH MONITOR DEBUG] SyncOnly before sync: go_block={}, go_gei={}, go_hash={}, boundary_block={}, boundary_gei={}",
+                                    go_block, go_last_gei, hex::encode(&go_hash), data.boundary_block, data.boundary_gei
+                                );
+
+                                        if go_block < data.boundary_block
+                                            || go_last_gei < data.boundary_gei
+                                        {
+                                            // First try fetching normal blocks
+                                            if go_block < data.boundary_block {
+                                                match crate::network::peer_rpc::fetch_blocks_from_peer(
                                             &peer_rpc,
                                             go_block + 1,
                                             data.boundary_block,
@@ -321,9 +338,16 @@ pub fn start_unified_epoch_monitor(
                                                     .await
                                                 {
                                                     Ok((synced, last, _)) => {
+                                                        let (_, after_gei, _, after_hash, _) =
+                                                            client_arc
+                                                                .get_last_block_number()
+                                                                .await
+                                                                .unwrap_or((
+                                                                    0, 0, false, [0; 32], 0,
+                                                                ));
                                                         info!(
-                                                            "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
-                                                            synced, last
+                                                            "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {}). 🔍 [DEBUG] gei={}, hash={}",
+                                                            synced, last, after_gei, hex::encode(&after_hash)
                                                         );
                                                     }
                                                     Err(e) => {
@@ -333,19 +357,20 @@ pub fn start_unified_epoch_monitor(
                                             }
                                             _ => {}
                                         }
-                                    }
+                                            }
 
-                                    // If we still haven't reached the boundary GEI, fetch empty executable blocks (empty commits)
-                                    let (_, current_go_gei, _, _, _) = client_arc
-                                        .get_last_block_number()
-                                        .await
-                                        .unwrap_or((0, 0, false, [0; 32], 0));
+                                            // If we still haven't reached the boundary GEI, fetch empty executable blocks (empty commits)
+                                            let (_, current_go_gei, _, current_hash, _) =
+                                                client_arc
+                                                    .get_last_block_number()
+                                                    .await
+                                                    .unwrap_or((0, 0, false, [0; 32], 0));
 
-                                    if current_go_gei < data.boundary_gei {
-                                        info!("🚀 [EPOCH MONITOR] SyncOnly: fetching empty commits from GEI {} to boundary GEI {}", current_go_gei + 1, data.boundary_gei);
-                                        // Pick the first peer
-                                        let best_peer = peer_rpc.first().unwrap().clone();
-                                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], current_go_gei + 1, data.boundary_gei).await {
+                                            if current_go_gei < data.boundary_gei {
+                                                info!("🚀 [EPOCH MONITOR] SyncOnly: fetching empty commits from GEI {} to boundary GEI {}. 🔍 [DEBUG] current_hash={}", current_go_gei + 1, data.boundary_gei, hex::encode(&current_hash));
+                                                // Pick the first peer
+                                                let best_peer = peer_rpc.first().unwrap().clone();
+                                                match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], current_go_gei + 1, data.boundary_gei).await {
                                             Ok(exec_blocks) if !exec_blocks.is_empty() => {
                                                 let mut sent = 0;
                                                 if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
@@ -357,7 +382,8 @@ pub fn start_unified_epoch_monitor(
                                                             break;
                                                         }
                                                     }
-                                                    info!("✅ [EPOCH MONITOR] SyncOnly: Successfully pushed {} empty commits to Go.", sent);
+                                                    let (_, empty_gei, _, empty_hash, _) = client_arc.get_last_block_number().await.unwrap_or((0, 0, false, [0; 32], 0));
+                                                    info!("✅ [EPOCH MONITOR] SyncOnly: Successfully pushed {} empty commits to Go. 🔍 [DEBUG] new_gei={}, new_hash={}", sent, empty_gei, hex::encode(&empty_hash));
                                                 } else {
                                                     warn!("⚠️ [EPOCH MONITOR] SyncOnly: GO_CALLBACKS not initialized!");
                                                 }
@@ -366,56 +392,67 @@ pub fn start_unified_epoch_monitor(
                                                 warn!("⚠️ [EPOCH MONITOR] SyncOnly: Failed to fetch executable blocks to reach boundary GEI.");
                                             }
                                         }
-                                    }
-                                }
-
-                                // Advance Go epoch
-                                if current_go_epoch < target_epoch {
-                                    match client_arc
-                                        .advance_epoch(
-                                            target_epoch,
-                                            data.timestamp_ms,
-                                            data.boundary_block,
-                                            data.boundary_gei,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            info!(
-                                                "✅ [EPOCH MONITOR] SyncOnly: advanced Go to epoch {} (boundary={})",
-                                                target_epoch, data.boundary_block
-                                            );
-                                            current_go_epoch = target_epoch;
+                                            }
                                         }
-                                        Err(e) => {
-                                            warn!(
+
+                                        // Advance Go epoch
+                                        if current_go_epoch < target_epoch {
+                                            match client_arc
+                                                .advance_epoch(
+                                                    target_epoch,
+                                                    data.timestamp_ms,
+                                                    data.boundary_block,
+                                                    data.boundary_gei,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    let (_, adv_gei, _, adv_hash, _) = client_arc
+                                                        .get_last_block_number()
+                                                        .await
+                                                        .unwrap_or((0, 0, false, [0; 32], 0));
+                                                    info!(
+                                                "✅ [EPOCH MONITOR] SyncOnly: advanced Go to epoch {} (boundary={}). 🔍 [DEBUG] gei={}, hash={}",
+                                                target_epoch, data.boundary_block, adv_gei, hex::encode(&adv_hash)
+                                            );
+                                                    current_go_epoch = target_epoch;
+                                                }
+                                                Err(e) => {
+                                                    warn!(
                                                 "⚠️ [EPOCH MONITOR] SyncOnly: failed to advance Go to epoch {}: {}",
                                                 target_epoch, e
                                             );
-                                            break;
+                                                    break;
+                                                }
+                                            }
                                         }
-                                    }
-                                }
 
-                                boundary_found = true;
-                                break;
-                            }
-                            Err(e) => {
-                                debug!(
+                                        boundary_found = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        debug!(
                                     "[EPOCH MONITOR] SyncOnly: peer {} failed for epoch {}: {}",
                                     peer_addr, target_epoch, e
                                 );
+                                    }
+                                }
+                            }
+
+                            if !boundary_found {
+                                warn!(
+                                        "⚠️ [EPOCH MONITOR] SyncOnly: no peer had boundary for epoch {}. Stopping at epoch {}.",
+                                        target_epoch, current_go_epoch
+                                    );
+                                break;
                             }
                         }
                     }
-
-                    if !boundary_found {
-                        warn!(
-                            "⚠️ [EPOCH MONITOR] SyncOnly: no peer had boundary for epoch {}. Stopping at epoch {}.",
-                            target_epoch, current_go_epoch
+                } else {
+                    info!(
+                            "🔍 [EPOCH MONITOR DEBUG] SyncOnly mode: Go epoch {} already caught up with network epoch {}",
+                            local_go_epoch, network_epoch
                         );
-                        break;
-                    }
                 }
 
                 // ═══════════════════════════════════════════════════════════════
@@ -428,6 +465,14 @@ pub fn start_unified_epoch_monitor(
                 if let Some(node_arc) = crate::node::get_transition_handler_node().await {
                     let node_guard = node_arc.lock().await;
                     let own_protocol_pubkey = node_guard.protocol_keypair.public();
+
+                    let (check_go_block, check_go_gei, _, check_go_hash, _) = client_arc
+                        .get_last_block_number()
+                        .await
+                        .unwrap_or((0, 0, false, [0; 32], 0));
+                    info!("🔍 [EPOCH MONITOR DEBUG] SyncOnly before promotion check: pubkey={}, current_epoch={}, network_epoch={}, go_block={}, go_gei={}, go_hash={}", 
+                          hex::encode(own_protocol_pubkey.to_bytes()), current_go_epoch, network_epoch, check_go_block, check_go_gei, hex::encode(&check_go_hash));
+
                     drop(node_guard); // Release lock before async calls
 
                     match crate::node::transition::demotion::determine_role_for_epoch(
@@ -472,6 +517,7 @@ pub fn start_unified_epoch_monitor(
 
                             // Re-acquire lock and trigger mode transition
                             let mut node_guard = node_arc.lock().await;
+                            info!("🔍 [EPOCH MONITOR DEBUG] Triggering check_and_update_node_mode for promotion. Committee size: {}", committee.size());
                             if let Err(e) = node_guard
                                 .check_and_update_node_mode(&committee, &config_clone, false)
                                 .await
@@ -481,6 +527,7 @@ pub fn start_unified_epoch_monitor(
                         }
                         Ok(crate::node::NodeMode::SyncOnly) => {
                             // Not in committee — stay SyncOnly, nothing to do
+                            debug!("🔍 [EPOCH MONITOR DEBUG] Promotion check returned SyncOnly. Staying in SyncOnly mode.");
                         }
                         Err(e) => {
                             debug!(

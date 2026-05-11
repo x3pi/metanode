@@ -146,9 +146,29 @@ impl ConsensusNode {
                 info!("🔓 [NODE MODE] Bypassing lock check (called from epoch transition context)");
             }
 
+            // Update stale GEI and Epoch from Go BEFORE logging and mode change
+            // ONLY do this if we are currently SyncOnly. If we are Validator, Rust is the
+            // source of truth for GEI, and Go might be slightly behind processing blocks.
+            if self.node_mode == NodeMode::SyncOnly {
+                if let Some(ref executor_client) = self.executor_client {
+                    // CRITICAL FIX: Synchronize the internal buffers and block trackers
+                    // of the executor_client (like next_block_number and next_expected_index).
+                    // Without this, a promoted Validator would start sending blocks with block_number=0!
+                    info!("🔄 [NODE MODE] Resyncing executor_client trackers from Go Master before promotion...");
+                    executor_client.initialize_from_go().await;
+
+                    if let Ok((_go_block, go_gei, _, _, _)) = executor_client.get_last_block_number().await {
+                        self.last_global_exec_index = go_gei;
+                    }
+                    if let Ok(go_epoch) = executor_client.get_current_epoch().await {
+                        self.current_epoch = go_epoch;
+                    }
+                }
+            }
+
             info!(
-                "🔄 [NODE MODE] Switching from {:?} to {:?}",
-                self.node_mode, new_mode
+                "🔄 [NODE MODE] Switching from {:?} to {:?} at epoch {}",
+                self.node_mode, new_mode, self.current_epoch
             );
             match (&self.node_mode, &new_mode) {
                 (NodeMode::SyncOnly, NodeMode::Validator) => {
@@ -174,8 +194,14 @@ impl ConsensusNode {
                     );
 
                     // STEP 3: Notify Go AFTER sync is fully stopped
-                    // Consensus will produce blocks starting from last_global_exec_index + 1
-                    let consensus_start_block = self.last_global_exec_index + 1;
+                    // Consensus will produce blocks starting from the actual Go block number + 1
+                    let mut go_current_block = self.last_global_exec_index; // fallback
+                    if let Some(ref executor_client) = self.executor_client {
+                        if let Ok((b, _, _, _, _)) = executor_client.get_last_block_number().await {
+                            go_current_block = b;
+                        }
+                    }
+                    let consensus_start_block = go_current_block + 1;
                     if let Some(ref executor_client) = self.executor_client {
                         match executor_client
                             .set_consensus_start_block(consensus_start_block)
@@ -257,7 +283,12 @@ impl ConsensusNode {
                     );
 
                     // STEP 3: Notify Go AFTER authority is fully stopped
-                    let last_consensus_block = self.last_global_exec_index;
+                    let mut last_consensus_block = self.last_global_exec_index; // fallback
+                    if let Some(ref executor_client) = self.executor_client {
+                        if let Ok((b, _, _, _, _)) = executor_client.get_last_block_number().await {
+                            last_consensus_block = b;
+                        }
+                    }
                     if let Some(ref executor_client) = self.executor_client {
                         match executor_client
                             .set_sync_start_block(last_consensus_block)
