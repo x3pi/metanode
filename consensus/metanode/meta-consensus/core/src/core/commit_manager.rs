@@ -305,42 +305,37 @@ impl Core {
                     break;
                 }
 
-                // DETERMINISTIC RECOVERY GUARD & HYBRID UNLOCK (Cluster Deadlock Prevention):
+                // DETERMINISTIC RECOVERY GUARD (Strict Event-Driven):
                 // After node restart, the local committer is LOCKED until it proves DAG density.
-                // It can be unlocked in one of two ways:
-                // 1. EVENT-DRIVEN: The node processes 5 CertifiedCommits from the active network.
-                // 2. TIME-DRIVEN: The node waits 15 seconds in the Healthy phase without receiving
-                //    enough commits. This breaks the deadlock in a full cluster-wide restart where
-                //    no node is producing commits.
+                // It MUST wait for 5 CertifiedCommits from the active network.
+                // We REMOVED the time-driven fallback because a timeout cannot distinguish between
+                // a cluster-wide deadlock and a naturally idle/slow network, which risks causing forks.
+                // The node will strictly wait for the network to provide enough commits.
                 // 
-                // We MUST check `local_commit_index > 0` to skip this at true genesis (fresh DAG).
-                if local_commit_index > 0 {
+                // We MUST check `local_commit_index >= 5` to skip this at true genesis (fresh DAG).
+                // At genesis (commit 0 to 4), no node has 5 commits, so enforcing this guard
+                // would cause a network-wide deadlock. We only apply the guard for mature chains
+                // or after a snapshot restore.
+                if local_commit_index >= 5 {
                     if !self.coordination_hub.is_local_commit_unlocked() {
                         let unlock_time = self.coordination_hub.get_healthy_unlock_time();
                         
+                        // We keep the unlock_time flag just to throttle the log message,
+                        // but we DO NOT force unlock when it expires.
                         if unlock_time.is_none() {
                             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
                             self.coordination_hub.set_healthy_unlock_time(Some(deadline));
                             tracing::info!(
                                 "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for 5 network commits \
-                                 OR 15 seconds for cluster deadlock timeout. \
-                                 (local_commit={}, quorum_commit={})",
+                                 to build DAG density. (local_commit={}, quorum_commit={}). \
+                                 Will NOT arbitrarily unlock via timeout to prevent forks.",
                                 local_commit_index,
                                 quorum_commit_index
                             );
-                            break;
                         }
                         
-                        if std::time::Instant::now() >= unlock_time.unwrap() {
-                            tracing::warn!(
-                                "✅ [RECOVERY-GUARD] Unlocking local committer via TIME-DRIVEN fallback: \
-                                 15 seconds elapsed without network commits. Assuming cluster-wide restart deadlock."
-                            );
-                            self.coordination_hub.force_unlock_local_commit();
-                        } else {
-                            // Suppress logs to avoid spam
-                            break;
-                        }
+                        // Strictly wait for the network. No forced unlock.
+                        break;
                     }
                 }
 

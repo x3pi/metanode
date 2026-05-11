@@ -235,7 +235,7 @@ enum PhaseTransitionDecision {
     Transition { to: crate::coordination_hub::NodeConsensusPhase },
     /// Transition to new phase AND clear startup_sync_active first.
     /// Used when all startup recovery gates have been passed.
-    TransitionAndUnlock { to: crate::coordination_hub::NodeConsensusPhase },
+    TransitionAndClearStartup { to: crate::coordination_hub::NodeConsensusPhase },
     /// Seed the CommitVoteMonitor with execution state to break bootstrap deadlock.
     /// Used when Go has state but Rust DAG is empty and quorum == 0.
     SeedQuorum { commit_index: u32 },

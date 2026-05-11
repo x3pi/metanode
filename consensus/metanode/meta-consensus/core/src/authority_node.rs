@@ -317,19 +317,28 @@ where
         let mut dag_state = DagState::new(context.clone(), store.clone());
         dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
 
-        // CRITICAL FIX: Align the CommitConsumerMonitor with the GREATER of:
-        // 1. DAG state's last_commit_index (persisted Rust consensus progress)
-        // 2. Go's replay_after_commit_index (Go execution progress from snapshot)
-        // On snapshot restart: DAG is empty (0), but Go has processed up to replay_after (e.g. 1000).
-        // Using max() ensures CommitSyncer detects the snapshot state and triggers fast-forward.
+        // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
+        // On snapshot restart: DAG might be at 1005, but Go has processed up to replay_after (e.g. 1000).
+        // We MUST set highest_handled_commit = go_handled so that CommitObserver replays 1001-1005 to Go!
+        // If we used max(), Go would permanently miss those commits, causing state divergence.
         let go_handled = commit_consumer.replay_after_commit_index;
         let dag_handled = dag_state.last_commit_index();
-        let effective_handled = go_handled.max(dag_handled);
-        commit_consumer.monitor().set_highest_handled_commit(effective_handled);
+        let effective_handled = go_handled.max(dag_handled); // kept for logging/logic
+        commit_consumer.monitor().set_highest_handled_commit(go_handled);
         info!(
             "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
             go_handled, dag_handled, effective_handled
         );
+
+        // FORK-SAFETY NOTE (May 2026):
+        // We intentionally do NOT call force_unlock_local_commit() here, even at genesis.
+        // The RECOVERY-GUARD in commit_manager.rs uses `if local_commit_index >= 5` which
+        // already bypasses the lock for the first 5 commits (genesis bootstrap).
+        // Calling force_unlock here would set the flag permanently, meaning a node that
+        // restarts at commit 3 (while the network is at commit 100) would SKIP the
+        // 5-CertifiedCommit density check after catch-up, risking sparse DAG fork.
+        // The correct approach: let the `< 5` guard handle genesis naturally, and for
+        // mature chains (>= 5), always require network verification before unlocking.
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
         // during the FastForwarding phase (see commit_syncer.rs). 
