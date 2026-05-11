@@ -77,10 +77,29 @@ impl Core {
         // is dense enough (has accumulated orphans) before it evaluates local blocks.
         // FORK-PREVENTION: Do NOT increment or unlock if STARTUP-SYNC is active.
         if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
+            // Track if the guard was already unlocked BEFORE this call.
+            // We need this to distinguish "CertifiedCommit that caused the unlock"
+            // from "CertifiedCommit processed AFTER the unlock".
+            let was_already_unlocked = self.coordination_hub.is_local_commit_unlocked();
+
             if self.coordination_hub.is_healthy_stable() {
                 self.coordination_hub.inc_network_commits_since_healthy(commits_count);
             }
             self.coordination_hub.unlock_local_commit();
+
+            // POST-RECOVERY RACE FIX:
+            // Only confirm post-recovery sync if the guard was ALREADY unlocked
+            // before this CertifiedCommit was processed. This ensures the local
+            // committer waits for at least one ADDITIONAL network-verified commit
+            // after unlock before evaluating locally.
+            //
+            // Without this, the CertifiedCommit that causes the unlock (the 5th)
+            // would also confirm sync, allowing the local committer to fire
+            // immediately on the next add_blocks event with a potentially
+            // divergent DAG view — the exact race that caused the #601 fork.
+            if was_already_unlocked {
+                self.coordination_hub.confirm_post_recovery_sync();
+            }
         }
 
         // Try to propose now since there are new blocks accepted.
@@ -332,6 +351,24 @@ impl Core {
                     }
                     
                     // Strictly wait for the network. No forced unlock.
+                    break;
+                }
+
+                // POST-RECOVERY SYNC GUARD:
+                // After the RECOVERY-GUARD unlocks (5 network commits), the local committer
+                // must NOT fire until at least one MORE CertifiedCommit has been processed.
+                // This prevents the race where local_commit == quorum_commit at unlock time
+                // but the local DAG has a different block set than the network.
+                // For fresh-DAG starts, this flag is pre-set to true (no-op).
+                if !self.coordination_hub.is_post_recovery_sync_confirmed() {
+                    tracing::info!(
+                        "\u{1F6E1}\u{FE0F} [POST-RECOVERY-SYNC-GUARD] Local committer blocked: RECOVERY-GUARD just \
+                         unlocked but no CertifiedCommit has been processed since unlock. \
+                         Waiting for at least one network-verified commit to confirm DAG alignment. \
+                         (local_commit={}, quorum_commit={})",
+                        local_commit_index,
+                        quorum_commit_index
+                    );
                     break;
                 }
 

@@ -123,6 +123,19 @@ pub struct ConsensusCoordinationHub {
     /// The time at which the local committer should unlock even if no commits have been processed.
     /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
     healthy_unlock_time: Arc<RwLock<Option<std::time::Instant>>>,
+
+    /// POST-RECOVERY SYNC CONFIRMATION (May 2026 — Race Fix):
+    /// Set to `false` when the RECOVERY-GUARD unlocks (locked→unlocked transition).
+    /// Set to `true` when the FIRST CertifiedCommit is processed AFTER the unlock.
+    ///
+    /// This closes a 10ms race window where the local committer can fire immediately
+    /// after the RECOVERY-GUARD unlocks (because local_commit == quorum_commit),
+    /// but the local DAG has different block availability than the network,
+    /// producing a divergent commit (different timestamp/leader → fork).
+    ///
+    /// For fresh-DAG starts (genesis/epoch), this is pre-set to `true` by
+    /// `pre_unlock_for_fresh_dag()` since all nodes start from identical state.
+    post_recovery_sync_confirmed: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -140,6 +153,7 @@ impl ConsensusCoordinationHub {
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
             healthy_unlock_time: Arc::new(RwLock::new(None)),
+            post_recovery_sync_confirmed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -294,9 +308,14 @@ impl ConsensusCoordinationHub {
         // before allowing the local committer to run.
         if commits_processed >= 5 {
             if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
+                // RACE FIX: Reset post_recovery_sync_confirmed when transitioning
+                // from locked → unlocked. The local committer cannot fire until
+                // a CertifiedCommit is processed AFTER this unlock moment.
+                self.post_recovery_sync_confirmed.store(false, Ordering::Release);
                 tracing::info!(
                     "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: processed {} CertifiedCommits from network in Healthy phase. \
-                     DAG consistency and density confirmed. Local commit evaluation is now permitted.",
+                     DAG consistency and density confirmed. Post-recovery sync confirmation PENDING — \
+                     local committer will remain blocked until next CertifiedCommit proves DAG alignment.",
                     commits_processed
                 );
             }
@@ -314,8 +333,11 @@ impl ConsensusCoordinationHub {
     /// Explicitly force the local committer to unlock (used by round-based hybrid guard)
     pub fn force_unlock_local_commit(&self) {
         if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
+            // Force-unlock also confirms post-recovery sync, because the deadlock
+            // detection has verified that all nodes have identical state.
+            self.post_recovery_sync_confirmed.store(true, Ordering::Release);
             tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted."
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted. Post-recovery sync auto-confirmed (deadlock recovery)."
             );
         }
     }
@@ -335,12 +357,40 @@ impl ConsensusCoordinationHub {
     /// `last_commit > 0`), where the guard IS needed to prevent sparse DAG fork.
     pub fn pre_unlock_for_fresh_dag(&self) {
         self.recovery_local_commit_unlocked.store(true, Ordering::Release);
+        // Fresh DAG = all nodes start from identical state, no recovery race possible.
+        self.post_recovery_sync_confirmed.store(true, Ordering::Release);
         self.reset_network_commits_since_healthy();
         self.set_healthy_unlock_time(None);
         tracing::info!(
             "🔓 [FRESH-DAG] Local committer pre-unlocked: DAG has no prior commits. \
-             All nodes start from synchronized empty state — density guard not needed."
+             All nodes start from synchronized empty state — density guard not needed. \
+             Post-recovery sync pre-confirmed (no recovery needed)."
         );
+    }
+
+    /// Returns true if at least one CertifiedCommit has been processed
+    /// after the RECOVERY-GUARD transitioned from locked → unlocked.
+    ///
+    /// This closes the race window where the local committer fires immediately
+    /// after unlock with a divergent local DAG (different block availability →
+    /// different timestamp/leader → fork).
+    ///
+    /// Always returns true for fresh-DAG starts (pre-confirmed) and after
+    /// the first post-unlock CertifiedCommit.
+    pub fn is_post_recovery_sync_confirmed(&self) -> bool {
+        self.post_recovery_sync_confirmed.load(Ordering::Acquire)
+    }
+
+    /// Called after successfully processing a CertifiedCommit when the
+    /// RECOVERY-GUARD is already unlocked. Sets the flag to true,
+    /// allowing the local committer to run.
+    pub fn confirm_post_recovery_sync(&self) {
+        if !self.post_recovery_sync_confirmed.swap(true, Ordering::Release) {
+            tracing::info!(
+                "✅ [POST-RECOVERY-SYNC] First CertifiedCommit processed after RECOVERY-GUARD unlock. \
+                 DAG alignment confirmed — local committer is now permitted to evaluate."
+            );
+        }
     }
 
     pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
