@@ -417,6 +417,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if current_phase != next_phase {
             self.coordination_hub.set_phase(next_phase);
             if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
+                // ARCHITECTURAL FIX (May 2026): Sparse DAG Evaluation Prevention.
+                // When entering Healthy after a recovery, the DAG is sparse for historical rounds.
+                // We MUST set the boundary to the current network commit tip to prevent the
+                // local committer from evaluating sparse regions and forking.
+                if self.coordination_hub.was_recovery_activated() {
+                    let network_tip = self.coordination_hub.get_quorum_commit_index();
+                    self.coordination_hub.set_sparse_dag_boundary(network_tip);
+                }
+
                 // CRITICAL FORK-SAFETY FIX: Prevent Time-of-Check vs Time-of-Use deadlock detection bug.
                 // When finishing STARTUP-SYNC, up to 5 seconds may have elapsed since quorum_commit advanced.
                 // If we don't reset the timer here, STALL DETECTOR 1 triggers IMMEDIATELY upon entering Healthy,
@@ -1007,7 +1016,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // leader elections and timestamps.
                         // ════════════════════════════════════════════════════════
                         let is_healthy_but_locked = self.coordination_hub.is_healthy()
-                            && !self.coordination_hub.is_post_recovery_network_verified();
+                            && self.coordination_hub.sparse_dag_boundary().is_some();
                             
                         let is_catching_up_but_schedule_pending = self.coordination_hub.is_catching_up()
                             && lag == 0

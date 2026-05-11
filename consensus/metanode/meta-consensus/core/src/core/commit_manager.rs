@@ -70,45 +70,7 @@ impl Core {
             }
         }
 
-        // MATHEMATICAL CONVERGENCE GUARD & NETWORK-FIRST-GUARD:
-        // After successfully processing CertifiedCommits from the network:
-        // 1. Check if the network committed OUR block. If yes, DAG is mathematically proven dense.
-        // 2. Otherwise, count how many new commits we processed.
-        // FORK-PREVENTION: Do NOT track if STARTUP-SYNC is active.
-        if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
-            // 1. Own Block Check
-            for commit in certified_commits.commits().iter() {
-                for block in commit.blocks() {
-                    // FORK-PREVENTION v2 (May 2026): Only unlock when a block proposed
-                    // IN THIS SESSION is certified by the network.
-                    //
-                    // Why first_proposed_round_this_session and NOT last_known_proposed_round?
-                    //   - last_known_proposed_round = highest round peers knew about PRE-CRASH.
-                    //     CertifiedCommits always contain pre-crash blocks with round > this value,
-                    //     so they would ALWAYS trigger unlock → FORK.
-                    //   - first_proposed_round_this_session = the round of the FIRST block this
-                    //     node actually proposed AFTER recovery. Only blocks at or above this
-                    //     round prove genuine post-recovery DAG convergence.
-                    //
-                    // If node hasn't proposed yet (first_proposed_round_this_session == None),
-                    // we MUST NOT unlock — no block proposed → no convergence proof.
-                    if block.author() == self.context.own_index {
-                        if let Some(post_recovery_round) = self.first_proposed_round_this_session {
-                            if block.round() >= post_recovery_round {
-                                tracing::info!(
-                                    "🛡️ [NETWORK-FIRST-GUARD] Certified block (author={}, round={}) \
-                                     is >= first_proposed_round_this_session ({}). \
-                                     This is a genuine post-recovery block!",
-                                    block.author(), block.round(), post_recovery_round
-                                );
-                                self.coordination_hub.mark_own_block_committed();
-                            }
-                        }
-                        // else: node hasn't proposed yet → don't unlock
-                    }
-                }
-            }
-        }
+
 
 
         // Try to propose now since there are new blocks accepted.
@@ -385,69 +347,26 @@ impl Core {
                     break;
                 }
 
-                // SCHEDULE GUARD: Block local committer when LeaderSchedule is unconfirmed.
-                // After restart, if CommitInfo was not persisted in RocksDB, the schedule
-                // falls back to a default (empty) LeaderSwapTable. This produces different
-                // leader elections than the network's reputation-swapped schedule, causing
-                // LEADER_ADDR divergence and hash forks.
-                // The schedule becomes confirmed when either:
-                //   - CommitInfo is recovered from store, OR
-                //   - A full 300-commit scoring cycle completes, OR
-                //   - Baseline scores are injected from the network.
-                if !self.leader_schedule.is_schedule_confirmed() {
-                    tracing::info!(
-                        "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
-                         Waiting for 300-commit scoring cycle or network baseline scores."
-                    );
-                    break;
-                }
-
-                // SCHEDULE-RECOVERY GUARD: After snapshot recovery, from_store() auto-confirms
-                // the schedule because last_commit_index < 300 (looks like Genesis). But the
-                // network has progressed far beyond commit 300 with reputation swaps active.
-                // The default (empty) LeaderSwapTable produces WRONG leader elections.
-                // Block until a full scoring cycle completes with network-verified data.
-                if self.coordination_hub.is_schedule_recovery_pending() {
-                    tracing::info!(
-                        "🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, \
-                         LeaderSchedule needs re-confirmation from network. \
-                         Waiting for 300-commit scoring cycle with CertifiedCommits."
-                    );
-                    break;
-                }
-
-                // UNIFIED RECOVERY BARRIER GUARD (May 2026):
-                // Defense-in-depth — even if legacy flags are somehow not set
-                // (e.g., epoch 2 commit index reset bypasses handled >= 300),
-                // the barrier will still block the committer until all recovery
-                // phases complete.
-                if !self.coordination_hub.recovery_barrier().can_propose() {
-                    tracing::info!(
-                        "🛡️ [RECOVERY-BARRIER-GUARD] Blocking local committer: \
-                         RecoveryBarrier phase={}. Recovery is still in progress.",
-                        self.coordination_hub.recovery_barrier().phase()
-                    );
-                    break;
-                }
-
-                // NETWORK-FIRST-COMMIT-GUARD (May 2026 — Definitive Fork Fix):
-                // After snapshot recovery, the local DAG above the committed tip
-                // has DIFFERENT block availability than the network's DAG.
-                // Even though local_commit == quorum_commit, the blocks ABOVE
-                // the tip are sparse/different. If the local committer evaluates
-                // rounds above the tip, it chooses a different leader → FORK.
-                //
-                // This guard requires at least N new CertifiedCommits from the
-                // network AFTER parity, proving the DAG has converged.
-                // Unlike all previous guards (schedule, barrier, etc.), this one
-                // addresses the ROOT CAUSE: DAG block availability divergence.
-                if !self.coordination_hub.is_post_recovery_network_verified() {
-                    tracing::info!(
-                        "🛡️ [NETWORK-FIRST-GUARD] Local committer blocked: snapshot recovery \
-                         session active, DAG convergence NOT yet confirmed. \
-                         Waiting for the network to commit a block proposed by this node."
-                    );
-                    break;
+                // ═══════════════════════════════════════════════════════════════════
+                // ARCHITECTURAL FIX (May 2026): SPARSE DAG EVALUATION PREVENTION
+                // After snapshot recovery, the local DAG is sparse for past rounds.
+                // If the local committer evaluates these sparse regions, it will
+                // calculate divergent leader support and cause a FORK.
+                // We MUST rely purely on CertifiedCommits until the DAG is dense.
+                // ═══════════════════════════════════════════════════════════════════
+                if let Some(boundary_commit) = self.coordination_hub.sparse_dag_boundary() {
+                    let current_commit = self.dag_state.read().last_commit_index();
+                    if current_commit < boundary_commit {
+                        tracing::info!(
+                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: current_commit ({}) < boundary ({}). \
+                             Waiting for network CertifiedCommits to fill the sparse DAG history.",
+                            current_commit, boundary_commit
+                        );
+                        break;
+                    } else {
+                        // The DAG has caught up to the dense region!
+                        self.coordination_hub.clear_sparse_dag_boundary();
+                    }
                 }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.

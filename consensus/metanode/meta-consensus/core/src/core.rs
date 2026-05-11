@@ -91,11 +91,6 @@ pub(crate) struct Core {
     /// This is currently being used to avoid equivocations during a node recovering from amnesia. When value is None it means that
     /// the last block sync mechanism is enabled, but it hasn't been initialised yet.
     pub(crate) last_known_proposed_round: Option<Round>,
-    /// The round of the first block proposed by this node in the CURRENT session.
-    /// None = node has not proposed any block yet since startup.
-    /// Used by the NETWORK-FIRST-GUARD to distinguish pre-crash blocks (which should NOT
-    /// unlock the local committer) from genuine post-recovery blocks.
-    pub(crate) first_proposed_round_this_session: Option<Round>,
     // The ancestor state manager will keep track of the quality of the authorities
     // based on the distribution of their blocks to the network. It will use this
     // information to decide whether to include that authority block in the next
@@ -189,7 +184,6 @@ impl Core {
             dag_state,
             dag_state_writer,
             last_known_proposed_round: min_propose_round,
-            first_proposed_round_this_session: None,
             ancestor_state_manager,
             round_tracker,
             adaptive_delay_state,

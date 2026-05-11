@@ -117,12 +117,14 @@ pub struct ConsensusCoordinationHub {
     /// remains active even after RecoveryBarrier transitions to Ready.
     recovery_was_activated: Arc<AtomicBool>,
 
-    /// MATHEMATICAL CONVERGENCE GUARD (May 2026):
-    /// Set to `true` when the node's OWN proposed block is included in a network `CertifiedCommit`.
-    /// Because 2f+1 nodes must validate the block's causal history (DAG) to vote for it,
-    /// a committed own-block is absolute mathematical proof that the node's local DAG
-    /// has reached 100% density and alignment with the network.
-    has_own_block_committed: Arc<AtomicBool>,
+
+    /// SPARSE DAG BOUNDARY (Architectural Fix for Snapshot Recovery Fork):
+    /// When a node recovers from a snapshot, its local DAG is sparse for past rounds.
+    /// Running the local committer on this sparse DAG leads to mathematically divergent
+    /// leader support evaluation (FORK).
+    /// This boundary defines the round below which the local committer MUST NOT evaluate.
+    /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
+    sparse_dag_boundary: Arc<RwLock<Option<u32>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -138,7 +140,7 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            has_own_block_committed: Arc::new(AtomicBool::new(false)),
+            sparse_dag_boundary: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -260,31 +262,7 @@ impl ConsensusCoordinationHub {
         self.is_healthy()
     }
 
-    /// Mark that the network has committed a block proposed by this node.
-    pub fn mark_own_block_committed(&self) {
-        if !self.has_own_block_committed.swap(true, Ordering::Release) {
-            tracing::info!(
-                "✅ [MATHEMATICAL-CONVERGENCE] Network has certified our locally proposed block! \
-                 DAG density and alignment is mathematically proven. Local committer unlocked."
-            );
-        }
-    }
 
-    /// Returns true if the network has certified a block proposed by this node.
-    pub fn is_own_block_committed(&self) -> bool {
-        self.has_own_block_committed.load(Ordering::Acquire)
-    }
-
-    /// Explicitly force the local committer to unlock (used by round-based hybrid guard).
-    /// Used only during cluster-wide deadlocks where all nodes are waiting for commits
-    /// but no one is proposing.
-    pub fn force_unlock_local_commit(&self) {
-        if !self.has_own_block_committed.swap(true, Ordering::Release) {
-            tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Deadlock recovery triggered. NETWORK-FIRST-GUARD mathematically bypassed."
-            );
-        }
-    }
 
     /// Convenience check for whether the node is explicitly catching up.
     pub fn is_catching_up(&self) -> bool {
@@ -428,8 +406,8 @@ impl ConsensusCoordinationHub {
     pub fn mark_recovery_activated(&self) {
         self.recovery_was_activated.store(true, Ordering::Release);
         tracing::info!(
-            "🛡️ [NETWORK-FIRST-GUARD] Recovery session activated. \
-             Local committer will be blocked until the node's own proposed block is committed."
+            "🛡️ [SPARSE-DAG-BOUNDARY] Recovery session activated. \
+             Sparse DAG Evaluation Prevention will be enabled when transitioning to Healthy."
         );
     }
 
@@ -438,17 +416,35 @@ impl ConsensusCoordinationHub {
         self.recovery_was_activated.load(Ordering::Acquire)
     }
 
-    /// Returns true if the local committer is safe to evaluate.
-    /// Either:
-    ///   1. No recovery occurred this session (`recovery_was_activated == false`), OR
-    ///   2. The network has verified a block proposed by this node (`has_own_block_committed`).
-    pub fn is_post_recovery_network_verified(&self) -> bool {
-        if !self.recovery_was_activated.load(Ordering::Acquire) {
-            return true; // No recovery this session — always safe
-        }
-        self.is_own_block_committed()
+
+
+    /// Sets the sparse DAG boundary based on CommitIndex.
+    pub fn set_sparse_dag_boundary(&self, commit_index: u32) {
+        let mut lock = self.sparse_dag_boundary.write();
+        *lock = Some(commit_index);
+        tracing::info!(
+            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to commit_index {}. \
+             Local committer will be BLOCKED until local DAG commits reach this index.",
+            commit_index
+        );
     }
 
+    /// Gets the current sparse DAG boundary.
+    pub fn sparse_dag_boundary(&self) -> Option<u32> {
+        *self.sparse_dag_boundary.read()
+    }
+
+    /// Clears the sparse DAG boundary.
+    pub fn clear_sparse_dag_boundary(&self) {
+        let mut lock = self.sparse_dag_boundary.write();
+        if lock.is_some() {
+            *lock = None;
+            tracing::info!(
+                "🔓 [SPARSE-DAG-BOUNDARY] Boundary cleared! \
+                 Local DAG has passed the sparse zone. Local committer UNLOCKED."
+            );
+        }
+    }
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -473,7 +469,7 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            has_own_block_committed: Arc::new(AtomicBool::new(true)),
+            sparse_dag_boundary: Arc::new(RwLock::new(None)),
         }
     }
 
