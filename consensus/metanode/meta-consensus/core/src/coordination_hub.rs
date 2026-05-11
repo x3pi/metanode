@@ -136,6 +136,19 @@ pub struct ConsensusCoordinationHub {
     /// For fresh-DAG starts (genesis/epoch), this is pre-set to `true` by
     /// `pre_unlock_for_fresh_dag()` since all nodes start from identical state.
     post_recovery_sync_confirmed: Arc<AtomicBool>,
+
+    /// NETWORK-FIRST-COMMIT-GUARD (May 2026 — Definitive fork fix):
+    /// Set to `true` when snapshot recovery is detected in this session.
+    /// Unlike RecoveryBarrier (which resets to Ready), this flag persists for
+    /// the entire session lifetime. It ensures the local committer guard
+    /// remains active even after RecoveryBarrier transitions to Ready.
+    recovery_was_activated: Arc<AtomicBool>,
+
+    /// Counter: how many NEW CertifiedCommits (with index > local at parity)
+    /// have been processed AFTER the node achieved parity post-recovery.
+    /// The local committer is blocked until this reaches REQUIRED_NETWORK_FIRST_COMMITS.
+    /// This proves the DAG above the committed tip has converged with the network.
+    post_recovery_network_first_commits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ConsensusCoordinationHub {
@@ -154,6 +167,8 @@ impl ConsensusCoordinationHub {
             network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
             healthy_unlock_time: Arc::new(RwLock::new(None)),
             post_recovery_sync_confirmed: Arc::new(AtomicBool::new(false)),
+            recovery_was_activated: Arc::new(AtomicBool::new(false)),
+            post_recovery_network_first_commits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -336,8 +351,14 @@ impl ConsensusCoordinationHub {
             // Force-unlock also confirms post-recovery sync, because the deadlock
             // detection has verified that all nodes have identical state.
             self.post_recovery_sync_confirmed.store(true, Ordering::Release);
+            // NETWORK-FIRST-GUARD: Also satisfy the guard. Case C (genuine deadlock)
+            // means ALL peers confirmed identical commit — DAG convergence is guaranteed.
+            self.post_recovery_network_first_commits.store(
+                Self::REQUIRED_NETWORK_FIRST_COMMITS,
+                Ordering::Release,
+            );
             tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted. Post-recovery sync auto-confirmed (deadlock recovery)."
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted. Post-recovery sync auto-confirmed (deadlock recovery). NETWORK-FIRST-GUARD also satisfied."
             );
         }
     }
@@ -515,6 +536,9 @@ impl ConsensusCoordinationHub {
         self.schedule_recovery_pending.store(true, Ordering::Release);
         // Reset block hash verification — must be re-verified after each recovery
         self.block_hash_verified.store(false, Ordering::Release);
+        // NETWORK-FIRST-COMMIT-GUARD: Mark this session as recovery-activated.
+        // This persists for the entire session — even after RecoveryBarrier → Ready.
+        self.mark_recovery_activated();
     }
 
     /// Mark block hash as verified against peers.
@@ -533,6 +557,68 @@ impl ConsensusCoordinationHub {
     /// Returns whether the block hash at tip has been verified against peers.
     pub fn is_block_hash_verified(&self) -> bool {
         self.block_hash_verified.load(Ordering::Acquire)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // NETWORK-FIRST-COMMIT-GUARD API (May 2026 — Definitive Fork Fix)
+    //
+    // After snapshot recovery, the local DAG above the committed tip has
+    // different block availability than the network. If the local committer
+    // evaluates rounds above the tip, it may choose a different leader → fork.
+    // This guard blocks local commit until N new CertifiedCommits from the
+    // network prove DAG convergence.
+    // ════════════════════════════════════════════════════════════════
+
+    /// Minimum number of NEW network CertifiedCommits required post-parity
+    /// before the local committer is allowed to evaluate.
+    pub const REQUIRED_NETWORK_FIRST_COMMITS: u32 = 6;
+
+    /// Mark this session as having undergone snapshot recovery.
+    /// Called once from `activate_recovery_barrier()`. Persists for session lifetime.
+    pub fn mark_recovery_activated(&self) {
+        self.recovery_was_activated.store(true, Ordering::Release);
+        self.post_recovery_network_first_commits.store(0, Ordering::Release);
+        tracing::info!(
+            "🛡️ [NETWORK-FIRST-GUARD] Recovery session activated. \
+             Local committer will be blocked until {} new network CertifiedCommits are processed.",
+            Self::REQUIRED_NETWORK_FIRST_COMMITS
+        );
+    }
+
+    /// Returns true if the session underwent recovery.
+    pub fn was_recovery_activated(&self) -> bool {
+        self.recovery_was_activated.load(Ordering::Acquire)
+    }
+
+    /// Increment the post-recovery network commit counter.
+    /// Called from `add_certified_commits()` when processing NEW (non-replay) commits.
+    pub fn inc_post_recovery_network_commits(&self, count: usize) {
+        let prev = self.post_recovery_network_first_commits.fetch_add(count as u32, Ordering::Release);
+        let new_val = prev + count as u32;
+        if prev < Self::REQUIRED_NETWORK_FIRST_COMMITS && new_val >= Self::REQUIRED_NETWORK_FIRST_COMMITS {
+            tracing::info!(
+                "✅ [NETWORK-FIRST-GUARD] Threshold reached ({}/{})! \
+                 DAG convergence confirmed. Local committer is now UNLOCKED.",
+                new_val, Self::REQUIRED_NETWORK_FIRST_COMMITS
+            );
+        }
+    }
+
+    /// Returns the current count of post-recovery network commits.
+    pub fn post_recovery_network_commits_count(&self) -> u32 {
+        self.post_recovery_network_first_commits.load(Ordering::Acquire)
+    }
+
+    /// Returns true if the local committer is safe to evaluate.
+    /// Either:
+    ///   1. No recovery occurred this session (`recovery_was_activated == false`), OR
+    ///   2. Enough new network CertifiedCommits have been processed post-parity.
+    pub fn is_post_recovery_network_verified(&self) -> bool {
+        if !self.recovery_was_activated.load(Ordering::Acquire) {
+            return true; // No recovery this session — always safe
+        }
+        self.post_recovery_network_first_commits.load(Ordering::Acquire)
+            >= Self::REQUIRED_NETWORK_FIRST_COMMITS
     }
 
 }
@@ -561,6 +647,9 @@ impl ConsensusCoordinationHub {
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
             healthy_unlock_time: Arc::new(RwLock::new(None)),
+            post_recovery_sync_confirmed: Arc::new(AtomicBool::new(true)),
+            recovery_was_activated: Arc::new(AtomicBool::new(false)),
+            post_recovery_network_first_commits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 

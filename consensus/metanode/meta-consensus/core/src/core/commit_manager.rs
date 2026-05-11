@@ -100,6 +100,16 @@ impl Core {
             if was_already_unlocked {
                 self.coordination_hub.confirm_post_recovery_sync();
             }
+
+            // NETWORK-FIRST-COMMIT-GUARD counter:
+            // After snapshot recovery, count NEW CertifiedCommits processed while Healthy.
+            // The local committer is blocked until this counter reaches the threshold,
+            // proving the DAG above the committed tip has converged with the network.
+            if self.coordination_hub.was_recovery_activated()
+                && self.coordination_hub.is_healthy()
+            {
+                self.coordination_hub.inc_post_recovery_network_commits(commits_count);
+            }
         }
 
         // Try to propose now since there are new blocks accepted.
@@ -464,6 +474,29 @@ impl Core {
                         "🛡️ [RECOVERY-BARRIER-GUARD] Blocking local committer: \
                          RecoveryBarrier phase={}. Recovery is still in progress.",
                         self.coordination_hub.recovery_barrier().phase()
+                    );
+                    break;
+                }
+
+                // NETWORK-FIRST-COMMIT-GUARD (May 2026 — Definitive Fork Fix):
+                // After snapshot recovery, the local DAG above the committed tip
+                // has DIFFERENT block availability than the network's DAG.
+                // Even though local_commit == quorum_commit, the blocks ABOVE
+                // the tip are sparse/different. If the local committer evaluates
+                // rounds above the tip, it chooses a different leader → FORK.
+                //
+                // This guard requires at least N new CertifiedCommits from the
+                // network AFTER parity, proving the DAG has converged.
+                // Unlike all previous guards (schedule, barrier, etc.), this one
+                // addresses the ROOT CAUSE: DAG block availability divergence.
+                if !self.coordination_hub.is_post_recovery_network_verified() {
+                    let current = self.coordination_hub.post_recovery_network_commits_count();
+                    let required = crate::coordination_hub::ConsensusCoordinationHub::REQUIRED_NETWORK_FIRST_COMMITS;
+                    tracing::info!(
+                        "🛡️ [NETWORK-FIRST-GUARD] Local committer blocked: snapshot recovery \
+                         session active, DAG convergence NOT yet confirmed. \
+                         Waiting for {} more network CertifiedCommits. (current={}/{})",
+                        required.saturating_sub(current), current, required
                     );
                     break;
                 }
