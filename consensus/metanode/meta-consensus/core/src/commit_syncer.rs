@@ -572,7 +572,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                      Transitioning to {:?} to allow block 1 proposal.",
                     next_phase_for_lag
                 );
-                PhaseTransitionDecision::TransitionAndUnlock { to: next_phase_for_lag }
+                PhaseTransitionDecision::TransitionAndClearStartup { to: next_phase_for_lag }
             }
 
             // ── Case 3: No local state, no quorum, still polling → WAIT ──
@@ -696,14 +696,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
             };
         }
 
-        // All gates passed — safe to unlock
+        // All gates passed — safe to exit startup sync
         tracing::info!(
             "✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, \
              network_synced={}) and RecoveryBarrier=Ready. \
-             Explicitly unlocking node.",
+             Clearing startup_sync. Local committer will unlock after DAG density confirmed.",
             input.synced_commit_index, input.quorum_commit, input.network_synced_commits
         );
-        PhaseTransitionDecision::TransitionAndUnlock {
+        PhaseTransitionDecision::TransitionAndClearStartup {
             to: crate::coordination_hub::NodeConsensusPhase::Healthy,
         }
     }
@@ -723,18 +723,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             }
 
-            PhaseTransitionDecision::TransitionAndUnlock { to } => {
+            PhaseTransitionDecision::TransitionAndClearStartup { to } => {
                 // Clear startup_sync BEFORE transitioning (so choke-point guard allows it)
                 if self.coordination_hub.is_startup_sync_active() {
                     self.coordination_hub.set_startup_sync_active(false);
                 }
                 
-                // CRITICAL FIX: We must explicitly unlock the local committer here!
-                // During CatchingUp, commits processed by Core have startup_sync_active=true,
-                // so they DO NOT unlock the committer (Anti-Fork guard). Once CatchingUp
-                // successfully completes and we transition to Healthy, we must manually
-                // unlock so the node can start proposing blocks.
-                self.coordination_hub.force_unlock_local_commit();
+                // FORK-SAFETY FIX (May 2026): We DO NOT force unlock the committer here.
+                // We rely on `commit_manager.rs` to unlock the committer ONLY AFTER it processes
+                // 5 CertifiedCommits from the active network (DAG density guard) OR after
+                // the 15-second cluster deadlock timeout. This prevents sparse DAG forks.
                 
                 if input.current_phase != to {
                     self.transition_phase_and_kick(to);
