@@ -771,6 +771,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // handle_fetch_result never calls dag_caught_up(). We must advance the
         // barrier here periodically when lag=0 to prevent a permanent stall.
         if !input.recovery_barrier_can_propose && input.lag == 0 && input.quorum_commit > 0 {
+            // CRITICAL FIX: If lag is 0, our DAG is perfectly synced with the network.
+            // This means our local LeaderSchedule is already correct. We don't need
+            // to wait 300 commits in ScheduleVerifying to rebuild it. We can safely
+            // pre-verify the schedule to prevent deadlocking a healthy restarted node.
+            self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
             self.coordination_hub.recovery_barrier().dag_caught_up();
         }
 
