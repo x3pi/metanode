@@ -473,7 +473,6 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            post_recovery_network_first_commits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             has_own_block_committed: Arc::new(AtomicBool::new(true)),
         }
     }

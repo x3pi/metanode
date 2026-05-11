@@ -79,8 +79,18 @@ impl Core {
             // 1. Own Block Check
             for commit in certified_commits.commits().iter() {
                 for block in commit.blocks() {
+                    // FORK-PREVENTION (May 2026): Only count blocks proposed AFTER recovery!
+                    // If the block round is <= the round at which we started the node,
+                    // it was proposed before the crash and does NOT prove convergence.
                     if block.author() == self.context.own_index {
-                        self.coordination_hub.mark_own_block_committed();
+                        if let Some(min_round) = self.last_known_proposed_round {
+                            if block.round() > min_round {
+                                self.coordination_hub.mark_own_block_committed();
+                            }
+                        } else {
+                            // If it's not set, we can't be sure, but we fall back to the old behavior
+                            self.coordination_hub.mark_own_block_committed();
+                        }
                     }
                 }
             }
@@ -114,7 +124,7 @@ impl Core {
 
         let mut certified_commits_map = BTreeMap::new();
         for c in &certified_commits {
-            certified_commits_map.insert(c.index(), c.reference());
+            certified_commits_map.insert(c.index(), c.clone());
         }
 
         if !certified_commits.is_empty() {
@@ -170,6 +180,7 @@ impl Core {
                 self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
                 
                 if self.coordination_hub.is_schedule_recovery_pending() {
+                    tracing::info!("🛡️ [SCHEDULE-RECOVERY] Baseline scores injected. UNBLOCKING local committer.");
                     self.coordination_hub.set_schedule_recovery_pending(false);
                 }
             }
@@ -241,9 +252,9 @@ impl Core {
 
                     // UNIFIED RECOVERY BARRIER (May 2026):
                     self.coordination_hub.recovery_barrier().schedule_verified();
-                    // Also clear legacy flag for backward compatibility
+                    
                     if self.coordination_hub.is_schedule_recovery_pending() {
-                        self.coordination_hub.set_schedule_recovery_pending(false);
+                        tracing::warn!("🛡️ [SCHEDULE-RECOVERY] Hit schedule update boundary, but keeping local committer blocked because DAG is sparse from snapshot recovery.");
                     }
 
                     let propagation_scores = self
@@ -490,16 +501,28 @@ impl Core {
         // During cold-start from snapshot, the DAG is empty so the Linearizer may skip missing
         // ancestor blocks → produces commits with different block sets → different digest.
         // The certified commits are already network-verified (2f+1 certifiers), so safety holds.
-        for sub_dag in &committed_sub_dags {
-            if let Some(commit_ref) = certified_commits_map.remove(&sub_dag.commit_ref.index) {
-                if commit_ref != sub_dag.commit_ref {
+        for sub_dag in &mut committed_sub_dags {
+            if let Some(certified_commit) = certified_commits_map.remove(&sub_dag.commit_ref.index) {
+                if certified_commit.reference() != sub_dag.commit_ref {
                     warn!(
                         "⚠️ [COLD-START] Commit digest mismatch at index {} \
                          (certified={:?}, local={:?}). \
                          Expected during snapshot restoration when ancestor blocks are missing. \
                          Using certified commit data (already network-verified).",
-                        sub_dag.commit_ref.index, commit_ref, sub_dag.commit_ref
+                        sub_dag.commit_ref.index, certified_commit.reference(), sub_dag.commit_ref
                     );
+                    
+                    // Force the authoritative network data to override the sparse local DAG's linearization
+                    sub_dag.blocks = certified_commit.blocks().to_vec();
+                    sub_dag.commit_ref = certified_commit.reference();
+                    
+                    // Recompute the correct deterministic timestamp from the real blocks
+                    sub_dag.timestamp_ms = sub_dag
+                        .blocks
+                        .iter()
+                        .map(|b| b.timestamp_ms())
+                        .max()
+                        .unwrap_or(0);
                 }
             }
         }

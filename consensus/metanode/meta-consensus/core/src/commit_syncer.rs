@@ -658,18 +658,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             };
         }
 
-        // Gate 3: LeaderSchedule confirmed (legacy check)
-        if input.schedule_recovery_pending {
-            tracing::warn!(
-                "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
-                 but LeaderSchedule recovery is still pending! \
-                 Node MUST NOT exit CatchingUp yet to prevent fork.",
-                input.synced_commit_index, input.quorum_commit
-            );
-            return PhaseTransitionDecision::Hold {
-                reason: "Startup sync: LeaderSchedule recovery pending",
-            };
-        }
+        // Gate 3 (REMOVED): LeaderSchedule confirmed check has been removed here.
+        // It now only blocks the local committer in `commit_manager.rs`. Node is allowed to
+        // transition to Healthy and propose blocks to break cluster deadlocks during recovery.
 
         // Gate 4 (NEW — DEFINITIVE): Recovery Barrier must be Ready or Inactive.
         // This is the ARCHITECTURAL INVARIANT — it cannot be bypassed by any
@@ -1123,33 +1114,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     return;
                                 }
 
-                                // ── Case C: Peers SAME + schedule IS confirmed ──
-                                // (or Case B exhausted → escalated to Case C)
-                                // This is a GENUINE cluster-wide deadlock:
-                                // - All nodes are at the same commit
-                                // - No node is progressing
-                                // - The LeaderSwapTable is verified/confirmed (or exhaustion-cleared)
-                                // - The local committer is locked (all nodes waiting)
-                                //
-                                // This is the ONLY case where direct unlock is safe,
-                                // because all nodes have identical verified state.
-                                // Typically occurs during cluster-wide cold start.
-                                tracing::warn!(
-                                    "🚨 [ACTIVE-SYNC-RECOVERY] Case C: Genuine deadlock confirmed. \
-                                     Polled {} peers, max_peer={}, my_commit={}. \
-                                     Schedule is confirmed. All nodes have verified state. \
-                                     Unlocking local committer to break deadlock.",
-                                    polled_peers, max_peer_commit, my_commit
+                                // ── Case C: REMOVED ──
+                                // The node MUST wait for the network to commit its own block
+                                // before unlocking the committer. `has_own_block_committed` is
+                                // the ONLY safe unlock mechanism to prevent sparse DAG forks.
+                                tracing::info!(
+                                    "⏳ [ACTIVE-SYNC-RECOVERY] Node is at network tip ({}), waiting for its own proposed block to be committed.",
+                                    my_commit
                                 );
-                                hub.force_unlock_local_commit();
-
-                                // Kick the core to evaluate the committer immediately
-                                let core_dispatcher = inner.core_thread_dispatcher.clone();
-                                if let Err(e) = core_dispatcher.new_block(
-                                    consensus_types::block::Round::MAX, true
-                                ).await {
-                                    tracing::warn!("Failed to kick Core for deadlock recovery: {:?}", e);
-                                }
                             });
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         } else {
