@@ -330,15 +330,38 @@ where
             go_handled, dag_handled, effective_handled
         );
 
-        // FORK-SAFETY NOTE (May 2026):
-        // We intentionally do NOT call force_unlock_local_commit() here, even at genesis.
-        // The RECOVERY-GUARD in commit_manager.rs uses `if local_commit_index >= 5` which
-        // already bypasses the lock for the first 5 commits (genesis bootstrap).
-        // Calling force_unlock here would set the flag permanently, meaning a node that
-        // restarts at commit 3 (while the network is at commit 100) would SKIP the
-        // 5-CertifiedCommit density check after catch-up, risking sparse DAG fork.
-        // The correct approach: let the `< 5` guard handle genesis naturally, and for
-        // mature chains (>= 5), always require network verification before unlocking.
+        // ═══════════════════════════════════════════════════════════════════
+        // UNIFIED RECOVERY-GUARD POLICY (DAG-State-Aware):
+        //
+        // The RECOVERY-GUARD prevents the local committer from evaluating a
+        // sparse DAG that might produce divergent commits (fork). It is ONLY
+        // needed when the DAG contains prior data loaded from disk (cold restart
+        // or snapshot restore).
+        //
+        // Decision rule (replaces the old `local_commit_index >= 5` heuristic):
+        //   last_commit_index == 0  →  FRESH DAG  →  pre-unlock (no guard)
+        //   last_commit_index > 0   →  POPULATED  →  keep locked (guard active)
+        //
+        // This single check correctly handles ALL scenarios:
+        //   - Genesis: fresh DAG → unlocked → no genesis deadlock
+        //   - Epoch transition: new epoch DAG → unlocked → no epoch deadlock
+        //   - Cold restart: loaded DAG → locked → density proof required
+        //   - Snapshot restore: loaded DAG → locked → density proof required
+        // ═══════════════════════════════════════════════════════════════════
+        let dag_commit_index = dag_state.last_commit_index();
+        if dag_commit_index == 0 {
+            coordination_hub.pre_unlock_for_fresh_dag();
+            info!(
+                "🟢 [GUARD-POLICY] Fresh DAG (last_commit=0): RECOVERY-GUARD disabled. \
+                 All nodes start synchronized — no fork risk."
+            );
+        } else {
+            info!(
+                "🔴 [GUARD-POLICY] Populated DAG (last_commit={}): RECOVERY-GUARD active. \
+                 Waiting for 5 network CertifiedCommits to prove density before local evaluation.",
+                dag_commit_index
+            );
+        }
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
         // during the FastForwarding phase (see commit_syncer.rs). 

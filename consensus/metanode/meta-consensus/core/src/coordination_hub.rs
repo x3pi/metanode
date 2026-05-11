@@ -320,6 +320,29 @@ impl ConsensusCoordinationHub {
         }
     }
 
+    /// Pre-unlock local committer for a FRESH DAG (no prior commits).
+    ///
+    /// Called when the DAG has `last_commit_index == 0`, which occurs in:
+    ///   1. **Genesis** — brand new network, all nodes start from block 0
+    ///   2. **Epoch transition** — new epoch starts with empty DAG, all nodes
+    ///      just completed a full epoch of healthy consensus
+    ///
+    /// In both cases, ALL nodes start from the same clean state. There is no
+    /// stale/partial DAG data that could cause divergent commits. The
+    /// RECOVERY-GUARD (waiting for 5 network commits) is NOT needed.
+    ///
+    /// This is NOT called for cold restart (DAG loaded from disk with
+    /// `last_commit > 0`), where the guard IS needed to prevent sparse DAG fork.
+    pub fn pre_unlock_for_fresh_dag(&self) {
+        self.recovery_local_commit_unlocked.store(true, Ordering::Release);
+        self.reset_network_commits_since_healthy();
+        self.set_healthy_unlock_time(None);
+        tracing::info!(
+            "🔓 [FRESH-DAG] Local committer pre-unlocked: DAG has no prior commits. \
+             All nodes start from synchronized empty state — density guard not needed."
+        );
+    }
+
     pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
         *self.healthy_unlock_time.read()
     }
