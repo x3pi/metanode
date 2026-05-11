@@ -516,6 +516,13 @@ impl Core {
                     sub_dag.blocks = certified_commit.blocks().to_vec();
                     sub_dag.commit_ref = certified_commit.reference();
                     
+                    // FORK-SAFETY: Ensure the entire SubDag is mathematically identical to the network
+                    // by copying the leader and execution metadata. The local Sparse DAG might have 
+                    // picked a different leader block or missed the network's agreed global_exec_index.
+                    sub_dag.leader = certified_commit.leader();
+                    sub_dag.leader_address = certified_commit.leader_address().to_vec();
+                    sub_dag.global_exec_index = certified_commit.global_exec_index();
+                    
                     // Recompute the correct deterministic timestamp from the real blocks
                     sub_dag.timestamp_ms = sub_dag
                         .blocks
