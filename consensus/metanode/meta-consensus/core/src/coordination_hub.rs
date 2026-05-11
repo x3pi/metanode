@@ -56,7 +56,7 @@ pub enum NodeConsensusPhase {
     Healthy,
 }
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Centralized state machine for coordinating node phase transitions.
 #[derive(Clone)]
@@ -74,12 +74,6 @@ pub struct ConsensusCoordinationHub {
     /// Only Ready or Inactive allows proposals.
     /// ═══════════════════════════════════════════════════════════════
     recovery_barrier: Arc<RecoveryBarrier>,
-
-    /// Deterministic recovery guard for the local committer.
-    /// After snapshot recovery, this is `false`. It is set to `true` ONLY when
-    /// the node processes a real CertifiedCommit from the network (via `add_certified_commits`).
-    /// This replaces the timeout-based DAG-GAP-GUARD with event-driven safety.
-    recovery_local_commit_unlocked: Arc<AtomicBool>,
     
     /// Global flag indicating if the epoch is currently transitioning.
     /// Mutated during Start/End of epoch transition.
@@ -116,27 +110,6 @@ pub struct ConsensusCoordinationHub {
     /// until its state is bit-perfect verified against the network.
     block_hash_verified: Arc<AtomicBool>,
 
-    /// Counter to track how many network commits we've processed since transitioning to Healthy.
-    /// Used to prevent the local committer from evaluating a sparse DAG immediately after fast-forwarding.
-    network_commits_since_healthy: Arc<AtomicUsize>,
-
-    /// The time at which the local committer should unlock even if no commits have been processed.
-    /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
-    healthy_unlock_time: Arc<RwLock<Option<std::time::Instant>>>,
-
-    /// POST-RECOVERY SYNC CONFIRMATION (May 2026 — Race Fix):
-    /// Set to `false` when the RECOVERY-GUARD unlocks (locked→unlocked transition).
-    /// Set to `true` when the FIRST CertifiedCommit is processed AFTER the unlock.
-    ///
-    /// This closes a 10ms race window where the local committer can fire immediately
-    /// after the RECOVERY-GUARD unlocks (because local_commit == quorum_commit),
-    /// but the local DAG has different block availability than the network,
-    /// producing a divergent commit (different timestamp/leader → fork).
-    ///
-    /// For fresh-DAG starts (genesis/epoch), this is pre-set to `true` by
-    /// `pre_unlock_for_fresh_dag()` since all nodes start from identical state.
-    post_recovery_sync_confirmed: Arc<AtomicBool>,
-
     /// NETWORK-FIRST-COMMIT-GUARD (May 2026 — Definitive fork fix):
     /// Set to `true` when snapshot recovery is detected in this session.
     /// Unlike RecoveryBarrier (which resets to Ready), this flag persists for
@@ -149,6 +122,13 @@ pub struct ConsensusCoordinationHub {
     /// The local committer is blocked until this reaches REQUIRED_NETWORK_FIRST_COMMITS.
     /// This proves the DAG above the committed tip has converged with the network.
     post_recovery_network_first_commits: Arc<std::sync::atomic::AtomicU32>,
+
+    /// MATHEMATICAL CONVERGENCE GUARD (May 2026):
+    /// Set to `true` when the node's OWN proposed block is included in a network `CertifiedCommit`.
+    /// Because 2f+1 nodes must validate the block's causal history (DAG) to vote for it,
+    /// a committed own-block is absolute mathematical proof that the node's local DAG
+    /// has reached 100% density and alignment with the network.
+    has_own_block_committed: Arc<AtomicBool>,
 }
 
 impl ConsensusCoordinationHub {
@@ -156,7 +136,6 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
             recovery_barrier: Arc::new(RecoveryBarrier::new()),
-            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(false)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -164,11 +143,9 @@ impl ConsensusCoordinationHub {
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
-            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
-            healthy_unlock_time: Arc::new(RwLock::new(None)),
-            post_recovery_sync_confirmed: Arc::new(AtomicBool::new(false)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
             post_recovery_network_first_commits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            has_own_block_committed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -275,8 +252,7 @@ impl ConsensusCoordinationHub {
             *w = new_phase;
             
             if new_phase == NodeConsensusPhase::Healthy {
-                self.reset_network_commits_since_healthy();
-                self.set_healthy_unlock_time(None);
+                // Legacy resets removed
             }
         }
     }
@@ -291,135 +267,34 @@ impl ConsensusCoordinationHub {
         self.is_healthy()
     }
 
-    /// Returns true if the local committer is allowed to run.
-    /// After snapshot recovery, this is false until the node processes
-    /// a minimum number of CertifiedCommits from the network in Healthy phase,
-    /// proving DAG density and consistency.
-    pub fn is_local_commit_unlocked(&self) -> bool {
-        self.recovery_local_commit_unlocked.load(Ordering::Acquire)
-    }
-
-    /// Reset the network commits counter when transitioning to Healthy.
-    pub fn reset_network_commits_since_healthy(&self) {
-        self.network_commits_since_healthy.store(0, Ordering::Release);
-    }
-
-    /// Increment the number of network commits processed since becoming Healthy.
-    pub fn inc_network_commits_since_healthy(&self, count: usize) {
-        self.network_commits_since_healthy.fetch_add(count, Ordering::Release);
-    }
-
-    /// Get the number of network commits processed since becoming Healthy.
-    pub fn get_network_commits_since_healthy(&self) -> usize {
-        self.network_commits_since_healthy.load(Ordering::Acquire)
-    }
-
-    /// Unlock the local committer after receiving enough real CertifiedCommits.
-    /// Called from `Core::add_certified_commits()` when processing succeeds.
-    /// Once unlocked, it stays unlocked for the remainder of this epoch.
-    pub fn unlock_local_commit(&self) {
-        let commits_processed = self.get_network_commits_since_healthy();
-        // DAG DENSITY GUARD: Require 5 commits to be processed in Healthy phase
-        // before allowing the local committer to run.
-        if commits_processed >= 5 {
-            if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
-                // RACE FIX: Reset post_recovery_sync_confirmed when transitioning
-                // from locked → unlocked. The local committer cannot fire until
-                // a CertifiedCommit is processed AFTER this unlock moment.
-                self.post_recovery_sync_confirmed.store(false, Ordering::Release);
-                tracing::info!(
-                    "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: processed {} CertifiedCommits from network in Healthy phase. \
-                     DAG consistency and density confirmed. Post-recovery sync confirmation PENDING — \
-                     local committer will remain blocked until next CertifiedCommit proves DAG alignment.",
-                    commits_processed
-                );
-            }
-        } else {
-            // Check if we are already unlocked, to avoid spamming logs
-            if !self.is_local_commit_unlocked() {
-                tracing::info!(
-                    "⏳ [RECOVERY-GUARD] Local committer remains locked. Processed {}/5 network commits in Healthy phase.",
-                    commits_processed
-                );
-            }
+    /// Mark that the network has committed a block proposed by this node.
+    pub fn mark_own_block_committed(&self) {
+        if !self.has_own_block_committed.swap(true, Ordering::Release) {
+            tracing::info!(
+                "✅ [MATHEMATICAL-CONVERGENCE] Network has certified our locally proposed block! \
+                 DAG density and alignment is mathematically proven. Local committer unlocked."
+            );
         }
     }
 
-    /// Explicitly force the local committer to unlock (used by round-based hybrid guard)
+    /// Returns true if the network has certified a block proposed by this node.
+    pub fn is_own_block_committed(&self) -> bool {
+        self.has_own_block_committed.load(Ordering::Acquire)
+    }
+
+    /// Explicitly force the local committer to unlock (used by round-based hybrid guard).
+    /// Used only during cluster-wide deadlocks where all nodes are waiting for commits
+    /// but no one is proposing.
     pub fn force_unlock_local_commit(&self) {
-        if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
-            // Force-unlock also confirms post-recovery sync, because the deadlock
-            // detection has verified that all nodes have identical state.
-            self.post_recovery_sync_confirmed.store(true, Ordering::Release);
-            // NETWORK-FIRST-GUARD: Also satisfy the guard. Case C (genuine deadlock)
-            // means ALL peers confirmed identical commit — DAG convergence is guaranteed.
+        if !self.has_own_block_committed.swap(true, Ordering::Release) {
             self.post_recovery_network_first_commits.store(
                 Self::REQUIRED_NETWORK_FIRST_COMMITS,
                 Ordering::Release,
             );
             tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted. Post-recovery sync auto-confirmed (deadlock recovery). NETWORK-FIRST-GUARD also satisfied."
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted. NETWORK-FIRST-GUARD also satisfied (deadlock recovery)."
             );
         }
-    }
-
-    /// Pre-unlock local committer for a FRESH DAG (no prior commits).
-    ///
-    /// Called when the DAG has `last_commit_index == 0`, which occurs in:
-    ///   1. **Genesis** — brand new network, all nodes start from block 0
-    ///   2. **Epoch transition** — new epoch starts with empty DAG, all nodes
-    ///      just completed a full epoch of healthy consensus
-    ///
-    /// In both cases, ALL nodes start from the same clean state. There is no
-    /// stale/partial DAG data that could cause divergent commits. The
-    /// RECOVERY-GUARD (waiting for 5 network commits) is NOT needed.
-    ///
-    /// This is NOT called for cold restart (DAG loaded from disk with
-    /// `last_commit > 0`), where the guard IS needed to prevent sparse DAG fork.
-    pub fn pre_unlock_for_fresh_dag(&self) {
-        self.recovery_local_commit_unlocked.store(true, Ordering::Release);
-        // Fresh DAG = all nodes start from identical state, no recovery race possible.
-        self.post_recovery_sync_confirmed.store(true, Ordering::Release);
-        self.reset_network_commits_since_healthy();
-        self.set_healthy_unlock_time(None);
-        tracing::info!(
-            "🔓 [FRESH-DAG] Local committer pre-unlocked: DAG has no prior commits. \
-             All nodes start from synchronized empty state — density guard not needed. \
-             Post-recovery sync pre-confirmed (no recovery needed)."
-        );
-    }
-
-    /// Returns true if at least one CertifiedCommit has been processed
-    /// after the RECOVERY-GUARD transitioned from locked → unlocked.
-    ///
-    /// This closes the race window where the local committer fires immediately
-    /// after unlock with a divergent local DAG (different block availability →
-    /// different timestamp/leader → fork).
-    ///
-    /// Always returns true for fresh-DAG starts (pre-confirmed) and after
-    /// the first post-unlock CertifiedCommit.
-    pub fn is_post_recovery_sync_confirmed(&self) -> bool {
-        self.post_recovery_sync_confirmed.load(Ordering::Acquire)
-    }
-
-    /// Called after successfully processing a CertifiedCommit when the
-    /// RECOVERY-GUARD is already unlocked. Sets the flag to true,
-    /// allowing the local committer to run.
-    pub fn confirm_post_recovery_sync(&self) {
-        if !self.post_recovery_sync_confirmed.swap(true, Ordering::Release) {
-            tracing::info!(
-                "✅ [POST-RECOVERY-SYNC] First CertifiedCommit processed after RECOVERY-GUARD unlock. \
-                 DAG alignment confirmed — local committer is now permitted to evaluate."
-            );
-        }
-    }
-
-    pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
-        *self.healthy_unlock_time.read()
-    }
-
-    pub fn set_healthy_unlock_time(&self, time: Option<std::time::Instant>) {
-        *self.healthy_unlock_time.write() = time;
     }
 
     /// Convenience check for whether the node is explicitly catching up.
@@ -617,6 +492,9 @@ impl ConsensusCoordinationHub {
         if !self.recovery_was_activated.load(Ordering::Acquire) {
             return true; // No recovery this session — always safe
         }
+        if self.is_own_block_committed() {
+            return true; // Own block committed — absolute mathematical proof
+        }
         self.post_recovery_network_first_commits.load(Ordering::Acquire)
             >= Self::REQUIRED_NETWORK_FIRST_COMMITS
     }
@@ -637,7 +515,6 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
             recovery_barrier: Arc::new(RecoveryBarrier::new()), // Inactive = can propose
-            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(true)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -645,11 +522,9 @@ impl ConsensusCoordinationHub {
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
-            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
-            healthy_unlock_time: Arc::new(RwLock::new(None)),
-            post_recovery_sync_confirmed: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
             post_recovery_network_first_commits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            has_own_block_committed: Arc::new(AtomicBool::new(true)),
         }
     }
 

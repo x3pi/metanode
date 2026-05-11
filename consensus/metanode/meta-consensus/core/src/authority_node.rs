@@ -350,7 +350,6 @@ where
         // ═══════════════════════════════════════════════════════════════════
         let dag_commit_index = dag_state.last_commit_index();
         if dag_commit_index == 0 && go_handled == 0 {
-            coordination_hub.pre_unlock_for_fresh_dag();
             info!(
                 "🟢 [GUARD-POLICY] True Genesis (dag=0, go=0): RECOVERY-GUARD disabled. \
                  All nodes start synchronized — no fork risk."

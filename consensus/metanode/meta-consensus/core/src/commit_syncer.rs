@@ -1016,7 +1016,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // leader elections and timestamps.
                         // ════════════════════════════════════════════════════════
                         let is_healthy_but_locked = self.coordination_hub.is_healthy()
-                            && !self.coordination_hub.is_local_commit_unlocked();
+                            && !self.coordination_hub.is_post_recovery_network_verified();
                             
                         let is_catching_up_but_schedule_pending = self.coordination_hub.is_catching_up()
                             && lag == 0
