@@ -178,6 +178,11 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// Cleared when commits advance past baseline (liveness proven) → `None`.
     /// `None` = guard inactive (normal operation or liveness already proven).
     post_restore_commit_baseline: Option<CommitIndex>,
+
+    /// Counts consecutive ticks where POST-RESTORE-GUARD detected commits stuck
+    /// at baseline while Healthy with an empty DAG. After enough failed Core kicks,
+    /// the guard escalates to a DAG baseline reset to break the deadlock.
+    post_restore_stuck_ticks: u32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -305,6 +310,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             network_synced_commits: 0,
             last_fetched_schedule_cycle: None,
             post_restore_commit_baseline: None,
+            post_restore_stuck_ticks: 0,
         }
     }
 
@@ -1018,69 +1024,171 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             if local_commit > baseline {
                                 // Liveness proven! Commits are advancing past the restore point.
                                 self.post_restore_commit_baseline = None;
+                                self.post_restore_stuck_ticks = 0;
                                 tracing::info!(
                                     "✅ [POST-RESTORE-GUARD] Liveness VERIFIED! \
                                      Commits advanced: {} → {} (delta={}). Guard cleared.",
                                     baseline, local_commit, local_commit - baseline
                                 );
                             } else if self.coordination_hub.is_healthy() {
-                                // Commits stuck at baseline — take immediate action.
-                                // No timeout gate: runs on THIS tick.
-                                let inner = self.inner.clone();
-                                let hub = self.coordination_hub.clone();
-                                let my_commit = local_commit;
-                                let guard_baseline = baseline;
-                                tokio::spawn(async move {
-                                    tracing::info!(
-                                        "🔄 [POST-RESTORE-GUARD] Commits stuck at {} (baseline={}). \
-                                         Polling peers for corrective action...",
-                                        my_commit, guard_baseline
+                                self.post_restore_stuck_ticks += 1;
+                                let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
+
+                                if is_dag_empty {
+                                    // ════════════════════════════════════════════════════════
+                                    // FAST PATH: Empty DAG after snapshot restore.
+                                    //
+                                    // Core CANNOT produce blocks with an empty DAG — kicking
+                                    // it is futile. Immediately reset the DAG baseline to
+                                    // local_commit so Core can start proposing from a clean
+                                    // state. No delay needed.
+                                    //
+                                    // Fork safety: reset_to_network_baseline only seeds the
+                                    // starting point for NEW proposals. All new blocks must
+                                    // pass CertifiedCommit validation by peers — bad blocks
+                                    // are always rejected by the network. Historical state
+                                    // is preserved in Go and untouched.
+                                    // ════════════════════════════════════════════════════════
+                                    tracing::warn!(
+                                        "⚡ [POST-RESTORE-GUARD] Empty DAG detected (tick={}). \
+                                         Core kicks are futile. Resetting DAG baseline to local_commit={} \
+                                         (quorum={}) for instant recovery.",
+                                        self.post_restore_stuck_ticks, local_commit, quorum_commit
                                     );
-                                    let timeout = Duration::from_secs(2);
-                                    let mut max_peer_commit: u32 = 0;
-                                    let mut peers_reached: u32 = 0;
+                                    self.inner.dag_state_writer.reset_to_network_baseline(
+                                        0, local_commit,
+                                        crate::commit::CommitDigest::MIN,
+                                        0, None
+                                    );
+                                    self.synced_commit_index = local_commit;
+                                    self.post_restore_stuck_ticks = 0;
+                                    self.last_quorum_change_at = now;
+                                    // DON'T clear guard — keep monitoring until commits
+                                    // actually advance. If DAG reset doesn't help, the
+                                    // normal path will escalate again in 10 ticks.
+                                    self.post_restore_commit_baseline = Some(local_commit);
+                                } else {
+                                    // NORMAL PATH: DAG has data but commits not advancing.
+                                    let is_sched_pending = self.coordination_hub.is_schedule_recovery_pending();
 
-                                    for authority in inner.context.committee.authorities().map(|(i, _)| i) {
-                                        if authority == inner.context.own_index {
-                                            continue;
-                                        }
-                                        if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
-                                            max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
-                                            peers_reached += 1;
-                                        }
-                                    }
-
-                                    if peers_reached == 0 {
-                                        tracing::warn!(
-                                            "⏳ [POST-RESTORE-GUARD] No peers reachable. Will retry next tick."
-                                        );
-                                        return;
-                                    }
-
-                                    if max_peer_commit > my_commit {
-                                        // Peers are ahead — fetch certified commits (data-driven recovery)
-                                        tracing::info!(
-                                            "📥 [POST-RESTORE-GUARD] Peers ahead ({} > {}). \
-                                             Updating quorum to trigger CertifiedCommit fetch.",
-                                            max_peer_commit, my_commit
-                                        );
-                                        hub.update_quorum_commit_index(max_peer_commit);
-                                    } else {
-                                        // Peers at same level — kick Core to force new proposal
-                                        tracing::info!(
-                                            "🔨 [POST-RESTORE-GUARD] Peers at same commit ({}). \
-                                             Kicking Core to produce new block.",
-                                            max_peer_commit
-                                        );
-                                        if let Err(e) = inner.core_thread_dispatcher.new_block(
-                                            consensus_types::block::Round::MAX, true
-                                        ).await {
+                                    // ════════════════════════════════════════════════════════
+                                    // BACKUP RECOVERY: POST-RESTORE-GUARD escalation.
+                                    //
+                                    // After 10 ticks (~20s) with DAG data but commits stuck,
+                                    // this acts as a safety net independent of ACTIVE-SYNC-RECOVERY.
+                                    //
+                                    // If schedule_pending=true → force-clear it (peers confirmed
+                                    // same commit via repeated polling, so schedule is consistent).
+                                    // Then reset DAG baseline to let Core start fresh.
+                                    //
+                                    // If schedule_pending=false → just reset DAG baseline.
+                                    //
+                                    // Fork safety: Only triggers after 20s of continuous stall
+                                    // with repeated peer polling confirming same state. DAG reset
+                                    // only seeds new proposals; CertifiedCommit validates all.
+                                    // ════════════════════════════════════════════════════════
+                                    if self.post_restore_stuck_ticks >= 10 {
+                                        if is_sched_pending {
                                             tracing::warn!(
-                                                "Failed to kick Core for post-restore liveness: {:?}", e
+                                                "⚡ [POST-RESTORE-GUARD] ESCALATION (tick={}): \
+                                                 schedule_pending=true after {} ticks. \
+                                                 Force-clearing schedule + resetting DAG baseline.",
+                                                self.post_restore_stuck_ticks, self.post_restore_stuck_ticks
+                                            );
+                                            self.coordination_hub.set_schedule_recovery_pending(false);
+                                        } else {
+                                            tracing::warn!(
+                                                "⚡ [POST-RESTORE-GUARD] ESCALATION (tick={}): \
+                                                 Commits stuck for {} ticks. Resetting DAG baseline.",
+                                                self.post_restore_stuck_ticks, self.post_restore_stuck_ticks
                                             );
                                         }
+                                        self.inner.dag_state_writer.reset_to_network_baseline(
+                                            0, local_commit,
+                                            crate::commit::CommitDigest::MIN,
+                                            0, None
+                                        );
+                                        self.synced_commit_index = local_commit;
+                                        self.post_restore_stuck_ticks = 0;
+                                        self.last_quorum_change_at = now;
+                                        // DON'T clear guard — keep monitoring. Guard only
+                                        // clears when commits ACTUALLY advance past baseline.
+                                        // This creates a perpetual recovery loop: escalate
+                                        // every 10 ticks, polling the network each time,
+                                        // until consensus finally resumes.
+                                        self.post_restore_commit_baseline = Some(local_commit);
+                                        // Also clear sparse boundary if present
+                                        self.coordination_hub.clear_sparse_dag_boundary();
+                                    } else {
+                                        // Standard path: poll peers and take corrective action.
+                                        let inner = self.inner.clone();
+                                        let hub = self.coordination_hub.clone();
+                                        let my_commit = local_commit;
+                                        let guard_baseline = baseline;
+                                        let stuck_ticks = self.post_restore_stuck_ticks;
+                                        let sched_pending = is_sched_pending;
+                                        tokio::spawn(async move {
+                                            tracing::info!(
+                                                "🔄 [POST-RESTORE-GUARD] Commits stuck at {} (baseline={}, tick={}, sched_pending={}). \
+                                                 Polling peers for corrective action...",
+                                                my_commit, guard_baseline, stuck_ticks, sched_pending
+                                            );
+                                            let timeout = Duration::from_secs(2);
+                                            let mut max_peer_commit: u32 = 0;
+                                            let mut peers_reached: u32 = 0;
+
+                                            for authority in inner.context.committee.authorities().map(|(i, _)| i) {
+                                                if authority == inner.context.own_index {
+                                                    continue;
+                                                }
+                                                if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
+                                                    if status.epoch == inner.context.committee.epoch() {
+                                                        max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                                        peers_reached += 1;
+                                                    }
+                                                }
+                                            }
+
+                                            if peers_reached == 0 {
+                                                tracing::warn!(
+                                                    "⏳ [POST-RESTORE-GUARD] No peers reachable. Will retry next tick."
+                                                );
+                                                return;
+                                            }
+
+                                            if max_peer_commit > my_commit {
+                                                tracing::info!(
+                                                    "📥 [POST-RESTORE-GUARD] Peers ahead ({} > {}). \
+                                                     Updating quorum to trigger CertifiedCommit fetch.",
+                                                    max_peer_commit, my_commit
+                                                );
+                                                hub.update_quorum_commit_index(max_peer_commit);
+                                            } else if !sched_pending {
+                                                // Only kick Core if schedule is NOT pending.
+                                                // Kicking Core with stale schedule is useless.
+                                                tracing::info!(
+                                                    "🔨 [POST-RESTORE-GUARD] Peers at same commit ({}). \
+                                                     Kicking Core to produce new block.",
+                                                    max_peer_commit
+                                                );
+                                                if let Err(e) = inner.core_thread_dispatcher.new_block(
+                                                    consensus_types::block::Round::MAX, true
+                                                ).await {
+                                                    tracing::warn!(
+                                                        "Failed to kick Core for post-restore liveness: {:?}", e
+                                                    );
+                                                }
+                                            } else {
+                                                tracing::info!(
+                                                    "⏳ [POST-RESTORE-GUARD] Peers at same commit ({}), \
+                                                     schedule_pending=true. Waiting for ACTIVE-SYNC-RECOVERY \
+                                                     to resolve schedule. (tick={})",
+                                                    max_peer_commit, stuck_ticks
+                                                );
+                                            }
+                                        });
                                     }
-                                });
+                                }
                             }
                         }
 
@@ -1119,7 +1227,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && lag == 0
                             && self.coordination_hub.is_schedule_recovery_pending();
 
-                        let needs_active_sync_recovery = is_healthy_but_locked || is_catching_up_but_schedule_pending;
+                        let needs_active_sync_recovery = is_healthy_but_locked
+                            || is_catching_up_but_schedule_pending
+                            // Healthy + schedule_pending but NO sparse boundary:
+                            // After snapshot restore, node may reach Healthy without
+                            // sparse_dag_boundary (DAG was reset). But schedule is still
+                            // pending because no historical commits were fetched.
+                            // Without this, Case B never triggers → permanent deadlock.
+                            || (self.coordination_hub.is_healthy()
+                                && self.coordination_hub.is_schedule_recovery_pending());
 
                         if needs_active_sync_recovery
                             && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
@@ -1153,8 +1269,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         continue;
                                     }
                                     if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
-                                        max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
-                                        polled_stake += inner.context.committee.stake(authority);
+                                        if status.epoch == inner.context.committee.epoch() {
+                                            max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                            polled_stake += inner.context.committee.stake(authority);
+                                        }
                                     }
                                 }
 
@@ -1218,21 +1336,39 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 // We NEVER unlock based on timeout here. The system MUST wait 
                                 // until it successfully receives the commits to reconstruct the DAG.
                                 if is_schedule_pending {
-                                    let num_commits: u32 = 300;
-                                    let last_boundary = (my_commit / num_commits) * num_commits;
-                                    let fetch_from = last_boundary.saturating_sub(num_commits);
-                                    tracing::warn!(
-                                        "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}): Peers at same commit ({}) \
-                                         but schedule_recovery_pending=true. LeaderSwapTable is stale. \
-                                         NOT unlocking (would cause fork). \
-                                         Triggering active fetch of commits {}→{} to rebuild schedule.",
-                                        retry_count + 1, my_commit, fetch_from, my_commit
-                                    );
-                                    // Trigger CommitSyncer to re-fetch the scoring range.
-                                    // The fetch itself is now handled natively in try_schedule_once
-                                    // which detects CatchingUp + schedule_recovery_pending and
-                                    // automatically lowers synced_commit_index to fetch_from.
-                                    return;
+                                    // After 3 retries (~15s) with all peers at the same commit,
+                                    // it means the ENTIRE cluster is at this level and no one
+                                    // has historical commits to share. The schedule is already
+                                    // consistent across the cluster — safe to clear pending
+                                    // and fall through to Case C (deadlock breaker).
+                                    if retry_count >= 3 {
+                                        tracing::warn!(
+                                            "⚡ [ACTIVE-SYNC-RECOVERY] Case B→C ESCALATION (retry {}): \
+                                             Peers at same commit ({}) for {} retries. \
+                                             No historical commits available from ANY peer. \
+                                             Force-clearing schedule_recovery_pending — schedule is \
+                                             already consistent across the quorum-verified cluster.",
+                                            retry_count + 1, my_commit, retry_count
+                                        );
+                                        hub.set_schedule_recovery_pending(false);
+                                        // Fall through to Case C below (deadlock breaker)
+                                    } else {
+                                        let num_commits: u32 = 300;
+                                        let last_boundary = (my_commit / num_commits) * num_commits;
+                                        let fetch_from = last_boundary.saturating_sub(num_commits);
+                                        tracing::warn!(
+                                            "📥 [ACTIVE-SYNC-RECOVERY] Case B (retry {}): Peers at same commit ({}) \
+                                             but schedule_recovery_pending=true. LeaderSwapTable is stale. \
+                                             NOT unlocking (would cause fork). \
+                                             Triggering active fetch of commits {}→{} to rebuild schedule.",
+                                            retry_count + 1, my_commit, fetch_from, my_commit
+                                        );
+                                        // Trigger CommitSyncer to re-fetch the scoring range.
+                                        // The fetch itself is now handled natively in try_schedule_once
+                                        // which detects CatchingUp + schedule_recovery_pending and
+                                        // automatically lowers synced_commit_index to fetch_from.
+                                        return;
+                                    }
                                 }
 
                                 // ── Case C: Peers SAME + schedule confirmed ──
@@ -1771,8 +1907,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     continue;
                 }
                 if let Ok(status) = self.inner.network_client.get_epoch_status(authority, timeout).await {
-                    max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
-                    polled_peers += 1;
+                    if status.epoch == self.inner.context.committee.epoch() {
+                        max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                        polled_peers += 1;
+                    }
                 }
             }
             

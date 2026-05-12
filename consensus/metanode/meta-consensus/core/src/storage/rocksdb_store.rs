@@ -338,11 +338,26 @@ impl Store for RocksDBStore {
 
     fn scan_commits(&self, range: CommitRange) -> ConsensusResult<Vec<TrustedCommit>> {
         let mut commits = vec![];
+        let start_key = (range.start(), CommitDigest::MIN);
+        let end_key = (range.end(), CommitDigest::MAX);
+        
+        tracing::info!(
+            "🔍 [SCAN_COMMITS] Searching range: {:?} -> start_key: {:?}, end_key: {:?}",
+            range, start_key.0, end_key.0
+        );
+
+        let mut count = 0;
         for result in self.commits.safe_range_iter((
-            Included((range.start(), CommitDigest::MIN)),
-            Included((range.end(), CommitDigest::MAX)),
+            Included(start_key),
+            Included(end_key),
         )) {
-            let ((_index, digest), serialized) = result?;
+            count += 1;
+            let ((index, digest), serialized) = result?;
+            
+            if count == 1 {
+                tracing::info!("🔍 [SCAN_COMMITS] First commit found: index={}, digest={:?}", index, digest);
+            }
+            
             let commit = TrustedCommit::new_trusted(
                 bcs::from_bytes(&serialized).map_err(ConsensusError::MalformedCommit)?,
                 serialized,
@@ -350,6 +365,11 @@ impl Store for RocksDBStore {
             assert_eq!(commit.digest(), digest);
             commits.push(commit);
         }
+        
+        tracing::info!(
+            "🔍 [SCAN_COMMITS] Found {} commits for range {:?}",
+            commits.len(), range
+        );
         Ok(commits)
     }
 

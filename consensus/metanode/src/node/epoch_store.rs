@@ -77,15 +77,51 @@ pub(super) fn load_legacy_epoch_stores(
             .join("consensus_db");
 
         if epoch_db_path.exists() {
+            // CRITICAL FIX (ANTI-FORK GUARD): Convert to absolute path so RocksDB correctly registers
+            // the database. We use a retry loop because NFS mounts or high disk I/O
+            // can temporarily cause canonicalize to fail even if the path exists.
+            let mut absolute_path_opt = None;
+            for attempt in 1..=5 {
+                match std::fs::canonicalize(&epoch_db_path) {
+                    Ok(path) => {
+                        absolute_path_opt = Some(path);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ [LEGACY STORE] Canonicalize failed for {:?} on attempt {}/5: {}. Retrying in 1s...",
+                            epoch_db_path, attempt, e
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+
+            let absolute_path = match absolute_path_opt {
+                Some(path) => path,
+                None => {
+                    tracing::error!("🚨 [LEGACY STORE] Failed to canonicalize legacy epoch DB path {:?} after 5 attempts. Skipping this epoch store.", epoch_db_path);
+                    continue;
+                }
+            };
+            
+            let absolute_path_str = match absolute_path.to_str() {
+                Some(s) => s,
+                None => {
+                    tracing::error!("🚨 [LEGACY STORE] Legacy epoch DB path contains invalid UTF-8: {:?}. Skipping this epoch store.", absolute_path);
+                    continue;
+                }
+            };
+
             info!(
-                "📦 [LEGACY STORE] Found previous epoch {} database at {:?}",
-                epoch, epoch_db_path
+                "📦 [LEGACY STORE] Found previous epoch {} database at {}",
+                epoch, absolute_path_str
             );
 
             // Create read-write store for the legacy epoch
             // Note: RocksDB supports concurrent access from the same process
             let legacy_store =
-                std::sync::Arc::new(RocksDBStore::new(epoch_db_path.to_str().unwrap_or("")));
+                std::sync::Arc::new(RocksDBStore::new(absolute_path_str));
 
             legacy_manager.add_store(epoch, legacy_store);
             loaded_count += 1;
