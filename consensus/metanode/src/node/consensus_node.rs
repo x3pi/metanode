@@ -1916,7 +1916,7 @@ impl ConsensusNode {
 
                 // Re-query Go for the final state after the gate
                 match executor_client_for_proc.get_last_handled_commit_index().await {
-                    Ok((commit_idx, _, _, _, _, _)) if commit_idx > 0 => {
+                    Ok((commit_idx, gei, _, _, _, _)) if commit_idx > 0 => {
                         tracing::info!(
                             "🔑 [FINAL-GATE] Updated CommitProcessor: last_handled={} → {}",
                             commit_processor.go_last_commit_index, commit_idx
@@ -1925,6 +1925,15 @@ impl ConsensusNode {
                         commit_processor.next_expected_index = commit_idx + 1;
                         commit_consumer.monitor().set_highest_handled_commit(commit_idx);
                         commit_consumer.update_replay_after_commit_index(commit_idx);
+
+                        // CRITICAL FIX: Ensure shared_last_global_exec_index is aligned with the final GEI
+                        // after FINAL-GATE. If we don't, CommitProcessor will start proposing blocks
+                        // using the pre-FINAL-GATE GEI, causing GEI duplicate forks on Go!
+                        {
+                            let mut gei_guard = shared_last_global_exec_index.lock().await;
+                            *gei_guard = gei;
+                            tracing::info!("🔄 [FINAL-GATE] Updated shared_last_global_exec_index to {}", gei);
+                        }
                     }
                     _ => {}
                 }

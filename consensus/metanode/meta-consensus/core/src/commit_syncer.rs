@@ -1048,7 +1048,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     my_commit, is_schedule_pending, retry_count
                                 );
                                 let mut max_peer_commit: u32 = 0;
-                                let mut polled_peers: u32 = 0;
+                                let mut polled_stake = inner.context.committee.stake(inner.context.own_index);
                                 let timeout = Duration::from_secs(2);
                                 
                                 for authority in inner.context.committee.authorities().map(|(i, _)| i) {
@@ -1057,13 +1057,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     }
                                     if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
                                         max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
-                                        polled_peers += 1;
+                                        polled_stake += inner.context.committee.stake(authority);
                                     }
                                 }
 
                                 // ── Case E: No peers reachable ──
                                 // Never act without data from the network.
-                                if polled_peers == 0 {
+                                if polled_stake == inner.context.committee.stake(inner.context.own_index) {
                                     tracing::warn!(
                                         "⚠️ [ACTIVE-SYNC-RECOVERY] Case E: Failed to reach any peers. \
                                          Cannot determine network state. Will retry next cycle. \
@@ -1097,6 +1097,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     return;
                                 }
 
+                                // ── QUORUM CHECK FOR STALL ──
+                                // To safely declare the network stalled (Case B/C) and act on it,
+                                // we MUST have heard from a Quorum of stake. If we heard from less,
+                                // the unresponsive nodes might be ahead, so unlocking would cause a fork!
+                                let quorum_threshold = inner.context.committee.quorum_threshold();
+                                if polled_stake < quorum_threshold {
+                                    tracing::warn!(
+                                        "⚠️ [ACTIVE-SYNC-RECOVERY] Potential deadlock at commit {}, \
+                                         but lacking Quorum to confirm! (Polled: {} / Quorum: {}). \
+                                         Will retry next cycle.",
+                                         my_commit, polled_stake, quorum_threshold
+                                    );
+                                    return;
+                                }
+
                                 // ── Case B: Peers SAME + schedule NOT confirmed ──
                                 // After snapshot recovery, the LeaderSwapTable is stale.
                                 // We CANNOT unlock — local commits would use wrong leader
@@ -1123,14 +1138,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     return;
                                 }
 
-                                // ── Case C: REMOVED ──
-                                // The node MUST wait for the network to commit its own block
-                                // before unlocking the committer. `has_own_block_committed` is
-                                // the ONLY safe unlock mechanism to prevent sparse DAG forks.
-                                tracing::info!(
-                                    "⏳ [ACTIVE-SYNC-RECOVERY] Node is at network tip ({}), waiting for its own proposed block to be committed.",
+                                // ── Case C: Peers SAME + schedule confirmed ──
+                                // The entire cluster is at the same commit level, but no one is committing.
+                                // This is a Cluster Cold Start Deadlock! All nodes are waiting for 
+                                // CertifiedCommits to fill their sparse DAGs, but no node is producing them.
+                                // It is SAFE to unlock the local committer because if all nodes have identical
+                                // sparse DAGs, they will all deterministically produce identical subdags!
+                                tracing::warn!(
+                                    "🔓 [DEADLOCK-BREAKER] Network is stalled at commit {} but cluster is fully synced. \
+                                     Forcing local committer unlock to break Cold Start Deadlock!",
                                     my_commit
                                 );
+                                hub.clear_sparse_dag_boundary();
                             });
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         } else {
