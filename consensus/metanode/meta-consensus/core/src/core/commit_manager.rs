@@ -445,23 +445,26 @@ impl Core {
                          Using certified commit data (already network-verified).",
                         sub_dag.commit_ref.index, certified_commit.reference(), sub_dag.commit_ref
                     );
-                    
-                    // Force the authoritative network data to override the sparse local DAG's linearization
-                    sub_dag.blocks = certified_commit.blocks().to_vec();
-                    sub_dag.commit_ref = certified_commit.reference();
-                    
-                    // FORK-SAFETY (May 2026): Ensure the entire SubDag is mathematically identical to the network
-                    // by copying the leader and execution metadata. The local Sparse DAG might have 
-                    // picked a different leader block or missed the network's agreed global_exec_index.
-                    sub_dag.leader = certified_commit.leader();
-                    sub_dag.leader_address = certified_commit.leader_address().to_vec();
-                    sub_dag.global_exec_index = certified_commit.global_exec_index();
-                    
-                    // FORK-SAFETY (May 2026): The network's CertifiedCommit timestamp is authoritative.
-                    // If we recompute it from a Sparse DAG (snapshot recovery), we might use a subset 
-                    // of blocks and produce a DIFFERENT timestamp, leading to execution-layer fork divergence.
-                    sub_dag.timestamp_ms = certified_commit.timestamp_ms();
                 }
+                
+                // FORK-SAFETY FIX (May 2026): UNCONDITIONAL OVERRIDE
+                // Even if the leader digest matches, the local sparse DAG might have linearized 
+                // a different subset of ancestor blocks, resulting in a DIFFERENT timestamp_ms 
+                // or transaction sequence. We MUST ALWAYS override the entire subdag with the 
+                // network's CertifiedCommit data to guarantee bit-perfect execution parity.
+                
+                // Force the authoritative network data to override the sparse local DAG's linearization
+                sub_dag.blocks = certified_commit.blocks().to_vec();
+                sub_dag.commit_ref = certified_commit.reference();
+                
+                // Ensure the entire SubDag is mathematically identical to the network
+                // by copying the leader and execution metadata.
+                sub_dag.leader = certified_commit.leader();
+                sub_dag.leader_address = certified_commit.leader_address().to_vec();
+                sub_dag.global_exec_index = certified_commit.global_exec_index();
+                
+                // The network's CertifiedCommit timestamp is authoritative.
+                sub_dag.timestamp_ms = certified_commit.timestamp_ms();
             }
         }
 

@@ -1865,12 +1865,71 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 self.last_fetched_schedule_cycle = Some(current_cycle);
                             } else if needs_schedule_recovery {
                                 if schedule_ready_to_recover {
-                                    let scores = reputation_scores.unwrap_or_default();
-                                    tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
-                                    self.inner.dag_state_writer.inject_baseline_scores(scores);
-                                    // Send empty commits list to trigger Core to process the new baseline
-                                    let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
-                                    self.last_fetched_schedule_cycle = Some(current_cycle);
+                                    if last_schedule_change_index == 0 {
+                                        // ─────────────────────────────────────────────────────
+                                        // [CYCLE-0 GUARD] Schedule recovery for epoch's first cycle.
+                                        //
+                                        // When commit index < commits_per_schedule (cycle 0 of the
+                                        // current epoch), no boundary reputation scores have been
+                                        // accumulated yet. The initial LeaderSchedule is either:
+                                        //   a) Genesis epoch:  pure round-robin from validator keys
+                                        //   b) Epoch N ≥ 1:   inherited from epoch N-1 final scores,
+                                        //      already embedded in the snapshot's DagState.
+                                        //
+                                        // Injecting empty scores (old code) would OVERWRITE the
+                                        // snapshot's correct scores → schedule divergence → fork risk.
+                                        //
+                                        // Instead, we clear the flag without touching DagState scores.
+                                        // The existing 4-layer fork protection guarantees safety even
+                                        // if snapshot scores are absent:
+                                        //   L1: PHASE-GUARD blocks local committer during catch-up
+                                        //   L2: SPARSE-DAG-GUARD blocks until DAG is dense
+                                        //   L3: QUORUM-REQUIREMENT needs 2f+1 to commit
+                                        //   L4: CertifiedCommit OVERRIDE forces network data
+                                        // ─────────────────────────────────────────────────────
+                                        tracing::info!(
+                                            "✅ [BASELINE] Cycle-0 Guard: commit #{} is in schedule cycle 0 \
+                                             (threshold={}). No boundary scores to fetch. \
+                                             Clearing schedule_recovery_pending to unblock committer.",
+                                            prev_index,
+                                            crate::leader_schedule::LeaderSchedule::commits_per_schedule()
+                                        );
+                                        self.coordination_hub.set_schedule_recovery_pending(false);
+                                        self.last_fetched_schedule_cycle = Some(current_cycle);
+
+                                        // IMMEDIATE UNLOCK: If sparse_dag_boundary is still set
+                                        // (the node entered Healthy but committer was locked),
+                                        // clear it now in the same tick. This avoids the 5s
+                                        // ACTIVE-SYNC-RECOVERY delay and unblocks the Core
+                                        // committer immediately.
+                                        // FORK-SAFETY: sparse_dag_boundary is cleared here ONLY
+                                        // when we are NOT in CatchingUp. The SPARSE-DAG-GUARD
+                                        // in Core still checks gc_round vs boundary_round before
+                                        // actually running the local committer — so even if we
+                                        // clear prematurely, Core itself will not commit on sparse data.
+                                        if self.coordination_hub.is_healthy()
+                                            && self.coordination_hub.sparse_dag_boundary().is_some()
+                                        {
+                                            tracing::info!(
+                                                "✅ [CYCLE-0 GUARD] Clearing sparse_dag_boundary immediately \
+                                                 (schedule confirmed, node Healthy). \
+                                                 Core's gc_round guard still prevents sparse evaluation."
+                                            );
+                                            self.coordination_hub.clear_sparse_dag_boundary();
+                                            // Kick Core to start proposing
+                                            let disp = self.inner.core_thread_dispatcher.clone();
+                                            tokio::spawn(async move {
+                                                let _ = disp.new_block(consensus_types::block::Round::MAX, true).await;
+                                            });
+                                        }
+                                    } else {
+                                        let scores = reputation_scores.unwrap_or_default();
+                                        tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
+                                        self.inner.dag_state_writer.inject_baseline_scores(scores);
+                                        // Send empty commits list to trigger Core to process the new baseline
+                                        let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                        self.last_fetched_schedule_cycle = Some(current_cycle);
+                                    }
                                 }
                             }
                             

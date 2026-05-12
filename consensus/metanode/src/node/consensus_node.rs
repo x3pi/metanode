@@ -2452,17 +2452,38 @@ impl ConsensusNode {
         // ═══════════════════════════════════════════════════════════════════════════
 
         // 🏥 AUTOMATED RECOVERY HEALTH CHECK
-        // Spawns a background task that waits 30s after startup to verify node health
+        // Spawns a background task that waits 30s after startup to verify node health.
+        // Retries up to 3 times to allow for schedule recovery completion.
         let health_client = executor_client_for_proc.clone();
         let health_peers = config.peer_rpc_addresses.clone();
         tokio::spawn(async move {
+            // Initial delay: allow startup sync to complete
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            let checker = crate::node::health_check::PostRecoveryHealthCheck::new(health_client, health_peers);
-            let result = checker.run().await;
-            if result.is_healthy() {
-                tracing::info!("✅ [HEALTH] Post-recovery health check PASSED: {:?}", result);
-            } else {
-                tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED: {:?}", result);
+            
+            const MAX_HEALTH_RETRIES: u32 = 3;
+            let mut passed = false;
+            for attempt in 1..=MAX_HEALTH_RETRIES {
+                let checker = crate::node::health_check::PostRecoveryHealthCheck::new(
+                    health_client.clone(), health_peers.clone()
+                );
+                let result = checker.run().await;
+                if result.is_healthy() {
+                    tracing::info!("✅ [HEALTH] Post-recovery health check PASSED (attempt {}/{}): {:?}", attempt, MAX_HEALTH_RETRIES, result);
+                    passed = true;
+                    break;
+                } else if attempt < MAX_HEALTH_RETRIES {
+                    tracing::warn!(
+                        "⚠️ [HEALTH] Post-recovery health check FAILED (attempt {}/{}): {:?}. \
+                         Retrying in 30s — node may still be in schedule recovery...",
+                        attempt, MAX_HEALTH_RETRIES, result
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                } else {
+                    tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED after {} attempts: {:?}", MAX_HEALTH_RETRIES, result);
+                }
+            }
+            if !passed {
+                tracing::error!("🚨 [HEALTH] Node did NOT recover within the health check window. Manual investigation required.");
             }
         });
 

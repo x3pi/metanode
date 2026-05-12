@@ -56,25 +56,16 @@ impl Core {
         // Ensure the new block has a higher round than the last proposed block.
         let clock_round = {
             let dag_state = self.dag_state.read();
-            let mut clock_round = dag_state.threshold_clock_round();
+            let clock_round = dag_state.threshold_clock_round();
             let last_proposed_round = dag_state.get_last_proposed_block().round();
             
             if clock_round <= last_proposed_round {
-                if force {
-                    tracing::warn!(
-                        "🔥 [IGNITION] clock_round ({}) <= last_proposed_round ({}). \
-                         force=true is active! Bumping clock_round to {} to break deadlock.",
-                         clock_round, last_proposed_round, last_proposed_round + 1
-                    );
-                    clock_round = last_proposed_round + 1;
-                } else {
-                    info!(
-                        "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
-                        clock_round,
-                        last_proposed_round
-                    );
-                    return None;
-                }
+                info!(
+                    "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
+                    clock_round,
+                    last_proposed_round
+                );
+                return None;
             }
 
             // COLD-START RECOVERY FIX:
@@ -83,21 +74,12 @@ impl Core {
             // is invalid and will be rejected by the BlockManager, causing a crash.
             let gc_round = dag_state.gc_round();
             if clock_round <= gc_round {
-                if force {
-                    tracing::warn!(
-                        "🔥 [IGNITION] clock_round ({}) <= gc_round ({}). \
-                         force=true is active! Bumping clock_round to {} to break deadlock.",
-                         clock_round, gc_round, gc_round + 1
-                    );
-                    clock_round = gc_round + 1;
-                } else {
-                    info!(
-                        "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
-                        clock_round,
-                        gc_round
-                    );
-                    return None;
-                }
+                info!(
+                    "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
+                    clock_round,
+                    gc_round
+                );
+                return None;
             }
 
             clock_round
@@ -775,22 +757,14 @@ impl Core {
                 .inc();
         }
 
-        if smart_select && !parent_round_quorum.reached_threshold(&self.context.committee) {
+        if !parent_round_quorum.reached_threshold(&self.context.committee) {
             tracing::warn!(
-                "⚠️ Quorum not reached for parent round {} when proposing for round {clock_round} (stake: {}/{}). Possible mismatch between DagState and Core. Cannot propose.",
+                "⚠️ Quorum not reached for parent round {} when proposing for round {clock_round} (stake: {}/{}). Cannot propose.",
                 quorum_round,
                 parent_round_quorum.stake(),
                 parent_round_quorum.threshold(&self.context.committee)
             );
             return (vec![], BTreeSet::new());
-        } else if !smart_select && !parent_round_quorum.reached_threshold(&self.context.committee) {
-            tracing::warn!(
-                "🔥 [IGNITION] Quorum not reached for parent round {} (stake: {}/{}). \
-                 However, force=true (smart_select=false), so allowing IGNITION BLOCK proposal to break deadlock.",
-                quorum_round,
-                parent_round_quorum.stake(),
-                parent_round_quorum.threshold(&self.context.committee)
-            );
         }
 
         debug!(
