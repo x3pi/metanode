@@ -376,3 +376,27 @@ mtn-consensus/metanode/config/storage/
 │   └── ...                     # DAG storage
 └── node_1/ ... node_4/
 ```
+
+---
+
+## 10. Automated Debugging & Stress Testing
+
+Hệ thống cung cấp một script đặc biệt để hỗ trợ kiểm tra và gỡ lỗi tự động thông qua AI: `automate_ai_debugging.sh`. Script này sẽ:
+1. Build và khởi động lại cluster với dữ liệu sạch.
+2. Bơm giao dịch tự động để hệ thống tiến tới trạng thái có snapshot (block > 500).
+3. Chạy vòng lặp test độ ổn định (`test_snapshot_stability_loop.sh`).
+4. Tự động đóng gói logs (Go, Rust, báo cáo fork) thành file `.zip` nếu phát hiện lỗi hoặc deadlock.
+
+**Cú pháp:**
+```bash
+./scripts/automate_ai_debugging.sh [ROUNDS] [--test-only]
+```
+
+**Ví dụ:**
+```bash
+# Chạy toàn bộ quy trình với 100 vòng test
+./scripts/automate_ai_debugging.sh 100
+
+# Bỏ qua bước build, khởi động lại và tạo snapshot. Chỉ tập trung chạy test snapshot với 50 vòng (hữu ích khi snapshot đã có sẵn)
+./scripts/automate_ai_debugging.sh 50 --test-only
+```

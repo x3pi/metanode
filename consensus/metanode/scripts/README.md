@@ -168,4 +168,7 @@ tmux ls
 
 # Kiểm tra Go đang xử lý block nào
 ./logs/go-master.sh 0 5 | grep "block"
+
+# Chạy test stability tự động với AI
+./automate_ai_debugging.sh 50 --test-only
 ```
