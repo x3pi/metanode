@@ -229,11 +229,12 @@ start_go_master() {
     cmd+="export GOMEMLIMIT=500MiB && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
-    cmd+="exec ./simple_chain -config=${config} ${pprof_flag} "
-    cmd+=">> \"${log_file}\" 2>&1"
+    cmd+="set -o pipefail; "
+    cmd+="./simple_chain -config=${config} ${pprof_flag} 2>&1 | tee -a \"${log_file}\"; "
 
     cd "$GO_DIR" && tmux new-session -d -s "$session" "bash -c '$cmd'"
-    log_step "Go Master node${node_id} → process started via tmux"
+    # tmux set-option -t "$session" remain-on-exit on
+    log_step "Go Master node${node_id} → process started via tmux (remain-on-exit enabled)"
 }
 
 

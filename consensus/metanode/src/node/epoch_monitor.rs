@@ -199,7 +199,7 @@ pub fn start_unified_epoch_monitor(
                             )
                             .await
                             {
-                                Ok(mut blocks) if !blocks.is_empty() => {
+                                Ok(blocks) if !blocks.is_empty() => {
                                     // CRITICAL FORK-SAFETY FIX: NEVER execute blocks from a future epoch!
                                     let mut valid_blocks = Vec::with_capacity(blocks.len());
                                     for block in blocks {

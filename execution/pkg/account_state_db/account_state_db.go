@@ -657,8 +657,7 @@ func (db *AccountStateDB) getOrCreateAccountState(
 			db.muTrie.Unlock()
 		}
 		if err != nil {
-			logger.Debug("getOrCreateAccountState: Error getting data from Trie: address=%s, err=%v", address.Hex(), err)
-			return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
+			return nil, fmt.Errorf("[getOrCreateAccountState] error getting %s from Trie: %w", address.Hex(), err)
 		}
 
 		db.setLruCacheSafe(address, bData, readEpoch)

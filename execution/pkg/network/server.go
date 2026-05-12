@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types/network"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -122,10 +123,15 @@ func (s *SocketServer) startWorkerPool() {
 								request.Message().Command(),
 								err,
 							)
-							
-							// Gửi lại lỗi cho client để client không bị treo chờ phản hồi
+
+							// Gửi lại lỗi cho client dưới dạng TransactionHashWithError proto
+							// để client có thể parse được đúng định dạng
 							msgID := request.Message().ID()
-							errBytes := []byte(fmt.Sprintf("Server error: %v", err))
+							errProto := &pb.TransactionHashWithError{
+								Code:        -1,
+								Description: fmt.Sprintf("Server error: %v", err),
+							}
+							errBytes, _ := proto.Marshal(errProto)
 							errorMsg := NewMessage(&pb.Message{
 								Header: &pb.Header{
 									Command: command.TransactionError,

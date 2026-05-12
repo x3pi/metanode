@@ -32,9 +32,9 @@ type Handle struct {
 	sessionsMu      sync.Mutex
 	pendingSessions []*FinishedSession
 
-	closing         bool
-	activeCount     int
-	activeCond      *sync.Cond
+	closing     bool
+	activeCount int
+	activeCond  *sync.Cond
 }
 
 // Session wraps the opaque NOMT write session pointer.
@@ -122,7 +122,7 @@ func (h *Handle) CloseForSnapshot() {
 		}
 	}
 
-	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
+	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding
 	// Arc<Core> references, nomt_close will fully drop the database synchronously,
 	// flushing all WALs and memory mapped files safely.
 	if h.ptr != nil {
