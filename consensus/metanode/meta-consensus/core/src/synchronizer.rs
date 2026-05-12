@@ -23,7 +23,7 @@ use mysten_metrics::{
 };
 use parking_lot::{Mutex, RwLock};
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
-use tap::TapFallible;
+
 use tokio::{
     sync::{mpsc::error::TrySendError, oneshot},
     task::{JoinError, JoinSet},
@@ -859,17 +859,45 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 let process_blocks = |blocks: Vec<Bytes>, authority_index: AuthorityIndex| -> ConsensusResult<Vec<VerifiedBlock>> {
                     let mut result = Vec::new();
                     for serialized_block in blocks {
-                        let signed_block = bcs::from_bytes(&serialized_block).map_err(ConsensusError::MalformedBlock)?;
-                        let (verified_block, _) = block_verifier.verify_and_vote(signed_block, serialized_block).tap_err(|err|{
-                            let hostname = context.committee.authority(authority_index).hostname.clone();
-                            context
-                                .metrics
-                                .node_metrics
-                                .invalid_blocks
-                                .with_label_values(&[&hostname, "synchronizer_own_block", err.clone().name()])
-                                .inc();
-                            warn!("Invalid block received from {}: {}", authority_index, err);
-                        })?;
+                        let signed_block: SignedBlock = bcs::from_bytes(&serialized_block).map_err(ConsensusError::MalformedBlock)?;
+                        let verified_block = match block_verifier.verify_and_vote(signed_block.clone(), serialized_block.clone()) {
+                            Ok((block, _)) => block,
+                            Err(ConsensusError::WrongEpoch { expected, actual }) if actual < expected => {
+                                // CROSS-EPOCH FIX: After snapshot restore to epoch N, peers
+                                // may return our last block from epoch N-1. We only care about
+                                // the round number here, so cross-epoch verification is safe.
+                                info!(
+                                    "Cross-epoch own block from peer {} (expected epoch {}, got {}). \
+                                     Using commit-sync verification.",
+                                    authority_index, expected, actual
+                                );
+                                match block_verifier.verify_for_commit_sync(signed_block, serialized_block) {
+                                    Ok((block, _)) => block,
+                                    Err(e) => {
+                                        let hostname = context.committee.authority(authority_index).hostname.clone();
+                                        context
+                                            .metrics
+                                            .node_metrics
+                                            .invalid_blocks
+                                            .with_label_values(&[&hostname, "synchronizer_own_block_cross_epoch", e.clone().name()])
+                                            .inc();
+                                        warn!("Invalid cross-epoch own block from {}: {}", authority_index, e);
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let hostname = context.committee.authority(authority_index).hostname.clone();
+                                context
+                                    .metrics
+                                    .node_metrics
+                                    .invalid_blocks
+                                    .with_label_values(&[&hostname, "synchronizer_own_block", err.clone().name()])
+                                    .inc();
+                                warn!("Invalid block received from {}: {}", authority_index, err);
+                                return Err(err);
+                            }
+                        };
 
                         if verified_block.author() != context.own_index {
                             return Err(ConsensusError::UnexpectedLastOwnBlock { index: authority_index, block_ref: verified_block.reference()});

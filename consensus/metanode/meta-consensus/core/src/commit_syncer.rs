@@ -170,6 +170,14 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// Tracks the schedule cycle of the last successfully fetched network baseline scores.
     /// This ensures we fetch the schedule info at EVERY boundary crossed during fast-forward.
     last_fetched_schedule_cycle: Option<u32>,
+
+    /// POST-RESTORE LIVENESS GUARD (data-driven, zero-timeout):
+    /// Records `local_commit` at the moment node enters Healthy after snapshot restore.
+    /// While `Some(baseline)`, EVERY tick checks if `local_commit > baseline`.
+    /// If stuck, immediately polls peers and kicks Core — no timeout gate.
+    /// Cleared when commits advance past baseline (liveness proven) → `None`.
+    /// `None` = guard inactive (normal operation or liveness already proven).
+    post_restore_commit_baseline: Option<CommitIndex>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -296,6 +304,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             schedule_recovery_fetch_pending: false,
             network_synced_commits: 0,
             last_fetched_schedule_cycle: None,
+            post_restore_commit_baseline: None,
         }
     }
 
@@ -989,6 +998,94 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         // ════════════════════════════════════════════════════════
+                        // POST-RESTORE LIVENESS GUARD (data-driven, zero-timeout)
+                        //
+                        // After snapshot restore → Healthy, this guard activates.
+                        // On EVERY tick (2s), it checks if commits have advanced.
+                        //   - If YES: guard cleared, liveness proven.
+                        //   - If NO: immediately polls peers and kicks Core.
+                        //     No timeout gate. No waiting. Pure data-driven action.
+                        //
+                        // This replaces timeout-based stall detection for snapshot
+                        // recovery scenarios, eliminating the 30-60s detection gap.
+                        //
+                        // Safe actions only (zero fork risk):
+                        //   - Kick Core to force proposal (safe: peers will reject bad blocks)
+                        //   - Update quorum to trigger CertifiedCommit fetch (safe: certified data)
+                        //   - Retry next tick (safe: no state mutation)
+                        // ════════════════════════════════════════════════════════
+                        if let Some(baseline) = self.post_restore_commit_baseline {
+                            if local_commit > baseline {
+                                // Liveness proven! Commits are advancing past the restore point.
+                                self.post_restore_commit_baseline = None;
+                                tracing::info!(
+                                    "✅ [POST-RESTORE-GUARD] Liveness VERIFIED! \
+                                     Commits advanced: {} → {} (delta={}). Guard cleared.",
+                                    baseline, local_commit, local_commit - baseline
+                                );
+                            } else if self.coordination_hub.is_healthy() {
+                                // Commits stuck at baseline — take immediate action.
+                                // No timeout gate: runs on THIS tick.
+                                let inner = self.inner.clone();
+                                let hub = self.coordination_hub.clone();
+                                let my_commit = local_commit;
+                                let guard_baseline = baseline;
+                                tokio::spawn(async move {
+                                    tracing::info!(
+                                        "🔄 [POST-RESTORE-GUARD] Commits stuck at {} (baseline={}). \
+                                         Polling peers for corrective action...",
+                                        my_commit, guard_baseline
+                                    );
+                                    let timeout = Duration::from_secs(2);
+                                    let mut max_peer_commit: u32 = 0;
+                                    let mut peers_reached: u32 = 0;
+
+                                    for authority in inner.context.committee.authorities().map(|(i, _)| i) {
+                                        if authority == inner.context.own_index {
+                                            continue;
+                                        }
+                                        if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
+                                            max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                            peers_reached += 1;
+                                        }
+                                    }
+
+                                    if peers_reached == 0 {
+                                        tracing::warn!(
+                                            "⏳ [POST-RESTORE-GUARD] No peers reachable. Will retry next tick."
+                                        );
+                                        return;
+                                    }
+
+                                    if max_peer_commit > my_commit {
+                                        // Peers are ahead — fetch certified commits (data-driven recovery)
+                                        tracing::info!(
+                                            "📥 [POST-RESTORE-GUARD] Peers ahead ({} > {}). \
+                                             Updating quorum to trigger CertifiedCommit fetch.",
+                                            max_peer_commit, my_commit
+                                        );
+                                        hub.update_quorum_commit_index(max_peer_commit);
+                                    } else {
+                                        // Peers at same level — kick Core to force new proposal
+                                        tracing::info!(
+                                            "🔨 [POST-RESTORE-GUARD] Peers at same commit ({}). \
+                                             Kicking Core to produce new block.",
+                                            max_peer_commit
+                                        );
+                                        if let Err(e) = inner.core_thread_dispatcher.new_block(
+                                            consensus_types::block::Round::MAX, true
+                                        ).await {
+                                            tracing::warn!(
+                                                "Failed to kick Core for post-restore liveness: {:?}", e
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        // ════════════════════════════════════════════════════════
+
                         // ACTIVE PEER SYNC RECOVERY (replaces Stall Detector 6)
                         //
                         // Design philosophy: Blockchain MUST NEVER fork. Instead of
@@ -1259,6 +1356,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 info!("🛌 [STANDBY MODE] CommitSyncer has entered Standby Mode. Sleeping until quorum advances...");
                                 // When switching to Healthy, the 2-second interval tick continues as a background heartbeat,
                                 // but we rely primarily on `quorum_advanced_notify` to wake up instantly.
+
+                                // POST-RESTORE LIVENESS GUARD: Activate if this session underwent snapshot recovery.
+                                // The guard runs on EVERY tick (no timeout) until commits advance past baseline.
+                                if self.coordination_hub.was_recovery_activated()
+                                    && self.post_restore_commit_baseline.is_none()
+                                {
+                                    self.post_restore_commit_baseline = Some(local_commit);
+                                    info!(
+                                        "🛡️ [POST-RESTORE-GUARD] Activated at commit {}. \
+                                         Will verify commit advancement on EVERY tick (no timeout). \
+                                         Guard clears when local_commit > {}.",
+                                        local_commit, local_commit
+                                    );
+                                }
                             }
                         }
                         last_state_check = now;
