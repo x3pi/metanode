@@ -56,7 +56,7 @@ pub enum NodeConsensusPhase {
     Healthy,
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Centralized state machine for coordinating node phase transitions.
 #[derive(Clone)]
@@ -107,6 +107,22 @@ pub struct ConsensusCoordinationHub {
 
     /// LEGACY: Now shadowed by recovery_barrier.is_schedule_pending() — kept for backward compat.
     schedule_recovery_pending: Arc<AtomicBool>,
+
+    /// FORK-SAFETY (May 2026 — Structural Fix 2):
+    /// Set to `true` ONLY after POST-GATE-VERIFY in consensus_node.rs confirms
+    /// that the local block hash at the tip matches the peer's block hash.
+    /// CommitSyncer's determine_startup_sync_exit() uses this as Gate 5.
+    /// This ensures the node CANNOT transition to Healthy or propose blocks
+    /// until its state is bit-perfect verified against the network.
+    block_hash_verified: Arc<AtomicBool>,
+
+    /// Counter to track how many network commits we've processed since transitioning to Healthy.
+    /// Used to prevent the local committer from evaluating a sparse DAG immediately after fast-forwarding.
+    network_commits_since_healthy: Arc<AtomicUsize>,
+
+    /// The time at which the local committer should unlock even if no commits have been processed.
+    /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
+    healthy_unlock_time: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -121,6 +137,9 @@ impl ConsensusCoordinationHub {
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
+            block_hash_verified: Arc::new(AtomicBool::new(false)),
+            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
+            healthy_unlock_time: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -225,6 +244,11 @@ impl ConsensusCoordinationHub {
             );
             // Phase changed.
             *w = new_phase;
+            
+            if new_phase == NodeConsensusPhase::Healthy {
+                self.reset_network_commits_since_healthy();
+                self.set_healthy_unlock_time(None);
+            }
         }
     }
 
@@ -233,28 +257,98 @@ impl ConsensusCoordinationHub {
         matches!(*self.phase.read(), NodeConsensusPhase::Healthy)
     }
 
-    /// Returns true if the node is Healthy.
+    /// Convenience check for whether the node is Healthy.
     pub fn is_healthy_stable(&self) -> bool {
         self.is_healthy()
     }
 
     /// Returns true if the local committer is allowed to run.
     /// After snapshot recovery, this is false until the node processes
-    /// a real CertifiedCommit from the network, proving DAG consistency.
+    /// a minimum number of CertifiedCommits from the network in Healthy phase,
+    /// proving DAG density and consistency.
     pub fn is_local_commit_unlocked(&self) -> bool {
         self.recovery_local_commit_unlocked.load(Ordering::Acquire)
     }
 
-    /// Unlock the local committer after receiving a real CertifiedCommit.
+    /// Reset the network commits counter when transitioning to Healthy.
+    pub fn reset_network_commits_since_healthy(&self) {
+        self.network_commits_since_healthy.store(0, Ordering::Release);
+    }
+
+    /// Increment the number of network commits processed since becoming Healthy.
+    pub fn inc_network_commits_since_healthy(&self, count: usize) {
+        self.network_commits_since_healthy.fetch_add(count, Ordering::Release);
+    }
+
+    /// Get the number of network commits processed since becoming Healthy.
+    pub fn get_network_commits_since_healthy(&self) -> usize {
+        self.network_commits_since_healthy.load(Ordering::Acquire)
+    }
+
+    /// Unlock the local committer after receiving enough real CertifiedCommits.
     /// Called from `Core::add_certified_commits()` when processing succeeds.
     /// Once unlocked, it stays unlocked for the remainder of this epoch.
     pub fn unlock_local_commit(&self) {
+        let commits_processed = self.get_network_commits_since_healthy();
+        // DAG DENSITY GUARD: Require 5 commits to be processed in Healthy phase
+        // before allowing the local committer to run.
+        if commits_processed >= 5 {
+            if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
+                tracing::info!(
+                    "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: processed {} CertifiedCommits from network in Healthy phase. \
+                     DAG consistency and density confirmed. Local commit evaluation is now permitted.",
+                    commits_processed
+                );
+            }
+        } else {
+            // Check if we are already unlocked, to avoid spamming logs
+            if !self.is_local_commit_unlocked() {
+                tracing::info!(
+                    "⏳ [RECOVERY-GUARD] Local committer remains locked. Processed {}/5 network commits in Healthy phase.",
+                    commits_processed
+                );
+            }
+        }
+    }
+
+    /// Explicitly force the local committer to unlock (used by round-based hybrid guard)
+    pub fn force_unlock_local_commit(&self) {
         if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
             tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: received CertifiedCommit from network. \
-                 DAG consistency confirmed. Local commit evaluation is now permitted."
+                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted."
             );
         }
+    }
+
+    /// Pre-unlock local committer for a FRESH DAG (no prior commits).
+    ///
+    /// Called when the DAG has `last_commit_index == 0`, which occurs in:
+    ///   1. **Genesis** — brand new network, all nodes start from block 0
+    ///   2. **Epoch transition** — new epoch starts with empty DAG, all nodes
+    ///      just completed a full epoch of healthy consensus
+    ///
+    /// In both cases, ALL nodes start from the same clean state. There is no
+    /// stale/partial DAG data that could cause divergent commits. The
+    /// RECOVERY-GUARD (waiting for 5 network commits) is NOT needed.
+    ///
+    /// This is NOT called for cold restart (DAG loaded from disk with
+    /// `last_commit > 0`), where the guard IS needed to prevent sparse DAG fork.
+    pub fn pre_unlock_for_fresh_dag(&self) {
+        self.recovery_local_commit_unlocked.store(true, Ordering::Release);
+        self.reset_network_commits_since_healthy();
+        self.set_healthy_unlock_time(None);
+        tracing::info!(
+            "🔓 [FRESH-DAG] Local committer pre-unlocked: DAG has no prior commits. \
+             All nodes start from synchronized empty state — density guard not needed."
+        );
+    }
+
+    pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
+        *self.healthy_unlock_time.read()
+    }
+
+    pub fn set_healthy_unlock_time(&self, time: Option<std::time::Instant>) {
+        *self.healthy_unlock_time.write() = time;
     }
 
     /// Convenience check for whether the node is explicitly catching up.
@@ -369,6 +463,26 @@ impl ConsensusCoordinationHub {
         self.recovery_barrier.activate();
         // Also set legacy flags for backward compatibility
         self.schedule_recovery_pending.store(true, Ordering::Release);
+        // Reset block hash verification — must be re-verified after each recovery
+        self.block_hash_verified.store(false, Ordering::Release);
+    }
+
+    /// Mark block hash as verified against peers.
+    /// Called from consensus_node.rs after POST-GATE-VERIFY passes successfully.
+    /// This is Gate 5 in determine_startup_sync_exit().
+    pub fn set_block_hash_verified(&self, verified: bool) {
+        let was = self.block_hash_verified.swap(verified, Ordering::Release);
+        if verified && !was {
+            tracing::info!(
+                "✅ [BLOCK-HASH-GATE] Block hash VERIFIED against peers. \
+                 Gate 5 cleared — node state is bit-perfect."
+            );
+        }
+    }
+
+    /// Returns whether the block hash at tip has been verified against peers.
+    pub fn is_block_hash_verified(&self) -> bool {
+        self.block_hash_verified.load(Ordering::Acquire)
     }
 
 }
@@ -394,6 +508,9 @@ impl ConsensusCoordinationHub {
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
+            block_hash_verified: Arc::new(AtomicBool::new(true)),
+            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
+            healthy_unlock_time: Arc::new(RwLock::new(None)),
         }
     }
 

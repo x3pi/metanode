@@ -134,7 +134,7 @@ impl ExecutorClient {
         let mut all_proto_txs = Vec::new();
         let mut all_system_txs = Vec::new();
         let mut total_after_dedup = 0;
-
+        
         if total_tx_before > 0 {
             let (txs, sys_txs) = self.build_sorted_transactions(subdag)?;
             all_proto_txs = txs;
@@ -153,10 +153,10 @@ impl ExecutorClient {
             info!("🔪 [FRAGMENT] Splitting large commit: {} TXs → {} fragments of ≤{} TXs each (global_exec_index={}, commit_index={}, epoch={})",
                 total_tx_before, num_fragments, MAX_TXS_PER_GO_BLOCK, global_exec_index, subdag.commit_ref.index, epoch);
 
-            // CRITICAL FORK-SAFETY v5: Recalculate fragments using total_tx_before
+            // CRITICAL FORK-SAFETY v5: Recalculate fragments using total_tx_before 
             // (from the consensus deterministic subdag) instead of total_after_dedup.
-            // If we use total_after_dedup, a restarted node (empty tx_recycler) will
-            // fragment differently than a continuous node (populated tx_recycler),
+            // If we use total_after_dedup, a restarted node (empty tx_recycler) will 
+            // fragment differently than a continuous node (populated tx_recycler), 
             // causing GEI divergence!
             let actual_fragments = total_tx_before.div_ceil(MAX_TXS_PER_GO_BLOCK);
 
@@ -180,7 +180,7 @@ impl ExecutorClient {
                     } else {
                         let mut next_bn = self.next_block_number.lock().await;
                         let mut last_ep = self.last_processed_epoch.lock().await;
-
+                        
                         let is_epoch_boundary = epoch > *last_ep;
                         if is_epoch_boundary {
                             info!("🔄 [EPOCH BOUNDARY FRAGMENT] Sending Epoch block to Go! Epoch {} -> {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}", 
@@ -188,9 +188,9 @@ impl ExecutorClient {
                             *last_ep = epoch;
                         }
 
-                        // We ALWAYS increment block number for fragments to ensure block numbers
-                        // stay perfectly synchronized between continuous nodes (whose TxRecycler
-                        // may deduplicate many TXs making the fragment empty) and restarted nodes
+                        // We ALWAYS increment block number for fragments to ensure block numbers 
+                        // stay perfectly synchronized between continuous nodes (whose TxRecycler 
+                        // may deduplicate many TXs making the fragment empty) and restarted nodes 
                         // (whose empty TxRecycler will allow TXs through).
                         let bn = *next_bn;
                         *next_bn += 1;
@@ -200,7 +200,7 @@ impl ExecutorClient {
 
                 let subdag_commit_idx = subdag.commit_ref.index;
                 let is_last_frag = frag_idx == actual_fragments - 1;
-
+                
                 // CRITICAL FORK-SAFETY v6: Do not update Go's last_handled_commit_index until
                 // the FINAL fragment of a commit is executed. If a node crashes mid-commit,
                 // Go will stay at C-1, forcing the node to safely replay the entire commit C
@@ -223,11 +223,7 @@ impl ExecutorClient {
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
                     // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
                     is_authoritative_gei: false,
-                    system_transactions: if is_last_frag {
-                        all_system_txs.clone()
-                    } else {
-                        Vec::new()
-                    },
+                    system_transactions: if is_last_frag { all_system_txs.clone() } else { Vec::new() },
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -263,39 +259,28 @@ impl ExecutorClient {
         // ═══════════════════════════════════════════════════════════════
 
         let _has_system_tx = subdag.blocks.iter().any(|b| {
-            b.transactions()
-                .iter()
-                .any(|tx| SystemTransaction::from_bytes(tx.data()).is_ok())
+            b.transactions().iter().any(|tx| {
+                SystemTransaction::from_bytes(tx.data()).is_ok()
+            })
         });
 
         let block_number = {
             let mut next_bn = self.next_block_number.lock().await;
             let mut last_ep = self.last_processed_epoch.lock().await;
-
+            
             let is_epoch_boundary = epoch > *last_ep;
             if is_epoch_boundary {
-                info!("🔄 [EPOCH BOUNDARY] Preparing to send Epoch Boundary Block to Go: Epoch {} -> {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}, HasSysTxs: {}", 
-                    *last_ep, epoch, all_system_txs.len(), all_proto_txs.len(), global_exec_index, *next_bn, !all_system_txs.is_empty());
+                info!("🔄 [EPOCH BOUNDARY] Preparing to send Epoch Boundary Block to Go: Epoch {} -> {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}", 
+                    *last_ep, epoch, all_system_txs.len(), all_proto_txs.len(), global_exec_index, *next_bn);
                 *last_ep = epoch;
             }
-            if !all_system_txs.is_empty() {
-                info!("⚙️ [SYSTEM TX SPEC] Sending Block with System Transactions to Go: Epoch {}, SystemTxs: {}, UserTxs: {}, GEI: {}, Block: {}", 
-                    epoch, all_system_txs.len(), all_proto_txs.len(), global_exec_index, *next_bn);
-            }
-
-            // CRITICAL FORK-SAFETY v7: Only increment block number if the commit
-            // will actually result in a Go block (has txs, is epoch boundary, or has system txs).
-            // This prevents artificial block inflation during STARTUP-SYNC replay.
-            // We use total_tx_before because it's deterministic across all nodes regardless
-            // of tx_recycler deduplication state.
-            if total_tx_before > 0 || is_epoch_boundary || !all_system_txs.is_empty() {
-                let bn = *next_bn;
-                *next_bn += 1;
-                bn
-            } else {
-                trace!("⏭️  [BLOCK-NUM] Commit is empty and not epoch boundary, keeping BN=0");
-                0
-            }
+            
+            // CRITICAL FORK-SAFETY v7: Always increment block number for every commit,
+            // even if empty. This ensures Go receives a sequential block_number and can
+            // explicitly create an empty block to prevent "Ghost block" sequence gaps.
+            let bn = *next_bn;
+            *next_bn += 1;
+            bn
         };
 
         // Construct ExecutableBlock directly using pre-processed transactions
@@ -358,15 +343,10 @@ impl ExecutorClient {
                     self.record_send_success().await;
                     trace!(
                         "✅ [PHASE-B DIRECT] Sent commit_index={} to Go FFI (epoch={}, tx={})",
-                        commit_index,
-                        epoch,
-                        total_tx
+                        commit_index, epoch, total_tx
                     );
                 } else {
-                    warn!(
-                        "⚠️  [PHASE-B DIRECT] FFI execute_block failed for commit_index={}",
-                        commit_index
-                    );
+                    warn!("⚠️  [PHASE-B DIRECT] FFI execute_block failed for commit_index={}", commit_index);
                     self.record_send_failure().await;
                 }
             } else {
@@ -425,9 +405,7 @@ impl ExecutorClient {
                     warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
-            buffer
-                .entry(global_exec_index)
-                .or_insert((epoch_data_bytes, epoch, commit_index));
+            buffer.entry(global_exec_index).or_insert((epoch_data_bytes, epoch, commit_index));
             trace!("[batch_id=E{}C{}G{}] 📦 [SEQUENTIAL-BUFFER] Added block: total_tx={}, buffer_size={}",
                 epoch, commit_index, global_exec_index, total_tx, buffer.len());
         }
@@ -664,11 +642,8 @@ impl ExecutorClient {
             const WIPE_SAFE_PERSIST_INTERVAL: u64 = 10;
             if last_idx.is_multiple_of(WIPE_SAFE_PERSIST_INTERVAL) || batch_size > 1 {
                 let _ = super::persistence::persist_last_sent_index_wipe_safe(
-                    storage_path,
-                    last_idx,
-                    last_commit_index,
-                )
-                .await;
+                    storage_path, last_idx, last_commit_index
+                ).await;
             }
 
             // Phase 4.5: Store ExecutableBlock bytes for sync peers
@@ -869,16 +844,14 @@ impl ExecutorClient {
         }
     }
 
+
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///
     /// This extracts the filter → dedup → sort logic from convert_to_protobuf
     /// so it can be reused by the fragmentation path. Returns `(Vec<TransactionExe>, Vec<Vec<u8>>)`
-    /// where the first is deterministic order (sorted by tx hash) user transactions,
+    /// where the first is deterministic order (sorted by tx hash) user transactions, 
     /// and the second is the list of BCS-encoded SystemTransactions.
-    fn build_sorted_transactions(
-        &self,
-        subdag: &CommittedSubDag,
-    ) -> Result<(Vec<TransactionExe>, Vec<Vec<u8>>)> {
+    fn build_sorted_transactions(&self, subdag: &CommittedSubDag) -> Result<(Vec<TransactionExe>, Vec<Vec<u8>>)> {
         use crate::types::tx_hash::{
             calculate_transaction_hash_single, verify_transaction_protobuf,
         };

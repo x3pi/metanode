@@ -261,7 +261,13 @@ impl CommitProcessor {
                         if addr.len() == 20 {
                             subdag.leader_address = addr.clone();
                             return;
+                        } else {
+                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={})", epoch, leader_author_index, addr.len());
+                            return;
                         }
+                    } else {
+                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={})", epoch, leader_author_index, addrs.len());
+                        return;
                     }
                 }
             }

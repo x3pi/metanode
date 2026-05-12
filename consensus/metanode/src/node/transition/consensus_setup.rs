@@ -121,6 +121,11 @@ pub(super) async fn setup_validator_consensus(
     params.db_path = db_path;
     node.boot_counter += 1;
 
+    // NOTE: RECOVERY-GUARD activation is handled automatically inside
+    // ConsensusAuthority::start() based on DAG state (see authority_node.rs
+    // GUARD-POLICY). Fresh DAG (epoch transition) → auto pre-unlock.
+    // No manual pre_unlock call needed here.
+
     node.authority = Some(
         ConsensusAuthority::start(
             NetworkType::Tonic,

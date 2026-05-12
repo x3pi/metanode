@@ -2,6 +2,7 @@
 // @markdown processor/block_processor_sync.go - GEI ordering, fork-safety, and block sync processing
 package processor
 
+// Go build cache invalidation comment: Force relink of Rust FFI library
 import (
 	"fmt"
 	"time"
@@ -233,6 +234,18 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				*nextExpectedGlobalExecIndex = globalExecIndex
 				goto EPOCH_BOUNDARY_FALLTHROUGH
 			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// GHOST-BLOCK-GUARD: If Rust explicitly assigned a block number
+		// for this 0-tx commit, we MUST create an empty block to prevent
+		// sequence gaps in the Go chain.
+		// ═══════════════════════════════════════════════════════════════
+		if epochData.GetBlockNumber() > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Rust assigned block_number=%d for 0-tx commit (GEI=%d). Creating empty block to prevent sequence gap.",
+				epochData.GetBlockNumber(), globalExecIndex)
+			*nextExpectedGlobalExecIndex = globalExecIndex
+			goto EPOCH_BOUNDARY_FALLTHROUGH
 		}
 
 		// Drain pending blocks
@@ -487,39 +500,42 @@ PROCESS_BLOCK:
 	}
 
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
-		logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
+		if epochData.GetBlockNumber() > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Empty payload (deduplicated), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+		} else {
+			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
-		// Update GlobalExecIndex tracking (persistent)
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			// Update GlobalExecIndex tracking (persistent)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
-		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
-		if globalExecIndex > 0 {
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				logger.Info("✅ [FORK-SAFETY] Found pending block global_exec_index=%d after skipped empty commit", *nextExpectedGlobalExecIndex)
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				commitTimestampMs = epochData.GetCommitTimestampMs()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
-			} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
-				skippedTotalTxs := len(skippedBlock.Transactions)
-				logger.Info("✅ [LAG-HANDLING] Found skipped commit global_exec_index=%d after skipped empty (txs=%d)", *nextExpectedGlobalExecIndex, skippedTotalTxs)
-				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
-				epochData = skippedBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				commitTimestampMs = epochData.GetCommitTimestampMs()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
+				// Check pending blocks
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Found pending block global_exec_index=%d after skipped empty commit", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					globalExecIndex = epochData.GetGlobalExecIndex()
+					commitIndex = epochData.GetCommitIndex()
+					commitTimestampMs = epochData.GetCommitTimestampMs()
+					epochNum = epochData.GetEpoch()
+					goto PROCESS_BLOCK
+				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					skippedTotalTxs := len(skippedBlock.Transactions)
+					logger.Info("✅ [LAG-HANDLING] Found skipped commit global_exec_index=%d after skipped empty (txs=%d)", *nextExpectedGlobalExecIndex, skippedTotalTxs)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					globalExecIndex = epochData.GetGlobalExecIndex()
+					commitIndex = epochData.GetCommitIndex()
+					commitTimestampMs = epochData.GetCommitTimestampMs()
+					epochNum = epochData.GetEpoch()
+					goto PROCESS_BLOCK
+				}
 			}
 			return
 		}
-		return
 	}
 
 	logger.Debug("📦 [TX FLOW] Processing %d transactions straight from ExecutableBlock payload", len(epochData.Transactions))
@@ -596,34 +612,38 @@ PROCESS_BLOCK:
 
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
-		logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+		if epochData.GetBlockNumber() > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] len(allTransactions) is 0 after unmarshal, but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+		} else {
+			logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 
-		// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
-		if globalExecIndex > 0 {
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					globalExecIndex = epochData.GetGlobalExecIndex()
+					commitIndex = epochData.GetCommitIndex()
+					epochNum = epochData.GetEpoch()
+					goto PROCESS_BLOCK
+				}
+
+				if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [LAG-HANDLING] Found skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					globalExecIndex = epochData.GetGlobalExecIndex()
+					commitIndex = epochData.GetCommitIndex()
+					epochNum = epochData.GetEpoch()
+					goto PROCESS_BLOCK
+				}
 			}
-
-			if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
-				logger.Info("✅ [LAG-HANDLING] Found skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
-				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
-				epochData = skippedBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
-			}
+			return
 		}
-		return
 	}
 
 	fileLogger.Info("block: --------------------------------%v txs=%d", *currentBlockNumber, len(allTransactions))
@@ -783,29 +803,34 @@ PROCESS_BLOCK:
 	// that dropped it early via Rust tx_recycler.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
-		logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
-		
-		// Invalidate state to ensure next block reads fresh from NOMT
-		bp.chainState.InvalidateAllState()
-		
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
-		
-		if globalExecIndex > 0 {
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
-			// Process any pending blocks that are now in order
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				logger.Info("✅ [FORK-SAFETY] Processing pending block with global_exec_index=%d", *nextExpectedGlobalExecIndex)
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
-			} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
-				logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
-				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
-				epochData = skippedBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
+		if epochData.GetBlockNumber() > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", 
+				len(allTransactions), epochData.GetBlockNumber(), globalExecIndex)
+		} else {
+			logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
+			
+			// Invalidate state to ensure next block reads fresh from NOMT
+			bp.chainState.InvalidateAllState()
+			
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				// Process any pending blocks that are now in order
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Processing pending block with global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
 			}
+			return
 		}
-		return
 	}
 
 	logger.Debug("[PERF] ProcessTransactions: %d txs in %v (%.0f tx/s) for block #%d",

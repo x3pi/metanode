@@ -613,9 +613,51 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         );
 
         // First try to get commits from current store
-        let commits = self
+        let mut commits = self
             .store
             .scan_commits((commit_range.start()..=inclusive_end).into())?;
+
+        // STORE FALLBACK: If commits are missing, try legacy epoch stores
+        // We only fallback if we couldn't find ALL the requested commits
+        let expected_commits = inclusive_end - commit_range.start() + 1;
+        if commits.len() < expected_commits as usize {
+            if let Some(ref legacy_manager) = self.legacy_store_manager {
+                info!(
+                    "🔄 [FETCH-COMMITS] {}/{} commits found in current store, searching legacy stores for range {:?}...",
+                    commits.len(), expected_commits, commit_range
+                );
+
+                // For commits, we search through legacy stores from newest to oldest
+                for (epoch, legacy_store) in legacy_manager.get_all_stores() {
+                    if let Ok(legacy_commits) = legacy_store.scan_commits((commit_range.start()..=inclusive_end).into()) {
+                        if !legacy_commits.is_empty() {
+                            info!(
+                                "✅ [LEGACY SYNC] Found {} commits in epoch {} store",
+                                legacy_commits.len(),
+                                epoch
+                            );
+                            
+                            // Merge without duplicates based on commit index
+                            let existing_indices: std::collections::HashSet<_> = 
+                                commits.iter().map(|c| c.index()).collect();
+                                
+                            for commit in legacy_commits {
+                                if !existing_indices.contains(&commit.index()) {
+                                    commits.push(commit);
+                                }
+                            }
+                            
+                            // Sort by index just in case they were added out of order
+                            commits.sort_by_key(|c| c.index());
+                            
+                            if commits.len() >= expected_commits as usize {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // CRITICAL LOGGING: Trace commits found for sync debugging
         if !commits.is_empty() {
@@ -628,7 +670,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             );
         } else {
             info!(
-                "⚠️ [FETCH-COMMITS] No commits found in current store for range {:?}",
+                "⚠️ [FETCH-COMMITS] No commits found in any store for range {:?}",
                 commit_range
             );
         }
@@ -655,21 +697,63 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             info!("⚠️ [FETCH-COMMITS] No commits to return after quorum check");
         }
         
-        let certifier_blocks = self.store
-            .read_blocks(&certifier_block_refs)?
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut certifier_blocks = vec![];
+        if !certifier_block_refs.is_empty() {
+            // First try to read from current store
+            certifier_blocks = self.store
+                .read_blocks(&certifier_block_refs)?
+                .into_iter()
+                .flatten()
+                .collect();
+                
+            // If missing certifier blocks, try legacy stores
+            if certifier_blocks.len() < certifier_block_refs.len() {
+                let found_refs: std::collections::HashSet<_> = 
+                    certifier_blocks.iter().map(|b| b.reference()).collect();
+                let missing_refs: Vec<_> = certifier_block_refs
+                    .iter()
+                    .filter(|r| !found_refs.contains(r))
+                    .cloned()
+                    .collect();
+                    
+                if !missing_refs.is_empty() {
+                    if let Some(ref legacy_manager) = self.legacy_store_manager {
+                        for (_, legacy_store) in legacy_manager.get_all_stores() {
+                            if let Ok(legacy_blocks) = legacy_store.read_blocks(&missing_refs) {
+                                let found_legacy: Vec<_> = legacy_blocks.into_iter().flatten().collect();
+                                certifier_blocks.extend(found_legacy);
+                            }
+                        }
+                    }
+                }
+            }
+        }
             
         let mut commit_infos = vec![];
         for c in &commits {
+            // First try current store
             if let Ok(Some(info)) = self.store.read_commit_info(c.index(), c.digest()) {
                 commit_infos.push(info);
             } else {
-                commit_infos.push(crate::commit::CommitInfo {
-                    reputation_scores: Default::default(),
-                    committed_rounds: vec![],
-                });
+                // If not found, try legacy stores
+                let mut found_info = None;
+                if let Some(ref legacy_manager) = self.legacy_store_manager {
+                    for (_, legacy_store) in legacy_manager.get_all_stores() {
+                        if let Ok(Some(info)) = legacy_store.read_commit_info(c.index(), c.digest()) {
+                            found_info = Some(info);
+                            break;
+                        }
+                    }
+                }
+                
+                if let Some(info) = found_info {
+                    commit_infos.push(info);
+                } else {
+                    commit_infos.push(crate::commit::CommitInfo {
+                        reputation_scores: Default::default(),
+                        committed_rounds: vec![],
+                    });
+                }
             }
         }
 

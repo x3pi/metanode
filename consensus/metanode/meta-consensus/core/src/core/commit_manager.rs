@@ -72,12 +72,14 @@ impl Core {
 
         // DETERMINISTIC RECOVERY GUARD:
         // After successfully processing CertifiedCommits from the network,
-        // unlock the local committer. This ensures the node observes at least one
-        // network-agreed commit after catching up, healing any DAG sparseness
-        // before evaluating local timestamps.
-        // FORK-PREVENTION: Do NOT unlock if STARTUP-SYNC is active. The DAG is still
-        // accumulating historical blocks and is too sparse to safely evaluate local commits.
+        // we track how many network commits have been processed while in Healthy phase.
+        // The local committer will only unlock after 5 such commits, ensuring the DAG
+        // is dense enough (has accumulated orphans) before it evaluates local blocks.
+        // FORK-PREVENTION: Do NOT increment or unlock if STARTUP-SYNC is active.
         if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
+            if self.coordination_hub.is_healthy_stable() {
+                self.coordination_hub.inc_network_commits_since_healthy(commits_count);
+            }
             self.coordination_hub.unlock_local_commit();
         }
 
@@ -185,7 +187,7 @@ impl Core {
                 );
 
                 self.leader_schedule
-                    .update_leader_schedule_v2(&self.dag_state);
+                    .update_leader_schedule_v2(&self.dag_state, &self.dag_state_writer);
 
                 // UNIFIED RECOVERY BARRIER (May 2026):
                 // After a full 300-commit scoring cycle completes, advance the barrier.
@@ -303,26 +305,34 @@ impl Core {
                     break;
                 }
 
-                // DETERMINISTIC RECOVERY GUARD (replaces timeout-based DAG-GAP-GUARD):
-                // After snapshot recovery (last_decided_leader = 0 but local_commit > 0), 
-                // the local committer is LOCKED until the node processes a real CertifiedCommit 
-                // from the network (2f+1 verified).
-                // This is purely event-driven — no timeouts. The node can query peers
-                // for any commit via CommitSyncer::fetch_commits(), and will unlock
-                // as soon as it receives authoritative consensus data.
-                // NOTE: This MUST NOT apply to Genesis (local_commit == 0) or normal restarts
-                // (last_decided_leader > 0), otherwise the entire cluster could deadlock.
-                if self.last_decided_leader.round == 0 && local_commit_index > 0 {
-                    if !self.coordination_hub.is_local_commit_unlocked() {
+                // RECOVERY-GUARD (DAG-State-Aware):
+                // The guard is activated/deactivated at startup by authority_node.rs
+                // based on the actual DAG state:
+                //   - Fresh DAG (genesis/epoch transition): pre-unlocked → passes
+                //   - Populated DAG (cold restart/snapshot): locked → blocks here
+                //
+                // We do NOT use `local_commit_index >= 5` heuristic anymore.
+                // The decision is made explicitly at the source (authority_node.rs),
+                // not inferred from a magic number in the hot path.
+                if !self.coordination_hub.is_local_commit_unlocked() {
+                    let unlock_time = self.coordination_hub.get_healthy_unlock_time();
+                    
+                    // We keep the unlock_time flag just to throttle the log message,
+                    // but we DO NOT force unlock when it expires.
+                    if unlock_time.is_none() {
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                        self.coordination_hub.set_healthy_unlock_time(Some(deadline));
                         tracing::info!(
-                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for first \
-                             CertifiedCommit from network to confirm DAG consistency. \
-                             (local_commit={}, quorum_commit={})",
+                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for 5 network commits \
+                             to build DAG density. (local_commit={}, quorum_commit={}). \
+                             Will NOT arbitrarily unlock via timeout to prevent forks.",
                             local_commit_index,
                             quorum_commit_index
                         );
-                        break;
                     }
+                    
+                    // Strictly wait for the network. No forced unlock.
+                    break;
                 }
 
                 // CRITICAL HOTFIX: Synchronize `last_decided_leader` with `DagState`

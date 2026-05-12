@@ -58,12 +58,13 @@ impl CommitObserver {
         context: Arc<Context>,
         commit_consumer: CommitConsumerArgs,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         transaction_certifier: TransactionCertifier,
         leader_schedule: Arc<LeaderSchedule>,
         epoch_base_index: u64,
     ) -> Self {
         let store = dag_state.read().store();
-        let mut commit_interpreter = Linearizer::new(context.clone(), dag_state.clone());
+        let mut commit_interpreter = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer);
         commit_interpreter.set_epoch_base_index(epoch_base_index);
         let commit_finalizer_handle = CommitFinalizer::start(
             context.clone(),
@@ -480,10 +481,13 @@ mod tests {
                 .with_num_commits_per_schedule(NUM_OF_COMMITS_PER_SCHEDULE),
         );
 
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
         let mut observer = CommitObserver::new(
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             0,
@@ -517,7 +521,7 @@ mod tests {
             .unwrap();
 
         // Trigger a leader schedule update.
-        leader_schedule.update_leader_schedule_v2(&dag_state);
+        leader_schedule.update_leader_schedule_v2(&dag_state, &dag_state_writer);
 
         // Commit the next 5 leaders.
         commits.extend(observer.handle_commit(leaders[5..].to_vec(), None, true).unwrap());
@@ -632,10 +636,13 @@ mod tests {
             dag_state.clone(),
         ));
 
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
         let mut observer = CommitObserver::new(
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             0,
@@ -737,10 +744,13 @@ mod tests {
                     [0; 32],
                     0,
                 );
+            let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
             let _observer = CommitObserver::new(
                 context.clone(),
                 commit_consumer,
                 dag_state.clone(),
+                dag_state_writer.clone(),
                 transaction_certifier.clone(),
                 leader_schedule.clone(),
                 0,
@@ -788,10 +798,13 @@ mod tests {
                     [0; 32],
                     0,
                 );
+            let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
             let _observer = CommitObserver::new(
                 context.clone(),
                 commit_consumer,
                 dag_state.clone(),
+                dag_state_writer.clone(),
                 transaction_certifier.clone(),
                 leader_schedule.clone(),
                 0,
@@ -818,10 +831,13 @@ mod tests {
                     [0; 32],
                     0,
                 );
+            let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
             let _observer = CommitObserver::new(
                 context.clone(),
                 commit_consumer,
                 dag_state.clone(),
+                dag_state_writer.clone(),
                 transaction_certifier.clone(),
                 leader_schedule.clone(),
                 0,
@@ -868,10 +884,13 @@ mod tests {
                     [0; 32],
                     0,
                 );
+            let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+
             let _observer = CommitObserver::new(
                 context.clone(),
                 commit_consumer,
                 dag_state.clone(),
+                dag_state_writer.clone(),
                 transaction_certifier.clone(),
                 leader_schedule.clone(),
                 0,

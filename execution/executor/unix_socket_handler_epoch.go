@@ -525,9 +525,11 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	var lastEpoch uint64
+	var blockHashBytes []byte
 	if blockchainInstance != nil && returnBlockNumber > 0 {
 		hash, ok := blockchainInstance.GetBlockHashByNumber(returnBlockNumber)
 		if ok && hash != (common.Hash{}) {
+			blockHashBytes = hash.Bytes()
 			block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(hash)
 			if err == nil && block != nil {
 				lastEpoch = block.Header().Epoch()
@@ -539,7 +541,10 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 		LastBlockNumber:        returnBlockNumber,
 		LastGlobalExecIndex:    lastGEI,
 		IsReady:                isReady,
-		LastExecutedCommitHash: storage.GetLastExecutedCommitHash(),
+		// CRITICAL FIX: Return the actual BlockHash in the LastExecutedCommitHash field.
+		// POST-GATE-VERIFY in Rust relies on this to compare against the peer's block_hash.
+		// Returning the DAG commit hash here caused a state mismatch false positive!
+		LastExecutedCommitHash: blockHashBytes,
 		LastEpoch:              lastEpoch,
 	}
 
@@ -1150,7 +1155,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		blk, err := blockDatabase.GetBlockByHash(blockHash)
-		if err != nil {
+		if err != nil || blk == nil {
 			continue
 		}
 

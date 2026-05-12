@@ -317,19 +317,51 @@ where
         let mut dag_state = DagState::new(context.clone(), store.clone());
         dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
 
-        // CRITICAL FIX: Align the CommitConsumerMonitor with the GREATER of:
-        // 1. DAG state's last_commit_index (persisted Rust consensus progress)
-        // 2. Go's replay_after_commit_index (Go execution progress from snapshot)
-        // On snapshot restart: DAG is empty (0), but Go has processed up to replay_after (e.g. 1000).
-        // Using max() ensures CommitSyncer detects the snapshot state and triggers fast-forward.
+        // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
+        // On snapshot restart: DAG might be at 1005, but Go has processed up to replay_after (e.g. 1000).
+        // We MUST set highest_handled_commit = go_handled so that CommitObserver replays 1001-1005 to Go!
+        // If we used max(), Go would permanently miss those commits, causing state divergence.
         let go_handled = commit_consumer.replay_after_commit_index;
         let dag_handled = dag_state.last_commit_index();
-        let effective_handled = go_handled.max(dag_handled);
-        commit_consumer.monitor().set_highest_handled_commit(effective_handled);
+        let effective_handled = go_handled.max(dag_handled); // kept for logging/logic
+        commit_consumer.monitor().set_highest_handled_commit(go_handled);
         info!(
             "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
             go_handled, dag_handled, effective_handled
         );
+
+        // ═══════════════════════════════════════════════════════════════════
+        // UNIFIED RECOVERY-GUARD POLICY (DAG-State-Aware & Go-State-Aware):
+        //
+        // The RECOVERY-GUARD prevents the local committer from evaluating a
+        // sparse DAG that might produce divergent commits (fork).
+        //
+        // Decision rule:
+        //   dag_commit == 0 && go_handled == 0 → TRUE GENESIS / EPOCH START
+        //     → Auto-unlock (safe to participate).
+        //   dag_commit > 0 OR go_handled > 0   → RECOVERY / RESTART
+        //     → Keep locked until CommitSyncer verifies we are caught up.
+        //
+        // Scenarios:
+        //   - Genesis: dag=0, go=0 → unlocked → no genesis deadlock
+        //   - Epoch transition: dag=0, go=0 → unlocked → no epoch deadlock
+        //   - Cold restart: dag>0, go>0 → locked → density proof required
+        //   - Snapshot restore: dag=0, go>0 → locked → density proof required
+        // ═══════════════════════════════════════════════════════════════════
+        let dag_commit_index = dag_state.last_commit_index();
+        if dag_commit_index == 0 && go_handled == 0 {
+            coordination_hub.pre_unlock_for_fresh_dag();
+            info!(
+                "🟢 [GUARD-POLICY] True Genesis (dag=0, go=0): RECOVERY-GUARD disabled. \
+                 All nodes start synchronized — no fork risk."
+            );
+        } else {
+            info!(
+                "🔴 [GUARD-POLICY] Recovery Mode (dag={}, go={}): RECOVERY-GUARD active. \
+                 Waiting for 5 network CertifiedCommits to prove density before local evaluation.",
+                dag_commit_index, go_handled
+            );
+        }
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
         // during the FastForwarding phase (see commit_syncer.rs). 
@@ -376,7 +408,7 @@ where
                 .is_zero();
         info!("Sync last known own block: {sync_last_known_own_block}");
 
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
@@ -388,6 +420,7 @@ where
             context.clone(),
             commit_consumer,
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             leader_schedule.clone(),
             epoch_base_index,

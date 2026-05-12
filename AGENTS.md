@@ -1,43 +1,70 @@
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+# 🚀 Angel Operations Guide — Metanode Core (Resilience & Recovery)
 
-This project is indexed by GitNexus as **metanode** (60966 symbols, 107755 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This guide integrates the **Angel Protocol** (Rules) and **Angel Workflow** (Processes) to manage complexity, prevent state drift, eliminate congestion, and enable peer-based recovery for high availability.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+---
 
-## Always Do
+## 📜 PART 1: ANGEL PROTOCOL (THE RULES)
+*Non-negotiable constraints for system stability, throughput, and data integrity.*
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+### 🟢 1. Always Do
+*   **Multi-Directional Impact Analysis:** Before modifying any symbol, you MUST run:
+    *   `gitnexus_impact({target: "symbolName", direction: "upstream"})`
+    *   `gitnexus_impact({target: "symbolName", direction: "downstream"})`
+*   **Identify State Owner:** Verify the **Single Source of Truth** before modifying write logic.
+*   **Implement Backpressure:** Every queue MUST have a defined limit. Use backpressure signals to slow down producers when consumers are overwhelmed.
+*   **Consensus-Based Recovery:** If local data is detected as corrupted or missing, the node MUST query a **Majority of Trusted Nodes** (Quorum) to fetch the valid state.
+*   **Verify Checksums/Hashes:** Always validate incoming data from peers using cryptographic hashes before merging it into the local state.
+*   **🇻🇳 Post-Process Summary:** Upon completing any task, the Agent MUST provide a concise summary of changes, impacts, and performance considerations **in Vietnamese**.
 
-## Never Do
+### 🔴 2. Never Do
+*   **NEVER** trust local state blindly if a hash mismatch is detected with the network.
+*   **NEVER** use Synchronous Blocking calls (e.g., sync I/O) inside an asynchronous loop.
+*   **NEVER** create unbounded queues (infinite buffers).
+*   **NEVER** modify code without understanding the downstream impact.
+*   **NEVER** ignore Race Conditions or "State Forking" risks.
 
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+---
 
-## Resources
+## 🔄 PART 2: ANGEL WORKFLOW (THE PROCESSES)
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/metanode/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/metanode/clusters` | All functional areas |
-| `gitnexus://repo/metanode/processes` | All execution flows |
-| `gitnexus://repo/metanode/process/{name}` | Step-by-step execution trace |
+### 2.1. Feature Development (The Safe-Change Loop)
+1.  **Discovery:** Use `gitnexus_query` to map flows.
+2.  **Concurrency Design:** Isolate heavy tasks to background workers.
+3.  **Recovery Logic:** Ensure new components have a "Sync-on-Startup" or "Re-sync" capability to pull data from trusted peers.
+4.  **Implementation & Verification:** Insert logs with `Correlation ID`. Run `gitnexus_detect_changes()`.
 
-## CLI
+### 2.2. State Recovery & Peer Sync (Emergency Workflow)
+*Executed when data is wrong, missing, or the node is severely lagged (Congested).*
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| Step | Action | Tool/Objective |
+| :--- | :--- | :--- |
+| **S1: Detection** | Run local hash validation against the **Network Quorum**. | Identify corruption or data gaps. |
+| **S2: Peer Selection** | Identify and connect to a list of **Trusted Nodes** (White-listed). | Establish a secure recovery channel. |
+| **S3: Request Sync** | Request missing/correct data chunks using `Correlation IDs`. | Targeted recovery to minimize bandwidth. |
+| **S4: Validation** | Compare peer data against local hash expectations. | Ensure the recovered data is untampered. |
+| **S5: Merging** | Apply recovered data and clear any backlogged queues. | Resume normal operations. |
+| **S6: Summary** | Provide a **Vietnamese Report** on the recovery process. | Documentation & Audit. |
 
-<!-- gitnexus:end -->
+---
+
+## ⚡ PART 3: ASYNC, STATE & THROUGHPUT (TECHNICAL)
+
+| Scenario | Handling Protocol |
+| :--- | :--- |
+| **Data Corruption** | **Peer-to-Peer Recovery:** Fetch state from Majority Trusted Nodes. |
+| **Missing Data (Gaps)** | **Anti-Entropy Sync:** Background gossip to fill gaps from peers. |
+| **System Congestion** | **Backpressure + Circuit Breakers:** Fail fast and slow down producers. |
+| **State Forking** | **Deterministic Merging:** Use Logic Clocks to resolve conflicts. |
+| **Persistent Lag** | **Snapshot Recovery:** Drop local diffs and pull the latest full snapshot. |
+
+---
+
+## 🛠 PART 4: GITNEXUS QUICK COMMANDS
+*   **System Overview:** `gitnexus://repo/metanode/context`
+*   **Execution Flows:** `gitnexus://repo/metanode/processes`
+*   **Flow Trace:** `gitnexus://repo/metanode/process/{name}`
+*   **Re-index:** `npx gitnexus analyze`
+
+---
+> **Operational Philosophy:** "In Peers we Trust, in Code we Verify." Prioritize **Quorum Consensus** to recover from local failures and maintain the global source of truth.

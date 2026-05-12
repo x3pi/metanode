@@ -23,8 +23,6 @@ pub(crate) trait BlockStoreAPI {
 
     fn gc_round(&self) -> Round;
 
-    fn set_committed(&mut self, block_ref: &BlockRef) -> bool;
-
     fn is_committed(&self, block_ref: &BlockRef) -> bool;
 
     /// Gets all uncommitted blocks in a round.
@@ -35,7 +33,7 @@ pub(crate) trait BlockStoreAPI {
 }
 
 impl BlockStoreAPI
-    for parking_lot::lock_api::RwLockWriteGuard<'_, parking_lot::RawRwLock, DagState>
+    for parking_lot::lock_api::RwLockReadGuard<'_, parking_lot::RawRwLock, DagState>
 {
     fn get_blocks(&self, refs: &[BlockRef]) -> Vec<Option<VerifiedBlock>> {
         DagState::get_blocks(self, refs)
@@ -43,10 +41,6 @@ impl BlockStoreAPI
 
     fn gc_round(&self) -> Round {
         DagState::gc_round(self)
-    }
-
-    fn set_committed(&mut self, block_ref: &BlockRef) -> bool {
-        DagState::set_committed(self, block_ref)
     }
 
     fn is_committed(&self, block_ref: &BlockRef) -> bool {
@@ -64,6 +58,7 @@ pub struct Linearizer {
     /// In memory block store representing the dag state
     context: Arc<Context>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
     /// Base index for global_exec_index calculation.
     /// global_exec_index = epoch_base_index + commit_index
     /// This is set once at epoch start and remains constant.
@@ -75,10 +70,15 @@ pub struct Linearizer {
 }
 
 impl Linearizer {
-    pub fn new(context: Arc<Context>, dag_state: Arc<RwLock<DagState>>) -> Self {
+    pub fn new(
+        context: Arc<Context>,
+        dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
+    ) -> Self {
         Self {
             context,
             dag_state,
+            dag_state_writer,
             epoch_base_index: 0,
             deferred_leaders: Vec::new(),
         }
@@ -121,7 +121,7 @@ impl Linearizer {
         );
 
         // Grab latest commit state from dag state
-        let mut dag_state = self.dag_state.write();
+        let dag_state = self.dag_state.read();
         let last_commit_index = dag_state.last_commit_index();
         let last_commit_digest = dag_state.last_commit_digest();
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
@@ -129,13 +129,10 @@ impl Linearizer {
         // Now linearize the sub-dag starting from the leader block
         let (to_commit_blocks, timestamp_ms, final_commit) = if let Some(certified_commit) = precomputed_commit.as_ref() {
             let mut blocks = certified_commit.blocks().to_vec();
-            for block in &blocks {
-                dag_state.set_committed(&block.reference());
-            }
             crate::commit::sort_sub_dag_blocks(&mut blocks);
             (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
         } else {
-            let blocks = Self::linearize_sub_dag(leader_block.clone(), &mut dag_state);
+            let blocks = Self::linearize_sub_dag(leader_block.clone(), &dag_state);
 
             // ═══════════════════════════════════════════════════════════════════════════
             // COLD-START-GUARD: Multi-layer ancestor verification for local commits.
@@ -188,7 +185,7 @@ impl Linearizer {
 
             let ts = Self::calculate_commit_timestamp(
                 &self.context,
-                &mut dag_state,
+                &dag_state,
                 &leader_block,
                 last_commit_timestamp_ms,
             );
@@ -205,6 +202,15 @@ impl Linearizer {
         };
 
         drop(dag_state);
+
+        // ACTOR WRITE: Now that we don't hold the read lock, we can set them as committed!
+        for block in &to_commit {
+            assert!(
+                self.dag_state_writer.set_committed(block.reference()),
+                "Block with reference {:?} attempted to be committed twice",
+                block.reference()
+            );
+        }
 
         let commit = if let Some(trusted_commit) = final_commit {
             trusted_commit
@@ -252,7 +258,7 @@ impl Linearizer {
     /// and the maximum of the two is returned.
     pub(crate) fn calculate_commit_timestamp(
         _context: &Context,
-        _dag_state: &mut impl BlockStoreAPI,
+        _dag_state: &impl BlockStoreAPI,
         leader_block: &VerifiedBlock,
         last_commit_timestamp_ms: BlockTimestampMs,
     ) -> BlockTimestampMs {
@@ -270,7 +276,7 @@ impl Linearizer {
 
     pub(crate) fn linearize_sub_dag(
         leader_block: VerifiedBlock,
-        dag_state: &mut impl BlockStoreAPI,
+        dag_state: &impl BlockStoreAPI,
     ) -> Option<Vec<VerifiedBlock>> {
         // The GC round here is calculated based on the last committed round of the leader block.
         let gc_round: Round = dag_state.gc_round();
@@ -319,15 +325,6 @@ impl Linearizer {
                     }
                 }
             }
-        }
-        
-        // NOW that we successfully collected ALL blocks, we can safely commit them!
-        for block in &to_commit {
-            assert!(
-                dag_state.set_committed(&block.reference()),
-                "Block with reference {:?} attempted to be committed twice",
-                block.reference()
-            );
         }
         
         assert!(
@@ -403,7 +400,7 @@ impl Linearizer {
 
                     // Buffer commit in dag state for persistence later.
                     // This also updates the last committed rounds.
-                    self.dag_state.write().add_commit(commit.clone());
+                    self.dag_state_writer.add_commit(commit.clone());
 
                     committed_sub_dags.push(sub_dag);
                 }
@@ -565,7 +562,8 @@ mod tests {
             context.clone(),
             Arc::new(MemStore::new()),
         )));
-        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone());
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         // Populate fully connected test blocks for round 0 ~ 10, authorities 0 ~ 3.
         let num_rounds: u32 = 10;
@@ -634,7 +632,8 @@ mod tests {
             context.clone(),
             LeaderSwapTable::default(),
         ));
-        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone());
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let wave_length = DEFAULT_WAVE_LENGTH;
 
         let leader_round_wave_1 = 3;
@@ -653,7 +652,7 @@ mod tests {
                 .leader_block(leader_round_wave_1)
                 .expect("Leader block should have been found"),
         );
-        dag_state.write().accept_blocks(blocks.clone());
+        dag_state_writer.accept_blocks(blocks.clone());
 
         let first_leader = dag_builder
             .leader_block(leader_round_wave_1)
@@ -667,11 +666,11 @@ mod tests {
             blocks.iter().map(|block| block.reference()).collect(),
             last_commit_index as u64, // global_exec_index for test
         );
-        dag_state.write().add_commit(first_commit_data);
+        dag_state_writer.add_commit(first_commit_data);
 
         // Mark the blocks as committed in DagState. This will allow to correctly detect the committed blocks when the new linearizer logic is enabled.
         for block in blocks.iter() {
-            dag_state.write().set_committed(&block.reference());
+            dag_state_writer.set_committed(&block.reference());
         }
 
         // Now take all the blocks from round `leader_round_wave_1` up to round `leader_round_wave_2-1`
@@ -688,7 +687,7 @@ mod tests {
                 .expect("Leader block should have been found"),
         );
         // Write them in dag state
-        dag_state.write().accept_blocks(blocks.clone());
+        dag_state_writer.accept_blocks(blocks.clone());
 
         let mut blocks: Vec<_> = blocks.into_iter().map(|block| block.reference()).collect();
 
@@ -763,7 +762,8 @@ mod tests {
             context.clone(),
             Arc::new(MemStore::new()),
         )));
-        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone());
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         // Authorities of index 0->2 will always creates blocks that see each other, but until round 5 they won't see the blocks of authority 3.
         // For authority 3 we create blocks that connect to all the other authorities.
@@ -875,7 +875,8 @@ mod tests {
             context.clone(),
             Arc::new(MemStore::new()),
         )));
-        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone());
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         // Authority D will create an "orphaned" block on round 1 as it won't reference to it on the block of round 2. Similar, no other authority will reference to it on round 2.
         // Then on round 3 the authorities A, B & C will link to block D1. Once the DAG gets committed we should see the block D1 getting committed as well. Normally ,as block D2 would
@@ -988,7 +989,7 @@ mod tests {
         let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
-        let mut dag_state = dag_state.write();
+        let dag_state = dag_state.read();
 
         let ancestors = vec![
             VerifiedBlock::new_for_test(TestBlock::new(4, 0).set_timestamp_ms(1_000).build()),

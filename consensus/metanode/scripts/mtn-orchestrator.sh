@@ -226,7 +226,7 @@ start_go_master() {
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
-    cmd+="export GOMEMLIMIT=2GiB && "
+    cmd+="export GOMEMLIMIT=500MiB && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="exec ./simple_chain -config=${config} ${pprof_flag} "
@@ -381,6 +381,11 @@ cmd_start() {
     if $build_rust; then
         log_info "🛠  Đang build Rust (metanode)..."
         (cd "$RUST_DIR" && cargo +nightly build --release) || exit 1
+        
+        # CRITICAL FIX: Clean the Go build cache so it relinks the new libmetanode.a.
+        # This replaces the need to 'touch' source files manually.
+        log_info "🧹  Đang ép Go xóa cache cho FFI bridge..."
+        (cd "$GO_DIR" && go clean -cache)
     fi
     if $build_go; then
         log_info "🛠  Đang build Protobuf cho Go (simple_chain)..."

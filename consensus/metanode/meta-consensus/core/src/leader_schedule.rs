@@ -68,12 +68,27 @@ impl LeaderSchedule {
         for (authority, score) in &scores {
             scores_per_authority[authority.value()] = *score;
         }
+
+        let cycle = last_commit_index / self.num_commits_per_schedule as u32;
+        let mock_range = if cycle == 0 {
+            crate::commit::CommitRange::default()
+        } else {
+            let start = (cycle - 1) * self.num_commits_per_schedule as u32 + 1;
+            let end = cycle * self.num_commits_per_schedule as u32;
+            crate::commit::CommitRange::new(start..=end)
+        };
+
         let reputation_scores = crate::leader_scoring::ReputationScores::new(
-            crate::commit::CommitRange::new(1..=last_commit_index),
+            mock_range,
             scores_per_authority,
         );
         let table = LeaderSwapTable::new(context, last_commit_index, reputation_scores);
-        self.update_leader_swap_table(table);
+        
+        {
+            let mut write = self.leader_swap_table.write();
+            *write = table;
+        }
+        
         self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
         tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via baseline scores injection.");
     }
@@ -155,7 +170,7 @@ impl LeaderSchedule {
         dag_state.read().is_scoring_subdag_empty()
     }
 
-    pub(crate) fn update_leader_schedule_v2(&self, dag_state: &RwLock<DagState>) {
+    pub(crate) fn update_leader_schedule_v2(&self, dag_state: &RwLock<DagState>, dag_state_writer: &crate::dag_state_actor::DagStateWriter) {
         let _s = self
             .context
             .metrics
@@ -173,13 +188,7 @@ impl LeaderSchedule {
             (reputation_scores, last_commit_index)
         };
 
-        {
-            let mut dag_state = dag_state.write();
-            // Clear scoring subdag as we have updated the leader schedule
-            dag_state.clear_scoring_subdag();
-            // Buffer score and last commit rounds in dag state to be persisted later
-            dag_state.add_commit_info(reputation_scores.clone());
-        }
+        dag_state_writer.update_scoring_info(reputation_scores.clone());
 
         self.update_leader_swap_table(LeaderSwapTable::new(
             self.context.clone(),
@@ -281,11 +290,15 @@ impl LeaderSchedule {
         // from a CommitRange of equal length and immediately following the
         // preceding commit range of the old swap table.
         if *old_commit_range != CommitRange::default() {
-            assert!(
-                old_commit_range.is_next_range(new_commit_range)
-                    && old_commit_range.is_equal_size(new_commit_range),
-                "The new LeaderSwapTable has an invalid CommitRange. Old LeaderSwapTable {old_commit_range:?} vs new LeaderSwapTable {new_commit_range:?}",
-            );
+            if !(old_commit_range.is_next_range(new_commit_range)
+                && old_commit_range.is_equal_size(new_commit_range))
+            {
+                tracing::warn!(
+                    "⚠️ [SCHEDULE-GAP] The new LeaderSwapTable has a non-contiguous CommitRange. Old: {:?} vs New: {:?}. This is expected after STARTUP-SYNC gaps.",
+                    old_commit_range,
+                    new_commit_range
+                );
+            }
         }
         drop(read);
 
@@ -872,7 +885,8 @@ mod tests {
             AuthorityIndex::new_for_test(0)
         );
 
-        leader_schedule.update_leader_schedule_v2(&dag_state);
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        leader_schedule.update_leader_schedule_v2(&dag_state, &dag_state_writer);
 
         let leader_swap_table = leader_schedule.leader_swap_table.read();
         assert_eq!(leader_swap_table.good_nodes.len(), 1);

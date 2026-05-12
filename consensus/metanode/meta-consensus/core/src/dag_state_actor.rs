@@ -34,12 +34,14 @@
 use std::sync::{mpsc, Arc};
 
 use consensus_config::AuthorityIndex;
-use consensus_types::block::BlockTimestampMs;
+use consensus_types::block::{BlockRef, BlockTimestampMs};
 use parking_lot::RwLock;
 
 use crate::{
-    commit::CommitDigest,
+    block::VerifiedBlock,
+    commit::{CommitDigest, TrustedCommit},
     dag_state::DagState,
+    leader_scoring::ReputationScores,
 };
 
 /// Commands that mutate `DagState`. Each variant corresponds to a public
@@ -71,6 +73,44 @@ pub(crate) enum DagWriteCommand {
         timestamp_ms: BlockTimestampMs,
         reputation_scores: Option<Vec<(AuthorityIndex, u64)>>,
     },
+
+    /// Add a committed sub-DAG.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `dag_state.write().add_commit(sub_dag)`
+    AddCommit {
+        commit: TrustedCommit,
+        reply: std::sync::mpsc::Sender<()>,
+    },
+
+    /// Accept new verified blocks.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `dag_state.write().accept_blocks(blocks)`
+    AcceptBlocks {
+        blocks: Vec<VerifiedBlock>,
+        reply: std::sync::mpsc::Sender<()>,
+    },
+
+    #[cfg(test)]
+    SetLastCommit {
+        commit: TrustedCommit,
+        reply: std::sync::mpsc::Sender<()>,
+    },
+
+    /// Clear the scoring sub-DAGs and append a new CommitInfo.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `dag_state.write().clear_scoring_subdag()` and `dag_state.write().add_commit_info(scores)`
+    UpdateScoringInfo {
+        scores: ReputationScores,
+        reply: std::sync::mpsc::Sender<()>,
+    },
+
+    /// Set a block as committed.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `dag_state.write().set_committed(&block_ref)`
+    SetCommitted {
+        block_ref: BlockRef,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
 }
 
 /// Handle for sending write commands to the `DagStateActor`.
@@ -88,7 +128,7 @@ pub(crate) enum DagWriteCommand {
 /// let scores = writer.take_baseline_scores();
 /// ```
 #[derive(Clone)]
-pub(crate) struct DagStateWriter {
+pub struct DagStateWriter {
     tx: mpsc::Sender<DagWriteCommand>,
 }
 
@@ -149,6 +189,52 @@ impl DagStateWriter {
                 e
             );
         }
+    }
+
+    pub(crate) fn add_commit(&self, commit: TrustedCommit) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::AddCommit { commit, reply: reply_tx }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send AddCommit: {}", e);
+            return;
+        }
+        let _ = reply_rx.recv();
+    }
+
+    pub(crate) fn accept_blocks(&self, blocks: Vec<VerifiedBlock>) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::AcceptBlocks { blocks, reply: reply_tx }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send AcceptBlocks: {}", e);
+            return;
+        }
+        let _ = reply_rx.recv();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_last_commit(&self, commit: TrustedCommit) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit { commit, reply: reply_tx }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send SetLastCommit: {}", e);
+            return;
+        }
+        let _ = reply_rx.recv();
+    }
+
+    pub(crate) fn update_scoring_info(&self, scores: ReputationScores) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::UpdateScoringInfo { scores, reply: reply_tx }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send UpdateScoringInfo: {}", e);
+            return;
+        }
+        let _ = reply_rx.recv();
+    }
+
+    pub(crate) fn set_committed(&self, block_ref: BlockRef) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::SetCommitted { block_ref, reply: reply_tx }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send SetCommitted: {}", e);
+            return false;
+        }
+        reply_rx.recv().unwrap_or(false)
     }
 }
 
@@ -219,6 +305,34 @@ impl DagStateActor {
                         timestamp_ms,
                         reputation_scores,
                     );
+                }
+
+                DagWriteCommand::AddCommit { commit, reply } => {
+                    dag_state.write().add_commit(commit);
+                    let _ = reply.send(());
+                }
+
+                DagWriteCommand::AcceptBlocks { blocks, reply } => {
+                    dag_state.write().accept_blocks(blocks);
+                    let _ = reply.send(());
+                }
+
+                #[cfg(test)]
+                DagWriteCommand::SetLastCommit { commit, reply } => {
+                    dag_state.write().set_last_commit(commit);
+                    let _ = reply.send(());
+                }
+
+                DagWriteCommand::UpdateScoringInfo { scores, reply } => {
+                    let mut state = dag_state.write();
+                    state.clear_scoring_subdag();
+                    state.add_commit_info(scores);
+                    let _ = reply.send(());
+                }
+
+                DagWriteCommand::SetCommitted { block_ref, reply } => {
+                    let result = dag_state.write().set_committed(&block_ref);
+                    let _ = reply.send(result);
                 }
             }
         }

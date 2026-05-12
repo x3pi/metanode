@@ -47,6 +47,7 @@ const MAX_SUSPENDED_BLOCKS_PER_AUTHORITY: usize = 5000;
 pub(crate) struct BlockManager {
     context: Arc<Context>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
 
     /// Keeps all the suspended blocks. A suspended block is a block that is missing part of its causal history and thus
     /// can't be immediately processed. A block will remain in this map until all its causal history has been successfully
@@ -65,11 +66,12 @@ pub(crate) struct BlockManager {
 }
 
 impl BlockManager {
-    pub(crate) fn new(context: Arc<Context>, dag_state: Arc<RwLock<DagState>>) -> Self {
+    pub(crate) fn new(context: Arc<Context>, dag_state: Arc<RwLock<DagState>>, dag_state_writer: crate::dag_state_actor::DagStateWriter) -> Self {
         let committee_size = context.committee.size();
         Self {
             context,
             dag_state,
+            dag_state_writer,
             suspended_blocks: BTreeMap::new(),
             missing_ancestors: BTreeMap::new(),
             missing_blocks: BTreeSet::new(),
@@ -170,8 +172,7 @@ impl BlockManager {
 
             // Insert the accepted blocks into DAG state so future blocks including them as
             // ancestors do not get suspended.
-            self.dag_state
-                .write()
+            self.dag_state_writer
                 .accept_blocks(blocks_to_accept.clone());
 
             accepted_blocks.extend(blocks_to_accept);
@@ -206,7 +207,7 @@ impl BlockManager {
         }
 
         // Accept this block before any unsuspended children blocks
-        self.dag_state.write().accept_blocks(vec![block.clone()]);
+        self.dag_state_writer.accept_blocks(vec![block.clone()]);
 
         TryAcceptResult::Accepted(block)
     }
@@ -596,8 +597,7 @@ impl BlockManager {
             });
 
             // Now accept the unsuspended blocks
-            self.dag_state
-                .write()
+            self.dag_state_writer
                 .accept_blocks(unsuspended_blocks.clone());
 
             for block in unsuspended_blocks {
