@@ -1383,90 +1383,150 @@ impl ConsensusNode {
             // so this is zero-overhead for healthy nodes.
             // ═══════════════════════════════════════════════════════════════
             if local_block > 0 && !barrier_peers.is_empty() {
-                match crate::network::peer_rpc::fetch_blocks_from_peer(
-                    &barrier_peers, local_block, local_block,
-                ).await {
-                    Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                        // Compare raw block bytes — if Go's block at this number
-                        // has different content, the local state is corrupt.
-                        match barrier_client.get_blocks_range(local_block, local_block).await {
-                            Ok(local_blocks) if !local_blocks.is_empty() => {
-                                let local_b = &local_blocks[0];
-                                let peer_b = &peer_blocks[0];
-                                
-                                if local_b.raw_block_bytes != peer_b.raw_block_bytes {
-                                    let mut err_msg = format!(
-                                        "🚨 [ANTI-FORK] FATAL: Block #{} hash MISMATCH between Go and peer!\nGo has stale/corrupt data.",
-                                        local_block
-                                    );
-                                    
-                                    err_msg.push_str(&format!(
-                                        "\n- Block Hash: local={}, peer={}",
-                                        hex::encode(&local_b.block_hash),
-                                        hex::encode(&peer_b.block_hash)
-                                    ));
-                                    
-                                    if local_b.timestamp_ms != peer_b.timestamp_ms {
-                                        err_msg.push_str(&format!(
-                                            "\n- Timestamp Mismatch: local={}, peer={}",
-                                            local_b.timestamp_ms, peer_b.timestamp_ms
-                                        ));
-                                    }
-                                    if local_b.transactions_root != peer_b.transactions_root {
-                                        err_msg.push_str(&format!(
-                                            "\n- TxRoot Mismatch: local={}, peer={}",
-                                            hex::encode(&local_b.transactions_root),
-                                            hex::encode(&peer_b.transactions_root)
-                                        ));
-                                    }
-                                    if local_b.receipts_root != peer_b.receipts_root {
-                                        err_msg.push_str(&format!(
-                                            "\n- ReceiptsRoot Mismatch: local={}, peer={}",
-                                            hex::encode(&local_b.receipts_root),
-                                            hex::encode(&peer_b.receipts_root)
-                                        ));
-                                    }
-                                    if local_b.state_root != peer_b.state_root {
-                                        err_msg.push_str(&format!(
-                                            "\n- StateRoot Mismatch: local={}, peer={}",
-                                            hex::encode(&local_b.state_root),
-                                            hex::encode(&peer_b.state_root)
-                                        ));
-                                    }
-                                    if local_b.extra_data != peer_b.extra_data {
-                                        err_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
-                                    }
-                                    
-                                    err_msg.push_str("\n\nHALTING NODE to prevent fork. Operator MUST wipe the database and restart from scratch.");
-                                    tracing::error!("{}", err_msg);
-                                    panic!("{}", err_msg);
-                                } else {
-                                    tracing::info!(
-                                        "✅ [ANTI-FORK] Block #{} verified: Go matches peer.",
-                                        local_block
-                                    );
-                                }
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    "⚠️ [ANTI-FORK] Could not fetch block #{} from Go for verification. Skipping check.",
-                                    local_block
+                const MAX_VERIFY_RETRIES: u32 = 10;
+                const VERIFY_RETRY_DELAY_SECS: u64 = 3;
+                let mut verify_attempt = 0u32;
+                let mut anti_fork_verified = false;
+
+                loop {
+                    // Step 1: Fetch block from peer
+                    let peer_result = crate::network::peer_rpc::fetch_blocks_from_peer(
+                        &barrier_peers, local_block, local_block,
+                    ).await;
+
+                    let peer_blocks = match peer_result {
+                        Ok(blocks) if !blocks.is_empty() => blocks,
+                        Ok(_) => {
+                            verify_attempt += 1;
+                            if verify_attempt >= MAX_VERIFY_RETRIES {
+                                // ALL PEERS UNREACHABLE — likely cluster-wide restart.
+                                // Do NOT panic here — defer to POST-GATE-VERIFY which
+                                // retries indefinitely and will catch any real fork
+                                // once peers come online.
+                                tracing::error!(
+                                    "⚠️ [ANTI-FORK] Cannot verify block #{} — peers returned no data after {} attempts. \
+                                     DEFERRING to POST-GATE-VERIFY (peers may be restarting simultaneously).",
+                                    local_block, MAX_VERIFY_RETRIES
                                 );
+                                break;
                             }
+                            tracing::warn!(
+                                "⏳ [ANTI-FORK] Peer returned no data for block #{} (attempt {}/{}). \
+                                 Retrying in {}s...",
+                                local_block, verify_attempt, MAX_VERIFY_RETRIES, VERIFY_RETRY_DELAY_SECS
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(VERIFY_RETRY_DELAY_SECS)).await;
+                            continue;
                         }
-                    }
-                    Ok(_) => {
-                        tracing::warn!(
-                            "⚠️ [ANTI-FORK] Peer returned no data for block #{}. Skipping verification.",
+                        Err(e) => {
+                            verify_attempt += 1;
+                            if verify_attempt >= MAX_VERIFY_RETRIES {
+                                tracing::error!(
+                                    "⚠️ [ANTI-FORK] Cannot verify block #{} — peer fetch failed after {} attempts: {}. \
+                                     DEFERRING to POST-GATE-VERIFY (peers may be restarting simultaneously).",
+                                    local_block, MAX_VERIFY_RETRIES, e
+                                );
+                                break;
+                            }
+                            tracing::warn!(
+                                "⏳ [ANTI-FORK] Could not fetch block #{} from peer (attempt {}/{}): {}. \
+                                 Retrying in {}s...",
+                                local_block, verify_attempt, MAX_VERIFY_RETRIES, e, VERIFY_RETRY_DELAY_SECS
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(VERIFY_RETRY_DELAY_SECS)).await;
+                            continue;
+                        }
+                    };
+
+                    // Step 2: Fetch same block from local Go
+                    let local_blocks = match barrier_client.get_blocks_range(local_block, local_block).await {
+                        Ok(blocks) if !blocks.is_empty() => blocks,
+                        Ok(_) | Err(_) => {
+                            verify_attempt += 1;
+                            if verify_attempt >= MAX_VERIFY_RETRIES {
+                                tracing::error!(
+                                    "⚠️ [ANTI-FORK] Cannot fetch block #{} from Go after {} attempts. \
+                                     DEFERRING to POST-GATE-VERIFY (Go may still be initializing).",
+                                    local_block, MAX_VERIFY_RETRIES
+                                );
+                                break;
+                            }
+                            tracing::warn!(
+                                "⏳ [ANTI-FORK] Could not fetch block #{} from Go (attempt {}/{}). \
+                                 Retrying in {}s...",
+                                local_block, verify_attempt, MAX_VERIFY_RETRIES, VERIFY_RETRY_DELAY_SECS
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(VERIFY_RETRY_DELAY_SECS)).await;
+                            continue;
+                        }
+                    };
+
+                    // Step 3: Compare — this is the critical fork-prevention check
+                    let local_b = &local_blocks[0];
+                    let peer_b = &peer_blocks[0];
+
+                    if local_b.raw_block_bytes != peer_b.raw_block_bytes {
+                        // ACTUAL DATA MISMATCH — this IS a fork. MUST panic.
+                        let mut err_msg = format!(
+                            "🚨 [ANTI-FORK] FATAL: Block #{} hash MISMATCH between Go and peer!\nGo has stale/corrupt data.",
                             local_block
                         );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "⚠️ [ANTI-FORK] Could not fetch block #{} from peer for verification: {}. Skipping check.",
-                            local_block, e
+
+                        err_msg.push_str(&format!(
+                            "\n- Block Hash: local={}, peer={}",
+                            hex::encode(&local_b.block_hash),
+                            hex::encode(&peer_b.block_hash)
+                        ));
+
+                        if local_b.timestamp_ms != peer_b.timestamp_ms {
+                            err_msg.push_str(&format!(
+                                "\n- Timestamp Mismatch: local={}, peer={}",
+                                local_b.timestamp_ms, peer_b.timestamp_ms
+                            ));
+                        }
+                        if local_b.transactions_root != peer_b.transactions_root {
+                            err_msg.push_str(&format!(
+                                "\n- TxRoot Mismatch: local={}, peer={}",
+                                hex::encode(&local_b.transactions_root),
+                                hex::encode(&peer_b.transactions_root)
+                            ));
+                        }
+                        if local_b.receipts_root != peer_b.receipts_root {
+                            err_msg.push_str(&format!(
+                                "\n- ReceiptsRoot Mismatch: local={}, peer={}",
+                                hex::encode(&local_b.receipts_root),
+                                hex::encode(&peer_b.receipts_root)
+                            ));
+                        }
+                        if local_b.state_root != peer_b.state_root {
+                            err_msg.push_str(&format!(
+                                "\n- StateRoot Mismatch: local={}, peer={}",
+                                hex::encode(&local_b.state_root),
+                                hex::encode(&peer_b.state_root)
+                            ));
+                        }
+                        if local_b.extra_data != peer_b.extra_data {
+                            err_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
+                        }
+
+                        err_msg.push_str("\n\nHALTING NODE to prevent fork. Operator MUST wipe the database and restart from scratch.");
+                        tracing::error!("{}", err_msg);
+                        panic!("{}", err_msg);
+                    } else {
+                        tracing::info!(
+                            "✅ [ANTI-FORK] Block #{} verified: Go matches peer. State integrity confirmed.",
+                            local_block
                         );
+                        anti_fork_verified = true;
+                        break;
                     }
+                }
+
+                if !anti_fork_verified {
+                    tracing::warn!(
+                        "⚠️ [ANTI-FORK] Pre-sync verification DEFERRED — relying on POST-GATE-VERIFY \
+                         to catch any state corruption once peers are online."
+                    );
                 }
             }
 
@@ -2235,6 +2295,21 @@ impl ConsensusNode {
                     match executor_client_for_proc.get_last_block_number().await {
                         Ok((local_bn, _gei, true, local_hash, _epoch)) => {
                             let check_block = local_bn;
+                            let effective_hash = local_hash;
+                            
+                            // EPOCH-BOUNDARY FIX: Go may report block=N (from snapshot metadata)
+                            // but not have actually persisted block N yet. In that case, the hash
+                            // returned is all zeros. Wait for Go to catch up before comparing.
+                            let is_zero_hash = effective_hash.iter().all(|&b| b == 0);
+                            if is_zero_hash && check_block > 0 {
+                                tracing::warn!(
+                                    "⚠️ [POST-GATE-VERIFY] Block {} has zero hash (not yet persisted by Go). \
+                                     Waiting for Go to finish executing this block...",
+                                    check_block
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                continue; // Re-query get_last_block_number on next iteration
+                            }
                             
                             // Query network for best block (Trusted Node logic)
                             match crate::network::peer_rpc::query_peer_epochs_network(&config.peer_rpc_addresses).await {
@@ -2265,12 +2340,12 @@ impl ConsensusNode {
                                     ).await {
                                         Ok(peer_blocks) if !peer_blocks.is_empty() => {
                                             let peer_hash = &peer_blocks[0].block_hash;
-                                            if local_hash.as_slice() != peer_hash.as_slice() {
+                                            if effective_hash.as_slice() != peer_hash.as_slice() {
                                                 tracing::error!(
                                                     "🚨 [POST-GATE-VERIFY] Block {} hash MISMATCH! \
                                                      Local hash {} vs Peer hash {}. State is corrupted. \
                                                      HALTING to prevent fork. Node must be re-snapshot'd.",
-                                                    check_block, hex::encode(local_hash), hex::encode(peer_hash)
+                                                    check_block, hex::encode(effective_hash), hex::encode(peer_hash)
                                                 );
                                                 panic!(
                                                     "FORK-SAFETY: Block #{} hash mismatch after STARTUP-SYNC. \

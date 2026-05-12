@@ -532,6 +532,42 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			if err == nil && block != nil {
 				lastEpoch = block.Header().Epoch()
 			}
+		} else {
+			// EPOCH-BOUNDARY FIX: Counter reports block N but hash not persisted yet.
+			// This happens when snapshot metadata records the epoch boundary block number,
+			// but the block itself hasn't been committed to the chain DB.
+			// Scan backward to find the most recent block with a valid persisted hash.
+			// Max scan depth of 10 prevents pathological scanning.
+			logger.Warn("⚠️ [INIT] Block %d exists in counter but hash not found in DB. "+
+				"Scanning backward for nearest persisted block (epoch boundary race condition).",
+				returnBlockNumber)
+			const maxFallbackScan = 10
+			found := false
+			for delta := uint64(1); delta <= maxFallbackScan && delta <= returnBlockNumber; delta++ {
+				fallbackBlock := returnBlockNumber - delta
+				if fallbackBlock == 0 {
+					break // Don't fall back to genesis
+				}
+				fallbackHash, fallbackOk := blockchainInstance.GetBlockHashByNumber(fallbackBlock)
+				if fallbackOk && fallbackHash != (common.Hash{}) {
+					blockHashBytes = fallbackHash.Bytes()
+					returnBlockNumber = fallbackBlock
+					block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(fallbackHash)
+					if err == nil && block != nil {
+						lastEpoch = block.Header().Epoch()
+					}
+					logger.Info("✅ [INIT] Using fallback block %d (delta=-%d) with hash %s",
+						returnBlockNumber, delta, fallbackHash.Hex())
+					found = true
+					break
+				}
+			}
+			if !found {
+				logger.Error("🚨 [INIT] CRITICAL: Could not find ANY persisted block hash within %d blocks of counter=%d. "+
+					"Returning block=0 to force STARTUP-SYNC from scratch.",
+					maxFallbackScan, counterBlockNumber)
+				returnBlockNumber = 0
+			}
 		}
 	}
 

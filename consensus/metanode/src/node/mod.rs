@@ -32,7 +32,6 @@ pub mod epoch_checkpoint;
 pub mod epoch_monitor;
 pub mod epoch_transition_manager;
 pub mod executor_client;
-pub mod notification_listener;
 pub mod notification_server;
 pub mod peer_go_client;
 pub mod peer_health;
@@ -42,7 +41,6 @@ pub mod recovery;
 pub mod rpc_circuit_breaker;
 pub mod rust_sync_node;
 pub mod startup;
-pub mod coordinator;
 pub mod sync;
 pub mod sync_controller;
 pub mod sync_metrics;
@@ -56,8 +54,7 @@ mod node_methods;
 
 // Re-export from epoch_store for use in consensus_node
 use epoch_store::detect_local_epoch;
-#[allow(unused_imports)]
-use epoch_store::load_legacy_epoch_stores;
+
 
 #[cfg(test)]
 mod epoch_transition_tests;
