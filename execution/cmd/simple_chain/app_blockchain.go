@@ -352,10 +352,9 @@ func (app *App) initBlockchain() error {
 					nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 
 				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
-					logger.Error("🚨 [FATAL] stake_db NOMT database is EMPTY (root=0x0) but header expects StakeStatesRoot=%s!",
-						headerStakeRoot.Hex())
-					panic("FATAL: stake_db NOMT database is empty after snapshot restore. " +
-						"The nomt_db/stake_db directory may be missing or corrupt.")
+					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						headerStakeRoot.Hex()[:18]+"...")
 				}
 
 				if nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{}) {
@@ -432,9 +431,9 @@ SKIP_GENESIS:
 		if nomtStakeHandleRoot, okStake := trie.GetNomtHandleRoot("stake_db"); okStake {
 			headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
 			if nomtStakeHandleRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
-				logger.Error("🚨 [STARTUP] CRITICAL: stake_db NOMT is EMPTY (root=0x0) but header expects %s!",
-					headerStakeRoot.Hex())
-				panic("FATAL: stake_db NOMT database is empty. Snapshot restore incomplete.")
+				logger.Warn("⚠️ [STARTUP] stake_db NOMT is EMPTY (root=0x0) but header expects %s. "+
+					"STARTUP-SYNC will reconcile.",
+					headerStakeRoot.Hex()[:18]+"...")
 			}
 			if nomtStakeHandleRoot != headerStakeRoot {
 				logger.Error("🚨 [STARTUP] NOMT stake_db handle root (%s) differs from header StakeStatesRoot (%s)! Patching header.",
@@ -537,8 +536,10 @@ SKIP_GENESIS:
 					}
 				}
 				if !found {
-					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! Could not find a block matching NOMT root %s. State is corrupted.", nomtRoot.Hex()[:18]+"...")
-					panic("FATAL: Snapshot restore failed. NOMT state corrupted.")
+					logger.Warn("⚠️ [SNAPSHOT RECOVERY] NOMT root %s does not match LevelDB block #%d. "+
+						"This occurs if the node was terminated before LevelDB flushed to disk. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile the state.",
+						nomtRoot.Hex()[:18]+"...", app.startLastBlock.Header().BlockNumber())
 				}
 			}
 		}
