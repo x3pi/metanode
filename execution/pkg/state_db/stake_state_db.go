@@ -601,6 +601,19 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		return bytes.Compare(a[:], b[:])
 	})
 
+	// ═══════════════════════════════════════════════════════════════
+	// FORK-SAFETY FIX (May 2026): Track NOMT addresses that need
+	// trie reads for old values. These reads MUST be deferred until
+	// AFTER persistReady to ensure db.trie is the swapped (current) trie.
+	// Same race condition as AccountStateDB — see account_state_db_commit.go.
+	// ═══════════════════════════════════════════════════════════════
+	type stakeTrieReadPending struct {
+		batchIdx int
+		address  common.Address
+	}
+	var pendingTrieReads []stakeTrieReadPending
+	_, isNomt := db.trie.(*p_trie.NomtStateTrie)
+
 	for _, address := range dirtyAddresses {
 		value, ok := db.dirtyValidators.Load(address)
 		if !ok {
@@ -630,16 +643,15 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		// CRITICAL FIX: NOMT requires the OLD value to correctly compute the Merkle root.
 		// If we pass nil for oldValues, NOMT treats all updates as NEW leaf insertions,
 		// which corrupts the internal tree and results in `0x0` or wrong hashes!
-		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
-			var oldData []byte
-			if db.trie != nil {
-				oldData, _ = db.trie.Get(address.Bytes())
-			}
-			if len(oldData) == 0 {
-				batchOldValues = append(batchOldValues, nil)
-			} else {
-				batchOldValues = append(batchOldValues, oldData)
-			}
+		//
+		// FORK-SAFETY FIX: Do NOT call db.trie.Get() here — PersistAsync may
+		// not have swapped db.trie yet. Record placeholder and backfill after persistReady.
+		if isNomt {
+			batchOldValues = append(batchOldValues, nil) // placeholder
+			pendingTrieReads = append(pendingTrieReads, stakeTrieReadPending{
+				batchIdx: len(batchOldValues) - 1,
+				address:  address,
+			})
 		}
 	}
 
@@ -651,7 +663,21 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		isNOMT := false
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			isNOMT = true
-			<-db.persistReady // For NOMT, we MUST wait for the C++ CommitPayload to complete
+			<-db.persistReady // MUST wait for trie swap before any trie reads
+
+			// FORK-SAFETY: Backfill trie reads now that db.trie is swapped
+			if len(pendingTrieReads) > 0 {
+				for _, pr := range pendingTrieReads {
+					if db.trie != nil {
+						trieOldData, _ := db.trie.Get(pr.address.Bytes())
+						if len(trieOldData) > 0 {
+							batchOldValues[pr.batchIdx] = trieOldData
+						}
+					}
+				}
+				logger.Debug("[FORK-FIX] StakeStateDB: Backfilled %d trie reads after persist gate", len(pendingTrieReads))
+			}
+
 			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 			}

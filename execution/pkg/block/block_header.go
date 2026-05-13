@@ -125,15 +125,13 @@ func (b *BlockHeader) Unmarshal(bData []byte) error {
 }
 
 func (b *BlockHeader) Hash() common.Hash {
-	// FORK-SAFETY: Hash computed WITHOUT lastBlockHash to prevent
-	// hash chain divergence when nodes restart/sync from different points.
-	// lastBlockHash is still stored in the header for chain linking,
-	// but does NOT affect the block identity hash.
+	// TRUE FORK-SAFETY: Hash MUST include LastBlockHash to prevent 
+	// hidden divergence. A block hash cryptographically seals its ancestry.
 	// NOTE: GlobalExecIndex IS included — it acts as a fork-detection canary.
 	// If GEI diverges between nodes, hash mismatch alerts to a problem
 	// that MUST be fixed at the source (Rust commit ordering), not hidden.
 	pbHeader := &pb.BlockHeader{
-		// NOTE: LastBlockHash deliberately EXCLUDED from hash
+		LastBlockHash:     b.lastBlockHash.Bytes(),
 		BlockNumber:       b.blockNumber,
 		AccountStatesRoot: b.accountStatesRoot.Bytes(),
 		StakeStatesRoot:   b.stakeStatesRoot.Bytes(),
@@ -197,11 +195,10 @@ func (b *BlockHeader) SetAggregateSignature(sig []byte) {
 // This is used for signing: hash the block without sig → sign the hash → set sig.
 // Without this, the hash would change after setting the signature, making verification impossible.
 func (b *BlockHeader) HashWithoutSignature() common.Hash {
-	// FORK-SAFETY: Hash computed WITHOUT lastBlockHash AND AggregateSignature.
-	// This matches Hash() which also excludes lastBlockHash.
+	// TRUE FORK-SAFETY: Hash MUST include LastBlockHash.
 	// GlobalExecIndex IS included as a fork-detection canary.
 	pbHeader := &pb.BlockHeader{
-		// NOTE: LastBlockHash deliberately EXCLUDED (fork-safety)
+		LastBlockHash:     b.lastBlockHash.Bytes(),
 		BlockNumber:       b.blockNumber,
 		AccountStatesRoot: b.accountStatesRoot.Bytes(),
 		StakeStatesRoot:   b.stakeStatesRoot.Bytes(),

@@ -76,12 +76,6 @@ type AccountStateDB struct {
 	// completed its trie swap yet (race condition causing stateRoot divergence).
 	persistReady chan struct{}
 
-	// nomtCommitGuard serializes BatchUpdateWithCachedOldValues and CommitPayload
-	// for NomtStateTrie. CommitPayload is pushed to the background, but we still
-	// need to prevent concurrent modifications to the NOMT structure during disk flush.
-	// This acts as a lightweight, channel-based mutex.
-	nomtCommitGuard chan struct{}
-
 	// cacheEpoch tracks the generation of the trie/LRU caches. It is incremented
 	// by InvalidateAllCaches, ReloadTrie, and Discard to prevent stale reads
 	// from poisoning the newly constructed read caches concurrently.
@@ -124,10 +118,6 @@ func NewAccountStateDB(
 	initReady := make(chan struct{})
 	close(initReady)
 
-	// Initialize nomtCommitGuard with capacity 1 to act as a mutex
-	guard := make(chan struct{}, 1)
-	guard <- struct{}{} // Initialize as unlocked
-
 	// TPS OPT: Cache trie type once to avoid repeated type assertions in hot-path.
 	// Both FlatStateTrie and NomtStateTrie are thread-safe for concurrent reads,
 	// allowing us to skip muTrie.Lock on Get() calls.
@@ -143,7 +133,6 @@ func NewAccountStateDB(
 		lruCache:       cacheCurrent,
 		lruCacheOld:    cacheOld,
 		persistReady:   initReady,
-		nomtCommitGuard: guard,
 		isFlatTrie:     isThreadSafeRead,
 	}
 	for i := 0; i < 256; i++ {

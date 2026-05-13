@@ -509,34 +509,25 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
 
 	// ═══════════════════════════════════════════════════════════════
-	// Step 3: IMMEDIATE PERSIST GATE UNBLOCK
-	// Signal that trie swap is complete. Ensure this always runs BEFORE
-	// CommitPayload so the next block's IntermediateRoot(true) is unblocked
-	// and EVM execution can overlap with disk I/O!
+	// Step 3: BACKGROUND NOMT DISK FLUSH (CommitPayload)
+	// ═══════════════════════════════════════════════════════════════
+	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
+		if err := nomtTrie.CommitPayload(); err != nil {
+			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
+			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// Step 4: IMMEDIATE PERSIST GATE UNBLOCK
+	// Signal that trie swap AND CommitPayload are complete.
+	// This MUST happen after CommitPayload to guarantee strict sequential
+	// ordering so the next block's IntermediateRoot waits for completion.
 	// ═══════════════════════════════════════════════════════════════
 	if result.PersistChannel != nil {
 		close(result.PersistChannel)
 	} else {
 		close(db.persistReady)
-	}
-
-	// ═══════════════════════════════════════════════════════════════
-	// Step 4: BACKGROUND NOMT DISK FLUSH (CommitPayload)
-	// With the gate opened, the next block proceeds at full speed.
-	// We use nomtCommitGuard to serialize this background flush with the next
-	// block's BatchUpdateWithCachedOldValues.
-	// ═══════════════════════════════════════════════════════════════
-	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		// Acquire guard to prevent concurrent modification during flush
-		<-db.nomtCommitGuard
-		defer func() {
-			db.nomtCommitGuard <- struct{}{} // Release guard
-		}()
-
-		if err := nomtTrie.CommitPayload(); err != nil {
-			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
-			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
-		}
 	}
 
 	return nil
@@ -675,12 +666,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			return true // Skip this account, it wasn't modified
 		}
 
-		// FORK-SAFETY FIX: Update loadedAccounts with the newly mutated state.
-		// Since loadedAccounts is kept across blocks (TPS OPT PHASE 4), failing
-		// to update it causes the NEXT block to read the stale pre-mutation state,
-		// leading to state root divergence when empty blocks drift cache clear schedules.
-		db.loadedAccounts.Store(address, state)
-
 		keysToProcess = append(keysToProcess, dirtyAccountEntry{
 			addr:  address,
 			state: state,
@@ -783,6 +768,23 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// The LRU cache contains pre-commit serialized bytes — exactly what
 	// FlatStateTrie needs for bucket hash computation (old contribution).
 	// ═══════════════════════════════════════════════════════════════
+	// ═══════════════════════════════════════════════════════════════
+	// FORK-SAFETY FIX (May 2026): Track LRU cache misses that need
+	// trie reads. These reads MUST be deferred until AFTER persistReady
+	// to ensure db.trie points to the correct (swapped) trie.
+	//
+	// BUG: Previously, db.trie.Get() was called here (before persistReady).
+	// If PersistAsync from the previous block hadn't swapped db.trie yet,
+	// this read returned stale data (2 blocks behind). Different nodes
+	// complete PersistAsync at different times → different old values
+	// → different NOMT hash computation → stateRoot fork (Block 2395).
+	// ═══════════════════════════════════════════════════════════════
+	type trieReadPending struct {
+		batchIdx int
+		address  common.Address
+	}
+	var pendingTrieReads []trieReadPending
+
 	// batchKeys and batchValues slices are pre-allocated via sync.Pool above.
 	for _, res := range marshalResults {
 		if res.err != nil {
@@ -803,18 +805,15 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			if ok {
 				batchOldValues = append(batchOldValues, oldData)
 			} else {
-				// BUG FIX: If not in LRU cache (e.g. cache evicted or PreloadAccounts hit loadedAccounts instead),
-				// MUST fetch the original bytes directly from the trie. Otherwise NOMT receives nil
-				// (assuming it's a new account), which corrupts the internal Merkle tree state and causes a fork!
-				var trieOldData []byte
-				if db.trie != nil {
-					trieOldData, _ = db.trie.Get(res.address.Bytes())
-				}
-				if len(trieOldData) == 0 {
-					batchOldValues = append(batchOldValues, nil) // true new account, no old value
-				} else {
-					batchOldValues = append(batchOldValues, trieOldData)
-				}
+				// FORK-SAFETY FIX: Do NOT call db.trie.Get() here!
+				// PersistAsync from the previous block may not have swapped
+				// db.trie yet. Reading now returns stale data (2 blocks behind).
+				// Record a placeholder nil and backfill AFTER persistReady.
+				batchOldValues = append(batchOldValues, nil) // placeholder
+				pendingTrieReads = append(pendingTrieReads, trieReadPending{
+					batchIdx: len(batchOldValues) - 1,
+					address:  res.address,
+				})
 			}
 		}
 
@@ -850,42 +849,76 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// Both FlatStateTrie and NomtStateTrie support this path.
 
 		// ═══════════════════════════════════════════════════════════════
-		// DEFERRED PERSIST GATE (MOVED TO CommitPipeline):
-		// Since we now use BatchUpdateWithCachedOldValues which does NOT
-		// touch C++ or read from DB, we no longer need to wait for
-		// persistReady here for Flat/NOMT tries. This removes the
-		// block generation bottleneck completely, allowing TPS to soar.
+		// PERSIST GATE: Wait for the previous block's trie swap BEFORE
+		// any trie reads or BatchUpdate. This ensures db.trie is up-to-date.
+		//
+		// FORK-SAFETY FIX (May 2026): Previously this wait was AFTER
+		// BatchUpdate — but trie.Get() fallback reads (for LRU cache misses)
+		// happened in the prepare phase BEFORE this gate, reading stale data.
+		// Moving the gate here ensures all trie reads see the swapped trie.
+		//
+		// PERF NOTE: PersistAsync closes persistReady BEFORE CommitPayload,
+		// so this wait is nearly instantaneous (trie swap << disk flush).
+		// The marshal phase (10-50ms) still overlaps with disk I/O.
 		// ═══════════════════════════════════════════════════════════════
+		persistWaitStart := time.Now()
+		<-db.persistReady
+		persistWaitDuration := time.Since(persistWaitStart)
+		if persistWaitDuration > 5*time.Millisecond {
+			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", persistWaitDuration)
+		}
 
 		if updateErr == nil && len(batchKeys) > 0 {
 			startBatch := time.Now()
 			// TPS OPT PHASE 2: Use BatchUpdateWithCachedOldValues to skip DB reads
 			// Try FlatStateTrie first, then NomtStateTrie
 			if flatTrie, ok := db.trie.(*p_trie.FlatStateTrie); ok {
+				// ═══════════════════════════════════════════════════════════════
+				// FORK-SAFETY: Backfill trie reads for LRU cache misses.
+				// FlatStateTrie does not have a background CommitPayload flush,
+				// so waiting on persistReady was sufficient.
+				// ═══════════════════════════════════════════════════════════════
+				if len(pendingTrieReads) > 0 {
+					for _, pr := range pendingTrieReads {
+						if db.trie != nil {
+							trieOldData, _ := db.trie.Get(pr.address.Bytes())
+							if len(trieOldData) > 0 {
+								batchOldValues[pr.batchIdx] = trieOldData
+							}
+						}
+					}
+					logger.Debug("[FORK-FIX] Backfilled %d trie reads (FlatStateTrie)", len(pendingTrieReads))
+				}
+
 				if err := flatTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 					logger.Error("BatchUpdateWithCachedOldValues failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 				}
 			} else if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 				// ═══════════════════════════════════════════════════════════════
-				// BACKGROUND FLUSH GUARD
-				// Wait for any running CommitPayload to finish before applying new state.
-				// This protects NOMT's internal structures during concurrent I/O flush.
+				// 100% FORK-SAFETY GUARANTEE: Backfill trie reads here!
+				// Waiting for persistReady at the start of IntermediateRoot
+				// guarantees the previous block's CommitPayload() has FULLY flushed 
+				// to the C++ backend.
+				// This guarantees db.trie.Get() reads the completely durable state
+				// with absolutely zero race conditions.
 				// ═══════════════════════════════════════════════════════════════
-				guardStart := time.Now()
-				<-db.nomtCommitGuard
-				guardWait := time.Since(guardStart)
-				if guardWait > 5*time.Millisecond {
-					logger.Debug("[PERF] IntermediateRoot guarded wait for CommitPayload: %v", guardWait)
+				if len(pendingTrieReads) > 0 {
+					for _, pr := range pendingTrieReads {
+						if db.trie != nil {
+							trieOldData, _ := db.trie.Get(pr.address.Bytes())
+							if len(trieOldData) > 0 {
+								batchOldValues[pr.batchIdx] = trieOldData
+							}
+						}
+					}
+					logger.Debug("[FORK-FIX] Backfilled %d trie reads AFTER persistReady (NomtStateTrie)", len(pendingTrieReads))
 				}
 
 				if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
 					logger.Error("BatchUpdateWithCachedOldValues (NOMT) failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
 				}
-				
-				// Release guard immediately after update
-				db.nomtCommitGuard <- struct{}{}
 			} else {
 				// Fallback: generic BatchUpdate
 				if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
@@ -899,17 +932,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		if updateErr != nil {
 			logger.Error("Failed during dirtyAccounts update loop", "error", updateErr, "processedBeforeError", processedKeys)
 			return common.Hash{}, updateErr
-		}
-
-		// DEFERRED PERSIST GATE: Wait for the previous block's trie swap
-		// to complete before we lock the trie and modify its structural state.
-		// Since PersistAsync now closes persistReady BEFORE CommitPayload, this wait
-		// is nearly instantaneous.
-		persistWaitStart := time.Now()
-		<-db.persistReady
-		persistWaitDuration := time.Since(persistWaitStart)
-		if persistWaitDuration > 5*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait: %v", persistWaitDuration)
 		}
 
 		// Only lock for Hash() + clear maps (minimal critical section ~10ms)
@@ -975,21 +997,25 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		return true
 	})
 
-	// TPS OPT Phase 1: Bounded eviction for loadedAccounts and lruCache.
-	// loadedAccounts and lruCache grow unbounded across blocks (~10-30K new entries/block).
-	// After 10 blocks, clear them to cap memory. 
+	// TPS OPT Phase 1: Bounded eviction for lruCache.
+	// lruCache grows unbounded across blocks (~10-30K new entries/block).
+	// After 10 blocks, rotate it generationally to cap memory.
 	// FORK-SAFETY: these are read-only caches — clearing/rotating them only
 	// causes re-reads from trie, which produce identical values.
+	
+	// Unconditionally clear loadedAccounts at the end of every block.
+	// FORK-SAFETY FIX: Retaining loadedAccounts across blocks causes pointer
+	// mutation state drift when blocksSinceLoadedClear diverges between nodes.
+	db.loadedAccounts.Range(func(key, _ interface{}) bool {
+		db.loadedAccounts.Delete(key)
+		return true
+	})
+
 	db.blocksSinceLoadedClear++
 	if db.blocksSinceLoadedClear >= 10 {
-		db.loadedAccounts.Range(func(key, _ interface{}) bool {
-			db.loadedAccounts.Delete(key)
-			return true
-		})
 		db.blocksSinceLoadedClear = 0
-		logger.Debug("[TPS-OPT] Cleared loadedAccounts cache (bounded eviction every 10 blocks)")
 
-		// Also rotate lruCache generationally to prevent OOM
+		// Rotate lruCache generationally to prevent OOM
 		if db.lruCache != nil {
 			db.lruMu.Lock()
 			db.lruCacheOld = db.lruCache

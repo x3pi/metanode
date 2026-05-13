@@ -95,6 +95,7 @@ func main() {
 	watchMode := flag.Bool("watch", false, "Chế độ giám sát liên tục — kiểm tra block mới nhất định kỳ")
 	watchInterval := flag.Duration("interval", 10*time.Second, "Khoảng thời gian giữa mỗi lần check (watch mode)")
 	checkLast := flag.Int("check-last", 5, "Số block gần nhất cần check mỗi cycle (watch mode)")
+	scanFork := flag.Bool("scan-fork", false, "Quét từ block 1 đến mới nhất để tìm block LỆCH ĐẦU TIÊN và dừng")
 	flag.Parse()
 
 	if *nodesFlag == "" {
@@ -106,6 +107,9 @@ func main() {
 		fmt.Println()
 		fmt.Println(`  # Giám sát liên tục:`)
 		fmt.Println(`  ./block_hash_checker --watch --nodes "master=http://localhost:8747,node4=http://localhost:10748" --interval 10s`)
+		fmt.Println()
+		fmt.Println(`  # Quét tìm block lệch đầu tiên:`)
+		fmt.Println(`  ./block_hash_checker --scan-fork --nodes "master=http://localhost:8747,node4=http://localhost:10748"`)
 		os.Exit(1)
 	}
 
@@ -130,15 +134,28 @@ func main() {
 		return
 	}
 
+	// Nếu --scan-fork được bật
+	if *scanFork {
+		*fromBlock = 1
+		*toBlock = 0
+	}
+
 	// Nếu --to=0, query block mới nhất từ node đầu tiên
 	if *toBlock == 0 {
-		latest, err := getLatestBlockNumber(client, nodes[0].URL)
-		if err != nil {
-			fmt.Printf("❌ Không thể lấy block mới nhất từ %s: %v\n", nodes[0].Name, err)
+		var latest uint64
+		var err error
+		for _, n := range nodes {
+			latest, err = getLatestBlockNumber(client, n.URL)
+			if err == nil && latest > 0 {
+				*toBlock = latest
+				fmt.Printf("📊 Block mới nhất: %d (từ %s)\n", *toBlock, n.Name)
+				break
+			}
+		}
+		if *toBlock == 0 {
+			fmt.Println("❌ Không thể lấy block mới nhất từ bất kỳ node nào")
 			os.Exit(1)
 		}
-		*toBlock = latest
-		fmt.Printf("📊 Block mới nhất trên %s: %d\n", nodes[0].Name, *toBlock)
 	}
 
 	totalBlocks := *toBlock - *fromBlock + 1
@@ -163,6 +180,11 @@ func main() {
 		errorCount += batchErrors
 		skipCount += batchSkips
 
+		// Nếu đang scan tìm fork point, dừng ngay khi phát hiện mismatch
+		if *scanFork && len(allMismatches) > 0 {
+			break
+		}
+
 		// Progress
 		checked := batchEnd - *fromBlock + 1
 		elapsed := time.Since(startTime)
@@ -185,13 +207,23 @@ func main() {
 			matchCount, len(allMismatches), errorCount, elapsed.Seconds())
 
 		// Chi tiết từng mismatch
-		maxShow := 50
-		for i, m := range allMismatches {
-			if i >= maxShow {
-				fmt.Printf("   ... và %d blocks lệch khác (bỏ qua)\n", len(allMismatches)-maxShow)
-				break
+		if *scanFork {
+			fmt.Println("\n🛑 ĐIỂM CHIA NHÁNH (FORK POINT) ĐẦU TIÊN TÌM THẤY:")
+			// Sắp xếp các mismatches theo block number (vì chạy song song trong checkBatch)
+			sort.Slice(allMismatches, func(i, j int) bool {
+				return allMismatches[i].BlockNumber < allMismatches[j].BlockNumber
+			})
+			printMismatchDetail(allMismatches[0], nodes)
+			fmt.Println("\n⚠️ DỪNG SCAN VÌ ĐÃ TÌM THẤY ĐIỂM LỆCH ĐẦU TIÊN (--scan-fork).")
+		} else {
+			maxShow := 50
+			for i, m := range allMismatches {
+				if i >= maxShow {
+					fmt.Printf("   ... và %d blocks lệch khác (bỏ qua)\n", len(allMismatches)-maxShow)
+					break
+				}
+				printMismatchDetail(m, nodes)
 			}
-			printMismatchDetail(m, nodes)
 		}
 
 		// Xuất file CSV
