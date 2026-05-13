@@ -353,6 +353,14 @@ func (n *NomtStateTrie) SetChangelogDB(db *state_changelog.StateChangelogDB) {
 	n.changelogDB = db
 }
 
+// GetChangelogDB gets the state changelog database for historical querying.
+func (n *NomtStateTrie) GetChangelogDB() *state_changelog.StateChangelogDB {
+	n.writerMu.RLock()
+	defer n.writerMu.RUnlock()
+	return n.changelogDB
+}
+
+
 // SetCurrentCommitBlock sets the block number for the upcoming commit.
 func (n *NomtStateTrie) SetCurrentCommitBlock(blockNumber uint64) {
 	n.writerMu.Lock()

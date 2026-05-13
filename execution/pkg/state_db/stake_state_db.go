@@ -795,6 +795,19 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("failed to load trie for new root %s: %w", committedHash, err)
 	}
 
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
+	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+
 	db.trie = newTrie
 	db.originRootHash = committedHash
 
@@ -953,8 +966,9 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	}
 
 	db.muCommit.Lock()
+	var newTrieToSet p_trie.StateTrie
 	if result.Trie != nil {
-		db.trie = result.Trie
+		newTrieToSet = result.Trie
 	} else {
 		newTrie, err := p_trie.NewStateTrie(result.FinalHash, db.db, true)
 		if err != nil {
@@ -962,8 +976,23 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 			db.muCommit.Unlock()
 			return fmt.Errorf("PersistAsync: failed to load trie for root %s: %w", result.FinalHash, err)
 		}
-		db.trie = newTrie
+		newTrieToSet = newTrie
 	}
+	
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
+	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrieToSet.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+	
+	db.trie = newTrieToSet
 	db.originRootHash = result.FinalHash
 	db.muCommit.Unlock()
 
@@ -987,6 +1016,20 @@ func (db *StakeStateDB) Discard() error {
 	if err != nil {
 		return fmt.Errorf("failed to reload trie to %s: %w", db.originRootHash, err)
 	}
+	
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
+	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+	
 	db.trie = newTrie
 	return nil
 }
