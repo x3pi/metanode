@@ -12,6 +12,7 @@
 # ═══════════════════════════════════════════════════════════════════
 
 set -uo pipefail
+ulimit -n 65535
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -462,6 +463,27 @@ run_single_round() {
     mkdir -p "$LOG_BASE/node_$dst" "$RUST_DIR/config/storage/node_$dst"
     rm -rf "$dl_dir"
     log "- ✅ Snapshot restored to Node $dst"
+    log ""
+
+    # ── Pre-flight Check: Verify NOMT Registry Parity ──
+    log "### Pre-flight Check: NOMT Registry"
+    local checksum_fail=0
+    for file in "$dst_data/data/data/nomt_registry_"*.bin; do
+        [ ! -f "$file" ] && continue
+        local fname=$(basename "$file")
+        local dst_md5=$(md5sum "$file" | awk '{print $1}')
+        local src_md5=$(md5sum "$GO_DIR/sample/node${SRC_NODE}/data/data/$fname" 2>/dev/null | awk '{print $1}' || echo "missing_in_src")
+        if [ "$dst_md5" != "$src_md5" ]; then
+            log "- ❌ Checksum mismatch for $fname: src=$src_md5, dst=$dst_md5"
+            checksum_fail=1
+        else
+            log "- ✅ $fname checksum matches ($dst_md5)"
+        fi
+    done
+    if [ "$checksum_fail" -eq 1 ]; then
+        log "- 🚨 Pre-flight check failed: NOMT registry state root divergence detected before startup!"
+        # We allow it to continue to see if it heals, but it's flagged
+    fi
     log ""
 
     # ── Phase 3: Restart & Catch-up ──

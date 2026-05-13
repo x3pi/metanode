@@ -916,7 +916,11 @@ impl ConsensusNode {
         };
 
         let (last_handled_commit_index, last_block_timestamp_ms) = match executor_client.get_last_handled_commit_index().await {
-            Ok((commit_index, _, _, _, _, ts)) => (Some(commit_index), ts),
+            Ok((commit_index, _, _, _, _, ts, state_root)) => {
+                let state_root_hex = hex::encode(&state_root);
+                tracing::info!("🔑 [GO-AUTH GEI] Post-init query: state_root=0x{}", state_root_hex);
+                (Some(commit_index), ts)
+            },
             Err(e) => {
                 warn!("⚠️ [STARTUP] Failed to get last_handled_commit_index from Go: {}", e);
                 (None, 0)
@@ -1719,7 +1723,7 @@ impl ConsensusNode {
                                     // that Go already processed → duplicate blocks → fork.
                                     let mut post_sync_epoch = storage.current_epoch;
                                     let new_handled = match barrier_client.get_last_handled_commit_index().await {
-                                        Ok((commit_idx, _, _, go_epoch, _, last_ts)) => {
+                                        Ok((commit_idx, _, _, go_epoch, _, last_ts, _state_root)) => {
                                             post_sync_epoch = go_epoch;
                                             if commit_idx > 0 {
                                                 tracing::info!(
@@ -1976,7 +1980,7 @@ impl ConsensusNode {
 
                 // Re-query Go for the final state after the gate
                 match executor_client_for_proc.get_last_handled_commit_index().await {
-                    Ok((commit_idx, gei, _, _, _, _)) if commit_idx > 0 => {
+                    Ok((commit_idx, gei, _, _, _, _, _state_root)) if commit_idx > 0 => {
                         tracing::info!(
                             "🔑 [FINAL-GATE] Updated CommitProcessor: last_handled={} → {}",
                             commit_processor.go_last_commit_index, commit_idx
@@ -2024,7 +2028,7 @@ impl ConsensusNode {
         // ═══════════════════════════════════════════════════════════════
         if config.executor_read_enabled {
             match executor_client_for_proc.get_last_handled_commit_index().await {
-                Ok((commit_idx, gei, block_num, go_epoch, _auth, _ts)) => {
+                Ok((commit_idx, gei, block_num, go_epoch, _auth, _ts, _state_root)) => {
                     // Log complete diagnostic state
                     tracing::info!(
                         "🔍 [CONSISTENCY CHECK] Go state: block={}, gei={}, commit_index={}, epoch={}, \
@@ -2150,15 +2154,17 @@ impl ConsensusNode {
 
             // Also re-query Go for ground truth
             match executor_client_for_proc.get_last_handled_commit_index().await {
-                Ok((go_commit_idx, go_gei, go_block, go_epoch, _, _)) => {
+                Ok((go_commit_idx, go_gei, go_block, go_epoch, _, _, state_root)) => {
+                    let state_root_hex = hex::encode(&state_root);
                     tracing::info!(
                         "🔍 [SYNC-PARITY] Post-init state comparison:\n  \
                          CommitProcessor:  go_last_commit_index={}, next_expected_index={}\n  \
                          ExecutorClient:   next_expected_index={}\n  \
-                         Go (authoritative): commit_index={}, gei={}, block={}, epoch={}",
+                         Go (authoritative): commit_index={}, gei={}, block={}, epoch={}\n  \
+                         Go State Root: 0x{}",
                         cp_go_last, cp_next_expected,
                         executor_next_expected,
-                        go_commit_idx, go_gei, go_block, go_epoch
+                        go_commit_idx, go_gei, go_block, go_epoch, state_root_hex
                     );
 
                     // CHECK 1: CommitProcessor.next_expected must not EXCEED
@@ -2190,16 +2196,28 @@ impl ConsensusNode {
 
                     // CHECK 3: ExecutorClient and CommitProcessor must not diverge
                     // on their understanding of the "next" index by more than a
-                    // small tolerance (1 commit of jitter is acceptable).
-                    let ec_cp_delta = (executor_next_expected as i64) - (cp_next_expected as i64);
+                    // small tolerance.
+                    // CRITICAL FIX: executor_next_expected tracks GEI (u64), but
+                    // cp_next_expected tracks CommitIndex (u32, resets to 1 each epoch).
+                    // We must compare ExecutorClient's GEI against CommitProcessor's
+                    // shared_last_global_exec_index (GEI) to avoid false positives!
+                    let cp_gei = {
+                        let gei_guard = shared_last_global_exec_index.lock().await;
+                        *gei_guard + 1
+                    };
+                    let ec_cp_delta = (executor_next_expected as i64) - (cp_gei as i64);
                     if ec_cp_delta.abs() > 1 {
                         tracing::warn!(
-                            "⚠️ [SYNC-PARITY] ExecutorClient/CommitProcessor divergence: \
-                             EC.next_expected={} vs CP.next_expected={} (delta={}). \
-                             This can happen if initialize_from_go() advanced the EC \
-                             past the CP's expectation. The CP will naturally catch up \
-                             by skipping already-processed commits via go_last_commit_index.",
-                            executor_next_expected, cp_next_expected, ec_cp_delta
+                            "⚠️ [SYNC-PARITY] ExecutorClient/CommitProcessor GEI divergence: \
+                             EC.next_expected_gei={} vs CP.expected_gei={} (delta={}). \
+                             This indicates a potential sync race.",
+                            executor_next_expected, cp_gei, ec_cp_delta
+                        );
+                    } else {
+                        tracing::info!(
+                            "✅ [SYNC-PARITY] ExecutorClient and CommitProcessor GEI matched \
+                             (EC={}, CP={})",
+                             executor_next_expected, cp_gei
                         );
                     }
                 }

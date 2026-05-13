@@ -1987,18 +1987,20 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 	}
 
 	var lastBlockTimestampMs uint64 = 0
+	var stateRoot []byte = nil
 	if lastBlockNumber > 0 {
 		blockchainInstance := blockchain.GetBlockChainInstance()
 		if blockchainInstance != nil {
 			lastBlock := blockchainInstance.GetLastBlock()
 			if lastBlock != nil {
 				lastBlockTimestampMs = lastBlock.Header().TimeStamp() * 1000
+				stateRoot = lastBlock.Header().AccountStatesRoot().Bytes()
 			}
 		}
 	}
 
-	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_commit=%d (epoch=%d), last_gei=%d, last_block=%d, current_epoch=%d, authoritative=%v, ts=%d",
-		commitIndex, commitEpoch, lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs)
+	logger.Info("🔑 [GO-AUTH GEI] Recovery query: last_commit=%d (epoch=%d), last_gei=%d, last_block=%d, current_epoch=%d, authoritative=%v, ts=%d, state_root=%x",
+		commitIndex, commitEpoch, lastGEI, lastBlockNumber, currentEpoch, isAuthoritative, lastBlockTimestampMs, stateRoot)
 
 	response := &pb.GetLastHandledCommitIndexResponse{
 		LastCommitIndex:      commitIndex,
@@ -2007,6 +2009,7 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		Epoch:                currentEpoch,
 		IsAuthoritative:      isAuthoritative,
 		LastBlockTimestampMs: lastBlockTimestampMs,
+		StateRoot:            stateRoot,
 	}
 
 	return response, nil
