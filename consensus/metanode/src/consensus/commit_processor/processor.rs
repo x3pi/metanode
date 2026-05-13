@@ -136,6 +136,11 @@ impl CommitProcessor {
         self
     }
 
+    /// Update the next expected index (used after STARTUP-SYNC if sync advanced)
+    pub fn update_next_expected_index(&mut self, next_expected: u32) {
+        self.next_expected_index = next_expected;
+    }
+
     /// Set executor client to send blocks to Go executor
     pub fn with_executor_client(mut self, executor_client: Arc<ExecutorClient>) -> Self {
         self.executor_client = Some(executor_client);
@@ -146,6 +151,11 @@ impl CommitProcessor {
     pub fn with_go_last_commit_index(mut self, go_last_commit_index: u32) -> Self {
         self.go_last_commit_index = go_last_commit_index;
         self
+    }
+
+    /// Update the last commit index already handled by Go (used after STARTUP-SYNC)
+    pub fn update_go_last_commit_index(&mut self, go_last_commit_index: u32) {
+        self.go_last_commit_index = go_last_commit_index;
     }
 
     /// Set is_transitioning flag to track epoch transition state
