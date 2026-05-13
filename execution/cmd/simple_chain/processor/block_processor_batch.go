@@ -267,7 +267,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	// PERFORMANCE OPTIMIZATION: Use TrieDB connection pool
 	for key, combinedBatch := range allTrieDbBatches {
 		if len(combinedBatch) > 0 {
-			databasePath := filepath.Join(config.ConfigApp.Databases.RootPath+config.ConfigApp.Databases.Trie.Path, key)
+			databasePath := filepath.Join(config.JoinPathIfNotURL(config.ConfigApp.Databases.RootPath, config.PathTrie), key)
 			database, err := getTrieDBFromPool(databasePath)
 			if err != nil {
 				return fmt.Errorf("error getting TrieDB connection for '%s': %w", key, err)
@@ -355,7 +355,7 @@ func (bp *BlockProcessor) applyBlockBatchForMapping(blockBatch []*storage.BackUp
 
 	for key, combinedBatch := range allTrieDbBatches {
 		if len(combinedBatch) > 0 {
-			databasePath := filepath.Join(config.ConfigApp.Databases.RootPath+config.ConfigApp.Databases.Trie.Path, key)
+			databasePath := filepath.Join(config.JoinPathIfNotURL(config.ConfigApp.Databases.RootPath, config.PathTrie), key)
 			database, err := getTrieDBFromPool(databasePath)
 			if err != nil {
 				return fmt.Errorf("error getting TrieDB connection for '%s': %w", key, err)
