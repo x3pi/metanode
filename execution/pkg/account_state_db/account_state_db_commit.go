@@ -20,6 +20,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 )
 
 type dirtyAccountEntry struct {
@@ -239,6 +240,19 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 		db.muTrie.Unlock()
 		logger.Error("Commit: Failed to create new trie instance after DB write", "hash", finalHash, "error", err)
 		return common.Hash{}, fmt.Errorf("failed to load trie for new root %s after commit: %w", finalHash, err)
+	}
+
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
+	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
 	}
 
 	// 6. Update the live trie reference and origin hash
@@ -461,8 +475,9 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	// ═══════════════════════════════════════════════════════════════
 
 	db.muTrie.Lock()
+	var newTrieToSet p_trie.StateTrie
 	if result.Trie != nil {
-		db.trie = result.Trie
+		newTrieToSet = result.Trie
 	} else {
 		// Fallback for edge cases where Trie is not provided
 		newTrie, err := p_trie.NewStateTrie(result.FinalHash, db.db, true)
@@ -471,8 +486,23 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 			logger.Error("PersistAsync: Failed to create new trie", "hash", result.FinalHash, "error", err)
 			return fmt.Errorf("PersistAsync: failed to load trie for root %s: %w", result.FinalHash, err)
 		}
-		db.trie = newTrie
+		newTrieToSet = newTrie
 	}
+	
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
+	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrieToSet.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+	
+	db.trie = newTrieToSet
 	db.originRootHash = result.FinalHash
 	db.muTrie.Unlock()
 
