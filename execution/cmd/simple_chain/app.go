@@ -114,10 +114,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	//   → fullXapianPath = "./sample/node0/data-write/data/xapian"
 	// Falls back to RootPath+"/xapian" if XapianPath not set.
 	{
-		xapianRelPath := app.config.Databases.XapianPath
-		if xapianRelPath == "" {
-			xapianRelPath = "/xapian"
-		}
+		xapianRelPath := config.PathXapian
 		fullXapianPath := config.JoinPathIfNotURL(app.config.Databases.RootPath, xapianRelPath)
 		if mkErr := os.MkdirAll(fullXapianPath, 0755); mkErr != nil {
 			return nil, fmt.Errorf(
@@ -157,10 +154,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	// Backup database
 	backupDB, err := storage.NewShardelDB(
-		config.JoinPathIfNotURL(app.config.BackupPath, app.config.Databases.Backup.Path),
+		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
 		4, 2,
 		app.config.DBType,
-		config.JoinPathIfNotURL(app.config.BackupPath, app.config.Databases.Backup.Path),
+		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create backup DB: %v", err)
@@ -270,7 +267,7 @@ func (app *App) initProcessors() {
 		app.transactionStateDB,
 		app.eventSystem,
 		app.config.ServiceType,
-		app.config.Databases.SmartContractStorage.Path,
+		config.PathSmartContractStorage,
 		app.config.ChainId.String(),
 		app.node,
 		app.storageManager,

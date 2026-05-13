@@ -118,51 +118,7 @@
         "BLSPrivateKey": "54299679cc61c8930e92b8c9b3c9ff0bd84425a3270419f4407a27f608f3ee97",
         "SnapshotPath": "./snapshot_data_node3",
         "MaxPartSizeMB": 100,
-        "ArchiveBaseName": "snapshot_archive",
-        "AccountState": {
-            "Path": "/account_state/",
-            "ListenAddress": "0.0.0.0:8301"
-        },
-        "Trie": {
-            "Path": "/trie_database/",
-            "ListenAddress": "0.0.0.0:8302"
-        },
-        "SmartContractCode": {
-            "Path": "/smart_contract_code/",
-            "ListenAddress": "0.0.0.0:8303"
-        },
-        "SmartContractStorage": {
-            "Path": "/smart_contract_storage/",
-            "ListenAddress": "0.0.0.0:8304"
-        },
-        "Blocks": {
-            "Path": "/blocks/",
-            "ListenAddress": "0.0.0.0:8305"
-        },
-        "Receipts": {
-            "Path": "/receipts/",
-            "ListenAddress": "0.0.0.0:8306"
-        },
-        "BackupDeviceKey": {
-            "Path": "/backup_device_key_storage/",
-            "ListenAddress": "0.0.0.0:8307"
-        },
-        "TransactionState": {
-            "Path": "/transaction_state/",
-            "ListenAddress": "0.0.0.0:8308"
-        },
-        "Mapping": {
-            "Path": "/mapping/",
-            "ListenAddress": "0.0.0.0:8309"
-        },
-        "Backup": {
-            "Path": "/backup_db/",
-            "ListenAddress": null
-        },
-        "Stake": {
-            "Path": "/stake_db/"
-        },
-        "XapianPath": "/xapian"
+        "ArchiveBaseName": "snapshot_archive"
     },
     "nodes": {
         "list_sub_address": [

@@ -13,59 +13,43 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
-// NodeType định nghĩa các loại node lưu trữ.
-type NodeType string
-
-const (
-	// STORAGE_REMOTE chỉ định rằng node sử dụng lưu trữ từ xa.
-	STORAGE_REMOTE NodeType = "STORAGE_REMOTE"
-	STORAGE_CLIENT NodeType = "STORAGE_CLIENT"
-
-	// STORAGE_LOCAL chỉ định rằng node sử dụng lưu trữ cục bộ.
-	STORAGE_LOCAL NodeType = "STORAGE_LOCAL"
-)
+// Xóa cấu hình NodeType do hệ thống chỉ còn hỗ trợ lưu trữ cục bộ.
 
 var (
 	ConfigApp  *SimpleChainConfig
 	loadConfig sync.Once
 )
 
-// DBDetail định nghĩa cấu trúc cho một database cụ thể, bao gồm đường dẫn và địa chỉ lắng nghe.
-type DBDetail struct {
-	Path          string `json:"Path"`
-	ListenAddress string `json:"ListenAddress"` // Đã xóa omitempty, trường này là bắt buộc
-	DBEngine      string `json:"DBEngine,omitempty"`
-}
+// Các hằng số đường dẫn con cho các thư mục database (tương đối so với RootPath)
+const (
+	PathAccountState           = "/account_state/"
+	PathTrie                   = "/trie_database/"
+	PathSmartContractCode      = "/smart_contract_code/"
+	PathSmartContractStorage   = "/smart_contract_storage/"
+	PathBlocks                 = "/blocks/"
+	PathReceipts               = "/receipts/"
+	PathTxsEth                 = "/txs_eth/"
+	PathBlocksHash             = "/blocks_hash/"
+	PathBackupDeviceKey        = "/backup_device_key_storage/"
+	PathTransactionBlockNumber = "/transaction_block_number/"
+	PathTransactionState       = "/transaction_state/"
+	PathBlockHashToNumber      = "/block_hash_to_number/"
+	PathWallets                = "/wallets/"
+	PathMapping                = "/mapping/"
+	PathBackup                 = "/backup_db/"
+	PathStake                  = "/stake_db/"
+	PathXapian                 = "/xapian"
+)
 
 // DatabasesConfig định nghĩa cấu trúc cho đối tượng "Databases" trong file JSON.
+// Hiện tại chỉ cần cấu hình thư mục gốc (RootPath), các đường dẫn con được hardcode qua các hằng số.
 type DatabasesConfig struct {
-	RootPath               string   `json:"RootPath"`
-	NodeType               NodeType `json:"NodeType"`
-	Version                string   `json:"Version"`
-	BLSPrivateKey          string   `json:"BLSPrivateKey"`
-	SnapshotPath           string   `json:"SnapshotPath"`
-	MaxPartSizeMB          int      `json:"MaxPartSizeMB"`
-	ArchiveBaseName        string   `json:"ArchiveBaseName"`
-	AccountState           DBDetail `json:"AccountState"`
-	Trie                   DBDetail `json:"Trie"`
-	SmartContractCode      DBDetail `json:"SmartContractCode"`
-	SmartContractStorage   DBDetail `json:"SmartContractStorage"`
-	Blocks                 DBDetail `json:"Blocks"`
-	Receipts               DBDetail `json:"Receipts"`
-	TxsEth                 DBDetail `json:"TxsEth"`
-	BlocksHash             DBDetail `json:"BlocksHash"`
-	BackupDeviceKey        DBDetail `json:"BackupDeviceKey"`
-	TransactionBlockNumber DBDetail `json:"TransactionBlockNumber"`
-	TransactionState       DBDetail `json:"TransactionState"`
-	BlockHashToNumber      DBDetail `json:"BlockHashToNumber"`
-	Wallets                DBDetail `json:"Wallets"`
-	Mapping                DBDetail `json:"Mapping"`
-	Backup                 DBDetail `json:"Backup"`
-	Stake                  DBDetail `json:"Stake"`
-	// XapianPath: sub-path relative to RootPath for Xapian full-text search databases.
-	// Combined as: JoinPathIfNotURL(RootPath, XapianPath) — same pattern as other DB paths.
-	// Default: "/xapian" (auto-created at startup if missing).
-	XapianPath string `json:"XapianPath,omitempty"`
+	RootPath        string   `json:"RootPath"`
+	Version         string   `json:"Version"`
+	BLSPrivateKey   string   `json:"BLSPrivateKey"`
+	SnapshotPath    string   `json:"SnapshotPath"`
+	MaxPartSizeMB   int      `json:"MaxPartSizeMB"`
+	ArchiveBaseName string   `json:"ArchiveBaseName"`
 }
 
 // NodesConfig khớp với cấu trúc của đối tượng "nodes" trong JSON.

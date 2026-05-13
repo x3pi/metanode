@@ -107,7 +107,7 @@ func (app *App) initStorage() error {
 
 // createDatabase determines whether to create a local or remote database.
 // This version ensures the remote server starts successfully before continuing.
-func (app *App) createDatabase(dbDetail config.DBDetail, backupPath string, dbType storage.DBType) (storage.Storage, error) {
+func (app *App) createDatabase(subPath string, listenAddress string, backupPath string, dbType storage.DBType) (storage.Storage, error) {
 	// Case 1: Run as a Remote Storage Node
 	if app.config.Databases.NodeType == config.STORAGE_REMOTE {
 		// Tạo một channel để nhận tín hiệu khởi động từ server.
@@ -118,7 +118,7 @@ func (app *App) createDatabase(dbDetail config.DBDetail, backupPath string, dbTy
 		go func() {
 			// Goroutine này sẽ chạy cho đến khi app bị dừng.
 			// Lỗi trả về ở đây là lỗi lúc server đang chạy hoặc lúc tắt, không phải lỗi khởi động.
-			if err := app.startStorageServer(app.ctx, dbDetail, startupSignal); err != nil {
+			if err := app.startStorageServer(app.ctx, subPath, listenAddress, startupSignal); err != nil {
 				logger.Error("Storage server stopped with error: %v", err)
 			}
 		}()
@@ -134,16 +134,16 @@ func (app *App) createDatabase(dbDetail config.DBDetail, backupPath string, dbTy
 
 		time.Sleep(1 * time.Second)
 		// Bây giờ mới tiến hành kết nối client.
-		return createRemoteDBClient(dbDetail.ListenAddress)
+		return createRemoteDBClient(listenAddress)
 	}
 	if app.config.Databases.NodeType == config.STORAGE_CLIENT {
-		return createRemoteDBClient(dbDetail.ListenAddress)
+		return createRemoteDBClient(listenAddress)
 	}
 
 	// Case 2: Use a Local Database (không thay đổi)
-	logger.Info("Initializing local ShardelDB at: %s", dbDetail.Path)
+	logger.Info("Initializing local ShardelDB at: %s", subPath)
 	db, err := storage.NewShardelDB(
-		config.JoinPathIfNotURL(app.config.Databases.RootPath, dbDetail.Path),
+		config.JoinPathIfNotURL(app.config.Databases.RootPath, subPath),
 		16,
 		2,
 		dbType,
@@ -161,9 +161,9 @@ func (app *App) createDatabase(dbDetail config.DBDetail, backupPath string, dbTy
 
 // startStorageServer encapsulates all logic for initializing and running the storage server.
 // It now accepts a `startupSignal` channel to report its status back.
-func (app *App) startStorageServer(ctx context.Context, dbDetail config.DBDetail, startupSignal chan<- error) error {
+func (app *App) startStorageServer(ctx context.Context, subPath string, listenAddress string, startupSignal chan<- error) error {
 	// 1. Initialize the actual ShardelDB storage
-	actualStorage, err := storage.NewShardelDB(config.JoinPathIfNotURL(app.config.Databases.RootPath, dbDetail.Path), 16, 2, app.config.DBType, "")
+	actualStorage, err := storage.NewShardelDB(config.JoinPathIfNotURL(app.config.Databases.RootPath, subPath), 16, 2, app.config.DBType, "")
 	if err != nil {
 		startupSignal <- err // Gửi lỗi khởi động về và kết thúc
 		return err
@@ -209,8 +209,8 @@ func (app *App) startStorageServer(ctx context.Context, dbDetail config.DBDetail
 	startupSignal <- nil
 
 	// 5. Start listening for connections (this is a blocking call)
-	logger.Info("Storage server is now listening on %s", dbDetail.ListenAddress)
-	err = socketServer.Listen(dbDetail.ListenAddress)
+	logger.Info("Storage server is now listening on %s", listenAddress)
+	err = socketServer.Listen(listenAddress)
 
 	// The error will be returned when the server stops
 	if err != nil && err != context.Canceled {
@@ -250,92 +250,13 @@ func (app *App) initStorageDatabases() error {
 
 	databaseConfig := app.config.Databases
 
-	// Use unified SharedDB if running locally (not remote or client)
-	if databaseConfig.NodeType != config.STORAGE_REMOTE && databaseConfig.NodeType != config.STORAGE_CLIENT {
-		if err := app.storageManager.InitSharedDatabase(databaseConfig.RootPath, app.config.DBType); err != nil {
-			return fmt.Errorf("failed to initialize unified shared database: %w", err)
-		}
-		logger.Info("Initialized unified SharedDB at %s/chaindata", databaseConfig.RootPath)
-		return nil
+	// Use unified SharedDB
+	if err := app.storageManager.InitSharedDatabase(databaseConfig.RootPath, app.config.DBType); err != nil {
+		return fmt.Errorf("failed to initialize unified shared database: %w", err)
 	}
+	logger.Info("Initialized unified SharedDB at %s/chaindata", databaseConfig.RootPath)
 
-	// Legacy fallback for Remote/Client configs
-	logger.Warn("Using legacy fragmented DB architecture for Remote/Client mode")
-	
-	// Helper function for creating and adding storage
-	createAndAdd := func(storageName string, dbDetail config.DBDetail, dbType storage.DBType, addFunc func(storage.Storage) error) error {
-		fullBackupPath := app.config.BackupPath + dbDetail.Path
-		db, err := app.createDatabase(dbDetail, fullBackupPath, dbType)
-		if err != nil {
-			return fmt.Errorf("failed to create %s DB: %w", storageName, err)
-		}
-		return addFunc(db)
-	}
-
-	// Account state database
-	if err := createAndAdd("account", databaseConfig.AccountState, app.config.DBType, app.storageManager.AddStorageAccount); err != nil {
-		return err
-	}
-
-	// Receipts database
-	if err := createAndAdd("receipts", databaseConfig.Receipts, app.config.DBType, app.storageManager.AddStorageReceipt); err != nil {
-		return err
-	}
-
-	// Transaction state database
-	if err := createAndAdd("transaction state", databaseConfig.TransactionState, app.config.DBType, app.storageManager.AddStorageTransaction); err != nil {
-		return err
-	}
-
-	// Device key storage
-	if err := createAndAdd("device key", databaseConfig.BackupDeviceKey, app.config.DBType, app.storageManager.AddStorageBackupDeviceKey); err != nil {
-		return err
-	}
-
-	// Smart contract database
-	if err := createAndAdd("smart contract", databaseConfig.SmartContractStorage, app.config.DBType, app.storageManager.AddStorageSmartContract); err != nil {
-		return err
-	}
-
-	// Code database
-	if err := createAndAdd("code", databaseConfig.SmartContractCode, app.config.DBType, app.storageManager.AddStorageCode); err != nil {
-		return err
-	}
-
-	// Trie database
-	if err := createAndAdd("trie", databaseConfig.Trie, app.config.DBType, app.storageManager.AddStorageDatabaseTrie); err != nil {
-		return err
-	}
-
-	// Block database
-	if err := createAndAdd("block", databaseConfig.Blocks, app.config.DBType, app.storageManager.AddStorageBlock); err != nil {
-		return err
-	}
-
-	// Mapping database
-	if err := createAndAdd("mapping", databaseConfig.Mapping, app.config.DBType, app.storageManager.AddStorageMapping); err != nil {
-		return err
-	}
-
-	// Backup database (Legacy setup)
-	backupPath := config.JoinPathIfNotURL(app.config.BackupPath, databaseConfig.Backup.Path)
-	backupDB, err := storage.NewShardelDB(
-		backupPath,
-		16, 2,
-		app.config.DBType,
-		backupPath,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create backup DB: %v", err)
-	}
-	if err := backupDB.Open(); err != nil {
-		return fmt.Errorf("failed to open backup DB: %v", err)
-	}
-	if err := app.storageManager.AddStorageBackupDb(backupDB); err != nil {
-		return err
-	}
-
-	logger.Info("End initStorageDatabases via legacy fallback")
+	logger.Info("End initStorageDatabases")
 	return nil
 }
 
