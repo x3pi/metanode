@@ -222,6 +222,12 @@ impl CommitteeSource {
                                     "✅ [COMMITTEE SOURCE] Built committee with {} authorities",
                                     committee.size()
                                 );
+                                for (i, v) in validators.iter().enumerate() {
+                                    info!(
+                                        "   🧑‍⚖️  [Committee Member {}] Address: {} | Name: {} | Stake: {}",
+                                        i + 1, v.address, v.name, v.stake
+                                    );
+                                }
                                 return Ok((committee, eth_addresses));
                             }
                             Err(e) => {
@@ -291,6 +297,12 @@ impl CommitteeSource {
                                     "✅ [COMMITTEE SOURCE] PEER FALLBACK: Built committee with {} authorities from peer {}",
                                     committee.size(), peer_addr
                                 );
+                                for (i, v) in proto_validators.iter().enumerate() {
+                                    info!(
+                                        "   🧑‍⚖️  [Committee Member {}] Address: {} | Name: {} | Stake: {}",
+                                        i + 1, v.address, v.name, v.stake
+                                    );
+                                }
                                 return Ok((committee, eth_addresses));
                             }
                             Err(e) => {
@@ -394,6 +406,12 @@ impl CommitteeSource {
                                             "✅ [UNIFIED TIMESTAMP] PEER FALLBACK: Built committee size={}, timestamp={} from peer {}",
                                             committee.size(), pb.timestamp_ms, peer_addr
                                         );
+                                        for (i, v) in proto_validators.iter().enumerate() {
+                                            info!(
+                                                "   🧑‍⚖️  [Committee Member {}] Address: {} | Name: {} | Stake: {}",
+                                                i + 1, v.address, v.name, v.stake
+                                            );
+                                        }
                                         return Ok((committee, pb.timestamp_ms, eth_addresses));
                                     }
                                     Err(e) => {
@@ -439,6 +457,12 @@ impl CommitteeSource {
                                     "✅ [UNIFIED TIMESTAMP] Committee size={}, AUTHORITATIVE timestamp={} ms",
                                     committee.size(), timestamp_ms
                                 );
+                                for (i, v) in validators.iter().enumerate() {
+                                    info!(
+                                        "   🧑‍⚖️  [Committee Member {}] Address: {} | Name: {} | Stake: {}",
+                                        i + 1, v.address, v.name, v.stake
+                                    );
+                                }
                                 return Ok((committee, timestamp_ms, eth_addresses));
                             }
                             Err(e) => {
