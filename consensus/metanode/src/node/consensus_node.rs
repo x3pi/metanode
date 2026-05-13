@@ -2506,12 +2506,32 @@ impl ConsensusNode {
                             match crate::network::peer_rpc::query_peer_epochs_network(&bg_peers).await {
                                 Ok((_epoch, peer_block, peer_addr, _)) => {
                                     if peer_block == 0 { continue; }
+                                    // Compare at the SAME block height
                                     let check = std::cmp::min(local_bn, peer_block);
+                                    
+                                    // Get local block hash at `check` height
+                                    // (local_hash from get_last_block_number is for local_bn,
+                                    //  which may differ from check if peer is behind)
+                                    let local_check_hash: Vec<u8> = if check == local_bn {
+                                        local_hash.to_vec()
+                                    } else {
+                                        // Need to fetch local block at `check` height
+                                        match bg_client.get_blocks_range(check, 1).await {
+                                            Ok(blocks) if !blocks.is_empty() => {
+                                                blocks[0].block_hash.clone()
+                                            }
+                                            _ => {
+                                                tracing::debug!("[BG-VERIFY] Could not fetch local block {}. Retrying...", check);
+                                                continue;
+                                            }
+                                        }
+                                    };
+                                    
                                     match crate::network::peer_rpc::fetch_blocks_from_peer(
                                         &[peer_addr.clone()], check, check,
                                     ).await {
                                         Ok(blocks) if !blocks.is_empty() => {
-                                            if local_hash.as_slice() == blocks[0].block_hash.as_slice() {
+                                            if local_check_hash.as_slice() == blocks[0].block_hash.as_slice() {
                                                 tracing::info!(
                                                     "✅ [BG-VERIFY] Block {} hash MATCHES peer {}! \
                                                      Setting block_hash_verified=true. \
@@ -2526,7 +2546,7 @@ impl ConsensusNode {
                                                      Local={} Peer={}. State is CORRUPTED. \
                                                      Node will remain in degraded mode.",
                                                     check,
-                                                    hex::encode(local_hash),
+                                                    hex::encode(&local_check_hash),
                                                     hex::encode(&blocks[0].block_hash)
                                                 );
                                                 // Do NOT set verified — node stays pending
