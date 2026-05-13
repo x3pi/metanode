@@ -24,7 +24,10 @@ import (
 
 // initBlockchain initializes blockchain-related components
 func (app *App) initBlockchain() error {
-	logger.Info("initBlockchain started")
+	logger.Info("═══════════════════════════════════════════════")
+	logger.Info("🚀 [BOOT FLOW] initBlockchain: BẮT ĐẦU KHỞI ĐỘNG NODE")
+	logger.Info("═══════════════════════════════════════════════")
+	logger.Info("📋 [BOOT FLOW] Step 0: Mở database và kiểm tra block cuối cùng...")
 
 	blockDatabase := block.NewBlockDatabase(app.storageManager.GetStorageBlock())
 
@@ -83,7 +86,7 @@ func (app *App) initBlockchain() error {
 				}
 			}
 		}
-		
+
 		// Also check NOMT HT file presence
 		if _, err := os.Stat(nomtPath + "/ht"); err == nil {
 			hasExistingData = true
@@ -122,7 +125,7 @@ func (app *App) initBlockchain() error {
 					// GetAccountStateTrie() above lazily initializes the "account_state" NOMT handle.
 					// We must also force "stake_db" handle init so GetNomtHandleRoot works.
 					// ═══════════════════════════════════════════════════════════════
-					
+
 					// Force stake_db NOMT handle initialization by creating a temporary trie.
 					// This ensures GetNomtHandleRoot("stake_db") works before NewChainStateWithGenesis.
 					stakeStorage := app.storageManager.GetStorageStake()
@@ -175,7 +178,7 @@ func (app *App) initBlockchain() error {
 			logger.Error("🚨 [FATAL] REFUSING to re-initialize genesis to prevent wiping all state data.")
 			return fmt.Errorf("CORRUPTED BLOCK DATABASE: lastBlock not found but data exists at %s. Error: %v", dataDir, err)
 		}
-		
+
 		fmt.Printf("No existing block found (fresh start), initializing genesis block\n")
 		// No data directories → genuine fresh start
 		logger.Info("No existing block found (fresh start), initializing genesis block")
@@ -212,8 +215,14 @@ func (app *App) initBlockchain() error {
 
 	} else {
 		// Use existing last block
-		logger.Info("Using existing block (not init genesis)")
+		logger.Info("✅ [BOOT FLOW] Step 0: Tìm thấy block cuối cùng — KHÔNG phải fresh start, tiến hành khôi phục trạng thái...")
+		logger.Info("📋 [BOOT FLOW] Step 1: Load trạng thái từ LevelDB (BlockNumber, GEI, CommitIndex)...")
 		app.startLastBlock = lastBlock
+		logger.Info("✅ [BOOT FLOW] Step 1a: startLastBlock = block #%d (GEI=%d, Epoch=%d, CommitIdx=%d)",
+			lastBlock.Header().BlockNumber(),
+			lastBlock.Header().GlobalExecIndex(),
+			lastBlock.Header().Epoch(),
+			lastBlock.Header().CommitIndex())
 		logger.Info("lastblock header 2: %v (using existing block)", app.startLastBlock.Header())
 		storage.UpdateLastBlockNumber(app.startLastBlock.Header().BlockNumber())
 
@@ -225,7 +234,7 @@ func (app *App) initBlockchain() error {
 		// authoritative source on startup. This guarantees Rust receives the
 		// correct GEI during initialization and can resume epoch transitions.
 		headerGEI := app.startLastBlock.Header().GlobalExecIndex()
-		
+
 		// Attempt to load from BackupDb as well
 		var backupGEI uint64 = 0
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
@@ -251,6 +260,8 @@ func (app *App) initBlockchain() error {
 		if targetGEI > 0 {
 			storage.UpdateLastGlobalExecIndex(targetGEI)
 		}
+		logger.Info("✅ [BOOT FLOW] Step 1b: GEI xác định = %d (headerGEI=%d, backupGEI=%d)",
+			targetGEI, headerGEI, backupGEI)
 
 		// ─── Initialize LastExecutedCommitHash from BackupDb ──────────
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
@@ -320,8 +331,11 @@ func (app *App) initBlockchain() error {
 		}
 		// Always persist the current epoch for next restart
 		storage.UpdateLastHandledCommitEpoch(headerEpoch)
+		logger.Info("✅ [BOOT FLOW] Step 1c: CommitIndex xác định = %d (headerCommitIdx=%d, backupCommitIdx=%d, epoch=%d)",
+			targetCommitIndex, headerCommitIndex, backupCommitIndex, headerEpoch)
 
 		// ─── Startup State Sync Logging ────────────────────────────────
+		logger.Info("📋 [BOOT FLOW] Step 2: Kiểm tra NOMT database (AccountState & StakeState)...")
 		logger.Info("🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=%d, account_root=%s, stake_root=%s",
 			app.startLastBlock.Header().BlockNumber(),
 			app.startLastBlock.Header().AccountStatesRoot().Hex(),
@@ -386,6 +400,7 @@ func (app *App) initBlockchain() error {
 
 		// Note: SetBackupPath is no longer needed - backupPath is set in constructor
 
+		logger.Info("📋 [BOOT FLOW] Step 3: Khởi tạo TrieDatabaseManager và BlockChain instance...")
 		// Initialize trie database manager
 		trie_database.CreateTrieDatabaseManager(
 			app.storageManager.GetStorageDatabaseTrie(),
@@ -393,6 +408,7 @@ func (app *App) initBlockchain() error {
 
 		// Initialize blockchain
 		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		logger.Info("✅ [BOOT FLOW] Step 3: TrieDatabaseManager và BlockChain đã sẵn sàng")
 	}
 
 SKIP_GENESIS:
@@ -405,6 +421,9 @@ SKIP_GENESIS:
 	if app.chainState != nil && app.chainState.GetAccountStateDB() != nil {
 		nomtRoot := app.chainState.GetAccountStateDB().Trie().Hash()
 		startStateRoot := app.startLastBlock.Header().AccountStatesRoot()
+		logger.Info("📋 [BOOT FLOW] Step 4: Xác minh NOMT root vs Block Header (FORK-SAFETY check)...")
+		logger.Info("🔍 [BOOT FLOW] Step 4: nomtRoot=%s, startStateRoot=%s",
+			nomtRoot.Hex()[:18]+"...", startStateRoot.Hex()[:18]+"...")
 
 		// ═══════════════════════════════════════════════════════════════
 		// FORK-DIAG (May 2026): Cross-check trie cached root vs direct NOMT handle root.
@@ -563,6 +582,10 @@ SKIP_GENESIS:
 			}
 			logger.Info("✅ [STARTUP-DIAG] Final state: GEI=%d, CommitIndex=%d, Block=%d, Epoch=%d",
 				storageGEI, storageCommit, app.startLastBlock.Header().BlockNumber(), app.startLastBlock.Header().Epoch())
+			logger.Info("✅ [BOOT FLOW] Step 4: HOÀN TẤT kiểm tra FORK-SAFETY. Node sẵn sàng kết nối Rust.")
+			logger.Info("═══════════════════════════════════════════════")
+			logger.Info("🎯 [BOOT FLOW] initBlockchain HOÀN TẤT — Chờ Rust gửi ExecutableBlock qua FFI socket...")
+			logger.Info("═══════════════════════════════════════════════")
 		}
 	}
 
@@ -847,7 +870,6 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			}
 		}
 	}
-
 	logger.Info("Genesis block initialized successfully with %d validators", len(app.genesis.Validators))
 
 	// NOTE (Apr 2026): NOMT CommitPayload is now handled synchronously inside
