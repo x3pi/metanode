@@ -1815,7 +1815,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
         
         tracing::info!("🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #{} (current cycle: {})", last_schedule_change_index, current_cycle);
         
+        // ════════════════════════════════════════════════════════════════
+        // PARTITION SAFETY (May 2026):
+        // This loop was previously unbounded — if ALL peers were down,
+        // the node would stall here FOREVER, blocking schedule_loop.
+        //
+        // Fix: After MAX_BASELINE_ATTEMPTS, skip baseline injection and
+        // enter ScheduleVerifying phase. LeaderSchedule rebuilds from
+        // the next 300 commits received when partition heals.
+        //
+        // Fork safety: Without baseline, ScheduleVerifying blocks the
+        // node from Healthy → no proposals → no fork risk.
+        // ════════════════════════════════════════════════════════════════
+        const MAX_BASELINE_ATTEMPTS: u32 = 30; // 30 × 1s = 30s max
+        let mut baseline_attempt: u32 = 0;
+        
         loop {
+            baseline_attempt += 1;
+            
+            if baseline_attempt > MAX_BASELINE_ATTEMPTS {
+                tracing::error!(
+                    "🚨 [BASELINE] Failed to fetch baseline commit #{} after {} attempts. \
+                     ALL peers unreachable (network partition?). \
+                     Skipping baseline — entering ScheduleVerifying for natural rebuild. \
+                     Fork-safe: no proposals until schedule is verified.",
+                    prev_index, MAX_BASELINE_ATTEMPTS
+                );
+                self.coordination_hub.set_schedule_recovery_pending(true);
+                return;
+            }
             let mut target_authorities = self.inner.context.committee.authorities()
                 .filter_map(|(i, _)| if i != self.inner.context.own_index { Some(i) } else { None })
                 .collect::<Vec<_>>();
@@ -1968,7 +1996,19 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     }
                 }
             }
-            tracing::warn!("⚠️ Failed to fetch baseline commit #{} from network. Retrying in 1s...", prev_index);
+            if baseline_attempt % 10 == 0 {
+                tracing::error!(
+                    "🚨 [BASELINE] Attempt {}/{}: ALL peers unreachable for commit #{}. \
+                     Will degrade to ScheduleVerifying after {} more attempts.",
+                    baseline_attempt, MAX_BASELINE_ATTEMPTS, prev_index,
+                    MAX_BASELINE_ATTEMPTS - baseline_attempt
+                );
+            } else {
+                tracing::warn!(
+                    "⚠️ [BASELINE] Attempt {}/{}: Failed to fetch baseline commit #{} from network. Retrying in 1s...",
+                    baseline_attempt, MAX_BASELINE_ATTEMPTS, prev_index
+                );
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }

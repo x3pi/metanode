@@ -212,27 +212,37 @@ impl ConsensusCoordinationHub {
         let mut w = self.phase.write();
         if *w != new_phase {
             // ═══════════════════════════════════════════════════════════════
-            // CHOKE-POINT GUARD: Block ANY transition to Healthy if
-            // startup_sync is still active OR if the RecoveryBarrier
-            // indicates recovery is still in progress.
+            // CHOKE-POINT GUARD: Block ANY transition to Healthy if:
+            //   1. startup_sync is still active, OR
+            //   2. RecoveryBarrier indicates recovery still in progress, OR
+            //   3. Recovery was activated but block hash NOT yet verified
+            //      (POST-GATE-VERIFY timed out or hasn't completed)
+            //
             // This catches ALL code paths including bootstrap exit,
             // update_state non-startup branch, and any future paths.
             //
-            // DEFENSE-IN-DEPTH: Even if startup_sync_active is somehow
-            // cleared early (bug), the barrier provides a second layer
-            // of protection since it tracks the ACTUAL recovery phase.
+            // DEFENSE-IN-DEPTH: Three independent layers of protection:
+            //   Layer 1: startup_sync_active (legacy)
+            //   Layer 2: recovery_barrier.can_propose() (architectural)
+            //   Layer 3: block_hash_verified (bit-perfect parity)
             // ═══════════════════════════════════════════════════════════════
+            let recovery_hash_unverified = self.recovery_was_activated.load(Ordering::Acquire) 
+                && !self.block_hash_verified.load(Ordering::Acquire);
+            
             if new_phase == NodeConsensusPhase::Healthy 
                 && (self.startup_sync_active.load(Ordering::Acquire)
-                    || !self.recovery_barrier.can_propose())
+                    || !self.recovery_barrier.can_propose()
+                    || recovery_hash_unverified)
             {
                 tracing::warn!(
                     "🚫 [HUB] BLOCKED {:?} → Healthy: recovery not complete! \
-                     startup_sync={}, barrier_phase={}. \
+                     startup_sync={}, barrier_phase={}, hash_verified={}, recovery_activated={}. \
                      Node must complete all recovery phases before transitioning.",
                     *w,
                     self.startup_sync_active.load(Ordering::Acquire),
-                    self.recovery_barrier.phase()
+                    self.recovery_barrier.phase(),
+                    self.block_hash_verified.load(Ordering::Acquire),
+                    self.recovery_was_activated.load(Ordering::Acquire)
                 );
                 return; // Refuse the transition
             }

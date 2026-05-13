@@ -1582,6 +1582,27 @@ impl ConsensusNode {
                     } else {
                         tracing::warn!("⚠️ [STARTUP-SYNC] Could not reach any peers (round {}). Retrying...", sync_round);
                     }
+                    
+                    // ════════════════════════════════════════════════════
+                    // PARTITION SAFETY (May 2026):
+                    // After MAX_ISOLATION_ROUNDS of zero peers, break out
+                    // and let CommitSyncer handle remaining sync via
+                    // CatchingUp phase. Prevents permanent startup stall.
+                    //
+                    // Fork safety: recovery_barrier + startup_sync_active
+                    // block ALL proposals until CommitSyncer verifies state.
+                    // ════════════════════════════════════════════════════
+                    const MAX_ISOLATION_ROUNDS: u64 = 60; // 60 × 5s = 300s max
+                    if sync_round >= MAX_ISOLATION_ROUNDS {
+                        tracing::error!(
+                            "🚨 [STARTUP-SYNC] Node ISOLATED for {} rounds (~{}s). \
+                             Breaking out to let CommitSyncer handle sync. \
+                             Proposals remain BLOCKED until state is verified.",
+                            sync_round, sync_round * INITIAL_RETRY_DELAY_MS / 1000
+                        );
+                        break;
+                    }
+                    
                     tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
                     sync_round += 1;
                     continue;
@@ -2309,7 +2330,37 @@ impl ConsensusNode {
             // ═══════════════════════════════════════════════════════════════
             if !config.peer_rpc_addresses.is_empty() {
                 tracing::info!("🛡️ [POST-GATE-VERIFY] Entering STRICT verification loop with trusted nodes.");
+                // ════════════════════════════════════════════════════════
+                // PARTITION SAFETY (May 2026):
+                // This loop was previously unbounded — if ALL peers were
+                // down, it blocked the ENTIRE consensus startup forever.
+                //
+                // Fix: After MAX_VERIFY_ROUNDS, proceed with
+                // block_hash_verified=false. The node stays in degraded
+                // mode (no proposals) until CommitSyncer verifies state.
+                //
+                // Fork safety: startup_sync_active remains true, which
+                // blocks the node from Healthy → no proposals → no fork.
+                // ════════════════════════════════════════════════════════
+                const MAX_VERIFY_ROUNDS: u32 = 30; // 30 × 5s = 150s max
+                let mut verify_round: u32 = 0;
                 loop {
+                    verify_round += 1;
+                    if verify_round > MAX_VERIFY_ROUNDS {
+                        tracing::error!(
+                            "🚨 [POST-GATE-VERIFY] Failed to verify block hash after {} rounds ({}s). \
+                             ALL peers unreachable (network partition?). \
+                             Proceeding with block_hash_verified=FALSE. \
+                             Node will NOT propose until CommitSyncer verifies state. \
+                             Self-recovery: verification resumes when peers come online.",
+                            MAX_VERIFY_ROUNDS, MAX_VERIFY_ROUNDS * 5
+                        );
+                        // Do NOT set block_hash_verified=true — keep the node
+                        // in degraded mode. CommitSyncer's startup_sync_active
+                        // flag still blocks proposals.
+                        coordination_hub.set_block_hash_verified(false);
+                        break;
+                    }
                     match executor_client_for_proc.get_last_block_number().await {
                         Ok((local_bn, _gei, true, local_hash, _epoch)) => {
                             let check_block = local_bn;
@@ -2322,8 +2373,8 @@ impl ConsensusNode {
                             if is_zero_hash && check_block > 0 {
                                 tracing::warn!(
                                     "⚠️ [POST-GATE-VERIFY] Block {} has zero hash (not yet persisted by Go). \
-                                     Waiting for Go to finish executing this block...",
-                                    check_block
+                                     Waiting for Go to finish executing this block... (round {}/{})",
+                                    check_block, verify_round, MAX_VERIFY_ROUNDS
                                 );
                                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                 continue; // Re-query get_last_block_number on next iteration
@@ -2345,8 +2396,8 @@ impl ConsensusNode {
                                     if check_block == 0 && peer_block > 0 {
                                         tracing::warn!(
                                             "⏳ [POST-GATE-VERIFY] Local is at genesis (0) but trusted network is at {}. \
-                                             Waiting for CatchingUp / STARTUP-SYNC to fetch blocks...", 
-                                            peer_block
+                                             Waiting for CatchingUp / STARTUP-SYNC to fetch blocks... (round {}/{})", 
+                                            peer_block, verify_round, MAX_VERIFY_ROUNDS
                                         );
                                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                         continue;
@@ -2382,8 +2433,9 @@ impl ConsensusNode {
                                         }
                                         _ => {
                                             tracing::warn!(
-                                                "⏳ [POST-GATE-VERIFY] Could not fetch block {} from trusted peer {}. Retrying in 5s...",
-                                                check_block, peer_addr
+                                                "⏳ [POST-GATE-VERIFY] Could not fetch block {} from trusted peer {}. \
+                                                 Retrying... (round {}/{})",
+                                                check_block, peer_addr, verify_round, MAX_VERIFY_ROUNDS
                                             );
                                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                             continue;
@@ -2392,8 +2444,9 @@ impl ConsensusNode {
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        "⏳ [POST-GATE-VERIFY] Could not query network for trusted state: {}. Retrying in 5s...",
-                                        e
+                                        "⏳ [POST-GATE-VERIFY] Could not query network for trusted state: {}. \
+                                         Retrying... (round {}/{})",
+                                        e, verify_round, MAX_VERIFY_ROUNDS
                                     );
                                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                     continue;
@@ -2401,11 +2454,95 @@ impl ConsensusNode {
                             }
                         }
                         _ => {
-                            tracing::warn!("⏳ [POST-GATE-VERIFY] Go not ready. Retrying in 5s...");
+                            tracing::warn!(
+                                "⏳ [POST-GATE-VERIFY] Go not ready. Retrying... (round {}/{})",
+                                verify_round, MAX_VERIFY_ROUNDS
+                            );
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }
                     }
+                }
+                
+                // ════════════════════════════════════════════════════════
+                // SELF-RECOVERY: Background re-verification task.
+                // If POST-GATE-VERIFY timed out (block_hash_verified=false),
+                // spawn a background task that retries verification every
+                // 30s. When peers come back and hash matches, it sets
+                // block_hash_verified=true → CHOKE-POINT GUARD allows
+                // Healthy transition → node resumes proposals.
+                //
+                // This ensures the node self-recovers after partition
+                // heals, rather than staying pending forever.
+                // ════════════════════════════════════════════════════════
+                if !coordination_hub.is_block_hash_verified() {
+                    let bg_hub = coordination_hub.clone();
+                    let bg_client = executor_client_for_proc.clone();
+                    let bg_peers = config.peer_rpc_addresses.clone();
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            "🔄 [BG-VERIFY] Starting background hash re-verification task. \
+                             Will retry every 30s until peers are reachable and hash matches."
+                        );
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            
+                            // Already verified by another path? Exit.
+                            if bg_hub.is_block_hash_verified() {
+                                tracing::info!("✅ [BG-VERIFY] Block hash already verified. Background task exiting.");
+                                break;
+                            }
+                            
+                            // Get local block + hash
+                            let (local_bn, local_hash) = match bg_client.get_last_block_number().await {
+                                Ok((bn, _, true, hash, _)) => (bn, hash),
+                                _ => continue, // Go not ready, retry
+                            };
+                            
+                            let is_zero = local_hash.iter().all(|&b| b == 0);
+                            if is_zero || local_bn == 0 { continue; }
+                            
+                            // Query peer
+                            match crate::network::peer_rpc::query_peer_epochs_network(&bg_peers).await {
+                                Ok((_epoch, peer_block, peer_addr, _)) => {
+                                    if peer_block == 0 { continue; }
+                                    let check = std::cmp::min(local_bn, peer_block);
+                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                        &[peer_addr.clone()], check, check,
+                                    ).await {
+                                        Ok(blocks) if !blocks.is_empty() => {
+                                            if local_hash.as_slice() == blocks[0].block_hash.as_slice() {
+                                                tracing::info!(
+                                                    "✅ [BG-VERIFY] Block {} hash MATCHES peer {}! \
+                                                     Setting block_hash_verified=true. \
+                                                     Node can now transition to Healthy.",
+                                                    check, peer_addr
+                                                );
+                                                bg_hub.set_block_hash_verified(true);
+                                                break;
+                                            } else {
+                                                tracing::error!(
+                                                    "🚨 [BG-VERIFY] Block {} hash MISMATCH! \
+                                                     Local={} Peer={}. State is CORRUPTED. \
+                                                     Node will remain in degraded mode.",
+                                                    check,
+                                                    hex::encode(local_hash),
+                                                    hex::encode(&blocks[0].block_hash)
+                                                );
+                                                // Do NOT set verified — node stays pending
+                                            }
+                                        }
+                                        _ => {
+                                            tracing::debug!("[BG-VERIFY] Could not fetch block from peer. Retrying...");
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    tracing::debug!("[BG-VERIFY] Peers unreachable. Retrying in 30s...");
+                                }
+                            }
+                        }
+                    });
                 }
             } else {
                 // No peers configured — set verified to unblock Gate 5
@@ -2677,7 +2814,10 @@ impl ConsensusNode {
                                     go_epoch, storage.current_epoch
                                 );
                                 storage.current_epoch = go_epoch;
-                                commit_processor.update_epoch(go_epoch);
+                                // Note: commit_processor.update_epoch() not called here —
+                                // commit_processor owns its epoch internally and handles
+                                // epoch transitions via EndOfEpoch system transactions.
+                                // We only update storage and epoch_eth_addresses here.
                                 
                                 // Fetch epoch boundary data for the new epoch
                                 if let Ok((_, timestamp_ms, _, validators, _, boundary_gei)) = 
@@ -2689,7 +2829,8 @@ impl ConsensusNode {
                                                 validators, go_epoch
                                             ) 
                                         {
-                                            let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                            // Use the already-cloned Arc (line 2696) — 
+                                            // commit_processor was moved into tokio::spawn
                                             let mut map = epoch_eth_addresses_arc.write().await;
                                             map.insert(go_epoch, new_eth_addrs);
                                             storage.epoch_timestamp_ms = timestamp_ms;
