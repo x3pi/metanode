@@ -14,11 +14,11 @@ import (
 // Progress updater — cập nhật lastBlock lên config SMC sau khi batch gửi xong
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, lastBlock uint64, localBlock uint64, isQuorum bool) {
+func (s *CrossChainScanner) enqueueProgressUpdate(chainId uint64, remoteScanBlock uint64, localBlock uint64, isQuorum bool) {
 	select {
-	case s.progressCh <- scanProgressUpdate{chainId: chainId, lastBlock: lastBlock, localBlock: localBlock, isQuorum: isQuorum}:
+	case s.progressCh <- scanProgressUpdate{chainId: chainId, lastBlock: remoteScanBlock, localBlock: localBlock, isQuorum: isQuorum}:
 	default:
-		logger.Warn("⚠️  [Scanner] progressCh full, dropping update chainId=%d block=%d", chainId, lastBlock)
+		logger.Warn("⚠️  [Scanner] progressCh full, dropping update chainId=%d block=%d", chainId, remoteScanBlock)
 	}
 }
 

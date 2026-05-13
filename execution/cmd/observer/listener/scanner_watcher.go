@@ -84,7 +84,7 @@ func (s *CrossChainScanner) runSmartWatcher() {
 							var bn uint64
 							if _, scanErr := fmt.Sscanf(blockNumHex, "0x%x", &bn); scanErr == nil && bn > 0 {
 								// LUÔN LUÔN cập nhật tiến độ và localBlock chung 1 channel
-								s.enqueueProgressUpdate(tracked.NationId, tracked.RemoteBlock, bn, tracked.IsQuorum)
+								s.enqueueProgressUpdate(tracked.RemoteNationId, tracked.RemoteBlock, bn, tracked.IsQuorum)
 							}
 						}
 

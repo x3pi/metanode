@@ -29,7 +29,7 @@ type TrackedTx struct {
 	Wallet      common.Address
 	IsQuorum    bool
 	TargetIndex int // Lưu lại client index đã gửi để reset
-	NationId    uint64
+	RemoteNationId uint64
 	RemoteBlock uint64
 }
 

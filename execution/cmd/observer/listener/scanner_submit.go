@@ -89,6 +89,6 @@ func (s *CrossChainScanner) submitBatch(rc tcp_config.RemoteChain, events []cros
 
 	// Khi BatchSubmit thành công, gán nonce + 1
 	wallet.ExpectedNonce = nodeNonce + 1
-	s.txHashToWallet.Store(txHash, TrackedTx{Wallet: wallet.Address(), IsQuorum: isQuorum, TargetIndex: actualIndex, NationId: rc.NationId, RemoteBlock: blockNum})
+	s.txHashToWallet.Store(txHash, TrackedTx{Wallet: wallet.Address(), IsQuorum: isQuorum, TargetIndex: actualIndex, RemoteNationId: rc.NationId, RemoteBlock: blockNum})
 	return txHash, actualIndex, isQuorum, nil
 }

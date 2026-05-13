@@ -202,9 +202,15 @@ func (tp *TransactionProcessor) sendTransactionResult(conn network.Connection, t
 		return
 	}
 
+	msg := ""
+	if code == mt_common.CROSS_CHAIN_QUORUM_REACHED_CODE {
+		msg = "crosschain"
+	}
+
 	body, err := proto.Marshal(&pb.TransactionSuccess{
-		Hash: txHash.Bytes(),
-		Code: code,
+		Hash:    txHash.Bytes(),
+		Code:    code,
+		Message: msg,
 	})
 	if err != nil {
 		logger.Error("sendTransactionResult: marshal error: %v", err)
