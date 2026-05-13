@@ -183,6 +183,13 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     /// at baseline while Healthy with an empty DAG. After enough failed Core kicks,
     /// the guard escalates to a DAG baseline reset to break the deadlock.
     post_restore_stuck_ticks: u32,
+
+    /// FORK-SAFETY (May 2026): Set to true by discover_quorum_commit() when
+    /// quorum-verified epoch mismatch is detected. When true, schedule_loop()
+    /// exits immediately WITHOUT seeding quorum or running any consensus logic.
+    /// The CoreThread detects the shutdown and triggers epoch restart.
+    /// This prevents ALL fork scenarios from stale-epoch consensus execution.
+    epoch_mismatch_halt: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -311,6 +318,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_fetched_schedule_cycle: None,
             post_restore_commit_baseline: None,
             post_restore_stuck_ticks: 0,
+            epoch_mismatch_halt: false,
         }
     }
 
@@ -845,6 +853,28 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // tricking the node into transitioning to `Healthy` prematurely and causing forks.
         // We must ACTIVELY discover the true quorum commit from peers before starting.
         self.discover_quorum_commit().await;
+
+        // ═══════════════════════════════════════════════════════════════
+        // EPOCH MISMATCH HALT CHECK (May 2026 — Fork Prevention):
+        // If discover_quorum_commit detected a quorum-verified epoch
+        // mismatch, we MUST NOT start the schedule loop. Running
+        // consensus at the wrong epoch risks STALL DETECTOR-triggered
+        // DAG resets → local commits on stale data → fork.
+        //
+        // Instead, cleanly exit the CommitSyncer. The CoreThread will
+        // detect the channel closure and signal the outer ConsensusNode
+        // to restart with the correct epoch.
+        // ═══════════════════════════════════════════════════════════════
+        if self.epoch_mismatch_halt {
+            tracing::error!(
+                "🛑 [COMMIT-SYNCER] HALTED due to epoch mismatch. \
+                 CommitSyncer will NOT start schedule_loop. \
+                 Returning to trigger epoch restart via CoreThread shutdown."
+            );
+            // Keep the node in Bootstrapping phase with proposals blocked.
+            // The outer node will detect the CommitSyncer exit and restart.
+            return;
+        }
 
         // STATE MACHINE: Get initial interval from current state
         let initial_interval = self.poll_interval();
@@ -1946,7 +1976,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// Actively polls peers to establish the true quorum commit index before starting.
     /// This prevents the node from prematurely transitioning to Healthy phase when the cluster
     /// is idle and no P2P votes are being broadcasted.
-    async fn discover_quorum_commit(&self) {
+    ///
+    /// FORK-SAFETY (May 2026): When ALL peers report a higher epoch (cross-epoch
+    /// snapshot recovery), this function triggers a clean CoreThread shutdown instead
+    /// of continuing with stale epoch data. The outer ConsensusNode will then restart
+    /// consensus with the correct epoch from `get_current_epoch()`.
+    async fn discover_quorum_commit(&mut self) {
         tracing::info!("🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...");
         let timeout = Duration::from_secs(3);
         
@@ -1957,31 +1992,142 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
 
         let mut max_peer_commit = 0;
-        let mut attempt = 1;
+        let mut attempt: u32 = 0;
+        // ════════════════════════════════════════════════════════════════
+        // PRINCIPLE: "Thà pending mãi chứ không fork"
+        //
+        // NO max_attempts limit. This loop runs INDEFINITELY until one
+        // of exactly two quorum-verified conditions is met:
+        //   1. Found same-epoch peer(s) → seed quorum, start normally
+        //   2. Quorum stake confirms higher epoch → halt for restart
+        //
+        // If neither condition is met (network partition, nodes still
+        // booting), the node stays here safely — no consensus runs,
+        // no blocks produced, no fork risk. Exponential backoff prevents
+        // network spam (2s→4s→8s→16s→30s cap).
+        //
+        // The Supervisor does NOT interfere because this loop never
+        // panics or returns — it just waits until the network converges.
+        // ════════════════════════════════════════════════════════════════
         
         loop {
-            let mut polled_peers = 0;
-            for authority in self.inner.context.committee.authorities().map(|(i, _)| i) {
+            attempt += 1;
+            let mut polled_peers = 0u32;
+            let mut reachable_peers = 0u32;
+            let mut peers_at_higher_epoch = 0u32;
+            let mut higher_epoch_stake: u64 = 0;
+            let mut highest_peer_epoch: u64 = self.inner.context.committee.epoch() as u64;
+            
+            for (authority, authority_info) in self.inner.context.committee.authorities() {
                 if authority == self.inner.context.own_index {
                     continue;
                 }
                 if let Ok(status) = self.inner.network_client.get_epoch_status(authority, timeout).await {
+                    reachable_peers += 1;
                     if status.epoch == self.inner.context.committee.epoch() {
                         max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
                         polled_peers += 1;
+                    } else if status.epoch > self.inner.context.committee.epoch() {
+                        peers_at_higher_epoch += 1;
+                        higher_epoch_stake += authority_info.stake;
+                        highest_peer_epoch = std::cmp::max(highest_peer_epoch, status.epoch as u64);
                     }
                 }
             }
             
+            // ── EXIT CONDITION 1: Found same-epoch peers ──────────────
             if polled_peers > 0 {
-                tracing::info!("✅ [BOOTSTRAP] Discovered max peer commit: {}. Updating quorum_commit_index.", max_peer_commit);
+                tracing::info!(
+                    "✅ [BOOTSTRAP] Discovered max peer commit: {} (from {} same-epoch peers, attempt {}). \
+                     Updating quorum_commit_index.",
+                    max_peer_commit, polled_peers, attempt
+                );
                 self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
                 break;
             }
+
+            // ════════════════════════════════════════════════════════════
+            // EXIT CONDITION 2: QUORUM-VERIFIED EPOCH MISMATCH
+            //
+            // When a node restores from a snapshot at epoch N but the
+            // cluster has transitioned to epoch N+1+, ALL peer responses
+            // report the higher epoch and no same-epoch peers exist.
+            //
+            // Safety requirements for this exit:
+            //   1. QUORUM STAKE must confirm higher epoch (not just 1
+            //      peer — prevents malicious/partitioned peer from
+            //      triggering false transition).
+            //   2. Do NOT seed quorum or continue running epoch N
+            //      consensus. STALL DETECTORs could reset the DAG and
+            //      the local committer would produce divergent commits.
+            //   3. HALT CommitSyncer → Supervisor restarts → outer node
+            //      re-queries get_current_epoch() → correct epoch.
+            //
+            // Fork safety: No quorum seeding, no DAG reset, no local
+            // commits. The CommitSyncer simply stops, node restarts
+            // with the correct epoch committee.
+            // ════════════════════════════════════════════════════════════
+            if peers_at_higher_epoch > 0 && polled_peers == 0 {
+                let quorum_threshold = self.inner.context.committee.quorum_threshold();
+                
+                if higher_epoch_stake >= quorum_threshold {
+                    tracing::error!(
+                        "🚨 [BOOTSTRAP] EPOCH MISMATCH — QUORUM VERIFIED! \
+                         {} peer(s) (stake={}/{}) at epoch {} (local epoch={}). \
+                         Node started consensus with stale snapshot epoch. \
+                         HALTING CommitSyncer to trigger epoch restart. \
+                         DO NOT seed quorum — preventing fork risk from stale DAG.",
+                        peers_at_higher_epoch, higher_epoch_stake, quorum_threshold,
+                        highest_peer_epoch, self.inner.context.committee.epoch()
+                    );
+                    self.epoch_mismatch_halt = true;
+                    return;
+                } else {
+                    // Sub-quorum peers at higher epoch — could be partial
+                    // network partition or nodes still starting up.
+                    // Keep polling until quorum stake is reached.
+                    tracing::warn!(
+                        "⚠️ [BOOTSTRAP] Attempt {}: Potential epoch mismatch — \
+                         {} peer(s) at epoch {} but insufficient stake ({}/{}) \
+                         for quorum confirmation. Waiting for more peers...",
+                        attempt, peers_at_higher_epoch, highest_peer_epoch,
+                        higher_epoch_stake, quorum_threshold
+                    );
+                }
+            }
+
+            // ── NO EXIT: Keep waiting with exponential backoff ────────
+            // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap
+            let backoff_secs = std::cmp::min(2u64 << attempt.min(4), 30);
             
-            tracing::warn!("⚠️ [BOOTSTRAP] Attempt {}: Failed to reach peers for quorum discovery. Node CANNOT start safely. Retrying in 2s...", attempt);
-            attempt += 1;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            if reachable_peers == 0 {
+                // No peers reachable at all — network partition or all nodes down
+                if attempt % 10 == 0 {
+                    tracing::error!(
+                        "🚨 [BOOTSTRAP] Attempt {}: ZERO peers reachable! \
+                         Node is ISOLATED. Staying in safe pending state. \
+                         Will resume automatically when peers come online. \
+                         Next retry in {}s...",
+                        attempt, backoff_secs
+                    );
+                } else {
+                    tracing::warn!(
+                        "⚠️ [BOOTSTRAP] Attempt {}: No peers reachable. \
+                         Retrying in {}s... (node is safe — no consensus running)",
+                        attempt, backoff_secs
+                    );
+                }
+            } else {
+                // Some peers reachable but none at same epoch and not enough
+                // stake for quorum confirmation — keep waiting
+                tracing::warn!(
+                    "⚠️ [BOOTSTRAP] Attempt {}: {} peer(s) reachable but none at \
+                     local epoch {}. Waiting for network convergence ({}s backoff)...",
+                    attempt, reachable_peers, self.inner.context.committee.epoch(), backoff_secs
+                );
+            }
+            
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
     }
 

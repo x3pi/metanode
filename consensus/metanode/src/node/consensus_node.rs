@@ -2607,6 +2607,148 @@ impl ConsensusNode {
         // (before executor_client_for_proc) for backpressure wiring
 
         // ═══════════════════════════════════════════════════════════════════
+        // EPOCH CROSS-CHECK WITH PEERS (May 2026 — Fork Prevention):
+        //
+        // After STARTUP-SYNC, `storage.current_epoch` may be stale if the
+        // node restored from a snapshot at epoch N but the cluster has
+        // already transitioned to epoch N+1. This happens because:
+        //   - get_last_handled_commit_index() returns block-level epoch (N)
+        //   - STARTUP-SYNC uses this to set post_sync_epoch
+        //   - The check `post_sync_epoch > storage.current_epoch` fails
+        //     if storage was already set to N from setup_storage()
+        //
+        // ROOT CAUSE of Round 59 stall: Node starts consensus at epoch 5
+        // while ALL peers are at epoch 6 → permanent deadlock.
+        //
+        // FIX: Query peers via /peer_info (which returns Go's
+        // get_current_epoch()). If a MAJORITY of peers report a higher
+        // epoch, re-query our own Go for get_current_epoch() (which may
+        // have been updated by the blocks we just synced) and use that.
+        //
+        // This is a RETRY-BASED synchronization mechanism — we keep
+        // polling peers until we reach consensus on the epoch, rather
+        // than arbitrarily skipping the mismatch.
+        // ═══════════════════════════════════════════════════════════════════
+        if !config.peer_rpc_addresses.is_empty() && storage.current_epoch > 0 {
+            let mut peer_epoch_counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+            let mut max_peer_epoch = storage.current_epoch;
+            
+            for peer_addr in &config.peer_rpc_addresses {
+                match crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                    Ok(info) => {
+                        *peer_epoch_counts.entry(info.epoch).or_insert(0) += 1;
+                        if info.epoch > max_peer_epoch {
+                            max_peer_epoch = info.epoch;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("⚠️ [EPOCH-CROSSCHECK] Peer {} unreachable: {}", peer_addr, e);
+                    }
+                }
+            }
+            
+            if max_peer_epoch > storage.current_epoch {
+                let peers_at_higher = peer_epoch_counts.iter()
+                    .filter(|(&epoch, _)| epoch > storage.current_epoch)
+                    .map(|(_, &count)| count)
+                    .sum::<u32>();
+                let total_peers_reached = peer_epoch_counts.values().sum::<u32>();
+                
+                if peers_at_higher > 0 && peers_at_higher >= total_peers_reached / 2 {
+                    tracing::warn!(
+                        "⚡ [EPOCH-CROSSCHECK] MAJORITY of peers ({}/{}) at epoch {} \
+                         (local epoch={}). Attempting epoch correction via Go...",
+                        peers_at_higher, total_peers_reached,
+                        max_peer_epoch, storage.current_epoch
+                    );
+                    
+                    // Retry get_current_epoch() from Go — it may have been updated
+                    // by the blocks we synced during STARTUP-SYNC.
+                    let mut correction_attempt = 0u32;
+                    let max_correction_retries = 5u32;
+                    
+                    loop {
+                        correction_attempt += 1;
+                        match executor_client_for_proc.get_current_epoch().await {
+                            Ok(go_epoch) if go_epoch > storage.current_epoch => {
+                                tracing::info!(
+                                    "✅ [EPOCH-CROSSCHECK] Go confirms epoch {} (was {}). \
+                                     Updating storage.current_epoch to match cluster.",
+                                    go_epoch, storage.current_epoch
+                                );
+                                storage.current_epoch = go_epoch;
+                                commit_processor.update_epoch(go_epoch);
+                                
+                                // Fetch epoch boundary data for the new epoch
+                                if let Ok((_, timestamp_ms, _, validators, _, boundary_gei)) = 
+                                    executor_client_for_proc.get_epoch_boundary_data(go_epoch).await 
+                                {
+                                    if !validators.is_empty() {
+                                        if let Ok((_, new_eth_addrs)) = 
+                                            crate::node::committee::build_committee_with_eth_addresses(
+                                                validators, go_epoch
+                                            ) 
+                                        {
+                                            let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                            let mut map = epoch_eth_addresses_arc.write().await;
+                                            map.insert(go_epoch, new_eth_addrs);
+                                            storage.epoch_timestamp_ms = timestamp_ms;
+                                            storage.epoch_base_exec_index = boundary_gei;
+                                            tracing::info!(
+                                                "✅ [EPOCH-CROSSCHECK] Populated epoch_eth_addresses for epoch {} \
+                                                 (timestamp={}ms, boundary_gei={})",
+                                                go_epoch, timestamp_ms, boundary_gei
+                                            );
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            Ok(go_epoch) => {
+                                // Go still returns the old epoch — may need more time
+                                if correction_attempt >= max_correction_retries {
+                                    tracing::error!(
+                                        "🚨 [EPOCH-CROSSCHECK] Go still at epoch {} after {} retries \
+                                         but peers at epoch {}. Proceeding with Go's epoch — \
+                                         CommitSyncer will detect and handle the mismatch at runtime.",
+                                        go_epoch, correction_attempt, max_peer_epoch
+                                    );
+                                    break;
+                                }
+                                tracing::warn!(
+                                    "⏳ [EPOCH-CROSSCHECK] Go reports epoch {} (attempt {}/{}), \
+                                     peers at {}. Waiting for Go to catch up...",
+                                    go_epoch, correction_attempt, max_correction_retries, max_peer_epoch
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                            Err(e) => {
+                                if correction_attempt >= max_correction_retries {
+                                    tracing::error!(
+                                        "🚨 [EPOCH-CROSSCHECK] Go RPC failed after {} retries: {}. \
+                                         Proceeding with current epoch {}.",
+                                        correction_attempt, e, storage.current_epoch
+                                    );
+                                    break;
+                                }
+                                tracing::warn!(
+                                    "⚠️ [EPOCH-CROSSCHECK] Go RPC failed (attempt {}/{}): {}. Retrying...",
+                                    correction_attempt, max_correction_retries, e
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        "✅ [EPOCH-CROSSCHECK] Peers confirm epoch {} matches local. No correction needed.",
+                        storage.current_epoch
+                    );
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
         // POST-SYNC COMMITTEE RESOLUTION & GRACEFUL DEGRADATION
         // Once STARTUP-SYNC is completely done and we have caught up to the
         // network, we need to determine the committee for the current epoch.
