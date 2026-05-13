@@ -9,41 +9,7 @@
   "genesis_file_path": "genesis.json",
   "db_type": 2,
   "Databases": {
-    "RootPath": "./data",
-    "NodeType": "STORAGE_CLIENT",
-    "Version": "0.0.1.0",
-    "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
-    "AccountState": {
-      "ListenAddress": "0.0.0.0:6001"
-    },
-    "Trie": {
-      "ListenAddress": "0.0.0.0:6002"
-    },
-    "SmartContractCode": {
-      "ListenAddress": "0.0.0.0:6003"
-    },
-    "SmartContractStorage": {
-      "ListenAddress": "0.0.0.0:6004"
-    },
-    "Blocks": {
-      "ListenAddress": "0.0.0.0:6005"
-    },
-    "Receipts": {
-      "ListenAddress": "0.0.0.0:6006"
-    },
-    "BackupDeviceKey": {
-      "ListenAddress": "0.0.0.0:6007"
-    },
-    "TransactionState": {
-      "ListenAddress": "0.0.0.0:6008"
-    },
-    "Mapping": {
-      "ListenAddress": "0.0.0.0:6009"
-    },
-    "Backup": {
-      "Path": "./backup_db/",
-      "ListenAddress": null
-    }
+    "RootPath": "./data"
   },
   "nodes": {
     "master_address": "0.0.0.0:4201",
