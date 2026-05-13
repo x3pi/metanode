@@ -1781,6 +1781,19 @@ impl ConsensusNode {
                                         sync_round, new_gei, new_handled, new_handled
                                     );
                                     
+                                    // CRITICAL FIX: Also update the CommitProcessor's internal tracking indices.
+                                    // If these are not updated, the CommitProcessor will use its stale pre-sync
+                                    // values (e.g. from the snapshot block 5000) and will REPLAY all the commits
+                                    // that Go just downloaded via P2P Block Sync. This replay causes Go to execute
+                                    // the historical commits AGAIN as new blocks (e.g. 5436, 5437) -> Hard Fork.
+                                    // MUST be done unconditionally, even if epoch hasn't changed.
+                                    commit_processor.update_go_last_commit_index(new_handled);
+                                    commit_processor.update_next_expected_index(new_handled + 1);
+                                    tracing::info!(
+                                        "🔄 [STARTUP-SYNC] Updated CommitProcessor: go_last_commit_index={}, next_expected_index={}",
+                                        new_handled, new_handled + 1
+                                    );
+
                                     if post_sync_epoch > storage.current_epoch {
                                         tracing::info!(
                                             "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
