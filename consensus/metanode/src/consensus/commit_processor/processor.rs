@@ -798,8 +798,6 @@ impl CommitProcessor {
                         // ═══════════════════════════════════════════════
                         // DISPATCH TO GO — only for confirmed commits
                         // ═══════════════════════════════════════════════
-                        let batch_id =
-                            format!("E{}C{}", current_epoch, commit_index);
 
                         let total_txs_in_commit: usize = subdag
                             .blocks
