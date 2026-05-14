@@ -94,7 +94,9 @@ func (t *Transaction) ToEthTransaction() *e_types.Transaction { // SỬA: Kiểu
 		data = t.CallData().Input()
 	}
 	if t.IsDeployContract() {
-		data = t.DeployData().Code()
+		if t.ValidDeployData() {
+			data = t.DeployData().Code()
+		}
 	}
 	// logger.Debug("tx.Type 2: ", tx.Type)
 	switch tx.Type {
@@ -805,7 +807,10 @@ func (t *Transaction) GetData() []byte {
 		return t.CallData().Input()
 	}
 	if t.IsDeployContract() {
-		return t.DeployData().Code()
+		if t.ValidDeployData() {
+			return t.DeployData().Code()
+		}
+		return nil
 	}
 	return t.Data()
 }
