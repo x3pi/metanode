@@ -285,6 +285,7 @@ impl CommitProcessor {
         epoch_eth_addresses: &tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>,
         subdag: &mut CommittedSubDag,
         epoch: u64,
+        leader_store: &Option<super::wal::LeaderStore>,
     ) {
         // FORK-SAFETY: If leader_address was pre-populated from stored commit data,
         // trust it and skip local resolution. This ensures recovering nodes use the
@@ -297,6 +298,17 @@ impl CommitProcessor {
             return;
         }
 
+        if let Some(store) = leader_store {
+            if let Some(addr) = store.get_leader_address(epoch, subdag.commit_ref.index) {
+                trace!(
+                    "✅ [LEADER] Recovered leader_address from RocksDB for commit {} (addr=0x{})",
+                    subdag.commit_ref.index, hex::encode(&addr)
+                );
+                subdag.leader_address = addr;
+                return;
+            }
+        }
+
         let leader_author_index = subdag.leader.author.value();
 
         loop {
@@ -307,6 +319,9 @@ impl CommitProcessor {
                         let addr = &addrs[leader_author_index];
                         if addr.len() == 20 {
                             subdag.leader_address = addr.clone();
+                            if let Some(store) = leader_store {
+                                let _ = store.save_leader_address(epoch, subdag.commit_ref.index, addr);
+                            }
                             return;
                         } else {
                             warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={})", epoch, leader_author_index, addr.len());
@@ -367,6 +382,12 @@ impl CommitProcessor {
         let mut pending_local_commits: BTreeMap<u32, CommittedSubDag> = BTreeMap::new();
         let mut pending_local_timestamps: BTreeMap<u32, std::time::Instant> = BTreeMap::new();
         const MAX_PENDING_LOCAL_COMMITS: usize = 100;
+
+        let leader_store = if let Some(ref sp) = self.storage_path {
+            Some(super::wal::LeaderStore::new(sp))
+        } else {
+            None
+        };
 
         // ═══════════════════════════════════════════════════════════════
         // LAYER-4 WAL: Write-Ahead Log for crash-safe FFI tracking.
@@ -548,7 +569,7 @@ impl CommitProcessor {
                                 let gei_guard = shared_gei.lock().await;
                                 *gei_guard + 1
                             };
-                            Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
+                            Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch, &leader_store).await;
                             // WAL: Record PENDING before FFI
                             if let Some(ref mut wal) = commit_wal {
                                 let _ = wal.write_pending(local_idx, exec_gei, current_epoch);
@@ -848,7 +869,7 @@ impl CommitProcessor {
                         }
 
                         // Resolve leader ETH address into subdag (immutable after this)
-                        Self::resolve_leader_address(&epoch_eth_addresses, &mut subdag, current_epoch).await;
+                        Self::resolve_leader_address(&epoch_eth_addresses, &mut subdag, current_epoch, &leader_store).await;
 
                         // WAL: Record PENDING before FFI
                         if let Some(ref mut wal) = commit_wal {
@@ -1004,7 +1025,7 @@ impl CommitProcessor {
                                 *gei_guard + 1
                             };
 
-                            Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
+                            Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch, &leader_store).await;
 
                             // WAL: Record PENDING before FFI
                             if let Some(ref mut wal) = commit_wal {
@@ -1129,7 +1150,7 @@ impl CommitProcessor {
                                     let gei_guard = shared_gei.lock().await;
                                     *gei_guard + 1
                                 };
-                                Self::resolve_leader_address(&epoch_eth_addresses, &mut certified, current_epoch).await;
+                                Self::resolve_leader_address(&epoch_eth_addresses, &mut certified, current_epoch, &leader_store).await;
                                 // WAL: Record PENDING before FFI
                                 if let Some(ref mut wal) = commit_wal {
                                     let _ = wal.write_pending(commit_index, exec_gei, current_epoch);

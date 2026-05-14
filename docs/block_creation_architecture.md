@@ -751,4 +751,24 @@ flowchart LR
 | 3 | DIGEST-GATE monitor stale commits | 🟢 Info | Log cảnh báo tại 60s, 120s, 300s — không force-dispatch | ✅ **ĐÃ FIX** (`processor.rs`) |
 | 4 | Runtime Fork Guard log spam | 🟢 Low | Chỉ log mỗi 100 blocks | ✅ **ĐÃ FIX** (`consensus_node.rs`) |
 
+---
 
+## 9. Cập Nhật Mới Nhất: Các Biện Pháp Chống Fork (Phase 2 & 3)
+
+Để khắc phục triệt để các rủi ro (đặc biệt là tình trạng fork ở Block 20 và các mốc TPS cao), hệ thống đã được nâng cấp với các cơ chế bảo vệ ở cả mức I/O và Execution Layer:
+
+### 9.1. Write-Ahead Log (WAL) cho FFI Dispatch
+* **Vấn đề:** Khi Rust gọi FFI sang Go, nếu Go (hoặc toàn bộ Node) crash ngay trong lúc đang thực thi (vd: đang tính StateRoot), tiến trình commit sẽ bị đứt gãy. Khi restart, Rust có thể tưởng commit đó chưa chạy và gửi lại, hoặc tưởng đã chạy và bỏ qua.
+* **Giải pháp:** Tích hợp WAL (`wal.rs`). Trước khi gọi `dispatch_commit`, Rust ghi `PENDING` kèm `commit_index`, `GEI`, và `Epoch` xuống đĩa. Sau khi Go báo thành công, Rust ghi `COMMITTED`. Nếu hệ thống restart mà phát hiện `PENDING` không có `COMMITTED`, node biết chính xác crash xảy ra ở ranh giới FFI.
+
+### 9.2. Kế thừa Leader Address (Leader Persistence)
+* **Vấn đề:** `LeaderAddress` được suy ra từ DAG. Nếu Node restart và DAG bị wipe (quá trình catch-up), Node không thể tự tính lại `LeaderAddress` cho các commit cũ, dẫn đến rủi ro gán sai Leader làm đổi BlockHash.
+* **Giải pháp:** Sử dụng `LeaderStore` (bên trong `wal.rs`) để lưu trữ cặp `(Epoch, CommitIndex) -> LeaderAddress` xuống local log (JSON) ngay khi resolve xong. Khi phục hồi, hàm `resolve_leader_address` sẽ ưu tiên đọc từ cache đĩa này thay vì tính lại, đảm bảo 100% không lệch LeaderAddress cũ.
+
+### 9.3. Epoch Transition Committee Hash
+* **Vấn đề:** Các Node chuyển epoch độc lập. Nếu Node A tính sai danh sách Validator cho Epoch mới (ví dụ do lỗi đồng bộ file), nó sẽ rẽ nhánh (hard fork) cục bộ.
+* **Giải pháp:** Gắn thêm **Layer 7 Epoch Transition Assert**. Tại khoảnh khắc chuyển epoch, Node sinh ra `transition_hash` (băm của Committee mới) và lập tức gọi RPC chéo các peers để so sánh `peer_hash`. Nếu có sự bất đồng (`mismatch`), hệ thống sẽ báo `CRITICAL` và chủ động HALT thay vì âm thầm sinh ra block rẽ nhánh.
+
+### 9.4. DB Write Lock Isolation (Chống State Poisoning tại Go)
+* **Vấn đề:** Hàm `ProcessBlockData` (từ network sync) và `processRustEpochData` (từ FFI) có thể vô tình chạy đồng thời (concurrent goroutines). Cả 2 cùng chọc vào thư viện State Trie (NOMT) và RocksDB, gây nhiễu loạn cây trạng thái, làm sai lệch `ReceiptsRoot` và `TxRoot`.
+* **Giải pháp:** Bổ sung `blockWriteMutex` (Mutex của Go) trực tiếp vào `BlockValidator`. Hàm `ProcessBlock` được bọc chặt trong cơ chế `Lock/Unlock`, biến toàn bộ quá trình xác thực và ghi vào state DB thành một luồng thực thi tuyến tính (Serializable Write). Điều này đánh đổi một chút TPS cục bộ để lấy sự an toàn tuyệt đối.```
