@@ -1,6 +1,9 @@
 package executor
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -33,11 +36,23 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 		return nil, fmt.Errorf("could not get all validators from stake DB: %w", err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// Go must use the SAME string comparison to produce identical ordering
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by decoded bytes
+	// to ensure consistent bit-level ordering with Rust.
+	// Rust uses: sorted_validators.sort_by(|a, b| decode(a.authority_key).cmp(&decode(b.authority_key)))
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		decodeKey := func(k string) []byte {
+			if strings.HasPrefix(k, "0x") {
+				b, _ := hex.DecodeString(k[2:])
+				return b
+			}
+			b, err := base64.StdEncoding.DecodeString(k)
+			if err == nil {
+				return b
+			}
+			b, _ = hex.DecodeString(k)
+			return b
+		}
+		return bytes.Compare(decodeKey(validators[i].AuthorityKey()), decodeKey(validators[j].AuthorityKey())) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -342,11 +357,23 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// Go must use the SAME string comparison to produce identical ordering
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by decoded bytes
+	// to ensure consistent bit-level ordering with Rust.
+	// Rust uses: sorted_validators.sort_by(|a, b| decode(a.authority_key).cmp(&decode(b.authority_key)))
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		decodeKey := func(k string) []byte {
+			if strings.HasPrefix(k, "0x") {
+				b, _ := hex.DecodeString(k[2:])
+				return b
+			}
+			b, err := base64.StdEncoding.DecodeString(k)
+			if err == nil {
+				return b
+			}
+			b, _ = hex.DecodeString(k)
+			return b
+		}
+		return bytes.Compare(decodeKey(validators[i].AuthorityKey()), decodeKey(validators[j].AuthorityKey())) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)

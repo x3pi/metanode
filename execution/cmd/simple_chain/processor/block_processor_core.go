@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -678,13 +680,21 @@ func (bp *BlockProcessor) GetLeaderAddressByIndex(leaderAuthorIndex uint32) comm
 	}
 
 	// CRITICAL: Sort validators by AuthorityKey to match Rust committee ordering
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// We MUST decode the Base64 strings to bytes before comparing, because Base64
-	// character values do not monotonically map to the underlying byte values.
+	// We MUST decode the Hex/Base64 strings to bytes before comparing.
 	sort.Slice(validators, func(i, j int) bool {
-		aBytes, _ := base64.StdEncoding.DecodeString(validators[i].AuthorityKey())
-		bBytes, _ := base64.StdEncoding.DecodeString(validators[j].AuthorityKey())
-		return bytes.Compare(aBytes, bBytes) < 0
+		decodeKey := func(k string) []byte {
+			if strings.HasPrefix(k, "0x") {
+				b, _ := hex.DecodeString(k[2:])
+				return b
+			}
+			b, err := base64.StdEncoding.DecodeString(k)
+			if err == nil {
+				return b
+			}
+			b, _ = hex.DecodeString(k)
+			return b
+		}
+		return bytes.Compare(decodeKey(validators[i].AuthorityKey()), decodeKey(validators[j].AuthorityKey())) < 0
 	})
 
 	// Filter only active validators (not jailed, has stake > 0)
