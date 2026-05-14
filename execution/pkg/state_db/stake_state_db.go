@@ -163,7 +163,7 @@ func (db *StakeStateDB) CreateRegister(
 ) error {
 	// Backward compatible: use name as hostname, pubKeyBls as authorityKey
 	return db.CreateRegisterWithKeys(address, name, description, website, image, commissionRate, minSelfDelegation,
-		primaryAddress, workerAddress, p2pAddress, pubKeyBls, pubKeySecp, pubKeySecp, name, pubKeyBls)
+		primaryAddress, workerAddress, p2pAddress, pubKeyBls, []byte(pubKeySecp), []byte(pubKeySecp), name, []byte(pubKeyBls))
 }
 
 // CreateRegisterWithKeys registers a validator with separate protocol_key and network_key
@@ -180,10 +180,10 @@ func (db *StakeStateDB) CreateRegisterWithKeys(
 	workerAddress string,
 	p2pAddress string,
 	pubKeyBls string,
-	protocolKey string,
-	networkKey string,
+	protocolKey []byte,
+	networkKey []byte,
 	hostname string,
-	authorityKey string,
+	authorityKey []byte,
 ) error {
 	if db.lockedFlag.Load() {
 		return errors.New("CreateRegister: db is locked")

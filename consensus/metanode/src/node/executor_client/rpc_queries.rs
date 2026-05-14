@@ -80,14 +80,15 @@ impl ExecutorClient {
                 );
                 // CRITICAL: Log each ValidatorInfo exactly as received from Go
                 for (idx, validator) in v.validators.iter().enumerate() {
-                    let auth_key_preview = if validator.authority_key.len() > 50 {
-                        format!("{}...", &validator.authority_key[..50])
+                    let auth_hex = hex::encode(&validator.authority_key);
+                    let auth_key_preview = if auth_hex.len() > 50 {
+                        format!("{}...", &auth_hex[..50])
                     } else {
-                        validator.authority_key.clone()
+                        auth_hex
                     };
                     info!("📥 [RUST←GO] ValidatorInfo[{}]: address={}, stake={}, name={}, authority_key={}, protocol_key={}, network_key={}",
                             idx, validator.address, validator.stake, validator.name,
-                            auth_key_preview, validator.protocol_key, validator.network_key);
+                            auth_key_preview, hex::encode(&validator.protocol_key), hex::encode(&validator.network_key));
                 }
             }
             Some(proto::response::Payload::Error(e)) => {
@@ -147,14 +148,15 @@ impl ExecutorClient {
 
                     // CRITICAL: Log each ValidatorInfo exactly as received from Go
                     for (idx, validator) in validator_info_list.validators.iter().enumerate() {
-                        let auth_key_preview = if validator.authority_key.len() > 50 {
-                            format!("{}...", &validator.authority_key[..50])
+                        let auth_hex = hex::encode(&validator.authority_key);
+                        let auth_key_preview = if auth_hex.len() > 50 {
+                            format!("{}...", &auth_hex[..50])
                         } else {
-                            validator.authority_key.clone()
+                            auth_hex
                         };
                         info!("📥 [RUST←GO] ValidatorInfo[{}]: address={}, stake={}, name={}, authority_key={}, protocol_key={}, network_key={}",
                             idx, validator.address, validator.stake, validator.name,
-                            auth_key_preview, validator.protocol_key, validator.network_key);
+                            auth_key_preview, hex::encode(&validator.protocol_key), hex::encode(&validator.network_key));
                     }
 
                     Ok((

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -59,7 +60,6 @@ func (app *App) initBlockchain() error {
 		// ═══════════════════════════════════════════════════════════════════
 		dataDir := app.config.Databases.RootPath
 		blocksPath := dataDir + "/blocks"
-		nomtPath := dataDir + "/nomt_db/account_state"
 		metadataPath := dataDir + "/metadata.json"
 		hasExistingData := false
 
@@ -83,12 +83,6 @@ func (app *App) initBlockchain() error {
 				}
 			}
 		}
-		
-		// Also check NOMT HT file presence
-		if _, err := os.Stat(nomtPath + "/ht"); err == nil {
-			hasExistingData = true
-		}
-
 		if hasExistingData {
 			if _, err := os.Stat(metadataPath); err == nil {
 				logger.Warn("⚠️ GetLastBlock() failed, but metadata.json exists! Bypassing panic to recover from snapshot.")
@@ -678,15 +672,15 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			name = val.GetName()
 		}
 		pubkeyBls := val.GetAuthorityKey()
-		if pubkeyBls == "" {
-			pubkeyBls = val.GetPubkeyBls()
+		if len(pubkeyBls) == 0 {
+			pubkeyBls = []byte(val.GetPubkeyBls())
 		}
 		pubkeySecp := val.GetProtocolKey()
-		if pubkeySecp == "" {
-			pubkeySecp = val.GetPubkeySecp()
+		if len(pubkeySecp) == 0 {
+			pubkeySecp = []byte(val.GetPubkeySecp())
 		}
 		networkKey := val.GetNetworkKey()
-		if networkKey == "" {
+		if len(networkKey) == 0 {
 			networkKey = pubkeySecp // Fallback to protocol_key if network_key not set
 		}
 		validatorAddress := e_common.HexToAddress(val.GetAddress())
@@ -704,11 +698,11 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			val.GetPrimaryAddress(),
 			val.GetWorkerAddress(),
 			val.GetP2PAddress(),
-			pubkeyBls,
-			pubkeySecp, // protocol_key (Ed25519)
-			networkKey, // network_key (Ed25519)
-			name,       // hostname (use validator name)
-			pubkeyBls,  // authority_key (BLS public key)
+			hex.EncodeToString(pubkeyBls), // Encode raw bytes to hex string for valid UTF-8
+			pubkeySecp,        // protocol_key []byte
+			networkKey,        // network_key []byte
+			name,              // hostname
+			pubkeyBls,         // authority_key []byte
 		)
 
 		// CRITICAL: Set initial stake from delegator_stakes in genesis.json

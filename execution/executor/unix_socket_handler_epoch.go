@@ -2,8 +2,6 @@ package executor
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -36,23 +34,10 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 		return nil, fmt.Errorf("could not get all validators from stake DB: %w", err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by decoded bytes
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
 	// to ensure consistent bit-level ordering with Rust.
-	// Rust uses: sorted_validators.sort_by(|a, b| decode(a.authority_key).cmp(&decode(b.authority_key)))
 	sort.Slice(validators, func(i, j int) bool {
-		decodeKey := func(k string) []byte {
-			if strings.HasPrefix(k, "0x") {
-				b, _ := hex.DecodeString(k[2:])
-				return b
-			}
-			b, err := base64.StdEncoding.DecodeString(k)
-			if err == nil {
-				return b
-			}
-			b, _ = hex.DecodeString(k)
-			return b
-		}
-		return bytes.Compare(decodeKey(validators[i].AuthorityKey()), decodeKey(validators[j].AuthorityKey())) < 0
+		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -182,18 +167,18 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 				}
 
-				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
+				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as bytes to ensure consistent ordering with Rust
 				sort.Slice(validatorInfoList.Validators, func(i, j int) bool {
-					return validatorInfoList.Validators[i].AuthorityKey < validatorInfoList.Validators[j].AuthorityKey
+					return bytes.Compare(validatorInfoList.Validators[i].AuthorityKey, validatorInfoList.Validators[j].AuthorityKey) < 0
 				})
 
 				for i, val := range validatorInfoList.Validators {
 					authKeyPreview := val.AuthorityKey
 					if len(authKeyPreview) > 50 {
-						authKeyPreview = authKeyPreview[:50] + "..."
+						authKeyPreview = authKeyPreview[:50]
 					}
 					logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] Genesis ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s",
-						i, val.Address, val.Stake, val.Name, authKeyPreview)
+						i, val.Address, val.Stake, val.Name, string(authKeyPreview)+"...")
 				}
 			} else {
 				// Fallback to current state ONLY if genesis.json is missing (should not happen in prod)
@@ -210,7 +195,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 				// Sort
 				sort.Slice(validators, func(i, j int) bool {
-					return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+					return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 				})
 
 				for _, dbValidator := range validators {
@@ -357,23 +342,10 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by decoded bytes
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
 	// to ensure consistent bit-level ordering with Rust.
-	// Rust uses: sorted_validators.sort_by(|a, b| decode(a.authority_key).cmp(&decode(b.authority_key)))
 	sort.Slice(validators, func(i, j int) bool {
-		decodeKey := func(k string) []byte {
-			if strings.HasPrefix(k, "0x") {
-				b, _ := hex.DecodeString(k[2:])
-				return b
-			}
-			b, err := base64.StdEncoding.DecodeString(k)
-			if err == nil {
-				return b
-			}
-			b, _ = hex.DecodeString(k)
-			return b
-		}
-		return bytes.Compare(decodeKey(validators[i].AuthorityKey()), decodeKey(validators[j].AuthorityKey())) < 0
+		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -436,11 +408,11 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		}
 
 		// CRITICAL: Log ValidatorInfo exactly as Rust will receive it
-		authKeyPreview := val.AuthorityKey
+		authKeyPreview := fmt.Sprintf("%x", val.AuthorityKey)
 		if len(authKeyPreview) > 50 {
 			authKeyPreview = authKeyPreview[:50] + "..."
 		}
-		logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s",
+		logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%x, network_key=%x",
 			len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey)
 
 		validatorInfoList.Validators = append(validatorInfoList.Validators, val)
