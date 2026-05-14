@@ -3,10 +3,8 @@
 package processor
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -677,91 +675,22 @@ func (bp *BlockProcessor) calculateReceiptsRoot(receiptList []types.Receipt) (ty
 // CRITICAL FORK-SAFETY: This ensures all nodes use the same leader address for the same commit
 // Validators are sorted by AuthorityKey (matching Rust committee ordering)
 // Returns the validator's Ethereum address, or falls back to bp.validatorAddress if lookup fails
-func (bp *BlockProcessor) GetLeaderAddressByIndex(leaderAuthorIndex uint32) common.Address {
-	if bp.chainState == nil {
-		logger.Warn("⚠️ [LEADER LOOKUP] chainState is nil, falling back to validatorAddress")
-		return bp.validatorAddress
-	}
-
-	// Get all validators from stake state
-	validators, err := bp.chainState.GetStakeStateDB().GetAllValidators()
-	if err != nil {
-		logger.Warn("⚠️ [LEADER LOOKUP] Failed to get validators: %v, falling back to validatorAddress", err)
-		return bp.validatorAddress
-	}
-
-	if len(validators) == 0 {
-		logger.Warn("⚠️ [LEADER LOOKUP] No validators found, falling back to validatorAddress")
-		return bp.validatorAddress
-	}
-
-	// CRITICAL: Sort validators by AuthorityKey to match Rust committee ordering
-	// We MUST compare the bytes directly.
-	sort.Slice(validators, func(i, j int) bool {
-		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
-	})
-
-	// Filter only active validators (not jailed, has stake > 0)
-	var activeValidators []common.Address
-	for _, v := range validators {
-		if v.IsJailed() {
-			continue
-		}
-		stake := v.TotalStakedAmount()
-		if stake == nil || stake.Sign() <= 0 {
-			continue
-		}
-		activeValidators = append(activeValidators, v.Address())
-	}
-
-	if len(activeValidators) == 0 {
-		// CRITICAL: No active validators is fatal
-		logger.Error("🚨 [FATAL] No active validators found! Cannot determine leader.")
-		logger.Error("🚨 [FATAL] This indicates consensus corruption. System cannot continue safely.")
-		logger.Fatal("FORK-SAFETY: No active validators - cannot determine leader")
-	}
-
-	// Lookup by index with DETERMINISTIC FALLBACK (not node-specific address)
-	if int(leaderAuthorIndex) >= len(activeValidators) {
-		// DETERMINISTIC FALLBACK: Use modulo to wrap index
-		// This ensures ALL nodes pick the SAME fallback leader
-		safeIndex := int(leaderAuthorIndex) % len(activeValidators)
-		logger.Warn("⚠️ [LEADER LOOKUP] leaderAuthorIndex=%d out of range (active=%d), using deterministic fallback index=%d",
-			leaderAuthorIndex, len(activeValidators), safeIndex)
-		return activeValidators[safeIndex]
-	}
-
-	leaderAddr := activeValidators[leaderAuthorIndex]
-	logger.Debug("✅ [LEADER LOOKUP] Found leader address for index %d: %s", leaderAuthorIndex, leaderAddr.Hex())
-	return leaderAddr
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GetLeaderAddress - PRIMARY ENTRY POINT FOR LEADER LOOKUP
-// ═══════════════════════════════════════════════════════════════════════════════
-// RUST-DRIVEN: Rust MUST provide valid 20-byte leader_address
-// Go only falls back to index lookup as SAFETY NET, not primary mechanism
-// ═══════════════════════════════════════════════════════════════════════════════
 func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorIndex uint32) common.Address {
-	// PREFERRED PATH: Rust provided valid 20-byte Ethereum address
-	if len(leaderAddress) == 20 {
-		addr := common.BytesToAddress(leaderAddress)
-		logger.Debug("✅ [LEADER] Using direct address from Rust: %s", addr.Hex())
-		return addr
+	// ═══════════════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY INVARIANT #1: Immutable Leader
+	// Go MUST NEVER calculate the leader address. It must strictly use the address
+	// determined by the Rust consensus layer to prevent forks.
+	// ═══════════════════════════════════════════════════════════════════════════════
+	if len(leaderAddress) != 20 {
+		logger.Error("🚨 [FATAL] [FORK-GUARD] Rust sent leader_address with invalid length %d (expected 20).", len(leaderAddress))
+		logger.Error("🚨 [FATAL] Go Execution layer CANNOT calculate leader address locally.")
+		logger.Error("🚨 [FATAL] This indicates a critical breakdown in Rust consensus FFI boundary.")
+		logger.Fatal("FORK-SAFETY: Invalid leader address from consensus")
 	}
 
-	// SAFETY NET: Rust did not provide valid address
-	// This should be RARE with fixed Rust code
-	// Use deterministic index lookup as fallback
-	if len(leaderAddress) > 0 {
-		logger.Warn("⚠️ [LEADER] Rust sent leader_address with invalid length %d (expected 20). Using index fallback.", len(leaderAddress))
-	} else {
-		logger.Warn("⚠️ [LEADER] Rust sent EMPTY leader_address. Using index fallback. This may indicate Rust bug!")
-	}
-
-	// Fallback to deterministic index lookup
-	// GetLeaderAddressByIndex now uses modulo for deterministic fallback
-	return bp.GetLeaderAddressByIndex(leaderAuthorIndex)
+	addr := common.BytesToAddress(leaderAddress)
+	logger.Debug("✅ [LEADER] Using deterministic address from Rust Consensus: %s", addr.Hex())
+	return addr
 }
 
 // WaitForPersistence blocks until all pending async persistence jobs are processed.
