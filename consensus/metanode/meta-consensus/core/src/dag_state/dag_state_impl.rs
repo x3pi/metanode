@@ -213,34 +213,50 @@ impl DagState {
         let mut scoring_subdag = ScoringSubdag::new(context.clone());
 
         if let Some(last_commit) = last_commit.as_ref() {
-            store
-                .scan_commits((commit_recovery_start_index..=last_commit.index()).into())
+            let commits_per_schedule = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
+            let scoring_window_start = (last_commit.index() / commits_per_schedule) * commits_per_schedule + 1;
+            let scan_start = std::cmp::min(scoring_window_start, commit_recovery_start_index);
+            
+            let commits = store
+                .scan_commits((scan_start..=last_commit.index()).into())
                 .unwrap_or_else(|e| {
-                    panic!(
-                        "Failed to scan_commits for scoring subdag recovery: {:?}",
-                        e
-                    )
-                })
-                .iter()
-                .for_each(|commit| {
+                    panic!("Failed to scan_commits for scoring subdag recovery: {:?}", e)
+                });
+                
+            let mut scoring_subdags_to_add = Vec::new();
+            
+            for commit in commits {
+                if commit.index() >= commit_recovery_start_index {
                     for block_ref in commit.blocks() {
                         last_committed_rounds[block_ref.author] =
                             max(last_committed_rounds[block_ref.author], block_ref.round);
                     }
                     let committed_subdag =
                         load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
-                    // We don't need to recover reputation scores for unscored_committed_subdags
                     unscored_committed_subdags.push(committed_subdag);
-                });
+                }
+                
+                if commit.index() >= scoring_window_start {
+                    let committed_subdag =
+                        load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
+                    scoring_subdags_to_add.push(committed_subdag);
+                }
+            }
+            
+            scoring_subdag.add_subdags(scoring_subdags_to_add);
         }
 
         tracing::info!(
             "DagState was initialized with the following state: \
-            {last_commit:?}; {last_committed_rounds:?}; {} unscored committed subdags;",
-            unscored_committed_subdags.len()
+            {last_commit:?}; {last_committed_rounds:?}; {} unscored committed subdags; {} scored subdags",
+            unscored_committed_subdags.len(),
+            scoring_subdag.scored_subdags_count()
         );
 
-        scoring_subdag.add_subdags(std::mem::take(&mut unscored_committed_subdags));
+        let mut last_commit_timestamp_ms = 0;
+        if let Some(commit) = last_commit.as_ref() {
+            last_commit_timestamp_ms = commit.timestamp_ms();
+        }
 
         let mut state = Self {
             context: context.clone(),
@@ -261,7 +277,7 @@ impl DagState {
             store: store.clone(),
             cached_rounds,
             evicted_rounds: vec![0; num_authorities],
-            fallback_last_commit_timestamp_ms: 0,
+            fallback_last_commit_timestamp_ms: last_commit_timestamp_ms,
             baseline_reputation_scores: None,
         };
 

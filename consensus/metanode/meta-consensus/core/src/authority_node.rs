@@ -314,8 +314,10 @@ where
             "consensus db_path must be valid UTF-8 — check Parameters::db_path configuration",
         );
         let store = Arc::new(RocksDBStore::new(store_path));
-        let mut dag_state = DagState::new(context.clone(), store.clone());
-        dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
+        let dag_state = DagState::new(context.clone(), store.clone());
+        // REMOVED: dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
+        // This was overwriting the accurate ms-precision timestamp from Rust's DagState 
+        // with Go's second-precision timestamp, causing fork divergence.
 
         // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
         // On snapshot restart: DAG might be at 1005, but Go has processed up to replay_after (e.g. 1000).

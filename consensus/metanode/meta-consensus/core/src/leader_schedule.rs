@@ -150,16 +150,10 @@ impl LeaderSchedule {
         &self,
         dag_state: Arc<RwLock<DagState>>,
     ) -> usize {
-        let subdag_count = dag_state.read().scoring_subdags_count() as u64;
+        let last_commit_index = dag_state.read().last_commit_index() as u64;
+        let commits_in_current_schedule = last_commit_index % self.num_commits_per_schedule;
 
-        assert!(
-            subdag_count <= self.num_commits_per_schedule,
-            "Committed subdags count exceeds the number of commits per schedule"
-        );
-        self.num_commits_per_schedule
-            .checked_sub(subdag_count)
-            .expect("subdag_count <= num_commits_per_schedule, guaranteed by assert above")
-            as usize
+        (self.num_commits_per_schedule - commits_in_current_schedule) as usize
     }
 
     /// Checks whether the dag state sub dags list is empty. If yes then that means that
