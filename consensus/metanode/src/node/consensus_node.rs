@@ -1232,6 +1232,7 @@ impl ConsensusNode {
             Arc::new(tokio::sync::RwLock::new(map))
         })
         .with_storage_path(config.storage_path.clone())
+        .with_quorum_commit_index(coordination_hub.get_quorum_commit_index_ref())
         ;
 
         // ExecutorClient for commit processing

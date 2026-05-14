@@ -787,7 +787,60 @@ PROCESS_BLOCK:
 		}
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// TIMESTAMP REGRESSION GUARD (May 2026): Reject stale DAG commits BEFORE
+	// executing any transactions. This MUST run before ProcessTransactions()
+	// because EVM execution mutates in-memory state (account balances, nonces,
+	// storage). If we detect regression after execution, the state is already
+	// corrupted and cannot be cleanly reverted.
+	//
+	// ROOT CAUSE: When Rust's local committer evaluates a sparse/incomplete DAG
+	// (e.g., after snapshot restore or during network partition), it may decide
+	// a different leader whose commit has an OLD timestamp. This produces a block
+	// with timestamp BEHIND the parent → different block hash → FORK.
+	//
+	// Observed: Block 2718 fork — m2's timestamp was 122 seconds behind the
+	// cluster (leader 0xb014 vs cluster's 0xCCc7, timestamp 0x6a04b115 vs
+	// 0x6a04b18f). Different leader = different TX set = different txRoot.
+	//
+	// SAFETY: Legitimate blocks NEVER regress >30s because Rust's
+	// calculate_commit_timestamp() uses median stake-weighted algorithm which
+	// always produces monotonically increasing timestamps under normal conditions.
+	// ═══════════════════════════════════════════════════════════════════════════
 	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
+	if lastBlock != nil && blockTimeSec > 0 {
+		parentTs := lastBlock.Header().TimeStamp()
+		if parentTs > 0 && blockTimeSec < parentTs {
+			regression := parentTs - blockTimeSec
+			if regression > 30 {
+				leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
+				logger.Error("🚨 [TIMESTAMP-REGRESSION] DROPPING commit BEFORE execution: "+
+					"block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
+					"Stale Rust commit from sparse DAG local committer "+
+					"(leader=%s, GEI=%d, epoch=%d, txs=%d). "+
+					"Correct block will arrive via CertifiedCommit.",
+					*currentBlockNumber, blockTimeSec, regression,
+					lastBlock.Header().BlockNumber(), parentTs,
+					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
+
+				// Update GEI so processor advances past this commit
+				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
+				// Invalidate state caches (no EVM mutations happened, this is just safety)
+				bp.chainState.InvalidateAllState()
+
+				// Process any pending blocks
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+				return
+			}
+		}
+	}
+
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
 	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, preloadChan)
@@ -881,6 +934,7 @@ PROCESS_BLOCK:
 	blockHash := newBlock.Header().Hash().Hex()
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
+
 
 	// Save SystemTransactions if present
 	sysTxs := epochData.GetSystemTransactions()

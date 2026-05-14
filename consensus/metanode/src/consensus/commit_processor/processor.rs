@@ -5,7 +5,7 @@ use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use mysten_metrics::monitored_mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 use tracing::{error, info, trace, warn};
 
@@ -58,6 +58,11 @@ pub struct CommitProcessor {
             crate::consensus::commit_processor::lag_monitor::LagAlert,
         >,
     >,
+    /// QUORUM-GATE (May 2026): Shared reference to the network's quorum commit index.
+    /// When set, local commits (decided_with_local_blocks=true) are held until
+    /// quorum_commit_index >= commit_index. This prevents Go from executing
+    /// divergent blocks produced by a sparse DAG local committer.
+    quorum_commit_index: Option<Arc<AtomicU32>>,
 }
 
 impl CommitProcessor {
@@ -84,7 +89,7 @@ impl CommitProcessor {
             tx_recycler: None,
             storage_path: None,
             lag_alert_sender: None,
-
+            quorum_commit_index: None,
         }
     }
 
@@ -238,6 +243,16 @@ impl CommitProcessor {
         self
     }
 
+    /// QUORUM-GATE (May 2026): Set the shared quorum commit index reference.
+    /// When set, commits decided locally (decided_with_local_blocks=true) will be
+    /// held in a buffer until the network quorum has confirmed them.
+    /// This eliminates the root cause of consensus-layer forks from sparse DAG
+    /// local committer decisions.
+    pub fn with_quorum_commit_index(mut self, quorum_index: Arc<AtomicU32>) -> Self {
+        self.quorum_commit_index = Some(quorum_index);
+        self
+    }
+
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
@@ -308,6 +323,10 @@ impl CommitProcessor {
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
         let epoch_eth_addresses = self.epoch_eth_addresses;
+        let quorum_commit_index_ref = self.quorum_commit_index.clone();
+
+        // QUORUM-GATE: Buffer for local commits waiting for quorum confirmation
+        let mut pending_local_commits: BTreeMap<u32, CommittedSubDag> = BTreeMap::new();
 
         // PHASE-B: Go is the sole authority for GEI. Rust sends commit_index +
         // transactions to Go. Go assigns GEI via GEIAuthority singleton.
@@ -368,9 +387,103 @@ impl CommitProcessor {
                 }
             }
 
+            // ═══════════════════════════════════════════════════════════════
+            // QUORUM-GATE POLL: Dispatch buffered local commits when quorum confirms.
+            //
+            // Since acceptance is decoupled from execution (next_expected_index
+            // already advanced), these commits are dispatched directly to Go
+            // when the network votes confirm them.
+            //
+            // CertifiedCommit replacement: if a CertifiedCommit has already
+            // been dispatched for an index, the local commit is discarded.
+            // ═══════════════════════════════════════════════════════════════
+            if !pending_local_commits.is_empty() {
+                if let Some(ref quorum_ref) = quorum_commit_index_ref {
+                    let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
+                    while let Some(entry) = pending_local_commits.first_entry() {
+                        let local_idx = *entry.key();
+
+                        // Check quorum confirmation
+                        if local_idx > quorum_idx {
+                            break; // Still waiting for network votes
+                        }
+
+                        // Quorum confirmed — dispatch directly to Go
+                        let mut confirmed = entry.remove();
+                        info!(
+                            "✅ [QUORUM-GATE] Dispatching quorum-confirmed local commit {} \
+                             to Go execution (quorum={}, poll).",
+                            local_idx, quorum_idx
+                        );
+
+                        let exec_gei = {
+                            let gei_guard = shared_gei.lock().await;
+                            *gei_guard + 1
+                        };
+                        Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
+                        let geis_consumed = super::executor::dispatch_commit(
+                            &confirmed,
+                            exec_gei,
+                            current_epoch,
+                            executor_client.clone(),
+                            delivery_sender.clone(),
+                        )
+                        .await?;
+                        {
+                            let mut gei_guard = shared_gei.lock().await;
+                            *gei_guard += geis_consumed;
+                        }
+                        if let Some(ref recycler) = self.tx_recycler {
+                            let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
+                            if total_txs > 0 {
+                                let committed_tx_data: Vec<Vec<u8>> = confirmed
+                                    .blocks.iter()
+                                    .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                                    .collect();
+                                recycler.confirm_committed(&committed_tx_data).await;
+                            }
+                        }
+                        if let Some(ref callback) = commit_index_callback {
+                            callback(local_idx);
+                        }
+
+                        // Check EndOfEpoch
+                        if let Some((_block_ref, system_tx)) = confirmed.extract_end_of_epoch_transaction() {
+                            if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
+                                let current_gei = {
+                                    let gei_guard = shared_gei.lock().await;
+                                    *gei_guard
+                                };
+                                if let Some(ref callback) = epoch_transition_callback {
+                                    if let Err(e) = callback(new_epoch, confirmed.timestamp_ms, boundary_block, current_gei) {
+                                        warn!("❌ Failed to trigger epoch transition: {}", e);
+                                    }
+                                }
+                                info!("🛑 [STATION 3: PROCESSOR] Halting for EndOfEpoch in quorum-confirmed commit.");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Fix 3 Revert: Use direct indefinite block (no 120s timeout) to enforce backpressure
-            match receiver.recv().await {
-                Some(mut subdag) => {
+            // QUORUM-GATE: Use select! with timeout when local commits are pending,
+            // so we don't block forever waiting for new commits while quorum catches up.
+            let recv_result = if !pending_local_commits.is_empty() {
+                tokio::select! {
+                    result = receiver.recv() => result,
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(200)) => {
+                        // Timeout — loop back to check quorum again
+                        continue;
+                    }
+                }
+            } else {
+                receiver.recv().await
+            };
+
+            match recv_result {
+                Some(subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;
                     trace!("📥 [COMMIT PROCESSOR] Received committed subdag: commit_index={}, leader={:?}, blocks={}",
                         commit_index, subdag.leader, subdag.blocks.len());
@@ -422,12 +535,66 @@ impl CommitProcessor {
                     }
 
                     if commit_index == next_expected_index {
-                        // ═══════════════════════════════════════════════════════
-                        // PHASE-B: GO-AUTHORITATIVE GEI
+                        // ═══════════════════════════════════════════════════════════════
+                        // QUORUM-GATE (May 2026): Decouple acceptance from execution.
                         //
-                        // Rust sends commit_index + transactions. Go assigns GEI.
-                        // No hint_gei tracking in Rust.
-                        // ═══════════════════════════════════════════════════════
+                        // Rust CommitProcessor ACCEPTS all commits (advances next_expected_index)
+                        // so DAG keeps progressing. But Go execution is gated:
+                        //
+                        //   LOCAL commit: buffer for execution, dispatch only when quorum confirms
+                        //   CERTIFIED commit: dispatch to Go immediately (already has 2f+1 votes)
+                        //
+                        // This prevents the processor from freezing at block 0 while still
+                        // ensuring Go never executes an unverified local commit.
+                        // ═══════════════════════════════════════════════════════════════
+                        let dispatch_subdag: Option<CommittedSubDag>;
+
+                        if subdag.decided_with_local_blocks {
+                            if let Some(ref quorum_ref) = quorum_commit_index_ref {
+                                let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
+                                if commit_index > quorum_idx {
+                                    info!(
+                                        "🛡️ [QUORUM-GATE] Local commit {} accepted (next_expected→{}), \
+                                         execution buffered until quorum vote (quorum={}, leader={:?}, txs={}). \
+                                         DAG continues normally.",
+                                        commit_index, next_expected_index + 1, quorum_idx, subdag.leader,
+                                        subdag.blocks.iter().map(|b| b.transactions().len()).sum::<usize>()
+                                    );
+                                    pending_local_commits.insert(commit_index, subdag);
+                                    dispatch_subdag = None;
+                                } else {
+                                    info!(
+                                        "✅ [QUORUM-GATE] Local commit {} confirmed by network vote (quorum={}). \
+                                         Sending to execution.",
+                                        commit_index, quorum_idx
+                                    );
+                                    dispatch_subdag = Some(subdag);
+                                }
+                            } else {
+                                dispatch_subdag = Some(subdag);
+                            }
+                        } else {
+                            // CertifiedCommit — network-verified, execute immediately.
+                            // Discard any buffered local commit for the same index.
+                            if let Some(local_subdag) = pending_local_commits.remove(&commit_index) {
+                                info!(
+                                    "🔄 [QUORUM-GATE] CertifiedCommit {} REPLACES buffered local commit! \
+                                     Local leader={:?}, Network leader={:?}. \
+                                     Auto-proceeding with network version.",
+                                    commit_index, local_subdag.leader, subdag.leader
+                                );
+                            }
+                            dispatch_subdag = Some(subdag);
+                        }
+
+                        // ALWAYS advance next_expected_index — acceptance is decoupled from execution
+                        next_expected_index += 1;
+
+                        // Skip Go dispatch for buffered local commits
+                        if let Some(mut subdag) = dispatch_subdag {
+                        // ═══════════════════════════════════════════════
+                        // DISPATCH TO GO — only for confirmed commits
+                        // ═══════════════════════════════════════════════
                         let batch_id =
                             format!("E{}C{}", current_epoch, commit_index);
 
@@ -484,14 +651,10 @@ impl CommitProcessor {
                             callback(commit_index);
                         }
 
-                        next_expected_index += 1;
-
                         // Check for EndOfEpoch system transactions AFTER commit is sent to Go
                         if let Some((_block_ref, system_tx)) =
                             subdag.extract_end_of_epoch_transaction()
                         {
-                            // SIMPLIFIED: as_end_of_epoch now returns (new_epoch, boundary_block)
-                            // Timestamp is derived from block header at boundary_block (by Go/Rust later)
                             if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
                                 info!(
                                     "🎯 [SYSTEM TX] EndOfEpoch transaction detected in commit {}: epoch {} -> {}, boundary_block={}, total_txs_in_commit={}",
@@ -518,17 +681,30 @@ impl CommitProcessor {
                                     }
                                 }
 
-                                // We MUST break here! This epoch is over. Any remaining commits in the channel
-                                // belong to the old epoch (empty trailing commits) and must NOT be sent to Go,
-                                // otherwise Go will increment LastGlobalExecIndex and cause a hash mismatch for the new epoch.
                                 info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
                                 break;
                             }
                         }
 
-                        // Process pending out-of-order commits
+                        // Process pending out-of-order commits that are now in sequence
                         let mut should_break = false;
                         while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
+                            // QUORUM-GATE: Check if pending is local and needs quorum
+                            if pending.decided_with_local_blocks {
+                                if let Some(ref quorum_ref) = quorum_commit_index_ref {
+                                    let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
+                                    if next_expected_index > quorum_idx {
+                                        // Buffer for execution, advance acceptance
+                                        pending_local_commits.insert(next_expected_index, pending);
+                                        next_expected_index += 1;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // CertifiedCommit: discard any buffered local for same index
+                                pending_local_commits.remove(&next_expected_index);
+                            }
+
                             let pending_commit_index = next_expected_index;
 
                             let pending_gei = {
@@ -536,7 +712,6 @@ impl CommitProcessor {
                                 *gei_guard + 1
                             };
 
-                            // Resolve leader ETH address into pending subdag
                             Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
                             let geis_consumed = super::executor::dispatch_commit(
@@ -559,7 +734,6 @@ impl CommitProcessor {
 
                             next_expected_index += 1;
 
-                            // Check for EndOfEpoch in pending commits
                             if let Some((_block_ref, system_tx)) =
                                 pending.extract_end_of_epoch_transaction()
                             {
@@ -588,7 +762,21 @@ impl CommitProcessor {
                         if should_break {
                             break;
                         }
+                        } // end of `if let Some(mut subdag) = dispatch_subdag` (Go dispatch path)
                     } else if commit_index > next_expected_index {
+                        // QUORUM-GATE: If this is a CertifiedCommit (network-verified) and we have a
+                        // buffered local commit for the SAME index, the certified version is authoritative.
+                        // Replace the local version to prevent fork.
+                        if !subdag.decided_with_local_blocks {
+                            if let Some(local_subdag) = pending_local_commits.remove(&commit_index) {
+                                info!(
+                                    "🔄 [QUORUM-GATE] CertifiedCommit {} REPLACING buffered local commit \
+                                     (local_leader={:?}, certified_leader={:?})",
+                                    commit_index, local_subdag.leader, subdag.leader
+                                );
+                            }
+                        }
+
                         // SAFETY: Limit pending_commits size to prevent OOM
                         const MAX_PENDING_COMMITS: usize = 5000;
                         if pending_commits.len() >= MAX_PENDING_COMMITS {

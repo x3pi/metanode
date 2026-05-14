@@ -193,6 +193,12 @@ impl ConsensusCoordinationHub {
         self.quorum_commit_index.load(Ordering::Relaxed)
     }
 
+    /// Retrieve the shared reference to the quorum commit index (for cross-component sharing)
+    /// Used by CommitProcessor's QUORUM-GATE to hold local commits until quorum confirms them.
+    pub fn get_quorum_commit_index_ref(&self) -> Arc<std::sync::atomic::AtomicU32> {
+        self.quorum_commit_index.clone()
+    }
+
     /// Retrieve the current consensus phase.
     pub fn get_phase(&self) -> NodeConsensusPhase {
         *self.phase.read()
