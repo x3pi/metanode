@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -197,6 +198,15 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	go func() {
 		defer rootsWg.Done()
 		startReceipts := time.Now()
+
+		if len(processResults.Receipts) > 0 {
+			var combinedHash common.Hash
+			for _, rcp := range processResults.Receipts {
+				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), rcp.TransactionHash().Bytes(), []byte{byte(rcp.Status())})
+			}
+			logger.Info("🔍 [FORENSIC] Block %d: Input %d receipts to calculateReceiptsRoot. Combined Input Hash: %s", currentBlockNumber, len(processResults.Receipts), combinedHash.Hex())
+		}
+
 		receipts, receiptsRoot = bp.calculateReceiptsRoot(processResults.Receipts)
 		logger.Debug("[PERF] Phase1.receiptsRoot: %v (%d receipts)", time.Since(startReceipts), len(processResults.Receipts))
 	}()
@@ -205,6 +215,15 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	go func() {
 		defer rootsWg.Done()
 		startTxRoot := time.Now()
+
+		if len(processResults.Transactions) > 0 {
+			var combinedHash common.Hash
+			for _, tx := range processResults.Transactions {
+				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), tx.Hash().Bytes())
+			}
+			logger.Info("🔍 [FORENSIC] Block %d: Input %d txs to txDB. Combined Input Hash: %s", currentBlockNumber, len(processResults.Transactions), combinedHash.Hex())
+		}
+
 		txDB.AddTransactions(processResults.Transactions)
 		txsRoot, txsRootErr = txDB.IntermediateRoot()
 		logger.Debug("[PERF] Phase1.txsRoot: %v (%d txs)", time.Since(startTxRoot), len(processResults.Transactions))
