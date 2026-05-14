@@ -214,7 +214,7 @@ impl CommitteeSource {
                         );
 
                         match crate::node::committee::build_committee_with_eth_addresses(
-                            validators,
+                            validators.clone(),
                             target_epoch,
                         ) {
                             Ok((committee, eth_addresses)) => {
@@ -290,7 +290,7 @@ impl CommitteeSource {
                             }).collect();
 
                         match crate::node::committee::build_committee_with_eth_addresses(
-                            proto_validators, target_epoch,
+                            proto_validators.clone(), target_epoch,
                         ) {
                             Ok((committee, eth_addresses)) => {
                                 info!(
@@ -399,7 +399,7 @@ impl CommitteeSource {
                                     }).collect();
 
                                 match crate::node::committee::build_committee_with_eth_addresses(
-                                    proto_validators, target_epoch,
+                                    proto_validators.clone(), target_epoch,
                                 ) {
                                     Ok((committee, eth_addresses)) => {
                                         info!(
@@ -449,7 +449,7 @@ impl CommitteeSource {
                         );
 
                         match crate::node::committee::build_committee_with_eth_addresses(
-                            validators,
+                            validators.clone(),
                             target_epoch,
                         ) {
                             Ok((committee, eth_addresses)) => {
