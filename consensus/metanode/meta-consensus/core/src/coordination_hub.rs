@@ -56,7 +56,7 @@ pub enum NodeConsensusPhase {
     Healthy,
 }
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Centralized state machine for coordinating node phase transitions.
 #[derive(Clone)]
@@ -74,12 +74,6 @@ pub struct ConsensusCoordinationHub {
     /// Only Ready or Inactive allows proposals.
     /// ═══════════════════════════════════════════════════════════════
     recovery_barrier: Arc<RecoveryBarrier>,
-
-    /// Deterministic recovery guard for the local committer.
-    /// After snapshot recovery, this is `false`. It is set to `true` ONLY when
-    /// the node processes a real CertifiedCommit from the network (via `add_certified_commits`).
-    /// This replaces the timeout-based DAG-GAP-GUARD with event-driven safety.
-    recovery_local_commit_unlocked: Arc<AtomicBool>,
     
     /// Global flag indicating if the epoch is currently transitioning.
     /// Mutated during Start/End of epoch transition.
@@ -116,13 +110,21 @@ pub struct ConsensusCoordinationHub {
     /// until its state is bit-perfect verified against the network.
     block_hash_verified: Arc<AtomicBool>,
 
-    /// Counter to track how many network commits we've processed since transitioning to Healthy.
-    /// Used to prevent the local committer from evaluating a sparse DAG immediately after fast-forwarding.
-    network_commits_since_healthy: Arc<AtomicUsize>,
+    /// NETWORK-FIRST-COMMIT-GUARD (May 2026 — Definitive fork fix):
+    /// Set to `true` when snapshot recovery is detected in this session.
+    /// Unlike RecoveryBarrier (which resets to Ready), this flag persists for
+    /// the entire session lifetime. It ensures the local committer guard
+    /// remains active even after RecoveryBarrier transitions to Ready.
+    recovery_was_activated: Arc<AtomicBool>,
 
-    /// The time at which the local committer should unlock even if no commits have been processed.
-    /// This prevents a cluster-wide restart deadlock where all nodes wait for commits that no one is producing.
-    healthy_unlock_time: Arc<RwLock<Option<std::time::Instant>>>,
+
+    /// SPARSE DAG BOUNDARY (Architectural Fix for Snapshot Recovery Fork):
+    /// When a node recovers from a snapshot, its local DAG is sparse for past rounds.
+    /// Running the local committer on this sparse DAG leads to mathematically divergent
+    /// leader support evaluation (FORK).
+    /// This boundary defines the round below which the local committer MUST NOT evaluate.
+    /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
+    sparse_dag_boundary: Arc<RwLock<Option<u32>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -130,7 +132,6 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Initializing)),
             recovery_barrier: Arc::new(RecoveryBarrier::new()),
-            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(false)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -138,8 +139,8 @@ impl ConsensusCoordinationHub {
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
-            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
-            healthy_unlock_time: Arc::new(RwLock::new(None)),
+            recovery_was_activated: Arc::new(AtomicBool::new(false)),
+            sparse_dag_boundary: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -211,27 +212,37 @@ impl ConsensusCoordinationHub {
         let mut w = self.phase.write();
         if *w != new_phase {
             // ═══════════════════════════════════════════════════════════════
-            // CHOKE-POINT GUARD: Block ANY transition to Healthy if
-            // startup_sync is still active OR if the RecoveryBarrier
-            // indicates recovery is still in progress.
+            // CHOKE-POINT GUARD: Block ANY transition to Healthy if:
+            //   1. startup_sync is still active, OR
+            //   2. RecoveryBarrier indicates recovery still in progress, OR
+            //   3. Recovery was activated but block hash NOT yet verified
+            //      (POST-GATE-VERIFY timed out or hasn't completed)
+            //
             // This catches ALL code paths including bootstrap exit,
             // update_state non-startup branch, and any future paths.
             //
-            // DEFENSE-IN-DEPTH: Even if startup_sync_active is somehow
-            // cleared early (bug), the barrier provides a second layer
-            // of protection since it tracks the ACTUAL recovery phase.
+            // DEFENSE-IN-DEPTH: Three independent layers of protection:
+            //   Layer 1: startup_sync_active (legacy)
+            //   Layer 2: recovery_barrier.can_propose() (architectural)
+            //   Layer 3: block_hash_verified (bit-perfect parity)
             // ═══════════════════════════════════════════════════════════════
+            let recovery_hash_unverified = self.recovery_was_activated.load(Ordering::Acquire) 
+                && !self.block_hash_verified.load(Ordering::Acquire);
+            
             if new_phase == NodeConsensusPhase::Healthy 
                 && (self.startup_sync_active.load(Ordering::Acquire)
-                    || !self.recovery_barrier.can_propose())
+                    || !self.recovery_barrier.can_propose()
+                    || recovery_hash_unverified)
             {
                 tracing::warn!(
                     "🚫 [HUB] BLOCKED {:?} → Healthy: recovery not complete! \
-                     startup_sync={}, barrier_phase={}. \
+                     startup_sync={}, barrier_phase={}, hash_verified={}, recovery_activated={}. \
                      Node must complete all recovery phases before transitioning.",
                     *w,
                     self.startup_sync_active.load(Ordering::Acquire),
-                    self.recovery_barrier.phase()
+                    self.recovery_barrier.phase(),
+                    self.block_hash_verified.load(Ordering::Acquire),
+                    self.recovery_was_activated.load(Ordering::Acquire)
                 );
                 return; // Refuse the transition
             }
@@ -246,8 +257,7 @@ impl ConsensusCoordinationHub {
             *w = new_phase;
             
             if new_phase == NodeConsensusPhase::Healthy {
-                self.reset_network_commits_since_healthy();
-                self.set_healthy_unlock_time(None);
+                // Legacy resets removed
             }
         }
     }
@@ -262,94 +272,7 @@ impl ConsensusCoordinationHub {
         self.is_healthy()
     }
 
-    /// Returns true if the local committer is allowed to run.
-    /// After snapshot recovery, this is false until the node processes
-    /// a minimum number of CertifiedCommits from the network in Healthy phase,
-    /// proving DAG density and consistency.
-    pub fn is_local_commit_unlocked(&self) -> bool {
-        self.recovery_local_commit_unlocked.load(Ordering::Acquire)
-    }
 
-    /// Reset the network commits counter when transitioning to Healthy.
-    pub fn reset_network_commits_since_healthy(&self) {
-        self.network_commits_since_healthy.store(0, Ordering::Release);
-    }
-
-    /// Increment the number of network commits processed since becoming Healthy.
-    pub fn inc_network_commits_since_healthy(&self, count: usize) {
-        self.network_commits_since_healthy.fetch_add(count, Ordering::Release);
-    }
-
-    /// Get the number of network commits processed since becoming Healthy.
-    pub fn get_network_commits_since_healthy(&self) -> usize {
-        self.network_commits_since_healthy.load(Ordering::Acquire)
-    }
-
-    /// Unlock the local committer after receiving enough real CertifiedCommits.
-    /// Called from `Core::add_certified_commits()` when processing succeeds.
-    /// Once unlocked, it stays unlocked for the remainder of this epoch.
-    pub fn unlock_local_commit(&self) {
-        let commits_processed = self.get_network_commits_since_healthy();
-        // DAG DENSITY GUARD: Require 5 commits to be processed in Healthy phase
-        // before allowing the local committer to run.
-        if commits_processed >= 5 {
-            if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
-                tracing::info!(
-                    "🔓 [RECOVERY-GUARD] Local committer UNLOCKED: processed {} CertifiedCommits from network in Healthy phase. \
-                     DAG consistency and density confirmed. Local commit evaluation is now permitted.",
-                    commits_processed
-                );
-            }
-        } else {
-            // Check if we are already unlocked, to avoid spamming logs
-            if !self.is_local_commit_unlocked() {
-                tracing::info!(
-                    "⏳ [RECOVERY-GUARD] Local committer remains locked. Processed {}/5 network commits in Healthy phase.",
-                    commits_processed
-                );
-            }
-        }
-    }
-
-    /// Explicitly force the local committer to unlock (used by round-based hybrid guard)
-    pub fn force_unlock_local_commit(&self) {
-        if !self.recovery_local_commit_unlocked.swap(true, Ordering::Release) {
-            tracing::info!(
-                "🔓 [RECOVERY-GUARD] Local committer UNLOCKED (forced): Network has advanced sufficiently to confirm DAG density. Local commit evaluation is now permitted."
-            );
-        }
-    }
-
-    /// Pre-unlock local committer for a FRESH DAG (no prior commits).
-    ///
-    /// Called when the DAG has `last_commit_index == 0`, which occurs in:
-    ///   1. **Genesis** — brand new network, all nodes start from block 0
-    ///   2. **Epoch transition** — new epoch starts with empty DAG, all nodes
-    ///      just completed a full epoch of healthy consensus
-    ///
-    /// In both cases, ALL nodes start from the same clean state. There is no
-    /// stale/partial DAG data that could cause divergent commits. The
-    /// RECOVERY-GUARD (waiting for 5 network commits) is NOT needed.
-    ///
-    /// This is NOT called for cold restart (DAG loaded from disk with
-    /// `last_commit > 0`), where the guard IS needed to prevent sparse DAG fork.
-    pub fn pre_unlock_for_fresh_dag(&self) {
-        self.recovery_local_commit_unlocked.store(true, Ordering::Release);
-        self.reset_network_commits_since_healthy();
-        self.set_healthy_unlock_time(None);
-        tracing::info!(
-            "🔓 [FRESH-DAG] Local committer pre-unlocked: DAG has no prior commits. \
-             All nodes start from synchronized empty state — density guard not needed."
-        );
-    }
-
-    pub fn get_healthy_unlock_time(&self) -> Option<std::time::Instant> {
-        *self.healthy_unlock_time.read()
-    }
-
-    pub fn set_healthy_unlock_time(&self, time: Option<std::time::Instant>) {
-        *self.healthy_unlock_time.write() = time;
-    }
 
     /// Convenience check for whether the node is explicitly catching up.
     pub fn is_catching_up(&self) -> bool {
@@ -465,6 +388,9 @@ impl ConsensusCoordinationHub {
         self.schedule_recovery_pending.store(true, Ordering::Release);
         // Reset block hash verification — must be re-verified after each recovery
         self.block_hash_verified.store(false, Ordering::Release);
+        // NETWORK-FIRST-COMMIT-GUARD: Mark this session as recovery-activated.
+        // This persists for the entire session — even after RecoveryBarrier → Ready.
+        self.mark_recovery_activated();
     }
 
     /// Mark block hash as verified against peers.
@@ -485,6 +411,50 @@ impl ConsensusCoordinationHub {
         self.block_hash_verified.load(Ordering::Acquire)
     }
 
+    /// Mark this session as having undergone snapshot recovery.
+    /// Called once from `activate_recovery_barrier()`. Persists for session lifetime.
+    pub fn mark_recovery_activated(&self) {
+        self.recovery_was_activated.store(true, Ordering::Release);
+        tracing::info!(
+            "🛡️ [SPARSE-DAG-BOUNDARY] Recovery session activated. \
+             Sparse DAG Evaluation Prevention will be enabled when transitioning to Healthy."
+        );
+    }
+
+    /// Returns true if the session underwent recovery.
+    pub fn was_recovery_activated(&self) -> bool {
+        self.recovery_was_activated.load(Ordering::Acquire)
+    }
+
+
+
+    /// Sets the sparse DAG boundary based on Round.
+    pub fn set_sparse_dag_boundary(&self, boundary_round: consensus_types::block::Round) {
+        let mut lock = self.sparse_dag_boundary.write();
+        *lock = Some(boundary_round);
+        tracing::info!(
+            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to round {}. \
+             Local committer will be BLOCKED until gc_round > this boundary to prevent sparse DAG evaluation.",
+            boundary_round
+        );
+    }
+
+    /// Gets the current sparse DAG boundary.
+    pub fn sparse_dag_boundary(&self) -> Option<u32> {
+        *self.sparse_dag_boundary.read()
+    }
+
+    /// Clears the sparse DAG boundary.
+    pub fn clear_sparse_dag_boundary(&self) {
+        let mut lock = self.sparse_dag_boundary.write();
+        if lock.is_some() {
+            *lock = None;
+            tracing::info!(
+                "🔓 [SPARSE-DAG-BOUNDARY] Boundary cleared! \
+                 Local DAG has passed the sparse zone. Local committer UNLOCKED."
+            );
+        }
+    }
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -501,7 +471,6 @@ impl ConsensusCoordinationHub {
         Self {
             phase: Arc::new(RwLock::new(NodeConsensusPhase::Healthy)),
             recovery_barrier: Arc::new(RecoveryBarrier::new()), // Inactive = can propose
-            recovery_local_commit_unlocked: Arc::new(AtomicBool::new(true)),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
             global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -509,8 +478,8 @@ impl ConsensusCoordinationHub {
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
-            network_commits_since_healthy: Arc::new(AtomicUsize::new(0)),
-            healthy_unlock_time: Arc::new(RwLock::new(None)),
+            recovery_was_activated: Arc::new(AtomicBool::new(false)),
+            sparse_dag_boundary: Arc::new(RwLock::new(None)),
         }
     }
 

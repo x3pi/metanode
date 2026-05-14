@@ -97,7 +97,7 @@ impl Linearizer {
         &mut self,
         leader_block: VerifiedBlock,
         precomputed_commit: Option<crate::commit::CertifiedCommit>,
-    ) -> Option<(CommittedSubDag, TrustedCommit)> {
+    ) -> Option<(CommittedSubDag, TrustedCommit, bool)> {
         let _s = self
             .context
             .metrics
@@ -201,14 +201,24 @@ impl Linearizer {
             }
         };
 
+        // Check if this is a historical commit (already committed during previous epochs)
+        let is_historical = final_commit.as_ref().map_or(false, |fc| fc.index() <= last_commit_index);
+
         drop(dag_state);
 
         // ACTOR WRITE: Now that we don't hold the read lock, we can set them as committed!
-        for block in &to_commit {
-            assert!(
-                self.dag_state_writer.set_committed(block.reference()),
-                "Block with reference {:?} attempted to be committed twice",
-                block.reference()
+        if !is_historical {
+            for block in &to_commit {
+                assert!(
+                    self.dag_state_writer.set_committed(block.reference()),
+                    "Block with reference {:?} attempted to be committed twice",
+                    block.reference()
+                );
+            }
+        } else {
+            tracing::debug!(
+                "⏭️ [SCHEDULE-RECOVERY] Skipping set_committed for {} blocks. They are from a historical commit and already committed.",
+                to_commit.len()
             );
         }
 
@@ -250,7 +260,7 @@ impl Linearizer {
             sub_dag.leader_address = stored_leader_addr.to_vec();
         }
 
-        Some((sub_dag, commit))
+        Some((sub_dag, commit, is_historical))
     }
 
     /// Calculates the commit's timestamp. The timestamp will be calculated as the median of leader's parents (leader.round - 1)
@@ -394,13 +404,20 @@ impl Linearizer {
         while let Some((leader_block, precomputed_ts)) = leaders_iter.next() {
             // Try to collect the sub-dag. Returns None if blocks are missing.
             match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts.clone()) {
-                Some((sub_dag, commit)) => {
+                Some((sub_dag, commit, is_historical)) => {
                     // Success! All blocks were available.
                     self.update_blocks_pruned_metric(&sub_dag);
 
                     // Buffer commit in dag state for persistence later.
                     // This also updates the last committed rounds.
-                    self.dag_state_writer.add_commit(commit.clone());
+                    if !is_historical {
+                        self.dag_state_writer.add_commit(commit.clone());
+                    } else {
+                        tracing::debug!(
+                            "⏭️ [SCHEDULE-RECOVERY] Skipping DagStateWriter::add_commit for historical commit {}. It is already persisted.",
+                            commit.index()
+                        );
+                    }
 
                     committed_sub_dags.push(sub_dag);
                 }

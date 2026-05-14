@@ -57,11 +57,13 @@ impl Core {
         let clock_round = {
             let dag_state = self.dag_state.read();
             let clock_round = dag_state.threshold_clock_round();
-            if clock_round <= dag_state.get_last_proposed_block().round() {
+            let last_proposed_round = dag_state.get_last_proposed_block().round();
+            
+            if clock_round <= last_proposed_round {
                 info!(
                     "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
                     clock_round,
-                    dag_state.get_last_proposed_block().round()
+                    last_proposed_round
                 );
                 return None;
             }
@@ -757,7 +759,7 @@ impl Core {
 
         if !parent_round_quorum.reached_threshold(&self.context.committee) {
             tracing::warn!(
-                "⚠️ Quorum not reached for parent round {} when proposing for round {clock_round} (stake: {}/{}). Possible mismatch between DagState and Core. Cannot propose.",
+                "⚠️ Quorum not reached for parent round {} when proposing for round {clock_round} (stake: {}/{}). Cannot propose.",
                 quorum_round,
                 parent_round_quorum.stake(),
                 parent_round_quorum.threshold(&self.context.committee)

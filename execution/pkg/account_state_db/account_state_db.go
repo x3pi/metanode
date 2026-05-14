@@ -17,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 )
 
 var byteSlicePool = sync.Pool{
@@ -165,11 +166,22 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 		return fmt.Errorf("failed to load trie for root %s: %w", rootHash, err)
 	}
 	db.muTrie.Lock()
+	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
 		if closer, ok := db.trie.(interface{ Close() }); ok {
 			closer.Close()
 		}
 	}
+	
+	if changelogDB != nil {
+		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+
 	db.trie = newTrie
 	_, isFlat := newTrie.(*p_trie.FlatStateTrie)
 	_, isNomt := newTrie.(*p_trie.NomtStateTrie)

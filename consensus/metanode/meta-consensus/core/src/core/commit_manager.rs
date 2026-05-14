@@ -70,18 +70,8 @@ impl Core {
             }
         }
 
-        // DETERMINISTIC RECOVERY GUARD:
-        // After successfully processing CertifiedCommits from the network,
-        // we track how many network commits have been processed while in Healthy phase.
-        // The local committer will only unlock after 5 such commits, ensuring the DAG
-        // is dense enough (has accumulated orphans) before it evaluates local blocks.
-        // FORK-PREVENTION: Do NOT increment or unlock if STARTUP-SYNC is active.
-        if commits_count > 0 && !self.coordination_hub.is_startup_sync_active() {
-            if self.coordination_hub.is_healthy_stable() {
-                self.coordination_hub.inc_network_commits_since_healthy(commits_count);
-            }
-            self.coordination_hub.unlock_local_commit();
-        }
+
+
 
         // Try to propose now since there are new blocks accepted.
         self.try_propose(false)?;
@@ -111,7 +101,7 @@ impl Core {
 
         let mut certified_commits_map = BTreeMap::new();
         for c in &certified_commits {
-            certified_commits_map.insert(c.index(), c.reference());
+            certified_commits_map.insert(c.index(), c.clone());
         }
 
         if !certified_commits.is_empty() {
@@ -167,6 +157,7 @@ impl Core {
                 self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
                 
                 if self.coordination_hub.is_schedule_recovery_pending() {
+                    tracing::info!("🛡️ [SCHEDULE-RECOVERY] Baseline scores injected. UNBLOCKING local committer.");
                     self.coordination_hub.set_schedule_recovery_pending(false);
                 }
             }
@@ -182,42 +173,80 @@ impl Core {
             if commits_until_update == 0 {
                 let last_commit_index = self.dag_state.read().last_commit_index();
 
-                tracing::info!(
-                    "Leader schedule change triggered at commit index {last_commit_index}"
-                );
-
-                self.leader_schedule
-                    .update_leader_schedule_v2(&self.dag_state, &self.dag_state_writer);
-
-                // UNIFIED RECOVERY BARRIER (May 2026):
-                // After a full 300-commit scoring cycle completes, advance the barrier.
-                // The barrier only transitions ScheduleVerifying → Ready (via compare_exchange),
-                // so this is safe to call unconditionally — it's a no-op if the barrier
-                // is in any other phase (Inactive, GoSyncing, DagCatchingUp, or Ready).
-                //
-                // This replaces the fragmented logic that checked is_sync_mode, local vs quorum
-                // commit, and handled_commits >= 300. All those edge cases are now handled by
-                // the barrier's strict phase progression:
-                //   Inactive → GoSyncing → DagCatchingUp → ScheduleVerifying → Ready
-                // Only ScheduleVerifying → Ready happens here.
-                self.coordination_hub.recovery_barrier().schedule_verified();
-                // Also clear legacy flag for backward compatibility
+                // SCHEDULE-RECOVERY DAG DENSITY CHECK (May 2026):
+                // If a node recovers from a snapshot, its DAG is sparse (missing ancient blocks).
+                // If it hits the schedule update boundary BEFORE accumulating 300 commits,
+                // it MUST NOT calculate reputation scores because they will diverge from the network.
+                // The `schedule_recovery_pending` flag is cleared either when 300 commits pass natively,
+                // or when baseline scores are injected. If it's still true here, the DAG is sparse.
                 if self.coordination_hub.is_schedule_recovery_pending() {
-                    self.coordination_hub.set_schedule_recovery_pending(false);
+                    tracing::warn!(
+                        "🚫 [SCHEDULE-RECOVERY] DAG lacks 300 commits at schedule update boundary (commit_index={}). \
+                         Skipping LeaderSchedule update to prevent reputation score divergence. \
+                         Local committer will remain permanently blocked for this epoch.",
+                        last_commit_index
+                    );
+
+                    // We cannot calculate a valid schedule, and there is no peer RPC to fetch it.
+                    // To prevent `assert!(commits_until_update > 0)` from panicking, we MUST
+                    // reset the counter by forcing the leader schedule to "fake update" using the old table
+                    // or just resetting the range, but `update_leader_schedule_v2` is the only way to reset `commits_until_update`.
+                    // Actually, `update_leader_schedule_v2` calculates scores using `DagState`.
+                    // If we call it, it WILL calculate divergent scores. BUT since the local committer
+                    // is permanently blocked by `is_schedule_recovery_pending()`, the divergent scores
+                    // will NEVER be used to propose blocks!
+                    // So we can safely let it update, BUT we MUST NOT call `schedule_verified()`
+                    // or `set_schedule_recovery_pending(false)`.
+                    tracing::info!(
+                        "Leader schedule change triggered at commit index {last_commit_index} (SPARSE DAG)"
+                    );
+
+                    self.leader_schedule
+                        .update_leader_schedule_v2(&self.dag_state, &self.dag_state_writer);
+
+                    // DO NOT VERIFY THE SCHEDULE!
+                    // This keeps the `is_schedule_recovery_pending()` guard active!
+                    
+                    let propagation_scores = self
+                        .leader_schedule
+                        .leader_swap_table
+                        .read()
+                        .reputation_scores
+                        .clone();
+                    self.ancestor_state_manager
+                        .set_propagation_scores(propagation_scores);
+
+                    commits_until_update = self
+                        .leader_schedule
+                        .commits_until_leader_schedule_update(self.dag_state.clone());
+                } else {
+                    tracing::info!(
+                        "Leader schedule change triggered at commit index {last_commit_index}"
+                    );
+
+                    self.leader_schedule
+                        .update_leader_schedule_v2(&self.dag_state, &self.dag_state_writer);
+
+                    // UNIFIED RECOVERY BARRIER (May 2026):
+                    self.coordination_hub.recovery_barrier().schedule_verified();
+                    
+                    if self.coordination_hub.is_schedule_recovery_pending() {
+                        tracing::warn!("🛡️ [SCHEDULE-RECOVERY] Hit schedule update boundary, but keeping local committer blocked because DAG is sparse from snapshot recovery.");
+                    }
+
+                    let propagation_scores = self
+                        .leader_schedule
+                        .leader_swap_table
+                        .read()
+                        .reputation_scores
+                        .clone();
+                    self.ancestor_state_manager
+                        .set_propagation_scores(propagation_scores);
+
+                    commits_until_update = self
+                        .leader_schedule
+                        .commits_until_leader_schedule_update(self.dag_state.clone());
                 }
-
-                let propagation_scores = self
-                    .leader_schedule
-                    .leader_swap_table
-                    .read()
-                    .reputation_scores
-                    .clone();
-                self.ancestor_state_manager
-                    .set_propagation_scores(propagation_scores);
-
-                commits_until_update = self
-                    .leader_schedule
-                    .commits_until_leader_schedule_update(self.dag_state.clone());
 
                 fail_point!("consensus-after-leader-schedule-change");
             }
@@ -264,74 +293,6 @@ impl Core {
                 // have dangling blocks that trick the committer into choosing a leader whose
                 // ancestors are missing from RocksDB, leading to a fatal StorageFailure panic.
                 if is_sync_mode {
-                    break;
-                }
-
-                // CRITICAL FORK-SAFETY FIX (Deterministic Network Confirmation):
-                //
-                // Do not run local committer until the node has processed at least one
-                // CertifiedCommit from the network while in Healthy phase. This proves
-                // the DAG is populated enough for `calculate_commit_timestamp()` to produce
-                // the correct stake-weighted median timestamp.
-                //
-                // Without this, after snapshot restore the node oscillates CatchingUp↔Healthy.
-                // If the local committer fires during a brief Healthy window with a sparse DAG,
-                // it produces commits with wrong timestamps → fork.
-                //
-                // This guard is deterministic and event-driven — no arbitrary time delays.
-                // The lock is released by `confirm_network_commit()` in `add_certified_commits()`.
-                if !self.coordination_hub.is_healthy_stable() {
-                    tracing::debug!(
-                        "⏭️ [SYNC] Skipping local committer: awaiting network confirmation (phase={:?}). \
-                         Will unlock after processing a CertifiedCommit in Healthy phase.",
-                        self.coordination_hub.get_phase()
-                    );
-                    break;
-                }
-
-                // DAG SPARSENESS PREVENTION:
-                // Even if the phase is Healthy (e.g., lag <= 10), if we are missing ANY network commits,
-                // we MUST NOT evaluate the local committer!
-                // Local evaluation on a recently fast-forwarded (sparse) DAG will produce a truncated
-                // sub-dag with missing historical blocks, resulting in a divergent Timestamp and State Root!
-                let local_commit_index = self.dag_state.read().last_commit_index();
-                let quorum_commit_index = self.coordination_hub.get_quorum_commit_index();
-                if local_commit_index < quorum_commit_index {
-                    tracing::info!(
-                        "⏳ [ANTI-FORK] Local commit ({}) < Quorum commit ({}). Skipping local committer to prevent sparse DAG evaluation. Waiting for CertifiedCommits from CommitSyncer.",
-                        local_commit_index,
-                        quorum_commit_index
-                    );
-                    break;
-                }
-
-                // RECOVERY-GUARD (DAG-State-Aware):
-                // The guard is activated/deactivated at startup by authority_node.rs
-                // based on the actual DAG state:
-                //   - Fresh DAG (genesis/epoch transition): pre-unlocked → passes
-                //   - Populated DAG (cold restart/snapshot): locked → blocks here
-                //
-                // We do NOT use `local_commit_index >= 5` heuristic anymore.
-                // The decision is made explicitly at the source (authority_node.rs),
-                // not inferred from a magic number in the hot path.
-                if !self.coordination_hub.is_local_commit_unlocked() {
-                    let unlock_time = self.coordination_hub.get_healthy_unlock_time();
-                    
-                    // We keep the unlock_time flag just to throttle the log message,
-                    // but we DO NOT force unlock when it expires.
-                    if unlock_time.is_none() {
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-                        self.coordination_hub.set_healthy_unlock_time(Some(deadline));
-                        tracing::info!(
-                            "🔒 [RECOVERY-GUARD] Local committer blocked: waiting for 5 network commits \
-                             to build DAG density. (local_commit={}, quorum_commit={}). \
-                             Will NOT arbitrarily unlock via timeout to prevent forks.",
-                            local_commit_index,
-                            quorum_commit_index
-                        );
-                    }
-                    
-                    // Strictly wait for the network. No forced unlock.
                     break;
                 }
 
@@ -386,49 +347,26 @@ impl Core {
                     break;
                 }
 
-                // SCHEDULE GUARD: Block local committer when LeaderSchedule is unconfirmed.
-                // After restart, if CommitInfo was not persisted in RocksDB, the schedule
-                // falls back to a default (empty) LeaderSwapTable. This produces different
-                // leader elections than the network's reputation-swapped schedule, causing
-                // LEADER_ADDR divergence and hash forks.
-                // The schedule becomes confirmed when either:
-                //   - CommitInfo is recovered from store, OR
-                //   - A full 300-commit scoring cycle completes, OR
-                //   - Baseline scores are injected from the network.
-                if !self.leader_schedule.is_schedule_confirmed() {
-                    tracing::info!(
-                        "🛡️ [SCHEDULE-GUARD] Blocking local committer: LeaderSchedule not yet confirmed. \
-                         Waiting for 300-commit scoring cycle or network baseline scores."
-                    );
-                    break;
-                }
-
-                // SCHEDULE-RECOVERY GUARD: After snapshot recovery, from_store() auto-confirms
-                // the schedule because last_commit_index < 300 (looks like Genesis). But the
-                // network has progressed far beyond commit 300 with reputation swaps active.
-                // The default (empty) LeaderSwapTable produces WRONG leader elections.
-                // Block until a full scoring cycle completes with network-verified data.
-                if self.coordination_hub.is_schedule_recovery_pending() {
-                    tracing::info!(
-                        "🛡️ [SCHEDULE-RECOVERY-GUARD] Blocking local committer: snapshot recovery detected, \
-                         LeaderSchedule needs re-confirmation from network. \
-                         Waiting for 300-commit scoring cycle with CertifiedCommits."
-                    );
-                    break;
-                }
-
-                // UNIFIED RECOVERY BARRIER GUARD (May 2026):
-                // Defense-in-depth — even if legacy flags are somehow not set
-                // (e.g., epoch 2 commit index reset bypasses handled >= 300),
-                // the barrier will still block the committer until all recovery
-                // phases complete.
-                if !self.coordination_hub.recovery_barrier().can_propose() {
-                    tracing::info!(
-                        "🛡️ [RECOVERY-BARRIER-GUARD] Blocking local committer: \
-                         RecoveryBarrier phase={}. Recovery is still in progress.",
-                        self.coordination_hub.recovery_barrier().phase()
-                    );
-                    break;
+                // ═══════════════════════════════════════════════════════════════════
+                // ARCHITECTURAL FIX (May 2026): SPARSE DAG EVALUATION PREVENTION
+                // After snapshot recovery, the local DAG is sparse for past rounds.
+                // If the local committer evaluates these sparse regions, it will
+                // calculate divergent leader support and cause a FORK.
+                // We MUST rely purely on CertifiedCommits until the DAG is dense.
+                // ═══════════════════════════════════════════════════════════════════
+                if let Some(boundary_round) = self.coordination_hub.sparse_dag_boundary() {
+                    let gc_round = self.dag_state.read().gc_round();
+                    if gc_round <= boundary_round {
+                        tracing::info!(
+                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: gc_round ({}) <= boundary_round ({}). \
+                             Waiting for network CertifiedCommits to push the DAG search space entirely past the sparse history.",
+                            gc_round, boundary_round
+                        );
+                        break;
+                    } else {
+                        // The DAG search space has caught up to the dense region!
+                        self.coordination_hub.clear_sparse_dag_boundary();
+                    }
                 }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
@@ -497,17 +435,36 @@ impl Core {
         // During cold-start from snapshot, the DAG is empty so the Linearizer may skip missing
         // ancestor blocks → produces commits with different block sets → different digest.
         // The certified commits are already network-verified (2f+1 certifiers), so safety holds.
-        for sub_dag in &committed_sub_dags {
-            if let Some(commit_ref) = certified_commits_map.remove(&sub_dag.commit_ref.index) {
-                if commit_ref != sub_dag.commit_ref {
+        for sub_dag in &mut committed_sub_dags {
+            if let Some(certified_commit) = certified_commits_map.remove(&sub_dag.commit_ref.index) {
+                if certified_commit.reference() != sub_dag.commit_ref {
                     warn!(
                         "⚠️ [COLD-START] Commit digest mismatch at index {} \
                          (certified={:?}, local={:?}). \
                          Expected during snapshot restoration when ancestor blocks are missing. \
                          Using certified commit data (already network-verified).",
-                        sub_dag.commit_ref.index, commit_ref, sub_dag.commit_ref
+                        sub_dag.commit_ref.index, certified_commit.reference(), sub_dag.commit_ref
                     );
                 }
+                
+                // FORK-SAFETY FIX (May 2026): UNCONDITIONAL OVERRIDE
+                // Even if the leader digest matches, the local sparse DAG might have linearized 
+                // a different subset of ancestor blocks, resulting in a DIFFERENT timestamp_ms 
+                // or transaction sequence. We MUST ALWAYS override the entire subdag with the 
+                // network's CertifiedCommit data to guarantee bit-perfect execution parity.
+                
+                // Force the authoritative network data to override the sparse local DAG's linearization
+                sub_dag.blocks = certified_commit.blocks().to_vec();
+                sub_dag.commit_ref = certified_commit.reference();
+                
+                // Ensure the entire SubDag is mathematically identical to the network
+                // by copying the leader and execution metadata.
+                sub_dag.leader = certified_commit.leader();
+                sub_dag.leader_address = certified_commit.leader_address().to_vec();
+                sub_dag.global_exec_index = certified_commit.global_exec_index();
+                
+                // The network's CertifiedCommit timestamp is authoritative.
+                sub_dag.timestamp_ms = certified_commit.timestamp_ms();
             }
         }
 

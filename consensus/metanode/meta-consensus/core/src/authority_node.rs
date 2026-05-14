@@ -350,7 +350,6 @@ where
         // ═══════════════════════════════════════════════════════════════════
         let dag_commit_index = dag_state.last_commit_index();
         if dag_commit_index == 0 && go_handled == 0 {
-            coordination_hub.pre_unlock_for_fresh_dag();
             info!(
                 "🟢 [GUARD-POLICY] True Genesis (dag=0, go=0): RECOVERY-GUARD disabled. \
                  All nodes start synchronized — no fork risk."
@@ -478,7 +477,7 @@ where
             transaction_certifier.clone(),
             network_client.clone(),
             dag_state.clone(),
-            coordination_hub,
+            coordination_hub.clone(),
             Some(adaptive_delay_state.clone()),
             dag_state_writer,
         );
@@ -530,6 +529,7 @@ where
                 network_client,
                 network_service.clone(),
                 dag_state,
+                Some(coordination_hub),
             );
             for (peer, _) in context.committee.authorities() {
                 if peer != context.own_index {

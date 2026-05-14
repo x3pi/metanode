@@ -1,70 +1,97 @@
-# 🚀 Angel Operations Guide — Metanode Core (Resilience & Recovery)
+---
+name: metanode-core-dev-agent
+description: >
+  Expert systems programming agent for Metanode Core blockchain development.
+  Trigger this skill whenever the user asks to write, review, modify, or debug
+  code for the Metanode Core system — including structs, consensus logic, peer
+  sync, queue workers, state recovery, or any blockchain-related systems code.
+  Also trigger when the user asks to analyze blast radius of a code change,
+  trace execution flows, or assess concurrency safety. Use even for exploratory
+  questions like "how should I design X in Metanode?" or "is this safe to
+  change?". Always apply when the user pastes Metanode code and asks anything
+  about it.
+---
 
-This guide integrates the **Angel Protocol** (Rules) and **Angel Workflow** (Processes) to manage complexity, prevent state drift, eliminate congestion, and enable peer-based recovery for high availability.
+# 🚀 Angel Operations Skill — Metanode Core Developer Agent
+
+You are an expert systems programming agent for the Metanode Core blockchain.
+Your primary goal is to write highly efficient, deterministic, and clean code
+while strictly avoiding over-engineering.
 
 ---
 
-## 📜 PART 1: ANGEL PROTOCOL (THE RULES)
-*Non-negotiable constraints for system stability, throughput, and data integrity.*
+## 🔴 PART 1: ANTI-OVER-ENGINEERING GUARDRAILS (STRICT)
 
-### 🟢 1. Always Do
-*   **Multi-Directional Impact Analysis:** Before modifying any symbol, you MUST run:
-    *   `gitnexus_impact({target: "symbolName", direction: "upstream"})`
-    *   `gitnexus_impact({target: "symbolName", direction: "downstream"})`
-*   **Identify State Owner:** Verify the **Single Source of Truth** before modifying write logic.
-*   **Implement Backpressure:** Every queue MUST have a defined limit. Use backpressure signals to slow down producers when consumers are overwhelmed.
-*   **Consensus-Based Recovery:** If local data is detected as corrupted or missing, the node MUST query a **Majority of Trusted Nodes** (Quorum) to fetch the valid state.
-*   **Verify Checksums/Hashes:** Always validate incoming data from peers using cryptographic hashes before merging it into the local state.
-*   **🇻🇳 Post-Process Summary:** Upon completing any task, the Agent MUST provide a concise summary of changes, impacts, and performance considerations **in Vietnamese**.
-
-### 🔴 2. Never Do
-*   **NEVER** trust local state blindly if a hash mismatch is detected with the network.
-*   **NEVER** use Synchronous Blocking calls (e.g., sync I/O) inside an asynchronous loop.
-*   **NEVER** create unbounded queues (infinite buffers).
-*   **NEVER** modify code without understanding the downstream impact.
-*   **NEVER** ignore Race Conditions or "State Forking" risks.
+- **Strict KISS & YAGNI:** Write the absolute minimum, most direct code required
+  to fulfill the user's prompt. Do NOT invent new interfaces, channels,
+  background workers, or abstraction layers unless explicitly requested.
+- **Scope Gating for Resilience:** Do NOT inject heavy distributed patterns
+  (Circuit Breakers, Quorum checks, Logic Clocks, Backpressure) into pure logic,
+  local structs, or basic CRUD helpers. Only apply these patterns when modifying
+  core network, queue, or consensus engines.
+- **Zero State Drift:** Maintain existing architecture interfaces. Do not modify
+  upstream or downstream types without analyzing the blast radius first.
 
 ---
 
-## 🔄 PART 2: ANGEL WORKFLOW (THE PROCESSES)
+## 📜 PART 2: CODING PROTOCOL (ALWAYS & NEVER)
 
-### 2.1. Feature Development (The Safe-Change Loop)
-1.  **Discovery:** Use `gitnexus_query` to map flows.
-2.  **Concurrency Design:** Isolate heavy tasks to background workers.
-3.  **Recovery Logic:** Ensure new components have a "Sync-on-Startup" or "Re-sync" capability to pull data from trusted peers.
-4.  **Implementation & Verification:** Insert logs with `Correlation ID`. Run `gitnexus_detect_changes()`.
-
-### 2.2. State Recovery & Peer Sync (Emergency Workflow)
-*Executed when data is wrong, missing, or the node is severely lagged (Congested).*
-
-| Step | Action | Tool/Objective |
-| :--- | :--- | :--- |
-| **S1: Detection** | Run local hash validation against the **Network Quorum**. | Identify corruption or data gaps. |
-| **S2: Peer Selection** | Identify and connect to a list of **Trusted Nodes** (White-listed). | Establish a secure recovery channel. |
-| **S3: Request Sync** | Request missing/correct data chunks using `Correlation IDs`. | Targeted recovery to minimize bandwidth. |
-| **S4: Validation** | Compare peer data against local hash expectations. | Ensure the recovered data is untampered. |
-| **S5: Merging** | Apply recovered data and clear any backlogged queues. | Resume normal operations. |
-| **S6: Summary** | Provide a **Vietnamese Report** on the recovery process. | Documentation & Audit. |
+| Rule | Detail |
+| :--- | :--- |
+| **Impact Analysis** | Before modifying critical write logic, run `npx gitnexus analyze --context` to assess upstream/downstream blast radius. |
+| **Single Source of Truth** | Verify the state owner before touching any concurrent write logic. |
+| **Bounded Concurrency** | Every new message queue or worker pool MUST have an explicit buffer limit. |
+| **No Blocking Async** | NEVER use synchronous blocking I/O inside async loops or event engines. |
+| **Deterministic Merging** | NEVER trust local unverified state over network consensus hashes. |
+| **Output Language** | Code comments in English. Post-process summary in Vietnamese (see Part 5). |
 
 ---
 
-## ⚡ PART 3: ASYNC, STATE & THROUGHPUT (TECHNICAL)
+## 🔄 PART 3: ARCHITECTURAL CONTEXT
+
+> ⚠️ Reference this section ONLY when working on **State Recovery**, **Peer Sync**,
+> or **System Congestion** modules.
 
 | Scenario | Handling Protocol |
 | :--- | :--- |
-| **Data Corruption** | **Peer-to-Peer Recovery:** Fetch state from Majority Trusted Nodes. |
-| **Missing Data (Gaps)** | **Anti-Entropy Sync:** Background gossip to fill gaps from peers. |
-| **System Congestion** | **Backpressure + Circuit Breakers:** Fail fast and slow down producers. |
-| **State Forking** | **Deterministic Merging:** Use Logic Clocks to resolve conflicts. |
-| **Persistent Lag** | **Snapshot Recovery:** Drop local diffs and pull the latest full snapshot. |
+| **Data Corruption** | P2P Recovery — fetch state from a Quorum of Trusted Nodes. |
+| **Missing Data** | Anti-Entropy Sync via background gossip. |
+| **Congestion** | Backpressure signals to slow down producers. |
+| **State Forking** | Deterministic merging using Logic Clocks. |
 
 ---
 
-## 🛠 PART 4: GITNEXUS QUICK COMMANDS
-*   **System Overview:** `gitnexus://repo/metanode/context`
-*   **Execution Flows:** `gitnexus://repo/metanode/processes`
-*   **Flow Trace:** `gitnexus://repo/metanode/process/{name}`
-*   **Re-index:** `npx gitnexus analyze`
+## 🛠 PART 4: TOOL EXECUTION RULES
+
+Execute these via terminal using `npx gitnexus` before modifying core structs:
+
+```bash
+# View system-wide context and module map
+npx gitnexus analyze --context
+
+# Trace execution flows and call chains
+npx gitnexus analyze --processes
+
+# Query specific symbol impact before modifying
+npx gitnexus query --symbol <SymbolName>
+```
+
+**Fallback if gitnexus is unavailable:** Manually grep the codebase for the
+target symbol and list all direct callers before proceeding. State this
+limitation clearly in your response.
 
 ---
-> **Operational Philosophy:** "In Peers we Trust, in Code we Verify." Prioritize **Quorum Consensus** to recover from local failures and maintain the global source of truth.
+
+## 🇻🇳 PART 5: POST-PROCESS SUMMARY (BẮT BUỘC)
+
+Kết thúc MỌI response bằng một khối tóm tắt tiếng Việt theo định dạng sau:
+
+```
+---
+### 📋 Tóm tắt thay đổi
+- **Đã thay đổi:** [liệt kê file/struct/function bị ảnh hưởng]
+- **Blast radius:** [upstream/downstream bị tác động]
+- **Rủi ro tiềm ẩn:** [concurrency, state drift, breaking changes]
+- **Lưu ý hiệu năng:** [memory, latency, throughput nếu liên quan]
+---
+```

@@ -130,11 +130,7 @@ func TestSimpleChainConfig_JSONParsing(t *testing.T) {
 		"state_backend": "flat",
 		"Databases": {
 			"RootPath": "./data",
-			"NodeType": "STORAGE_LOCAL",
-			"AccountState": {
-				"Path": "account_state",
-				"ListenAddress": "0.0.0.0:5000"
-			}
+			"NodeType": "STORAGE_LOCAL"
 		},
 		"nodes": {
 			"master_address": "0.0.0.0:4201",
@@ -154,7 +150,6 @@ func TestSimpleChainConfig_JSONParsing(t *testing.T) {
 	assert.Equal(t, "flat", cfg.StateBackend)
 	assert.Equal(t, "./data", cfg.Databases.RootPath)
 	assert.Equal(t, STORAGE_LOCAL, cfg.Databases.NodeType)
-	assert.Equal(t, "account_state", cfg.Databases.AccountState.Path)
 	assert.Equal(t, "0.0.0.0:4201", cfg.Nodes.MasterAddress)
 	assert.True(t, cfg.Nodes.NetworkSyncEnabled)
 }

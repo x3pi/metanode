@@ -1,7 +1,7 @@
 // Copyright (c) MetaNode Team
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code, unused_imports)]
+
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};

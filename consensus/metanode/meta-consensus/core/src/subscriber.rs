@@ -31,6 +31,7 @@ pub(crate) struct Subscriber<C: NetworkClient, S: NetworkService> {
     network_client: Arc<C>,
     authority_service: Arc<S>,
     dag_state: Arc<RwLock<DagState>>,
+    coordination_hub: Option<crate::coordination_hub::ConsensusCoordinationHub>,
     subscriptions: Arc<Mutex<SubscriptionMap>>,
 }
 
@@ -40,6 +41,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         network_client: Arc<C>,
         authority_service: Arc<S>,
         dag_state: Arc<RwLock<DagState>>,
+        coordination_hub: Option<crate::coordination_hub::ConsensusCoordinationHub>,
     ) -> Self {
         let subscriptions = (0..context.committee.size())
             .map(|_| None)
@@ -49,6 +51,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
             network_client,
             authority_service,
             dag_state,
+            coordination_hub,
             subscriptions: Arc::new(Mutex::new(subscriptions.into_boxed_slice())),
         }
     }
@@ -81,10 +84,14 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
 
         let mut subscriptions = self.subscriptions.lock();
         self.unsubscribe_locked(peer, &mut subscriptions[peer.value()]);
+        
+        let coordination_hub = self.coordination_hub.clone();
+        
         subscriptions[peer.value()] = Some(spawn_monitored_task!(Self::subscription_loop(
             context,
             network_client,
             authority_service,
+            coordination_hub,
             peer,
             last_received,
         )));
@@ -112,6 +119,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         context: Arc<Context>,
         network_client: Arc<C>,
         authority_service: Arc<S>,
+        coordination_hub: Option<crate::coordination_hub::ConsensusCoordinationHub>,
         peer: AuthorityIndex,
         last_received: Round,
     ) {
@@ -220,12 +228,26 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                 // so we eventually connect to the peer's new epoch service.
                                 ConsensusError::WrongEpoch { .. }
                                 | ConsensusError::InvalidGenesisAncestor(_) => {
-                                    info!(
-                                        "Epoch mismatch from peer {} {}, forcing reconnect: {}",
-                                        peer, peer_hostname, e
-                                    );
-                                    retries += 1;
-                                    break 'stream;
+                                    let is_recovering = coordination_hub
+                                        .as_ref()
+                                        .map(|hub| hub.is_startup_sync_active() || hub.recovery_barrier().is_active())
+                                        .unwrap_or(false);
+
+                                    if is_recovering {
+                                        tracing::debug!(
+                                            "🛡️ [POST-RESTORE-GUARD] Ignoring Epoch mismatch from peer {} {} during recovery to keep stream open for catchup: {}",
+                                            peer, peer_hostname, e
+                                        );
+                                        retries = 0;
+                                        continue 'stream;
+                                    } else {
+                                        info!(
+                                            "Epoch mismatch from peer {} {}, forcing reconnect: {}",
+                                            peer, peer_hostname, e
+                                        );
+                                        retries += 1;
+                                        break 'stream;
+                                    }
                                 }
                                 ConsensusError::Shutdown => {
                                     debug!(
@@ -391,6 +413,7 @@ mod test {
             network_client,
             authority_service.clone(),
             dag_state,
+            None,
         );
 
         let peer = context.committee.to_authority_index(2).unwrap();

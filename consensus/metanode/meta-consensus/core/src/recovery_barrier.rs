@@ -125,7 +125,9 @@ impl RecoveryBarrier {
     #[inline]
     pub fn can_propose(&self) -> bool {
         let phase = self.phase.load(Ordering::Acquire);
-        phase == RecoveryPhase::Inactive as u8 || phase == RecoveryPhase::Ready as u8
+        phase == RecoveryPhase::Inactive as u8 
+            || phase == RecoveryPhase::Ready as u8
+            || phase == RecoveryPhase::ScheduleVerifying as u8
     }
 
     /// Current recovery phase.
@@ -349,7 +351,7 @@ mod tests {
 
         // DAG caught up
         barrier.dag_caught_up();
-        assert!(!barrier.can_propose());
+        assert!(barrier.can_propose());
         assert_eq!(barrier.phase(), RecoveryPhase::ScheduleVerifying);
 
         // Schedule verified

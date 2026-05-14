@@ -629,30 +629,35 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
 
                 // For commits, we search through legacy stores from newest to oldest
                 for (epoch, legacy_store) in legacy_manager.get_all_stores() {
-                    if let Ok(legacy_commits) = legacy_store.scan_commits((commit_range.start()..=inclusive_end).into()) {
-                        if !legacy_commits.is_empty() {
-                            info!(
-                                "✅ [LEGACY SYNC] Found {} commits in epoch {} store",
-                                legacy_commits.len(),
-                                epoch
-                            );
-                            
-                            // Merge without duplicates based on commit index
-                            let existing_indices: std::collections::HashSet<_> = 
-                                commits.iter().map(|c| c.index()).collect();
+                    match legacy_store.scan_commits((commit_range.start()..=inclusive_end).into()) {
+                        Ok(legacy_commits) => {
+                            if !legacy_commits.is_empty() {
+                                info!(
+                                    "✅ [LEGACY SYNC] Found {} commits in epoch {} store",
+                                    legacy_commits.len(),
+                                    epoch
+                                );
                                 
-                            for commit in legacy_commits {
-                                if !existing_indices.contains(&commit.index()) {
-                                    commits.push(commit);
+                                // Merge without duplicates based on commit index
+                                let existing_indices: std::collections::HashSet<_> = 
+                                    commits.iter().map(|c| c.index()).collect();
+                                    
+                                for commit in legacy_commits {
+                                    if !existing_indices.contains(&commit.index()) {
+                                        commits.push(commit);
+                                    }
+                                }
+                                
+                                // Sort by index just in case they were added out of order
+                                commits.sort_by_key(|c| c.index());
+                                
+                                if commits.len() >= expected_commits as usize {
+                                    break;
                                 }
                             }
-                            
-                            // Sort by index just in case they were added out of order
-                            commits.sort_by_key(|c| c.index());
-                            
-                            if commits.len() >= expected_commits as usize {
-                                break;
-                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("🚨 [LEGACY SYNC] Failed to scan legacy commits for epoch {}: {:?}", epoch, e);
                         }
                     }
                 }
