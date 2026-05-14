@@ -1,13 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use crate::{
     block::{BlockAPI as _, VerifiedBlock},
-    commit::GENESIS_COMMIT_INDEX,
+    commit::{CommitDigest, GENESIS_COMMIT_INDEX},
     context::Context,
     CommitIndex,
 };
@@ -17,28 +18,37 @@ pub struct CommitVoteMonitor {
     context: Arc<Context>,
     // Highest commit index voted by each authority.
     highest_voted_commits: Mutex<Vec<CommitIndex>>,
+    // Digest of the highest commit voted by each authority.
+    // Key: authority index, Value: (commit_index, digest)
+    highest_voted_digests: Mutex<Vec<(CommitIndex, CommitDigest)>>,
     // Notifier for when quorum index might have advanced
     pub quorum_advanced_notify: tokio::sync::Notify,
 }
 
 impl CommitVoteMonitor {
     pub(crate) fn new(context: Arc<Context>) -> Self {
-        let highest_voted_commits = Mutex::new(vec![0; context.committee.size()]);
+        let size = context.committee.size();
+        let highest_voted_commits = Mutex::new(vec![0; size]);
+        let highest_voted_digests = Mutex::new(vec![(0, CommitDigest::MIN); size]);
         Self {
             context,
             highest_voted_commits,
+            highest_voted_digests,
             quorum_advanced_notify: tokio::sync::Notify::new(),
         }
     }
 
     /// Keeps track of the highest commit voted by each authority.
+    /// Also tracks the digest of the highest voted commit for content verification.
     pub(crate) fn observe_block(&self, block: &VerifiedBlock) {
         let mut updated = false;
         {
             let mut highest_voted_commits = self.highest_voted_commits.lock();
+            let mut highest_voted_digests = self.highest_voted_digests.lock();
             for vote in block.commit_votes() {
                 if vote.index > highest_voted_commits[block.author()] {
                     highest_voted_commits[block.author()] = vote.index;
+                    highest_voted_digests[block.author()] = (vote.index, vote.digest);
                     updated = true;
                 }
             }
@@ -69,6 +79,43 @@ impl CommitVoteMonitor {
             }
         }
         GENESIS_COMMIT_INDEX
+    }
+
+    /// Returns the quorum-agreed digest for a specific commit index.
+    /// If 2f+1 authorities voted for the same digest at this index, returns Some(digest).
+    /// If there's no quorum agreement on digest (divergent DAG), returns None.
+    pub fn quorum_commit_digest(&self, target_index: CommitIndex) -> Option<CommitDigest> {
+        let highest_voted_digests = self.highest_voted_digests.lock();
+        
+        // Count digest votes ONLY for the exact target index.
+        // DANGER: We NO LONGER assume that authorities voting for higher indices
+        // implicitly agree with whatever digest happens to be currently available.
+        // Doing so allowed lagging nodes to "auto-verify" their own divergent digests
+        // simply because the rest of the network was ahead.
+        // We now enforce STRICT cryptographic parity: a digest is only verified
+        // if we have 2f+1 explicit exact matches.
+        let mut digest_stakes: HashMap<CommitDigest, u64> = HashMap::new();
+        
+        for ((_author_idx, (_voted_index, voted_digest)), (_, authority)) in 
+            highest_voted_digests.iter().enumerate()
+                .map(|(i, d)| (i, d))
+                .zip(self.context.committee.authorities())
+        {
+            if *_voted_index == target_index {
+                // Exact match — we know the digest
+                *digest_stakes.entry(*voted_digest).or_insert(0) += authority.stake;
+            }
+        }
+        
+        // Find the digest that reached quorum
+        if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
+            if *best_stake >= self.context.committee.quorum_threshold() {
+                return Some(*best_digest);
+            }
+        }
+        
+        // No single digest reached quorum at this EXACT index
+        None
     }
 
     /// Seeds the quorum from Go execution state to break the chicken-and-egg

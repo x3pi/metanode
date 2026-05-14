@@ -550,7 +550,7 @@ func (bp *BlockProcessor) ProcessBlockData(request network.Request) error {
 				if len(bp.masterBLSPubKey) > 0 && !bp.skipSigVerification {
 					sig := header.AggregateSignature()
 					if len(sig) > 0 {
-						signingHash := header.HashWithoutSignature()
+						signingHash := header.Hash()
 						if !block_signer.VerifyBlockSignature(signingHash, sig, bp.masterBLSPubKey) {
 							logger.Error("🚨 [BLOCK VERIFY] REJECTED block #%d: BLS signature INVALID! hash=%s",
 								header.BlockNumber(), signingHash.Hex()[:16]+"...")

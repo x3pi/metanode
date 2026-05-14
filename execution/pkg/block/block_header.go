@@ -191,28 +191,6 @@ func (b *BlockHeader) SetAggregateSignature(sig []byte) {
 	b.aggregateSignature = sig
 }
 
-// HashWithoutSignature computes the block hash EXCLUDING the AggregateSignature field.
-// This is used for signing: hash the block without sig → sign the hash → set sig.
-// Without this, the hash would change after setting the signature, making verification impossible.
-func (b *BlockHeader) HashWithoutSignature() common.Hash {
-	// TRUE FORK-SAFETY: Hash MUST include LastBlockHash.
-	// GlobalExecIndex IS included as a fork-detection canary.
-	pbHeader := &pb.BlockHeader{
-		LastBlockHash:     b.lastBlockHash.Bytes(),
-		BlockNumber:       b.blockNumber,
-		AccountStatesRoot: b.accountStatesRoot.Bytes(),
-		StakeStatesRoot:   b.stakeStatesRoot.Bytes(),
-		ReceiptRoot:       b.receiptRoot.Bytes(),
-		LeaderAddress:     b.leaderAddress.Bytes(),
-		TimeStamp:         b.timeStamp,
-		TransactionsRoot:  b.transactionsRoot.Bytes(),
-		Epoch:             b.epoch,
-		GlobalExecIndex:   b.globalExecIndex,
-		// NOTE: AggregateSignature deliberately EXCLUDED
-	}
-	bData, _ := proto.MarshalOptions{Deterministic: true}.Marshal(pbHeader)
-	return crypto.Keccak256Hash(bData)
-}
 
 func (b *BlockHeader) String() string {
 	str := fmt.Sprintf(`

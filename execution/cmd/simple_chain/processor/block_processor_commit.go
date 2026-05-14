@@ -167,7 +167,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// BLS sign ~0.5ms — negligible compared to block execution time.
 		// ══════════════════════════════════════════════════════════════════
 		if bp.blockSigner != nil {
-			signingHash := job.Block.Header().HashWithoutSignature()
+			signingHash := job.Block.Header().Hash()
 			signature := bp.blockSigner.SignBlockHash(signingHash)
 			job.Block.Header().SetAggregateSignature(signature)
 			logger.Debug("🔏 [BLOCK SIGN] Signed block #%d: hash=%s, sig_len=%d",

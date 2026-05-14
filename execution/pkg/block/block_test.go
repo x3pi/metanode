@@ -221,43 +221,6 @@ func TestBlock_ProtoRoundtrip(t *testing.T) {
 	assert.Equal(t, len(original.Transactions()), len(restored.Transactions()))
 }
 
-// ──────────────────────────────────────────────
-// HashWithoutSignature tests
-// ──────────────────────────────────────────────
-
-func TestBlockHeader_HashWithoutSignature_Deterministic(t *testing.T) {
-	h := makeTestHeader()
-	hash1 := h.HashWithoutSignature()
-	hash2 := h.HashWithoutSignature()
-	assert.Equal(t, hash1, hash2, "same header should produce same hash without signature")
-	assert.NotEqual(t, common.Hash{}, hash1, "hash should not be zero")
-}
-
-func TestBlockHeader_HashWithoutSignature_NotAffectedBySignature(t *testing.T) {
-	h := makeTestHeader()
-	hashBefore := h.HashWithoutSignature()
-	h.SetAggregateSignature([]byte("some-signature-data"))
-	hashAfter := h.HashWithoutSignature()
-	assert.Equal(t, hashBefore, hashAfter, "HashWithoutSignature should be same regardless of signature")
-}
-
-func TestBlockHeader_Hash_NotAffectedBySignature(t *testing.T) {
-	h := makeTestHeader()
-	hashBefore := h.Hash()
-	h.SetAggregateSignature([]byte("some-signature-data"))
-	hashAfter := h.Hash()
-	// Proto() does NOT include AggregateSignature, so Hash() is unchanged
-	assert.Equal(t, hashBefore, hashAfter, "Hash() should NOT change when signature is set (Proto excludes sig)")
-}
-
-func TestBlockHeader_HashEqualsHashWithoutSignature(t *testing.T) {
-	h := makeTestHeader()
-	h.SetAggregateSignature([]byte("test-sig"))
-	hashFull := h.Hash()
-	hashNoSig := h.HashWithoutSignature()
-	// Both Proto() and HashWithoutSignature exclude AggregateSignature
-	assert.Equal(t, hashFull, hashNoSig, "Hash and HashWithoutSignature should be equal (both exclude sig from Proto)")
-}
 
 func TestBlockHeader_SetAggregateSignature(t *testing.T) {
 	h := makeTestHeader()

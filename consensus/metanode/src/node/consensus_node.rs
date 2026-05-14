@@ -1201,7 +1201,7 @@ impl ConsensusNode {
             next_expected_commit_index, go_replay_after
         );
 
-        let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
+        let commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
             commit_receiver,
         )
         .with_delivery_sender(delivery_tx)
@@ -1233,7 +1233,20 @@ impl ConsensusNode {
         })
         .with_storage_path(config.storage_path.clone())
         .with_quorum_commit_index(coordination_hub.get_quorum_commit_index_ref())
+        .with_committee_size(storage.validator_eth_addresses.len())
         ;
+
+        // DIGEST-GATE: Wire digest verifier if available from CoordinationHub
+        // This gets set later by authority_node.rs when CommitVoteMonitor is created.
+        // We store a reference to the hub for lazy resolution.
+        let digest_verifier_hub = coordination_hub.clone();
+        let mut commit_processor = commit_processor.with_digest_verifier(move |index: u32| {
+            if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
+                verifier(index)
+            } else {
+                None // Monitor not yet initialized
+            }
+        });
 
         // ExecutorClient for commit processing
         let initial_next_expected = if config.executor_read_enabled {

@@ -63,6 +63,13 @@ pub struct CommitProcessor {
     /// quorum_commit_index >= commit_index. This prevents Go from executing
     /// divergent blocks produced by a sparse DAG local committer.
     quorum_commit_index: Option<Arc<AtomicU32>>,
+    /// Committee size (number of validators) for DAG density verification.
+    /// Used to compute quorum threshold: 2f+1 where f = (n-1)/3.
+    committee_size: usize,
+    /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
+    /// Takes commit_index, returns Some(digest_bytes) if 2f+1 authorities agree on digest,
+    /// None if not enough votes yet. Used to verify local commit content matches network.
+    digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
 }
 
 impl CommitProcessor {
@@ -90,6 +97,8 @@ impl CommitProcessor {
             storage_path: None,
             lag_alert_sender: None,
             quorum_commit_index: None,
+            committee_size: 0,
+            digest_verifier: None,
         }
     }
 
@@ -253,6 +262,19 @@ impl CommitProcessor {
         self
     }
 
+    pub fn with_committee_size(mut self, size: usize) -> Self {
+        self.committee_size = size;
+        self
+    }
+
+    pub fn with_digest_verifier<F>(mut self, verifier: F) -> Self
+    where
+        F: Fn(u32) -> Option<[u8; 32]> + Send + Sync + 'static,
+    {
+        self.digest_verifier = Some(Arc::new(verifier));
+        self
+    }
+
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
@@ -323,9 +345,20 @@ impl CommitProcessor {
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
         let epoch_eth_addresses = self.epoch_eth_addresses;
-        let quorum_commit_index_ref = self.quorum_commit_index.clone();
+        let _quorum_commit_index_ref = self.quorum_commit_index.clone();
+        let committee_size = self.committee_size;
+        let digest_verifier = self.digest_verifier.clone();
+        // BFT quorum threshold: 2f+1 where n=3f+1, so quorum = ceil(2n/3)
+        // For n=5: quorum=4, n=4: quorum=3, n=7: quorum=5
+        let _quorum_threshold = if committee_size > 0 {
+            (committee_size * 2 + 2) / 3 // ceil(2n/3)
+        } else {
+            1 // Fallback: accept all if committee_size not configured
+        };
+        info!("🛡️ [DIGEST-GATE] Initialized: committee_size={}, quorum_threshold={}, digest_verifier={}", 
+              committee_size, _quorum_threshold, digest_verifier.is_some());
 
-        // QUORUM-GATE: Buffer for local commits waiting for quorum confirmation
+        // DIGEST-GATE: Buffer for ALL local commits until digest verified
         let mut pending_local_commits: BTreeMap<u32, CommittedSubDag> = BTreeMap::new();
 
         // PHASE-B: Go is the sole authority for GEI. Rust sends commit_index +
@@ -388,79 +421,87 @@ impl CommitProcessor {
             }
 
             // ═══════════════════════════════════════════════════════════════
-            // QUORUM-GATE POLL: Dispatch buffered local commits when quorum confirms.
-            //
-            // Since acceptance is decoupled from execution (next_expected_index
-            // already advanced), these commits are dispatched directly to Go
-            // when the network votes confirm them.
-            //
-            // CertifiedCommit replacement: if a CertifiedCommit has already
-            // been dispatched for an index, the local commit is discarded.
+            // DIGEST-GATE POLL: Release buffered local commits when digest verified.
+            // Local commits are ONLY released when digest_verifier confirms
+            // the network quorum agrees on the EXACT SAME commit digest.
             // ═══════════════════════════════════════════════════════════════
             if !pending_local_commits.is_empty() {
-                if let Some(ref quorum_ref) = quorum_commit_index_ref {
-                    let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
-                    while let Some(entry) = pending_local_commits.first_entry() {
-                        let local_idx = *entry.key();
-
-                        // Check quorum confirmation
-                        if local_idx > quorum_idx {
-                            break; // Still waiting for network votes
-                        }
-
-                        // Quorum confirmed — dispatch directly to Go
-                        let mut confirmed = entry.remove();
-                        info!(
-                            "✅ [QUORUM-GATE] Dispatching quorum-confirmed local commit {} \
-                             to Go execution (quorum={}, poll).",
-                            local_idx, quorum_idx
-                        );
-
-                        let exec_gei = {
-                            let gei_guard = shared_gei.lock().await;
-                            *gei_guard + 1
-                        };
-                        Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
-                        let geis_consumed = super::executor::dispatch_commit(
-                            &confirmed,
-                            exec_gei,
-                            current_epoch,
-                            executor_client.clone(),
-                            delivery_sender.clone(),
-                        )
-                        .await?;
-                        {
-                            let mut gei_guard = shared_gei.lock().await;
-                            *gei_guard += geis_consumed;
-                        }
-                        if let Some(ref recycler) = self.tx_recycler {
-                            let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
-                            if total_txs > 0 {
-                                let committed_tx_data: Vec<Vec<u8>> = confirmed
-                                    .blocks.iter()
-                                    .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
-                                    .collect();
-                                recycler.confirm_committed(&committed_tx_data).await;
+                if let Some(ref verifier) = digest_verifier {
+                    let mut verified_indices: Vec<u32> = Vec::new();
+                    for (&local_idx, local_commit) in pending_local_commits.iter() {
+                        let local_digest = local_commit.commit_ref.digest.into_inner();
+                        match verifier(local_idx) {
+                            Some(quorum_digest) => {
+                                if quorum_digest == local_digest {
+                                    verified_indices.push(local_idx);
+                                } else {
+                                    // DIVERGENT — do NOT dispatch, wait for CertifiedCommit
+                                    warn!(
+                                        "🚨 [DIGEST-GATE POLL] Commit {} DIVERGENT! local={}, quorum={}. \
+                                         Waiting for CertifiedCommit to replace.",
+                                        local_idx,
+                                        hex::encode(&local_digest[..4]),
+                                        hex::encode(&quorum_digest[..4])
+                                    );
+                                }
+                            }
+                            None => {
+                                // No quorum yet — keep waiting
                             }
                         }
-                        if let Some(ref callback) = commit_index_callback {
-                            callback(local_idx);
-                        }
-
-                        // Check EndOfEpoch
-                        if let Some((_block_ref, system_tx)) = confirmed.extract_end_of_epoch_transaction() {
-                            if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
-                                let current_gei = {
-                                    let gei_guard = shared_gei.lock().await;
-                                    *gei_guard
-                                };
-                                if let Some(ref callback) = epoch_transition_callback {
-                                    if let Err(e) = callback(new_epoch, confirmed.timestamp_ms, boundary_block, current_gei) {
-                                        warn!("❌ Failed to trigger epoch transition: {}", e);
-                                    }
+                    }
+                    // Dispatch verified commits in order
+                    for local_idx in verified_indices {
+                        if let Some(mut confirmed) = pending_local_commits.remove(&local_idx) {
+                            info!(
+                                "✅ [DIGEST-GATE POLL] Dispatching digest-verified commit {} (leader={:?}).",
+                                local_idx, confirmed.leader
+                            );
+                            let exec_gei = {
+                                let gei_guard = shared_gei.lock().await;
+                                *gei_guard + 1
+                            };
+                            Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
+                            let geis_consumed = super::executor::dispatch_commit(
+                                &confirmed,
+                                exec_gei,
+                                current_epoch,
+                                executor_client.clone(),
+                                delivery_sender.clone(),
+                            )
+                            .await?;
+                            {
+                                let mut gei_guard = shared_gei.lock().await;
+                                *gei_guard += geis_consumed;
+                            }
+                            if let Some(ref recycler) = self.tx_recycler {
+                                let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
+                                if total_txs > 0 {
+                                    let committed_tx_data: Vec<Vec<u8>> = confirmed
+                                        .blocks.iter()
+                                        .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                                        .collect();
+                                    recycler.confirm_committed(&committed_tx_data).await;
                                 }
-                                info!("🛑 [STATION 3: PROCESSOR] Halting for EndOfEpoch in quorum-confirmed commit.");
-                                break;
+                            }
+                            if let Some(ref callback) = commit_index_callback {
+                                callback(local_idx);
+                            }
+                            // Check EndOfEpoch
+                            if let Some((_block_ref, system_tx)) = confirmed.extract_end_of_epoch_transaction() {
+                                if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
+                                    let current_gei = {
+                                        let gei_guard = shared_gei.lock().await;
+                                        *gei_guard
+                                    };
+                                    if let Some(ref callback) = epoch_transition_callback {
+                                        if let Err(e) = callback(new_epoch, confirmed.timestamp_ms, boundary_block, current_gei) {
+                                            warn!("❌ Failed to trigger epoch transition: {}", e);
+                                        }
+                                    }
+                                    info!("🛑 [STATION 3: PROCESSOR] Halting for EndOfEpoch in digest-gate confirmed commit.");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -536,52 +577,92 @@ impl CommitProcessor {
 
                     if commit_index == next_expected_index {
                         // ═══════════════════════════════════════════════════════════════
-                        // QUORUM-GATE (May 2026): Decouple acceptance from execution.
+                        // DIGEST-GATE (May 2026): Absolute fork prevention via digest verification.
                         //
-                        // Rust CommitProcessor ACCEPTS all commits (advances next_expected_index)
-                        // so DAG keeps progressing. But Go execution is gated:
+                        // ALL local commits are ALWAYS buffered — NEVER dispatched immediately.
+                        // A local commit is only dispatched when ONE of:
+                        //   1. digest_verifier confirms 2f+1 authorities voted for the
+                        //      EXACT SAME digest (content-level parity).
+                        //   2. A CertifiedCommit arrives from the network (replaces local).
                         //
-                        //   LOCAL commit: buffer for execution, dispatch only when quorum confirms
-                        //   CERTIFIED commit: dispatch to Go immediately (already has 2f+1 votes)
+                        // WHY density-gate was insufficient:
+                        //   Even in a dense DAG (blocks from all authors), different nodes
+                        //   can decide different leaders due to block arrival timing.
+                        //   Only DIGEST verification guarantees content agreement.
                         //
-                        // This prevents the processor from freezing at block 0 while still
-                        // ensuring Go never executes an unverified local commit.
+                        // DEADLOCK-FREE: DAG advances independently. CommitSyncer +
+                        // digest poll (200ms) release buffered commits when verified.
                         // ═══════════════════════════════════════════════════════════════
                         let dispatch_subdag: Option<CommittedSubDag>;
 
                         if subdag.decided_with_local_blocks {
-                            if let Some(ref quorum_ref) = quorum_commit_index_ref {
-                                let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
-                                if commit_index > quorum_idx {
-                                    info!(
-                                        "🛡️ [QUORUM-GATE] Local commit {} accepted (next_expected→{}), \
-                                         execution buffered until quorum vote (quorum={}, leader={:?}, txs={}). \
-                                         DAG continues normally.",
-                                        commit_index, next_expected_index + 1, quorum_idx, subdag.leader,
-                                        subdag.blocks.iter().map(|b| b.transactions().len()).sum::<usize>()
-                                    );
-                                    pending_local_commits.insert(commit_index, subdag);
-                                    dispatch_subdag = None;
-                                } else {
-                                    info!(
-                                        "✅ [QUORUM-GATE] Local commit {} confirmed by network vote (quorum={}). \
-                                         Sending to execution.",
-                                        commit_index, quorum_idx
-                                    );
-                                    dispatch_subdag = Some(subdag);
+                            // LOCAL commit: ALWAYS buffer first.
+                            let local_digest = subdag.commit_ref.digest.into_inner();
+
+                            // Check if digest is already verified by network quorum
+                            let digest_match = if let Some(ref verifier) = digest_verifier {
+                                match verifier(commit_index) {
+                                    Some(quorum_digest) => {
+                                        if quorum_digest == local_digest {
+                                            info!(
+                                                "✅ [DIGEST-GATE] Local commit {} VERIFIED: digest matches \
+                                                 network quorum (digest={}). Safe to dispatch.",
+                                                commit_index, hex::encode(&local_digest[..4])
+                                            );
+                                            true
+                                        } else {
+                                            warn!(
+                                                "🚨 [DIGEST-GATE] Local commit {} DIVERGENT! \
+                                                 local_digest={}, quorum_digest={}. \
+                                                 Buffered — waiting for CertifiedCommit.",
+                                                commit_index,
+                                                hex::encode(&local_digest[..4]),
+                                                hex::encode(&quorum_digest[..4])
+                                            );
+                                            false
+                                        }
+                                    }
+                                    None => {
+                                        // No quorum yet — buffer
+                                        false
+                                    }
                                 }
                             } else {
+                                false // No verifier available — buffer
+                            };
+
+                            if digest_match {
                                 dispatch_subdag = Some(subdag);
+                            } else {
+                                info!(
+                                    "🛡️ [DIGEST-GATE] Local commit {} buffered (leader={:?}, digest={}). \
+                                     Waiting for digest verification or CertifiedCommit.",
+                                    commit_index, subdag.leader, hex::encode(&local_digest[..4])
+                                );
+                                pending_local_commits.insert(commit_index, subdag);
+                                dispatch_subdag = None;
                             }
                         } else {
-                            // CertifiedCommit — network-verified, execute immediately.
+                            // CertifiedCommit — network-verified with 2f+1 agreement.
+                            // This is the authoritative path to Go execution.
                             // Discard any buffered local commit for the same index.
                             if let Some(local_subdag) = pending_local_commits.remove(&commit_index) {
+                                if local_subdag.leader != subdag.leader {
+                                    warn!(
+                                        "🚨 [DIGEST-GATE] CertifiedCommit {} has DIFFERENT leader! \
+                                         Local={:?}, Certified={:?}. Fork PREVENTED.",
+                                        commit_index, local_subdag.leader, subdag.leader
+                                    );
+                                } else {
+                                    info!(
+                                        "✅ [DIGEST-GATE] CertifiedCommit {} matches local (leader={:?}).",
+                                        commit_index, subdag.leader
+                                    );
+                                }
+                            } else {
                                 info!(
-                                    "🔄 [QUORUM-GATE] CertifiedCommit {} REPLACES buffered local commit! \
-                                     Local leader={:?}, Network leader={:?}. \
-                                     Auto-proceeding with network version.",
-                                    commit_index, local_subdag.leader, subdag.leader
+                                    "📥 [DIGEST-GATE] CertifiedCommit {} received directly. Dispatching.",
+                                    commit_index
                                 );
                             }
                             dispatch_subdag = Some(subdag);
@@ -689,20 +770,62 @@ impl CommitProcessor {
                         // Process pending out-of-order commits that are now in sequence
                         let mut should_break = false;
                         while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
-                            // QUORUM-GATE: Check if pending is local and needs quorum
+                            // ═══════════════════════════════════════════════════════
+                            // DIGEST-GATE (OOO PATH): Same logic as main path.
+                            // ALL local commits → buffer to pending_local_commits.
+                            // Only CertifiedCommits dispatch directly.
+                            // ═══════════════════════════════════════════════════════
                             if pending.decided_with_local_blocks {
-                                if let Some(ref quorum_ref) = quorum_commit_index_ref {
-                                    let quorum_idx = quorum_ref.load(std::sync::atomic::Ordering::Relaxed);
-                                    if next_expected_index > quorum_idx {
-                                        // Buffer for execution, advance acceptance
-                                        pending_local_commits.insert(next_expected_index, pending);
-                                        next_expected_index += 1;
-                                        continue;
+                                // LOCAL commit from OOO buffer: NEVER dispatch directly.
+                                // Buffer it for digest verification or CertifiedCommit replacement.
+                                let local_digest = pending.commit_ref.digest.into_inner();
+                                let digest_match = if let Some(ref verifier) = digest_verifier {
+                                    match verifier(next_expected_index) {
+                                        Some(quorum_digest) => {
+                                            if quorum_digest == local_digest {
+                                                info!(
+                                                    "✅ [DIGEST-GATE OOO] Pending local commit {} VERIFIED: digest matches quorum.",
+                                                    next_expected_index
+                                                );
+                                                true
+                                            } else {
+                                                warn!(
+                                                    "🚨 [DIGEST-GATE OOO] Pending local commit {} DIVERGENT! \
+                                                     local={}, quorum={}. Buffered for CertifiedCommit.",
+                                                    next_expected_index,
+                                                    hex::encode(&local_digest[..4]),
+                                                    hex::encode(&quorum_digest[..4])
+                                                );
+                                                false
+                                            }
+                                        }
+                                        None => false, // No quorum yet
                                     }
+                                } else {
+                                    false // No verifier
+                                };
+                                if !digest_match {
+                                    pending_local_commits.insert(next_expected_index, pending);
+                                    next_expected_index += 1;
+                                    continue;
                                 }
+                                // Digest verified — fall through to dispatch
                             } else {
                                 // CertifiedCommit: discard any buffered local for same index
-                                pending_local_commits.remove(&next_expected_index);
+                                if let Some(local) = pending_local_commits.remove(&next_expected_index) {
+                                    if local.leader != pending.leader {
+                                        warn!(
+                                            "🚨 [DIGEST-GATE OOO] CertifiedCommit {} has DIFFERENT leader! \
+                                             Local={:?}, Certified={:?}. Fork PREVENTED.",
+                                            next_expected_index, local.leader, pending.leader
+                                        );
+                                    } else {
+                                        info!(
+                                            "✅ [DIGEST-GATE OOO] CertifiedCommit {} matches local (leader={:?}).",
+                                            next_expected_index, pending.leader
+                                        );
+                                    }
+                                }
                             }
 
                             let pending_commit_index = next_expected_index;

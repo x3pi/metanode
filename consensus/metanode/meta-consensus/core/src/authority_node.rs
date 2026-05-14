@@ -457,6 +457,17 @@ where
 
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
 
+        // DIGEST-GATE: Wire CommitVoteMonitor.quorum_commit_digest() into CoordinationHub
+        // so CommitProcessor can verify local commit digests against network quorum.
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            coordination_hub.set_digest_verifier(move |index: u32| {
+                monitor_ref
+                    .quorum_commit_digest(index)
+                    .map(|d| d.into_inner())
+            });
+        }
+
         let synchronizer = Synchronizer::start(
             network_client.clone(),
             context.clone(),

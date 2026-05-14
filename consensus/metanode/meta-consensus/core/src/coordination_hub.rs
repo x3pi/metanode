@@ -125,6 +125,12 @@ pub struct ConsensusCoordinationHub {
     /// This boundary defines the round below which the local committer MUST NOT evaluate.
     /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
     sparse_dag_boundary: Arc<RwLock<Option<u32>>>,
+
+    /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
+    /// Wraps CommitVoteMonitor.quorum_commit_digest() for cross-crate access.
+    /// Takes commit_index (u32), returns Some([u8; 32]) if 2f+1 authorities
+    /// voted for the same digest at this index, None otherwise.
+    digest_verifier: Arc<RwLock<Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -141,6 +147,7 @@ impl ConsensusCoordinationHub {
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
             sparse_dag_boundary: Arc::new(RwLock::new(None)),
+            digest_verifier: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -197,6 +204,21 @@ impl ConsensusCoordinationHub {
     /// Used by CommitProcessor's QUORUM-GATE to hold local commits until quorum confirms them.
     pub fn get_quorum_commit_index_ref(&self) -> Arc<std::sync::atomic::AtomicU32> {
         self.quorum_commit_index.clone()
+    }
+
+    /// Set the digest verifier callback (called from authority_node after CommitVoteMonitor creation)
+    pub fn set_digest_verifier<F>(&self, verifier: F)
+    where
+        F: Fn(u32) -> Option<[u8; 32]> + Send + Sync + 'static,
+    {
+        let mut guard = self.digest_verifier.write();
+        *guard = Some(Arc::new(verifier));
+    }
+
+    /// Get a clone of the digest verifier callback for passing to CommitProcessor
+    pub fn get_digest_verifier(&self) -> Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>> {
+        let guard = self.digest_verifier.read();
+        guard.clone()
     }
 
     /// Retrieve the current consensus phase.
@@ -486,6 +508,7 @@ impl ConsensusCoordinationHub {
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
             sparse_dag_boundary: Arc::new(RwLock::new(None)),
+            digest_verifier: Arc::new(RwLock::new(None)),
         }
     }
 
