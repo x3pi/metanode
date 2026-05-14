@@ -163,6 +163,10 @@ func (bp *BlockProcessor) ProcessorPool() {
 // CRITICAL FORK-SAFETY: leaderAddressOverride (optional, variadic) allows passing leader address
 // from Rust consensus. If not provided, falls back to bp.validatorAddress (for local processing).
 func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, leaderAddressOverride ...common.Address) *block.Block {
+	// LAYER-8: DB Write Lock — serialize all block writes
+	bp.blockWriteMutex.Lock()
+	defer bp.blockWriteMutex.Unlock()
+
 	overallStart := time.Now()
 
 	tracer := tracing.GetTracer()

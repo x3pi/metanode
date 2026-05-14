@@ -189,6 +189,25 @@ type BlockProcessor struct {
 	// new-session commits. Set to true when a GEI backward jump is detected in
 	// processRustEpochData (new Rust session), reset when GEI catches up.
 	rustSessionRestarted atomic.Bool
+
+	// ═══════════════════════════════════════════════════════════════
+	// LAYER-8: DB Write Lock Isolation
+	// Serializes all block write operations (createBlockFromResults)
+	// to prevent concurrent writes from processRustEpochData and
+	// ProcessBlockData (network sync). Without this, two goroutines
+	// could simultaneously modify state DBs causing corrupted roots.
+	// ═══════════════════════════════════════════════════════════════
+	blockWriteMutex sync.Mutex
+
+	// ═══════════════════════════════════════════════════════════════
+	// LAYER-9: Leader Address Persistence
+	// Caches the last known leader address per GEI in BackupDB.
+	// When Rust DAG-wipe occurs, the leader address is lost since
+	// it's computed from DAG state. This cache allows recovery by
+	// reading from Go's persisted storage.
+	// Key: "leader_addr:<gei>" → 20-byte address
+	// ═══════════════════════════════════════════════════════════════
+	leaderAddrCache sync.Map // GEI → common.Address (in-memory LRU)
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
@@ -829,4 +848,52 @@ func (bp *BlockProcessor) TxsProcessor2() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYER-9: Leader Address Persistence
+// Persist leader addresses to BackupDB so they survive DAG-wipe + restart.
+// Without this, Rust must recompute leader addresses from DAG state,
+// which is lost after DAG-wipe, causing leader address divergence.
+// ═══════════════════════════════════════════════════════════════════════════
 
+// PersistLeaderAddress saves the leader address for a given GEI to BackupDB.
+// Called after successful block creation to ensure crash-safe persistence.
+func (bp *BlockProcessor) PersistLeaderAddress(gei uint64, addr common.Address) {
+	if addr == (common.Address{}) {
+		return // Don't persist zero addresses
+	}
+	// In-memory cache
+	bp.leaderAddrCache.Store(gei, addr)
+
+	// Persist to BackupDB
+	if bp.storageManager != nil {
+		backupDB := bp.storageManager.GetStorageBackupDb()
+		if backupDB != nil {
+			key := fmt.Sprintf("leader_addr:%d", gei)
+			backupDB.Put(common.BytesToHash([]byte(key)).Bytes(), addr.Bytes())
+		}
+	}
+}
+
+// GetPersistedLeaderAddress retrieves a persisted leader address for DAG-wipe recovery.
+// Returns (address, true) if found, (zero, false) if not persisted.
+func (bp *BlockProcessor) GetPersistedLeaderAddress(gei uint64) (common.Address, bool) {
+	// Check in-memory cache first
+	if cached, ok := bp.leaderAddrCache.Load(gei); ok {
+		return cached.(common.Address), true
+	}
+
+	// Fallback to BackupDB
+	if bp.storageManager != nil {
+		backupDB := bp.storageManager.GetStorageBackupDb()
+		if backupDB != nil {
+			key := fmt.Sprintf("leader_addr:%d", gei)
+			data, err := backupDB.Get(common.BytesToHash([]byte(key)).Bytes())
+			if err == nil && len(data) == 20 {
+				addr := common.BytesToAddress(data)
+				bp.leaderAddrCache.Store(gei, addr) // Promote to cache
+				return addr, true
+			}
+		}
+	}
+	return common.Address{}, false
+}

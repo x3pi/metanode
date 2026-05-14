@@ -655,19 +655,60 @@ impl ConsensusNode {
                 .map(|mut entries| entries.next().is_some())
                 .unwrap_or(false);
 
-        if !dag_has_history_for_committee && !config.peer_rpc_addresses.is_empty() {
+        if !dag_has_history_for_committee && !config.peer_rpc_addresses.is_empty() && current_epoch > 1 {
+            // NOTE: Skipped for epoch ≤ 1 (genesis). On fresh start, ALL nodes
+            // build committee from genesis.json — guaranteed identical. Querying
+            // peers for epoch_boundary_data would livelock because no peer has
+            // processed any epoch transitions yet.
             info!(
-                "🔍 [COMMITTEE VERIFY] Cold-start detected. Cross-validating committee with peers..."
+                "🔍 [LAYER-7 COMMITTEE VERIFY] Cold-start detected (epoch {}). Cross-validating committee hash with ALL peers...",
+                current_epoch
             );
-            for peer_addr in &config.peer_rpc_addresses {
-                match crate::network::peer_rpc::query_peer_epoch_boundary_data(
-                    peer_addr,
-                    current_epoch,
-                )
-                .await
-                {
-                    Ok(boundary) => {
-                        if !boundary.validators.is_empty() {
+            
+            // ═══════════════════════════════════════════════════════════════
+            // ABSOLUTE FORK-FREE COMMITTEE VERIFICATION
+            //
+            // RULES:
+            // 1. Mismatch with ANY peer → HALT (local state is wrong).
+            // 2. ≥1 peer matches, 0 mismatches → ACCEPT (confirmed).
+            // 3. 0 matches, 0 mismatches (all unreachable) → RETRY forever.
+            //    System waits indefinitely. This is intentional: waiting is
+            //    ALWAYS safer than starting with an unverified committee.
+            //
+            // CLUSTER COLD-START (Seed):
+            // When ALL nodes restart simultaneously, the FIRST node to start
+            // will loop here until at least 1 peer comes online. Once any
+            // peer is reachable, they cross-verify and both proceed.
+            // This acts as a natural "seed" — no special bootstrap needed.
+            //
+            // LIVENESS GUARANTEE: With ≥2f+1 nodes online, at least 1 peer
+            // will eventually respond, breaking the retry loop.
+            // ═══════════════════════════════════════════════════════════════
+            let total_peers = config.peer_rpc_addresses.len();
+            const PER_PEER_TIMEOUT_SECS: u64 = 5;
+            const RETRY_INTERVAL_SECS: u64 = 10;
+            let mut attempt = 0u32;
+            
+            loop {
+                attempt += 1;
+                let mut matching_peers = 0u32;
+                let mut mismatching_peers = 0u32;
+                let mut unreachable_peers = 0u32;
+                
+                let round_start = std::time::Instant::now();
+                
+                for peer_addr in &config.peer_rpc_addresses {
+                    // Per-peer timeout using tokio::time::timeout
+                    let peer_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(PER_PEER_TIMEOUT_SECS),
+                        crate::network::peer_rpc::query_peer_epoch_boundary_data(
+                            peer_addr,
+                            current_epoch,
+                        )
+                    ).await;
+                    
+                    match peer_result {
+                        Ok(Ok(boundary)) if !boundary.validators.is_empty() => {
                             // Build peer committee to compute hash
                             use super::executor_client::proto::ValidatorInfo as ProtoVI;
                             let peer_validators: Vec<ProtoVI> = boundary
@@ -689,7 +730,7 @@ impl ConsensusNode {
                                     p2p_address: String::new(),
                                 })
                                 .collect();
-
+                            
                             match super::committee::build_committee_from_validator_list(
                                 peer_validators,
                                 current_epoch,
@@ -700,48 +741,105 @@ impl ConsensusNode {
                                             &peer_committee,
                                         );
                                     let peer_hash_hex = hex::encode(&peer_hash[..8]);
-
+                                    
                                     if committee_hash == peer_hash {
+                                        matching_peers += 1;
                                         info!(
-                                            "✅ [COMMITTEE VERIFY] Peer {} committee matches! hash={}...",
-                                            peer_addr, peer_hash_hex
+                                            "✅ [LAYER-7] Peer {} committee MATCH (hash={}...) [{}/{}] attempt={}",
+                                            peer_addr, peer_hash_hex, matching_peers, total_peers, attempt
                                         );
                                     } else {
-                                        let err_msg = format!(
-                                            "🚨 [PARITY CHECK FAILED] Peer {} committee MISMATCH! \
-                                             local={}... ≠ peer={}... (epoch {}). \
-                                             Local authorities: {}, Peer authorities: {}. \
-                                             HALTING NODE: Starting with a mismatched committee WILL cause a hard fork. \
-                                             Please wipe the local database or verify your snapshot.",
-                                            peer_addr,
-                                            committee_hash_hex,
-                                            peer_hash_hex,
-                                            current_epoch,
-                                            committee.size(),
-                                            peer_committee.size()
+                                        mismatching_peers += 1;
+                                        warn!(
+                                            "🚨 [LAYER-7] Peer {} committee MISMATCH! local={}... ≠ peer={}... attempt={}",
+                                            peer_addr, committee_hash_hex, peer_hash_hex, attempt
                                         );
-                                        tracing::error!("{}", err_msg);
-                                        anyhow::bail!(err_msg);
                                     }
                                 }
                                 Err(e) => {
+                                    unreachable_peers += 1;
                                     warn!(
-                                        "⚠️ [COMMITTEE VERIFY] Failed to build peer committee from {}: {}",
+                                        "⚠️ [LAYER-7] Failed to build peer committee from {}: {}",
                                         peer_addr, e
                                     );
                                 }
                             }
-                            break; // Only need one peer to verify
+                        }
+                        Ok(Ok(_)) => {
+                            unreachable_peers += 1;
+                            // Don't log every attempt for empty validators — reduce noise
+                            if attempt <= 3 || attempt % 10 == 0 {
+                                warn!("⚠️ [LAYER-7] Peer {} returned empty validators (attempt={})", peer_addr, attempt);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            unreachable_peers += 1;
+                            if attempt <= 3 || attempt % 10 == 0 {
+                                warn!("⚠️ [LAYER-7] Failed to query peer {} (attempt={}): {}", peer_addr, attempt, e);
+                            }
+                        }
+                        Err(_) => {
+                            unreachable_peers += 1;
+                            if attempt <= 3 || attempt % 10 == 0 {
+                                warn!(
+                                    "⚠️ [LAYER-7] Peer {} timed out after {}s (attempt={})",
+                                    peer_addr, PER_PEER_TIMEOUT_SECS, attempt
+                                );
+                            }
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ [COMMITTEE VERIFY] Failed to query peer {}: {}",
-                            peer_addr, e
-                        );
+                    
+                    // Early exit on mismatch — no point checking remaining peers
+                    if mismatching_peers > 0 {
+                        break;
                     }
                 }
+                
+                let elapsed = round_start.elapsed().as_secs();
+                
+                // ═══════════════════════════════════════════════════════════
+                // DECISION LOGIC — same rules as documented:
+                // ═══════════════════════════════════════════════════════════
+                
+                if mismatching_peers > 0 {
+                    // HALT IMMEDIATELY — local committee is wrong
+                    let err_msg = format!(
+                        "🚨 [LAYER-7] Committee hash MISMATCH with {} peer(s)! \
+                         match={}, mismatch={}, unreachable={} (epoch {}, attempt={}, {}s). \
+                         HALTING NODE to prevent fork. Wipe local DB or verify snapshot.",
+                        mismatching_peers, matching_peers, mismatching_peers,
+                        unreachable_peers, current_epoch, attempt, elapsed
+                    );
+                    tracing::error!("{}", err_msg);
+                    anyhow::bail!(err_msg);
+                }
+                
+                if matching_peers > 0 {
+                    // ≥1 peer confirmed, 0 mismatches → SAFE to proceed
+                    info!(
+                        "✅ [LAYER-7] Committee verified: {}/{} peers match, 0 mismatch. \
+                         ACCEPTED after {} attempt(s). ({}s)",
+                        matching_peers, total_peers, attempt, elapsed
+                    );
+                    break; // Exit retry loop
+                }
+                
+                // 0 matches, 0 mismatches — ALL peers unreachable
+                // RETRY: Wait and try again. Do NOT accept without verification.
+                warn!(
+                    "⏳ [LAYER-7] No peers reachable for committee verification (attempt={}). \
+                     unreachable={}/{} (epoch {}). Retrying in {}s... \
+                     System will wait here until at least 1 peer confirms committee hash.",
+                    attempt, unreachable_peers, total_peers, current_epoch, RETRY_INTERVAL_SECS
+                );
+                
+                tokio::time::sleep(std::time::Duration::from_secs(RETRY_INTERVAL_SECS)).await;
             }
+        } else if !dag_has_history_for_committee && current_epoch <= 1 {
+            info!(
+                "✅ [LAYER-7 COMMITTEE VERIFY] Genesis epoch {} — committee from genesis.json, no peer verification needed.",
+                current_epoch
+            );
         }
 
         // EXECUTION INDEX SYNC
@@ -2871,11 +2969,72 @@ impl ConsensusNode {
                                     executor_client_for_proc.get_epoch_boundary_data(go_epoch).await 
                                 {
                                     if !validators.is_empty() {
-                                        if let Ok((_, new_eth_addrs)) = 
+                                        if let Ok((new_committee, new_eth_addrs)) = 
                                             crate::node::committee::build_committee_with_eth_addresses(
                                                 validators, go_epoch
                                             ) 
                                         {
+                                            // ═══════════════════════════════════════════════
+                                            // LAYER-7: Epoch Transition Committee Hash Assert
+                                            // Verify the new committee hash against peers.
+                                            // Bounded check — epoch transitions are time-sensitive
+                                            // so we log CRITICAL on mismatch and halt.
+                                            // ═══════════════════════════════════════════════
+                                            let transition_hash = super::committee_source::calculate_committee_hash(&new_committee);
+                                            let transition_hash_hex = hex::encode(&transition_hash[..8]);
+                                            let mut epoch_match = 0u32;
+                                            let mut epoch_mismatch = 0u32;
+                                            for peer_addr in &config.peer_rpc_addresses {
+                                                match tokio::time::timeout(
+                                                    std::time::Duration::from_secs(5),
+                                                    crate::network::peer_rpc::query_peer_epoch_boundary_data(peer_addr, go_epoch),
+                                                ).await {
+                                                    Ok(Ok(response)) if !response.validators.is_empty() => {
+                                                        // Convert ValidatorInfoSimple → proto::ValidatorInfo
+                                                        let peer_validators: Vec<crate::node::executor_client::proto::ValidatorInfo> = response.validators.iter().map(|v| {
+                                                            crate::node::executor_client::proto::ValidatorInfo {
+                                                                name: v.name.clone(),
+                                                                address: v.address.clone(),
+                                                                stake: v.stake.to_string(),
+                                                                protocol_key: v.protocol_key.clone(),
+                                                                network_key: v.network_key.clone(),
+                                                                authority_key: v.authority_key.clone(),
+                                                                p2p_address: v.p2p_address.clone(),
+                                                                ..Default::default()
+                                                            }
+                                                        }).collect();
+                                                        if let Ok((peer_comm, _)) = crate::node::committee::build_committee_with_eth_addresses(peer_validators, go_epoch) {
+                                                            let peer_hash = super::committee_source::calculate_committee_hash(&peer_comm);
+                                                            if transition_hash == peer_hash {
+                                                                epoch_match += 1;
+                                                            } else {
+                                                                epoch_mismatch += 1;
+                                                                tracing::error!(
+                                                                    "🚨 [LAYER-7 EPOCH] Committee MISMATCH at epoch {} transition! \
+                                                                     local={}... ≠ peer {}. CRITICAL.",
+                                                                    go_epoch, transition_hash_hex, peer_addr
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {} // Peer unreachable — skip
+                                                }
+                                            }
+                                            if epoch_mismatch > 0 {
+                                                tracing::error!(
+                                                    "🛑 [LAYER-7 EPOCH] HALT: {} peer(s) have different committee for epoch {}. \
+                                                     Stopping epoch transition to prevent fork.",
+                                                    epoch_mismatch, go_epoch
+                                                );
+                                                break;
+                                            }
+                                            if epoch_match > 0 {
+                                                tracing::info!(
+                                                    "✅ [LAYER-7 EPOCH] Committee verified for epoch {}: {}/{} peers match (hash={}...)",
+                                                    go_epoch, epoch_match, config.peer_rpc_addresses.len(), transition_hash_hex
+                                                );
+                                            }
+
                                             // Use the already-cloned Arc (line 2696) — 
                                             // commit_processor was moved into tokio::spawn
                                             let mut map = epoch_eth_addresses_arc.write().await;
@@ -3378,94 +3537,92 @@ impl ConsensusNode {
         Ok(node)
     }
 
-    /// Runtime Fork Guard — Background post-startup block hash verification.
+    /// Runtime Fork Guard — PERMANENT background block hash verification (Layer 6).
     ///
-    /// Verifies block hashes against peers at regular checkpoints for the first
-    /// 500 blocks after startup. This catches late-manifesting forks that pass
-    /// the initial POST-SYNC-VERIFY (which only checks the last synced block).
+    /// Verifies block hashes against peers at regular checkpoints for the
+    /// ENTIRE LIFETIME of the node (not just the first 500 blocks).
     ///
-    /// If a checkpoint mismatch is detected, the node halts to prevent fork
-    /// propagation to the rest of the cluster.
+    /// LAYER-6 FORK-PROOF: If a checkpoint mismatch is detected, the node
+    /// halts immediately to prevent fork propagation to the rest of the cluster.
+    ///
+    /// Interval: Every 10 blocks (configurable via CHECK_INTERVAL constant).
     async fn runtime_fork_guard(
         client: Arc<ExecutorClient>,
         peers: Vec<String>,
         start_block: u64,
     ) {
-        const CHECK_INTERVAL: u64 = 100;
-        const MAX_CHECKS: u64 = 5; // 5 checks × 100 blocks = 500 blocks monitored
+        const CHECK_INTERVAL: u64 = 10;
+        let mut next_check_block = start_block + CHECK_INTERVAL;
+        let mut consecutive_failures: u32 = 0;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 10; // Backoff after 10 consecutive peer failures
 
         tracing::info!(
-            "🛡️ [RUNTIME-GUARD] Started: monitoring blocks {}-{} against peers (checkpoints every {} blocks)",
-            start_block + CHECK_INTERVAL,
-            start_block + MAX_CHECKS * CHECK_INTERVAL,
-            CHECK_INTERVAL
+            "🛡️ [LAYER-6] Runtime Fork Guard started — PERMANENT monitoring from block {} (every {} blocks)",
+            start_block, CHECK_INTERVAL
         );
 
-        for i in 0..MAX_CHECKS {
-            let target_block = start_block + (i + 1) * CHECK_INTERVAL;
-
+        loop {
             // Wait until Go has processed this block
             loop {
                 match client.get_last_block_number().await {
-                    Ok((current, _, true, _, _)) if current >= target_block => break,
+                    Ok((current, _, true, _, _)) if current >= next_check_block => break,
                     _ => {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                 }
             }
 
             // Compare block hash with peer
             match crate::network::peer_rpc::fetch_blocks_from_peer(
-                &peers, target_block, target_block,
+                &peers, next_check_block, next_check_block,
             ).await {
                 Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                    match client.get_blocks_range(target_block, target_block).await {
+                    match client.get_blocks_range(next_check_block, next_check_block).await {
                         Ok(local_blocks) if !local_blocks.is_empty() => {
                             let local_raw = &local_blocks[0].raw_block_bytes;
                             let peer_raw = &peer_blocks[0].raw_block_bytes;
                             if local_raw == peer_raw {
-                                tracing::info!(
-                                    "✅ [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} verified ({} bytes match)",
-                                    i + 1, MAX_CHECKS, target_block, local_raw.len()
-                                );
+                                // Only log periodically (every 100 blocks) to reduce noise
+                                if next_check_block % 100 == 0 {
+                                    tracing::info!(
+                                        "✅ [LAYER-6] Block #{} verified ({} bytes match)",
+                                        next_check_block, local_raw.len()
+                                    );
+                                }
+                                consecutive_failures = 0;
                             } else {
                                 tracing::error!(
-                                    "🚨 [RUNTIME-GUARD] Checkpoint {}/{}: Block #{} MISMATCH! \
+                                    "🚨 [LAYER-6] Block #{} MISMATCH! \
                                      local_bytes={} peer_bytes={}. \
                                      HALTING NODE to prevent fork propagation.",
-                                    i + 1, MAX_CHECKS, target_block,
+                                    next_check_block,
                                     local_raw.len(), peer_raw.len()
                                 );
                                 std::process::exit(1);
                             }
                         }
                         _ => {
-                            tracing::warn!(
-                                "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from Go. Skipping.",
-                                i + 1, MAX_CHECKS, target_block
-                            );
+                            consecutive_failures += 1;
                         }
                     }
                 }
-                Ok(_) => {
-                    tracing::warn!(
-                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Peer returned no data for block #{}. Skipping.",
-                        i + 1, MAX_CHECKS, target_block
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "⚠️ [RUNTIME-GUARD] Checkpoint {}/{}: Could not fetch block #{} from peer: {}. Skipping.",
-                        i + 1, MAX_CHECKS, target_block, e
-                    );
+                _ => {
+                    consecutive_failures += 1;
                 }
             }
-        }
 
-        tracing::info!(
-            "✅ [RUNTIME-GUARD] All {} checkpoints passed. Fork monitoring complete.",
-            MAX_CHECKS
-        );
+            // Backoff if peers are consistently unavailable (avoid spamming)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                tracing::warn!(
+                    "⚠️ [LAYER-6] {} consecutive peer failures. Backing off to 60s interval.",
+                    consecutive_failures
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                consecutive_failures = 0; // Reset after backoff
+            }
+
+            next_check_block += CHECK_INTERVAL;
+        }
     }
 
     pub(crate) fn is_alive(&self) -> bool {

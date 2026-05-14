@@ -35,6 +35,33 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	commitIndex := epochData.GetCommitIndex()
 	epochNum := epochData.GetEpoch()
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAYER-4: Idempotent Execution Guard
+	// Check if this commit was already processed BEFORE any state mutation.
+	// This prevents GEI drift when Rust retries the same commit after
+	// timeout/crash. Must check before epoch transition logic to avoid
+	// double-resetting commitIndex.
+	// ═══════════════════════════════════════════════════════════════════════════
+	geiAuthLayer4 := GetGEIAuthority()
+	if geiAuthLayer4.ShouldSkipCommit(commitIndex, epochNum) {
+		logger.Info("🛡️ [LAYER-4] Idempotent guard triggered: returning early for commit=%d epoch=%d GEI=%d",
+			commitIndex, epochNum, globalExecIndex)
+		return
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAYER-1: Protobuf Strict Boundary — Go-side validation
+	// Reject blocks with invalid LeaderAddress. Valid values:
+	//   - Exactly 20 bytes (valid Ethereum address from Rust)
+	//   - Empty (0 bytes) — allowed for backward compatibility, uses index fallback
+	// Any other length indicates corrupted FFI data → REJECT to prevent fork.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if leaderAddrLen := len(epochData.LeaderAddress); leaderAddrLen != 20 && leaderAddrLen != 0 {
+		logger.Error("🛡️ [LAYER-1] REJECT: LeaderAddress must be 20 bytes or empty, got %d bytes (commit=%d, GEI=%d, epoch=%d). Dropping block to prevent fork.",
+			leaderAddrLen, commitIndex, globalExecIndex, epochNum)
+		return
+	}
+
 	// Compute the next GEI from Go's persisted state
 	lastPersistedGEI := storage.GetLastGlobalExecIndex()
 	if lastPersistedGEI >= *nextExpectedGlobalExecIndex && lastPersistedGEI > 0 {
@@ -935,6 +962,8 @@ PROCESS_BLOCK:
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
 
+	// LAYER-9: Persist leader address for DAG-wipe recovery
+	bp.PersistLeaderAddress(globalExecIndex, leaderAddr)
 
 	// Save SystemTransactions if present
 	sysTxs := epochData.GetSystemTransactions()

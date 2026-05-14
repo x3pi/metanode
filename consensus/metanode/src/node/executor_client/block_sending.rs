@@ -58,6 +58,19 @@ impl ExecutorClient {
             return Ok(1); // Silently skip if not enabled
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // LAYER-1: Protobuf Strict Boundary — Validate FFI data BEFORE
+        // any serialization or network calls. Reject malformed data at
+        // the gate to prevent String vs Bytes sorting forks.
+        // ═══════════════════════════════════════════════════════════════
+        if !leader_address.is_empty() && leader_address.len() != 20 {
+            anyhow::bail!(
+                "🛡️ [LAYER-1] REJECT: leader_address must be exactly 20 bytes, got {} bytes (commit={}). \
+                 This indicates a String/Bytes encoding mismatch in committee resolution.",
+                leader_address.len(), subdag.commit_ref.index
+            );
+        }
+
         // Count total transactions BEFORE conversion (to detect if transactions are lost)
         let total_tx_before: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
 
@@ -224,6 +237,9 @@ impl ExecutorClient {
                     // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
                     is_authoritative_gei: false,
                     system_transactions: if is_last_frag { all_system_txs.clone() } else { Vec::new() },
+                    // Layer 1: Protobuf strict boundary fields
+                    authority_key: vec![],
+                    commit_digest: vec![],
                 };
 
                 let tx_count = epoch_data.transactions.len();
@@ -297,6 +313,9 @@ impl ExecutorClient {
             // GO-AUTHORITATIVE GEI: Disabled. Rust is the absolute authority for GEI.
             is_authoritative_gei: false,
             system_transactions: all_system_txs,
+            // Layer 1: Protobuf strict boundary fields
+            authority_key: vec![],
+            commit_digest: vec![],
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -770,6 +789,14 @@ impl ExecutorClient {
             return Ok(()); // Silently skip if not enabled
         }
 
+        // LAYER-1: Protobuf Strict Boundary — same validation as send_committed_subdag
+        if !leader_address.is_empty() && leader_address.len() != 20 {
+            anyhow::bail!(
+                "🛡️ [LAYER-1] REJECT (direct): leader_address must be 20 bytes, got {} (commit={})",
+                leader_address.len(), subdag.commit_ref.index
+            );
+        }
+
         let (all_proto_txs, all_system_txs) = self.build_sorted_transactions(subdag)?;
 
         let epoch_data = ExecutableBlock {
@@ -785,6 +812,9 @@ impl ExecutorClient {
             // GO-AUTHORITATIVE GEI: Disabled
             is_authoritative_gei: false,
             system_transactions: all_system_txs,
+            // Layer 1: Protobuf strict boundary fields
+            authority_key: vec![],
+            commit_digest: vec![],
         };
 
         let mut epoch_data_bytes = Vec::new();
