@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::network::peer_rpc::query_peer_epoch_boundary_data;
+use base64::Engine;
 
 impl RustSyncNode {
     /// Process queue - drain ready commits and send to Go sequentially (Phase 3)
