@@ -787,6 +787,39 @@ impl CommitProcessor {
                         } else {
                             // CertifiedCommit — network-verified with 2f+1 agreement.
                             // This is the authoritative path to Go execution.
+
+                            // ═══════════════════════════════════════════════════════
+                            // DEFENSE-IN-DEPTH: Cross-validate CertifiedCommit digest
+                            // against local quorum data. This should NEVER mismatch
+                            // after the Phase 1 quorum fix in CommitSyncer, but serves
+                            // as a safety net for future regressions.
+                            // ═══════════════════════════════════════════════════════
+                            if let Some(ref verifier) = digest_verifier {
+                                let certified_digest = subdag.commit_ref.digest.into_inner();
+                                match verifier(commit_index) {
+                                    Some(quorum_digest) if quorum_digest != certified_digest => {
+                                        warn!(
+                                            "🚨🚨 [DIGEST-GATE CRITICAL] CertifiedCommit {} digest CONFLICTS with local quorum! \
+                                             certified={}, quorum={}. \
+                                             Dispatching CertifiedCommit (it has 2f+1 votes), but this indicates \
+                                             a potential CommitSyncer integrity issue. INVESTIGATE IMMEDIATELY.",
+                                            commit_index,
+                                            hex::encode(&certified_digest[..4]),
+                                            hex::encode(&quorum_digest[..4])
+                                        );
+                                    }
+                                    Some(_) => {
+                                        info!(
+                                            "✅ [DISPATCH:CERTIFIED+DIGEST] CertifiedCommit {} digest matches quorum.",
+                                            commit_index
+                                        );
+                                    }
+                                    None => {
+                                        // No quorum data available yet — normal during rapid sync
+                                    }
+                                }
+                            }
+
                             // Discard any buffered local commit for the same index.
                             if let Some(local_subdag) = pending_local_commits.remove(&commit_index) {
                                 pending_local_timestamps.remove(&commit_index);

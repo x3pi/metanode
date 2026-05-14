@@ -3024,8 +3024,49 @@ impl<C: NetworkClient> Inner<C> {
             vote_blocks.push(block);
         }
 
-        // Bypass quorum check for FETCH-COMMITS to fix deadlock.
-        // The master node's GEI determinism guarantees the commit sequence is correct.
+        // ═══════════════════════════════════════════════════════════════════
+        // FORK FIX (May 2026): RESTORED QUORUM VERIFICATION
+        //
+        // The quorum check was previously bypassed to fix a deadlock during
+        // snapshot recovery (DAG empty → no vote blocks → quorum always fails).
+        // However, this bypass allowed CommitSyncer to trust commits from a
+        // SINGLE peer, causing nodes to fetch divergent commits from different
+        // peers and fork the execution chain.
+        //
+        // Strategy:
+        // - Normal operation (DAG has blocks): REQUIRE 2f+1 quorum
+        // - Cold-start (DAG empty / snapshot restore): Allow single-peer trust
+        //   because vote blocks genuinely don't exist yet. Safety relies on
+        //   commit chain integrity (previous_digest chaining verified above).
+        // ═══════════════════════════════════════════════════════════════════
+        let is_cold_start = self.dag_state.read().highest_accepted_round() == 0;
+
+        if !is_cold_start && !stake_aggregator.reached_threshold(&self.context.committee) {
+            let accumulated_stake = stake_aggregator.stake();
+            tracing::warn!(
+                "🚨 [COMMIT-SYNCER] Rejecting commits from peer {}: insufficient quorum votes \
+                 for end commit {} (accumulated_stake={}, needed=2f+1). \
+                 This prevents single-peer fork attacks.",
+                peer,
+                end_commit_ref,
+                accumulated_stake,
+            );
+            return Err(ConsensusError::NotEnoughCommitVotes {
+                stake: accumulated_stake,
+                peer,
+                commit: Box::new(end_commit.clone()),
+            });
+        }
+
+        if is_cold_start {
+            tracing::info!(
+                "⚠️ [COMMIT-SYNCER COLD-START] DAG is empty (highest_accepted_round=0). \
+                 Trusting peer {} commit chain without quorum verification. \
+                 Safety: commit chain integrity verified via previous_digest chaining.",
+                peer
+            );
+        }
+
         let trusted_commits = commits
             .into_iter()
             .zip(serialized_commits)
