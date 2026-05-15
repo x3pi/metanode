@@ -1490,20 +1490,10 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 2: Save block to LevelDB (by hash + number→hash mapping)
+		// STEP 2: Block Saving and Mappings are now deferred to CommitBlockState
+		// to guarantee they are protected by commitMutex and SEQUENTIAL GUARD.
 		// ═══════════════════════════════════════════════════════════════════════════
-		if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
-			continue
-		}
-		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-		}
-		for _, txHash := range blk.Transactions() {
-			bc.SetTxHashMapBlockNumber(txHash, blockNum)
-		}
 
-		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 3: REBUILD TRIES (conditionally) — sync memory state with DB.
 		//
 		// CRITICAL FIX (Apr 2026): On NOMT backend, WithRebuildTries() MUST NOT

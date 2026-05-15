@@ -355,17 +355,13 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
-	headerCopy := bl.Header()
-	bp.chainState.SetcurrentBlockHeader(&headerCopy)
+	// currentBlockHeader and BlockNumberToHash mappings are safely updated 
+	// synchronously inside CommitBlockState (via commitWorker) under commitMutex
+	// to guarantee no race condition with P2P sync blocks.
 
 	phase2Elapsed := time.Since(phase2Start)
 
 	phase3Start := time.Now()
-	err = blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(bl.Header().BlockNumber()), bl.Header().Hash())
-	if err != nil {
-		bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
-		logger.Fatal("Error when setting BlockNumberToHash for block #%d: %v", currentBlockNumber, err)
-	}
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
 	// TxHashMapBlockNumber is now safely handled synchronously inside CommitBlockState
 	// to avoid race conditions with dirtyStorage flushing.
