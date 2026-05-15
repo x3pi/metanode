@@ -366,7 +366,10 @@ impl CommitProcessor {
         // will re-deliver them as CertifiedCommit from peers.
         let mut pending_local_commits: BTreeMap<u32, CommittedSubDag> = BTreeMap::new();
         let mut pending_local_timestamps: BTreeMap<u32, std::time::Instant> = BTreeMap::new();
-        const MAX_PENDING_LOCAL_COMMITS: usize = 100;
+        // At 50k+ TPS (~1000 commits/sec), epoch transitions can stall
+        // for 5-10s = 5000-10000 commits. Set to 500 for local commits
+        // (most resolve via DIGEST-GATE POLL within 200ms cycles).
+        const MAX_PENDING_LOCAL_COMMITS: usize = 500;
 
         // ═══════════════════════════════════════════════════════════════
         // LAYER-4 WAL: Write-Ahead Log for crash-safe FFI tracking.
@@ -529,8 +532,32 @@ impl CommitProcessor {
                                 }
                             }
                             None => {
-                                // No quorum yet — STOP here, don't skip ahead
-                                break; // STRICT ORDER: stop at first unresolved
+                                // No quorum yet — check if digest was GC'd
+                                // (quorum advanced far past this index, so the entry
+                                // was pruned from digest_history in CommitVoteMonitor).
+                                // If quorum_commit_index >> local_idx, the network has
+                                // already moved past this commit = implicitly verified.
+                                let quorum_gc_bypass = if let Some(ref qci) = _quorum_commit_index_ref {
+                                    let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
+                                    // DIGEST_HISTORY_RETAIN in CommitVoteMonitor is 50_000.
+                                    // If quorum is more than 50_000 past this commit, the
+                                    // digest entry was GC'd — the commit IS verified.
+                                    qci_val > local_idx + 50_000
+                                } else {
+                                    false
+                                };
+                                if quorum_gc_bypass {
+                                    info!(
+                                        "✅ [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
+                                         quorum_commit_index has advanced far past this commit. \
+                                         Digest entry was GC'd = implicitly verified by quorum.",
+                                        local_idx
+                                    );
+                                    verified_indices.push(local_idx);
+                                } else {
+                                    // Genuinely no quorum yet — STOP here
+                                    break; // STRICT ORDER: stop at first unresolved
+                                }
                             }
                         }
                     }
@@ -657,7 +684,24 @@ impl CommitProcessor {
                                     false
                                 }
                             }
-                            None => false,
+                            None => {
+                                // QUORUM-GC-BYPASS: Same logic as DIGEST-GATE POLL path.
+                                if let Some(ref qci) = _quorum_commit_index_ref {
+                                    let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
+                                    if qci_val > next_expected_index + 50_000 {
+                                        info!(
+                                            "✅ [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
+                                             digest GC'd, quorum={} >> commit. Implicitly verified.",
+                                            next_expected_index, qci_val
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
                         }
                     } else {
                         false
@@ -874,8 +918,23 @@ impl CommitProcessor {
                                         }
                                     }
                                     None => {
-                                        // No quorum yet — buffer
-                                        false
+                                        // QUORUM-GC-BYPASS: If quorum advanced far past
+                                        // this commit, digest entry was GC'd = implicitly verified.
+                                        if let Some(ref qci) = _quorum_commit_index_ref {
+                                            let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
+                                            if qci_val > commit_index + 50_000 {
+                                                info!(
+                                                    "✅ [DIGEST-GATE-IMMEDIATE] Commit {} QUORUM-GC-BYPASS: \
+                                                     quorum={} >> commit. Implicitly verified.",
+                                                    commit_index, qci_val
+                                                );
+                                                true
+                                            } else {
+                                                false // No quorum yet — buffer
+                                            }
+                                        } else {
+                                            false // No quorum ref — buffer
+                                        }
                                     }
                                 }
                             } else {
@@ -1170,7 +1229,9 @@ impl CommitProcessor {
                         }
 
                         // SAFETY: Limit pending_commits size to prevent OOM
-                        const MAX_PENDING_COMMITS: usize = 5000;
+                        // At 50k+ TPS (~1000 commits/sec), up to 50k commits
+                        // can queue during extended stalls or epoch transitions.
+                        const MAX_PENDING_COMMITS: usize = 50_000;
                         pending_commits.insert(commit_index, subdag);
                         
                         // SMART EVICTION: Instead of dropping the incoming commit (which might be 

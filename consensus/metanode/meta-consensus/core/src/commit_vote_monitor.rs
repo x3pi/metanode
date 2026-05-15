@@ -34,7 +34,11 @@ pub struct CommitVoteMonitor {
 /// Number of commit indices to retain in digest_history below the current
 /// quorum_commit_index. Prevents unbounded memory growth while ensuring
 /// recently-buffered local commits can still be verified.
-const DIGEST_HISTORY_RETAIN: u32 = 50;
+///
+/// Sizing: At 50k+ TPS (~1000 commits/sec), epoch transitions can stall
+/// CommitProcessor for 5-10s = 5k-10k commits. Set to 50k for 50× headroom.
+/// Memory: ~50k entries × ~100 bytes = ~5MB — negligible.
+const DIGEST_HISTORY_RETAIN: u32 = 50_000;
 
 impl CommitVoteMonitor {
     pub(crate) fn new(context: Arc<Context>) -> Self {

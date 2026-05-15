@@ -96,7 +96,18 @@ pub(super) async fn setup_validator_consensus(
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
 
-    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
+    let digest_verifier_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_verifier(move |index: u32| {
+        if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
+            verifier(index)
+        } else {
+            None // Monitor not yet initialized
+        }
+    });
+
+    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_committee_size(committee.size())
+        .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
     if let Some(c) = exec_client_proc {
         processor = processor.with_executor_client(c.clone());
@@ -238,7 +249,18 @@ pub(super) async fn setup_synconly_sync(
         .with_epoch_transition_callback(epoch_cb)
         .with_storage_path(node.storage_path.clone());
 
-    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
+    let digest_verifier_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_verifier(move |index: u32| {
+        if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
+            verifier(index)
+        } else {
+            None // Monitor not yet initialized
+        }
+    });
+
+    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_committee_size(committee.size())
+        .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
     if let Some(c) = exec_client_proc.clone() {
         processor = processor.with_executor_client(c.clone());
