@@ -440,13 +440,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if current_phase != next_phase {
             self.coordination_hub.set_phase(next_phase);
             if next_phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
-                // ARCHITECTURAL FIX (May 2026): Sparse DAG Evaluation Prevention.
-                // When entering Healthy after a recovery, the DAG is sparse for historical rounds.
-                // We MUST set the boundary to the current network commit tip to prevent the
-                // local committer from evaluating sparse regions and forking.
+                // ARCHITECTURAL FIX (May 2026): The sparse DAG boundary logic has been replaced
+                // by the dynamic DAG-GC-GUARD in `commit_manager.rs`. That guard automatically
+                // blocks the local committer if it falls behind `gc_round`, making explicit
+                // boundary round tracking unnecessary.
                 if self.coordination_hub.was_recovery_activated() {
-                    let network_tip_round = self.inner.dag_state.read().last_commit_leader().round;
-                    self.coordination_hub.set_sparse_dag_boundary(network_tip_round);
+                    tracing::info!("🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.");
                 }
 
                 // CRITICAL FORK-SAFETY FIX: Prevent Time-of-Check vs Time-of-Use deadlock detection bug.
@@ -1147,8 +1146,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         // every 10 ticks, polling the network each time,
                                         // until consensus finally resumes.
                                         self.post_restore_commit_baseline = Some(local_commit);
-                                        // Also clear sparse boundary if present
-                                        self.coordination_hub.clear_sparse_dag_boundary();
+                                        // Also clear DAG-GC-GUARD override if present
+                                        self.coordination_hub.set_override_dag_gc_guard(false);
                                     } else {
                                         // Standard path: poll peers and take corrective action.
                                         let inner = self.inner.clone();
@@ -1250,9 +1249,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         // unlocked with a stale LeaderSwapTable, producing divergent
                         // leader elections and timestamps.
                         // ════════════════════════════════════════════════════════
+                        // ARCHITECTURAL FIX: Check DAG-GC-GUARD condition directly.
+                        // If the DAG is sparse due to GC, the local committer is blocked.
+                        // We must actively trigger sync to fetch CertifiedCommits.
+                        let gc_round = self.inner.dag_state.read().gc_round();
+                        let next_leader_round = self.inner.dag_state.read().last_commit_leader().round + 1;
                         let is_healthy_but_locked = self.coordination_hub.is_healthy()
-                            && self.coordination_hub.sparse_dag_boundary().is_some();
-                            
+                            && next_leader_round <= gc_round;
                         let is_catching_up_but_schedule_pending = self.coordination_hub.is_catching_up()
                             && lag == 0
                             && self.coordination_hub.is_schedule_recovery_pending();
@@ -1412,7 +1415,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                      Forcing local committer unlock to break Cold Start Deadlock!",
                                     my_commit
                                 );
-                                hub.clear_sparse_dag_boundary();
+                                hub.set_override_dag_gc_guard(true);
                             });
                             self.last_quorum_change_at = now; // reset to avoid rapid re-trigger
                         } else {
@@ -1955,25 +1958,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         self.coordination_hub.set_schedule_recovery_pending(false);
                                         self.last_fetched_schedule_cycle = Some(current_cycle);
 
-                                        // IMMEDIATE UNLOCK: If sparse_dag_boundary is still set
-                                        // (the node entered Healthy but committer was locked),
-                                        // clear it now in the same tick. This avoids the 5s
-                                        // ACTIVE-SYNC-RECOVERY delay and unblocks the Core
-                                        // committer immediately.
-                                        // FORK-SAFETY: sparse_dag_boundary is cleared here ONLY
-                                        // when we are NOT in CatchingUp. The SPARSE-DAG-GUARD
-                                        // in Core still checks gc_round vs boundary_round before
-                                        // actually running the local committer — so even if we
-                                        // clear prematurely, Core itself will not commit on sparse data.
+                                        // IMMEDIATE UNLOCK: If DAG-GC-GUARD override is needed
+                                        // or if the node is locked, we don't clear sparse_dag_boundary 
+                                        // because it was removed. If it was overridden, we can clear it.
                                         if self.coordination_hub.is_healthy()
-                                            && self.coordination_hub.sparse_dag_boundary().is_some()
+                                            && self.coordination_hub.is_dag_gc_guard_overridden()
                                         {
                                             tracing::info!(
-                                                "✅ [CYCLE-0 GUARD] Clearing sparse_dag_boundary immediately \
-                                                 (schedule confirmed, node Healthy). \
-                                                 Core's gc_round guard still prevents sparse evaluation."
+                                                "✅ [CYCLE-0 GUARD] Clearing override_dag_gc_guard immediately \
+                                                 (schedule confirmed, node Healthy)."
                                             );
-                                            self.coordination_hub.clear_sparse_dag_boundary();
+                                            self.coordination_hub.set_override_dag_gc_guard(false);
                                             // Kick Core to start proposing
                                             let disp = self.inner.core_thread_dispatcher.clone();
                                             tokio::spawn(async move {

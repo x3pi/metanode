@@ -348,24 +348,31 @@ impl Core {
                 }
 
                 // ═══════════════════════════════════════════════════════════════════
-                // ARCHITECTURAL FIX (May 2026): SPARSE DAG EVALUATION PREVENTION
-                // After snapshot recovery, the local DAG is sparse for past rounds.
-                // If the local committer evaluates these sparse regions, it will
-                // calculate divergent leader support and cause a FORK.
-                // We MUST rely purely on CertifiedCommits until the DAG is dense.
+                // ARCHITECTURAL FIX (May 2026): DAG GC GUARD
+                // If the local committer has fallen behind `gc_round`, the DAG is sparse 
+                // for the next leader round because historical blocks were garbage collected
+                // and missing ancestors were dropped. Evaluating these sparse regions locally 
+                // will produce divergent "Skip" decisions and cause a FORK.
+                // We MUST block the local committer and rely purely on CertifiedCommits 
+                // from the network to safely advance `last_decided_leader` past the GC window.
                 // ═══════════════════════════════════════════════════════════════════
-                if let Some(boundary_round) = self.coordination_hub.sparse_dag_boundary() {
-                    let gc_round = self.dag_state.read().gc_round();
-                    if gc_round <= boundary_round {
+                let gc_round = self.dag_state.read().gc_round();
+                let next_leader_round = self.last_decided_leader.round + 1;
+                if next_leader_round <= gc_round {
+                    if !self.coordination_hub.is_dag_gc_guard_overridden() {
                         tracing::info!(
-                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: gc_round ({}) <= boundary_round ({}). \
-                             Waiting for network CertifiedCommits to push the DAG search space entirely past the sparse history.",
-                            gc_round, boundary_round
+                            "🛡️ [DAG-GC-GUARD] Blocking local committer: next_leader_round ({}) <= gc_round ({}). \
+                             The DAG is sparse for this round due to garbage collection. \
+                             Waiting for CommitSyncer to fetch CertifiedCommits from the network.",
+                            next_leader_round, gc_round
                         );
                         break;
-                    } else {
-                        // The DAG search space has caught up to the dense region!
-                        self.coordination_hub.clear_sparse_dag_boundary();
+                    }
+                } else {
+                    // The DAG search space has caught up to the dense region!
+                    if self.coordination_hub.is_dag_gc_guard_overridden() {
+                        tracing::info!("🔓 [DAG-GC-GUARD] DAG is dense again. Clearing override.");
+                        self.coordination_hub.set_override_dag_gc_guard(false);
                     }
                 }
 

@@ -116,6 +116,9 @@ pub struct ConsensusCoordinationHub {
     /// the entire session lifetime. It ensures the local committer guard
     /// remains active even after RecoveryBarrier transitions to Ready.
     recovery_was_activated: Arc<AtomicBool>,
+    
+    /// Override flag for the DAG-GC-GUARD. Used to break cold start deadlocks.
+    override_dag_gc_guard: Arc<AtomicBool>,
 
 
     /// SPARSE DAG BOUNDARY (Architectural Fix for Snapshot Recovery Fork):
@@ -124,7 +127,7 @@ pub struct ConsensusCoordinationHub {
     /// leader support evaluation (FORK).
     /// This boundary defines the round below which the local committer MUST NOT evaluate.
     /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
-    sparse_dag_boundary: Arc<RwLock<Option<u32>>>,
+
 
     /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
     /// Wraps CommitVoteMonitor.quorum_commit_digest() for cross-crate access.
@@ -146,7 +149,8 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            sparse_dag_boundary: Arc::new(RwLock::new(None)),
+            override_dag_gc_guard: Arc::new(AtomicBool::new(false)),
+
             digest_verifier: Arc::new(RwLock::new(None)),
         }
     }
@@ -454,35 +458,22 @@ impl ConsensusCoordinationHub {
         self.recovery_was_activated.load(Ordering::Acquire)
     }
 
-
-
-    /// Sets the sparse DAG boundary based on Round.
-    pub fn set_sparse_dag_boundary(&self, boundary_round: consensus_types::block::Round) {
-        let mut lock = self.sparse_dag_boundary.write();
-        *lock = Some(boundary_round);
-        tracing::info!(
-            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to round {}. \
-             Local committer will be BLOCKED until gc_round > this boundary to prevent sparse DAG evaluation.",
-            boundary_round
-        );
-    }
-
-    /// Gets the current sparse DAG boundary.
-    pub fn sparse_dag_boundary(&self) -> Option<u32> {
-        *self.sparse_dag_boundary.read()
-    }
-
-    /// Clears the sparse DAG boundary.
-    pub fn clear_sparse_dag_boundary(&self) {
-        let mut lock = self.sparse_dag_boundary.write();
-        if lock.is_some() {
-            *lock = None;
-            tracing::info!(
-                "🔓 [SPARSE-DAG-BOUNDARY] Boundary cleared! \
-                 Local DAG has passed the sparse zone. Local committer UNLOCKED."
-            );
+    /// Override the DAG-GC-GUARD. Used by the Cold Start Deadlock Breaker.
+    pub fn set_override_dag_gc_guard(&self, override_guard: bool) {
+        self.override_dag_gc_guard.store(override_guard, Ordering::Release);
+        if override_guard {
+            tracing::warn!("🔓 [DEADLOCK-BREAKER] DAG-GC-GUARD override activated!");
         }
     }
+
+    /// Returns true if the DAG-GC-GUARD is currently overridden.
+    pub fn is_dag_gc_guard_overridden(&self) -> bool {
+        self.override_dag_gc_guard.load(Ordering::Acquire)
+    }
+
+
+
+
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -507,7 +498,7 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            sparse_dag_boundary: Arc::new(RwLock::new(None)),
+
             digest_verifier: Arc::new(RwLock::new(None)),
         }
     }
