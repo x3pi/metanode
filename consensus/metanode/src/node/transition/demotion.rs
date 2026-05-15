@@ -125,6 +125,10 @@ pub async fn demote_to_synconly_and_catchup(
     }
 
     // STEP 6: Start epoch monitor for future transitions
+    if let Some(old_handle) = node.epoch_monitor_handle.take() {
+        old_handle.abort();
+        info!("🛑 [EPOCH MONITOR] Aborted old epoch monitor task to prevent leak");
+    }
     if let Ok(Some(handle)) =
         crate::node::epoch_monitor::start_unified_epoch_monitor(&node.executor_client, config)
     {

@@ -3522,6 +3522,10 @@ impl ConsensusNode {
         }
 
         // UNIFIED EPOCH MONITOR
+        if let Some(old_handle) = node.epoch_monitor_handle.take() {
+            old_handle.abort();
+            info!("🛑 [EPOCH MONITOR] Aborted old epoch monitor task from initial mode check");
+        }
         if let Ok(Some(handle)) =
             epoch_monitor::start_unified_epoch_monitor(&node.executor_client, &config)
         {
