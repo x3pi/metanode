@@ -59,8 +59,10 @@ type CommitJob struct {
 
 
 
-// PersistJob holds pipeline commit results for async LevelDB persistence.
-// Sent to persistWorker via persistChannel after CommitPipeline() completes.
+// PersistJob is used for fence/drain signaling in the persist pipeline.
+// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel.
+// This struct is retained only for DoneSignal fence operations used by
+// WaitForPersistence() and StopWait().
 type PersistJob struct {
 	BlockNum      uint64
 	AccountResult *account_state_db.PipelineCommitResult

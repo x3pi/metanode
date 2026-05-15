@@ -79,8 +79,10 @@ type CommitJob struct {
 	SerializedBackup []byte
 }
 
-// PersistJob holds pipeline commit results for async LevelDB persistence.
-// Sent to persistWorker via persistChannel after CommitPipeline() completes.
+// PersistJob is used for fence/drain signaling in the persist pipeline.
+// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel.
+// This struct is retained only for DoneSignal fence operations used by
+// WaitForPersistence() and StopWait().
 type PersistJob struct {
 	BlockNum      uint64
 	AccountResult *account_state_db.PipelineCommitResult
@@ -152,7 +154,8 @@ type BlockProcessor struct {
 	// Channel để đảm bảo chỉ một ProcessTransactionsInPool chạy tại một thời điểm
 	processingLockChan chan struct{}
 
-	// Pipeline commit: async persistence of trie nodes to LevelDB
+	// Pipeline commit: fence-only channel for WaitForPersistence/StopWait drain signals.
+	// PersistAsync now runs inline in commitToMemoryParallel (May 2026 fork fix).
 	persistChannel chan PersistJob
 
 	// Backup DB Coalescing
@@ -410,7 +413,7 @@ func NewBlockProcessor(
 	}
 	if serviceType == p_common.ServiceTypeMaster {
 		go bp.commitWorker()
-		go bp.persistWorker()   // Pipeline commit: async LevelDB persistence
+		go bp.persistWorker()   // Fence-only: drain endpoint for WaitForPersistence/StopWait
 		go bp.backupDbWorker()  // Coalesced BackupDb builder
 		go bp.geiWorker()       // Coalesced GEI updates
 	}
@@ -752,7 +755,7 @@ func (bp *BlockProcessor) StopWait() {
 func (bp *BlockProcessor) StartBackgroundWorkers() {
 	go bp.commitWorker()
 	go bp.persistWorker()
-	logger.Info("✅ Started background persistence workers (commit, persist)")
+	logger.Info("✅ Started background persistence workers (commit, persist-fence)")
 }
 
 // TxsProcessor2 is an adapter to start the TxBatchForwarder (Phase 7 Refactoring)

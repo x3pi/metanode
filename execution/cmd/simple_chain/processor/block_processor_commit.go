@@ -246,7 +246,8 @@ func (bp *BlockProcessor) commitWorker() {
 // commitToMemoryParallel performs parallel memory commit operations.
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
 // instead of Commit() (slow, holds locks until BatchPut completes).
-// The persist jobs are sent to persistWorker for async LevelDB persistence.
+// PersistAsync runs inline (synchronous) to guarantee trie swap completes before
+// the next block starts processing — eliminating the fork race condition.
 func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) {
 	overallStart := time.Now()
 
@@ -371,87 +372,83 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// Send AccountStateDB + StakeStateDB persist jobs to background worker
-	// This is non-blocking if persistChannel has capacity
+	// CRITICAL FORK FIX (May 2026): Persist ALL state DBs synchronously inline.
+	//
+	// ROOT CAUSE OF FORK AT BLOCK 10136:
+	// The previous non-blocking select/default dispatch to persistChannel
+	// allowed PersistAsync (trie swap + CommitPayload) to complete at a
+	// non-deterministic time across nodes. If persistWorker on node X was
+	// slower than on node Y, the next block's IntermediateRoot(true) would
+	// read from different trie states:
+	//   - Node X: old trie (PersistAsync not yet complete → stale data)
+	//   - Node Y: new trie (PersistAsync complete → fresh data)
+	// → Different stateRoot → Different receiptsRoot → FORK
+	//
+	// The persistReady gate in IntermediateRoot SHOULD prevent this, but
+	// it only works if PersistAsync is actually RUNNING (channel picked up).
+	// With the non-blocking select/default, the job could sit in the
+	// persistChannel buffer while the next block already starts processing.
+	//
+	// FIX: Run PersistAsync inline in commitToMemoryParallel. This guarantees:
+	//   1. Trie swap is complete before this function returns
+	//   2. persistReady channel is closed before DoneChan signals
+	//   3. Next block's IntermediateRoot sees the fully committed trie
+	//   4. All nodes have identical state before processing the next block
+	//
+	// PERFORMANCE: PersistAsync for NOMT takes ~5-10ms (memory-mapped trie swap
+	// + CommitPayload). This is negligible compared to block execution time
+	// (~50-500ms) and eliminates the fork entirely. The previous "optimization"
+	// of overlapping persist with next block's execution was unsafe.
 	// ═══════════════════════════════════════════════════════════════
-	if accountPipelineResult != nil || stakePipelineResult != nil || receiptPipelineResult != nil {
-		select {
-		case bp.persistChannel <- PersistJob{
-			AccountResult: accountPipelineResult,
-			StakeResult:   stakePipelineResult,
-			ReceiptResult: receiptPipelineResult,
-		}:
-			logger.Debug("[PIPELINE] Sent persist job for AccountStateDB + StakeStateDB to background worker")
-		default:
-			// Channel full — persist synchronously as fallback
-			logger.Warn("[PIPELINE] persistChannel full, persisting synchronously")
-			if accountPipelineResult != nil {
-				if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
-					logger.Fatal("Synchronous fallback persist failed for AccountStateDB: %v", err)
-				}
-			}
-			if stakePipelineResult != nil {
-				if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
-					logger.Fatal("Synchronous fallback persist failed for StakeStateDB: %v", err)
-				}
-			}
-			if receiptPipelineResult != nil {
-				if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
-					logger.Fatal("Synchronous fallback persist failed for Receipts: %v", err)
-				}
-			}
+	if accountPipelineResult != nil {
+		startPersist := time.Now()
+		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
+			logger.Fatal("PersistAsync failed for AccountStateDB: %v", err)
+		}
+		persistDuration := time.Since(startPersist)
+		if persistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", persistDuration)
+		}
+	}
+	if stakePipelineResult != nil {
+		startPersist := time.Now()
+		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
+			logger.Fatal("PersistAsync failed for StakeStateDB: %v", err)
+		}
+		persistDuration := time.Since(startPersist)
+		if persistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", persistDuration)
+		}
+	}
+	if receiptPipelineResult != nil {
+		startPersist := time.Now()
+		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
+			logger.Fatal("PersistAsync failed for Receipts: %v", err)
+		}
+		persistDuration := time.Since(startPersist)
+		if persistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", persistDuration)
 		}
 	}
 }
 
-// persistWorker is a background goroutine that processes PersistJobs sequentially.
-// It handles the slow disk I/O (BatchPut to LevelDB) and trie swap that was
-// moved out of the critical path by CommitPipeline().
+// persistWorker is a background goroutine that serves as a fence/drain endpoint.
+//
+// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel to
+// eliminate the fork race condition (Block 10136). This worker no longer processes
+// real PersistJobs. It only handles DoneSignal fence operations used by:
+//   - WaitForPersistence() — snapshot system drain gate
+//   - StopWait() — graceful shutdown drain
 func (bp *BlockProcessor) persistWorker() {
-	logger.Info("✅ Persist Worker initiated (pipeline commit background persistence)")
+	logger.Info("✅ Persist Worker initiated (fence-only mode — PersistAsync runs inline since May 2026)")
 	for job := range bp.persistChannel {
 		if job.DoneSignal != nil {
 			close(job.DoneSignal)
 			continue
 		}
-
-		start := time.Now()
-
-		// Persist AccountStateDB trie nodes to LevelDB + swap trie
-		if job.AccountResult != nil {
-			if err := bp.chainState.GetAccountStateDB().PersistAsync(job.AccountResult); err != nil {
-				logger.Error("❌ [PERSIST WORKER] AccountStateDB PersistAsync failed: %v", err)
-				// Not fatal — old trie is still valid for reads, just not persisted yet.
-				// Next block's IntermediateRoot will still work correctly.
-				// The data will be re-generated on next commit.
-			}
-		}
-
-		// Persist StakeStateDB trie nodes to DB + swap trie
-		if job.StakeResult != nil {
-			if err := bp.chainState.GetStakeStateDB().PersistAsync(job.StakeResult); err != nil {
-				logger.Error("❌ [PERSIST WORKER] StakeStateDB PersistAsync failed: %v", err)
-				// Not fatal — same resilience as AccountStateDB
-			}
-		}
-
-		// Persist Receipts trie nodes to DB
-		if job.ReceiptResult != nil {
-			// Actually we need the receipts object, but it is created per block.
-			// Let's instantiate a temporary Receipts wrapper or access `storageManager.GetStorageReceipt()`.
-			// Since we just need to BatchPut, we can get storage explicitly or use an empty wrapper.
-			if len(job.ReceiptResult.Batch) > 0 {
-				err := bp.storageManager.GetStorageReceipt().BatchPut(job.ReceiptResult.Batch)
-				if err != nil {
-					logger.Error("❌ [PERSIST WORKER] Receipts BatchPut failed: %v", err)
-				}
-			}
-		}
-
-		elapsed := time.Since(start)
-		if elapsed > 10*time.Millisecond {
-			logger.Debug("[PERF] PersistWorker: async persist completed in %v", elapsed)
-		}
+		// No-op: PersistAsync is now handled synchronously inline in commitToMemoryParallel.
+		// Any real PersistJob arriving here is a programming error.
+		logger.Warn("⚠️ [PERSIST WORKER] Received unexpected PersistJob with data (should be handled inline). Ignoring.")
 	}
 }
 

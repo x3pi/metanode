@@ -434,9 +434,18 @@ func (db *AccountStateDB) GetAll() (map[common.Address]types.AccountState, error
 // (e.g. mtn_getAccountState, eth_getBalance) will return stale cached values
 // instead of the freshly synced data — making the Sub node appear out of sync.
 //
-// This is safe to call at any time: it only affects read caches and will cause
-// the next read to go through trie.Get() which reads fresh data from NOMT/PebbleDB.
+// FORK-SAFETY FIX (May 2026): Wait for persistReady BEFORE clearing caches.
+// If PersistAsync from the previous block hasn't completed its trie swap yet,
+// clearing caches here would cause subsequent trie.Get() calls to read from
+// the OLD (pre-swap) trie and repopulate the fresh caches with stale data.
+// Waiting on persistReady ensures the trie is fully up-to-date before clearing.
 func (db *AccountStateDB) InvalidateAllCaches() {
+	// FORK-SAFETY: Ensure previous block's PersistAsync has completed the trie swap.
+	// This is a defense-in-depth measure — with inline PersistAsync (May 2026 fix),
+	// persistReady should already be closed by the time this is called.
+	// The channel is pre-closed at initialization, so this is a no-op for the first block.
+	<-db.persistReady
+
 	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
 	if db.lruCache != nil {
@@ -445,7 +454,7 @@ func (db *AccountStateDB) InvalidateAllCaches() {
 		db.lruCacheOld = make(map[common.Address][]byte)
 		db.lruMu.Unlock()
 	}
-	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe)")
+	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe, persistReady waited)")
 }
 
 // Discard reverts all uncommitted changes by clearing the dirty cache
