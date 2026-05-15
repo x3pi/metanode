@@ -89,10 +89,10 @@ pub async fn query_peer_info(peer_address: &str) -> Result<PeerInfoResponse> {
 pub async fn query_peer_epochs_network(
     peer_addresses: &[String],
 ) -> Result<(u64, u64, String, u64)> {
-    info!(
-        "🌐 [PEER RPC] Querying {} peer(s) over network for epoch discovery...",
-        peer_addresses.len()
-    );
+    // info!(
+    //     "🌐 [PEER RPC] Querying {} peer(s) over network for epoch discovery...",
+    //     peer_addresses.len()
+    // );
 
     let mut best_epoch = 0u64;
     let mut best_block = 0u64;
