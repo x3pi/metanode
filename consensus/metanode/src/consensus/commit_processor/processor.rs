@@ -599,6 +599,12 @@ impl CommitProcessor {
                                  leader={:?}, digest={}, local=true",
                                 local_idx, exec_gei, confirmed.leader, hex::encode(&local_digest[..4])
                             );
+
+                            // CRITICAL FORK-SAFETY FIX (May 2026):
+                            // Advance next_expected_index AFTER successful dispatch so that
+                            // the out-of-order drain loop can process the next sequential commits!
+                            next_expected_index += 1;
+
                             // Check EndOfEpoch
                             if let Some((_block_ref, system_tx)) = confirmed.extract_end_of_epoch_transaction() {
                                 if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
@@ -860,8 +866,14 @@ impl CommitProcessor {
                             dispatch_subdag = Some(subdag);
                         }
 
-                        // ALWAYS advance next_expected_index — acceptance is decoupled from execution
-                        next_expected_index += 1;
+                        // CRITICAL FORK-SAFETY FIX (May 2026):
+                        // We ONLY advance `next_expected_index` if the commit is actually dispatched!
+                        // If it is buffered in `pending_local_commits`, we DO NOT advance `next_expected_index`.
+                        // This guarantees STRICT sequential ordering for Go's GEI assignment and prevents
+                        // out-of-order execution holes if the buffer drops a commit.
+                        if dispatch_subdag.is_some() {
+                            next_expected_index += 1;
+                        }
 
                         // Skip Go dispatch for buffered local commits
                         if let Some(mut subdag) = dispatch_subdag {
