@@ -626,6 +626,139 @@ impl CommitProcessor {
                 }
             }
 
+            // CRITICAL FIX: Drain pending out-of-order commits BEFORE blocking on `recv()`.
+            // If DIGEST-GATE POLL just dispatched a commit and advanced `next_expected_index`,
+            // we MUST drain `pending_commits` here before `receiver.recv().await` blocks us forever.
+            let mut should_break = false;
+            while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
+                // ═══════════════════════════════════════════════════════
+                // DIGEST-GATE (OOO PATH): Same logic as main path.
+                // ═══════════════════════════════════════════════════════
+                if pending.decided_with_local_blocks {
+                    let local_digest = pending.commit_ref.digest.into_inner();
+                    let digest_match = if let Some(ref verifier) = digest_verifier {
+                        match verifier(next_expected_index) {
+                            Some(quorum_digest) => {
+                                if quorum_digest == local_digest {
+                                    info!(
+                                        "✅ [DISPATCH:DIGEST-GATE-OOO] Pending local commit {} VERIFIED: digest matches quorum.",
+                                        next_expected_index
+                                    );
+                                    true
+                                } else {
+                                    warn!(
+                                        "🚨 [DIGEST-GATE OOO] Pending local commit {} DIVERGENT! \
+                                         local={}, quorum={}. BLOCKING OOO drain. \
+                                         Buffered for CertifiedCommit.",
+                                        next_expected_index,
+                                        hex::encode(&local_digest[..4]),
+                                        hex::encode(&quorum_digest[..4])
+                                    );
+                                    false
+                                }
+                            }
+                            None => false,
+                        }
+                    } else {
+                        false
+                    };
+                    if !digest_match {
+                        pending_local_commits.insert(next_expected_index, pending);
+                        pending_local_timestamps.entry(next_expected_index)
+                            .or_insert_with(std::time::Instant::now);
+                        break;
+                    }
+                } else {
+                    if let Some(local) = pending_local_commits.remove(&next_expected_index) {
+                        if local.leader != pending.leader {
+                            let local_digest = local.commit_ref.digest.into_inner();
+                            let cert_digest = pending.commit_ref.digest.into_inner();
+                            let local_author_idx = local.leader.author.value();
+                            let cert_author_idx = pending.leader.author.value();
+                            let eth_cache = epoch_eth_addresses.read().await;
+                            let local_eth = eth_cache.get(&current_epoch)
+                                .and_then(|addrs| addrs.get(local_author_idx as usize))
+                                .map(|a| format!("0x{}", hex::encode(a)))
+                                .unwrap_or_else(|| "UNRESOLVED".to_string());
+                            let cert_eth = eth_cache.get(&current_epoch)
+                                .and_then(|addrs| addrs.get(cert_author_idx as usize))
+                                .map(|a| format!("0x{}", hex::encode(a)))
+                                .unwrap_or_else(|| "UNRESOLVED".to_string());
+                            drop(eth_cache);
+                            warn!(
+                                "🚨 [FORK-FORENSIC] LEADER DIVERGENCE PREVENTED at commit {}! \
+                                 path=OOO-CERTIFIED, epoch={}, \
+                                 local_leader={:?} (eth={}), certified_leader={:?} (eth={}), \
+                                 local_digest={}, cert_digest={}",
+                                next_expected_index, current_epoch,
+                                local.leader, local_eth,
+                                pending.leader, cert_eth,
+                                hex::encode(&local_digest[..4]), hex::encode(&cert_digest[..4])
+                            );
+                        } else {
+                            info!(
+                                "✅ [DIGEST-GATE OOO] CertifiedCommit {} matches local (leader={:?}).",
+                                next_expected_index, pending.leader
+                            );
+                        }
+                    }
+                }
+
+                let pending_commit_index = next_expected_index;
+                let pending_gei = {
+                    let gei_guard = shared_gei.lock().await;
+                    *gei_guard + 1
+                };
+
+                Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
+
+                if let Some(ref mut wal) = commit_wal {
+                    let _ = wal.write_pending(pending_commit_index, pending_gei, current_epoch);
+                }
+                let geis_consumed = super::executor::dispatch_commit(
+                    &pending,
+                    pending_gei, 
+                    current_epoch,
+                    executor_client.clone(),
+                    delivery_sender.clone(),
+                )
+                .await?;
+                if let Some(ref mut wal) = commit_wal {
+                    let _ = wal.mark_committed(pending_commit_index);
+                }
+
+                {
+                    let mut gei_guard = shared_gei.lock().await;
+                    *gei_guard += geis_consumed;
+                }
+
+                if let Some(ref callback) = commit_index_callback {
+                    callback(pending_commit_index);
+                }
+
+                next_expected_index += 1;
+
+                if let Some((_block_ref, system_tx)) = pending.extract_end_of_epoch_transaction() {
+                    if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
+                        let current_gei = {
+                            let gei_guard = shared_gei.lock().await;
+                            *gei_guard
+                        };
+                        if let Some(ref callback) = epoch_transition_callback {
+                            if let Err(e) = callback(new_epoch, pending.timestamp_ms, boundary_block, current_gei) {
+                                warn!("❌ Failed to trigger epoch transition from pending system transaction: {}", e);
+                            }
+                        }
+                        info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
+                        should_break = true;
+                        break;
+                    }
+                }
+            }
+            if should_break {
+                break;
+            }
+
             // Fix 3 Revert: Use direct indefinite block (no 120s timeout) to enforce backpressure
             // QUORUM-GATE: Use select! with timeout when local commits are pending,
             // so we don't block forever waiting for new commits while quorum catches up.
@@ -1017,166 +1150,10 @@ impl CommitProcessor {
                                     }
                                 }
 
-                                info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
-                                break;
-                            }
-                        }
-
-                        // Process pending out-of-order commits that are now in sequence
-                        let mut should_break = false;
-                        while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
-                            // ═══════════════════════════════════════════════════════
-                            // DIGEST-GATE (OOO PATH): Same logic as main path.
-                            // ALL local commits → buffer to pending_local_commits.
-                            // Only CertifiedCommits dispatch directly.
-                            // ═══════════════════════════════════════════════════════
-                            if pending.decided_with_local_blocks {
-                                // LOCAL commit from OOO buffer: NEVER dispatch directly.
-                                // Buffer it for digest verification or CertifiedCommit replacement.
-                                let local_digest = pending.commit_ref.digest.into_inner();
-                                let digest_match = if let Some(ref verifier) = digest_verifier {
-                                    match verifier(next_expected_index) {
-                                        Some(quorum_digest) => {
-                                            if quorum_digest == local_digest {
-                                                info!(
-                                                    "✅ [DISPATCH:DIGEST-GATE-OOO] Pending local commit {} VERIFIED: digest matches quorum.",
-                                                    next_expected_index
-                                                );
-                                                true
-                                            } else {
-                                                warn!(
-                                                    "🚨 [DIGEST-GATE OOO] Pending local commit {} DIVERGENT! \
-                                                     local={}, quorum={}. BLOCKING OOO drain. \
-                                                     Buffered for CertifiedCommit.",
-                                                    next_expected_index,
-                                                    hex::encode(&local_digest[..4]),
-                                                    hex::encode(&quorum_digest[..4])
-                                                );
-                                                false
-                                            }
-                                        }
-                                        None => false, // No quorum yet
-                                    }
-                                } else {
-                                    false // No verifier
-                                };
-                                if !digest_match {
-                                    // CRITICAL FIX: Do NOT advance next_expected_index.
-                                    // Put the commit back into pending_local_commits for
-                                    // DIGEST-GATE POLL to handle (or CertifiedCommit to replace).
-                                    // BREAK the OOO drain — no further commits can dispatch
-                                    // until this one resolves (strict ordering).
-                                    pending_local_commits.insert(next_expected_index, pending);
-                                    pending_local_timestamps.entry(next_expected_index)
-                                        .or_insert_with(std::time::Instant::now);
-                                    // Break OOO while loop only — main event loop continues
-                                    // (should_break stays false, so line 1063 won't exit main loop)
-                                    break;
-                                }
-                                // Digest verified — fall through to dispatch
-                            } else {
-                                // CertifiedCommit: discard any buffered local for same index
-                                if let Some(local) = pending_local_commits.remove(&next_expected_index) {
-                                    if local.leader != pending.leader {
-                                        // FORK-FORENSIC (May 2026): OOO leader divergence with full fingerprint
-                                        let local_digest = local.commit_ref.digest.into_inner();
-                                        let cert_digest = pending.commit_ref.digest.into_inner();
-                                        let local_author_idx = local.leader.author.value();
-                                        let cert_author_idx = pending.leader.author.value();
-                                        let eth_cache = epoch_eth_addresses.read().await;
-                                        let local_eth = eth_cache.get(&current_epoch)
-                                            .and_then(|addrs| addrs.get(local_author_idx as usize))
-                                            .map(|a| format!("0x{}", hex::encode(a)))
-                                            .unwrap_or_else(|| "UNRESOLVED".to_string());
-                                        let cert_eth = eth_cache.get(&current_epoch)
-                                            .and_then(|addrs| addrs.get(cert_author_idx as usize))
-                                            .map(|a| format!("0x{}", hex::encode(a)))
-                                            .unwrap_or_else(|| "UNRESOLVED".to_string());
-                                        drop(eth_cache);
-                                        warn!(
-                                            "🚨 [FORK-FORENSIC] LEADER DIVERGENCE PREVENTED at commit {}! \
-                                             path=OOO-CERTIFIED, epoch={}, \
-                                             local_leader={:?} (eth={}), certified_leader={:?} (eth={}), \
-                                             local_digest={}, cert_digest={}",
-                                            next_expected_index, current_epoch,
-                                            local.leader, local_eth,
-                                            pending.leader, cert_eth,
-                                            hex::encode(&local_digest[..4]), hex::encode(&cert_digest[..4])
-                                        );
-                                    } else {
-                                        info!(
-                                            "✅ [DIGEST-GATE OOO] CertifiedCommit {} matches local (leader={:?}).",
-                                            next_expected_index, pending.leader
-                                        );
-                                    }
-                                }
-                            }
-
-                            let pending_commit_index = next_expected_index;
-
-                            let pending_gei = {
-                                let gei_guard = shared_gei.lock().await;
-                                *gei_guard + 1
-                            };
-
-                            Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
-
-                            // WAL: Record PENDING before FFI
-                            if let Some(ref mut wal) = commit_wal {
-                                let _ = wal.write_pending(pending_commit_index, pending_gei, current_epoch);
-                            }
-                            let geis_consumed = super::executor::dispatch_commit(
-                                &pending,
-                                pending_gei, 
-                                current_epoch,
-                                executor_client.clone(),
-                                delivery_sender.clone(),
-                            )
-                            .await?;
-                            // WAL: Record COMMITTED after Go confirms
-                            if let Some(ref mut wal) = commit_wal {
-                                let _ = wal.mark_committed(pending_commit_index);
-                            }
-
-                            {
-                                let mut gei_guard = shared_gei.lock().await;
-                                *gei_guard += geis_consumed;
-                            }
-
-                            if let Some(ref callback) = commit_index_callback {
-                                callback(pending_commit_index);
-                            }
-
-                            next_expected_index += 1;
-
-                            if let Some((_block_ref, system_tx)) =
-                                pending.extract_end_of_epoch_transaction()
-                            {
-                                if let Some((new_epoch, boundary_block)) =
-                                    system_tx.as_end_of_epoch()
-                                {
-                                    let current_gei = {
-                                        let gei_guard = shared_gei.lock().await;
-                                        *gei_guard
-                                    };
-                                    if let Some(ref callback) = epoch_transition_callback {
-                                        if let Err(e) =
-                                            callback(new_epoch, pending.timestamp_ms, boundary_block, current_gei)
-                                        {
-                                            warn!("❌ Failed to trigger epoch transition from pending system transaction: {}", e);
-                                        }
-                                    }
-
-                                    info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction in PENDING commit.");
-                                    should_break = true;
+                                    info!("🛑 [STATION 3: PROCESSOR] Halting processing for current epoch after EndOfEpoch transaction.");
                                     break;
                                 }
                             }
-                        }
-
-                        if should_break {
-                            break;
-                        }
                         } // end of `if let Some(mut subdag) = dispatch_subdag` (Go dispatch path)
                     } else if commit_index > next_expected_index {
                         // QUORUM-GATE: If this is a CertifiedCommit (network-verified) and we have a

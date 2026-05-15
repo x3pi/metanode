@@ -348,33 +348,16 @@ impl Core {
                 }
 
                 // ═══════════════════════════════════════════════════════════════════
-                // ARCHITECTURAL FIX (May 2026): DAG GC GUARD
-                // If the local committer has fallen behind `gc_round`, the DAG is sparse 
-                // for the next leader round because historical blocks were garbage collected
-                // and missing ancestors were dropped. Evaluating these sparse regions locally 
-                // will produce divergent "Skip" decisions and cause a FORK.
-                // We MUST block the local committer and rely purely on CertifiedCommits 
-                // from the network to safely advance `last_decided_leader` past the GC window.
+                // ARCHITECTURAL FIX (May 2026): DAG GC GUARD (REMOVED)
+                // Previously, we blocked the local committer here if `next_leader_round <= gc_round`
+                // because the DAG was considered sparse and evaluating it locally would produce
+                // divergent "Skip" decisions.
+                // 
+                // However, DagState has been patched to fetch missing GC-ed blocks directly 
+                // from RocksDB (via `get_uncommitted_blocks_at_round`). This guarantees that the
+                // committer evaluates the EXACT same dense DAG state deterministically, eliminating 
+                // the fork risk without causing cluster deadlocks during cold starts or fast-forwards.
                 // ═══════════════════════════════════════════════════════════════════
-                let gc_round = self.dag_state.read().gc_round();
-                let next_leader_round = self.last_decided_leader.round + 1;
-                if next_leader_round <= gc_round {
-                    if !self.coordination_hub.is_dag_gc_guard_overridden() {
-                        tracing::info!(
-                            "🛡️ [DAG-GC-GUARD] Blocking local committer: next_leader_round ({}) <= gc_round ({}). \
-                             The DAG is sparse for this round due to garbage collection. \
-                             Waiting for CommitSyncer to fetch CertifiedCommits from the network.",
-                            next_leader_round, gc_round
-                        );
-                        break;
-                    }
-                } else {
-                    // The DAG search space has caught up to the dense region!
-                    if self.coordination_hub.is_dag_gc_guard_overridden() {
-                        tracing::info!("🔓 [DAG-GC-GUARD] DAG is dense again. Clearing override.");
-                        self.coordination_hub.set_override_dag_gc_guard(false);
-                    }
-                }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
