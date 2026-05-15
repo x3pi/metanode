@@ -143,16 +143,18 @@ pub async fn dispatch_commit(
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
 
-                    // Fix 4 Revert: Use direct indefinite wait (no 90s timeout) to enforce backpressure
-                    let geis_consumed = match response_rx.await {
-                        Ok(c) => c,
-                        Err(_) => {
-                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
-                            anyhow::bail!("DeliveryManager response channel closed.");
-                        }
-                    };
+                    // PIPELINE FIX: We return expected_fragments immediately to unblock CommitProcessor.
+                    // This eliminates the IPC serialization bottleneck. Backpressure is now handled
+                    // natively by the bounded capacity of `delivery_sender` (10,000 commits).
+                    let geis_consumed = expected_fragments;
 
-                    trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
+                    tokio::spawn(async move {
+                        if let Err(_) = response_rx.await {
+                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                        }
+                    });
+
+                    trace!("✅ [batch_id={}] [TX FLOW] Successfully pipelined committed subdag to DeliveryManager: global_exec_index={}, commit_index={}, expected_geis_consumed={}",
                                 batch_id, global_exec_index, commit_index, geis_consumed);
 
                     // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.

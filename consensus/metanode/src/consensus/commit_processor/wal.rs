@@ -111,14 +111,12 @@ impl CommitWAL {
     /// Mark that we are about to pass a commit across the FFI boundary to Go.
     pub fn write_pending(&mut self, commit_index: u32, global_exec_index: u64, epoch: u64) -> Result<()> {
         writeln!(self.file, "PENDING:{},{},{}", commit_index, global_exec_index, epoch)?;
-        self.file.sync_data()?;
         Ok(())
     }
 
     /// Mark that Go has successfully returned from the FFI call.
     pub fn mark_committed(&mut self, commit_index: u32) -> Result<()> {
         writeln!(self.file, "COMMITTED:{}", commit_index)?;
-        self.file.sync_data()?;
         Ok(())
     }
 }
