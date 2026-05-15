@@ -54,10 +54,13 @@ type ChainState struct {
 	changelogDB        *state_changelog.StateChangelogDB
 	stakeChangelogDB   *state_changelog.StateChangelogDB
 	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
-	// concurrent access during UpdateStateForNewHeader (writer) and Get*DB (readers).
-	// Without this, virtual execution can race with block processing and read a
-	// stale accountStateDB that doesn't contain newly deployed contract state.
+	// concurrent reads during initialization and swaps. It does NOT protect
+	// against concurrent state mutations.
 	stateMutex sync.RWMutex
+
+	// commitMutex serializes all block state mutations in CommitBlockState
+	// to prevent concurrent corruption of the NOMT trie and DB batches.
+	commitMutex sync.Mutex
 
 	// Sui-style epoch tracking
 	currentEpoch          uint64

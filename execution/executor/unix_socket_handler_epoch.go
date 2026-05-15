@@ -1319,11 +1319,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
 	}
-	// ═══════════════════════════════════════════════════════════════════════════
-	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
-	// ═══════════════════════════════════════════════════════════════════════════
-	currentGEI := storage.GetLastGlobalExecIndex()
-
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {
@@ -1362,10 +1357,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
-		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify
-		// that the block hash actually exists in our local database. Sometimes PebbleDB
-		// persists the GEI counter but fails to flush the actual block data.
+		// CRITICAL FIX: We MUST read GEI freshly in the loop. Caching it outside
+		// the loop causes this sync to blindly overwrite blocks that were concurrently
+		// processed by the live consensus goroutine (processRustEpochData).
 		// ═══════════════════════════════════════════════════════════════════════════
+		currentGEI := storage.GetLastGlobalExecIndex()
 		isFullyExecuted := false
 		if blockGEI > 0 && blockGEI <= currentGEI {
 			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
