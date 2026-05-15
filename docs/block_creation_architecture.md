@@ -484,4 +484,19 @@ Khi 2 partitions chọn leader khác nhau → sub-dag khác → tập giao dịc
 ### 8.6 Khuyến Nghị Tăng Cường (Backlog)
 
 1. **CommitVoteMonitor early initialization:** Khởi tạo CommitVoteMonitor TRƯỚC khi consensus bắt đầu xử lý commit, đảm bảo `get_digest_verifier()` không bao giờ trả về `None` khi có commit đầu tiên.
+
+### 8.7 Phát Hiện Fork Do LeaderStore Ghi Đè (May 2026)
+
+> **Vấn đề:** Trong các lần test cluster có reset DAG (`auto_test.sh`), `stateRoot` giống nhau hoàn toàn nhưng `txRoot` và `receiptsRoot` bị fork giữa các node. Đồng thời `leaderAddress` cũng bị sai lệch.
+
+**Root Cause:**
+1. Khi chạy lại test (wipe DAG nhưng giữ lại storage `leader_addresses.json`), DAG của `Mysticeti` sẽ build lại từ genesis (vì là test run mới).
+2. Do tính chất network-dependent của DAG, các block được gom vào `Commit 197` trong lần test mới khác với lần test cũ → **dẫn đến `txRoot` khác nhau** ngay cả khi state chưa bị thay đổi (các giao dịch có thể là no-op hoặc chưa thực thi).
+3. Tuy nhiên, `CommitProcessor` lại dùng `LeaderStore` đọc `leader_addresses.json` cũ từ đĩa và **ghi đè** leader của DAG hiện tại bằng leader của lần test trước đó.
+4. Điều này dẫn đến Go execution nhận `leaderAddress` cũ (sai lệch với DAG hiện tại) và ghi log ra block.
+
+**Giải Pháp Đã Triển Khai:**
+- **Loại bỏ hoàn toàn `LeaderStore` khỏi `wal.rs` và `processor.rs`:** `LeaderStore` là một phương pháp sai lầm để xử lý khởi động lại, vì nó force một leader cũ vào một DAG mới có transaction batching hoàn toàn khác.
+- Việc phục hồi leader của các commit cũ hiện nay dựa hoàn toàn vào **network sync** (các struct `Commit` sync từ peer đã được embedded sẵn `leader_address` chính xác) hoặc tính toán trực tiếp từ `epoch_eth_addresses` nếu tự build DAG.
+- Việc xoá `LeaderStore` đảm bảo **100% không inject stale data** vào các node bị wipe DAG, giúp cluster luôn tiến về phía trước một cách đồng thuận tuyệt đối trên cùng cấu trúc DAG và transaction roots.
 2. **Leader election determinism audit:** Kiểm tra `Linearizer::linearize_sub_dag()` để đảm bảo DAG traversal là hoàn toàn deterministic bất kể thứ tự nhận block.

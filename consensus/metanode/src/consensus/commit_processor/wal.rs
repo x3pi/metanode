@@ -123,47 +123,4 @@ impl CommitWAL {
     }
 }
 
-/// Persistent store for Leader Addresses to prevent divergence when DAG is wiped
-pub struct LeaderStore {
-    path: PathBuf,
-}
-
-impl LeaderStore {
-    pub fn new<P: AsRef<Path>>(storage_path: P) -> Self {
-        Self {
-            path: storage_path.as_ref().join("leader_addresses.json"),
-        }
-    }
-
-    pub fn save_leader_address(&self, epoch: u64, commit_index: u32, address: &[u8]) -> Result<()> {
-        let mut addrs = self.load_all()?;
-        let key = format!("{}_{}", epoch, commit_index);
-        addrs.insert(key, hex::encode(address));
-        let json = serde_json::to_string(&addrs)?;
-        std::fs::write(&self.path, json)?;
-        Ok(())
-    }
-
-    pub fn get_leader_address(&self, epoch: u64, commit_index: u32) -> Option<Vec<u8>> {
-        if let Ok(addrs) = self.load_all() {
-            let key = format!("{}_{}", epoch, commit_index);
-            if let Some(hex_str) = addrs.get(&key) {
-                return hex::decode(hex_str).ok();
-            }
-        }
-        None
-    }
-
-    fn load_all(&self) -> Result<std::collections::HashMap<String, String>> {
-        if !self.path.exists() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let content = std::fs::read_to_string(&self.path)?;
-        if content.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let addrs: std::collections::HashMap<String, String> = serde_json::from_str(&content)?;
-        Ok(addrs)
-    }
-}
 
