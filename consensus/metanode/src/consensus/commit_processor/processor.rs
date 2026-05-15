@@ -539,10 +539,21 @@ impl CommitProcessor {
                         if let Some(mut confirmed) = pending_local_commits.remove(&local_idx) {
                             pending_local_timestamps.remove(&local_idx);
                             let local_digest = confirmed.commit_ref.digest.into_inner();
+                            // FORK-FORENSIC: Structured dispatch log for DIGEST-GATE-POLL path
+                            let poll_leader_idx = confirmed.leader.author.value();
+                            let poll_leader_eth = {
+                                let eth_cache = epoch_eth_addresses.read().await;
+                                eth_cache.get(&current_epoch)
+                                    .and_then(|addrs| addrs.get(poll_leader_idx as usize))
+                                    .map(|a| format!("0x{}", hex::encode(a)))
+                                    .unwrap_or_else(|| "UNRESOLVED".to_string())
+                            };
+                            let poll_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
                             info!(
-                                "✅ [DISPATCH:DIGEST-GATE-POLL] Dispatching digest-verified commit {} \
-                                 (leader={:?}, digest={}).",
-                                local_idx, confirmed.leader, hex::encode(&local_digest[..4])
+                                "📊 [FORK-FORENSIC] commit_index={}, path=DIGEST-GATE-POLL, epoch={}, \
+                                 leader={:?} (auth_idx={}, eth={}), digest={}, txs={}, timestamp_ms={}",
+                                local_idx, current_epoch, confirmed.leader, poll_leader_idx, poll_leader_eth,
+                                hex::encode(&local_digest[..4]), poll_txs, confirmed.timestamp_ms
                             );
                             let exec_gei = {
                                 let gei_guard = shared_gei.lock().await;
@@ -766,14 +777,73 @@ impl CommitProcessor {
                         } else {
                             // CertifiedCommit — network-verified with 2f+1 agreement.
                             // This is the authoritative path to Go execution.
+
+                            // ═══════════════════════════════════════════════════════
+                            // DEFENSE-IN-DEPTH: Cross-validate CertifiedCommit digest
+                            // against local quorum data. This should NEVER mismatch
+                            // after the Phase 1 quorum fix in CommitSyncer, but serves
+                            // as a safety net for future regressions.
+                            // ═══════════════════════════════════════════════════════
+                            if let Some(ref verifier) = digest_verifier {
+                                let certified_digest = subdag.commit_ref.digest.into_inner();
+                                match verifier(commit_index) {
+                                    Some(quorum_digest) if quorum_digest != certified_digest => {
+                                        warn!(
+                                            "🚨🚨 [DIGEST-GATE CRITICAL] CertifiedCommit {} digest CONFLICTS with local quorum! \
+                                             certified={}, quorum={}. \
+                                             Dispatching CertifiedCommit (it has 2f+1 votes), but this indicates \
+                                             a potential CommitSyncer integrity issue. INVESTIGATE IMMEDIATELY.",
+                                            commit_index,
+                                            hex::encode(&certified_digest[..4]),
+                                            hex::encode(&quorum_digest[..4])
+                                        );
+                                    }
+                                    Some(_) => {
+                                        info!(
+                                            "✅ [DISPATCH:CERTIFIED+DIGEST] CertifiedCommit {} digest matches quorum.",
+                                            commit_index
+                                        );
+                                    }
+                                    None => {
+                                        // No quorum data available yet — normal during rapid sync
+                                    }
+                                }
+                            }
+
                             // Discard any buffered local commit for the same index.
                             if let Some(local_subdag) = pending_local_commits.remove(&commit_index) {
                                 pending_local_timestamps.remove(&commit_index);
                                 if local_subdag.leader != subdag.leader {
+                                    // FORK-FORENSIC (May 2026): Full fingerprint for leader divergence analysis
+                                    let local_digest = local_subdag.commit_ref.digest.into_inner();
+                                    let cert_digest = subdag.commit_ref.digest.into_inner();
+                                    let local_txs: usize = local_subdag.blocks.iter().map(|b| b.transactions().len()).sum();
+                                    let cert_txs: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
+                                    let local_author_idx = local_subdag.leader.author.value();
+                                    let cert_author_idx = subdag.leader.author.value();
+                                    // Resolve ETH addresses for forensic correlation
+                                    let eth_cache = epoch_eth_addresses.read().await;
+                                    let local_eth = eth_cache.get(&current_epoch)
+                                        .and_then(|addrs| addrs.get(local_author_idx as usize))
+                                        .map(|a| hex::encode(a))
+                                        .unwrap_or_else(|| "UNKNOWN".to_string());
+                                    let cert_eth = eth_cache.get(&current_epoch)
+                                        .and_then(|addrs| addrs.get(cert_author_idx as usize))
+                                        .map(|a| hex::encode(a))
+                                        .unwrap_or_else(|| "UNKNOWN".to_string());
+                                    drop(eth_cache);
                                     warn!(
-                                        "🚨 [DIGEST-GATE] CertifiedCommit {} has DIFFERENT leader! \
-                                         Local={:?}, Certified={:?}. Fork PREVENTED.",
-                                        commit_index, local_subdag.leader, subdag.leader
+                                        "🚨 [FORK-FORENSIC] LEADER DIVERGENCE PREVENTED at commit {}! \
+                                         path=CERTIFIED-COMMIT, epoch={}, \
+                                         local_leader={:?} (auth_idx={}, eth=0x{}), \
+                                         certified_leader={:?} (auth_idx={}, eth=0x{}), \
+                                         local_digest={}, cert_digest={}, \
+                                         local_txs={}, cert_txs={}",
+                                        commit_index, current_epoch,
+                                        local_subdag.leader, local_author_idx, local_eth,
+                                        subdag.leader, cert_author_idx, cert_eth,
+                                        hex::encode(&local_digest[..4]), hex::encode(&cert_digest[..4]),
+                                        local_txs, cert_txs
                                     );
                                 } else {
                                     info!(
@@ -816,10 +886,23 @@ impl CommitProcessor {
                             "CERTIFIED-COMMIT"
                         };
                         let commit_digest = subdag.commit_ref.digest.into_inner();
+                        let leader_author_idx = subdag.leader.author.value();
+                        // FORK-FORENSIC: Structured dispatch log with leader ETH address for hash_mismatch_alert.log correlation
+                        let leader_eth_hex = {
+                            let eth_cache = epoch_eth_addresses.read().await;
+                            eth_cache.get(&current_epoch)
+                                .and_then(|addrs| addrs.get(leader_author_idx as usize))
+                                .map(|a| format!("0x{}", hex::encode(a)))
+                                .unwrap_or_else(|| "UNRESOLVED".to_string())
+                        };
                         info!(
-                            "📊 [DISPATCH:{}] commit_index={}, gei={}, txs={}, leader={:?}, digest={}",
-                            dispatch_path, commit_index, gei, total_txs_in_commit,
-                            subdag.leader, hex::encode(&commit_digest[..4])
+                            "📊 [FORK-FORENSIC] commit_index={}, path={}, gei={}, epoch={}, \
+                             leader={:?} (auth_idx={}, eth={}), digest={}, txs={}, \
+                             decided_local={}, timestamp_ms={}",
+                            commit_index, dispatch_path, gei, current_epoch,
+                            subdag.leader, leader_author_idx, leader_eth_hex,
+                            hex::encode(&commit_digest[..4]), total_txs_in_commit,
+                            subdag.decided_with_local_blocks, subdag.timestamp_ms
                         );
 
                         // POST-DISPATCH DIGEST AUDIT: Cross-check dispatched content against quorum
@@ -983,10 +1066,30 @@ impl CommitProcessor {
                                 // CertifiedCommit: discard any buffered local for same index
                                 if let Some(local) = pending_local_commits.remove(&next_expected_index) {
                                     if local.leader != pending.leader {
+                                        // FORK-FORENSIC (May 2026): OOO leader divergence with full fingerprint
+                                        let local_digest = local.commit_ref.digest.into_inner();
+                                        let cert_digest = pending.commit_ref.digest.into_inner();
+                                        let local_author_idx = local.leader.author.value();
+                                        let cert_author_idx = pending.leader.author.value();
+                                        let eth_cache = epoch_eth_addresses.read().await;
+                                        let local_eth = eth_cache.get(&current_epoch)
+                                            .and_then(|addrs| addrs.get(local_author_idx as usize))
+                                            .map(|a| format!("0x{}", hex::encode(a)))
+                                            .unwrap_or_else(|| "UNRESOLVED".to_string());
+                                        let cert_eth = eth_cache.get(&current_epoch)
+                                            .and_then(|addrs| addrs.get(cert_author_idx as usize))
+                                            .map(|a| format!("0x{}", hex::encode(a)))
+                                            .unwrap_or_else(|| "UNRESOLVED".to_string());
+                                        drop(eth_cache);
                                         warn!(
-                                            "🚨 [DIGEST-GATE OOO] CertifiedCommit {} has DIFFERENT leader! \
-                                             Local={:?}, Certified={:?}. Fork PREVENTED.",
-                                            next_expected_index, local.leader, pending.leader
+                                            "🚨 [FORK-FORENSIC] LEADER DIVERGENCE PREVENTED at commit {}! \
+                                             path=OOO-CERTIFIED, epoch={}, \
+                                             local_leader={:?} (eth={}), certified_leader={:?} (eth={}), \
+                                             local_digest={}, cert_digest={}",
+                                            next_expected_index, current_epoch,
+                                            local.leader, local_eth,
+                                            pending.leader, cert_eth,
+                                            hex::encode(&local_digest[..4]), hex::encode(&cert_digest[..4])
                                         );
                                     } else {
                                         info!(
@@ -1111,10 +1214,30 @@ impl CommitProcessor {
                             if let Some(local) = pending_local_commits.remove(&commit_index) {
                                 pending_local_timestamps.remove(&commit_index);
                                 if local.leader != subdag.leader {
+                                    // FORK-FORENSIC (May 2026): Late CertifiedCommit replacement with full fingerprint
+                                    let local_digest = local.commit_ref.digest.into_inner();
+                                    let cert_digest = subdag.commit_ref.digest.into_inner();
+                                    let local_author_idx = local.leader.author.value();
+                                    let cert_author_idx = subdag.leader.author.value();
+                                    let eth_cache = epoch_eth_addresses.read().await;
+                                    let local_eth = eth_cache.get(&current_epoch)
+                                        .and_then(|addrs| addrs.get(local_author_idx as usize))
+                                        .map(|a| format!("0x{}", hex::encode(a)))
+                                        .unwrap_or_else(|| "UNRESOLVED".to_string());
+                                    let cert_eth = eth_cache.get(&current_epoch)
+                                        .and_then(|addrs| addrs.get(cert_author_idx as usize))
+                                        .map(|a| format!("0x{}", hex::encode(a)))
+                                        .unwrap_or_else(|| "UNRESOLVED".to_string());
+                                    drop(eth_cache);
                                     warn!(
-                                        "🚨 [DISPATCH:CERTIFIED-REPLACE] CertifiedCommit {} REPLACING \
-                                         divergent local! Local leader={:?}, Certified leader={:?}. Fork PREVENTED.",
-                                        commit_index, local.leader, subdag.leader
+                                        "🚨 [FORK-FORENSIC] LEADER DIVERGENCE PREVENTED at commit {}! \
+                                         path=CERTIFIED-REPLACE, epoch={}, \
+                                         local_leader={:?} (eth={}), certified_leader={:?} (eth={}), \
+                                         local_digest={}, cert_digest={}",
+                                        commit_index, current_epoch,
+                                        local.leader, local_eth,
+                                        subdag.leader, cert_eth,
+                                        hex::encode(&local_digest[..4]), hex::encode(&cert_digest[..4])
                                     );
                                 } else {
                                     info!(

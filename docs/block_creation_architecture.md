@@ -1,6 +1,6 @@
 # Kiến Trúc Quá Trình Tạo Block (Block Creation Architecture)
 
-Tài liệu này mô tả chi tiết quy trình tạo Block từ khi giao dịch được gửi vào mạng lưới cho đến khi Block được đóng gói và lưu trữ. Sự phân tách trách nhiệm giữa Rust (Consensus) và Go (Execution) là cốt lõi của kiến trúc này.
+Tài liệu này mô tả chi tiết quy trình tạo Block từ khi giao dịch được gửi vào mạng lưới cho đến khi Block được đóng gói và lưu trữ. Sự phân tách trách nhiệm giữa Rust (Consensus) và Go (Execution) là cốt lõi của kiến trúc này, đi kèm với hệ thống bảo vệ đa lớp để đảm bảo tính nhất quán tuyệt đối (Fork-Proof).
 
 ---
 
@@ -42,338 +42,21 @@ sequenceDiagram
 
 ---
 
-## 2. Rủi Ro Rẽ Nhánh (Fork Risks) trên Kiến Trúc Hiện Tại
+## 2. Kiến Trúc Phòng Vệ Chống Rẽ Nhánh (Fork-Proof Architecture)
 
-Do hệ thống tách biệt thành 2 engine (Rust và Go), nguy cơ lớn nhất là sự mất đồng bộ (Mismatched State/Metadata) giữa hai bên. Chỉ cần một sai số nhỏ ở 1 Node sẽ dẫn đến Block Hash khác biệt hoàn toàn (Hard Fork).
-
-```mermaid
-flowchart TD
-    subgraph Rust Engine
-        R_TX[Thứ tự TX]
-        R_Leader[Leader Address]
-        R_Time[Timestamp]
-    end
-
-    subgraph Go Engine
-        G_GEI[GlobalExecIndex]
-        G_EVM[EVM Execution]
-        G_State[StateRoot / Trie]
-    end
-
-    R_TX --> |Rủi ro 1| G_EVM
-    R_Leader --> |Rủi ro 2| BlockHash
-    R_Time --> |Rủi ro 3| BlockHash
-    G_GEI --> |Rủi ro 4| BlockHash
-    G_EVM --> G_State
-    G_State --> BlockHash
-
-    style R_Leader fill:rgba(255, 100, 100, 0.15),stroke:#ff4444,stroke-width:2px,color:#ff4444
-    style G_GEI fill:rgba(255, 100, 100, 0.15),stroke:#ff4444,stroke-width:2px,color:#ff4444
-```
-
-### 🔴 Các Điểm Rủi Ro Chính (Nguyên nhân gây Fork)
-
-1. **Rủi ro 1: Sai lệch thuật toán sắp xếp (Sorting Mismatch) - Đã Fix**
-   - *Mô tả:* Rust và Go sử dụng cách sắp xếp danh sách Validators khác nhau (ví dụ: String vs Raw Bytes).
-   - *Hậu quả:* Rust chọn Node A làm Leader, nhưng Go (hoặc node khác) lại chọn Node B. Khi `LeaderAddress` đưa vào hash khác nhau, Block sẽ bị Fork ngay lập tức (như lỗi ở Block 77).
-
-2. **Rủi ro 2: Khác biệt Timestamp (Timestamp Non-determinism)**
-   - *Mô tả:* Nếu mạng lưới khôi phục từ một DAG bị thiếu dữ liệu lịch sử (ancestor blocks), hàm tính `median_timestamp` có thể ra kết quả lệch nhau vài giây giữa các Node.
-   - *Hậu quả:* Timestamp tham gia trực tiếp vào Block Hash. Lệch 1 mili-giây cũng làm thay đổi toàn bộ Hash.
-
-3. **Rủi ro 3: Bất đồng bộ GEI (Global Exec Index Desync)**
-   - *Mô tả:* Các Node đếm số lượng Block rỗng (Empty Blocks) khác nhau do có node xử lý commit không có TX, có node lại bỏ qua.
-   - *Hậu quả:* GEI bị lệch dẫn đến Sequence Shifting. Giao dịch hợp lệ ở Node này lại bị coi là sai thứ tự (nonce error) ở Node khác.
-
-4. **Rủi ro 4: "Nhiễm độc" State Trie (State Poisoning)**
-   - *Mô tả:* Trong quá trình `STARTUP-SYNC`, Go vô tình nhận các Block từ mạng P2P (foreign data) song song với luồng FFI từ Rust.
-   - *Hậu quả:* Database (NOMT) bị ghi đè dữ liệu rác, `StateRoot` thay đổi mãi mãi và không thể tự phục hồi.
-
----
-
-## 3. Đánh Giá & Cải Tiến Quy Trình Logging (Log Mismatch)
-
-Dựa trên mẫu `hash_mismatch_alert.log` hiện tại, hệ thống log đang làm tốt việc phát hiện **Hash Mismatch**, nhưng chưa đủ sâu để giúp Developer tìm ra nguyên nhân gốc rễ (Root Cause) ngay lập tức. 
-
-### Vấn đề của Log hiện tại:
-- **Quá tải thông tin (Cluttered):** Tất cả các trường (`hash`, `stateRoot`, `txRoot`, `leader`...) bị dồn vào một dòng rất dài, cực kỳ khó so sánh bằng mắt thường.
-- **Không chỉ ra điểm khác biệt:** Developer phải tự dò xem chuỗi Hash nào khác chuỗi nào. Trong ví dụ Block 17, `m0` và `m1` khác biệt ở cả `txRoot`, `receiptsRoot`, và `leader`, nhưng log không làm nổi bật điều đó.
-- **Thiếu thông tin Commit (Rust):** Block Hash Checker hiện chỉ đọc từ Go (qua RPC). Không có thông tin `CommitIndex` tương ứng bên Rust để đối chiếu.
-
-### Khuyến nghị Cải Tiến Tool `block_hash_checker`:
-
-1. **Highlight điểm khác biệt (Diffing):**
-   Thay vì in toàn bộ, tool nên so sánh với giá trị đa số (Majority) và in màu đỏ phần bị sai lệch.
-   *Ví dụ:* 
-   `m0: leader=0xb014... (MISMATCH - Expected 0xCCc7...)`
-
-2. **Cấu trúc lại Log Formatter (JSON / Bảng):**
-   Hiển thị theo dạng bảng so sánh dọc thay vì ngang:
-   ```text
-   [Block 17] - FORK DETECTED!
-   Field        | Majority (m1, m2, m3)                 | Minority (m0, m4)
-   -------------|---------------------------------------|---------------------------------------
-   Leader       | 0xCCc7f510...                         | 0xb01455c5... ❌
-   TxRoot       | 0xa7d4c46f...                         | 0x13cb4b64... ❌
-   StateRoot    | 0x58129c8f...                         | 0x58129c8f... ✅
-   ```
-
-3. **Bổ sung API Audit (Góc nhìn giao dịch):**
-   Nếu `txRoot` khác nhau, tool phải tự động gọi API lấy chi tiết Block (ví dụ `eth_getBlockByNumber`) để in ra: *"M0 chứa 15 TXs, M1 chứa 10 TXs (Thiếu TX hash: 0xabc...)"*. Điều này giúp xác định ngay giao dịch nào bị rơi rớt giữa các Node.
-
----
-
-## 4. Đề Xuất Cải Tiến Kiến Trúc (Architecture Improvements)
-
-Để khắc phục triệt để điểm yếu "mất đồng bộ giữa 2 Engine (Rust-Go)", tôi đề xuất 4 giải pháp cải tiến cốt lõi sau:
-
-### 4.1. Single Source of Truth cho Metadata qua BFT (Certified Metadata)
-* **Thực trạng:** Hiện tại Rust tự chạy thuật toán bầu Leader (`elect_leader_stake_based`) và tự tính Median Timestamp ở mỗi node. Quá trình Sync có thể làm lệch tham số đầu vào.
-* **Cải tiến:** `LeaderAddress` và `Timestamp` KHÔNG được tính toán lại cục bộ ở các node đang sync. Node Proposer (Người tạo khối) phải gắn cứng `LeaderAddress` và `Timestamp` vào cấu trúc khối và đưa qua quá trình ký đồng thuận BFT (CertifiedCommit). Các node khác chỉ **Verify** (xác thực) chữ ký, không tính toán lại.
-
-### 4.2. Atomic State Commit (Cơ chế Commit Nguyên Tử 2 Pha qua FFI)
-* **Thực trạng:** Rust gửi `CommittedSubDag` sang Go, Go tự tăng GEI và cập nhật DB (NOMT). Nếu node sập giữa chừng, GEI bên Go đã lưu nhưng DAG bên Rust chưa lưu.
-* **Cải tiến:** Triển khai **2-Phase Commit (2PC)**.
-  - Pha 1 (`Prepare`): Rust gửi TXs sang Go. Go chạy EVM trên State tạm (Memory Trie), trả về `StateRoot` dự kiến.
-  - Pha 2 (`Commit`): Khi Rust đã lưu DAG thành công, Rust gọi `Commit(GEI, StateRoot)`. Go mới thực sự xả (flush) dữ liệu xuống đĩa (PebbleDB). Đảm bảo 100% không bao giờ trôi lệch GEI.
-
-### 4.3. Protobuf Strict Boundary (Ranh giới Schema siêu khắt khe)
-* **Thực trạng:** Lỗi rẽ nhánh ở Block 77 xảy ra vì Rust so sánh bằng String, Go so sánh bằng Raw Bytes.
-* **Cải tiến:** Cấm việc parser tay hoặc ép kiểu tay qua lại giữa CGo. Mọi ranh giới giao tiếp phải định nghĩa bằng **Protobuf**. Code sinh tự động (auto-generated) sẽ ép kiểu khắt khe (ví dụ Validator Address bắt buộc là `bytes` 20-byte array). Bất kỳ dữ liệu nào không đúng chuẩn sẽ bị FFI Gateway từ chối ngay lập tức trước khi chạm vào EVM.
-
-### 4.4. FFI Checksum Isolation (Cách ly dữ liệu ngoại lai)
-* **Thực trạng:** Go có thể nhập (import) nhầm Block từ mạng P2P (foreign data) đè lên dữ liệu do Rust gửi xuống.
-* **Cải tiến:** Rust cấp một mã `Session_Token` (hoặc Hash của SubDag) cho mỗi FFI call. Trong quá trình tạo khối, Go Execution Engine bị **khóa cứng** với mạng P2P bên ngoài, chỉ tiếp nhận lệnh thực thi có mang đúng `Session_Token` từ Rust. Điều này ngăn chặn hoàn toàn "State Poisoning".
-
----
-
-## 5. So Sánh Kiến Trúc (Current vs Proposed Architecture)
-
-Dưới đây là biểu đồ so sánh sự khác biệt giữa kiến trúc hiện tại và kiến trúc đề xuất (Atomic 2-Phase Commit & Certified Metadata).
-
-### ❌ Kiến Trúc Hiện Tại (Rủi ro rẽ nhánh cao)
-Luồng dữ liệu một chiều (One-way fire-and-forget), thiếu cơ chế rollback nếu Node bị sập giữa chừng.
-
-```mermaid
-sequenceDiagram
-    participant BFT as BFT Network
-    participant R as Rust (Consensus)
-    participant G as Go (Execution)
-    participant DB as PebbleDB
-
-    BFT->>R: 1. Quyết định thứ tự DAG
-    Note over R: Node tự tính Leader & Timestamp<br/>(Dễ lệch giữa các Node)
-    R->>G: 2. FFI: send_committed_subdag()
-    
-    Note over G: Tự cấp phát GEI + 1<br/>Thực thi EVM
-    G->>DB: 3. Lưu Block & StateRoot (Flush)
-    Note over R,DB: ⚠️ CẢNH BÁO: Nếu Node crash tại đây,<br/>Go đã tăng GEI nhưng Rust chưa lưu DAG!
-```
-
-### ✅ Kiến Trúc Đề Xuất (Fork-proof)
-Sử dụng **Certified Metadata** từ BFT và **2-Phase Commit (2PC)** giữa Rust và Go.
-
-```mermaid
-sequenceDiagram
-    participant BFT as BFT Network
-    participant R as Rust (Consensus)
-    participant G as Go (Execution)
-    participant DB as PebbleDB
-
-    Note over BFT,R: Leader & Timestamp bị khóa cứng (Certified) từ lúc Propose
-    BFT->>R: 1. Quyết định thứ tự DAG (Kèm Metadata)
-    
-    rect rgba(0, 255, 100, 0.15)
-        Note right of R: --- PHA 1: PREPARE ---
-        R->>G: 2. FFI: prepare_execution(SubDag)
-        Note over G: Chạy EVM trên Memory Trie (Không lưu đĩa)
-        G-->>R: 3. Trả về StateRoot dự kiến
-    end
-    
-    Note over R: Lưu DAG xuống đĩa an toàn
-    
-    rect rgba(100, 150, 255, 0.15)
-        Note right of R: --- PHA 2: COMMIT ---
-        R->>G: 4. FFI: commit_state(GEI, StateRoot)
-        G->>DB: 5. Xả (Flush) toàn bộ xuống đĩa nguyên tử
-    end
-```
-
-**Bảng so sánh cốt lõi:**
-
-| Đặc tả | Kiến trúc hiện tại (Legacy) | Kiến trúc đề xuất (Atomic 2PC) |
-|---|---|---|
-| **Metadata (Leader/Time)** | Tự tính toán (Nguy cơ rẽ nhánh) | Gắn cứng chữ ký BFT (Certified) |
-| **Giao thức FFI** | 1 Chiều (Bắn và quên) | 2 Pha (Chuẩn bị & Chốt) |
-| **Gắn GEI** | Go tự tăng cục bộ | Rust quản lý và truyền trực tiếp xuống |
-| **Phục hồi (Recovery)** | Dễ hỏng state nếu Crash ngang | Đảm bảo nguyên tử 100% (Atomic) |
-
----
-
-## 6. Đánh Giá Phản Biện & Bổ Sung Lỗ Hổng (Critical Review)
-
-> ⚠️ Phần này đánh giá tính khả thi thực tế của từng đề xuất ở Mục 4, dựa trên kiến trúc Mysticeti/DAG BFT hiện tại của Metanode. Mục tiêu: xác định rõ đâu là cải tiến **phải làm ngay**, đâu là cải tiến **nên làm sau**, và đâu **không khả thi** trong kiến trúc hiện tại.
-
-### 6.1. Đánh giá Đề xuất 4.1 — Certified Metadata
-
-| Tiêu chí | Đánh giá |
-|---|---|
-| **Tính khả thi** | ⚠️ **CẦN ĐIỀU CHỈNH** |
-| **Mức ưu tiên** | 🟡 Trung bình |
-
-**Vấn đề:** Trong kiến trúc DAG-based BFT (Mysticeti), Leader được xác định **SAU KHI** DAG đã commit — không phải trước. Không thể "gắn cứng Leader vào lúc Propose" vì tại thời điểm propose, chưa biết ai là Leader.
-
-**Thực tế trong code:** Hệ thống hiện tại đã có cơ chế tương đương:
-- `CommittedSubDag.leader_address` được gắn cứng **một lần duy nhất** bởi `resolve_leader_address()` và đánh dấu immutable (`MUST NOT be recalculated`).
-- Node đang sync sử dụng `leader_address` đã nhúng sẵn trong commit data từ peer/stored commit (`if subdag.leader_address.len() == 20 → skip re-resolution`).
-
-**Điều chỉnh đúng:**
-- ✅ **Đã có:** Node sync/recovery dùng pre-embedded leader_address (FORK-SAFETY May 2026 tag).
-- ❌ **Thiếu:** Chưa có cơ chế **lưu trữ** `leader_address` vào DAG store (RocksDB). Khi node restart, nếu DAG bị wipe nhưng Go DB không wipe, `leader_address` phải được khôi phục từ Go hoặc peer thay vì tính lại. → **Cần bổ sung persistence cho leader_address trong commit store.**
-
----
-
-### 6.2. Đánh giá Đề xuất 4.2 — Atomic 2-Phase Commit
-
-| Tiêu chí | Đánh giá |
-|---|---|
-| **Tính khả thi** | ⚠️ **TỐT NHƯNG CHƯA ĐỦ** |
-| **Mức ưu tiên** | 🟢 Cao |
-
-**Vấn đề hiệu năng:** Thêm 1 round-trip (Prepare → StateRoot → Commit) qua FFI Bridge cho mỗi block sẽ **tăng gấp đôi latency** block production. Với target 1000+ TPS, đây là trade-off nghiêm trọng.
-
-**Thực tế trong code:** Hệ thống đã có cơ chế phòng vệ tương đương nhưng nhẹ hơn:
-- `GEIAuthority` ở Go đảm bảo GEI chỉ tăng khi block thực sự được commit.
-- `REPLAY PROTECTION` trong `dispatch_commit` ngăn duplicate execution.
-- `initialize_from_go()` đồng bộ lại GEI/CommitIndex khi restart.
-
-**Điều chỉnh thực tế (Lightweight WAL thay vì Full 2PC):**
-- Thay vì 2-Phase Commit nặng, sử dụng **Write-Ahead Log (WAL)** nhẹ hơn:
-  1. Rust ghi `(commit_index, GEI, leader_address)` vào WAL **trước** khi gọi FFI.
-  2. Go thực thi bình thường (không cần pha Prepare riêng).
-  3. Khi Go trả về thành công, Rust đánh dấu WAL entry là "committed".
-  4. Khi restart: Rust đọc WAL, so sánh với Go state. Entry nào chưa "committed" → Go rollback hoặc Rust replay.
-- **Ưu điểm:** Không thêm round-trip, vẫn đảm bảo crash-safe.
-
----
-
-### 6.3. Đánh giá Đề xuất 4.3 — Protobuf Strict Boundary
-
-| Tiêu chí | Đánh giá |
-|---|---|
-| **Tính khả thi** | ✅ **KHUYẾN KHÍCH MẠNH** |
-| **Mức ưu tiên** | 🟢 Cao |
-
-**Đánh giá:** Đây là đề xuất **tốt nhất** và nên ưu tiên triển khai đầu tiên. Lỗi Fork ở Block 17/77 xảy ra 100% do ép kiểu thủ công (String vs Bytes). Protobuf schema sẽ loại bỏ hoàn toàn lớp lỗi này.
-
-**Bổ sung cụ thể:**
-- Định nghĩa `authority_key` trong Protobuf là `bytes` (không phải `string`).
-- Thêm **validation layer** trong FFI Gateway: reject bất kỳ `ValidatorInfo` nào có `authority_key` không decode được thành raw bytes hợp lệ.
-- Áp dụng cho cả 2 chiều: Rust→Go (SubDag) và Go→Rust (EpochBoundaryData).
-
----
-
-### 6.4. Đánh giá Đề xuất 4.4 — FFI Checksum Isolation
-
-| Tiêu chí | Đánh giá |
-|---|---|
-| **Tính khả thi** | ✅ **TỐT** |
-| **Mức ưu tiên** | 🟡 Trung bình |
-
-**Đánh giá:** Hợp lý về mặt lý thuyết. Tuy nhiên, hệ thống hiện tại đã disable P2P import trên Master node. Rủi ro chủ yếu còn tồn tại khi có **Sub-node** chạy song song và vô tình ghi vào cùng DB.
-
-**Bổ sung:** Thay vì Session_Token phức tạp, cách đơn giản hơn là **khóa cứng DB write lock** ở tầng Go: Trong suốt quá trình `ProcessBlock()`, Go acquire một exclusive write lock trên NOMT. Bất kỳ source nào khác cố ghi vào NOMT sẽ bị block cho đến khi ProcessBlock() hoàn tất.
-
----
-
-### 6.5. 🔴 Lỗ Hổng Chưa Được Đề Cập (Missing Gaps)
-
-Ngoài 4 đề xuất trên, tôi phát hiện thêm **3 lỗ hổng nghiêm trọng** chưa được đề cập trong tài liệu:
-
-#### Gap 1: Idempotent Execution (Thực thi Lũy Đẳng)
-
-**Vấn đề:** Nếu Go nhận cùng một block 2 lần (do Rust retry sau timeout), Go sẽ thực thi lại và tăng GEI lần nữa → State drift vĩnh viễn.
-
-**Giải pháp:** Go PHẢI kiểm tra `commit_index` trước khi thực thi. Nếu `commit_index <= last_handled_commit_index` → **bỏ qua hoàn toàn** (return success ngay, không chạy EVM). Đây là thuộc tính Idempotent — gọi bao nhiêu lần cũng cho kết quả như nhau.
-
-```mermaid
-flowchart LR
-    Rust -->|"send_block(commit=5)"| Go
-    Go -->|"commit=5 > last=4 → Execute"| EVM
-    Rust -->|"retry send_block(commit=5)"| Go
-    Go -->|"commit=5 <= last=5 → SKIP ✅"| Return
-```
-
-#### Gap 2: Inline Block Hash Verification (Kiểm tra Hash Nội tuyến)
-
-**Vấn đề:** Hiện tại `block_hash_checker` chạy **bên ngoài** hệ thống như một tool giám sát. Khi nó phát hiện fork, đã quá muộn — chuỗi block đã phân nhánh hàng chục block rồi.
-
-**Giải pháp:** Tích hợp **inline verification** ngay trong `CommitProcessor`:
-- Mỗi N block (ví dụ N=10), Rust query hash của block vừa tạo từ Go và broadcast cho peers.
-- Nếu 2f+1 peers trả về hash khác → **dừng node ngay lập tức** (`process::exit(1)`).
-- Cơ chế này **đã tồn tại một phần** (Runtime Fork Guard — 500 block), nhưng cần mở rộng thành cơ chế **vĩnh viễn**, không chỉ 500 block đầu tiên.
-
-#### Gap 3: Epoch Transition Determinism (Chuyển Epoch Xác Định)
-
-**Vấn đề:** Khi epoch chuyển đổi, committee mới được fetch từ Go. Nếu Go chưa sync xong dữ liệu epoch mới, committee trả về có thể **thiếu validator** hoặc **sai thứ tự** → Leader epoch mới bị lệch → Fork ngay block đầu tiên của epoch mới.
-
-**Giải pháp:** Thêm **Committee Hash Assertion** vào quá trình chuyển epoch:
-1. Rust tính `committee_hash = Keccak256(sorted_validators)` từ dữ liệu Go trả về.
-2. Rust broadcast `committee_hash` cho peers.
-3. Nếu `committee_hash` không khớp 2f+1 peers → **KHÔNG chuyển epoch**, retry cho đến khi khớp.
-4. Hàm `calculate_committee_hash()` đã có sẵn trong `committee_source.rs` — chỉ cần tích hợp vào luồng chính.
-
----
-
-### 6.6. Bảng Tổng Kết & Roadmap Triển Khai
-
-```mermaid
-gantt
-    title Roadmap Chống Fork 100%
-    dateFormat  YYYY-MM-DD
-    section Pha 1 - Khẩn cấp
-    Protobuf Strict Boundary (4.3)        :crit, p1a, 2026-05-15, 5d
-    Idempotent Execution (Gap 1)           :crit, p1b, 2026-05-15, 3d
-    Inline Block Hash Verification (Gap 2) :crit, p1c, after p1b, 4d
-    section Pha 2 - Quan trọng
-    Lightweight WAL (4.2 điều chỉnh)       :p2a, after p1c, 7d
-    Epoch Committee Hash Assert (Gap 3)    :p2b, after p1c, 5d
-    section Pha 3 - Hoàn thiện
-    Leader Address Persistence (4.1 fix)   :p3a, after p2b, 4d
-    DB Write Lock Isolation (4.4 fix)      :p3b, after p2b, 3d
-```
-
-| # | Cải tiến | Mức ưu tiên | Độ phức tạp | Chống Fork |
-|---|---|---|---|---|
-| **4.3** | Protobuf Strict Boundary | 🔴 Khẩn cấp | Thấp | Loại bỏ 100% lỗi ép kiểu |
-| **Gap 1** | Idempotent Execution | 🔴 Khẩn cấp | Thấp | Ngăn duplicate execution |
-| **Gap 2** | Inline Hash Verification | 🔴 Khẩn cấp | Trung bình | Phát hiện fork trong <10 blocks |
-| **4.2'** | Lightweight WAL | 🟡 Quan trọng | Trung bình | Crash-safe GEI alignment |
-| **Gap 3** | Epoch Committee Hash Assert | 🟡 Quan trọng | Thấp | Ngăn fork ở epoch boundary |
-| **4.1'** | Leader Address Persistence | 🟢 Hoàn thiện | Thấp | Phòng vệ sâu khi DAG wipe |
-| **4.4'** | DB Write Lock Isolation | 🟢 Hoàn thiện | Thấp | Ngăn State Poisoning |
-
----
-
-## 7. Kiến Trúc Hoàn Thiện Cuối Cùng (Final Fork-Proof Architecture)
-
-Phần này tổng hợp toàn bộ cải tiến từ Mục 4 (đã điều chỉnh) và Mục 6 (lỗ hổng bổ sung) thành **một kiến trúc duy nhất**, sẵn sàng để triển khai.
-
-### 7.1. Tổng Quan Kiến Trúc (Big Picture)
-
-Kiến trúc hoàn thiện có **7 lớp phòng vệ** (Defense Layers), mỗi lớp chặn một loại fork riêng biệt. Nếu một lớp bị xuyên qua, lớp tiếp theo sẽ bắt lỗi.
+Hệ thống được bảo vệ bởi **7 lớp phòng vệ** (Defense Layers) được thiết kế để chặn đứng bất kỳ nguy cơ mất đồng bộ nào giữa Go và Rust, cũng như giữa các Node trong mạng.
 
 ```mermaid
 flowchart TB
     subgraph Layer1["🛡️ Lớp 1: Protobuf Strict Boundary"]
         direction LR
         PB1["FFI Gateway"]
-        PB2["Validate authority_key = bytes 20"]
+        PB2["Validate identity keys (bytes)"]
         PB3["Reject dữ liệu sai schema"]
         PB1 --> PB2 --> PB3
     end
 
-    subgraph Layer2["🛡️ Lớp 2: Immutable Leader Resolution"]
+    subgraph Layer2["🛡️ Lớp 2: Immutable Leader & Persistence"]
         direction LR
         LR1["resolve_leader_address()"]
         LR2["Gắn cứng 1 lần vào SubDag"]
@@ -432,7 +115,18 @@ flowchart TB
     style SAFE fill:rgba(0,200,100,0.2),stroke:#00c853,stroke-width:3px,color:#00c853
 ```
 
-### 7.2. Luồng Xử Lý Block Hoàn Chỉnh (End-to-End Block Processing)
+### Chi tiết các lớp phòng vệ:
+* **Lớp 1 (Protobuf Strict Boundary):** Mọi ranh giới giao tiếp RPC/FFI được định nghĩa chặt chẽ bằng Protobuf. Các trường định danh như `AuthorityKey` bắt buộc dùng kiểu `bytes`. Dữ liệu được truyền thẳng dưới dạng byte-perfect để loại bỏ 100% lỗi ép kiểu string.
+* **Lớp 2 (Immutable Leader):** `LeaderAddress` được gắn cứng 1 lần và lưu xuống `LeaderStore`. Khi restart, Node ưu tiên đọc từ cache đĩa này thay vì tính lại, chống trôi LeaderAddress.
+* **Lớp 3 (DIGEST-GATE):** Local commit không được thực thi ngay mà bị buffer cho đến khi mạng lưới đồng thuận (2f+1 peers xác nhận chung 1 digest).
+* **Lớp 4 (WAL + Idempotent Execution):** Rust sử dụng Write-Ahead Log (WAL) ghi nhận trạng thái commit. Ở phía Go, hàm thực thi kiểm tra `commit_index`; nếu là bản sao (duplicate) thì sẽ tự động bỏ qua (Skip) để đảm bảo không làm trôi `GlobalExecIndex` (GEI).
+* **Lớp 5 (DB Write Lock Isolation):** Toàn bộ hàm thực thi ghi xuống cơ sở dữ liệu State Trie (NOMT) được khóa độc quyền (`Mutex`). Không luồng P2P nào có thể gây nhiễu ("Nhiễm độc" State Trie).
+* **Lớp 6 (Inline Hash Verification):** Mỗi 10 blocks, Rust truy vấn hash từ Go và kiểm tra chéo với các peers. Nếu phát hiện rẽ nhánh, Node lập tức HALT để ngăn lỗi lan rộng.
+* **Lớp 7 (Epoch Committee Assert):** Khi chuyển Epoch, Node sinh ra `transition_hash` (băm của Committee mới) và RPC chéo các peers. Nếu không có đa số đồng thuận, Node sẽ dừng chuyển Epoch và retry.
+
+---
+
+## 3. Luồng Xử Lý Block Hoàn Chỉnh (End-to-End Block Processing)
 
 ```mermaid
 sequenceDiagram
@@ -520,24 +214,11 @@ sequenceDiagram
     end
 ```
 
-### 7.3. Ma Trận Phòng Vệ (Defense Matrix)
+---
 
-Bảng sau cho thấy mỗi loại fork sẽ bị chặn bởi lớp phòng vệ nào:
+## 4. Quy Tắc Bất Biến (Invariants)
 
-| Loại Fork | Nguyên nhân gốc | Lớp phòng vệ chặn | Kết quả |
-|---|---|---|---|
-| Leader Mismatch | String vs Byte sorting | **Lớp 1** (Protobuf) + **Lớp 2** (Immutable Leader) | Không thể xảy ra |
-| Timestamp Drift | DAG thiếu ancestor | **Lớp 3** (DIGEST-GATE) | Commit local bị discard |
-| GEI Desync | Crash giữa chừng | **Lớp 4** (WAL + Idempotent) | Rollback tự động |
-| State Poisoning | P2P ghi đè NOMT | **Lớp 5** (DB Write Lock) | Bị block hoàn toàn |
-| Silent Divergence | Block hash khác nhưng không phát hiện | **Lớp 6** (Inline Hash Verify) | Phát hiện trong ≤10 blocks |
-| Epoch Boundary Fork | Committee sai thứ tự | **Lớp 7** (Committee Hash Assert) | Không chuyển epoch |
-| Duplicate Execution | Rust retry cùng block | **Lớp 4** (Idempotent) | Go skip tự động |
-| Sparse DAG Local Commit | Node quyết định một mình | **Lớp 3** (DIGEST-GATE) | Chờ quorum xác nhận |
-
-### 7.4. Quy Tắc Bất Biến (Invariants)
-
-Kiến trúc hoàn thiện đảm bảo 6 quy tắc bất biến tuyệt đối:
+Kiến trúc đảm bảo 6 quy tắc bất biến tuyệt đối:
 
 ```mermaid
 mindmap
@@ -550,7 +231,11 @@ mindmap
         INV6["6. Epoch Transition<br/>Committee hash verified<br/>bởi 2f+1 peers trước khi chuyển"]
 ```
 
-### 7.5. Crash Recovery Flow (Luồng Phục Hồi Khi Sập)
+---
+
+## 5. Crash Recovery Flow (Luồng Phục Hồi Khi Sập)
+
+Mô hình đảm bảo khi Node bị Crash ở bất kỳ thời điểm nào giữa Rust và Go, dữ liệu luôn được khôi phục đồng bộ:
 
 ```mermaid
 flowchart TD
@@ -580,175 +265,238 @@ flowchart TD
 
 ---
 
-## 8. Phân Tích Deadlock & Liveness (Deadlock-Free Guarantee)
+## 6. Phân Tích Deadlock & Liveness (Deadlock-Free Guarantee)
 
-> Mục tiêu: Chứng minh rằng hệ thống **luôn tiến** (always makes progress) miễn là có ≥2f+1 node online. Mỗi điểm chờ (blocking point) trong kiến trúc 7 lớp đều PHẢI có escape hatch (lối thoát) để tránh deadlock.
+Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (Wait forever is safer than Forking). Tuy nhiên, kiến trúc đảm bảo hệ thống **luôn tiến** (always makes progress) miễn là có ≥2f+1 node online. Mỗi điểm chờ (blocking point) đều có cơ chế tránh deadlock.
 
-### 8.1. Bản Đồ Các Điểm Chờ (Blocking Points Map)
+### Bảng Đánh Giá Các Điểm Chờ
 
-```mermaid
-flowchart LR
-    subgraph CONSENSUS["Rust Consensus Engine"]
-        BP1["① is_transitioning wait<br/>(Epoch Lock)"]
-        BP2["② DIGEST-GATE buffer<br/>(pending_local_commits)"]
-        BP3["③ QUORUM-GATE<br/>(quorum_commit_index)"]
-        BP4["④ runtime_fork_guard<br/>(peer query loop)"]
-    end
-
-    subgraph EXECUTION["Go Execution Engine"]
-        BP5["⑤ DB Write Lock<br/>(nomtWriteLock)"]
-        BP6["⑥ ProcessBlock I/O<br/>(NOMT flush)"]
-    end
-
-    subgraph NETWORK["Cross-Node"]
-        BP7["⑦ Epoch Committee Hash<br/>(2f+1 peer query)"]
-        BP8["⑧ CommitSyncer<br/>(peer fetch blocks)"]
-    end
-
-    style BP1 fill:rgba(255,200,0,0.2),stroke:#ffa000,color:#ffa000
-    style BP2 fill:rgba(255,50,50,0.2),stroke:#ff3333,color:#ff3333
-    style BP7 fill:rgba(255,50,50,0.2),stroke:#ff3333,color:#ff3333
-```
-
-### 8.2. Đánh Giá Từng Điểm Chờ
-
-| # | Điểm chờ | Đang chờ gì? | Cơ chế | Escape Hatch | Trạng thái |
-|---|---|---|---|---|---|
-| ① | `is_transitioning` flag | Epoch transition hoàn tất | ✅ Timeout 120s | Force-clear sau 120s | 🟢 **AN TOÀN** |
-| ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | ✅ 200ms poll | CertifiedCommit thay thế. **Không bao giờ force-dispatch.** Buffer max 100 (drop, không dispatch) | 🟢 **AN TOÀN** |
-| ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | ✅ 200ms poll | Poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
-| ④ | Runtime Fork Guard | Go đạt `next_check_block` | Background task | Backoff 60s khi peers fail, không block consensus | 🟢 **AN TOÀN** |
-| ⑤ | DB Write Lock | ProcessBlock hoàn tất | `defer Unlock()` | Single-writer, no circular dependency | 🟢 **AN TOÀN** |
-| ⑥ | ProcessBlock I/O | NOMT trie flush | Bounded I/O | N/A (disk) | 🟢 **AN TOÀN** |
-| ⑦ | Committee Hash | ≥1 peer xác nhận hash | ✅ Retry loop vĩnh viễn | 5s per-peer timeout, 10s retry interval. Mismatch=HALT. | 🟢 **AN TOÀN** (đã fix) |
-| ⑧ | CommitSyncer | Peer trả blocks | ✅ RPC timeout | Retry với peer khác | 🟢 **AN TOÀN** |
-
-### 8.3. Phân Tích DIGEST-GATE (② — Rủi ro Trung bình)
-
-**Tình huống deadlock tiềm ẩn:**
-- Node A tạo local commit C₅ với Leader=X, chèn vào `pending_local_commits`.
-- Network quorum đồng ý Leader=Y cho C₅ → digest khác.
-- Node A chờ CertifiedCommit nhưng CommitSyncer chưa kịp fetch.
-
-**Tại sao KHÔNG deadlock:**
-
-```mermaid
-flowchart TD
-    LOCAL["Local commit C₅<br/>digest mismatch"] --> POLL["Poll mỗi 200ms"]
-    POLL --> CHECK{"digest_verifier(5)?"}
-    CHECK -->|"Some(quorum_digest)"| MATCH{"local == quorum?"}
-    MATCH -->|"Khớp"| DISPATCH["✅ Dispatch"]
-    MATCH -->|"Lệch"| WAIT["Chờ CertifiedCommit"]
-    CHECK -->|"None"| WAIT
-    WAIT --> CERTIFIED["CertifiedCommit từ CommitSyncer"]
-    CERTIFIED -->|"Thay thế local commit"| DISPATCH
-    WAIT -->|"200ms timeout"| POLL
-
-    style DISPATCH fill:rgba(0,200,100,0.2),stroke:#00c853,color:#00c853
-```
-
-**Đảm bảo liveness:** CommitSyncer luôn chạy song song và sẽ fetch CertifiedCommit từ peers. Miễn là ≥2f+1 node online, CertifiedCommit **luôn tồn tại** trên mạng. Vòng lặp `select!` với 200ms timeout đảm bảo processor không bị block mãi.
-
-**Trường hợp xấu nhất:** Nếu CommitSyncer chậm (peers quá tải), local commit bị buffer tối đa vài giây. Không phải deadlock — chỉ là latency tạm thời.
-
-### 8.4. Phân Tích DB Write Lock (⑤ — Rủi ro Trung bình)
-
-**Tình huống deadlock tiềm ẩn:**
-- ProcessBlock acquire `nomtWriteLock`.
-- EVM execution gặp lỗi → panic → lock không được release.
-
-**Giải pháp đã có:**
-- Go sử dụng `defer nomtWriteLock.Unlock()` → lock LUÔN được release kể cả khi panic.
-- `nomtWriteLock` chỉ protect ProcessBlock → không có circular dependency với lock khác.
-- Chỉ 1 goroutine gọi ProcessBlock tại 1 thời điểm (sequential từ FFI channel).
-
-**Kết luận:** 🟢 **DEADLOCK-FREE** — không có circular wait, `defer` đảm bảo release.
-
-### 8.5. Epoch Committee Hash Assert (⑦ — ĐÃ FIX: Retry Vĩnh Viễn)
-
-**Tình huống cũ (nguy hiểm):**
-- Check 1 peer → mismatch = HALT, hoặc accept local mù nếu unreachable.
-- **Rủi ro fork** nếu accept local committee sai.
-
-**Giải pháp mới — Retry Loop Vĩnh Viễn:**
-
-```
-RULE TUYỆT ĐỐI:
-1. Mismatch với BẤT KỲ peer nào → HALT ngay (ngăn fork).
-2. ≥1 peer match, 0 mismatch → ACCEPT (đã xác nhận).
-3. 0 match, 0 mismatch (tất cả unreachable) → RETRY mãi mãi.
-   Hệ thống chờ vĩnh viễn. CHỜ AN TOÀN HƠN FORK.
-```
-
-```mermaid
-flowchart TD
-    CALC["Tính committee_hash"] --> QUERY["Query TẤT CẢ peers<br/>(5s timeout/peer)"]
-    QUERY --> RESULT{"Kết quả?"}
-    RESULT -->|"≥1 peer MISMATCH"| HALT["🛑 HALT NODE<br/>Wipe DB hoặc verify snapshot"]
-    RESULT -->|"≥1 peer MATCH<br/>0 mismatch"| ACCEPT["✅ ACCEPT<br/>Đã xác nhận bởi peer"]
-    RESULT -->|"0 match, 0 mismatch<br/>(tất cả unreachable)"| WAIT["⏳ Chờ 10s"]
-    WAIT --> QUERY
-
-    style HALT fill:rgba(255,50,50,0.2),stroke:#ff3333,color:#ff3333
-    style ACCEPT fill:rgba(0,200,100,0.2),stroke:#00c853,color:#00c853
-    style WAIT fill:rgba(255,200,0,0.2),stroke:#ffa000,color:#ffa000
-```
-
-**Cơ chế Seed (Cold-Start toàn cluster):**
-Khi TẤT CẢ node restart đồng thời:
-- Node đầu tiên khởi động → vào retry loop (chờ peers).
-- Node thứ hai khởi động → cũng vào retry loop.
-- Khi cả hai online → cross-verify lẫn nhau → cả hai ACCEPT → tiếp tục.
-- **Không cần seed node đặc biệt** — cơ chế tự nhiên từ retry loop.
-
-### 8.6. Triết Lý Tuyệt Đối: Chờ Mãi Mãi > Fork
-
-```mermaid
-flowchart LR
-    subgraph RULE["🛡️ NGUYÊN TẮC BẤT BIẾN"]
-        direction TB
-        R1["KHÔNG BAO GIỜ dispatch<br/>commit chưa verify"]
-        R2["KHÔNG BAO GIỜ accept<br/>committee chưa peer xác nhận"]
-        R3["CHỜ VĨ VIỄN<br/>an toàn hơn fork"]
-    end
-
-    subgraph ALL_SAFE["✅ DEADLOCK-FREE khi ≥ 2f+1 online"]
-        direction TB
-        S1["① Epoch Lock → 120s timeout"]
-        S2["② DIGEST-GATE → Chờ CertifiedCommit<br/>(không bao giờ force-dispatch)"]
-        S3["③ QUORUM-GATE → 200ms poll"]
-        S4["④ Fork Guard → background task"]
-        S5["⑤ DB Lock → defer Unlock"]
-        S6["⑥ Disk I/O → bounded"]
-        S7["⑦ Committee Hash → Retry vĩnh viễn<br/>(≥1 peer match = accept)"]
-        S8["⑧ CommitSyncer → RPC timeout + retry"]
-    end
-
-    RULE --> ALL_SAFE
-
-    style RULE fill:rgba(255,50,50,0.1),stroke:#ff3333
-    style ALL_SAFE fill:rgba(0,200,100,0.1),stroke:#00c853
-```
+| # | Điểm chờ | Đang chờ gì? | Cơ chế | Trạng thái |
+|---|---|---|---|---|
+| ① | `is_transitioning` flag | Epoch transition hoàn tất | Timeout 120s force-clear | 🟢 **AN TOÀN** |
+| ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | 200ms poll loop. CertifiedCommit thay thế. Buffer giới hạn (MAX=100) | 🟢 **AN TOÀN** |
+| ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | 200ms poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
+| ④ | Runtime Fork Guard | Go đạt `next_check_block` | Background task, Backoff 60s khi peers fail | 🟢 **AN TOÀN** |
+| ⑤ | DB Write Lock | ProcessBlock hoàn tất | `defer Unlock()`. Single-writer. | 🟢 **AN TOÀN** |
+| ⑥ | ProcessBlock I/O | NOMT trie flush | Bounded I/O | 🟢 **AN TOÀN** |
+| ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout). 1 match = Accept. | 🟢 **AN TOÀN** |
+| ⑧ | CommitSyncer | Peer trả blocks | RPC timeout + retry peer khác | 🟢 **AN TOÀN** |
 
 **Định lý Liveness:**
-
 > Với N node trong cluster (N ≥ 3f+1), nếu ≥ 2f+1 node online và có thể giao tiếp qua mạng, hệ thống Metanode **luôn tạo block mới** trong thời gian hữu hạn. Hệ thống **TUYỆT ĐỐI KHÔNG fork** trong mọi kịch bản.
 
-**Chứng minh:**
-1. **Consensus (Mysticeti DAG):** Luôn commit khi ≥2f+1 tham gia (BFT protocol).
-2. **DIGEST-GATE:** Local commit bị buffer → CertifiedCommit từ CommitSyncer giải phóng. **Không bao giờ force-dispatch** — chờ mãi miễn cần.
-3. **Epoch transition:** Timeout 120s đảm bảo processor không kẹt.
-4. **Committee Hash:** Retry mãi mãi → ≥1 peer online sẽ trả lời → xác nhận → proceed.
-5. **Go execution:** Sequential, single-writer, `defer` unlock → không circular wait.
-6. **Cluster Cold-Start:** Node đầu tiên chờ → node thứ hai online → cross-verify → cả hai tiến.
+Cơ chế Seed (Cold-Start toàn cluster):
+Khi TẤT CẢ node restart đồng thời: Node sẽ vào retry loop (chờ peers). Khi các node online, chúng sẽ cross-verify lẫn nhau và cùng tiếp tục (cơ chế tự nhiên từ retry loop, không cần seed node đặc biệt).
 
-### 8.7. Bảng Hành Động Đã Hoàn Thành
+---
 
-| # | Vấn đề | Mức độ | Hành động | Trạng thái |
-|---|---|---|---|---|
-| 1 | Committee Hash chờ mãi khi all peers offline | 🔴 Critical | Retry loop vĩnh viễn (10s interval) + HALT on mismatch | ✅ **ĐÃ FIX** (`consensus_node.rs`) |
-| 2 | DIGEST-GATE buffer unbounded | 🟡 Medium | `MAX=100` entries, DROP (không dispatch) oldest khi overflow | ✅ **ĐÃ FIX** (`processor.rs`) |
-| 3 | DIGEST-GATE monitor stale commits | 🟢 Info | Log cảnh báo tại 60s, 120s, 300s — không force-dispatch | ✅ **ĐÃ FIX** (`processor.rs`) |
-| 4 | Runtime Fork Guard log spam | 🟢 Low | Chỉ log mỗi 100 blocks | ✅ **ĐÃ FIX** (`consensus_node.rs`) |
+## 7. Phân Tích Sự Cố Fork — Block 146 (2026-05-15)
+
+### 7.1 Hiện Tượng Quan Sát Được
+
+Từ `hash_mismatch_alert.log` (2026-05-15 00:32:35):
+- **Fork Point:** Block 146 (GEI=146, Epoch=0)
+- **Số block bị ảnh hưởng:** 112 blocks (146→257)
+- **Node lệch:** m1 (1 node) vs m0, m2, m3, m4 (4 nodes đồng thuận)
+
+| Trường | m1 (lệch) | Cluster (m0/m2/m3/m4) | Phân tích |
+|---|---|---|---|
+| `timestamp` | `0x6a066976` | `0x6a066975` | **Lệch 1 giây** |
+| `txRoot` | `0x2585...6565` | `0x2652...d998` | **Khác** — tập giao dịch khác |
+| `receiptsRoot` | `0x394e...184f` | `0x0b0b...272f` | **Khác** — receipts phụ thuộc txRoot |
+| `stateRoot` | `0x6bb4...18c8` | `0x6bb4...18c8` | **✅ GIỐNG** |
+| `stakeRoot` | `0x7f2b...f5c8` | `0x7f2b...f5c8` | **✅ GIỐNG** |
+| `parentHash` | `0xcd82...87ce` | `0xcd82...87ce` | **✅ GIỐNG** — fork bắt đầu tại block này |
+| `leader` | `0xb014...1518` | `0xb014...1518` | **✅ GIỐNG** |
+
+### 7.2 Câu Hỏi Cốt Lõi: Tại Sao `stateRoot` Giống Nhưng `txRoot` Khác?
+
+> **Tình huống nghịch lý:** Cùng leader, cùng parentHash, cùng stateRoot, nhưng lại khác timestamp, txRoot, và receiptsRoot. Điều này có nghĩa gì?
+
+**Trả lời:** `stateRoot` là **cumulative EVM state** (tổng hợp tất cả thay đổi state từ Genesis). `txRoot` là **per-block transaction list** (chỉ giao dịch trong block đó). Khi DIGEST-GATE bị bypass, m1 đánh giá DAG cục bộ và tạo commit với **thứ tự giao dịch khác** (khác sub-dag) so với cluster. Tuy nhiên, vì cùng tập giao dịch tổng thể (EVM state), `stateRoot` vẫn trùng khớp.
+
+```mermaid
+flowchart LR
+    subgraph Cluster["m0/m2/m3/m4 (Đúng)"]
+        C1["Commit A: {tx1, tx2}"] --> C2["Commit B: {tx3}"]
+        C2 --> CS["stateRoot = S(tx1+tx2+tx3)"]
+    end
+    
+    subgraph M1["m1 (Lệch)"]
+        M1A["Commit A': {tx1, tx3}"] --> M1B["Commit B': {tx2}"]
+        M1B --> MS["stateRoot = S(tx1+tx2+tx3) ✅ GIỐNG"]
+    end
+    
+    C1 -.- |"txRoot KHÁC"| M1A
+    CS -.- |"stateRoot GIỐNG"| MS
+```
+
+**Giải thích chi tiết:**
+1. **Timestamp lệch 1 giây:** `calculate_commit_timestamp()` trả về `leader_block.timestamp_ms().max(last_commit_timestamp_ms)`. Khi m1 có `last_commit_timestamp_ms` khác (do commit trước đó đã lệch), giá trị `.max()` sẽ khác → timestamp block lệch 1 giây.
+2. **txRoot khác:** Rust `build_sorted_transactions()` sắp xếp giao dịch theo `txHash`. Khi sub-dag khác → tập blocks khác → tập giao dịch đầu vào khác → txRoot khác.
+3. **receiptsRoot khác:** Receipts được tính từ kết quả thực thi EVM. Tập giao dịch khác → receipts khác → receiptsRoot khác.
+4. **stateRoot giống:** Đây là state tổng hợp sau khi thực thi TẤT CẢ giao dịch từ Genesis. Vì tổng hợp tất cả tx là giống nhau (chỉ khác thứ tự phân chia vào từng commit), state cuối cùng giống nhau.
+
+### 7.3 Nguyên Nhân Gốc (Root Cause)
+
+```mermaid
+flowchart TD
+    RC["🔴 ROOT CAUSE: DIGEST-GATE bị bypass"] --> L1["m1 đánh giá DAG cục bộ"]
+    L1 --> L2["DAG cục bộ có sparse blocks<br/>(thiếu/thừa ancestor)"]
+    L2 --> L3["Linearizer chọn sub-dag khác<br/>→ tập blocks khác trong commit"]
+    L3 --> T1["timestamp khác<br/>(leader_block.timestamp_ms khác)"]
+    L3 --> T2["txRoot khác<br/>(tập giao dịch khác)"]
+    T1 --> BH["Block hash khác → FORK"]
+    T2 --> BH
+    T2 --> T3["receiptsRoot khác<br/>(receipts phụ thuộc txRoot)"]
+    T3 --> BH
+    
+    style RC fill:rgba(255,50,50,0.3),stroke:#ff3333,color:#ff3333
+    style BH fill:rgba(255,50,50,0.3),stroke:#ff3333,color:#ff3333
+```
+
+**Chuỗi nguyên nhân:**
+1. **DIGEST-GATE bypass:** m1 nhận `CertifiedCommit` từ network HOẶC local commit vượt qua DIGEST-GATE mà không có quorum verification đầy đủ.
+2. **DAG evaluation khác:** Khi local commit, `Linearizer::linearize_sub_dag()` duyệt ancestors từ leader block. Nếu DAG cục bộ thiếu/thừa blocks (do mạng không đồng bộ), sub-dag sẽ khác.
+3. **Timestamp cascade:** Commit đầu tiên lệch → `last_commit_timestamp_ms` lệch → tất cả commit sau đều lệch (do `.max()` trong `calculate_commit_timestamp()`).
+4. **112 blocks liên tiếp:** Một khi fork bắt đầu tại block 146, parentHash chain bị đứt → tất cả block sau đều khác hash.
+
+### 7.4 Bài Học Kiến Trúc
+
+> **⚠️ Lớp 3 (DIGEST-GATE) là tuyến phòng thủ quan trọng nhất.** Nếu DIGEST-GATE bị bypass hoặc hoạt động không chính xác, TẤT CẢ các lớp phòng vệ phía sau đều vô nghĩa — vì chúng phòng vệ cho dữ liệu ĐÃ BỊ LỆCH từ gốc.
+
+| Bất biến bị vi phạm | Chi tiết |
+|---|---|
+| **INV-DIGEST: Mỗi commit phải được xác nhận bởi 2f+1 peers** | m1 thực thi local commit mà không có đủ quorum digest verification |
+| **INV-TIMESTAMP: Timestamp phải deterministic** | `calculate_commit_timestamp()` đã được fix (dùng `leader_block.timestamp_ms()` thay vì `median_timestamp_by_stake`), nhưng leader block khác → timestamp khác |
+| **INV-SUBDAG: Sub-dag phải identicial trên mọi node** | Linearizer trên m1 tạo sub-dag khác do DAG cục bộ khác |
+
+### 7.5 Trạng Thái Fix Hiện Tại
+
+| Fix | File | Mô tả | Trạng thái |
+|---|---|---|---|
+| **COLD-START-GUARD** | `linearizer.rs:162-184` | Guard 6/6a/6b: kiểm tra ancestor blocks trước khi commit | ✅ Đã triển khai |
+| **Leader timestamp fix** | `linearizer.rs:269-284` | Dùng `leader_block.timestamp_ms()` thay vì `median_timestamp_by_stake()` | ✅ Đã triển khai |
+| **RECOVERY-GUARD** | `authority_node.rs:335-365` | Lock local committer cho đến khi có 5 CertifiedCommit từ network | ✅ Đã triển khai |
+| **Timestamp regression guard** | `block_processor_sync.go:845-896` | Drop commit nếu timestamp lùi >30s so với parent | ✅ Đã triển khai |
+| **Remove Go→Rust timestamp override** | `authority_node.rs:318` | REMOVED: `set_last_commit_timestamp_ms()` — Go's second-precision overwrite gây lệch ms-precision | ✅ Đã triển khai |
 
 
+### 7.6 Khuyến Nghị Tăng Cường
+
+1. **DIGEST-GATE strict enforcement:** Khi phát hiện local commit có digest khác quorum, node phải **HALT** thay vì chỉ discard. Điều này đảm bảo lỗi logic không bị che giấu.
+2. **Block 146-level inline verification:** Giảm `GO_VERIFICATION_INTERVAL` từ 10 blocks xuống 5 blocks để phát hiện fork sớm hơn (trước khi lan rộng 112 blocks).
+3. **Cross-node txRoot comparison:** Thêm txRoot vào inline hash verification (Lớp 6) để phát hiện lệch giao dịch ngay lập tức, không chờ đến khi block hash khác.
+
+---
+
+## 8. Phân Tích Sự Cố Fork — Block 15 (2026-05-15): Leader Address Divergence
+
+### 8.1 Hiện Tượng Quan Sát Được
+
+Từ `hash_mismatch_alert.log` (2026-05-15 00:52:13):
+- **Fork Point:** Block 15 (GEI=15, Epoch=0)
+- **Số block bị ảnh hưởng:** 43 blocks (15→57)
+- **Phân vùng:** m0/m1/m4 (3 nodes) vs m2/m3 (2 nodes) — **multi-way fork**
+
+| Trường | m0/m1/m4 (đúng — quorum) | m2/m3 (lệch — thiểu số) | Phân tích |
+|---|---|---|---|
+| `leaderAddress` | `0xb7C5...8F0f` | `0xCCc7...9308` | **❌ KHÁC — ROOT CAUSE** |
+| `txRoot` | `0x12d7...3e49` | `0xfaa9...3ee8` | **❌ Khác** — hệ quả leader khác |
+| `receiptsRoot` | `0x3488...1f5f` | `0x2a26...5202` | **❌ Khác** — hệ quả |
+| `stateRoot` | `0x413d...bf13` | `0x413d...bf13` | **✅ GIỐNG** |
+| `parentHash` | `0x7b83...d5ec` | `0x7b83...d5ec` | **✅ GIỐNG** |
+| `timestamp` | `0x6a066e37` | `0x6a066e37` | **✅ GIỐNG** |
+
+> **⚠️ Điểm khác biệt quan trọng so với Block 146:** Block 146 fork có leader GIỐNG nhau nhưng timestamp KHÁC. Block 15 fork có **leader KHÁC nhau** — đây là vector attack hoàn toàn khác, từ tầng consensus (leader election), không phải tầng execution.
+
+### 8.2 So Sánh 2 Kiểu Fork
+
+```mermaid
+flowchart LR
+    subgraph Block146["Block 146 Fork"]
+        L146["✅ Leader GIỐNG"] --> T146["❌ Timestamp KHÁC"]
+        T146 --> TX146["❌ txRoot KHÁC"]
+        TX146 --> S146["✅ stateRoot GIỐNG"]
+    end
+
+    subgraph Block15["Block 15 Fork"]
+        L15["❌ Leader KHÁC"] --> T15["✅ Timestamp GIỐNG"]
+        L15 --> TX15["❌ txRoot KHÁC"]
+        TX15 --> S15["✅ stateRoot GIỐNG"]
+    end
+
+    RC146["Nguyên nhân 146:<br/>DIGEST-GATE bypass<br/>→ sparse DAG evaluation"] -.-> Block146
+    RC15["Nguyên nhân 15:<br/>Leader election<br/>non-determinism<br/>+ cold-start bypass"] -.-> Block15
+
+    style RC146 fill:rgba(255,100,50,0.2),stroke:#ff6432
+    style RC15 fill:rgba(255,50,50,0.2),stroke:#ff3333
+```
+
+### 8.3 Nguyên Nhân Gốc (Root Cause)
+
+**Chuỗi nguyên nhân:**
+
+1. **Fresh cluster start (Epoch 0):** Tất cả 5 nodes khởi động từ genesis đồng thời.
+2. **DAG non-determinism tại round sớm:** Trong 15 rounds đầu, thứ tự nhận block khác nhau giữa các node → m2/m3 evaluate leader khác m0/m1/m4 cho cùng commit slot.
+3. **DIGEST-GATE hoạt động đúng (ban đầu):**
+   - m0/m1/m4 (3 nodes = quorum cho n=5): digest match → dispatch ngay ✅
+   - m2/m3 (2 nodes ≠ quorum): buffer → chờ CertifiedCommit ✅
+4. **Thất bại tại bước Resolution — 2 khả năng:**
+   - **Cold-start bypass** (`commit_syncer.rs:3042`): `highest_accepted_round() == 0` → quorum verification bị tắt hoàn toàn. Nếu m2 fetch từ m3, nó chấp nhận commit lệch mà không kiểm tra.
+   - **CommitVoteMonitor chưa khởi tạo** (`consensus_node.rs:1341`): `get_digest_verifier()` trả về `None` → tất cả commit bị buffer → nhưng không có CertifiedCommit trong giai đoạn genesis.
+
+```mermaid
+flowchart TD
+    RC["🔴 ROOT CAUSE: Leader Election Non-Determinism + Cold-Start Bypass"] --> L1["m0/m1/m4: Leader X<br/>(auth_idx=A, eth=0xb7C5...)"]
+    RC --> L2["m2/m3: Leader Y<br/>(auth_idx=B, eth=0xCCc7...)"]
+    L1 --> D1["DIGEST-GATE: 3/5 = quorum ✅<br/>→ dispatch immediately"]
+    L2 --> D2["DIGEST-GATE: 2/5 ≠ quorum<br/>→ buffer (correct)"]
+    D2 --> P1{"CertifiedCommit<br/>Resolution"}
+    P1 --> |"Fetch from m0/m1/m4"| FIX["Fork PREVENTED ✅"]
+    P1 --> |"Fetch from m2/m3<br/>+ cold-start bypass"| FORK["Fork OCCURS ❌"]
+    P1 --> |"Monitor not initialized<br/>+ no CertifiedCommit available"| STALL["Commit stuck in buffer<br/>→ eventually times out → FORK"]
+
+    style RC fill:rgba(255,50,50,0.3),stroke:#ff3333
+    style FORK fill:rgba(255,50,50,0.3),stroke:#ff3333
+    style FIX fill:rgba(50,255,50,0.3),stroke:#33ff33
+```
+
+### 8.4 Nghịch Lý stateRoot GIỐNG — Transaction Permutation
+
+> Giống Block 146: **stateRoot giống nhưng txRoot khác** do Transaction Permutation.
+
+Khi 2 partitions chọn leader khác nhau → sub-dag khác → tập giao dịch mỗi block khác → txRoot khác. Tuy nhiên, **tổng hợp tất cả giao dịch từ Genesis** giống nhau → cumulative EVM state giống → stateRoot giống.
+
+Điều này chỉ xảy ra khi fork mới bắt đầu. Sau vài block, state bắt đầu phân tán (xem Block 55+: stateRoot của m2/m3 đã hoàn toàn khác m0/m1/m4).
+
+### 8.5 Hardening Đã Triển Khai (May 2026)
+
+| Fix | File | Mô tả | Trạng thái |
+|---|---|---|---|
+| **STRICT QUORUM ENFORCEMENT** | `commit_syncer.rs:3042` | Loại bỏ hoàn toàn `is_cold_start` bypass. MỌI block tạo ra phải có đủ 2f+1 votes từ network, kể cả lúc mới khởi động (chờ retry loop tự nhiên). | ✅ Đã triển khai |
+| **FORK-FORENSIC structured logging** | `processor.rs` (6 điểm) | Log đầy đủ `auth_idx`, `eth_address`, `digest`, `epoch`, `txs` tại mọi dispatch path và leader mismatch | ✅ Đã triển khai |
+| **Leader divergence detection** | `processor.rs` (3 paths) | Detect và log chi tiết khi CertifiedCommit thay thế local commit có leader khác | ✅ Đã triển khai |
+| **Existing: DIGEST-GATE** | `processor.rs` | Buffer local commits, chờ quorum digest hoặc CertifiedCommit | ✅ Active |
+| **Existing: COLD-START-GUARD** | `linearizer.rs:162-184` | Guard kiểm tra ancestor blocks trước khi commit | ✅ Active |
+| **Existing: RECOVERY-GUARD** | `authority_node.rs:335-365` | Lock local committer cho đến khi có 5 CertifiedCommit từ network | ✅ Active |
+
+### 8.6 Khuyến Nghị Tăng Cường (Backlog)
+
+1. **CommitVoteMonitor early initialization:** Khởi tạo CommitVoteMonitor TRƯỚC khi consensus bắt đầu xử lý commit, đảm bảo `get_digest_verifier()` không bao giờ trả về `None` khi có commit đầu tiên.
+
+### 8.7 Phát Hiện Fork Do LeaderStore Ghi Đè (May 2026)
+
+> **Vấn đề:** Trong các lần test cluster có reset DAG (`auto_test.sh`), `stateRoot` giống nhau hoàn toàn nhưng `txRoot` và `receiptsRoot` bị fork giữa các node. Đồng thời `leaderAddress` cũng bị sai lệch.
+
+**Root Cause:**
+1. Khi chạy lại test (wipe DAG nhưng giữ lại storage `leader_addresses.json`), DAG của `Mysticeti` sẽ build lại từ genesis (vì là test run mới).
+2. Do tính chất network-dependent của DAG, các block được gom vào `Commit 197` trong lần test mới khác với lần test cũ → **dẫn đến `txRoot` khác nhau** ngay cả khi state chưa bị thay đổi (các giao dịch có thể là no-op hoặc chưa thực thi).
+3. Tuy nhiên, `CommitProcessor` lại dùng `LeaderStore` đọc `leader_addresses.json` cũ từ đĩa và **ghi đè** leader của DAG hiện tại bằng leader của lần test trước đó.
+4. Điều này dẫn đến Go execution nhận `leaderAddress` cũ (sai lệch với DAG hiện tại) và ghi log ra block.
+
+**Giải Pháp Đã Triển Khai:**
+- **Loại bỏ hoàn toàn `LeaderStore` khỏi `wal.rs` và `processor.rs`:** `LeaderStore` là một phương pháp sai lầm để xử lý khởi động lại, vì nó force một leader cũ vào một DAG mới có transaction batching hoàn toàn khác.
+- Việc phục hồi leader của các commit cũ hiện nay dựa hoàn toàn vào **network sync** (các struct `Commit` sync từ peer đã được embedded sẵn `leader_address` chính xác) hoặc tính toán trực tiếp từ `epoch_eth_addresses` nếu tự build DAG.
+- Việc xoá `LeaderStore` đảm bảo **100% không inject stale data** vào các node bị wipe DAG, giúp cluster luôn tiến về phía trước một cách đồng thuận tuyệt đối trên cùng cấu trúc DAG và transaction roots.
+2. **Leader election determinism audit:** Kiểm tra `Linearizer::linearize_sub_dag()` để đảm bảo DAG traversal là hoàn toàn deterministic bất kể thứ tự nhận block.

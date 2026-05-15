@@ -316,10 +316,11 @@ impl ExecutorClient {
 
                 // Log validators for debugging
                 for (idx, validator) in data.validators.iter().enumerate() {
-                    let auth_key_preview = if validator.authority_key.len() > 50 {
-                        format!("{}...", &validator.authority_key[..50])
+                    let auth_hex = hex::encode(&validator.authority_key);
+                    let auth_key_preview = if auth_hex.len() > 50 {
+                        format!("{}...", &auth_hex[..50])
                     } else {
-                        validator.authority_key.clone()
+                        auth_hex
                     };
                     info!("📥 [RUST←GO] EpochBoundaryData Validator[{}]: address={}, stake={}, name={}, authority_key={}",
                         idx, validator.address, validator.stake, validator.name, auth_key_preview);

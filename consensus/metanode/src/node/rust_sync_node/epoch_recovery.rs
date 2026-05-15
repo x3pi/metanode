@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::network::peer_rpc::query_peer_epoch_boundary_data;
-use base64::Engine;
 
 impl RustSyncNode {
     /// Process queue - drain ready commits and send to Go sequentially (Phase 3)
@@ -90,19 +89,8 @@ impl RustSyncNode {
                                             && !response.validators.is_empty()
                                         {
                                             let mut sorted = response.validators.clone();
-                                            let decode_key = |key: &str| -> Vec<u8> {
-                                                if key.starts_with("0x") {
-                                                    hex::decode(&key[2..]).unwrap_or_default()
-                                                } else if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(key) {
-                                                    decoded
-                                                } else {
-                                                    hex::decode(key).unwrap_or_default()
-                                                }
-                                            };
                                             sorted.sort_by(|a, b| {
-                                                let decoded_a = decode_key(&a.authority_key);
-                                                let decoded_b = decode_key(&b.authority_key);
-                                                decoded_a.cmp(&decoded_b)
+                                                a.authority_key.cmp(&b.authority_key)
                                             });
                                             let addr_list: Vec<Vec<u8>> = sorted
                                                 .iter()
@@ -131,19 +119,8 @@ impl RustSyncNode {
                             match self.executor_client.get_epoch_boundary_data(epoch).await {
                                 Ok((_e, _ts, _boundary, validators, _, _)) => {
                                     let mut sorted_validators = validators.clone();
-                                    let decode_key = |key: &str| -> Vec<u8> {
-                                        if key.starts_with("0x") {
-                                            hex::decode(&key[2..]).unwrap_or_default()
-                                        } else if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(key) {
-                                            decoded
-                                        } else {
-                                            hex::decode(key).unwrap_or_default()
-                                        }
-                                    };
                                     sorted_validators.sort_by(|a, b| {
-                                        let decoded_a = decode_key(&a.authority_key);
-                                        let decoded_b = decode_key(&b.authority_key);
-                                        decoded_a.cmp(&decoded_b)
+                                        a.authority_key.cmp(&b.authority_key)
                                     });
                                     let addr_list: Vec<Vec<u8>> = sorted_validators
                                         .iter()

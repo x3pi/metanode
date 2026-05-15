@@ -708,6 +708,33 @@ PROCESS_BLOCK:
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORENSIC COMMIT FINGERPRINT (Phase 3 — Fork Diagnosis)
+	//
+	// Log the complete identity of every commit dispatched from Rust.
+	// This enables immediate fork diagnosis by comparing logs across nodes
+	// without needing to correlate Rust consensus logs.
+	// ═══════════════════════════════════════════════════════════════════════════
+	{
+		leaderBytes := epochData.GetLeaderAddress()
+		commitDigest := epochData.GetCommitDigest()
+		leaderHex := fmt.Sprintf("0x%x", leaderBytes)
+		if len(leaderBytes) == 20 {
+			leaderHex = fmt.Sprintf("0x%X", leaderBytes)
+		}
+		digestHex := "nil"
+		if len(commitDigest) > 0 {
+			if len(commitDigest) >= 4 {
+				digestHex = fmt.Sprintf("0x%x", commitDigest[:4])
+			} else {
+				digestHex = fmt.Sprintf("0x%x", commitDigest)
+			}
+		}
+		logger.Info("🔍 [COMMIT-FINGERPRINT] block=#%d GEI=%d epoch=%d commitIdx=%d leader=%s digest=%s txs=%d",
+			*currentBlockNumber, globalExecIndex, epochNum, commitIndex,
+			leaderHex, digestHex, len(allTransactions))
+	}
+
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
