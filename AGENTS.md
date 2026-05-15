@@ -91,6 +91,7 @@ Kết thúc MỌI response bằng một khối tóm tắt tiếng Việt theo đ
 ### 📋 Tóm tắt thay đổi
 - **Đã thay đổi:** [liệt kê file/struct/function bị ảnh hưởng]
 - **Blast radius:** [upstream/downstream bị tác động]
+- **🐛 Nguyên nhân lỗi:** [nếu là fix bug — mô tả tóm tắt root cause, ví dụ: race condition, nil pointer, sai thứ tự khởi tạo, thiếu lock, v.v.]
 - **Rủi ro tiềm ẩn:** [concurrency, state drift, breaking changes]
 - **Lưu ý hiệu năng:** [memory, latency, throughput nếu liên quan]
 ---

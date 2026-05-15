@@ -537,20 +537,55 @@ impl CommitProcessor {
                                 // was pruned from digest_history in CommitVoteMonitor).
                                 // If quorum_commit_index >> local_idx, the network has
                                 // already moved past this commit = implicitly verified.
-                                let quorum_gc_bypass = if let Some(ref qci) = _quorum_commit_index_ref {
-                                    let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
-                                    // DIGEST_HISTORY_RETAIN in CommitVoteMonitor is 50_000.
-                                    // If quorum is more than 50_000 past this commit, the
-                                    // digest entry was GC'd — the commit IS verified.
-                                    qci_val > local_idx + 50_000
+                                let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
+                                    qci.load(std::sync::atomic::Ordering::Relaxed)
+                                } else {
+                                    0
+                                };
+                                let quorum_gc_bypass = qci_val > local_idx + 50_000;
+
+                                // ═══════════════════════════════════════════════════════
+                                // COLD-START-BYPASS (May 2026):
+                                // After epoch transition, CommitVoteMonitor restarts with
+                                // no history. digest_verifier always returns None because
+                                // no votes exist yet. quorum_commit_index stays at 0.
+                                // This creates a PERMANENT DEADLOCK: the gate requires
+                                // verification that can never arrive.
+                                //
+                                // Fix: If qci==0 (verification infrastructure entirely
+                                // non-functional) AND the commit has waited >=30s,
+                                // dispatch it. Once qci>0, normal verification resumes.
+                                //
+                                // Fork safety: qci==0 means NO node in the cluster has
+                                // quorum data for this epoch yet. All nodes are in the
+                                // same cold-start state producing identical local commits.
+                                // ═══════════════════════════════════════════════════════
+                                let cold_start_bypass = if qci_val == 0 {
+                                    if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
+                                        let now = std::time::Instant::now();
+                                        let age = now.duration_since(*pending_ts);
+                                        age.as_secs() >= 30
+                                    } else {
+                                        false
+                                    }
                                 } else {
                                     false
                                 };
+
                                 if quorum_gc_bypass {
                                     info!(
                                         "✅ [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
                                          quorum_commit_index has advanced far past this commit. \
                                          Digest entry was GC'd = implicitly verified by quorum.",
+                                        local_idx
+                                    );
+                                    verified_indices.push(local_idx);
+                                } else if cold_start_bypass {
+                                    warn!(
+                                        "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 30s wait. \
+                                         quorum_commit_index=0 (verification infrastructure non-functional). \
+                                         This is expected during epoch transition cold-start. \
+                                         Normal DIGEST-GATE verification will resume once qci>0.",
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
@@ -562,6 +597,7 @@ impl CommitProcessor {
                         }
                     }
                     // Dispatch verified commits in strict ascending order
+                    let mut digest_gate_epoch_break = false;
                     for local_idx in verified_indices {
                         if let Some(mut confirmed) = pending_local_commits.remove(&local_idx) {
                             pending_local_timestamps.remove(&local_idx);
@@ -645,10 +681,14 @@ impl CommitProcessor {
                                         }
                                     }
                                     info!("🛑 [STATION 3: PROCESSOR] Halting for EndOfEpoch in digest-gate confirmed commit.");
+                                    digest_gate_epoch_break = true;
                                     break;
                                 }
                             }
                         }
+                    }
+                    if digest_gate_epoch_break {
+                        break; // break from outer main loop
                     }
                 }
             }
@@ -685,19 +725,31 @@ impl CommitProcessor {
                                 }
                             }
                             None => {
-                                // QUORUM-GC-BYPASS: Same logic as DIGEST-GATE POLL path.
-                                if let Some(ref qci) = _quorum_commit_index_ref {
-                                    let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
-                                    if qci_val > next_expected_index + 50_000 {
-                                        info!(
-                                            "✅ [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
-                                             digest GC'd, quorum={} >> commit. Implicitly verified.",
-                                            next_expected_index, qci_val
-                                        );
-                                        true
-                                    } else {
-                                        false
-                                    }
+                                // QUORUM-GC-BYPASS + COLD-START-BYPASS: Same logic as DIGEST-GATE POLL path.
+                                let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
+                                    qci.load(std::sync::atomic::Ordering::Relaxed)
+                                } else {
+                                    0
+                                };
+                                if qci_val > next_expected_index + 50_000 {
+                                    info!(
+                                        "✅ [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
+                                         digest GC'd, quorum={} >> commit. Implicitly verified.",
+                                        next_expected_index, qci_val
+                                    );
+                                    true
+                                } else if qci_val == 0 {
+                                    // COLD-START-BYPASS: Same rationale as DIGEST-GATE POLL.
+                                    // In OOO path, commit was already waiting in pending_commits
+                                    // (arrived out of order). If qci==0, verification infra is
+                                    // non-functional — safe to dispatch.
+                                    warn!(
+                                        "⚡ [DIGEST-GATE-OOO COLD-START-BYPASS] Commit {} dispatching. \
+                                         quorum_commit_index=0 (epoch cold-start). Normal verification \
+                                         will resume once qci>0.",
+                                        next_expected_index
+                                    );
+                                    true
                                 } else {
                                     false
                                 }
