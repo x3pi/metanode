@@ -4,11 +4,9 @@
 //! Validator → SyncOnly demotion and role determination helpers.
 
 use crate::config::NodeConfig;
-use crate::node::{ConsensusNode, NodeMode};
+use crate::node::NodeMode;
 use anyhow::Result;
 
-use std::time::Duration;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 /// CROSS-EPOCH DEMOTION: Validator → SyncOnly with epoch catch-up
