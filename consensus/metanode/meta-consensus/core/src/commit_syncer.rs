@@ -3039,14 +3039,12 @@ impl<C: NetworkClient> Inner<C> {
         //   because vote blocks genuinely don't exist yet. Safety relies on
         //   commit chain integrity (previous_digest chaining verified above).
         // ═══════════════════════════════════════════════════════════════════
-        let is_cold_start = self.dag_state.read().highest_accepted_round() == 0;
-
-        if !is_cold_start && !stake_aggregator.reached_threshold(&self.context.committee) {
+        if !stake_aggregator.reached_threshold(&self.context.committee) {
             let accumulated_stake = stake_aggregator.stake();
             tracing::warn!(
                 "🚨 [COMMIT-SYNCER] Rejecting commits from peer {}: insufficient quorum votes \
                  for end commit {} (accumulated_stake={}, needed=2f+1). \
-                 This prevents single-peer fork attacks.",
+                 This prevents single-peer fork attacks. STRICT ENFORCEMENT, NO BYPASS.",
                 peer,
                 end_commit_ref,
                 accumulated_stake,
@@ -3056,15 +3054,6 @@ impl<C: NetworkClient> Inner<C> {
                 peer,
                 commit: Box::new(end_commit.clone()),
             });
-        }
-
-        if is_cold_start {
-            tracing::info!(
-                "⚠️ [COMMIT-SYNCER COLD-START] DAG is empty (highest_accepted_round=0). \
-                 Trusting peer {} commit chain without quorum verification. \
-                 Safety: commit chain integrity verified via previous_digest chaining.",
-                peer
-            );
         }
 
         let trusted_commits = commits
