@@ -1171,20 +1171,27 @@ impl CommitProcessor {
 
                         // SAFETY: Limit pending_commits size to prevent OOM
                         const MAX_PENDING_COMMITS: usize = 5000;
-                        if pending_commits.len() >= MAX_PENDING_COMMITS {
-                            warn!(
-                                "🚨 [STATION 3: PROCESSOR] pending_commits at capacity ({})! \
-                                Dropping out-of-order commit {} (expected {}). \
-                                This indicates severe downstream overload at Station 4.",
-                                MAX_PENDING_COMMITS, commit_index, next_expected_index
-                            );
-                            continue;
+                        pending_commits.insert(commit_index, subdag);
+                        
+                        // SMART EVICTION: Instead of dropping the incoming commit (which might be 
+                        // close to next_expected_index), we always evict the commit that is 
+                        // FARTHEST in the future using pop_last(). The CommitSyncer will safely 
+                        // re-fetch it later when the node catches up.
+                        while pending_commits.len() > MAX_PENDING_COMMITS {
+                            if let Some((dropped_idx, _)) = pending_commits.pop_last() {
+                                warn!(
+                                    "🚨 [STATION 3: PROCESSOR] pending_commits at capacity ({})! \
+                                    Evicted farthest future commit {} (expected {}). \
+                                    CommitSyncer will re-fetch this later.",
+                                    MAX_PENDING_COMMITS, dropped_idx, next_expected_index
+                                );
+                            }
                         }
+
                         warn!(
                             "Received out-of-order commit: index={}, expected={}, pending_count={}, storing for later",
                             commit_index, next_expected_index, pending_commits.len()
                         );
-                        pending_commits.insert(commit_index, subdag);
 
                         // FORK-SAFETY FIX: We NO LONGER jump forward heuristically!
                         // If the node is catching up and pending_commits grows large,
