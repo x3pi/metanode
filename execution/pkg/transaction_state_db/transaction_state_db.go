@@ -260,7 +260,6 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 				}
 			}
 		}
-		}
 		logger.Info("✅ [txDB Phase 1] Marshalling & Trie BatchUpdate completed in %v", time.Since(marshalTimeStart))
 	} else {
 		logger.Debug("Commit: No dirty transactions to process. Proceeding to commit current trie state.")
