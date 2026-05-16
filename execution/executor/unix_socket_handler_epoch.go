@@ -1322,6 +1322,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			rh.snapshotManager.WaitForPersistence()
 		}
 	}
+
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {

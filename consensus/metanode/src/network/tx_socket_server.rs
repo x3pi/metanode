@@ -229,7 +229,7 @@ impl TxSocketServer {
                                 drop(node_guard);
                                 attempt += 1;
                                 if attempt % 60 == 0 {
-                                    warn!("⏳ [FFI TX FLOW] Node still catching up. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
+                                    tracing::warn!("⚠️ [FFI TX FLOW] [DEADLOCK-MONITOR] Backpressure: Rust FFI transaction channel is full (50K capacity)!");
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                                 continue;
@@ -270,24 +270,36 @@ impl TxSocketServer {
                 // let chunk_len = chunk_vec.len();
                 
                 let epoch_pending_ptr = if let Some(ref node_mutex) = node {
-                    let node_guard = node_mutex.lock().await;
-                    Some(node_guard.epoch_pending_transactions.clone())
+                    let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_mutex.lock()).await;
+                    match lock_result {
+                        Ok(node_guard) => Some(node_guard.epoch_pending_transactions.clone()),
+                        Err(_) => {
+                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending_ptr extraction due to node lock timeout");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
 
                 if let Some(epoch_pending_mutex) = epoch_pending_ptr {
-                    let mut epoch_pending = epoch_pending_mutex.lock().await;
-                    for tx in chunk_vec.clone() {
-                        let hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(&tx);
-                        epoch_pending.insert(hash, tx);
-                    }
-                    
-                    if epoch_pending.len() % 5000 == 0 && epoch_pending.len() > 0 {
-                        tracing::debug!(
-                            "🗑️ [DEBUG-RÁC] epoch_pending_transactions đang chứa {} giao dịch đang chờ commit",
-                            epoch_pending.len()
-                        );
+                    match tokio::time::timeout(std::time::Duration::from_millis(200), epoch_pending_mutex.lock()).await {
+                        Ok(mut epoch_pending) => {
+                            for tx in chunk_vec.clone() {
+                                let hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(&tx);
+                                epoch_pending.insert(hash, tx);
+                            }
+                            
+                            if epoch_pending.len() % 5000 == 0 && epoch_pending.len() > 0 {
+                                tracing::debug!(
+                                    "🗑️ [DEBUG-RÁC] epoch_pending_transactions đang chứa {} giao dịch đang chờ commit",
+                                    epoch_pending.len()
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending insertion due to mutex lock timeout");
+                        }
                     }
                 }
 
