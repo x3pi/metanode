@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,23 +74,9 @@ func resolveLogRoot(root string) (string, error) {
 // normalizeEpochToPath converts an epoch string (e.g. "2") to the epoch directory name ("epoch_2").
 // Nếu epoch rỗng, sử dụng epoch hiện tại từ GetGlobalEpoch().
 func normalizeEpochToPath(epoch string) (string, error) {
-	epoch = strings.TrimSpace(epoch)
-	if epoch == "" {
-		// Sử dụng epoch hiện tại
-		return fmt.Sprintf("epoch_%d", GetGlobalEpoch()), nil
-	}
-
-	// Hỗ trợ cả "epoch_2" và "2"
-	if strings.HasPrefix(epoch, "epoch_") {
-		epoch = strings.TrimPrefix(epoch, "epoch_")
-	}
-
-	epochNum, err := strconv.ParseUint(epoch, 10, 64)
-	if err != nil {
-		return "", fmt.Errorf("invalid epoch value %q: must be a non-negative integer", epoch)
-	}
-
-	return fmt.Sprintf("epoch_%d", epochNum), nil
+	// Unified node logging: logs are no longer split by epoch directories.
+	// We return an empty string so the root directory is used directly.
+	return "", nil
 }
 
 func ensureWithinRoot(root, target string) error {
@@ -239,8 +224,8 @@ type FileLogger struct {
 
 // getEpochDir trả về tên thư mục epoch hiện tại: "epoch_N"
 func getEpochDir() string {
-	epoch := GetGlobalEpoch()
-	return fmt.Sprintf("epoch_%d", epoch)
+	// Unified node logging: no epoch directory.
+	return ""
 }
 
 // NewFileLogger tạo mới một FileLogger
