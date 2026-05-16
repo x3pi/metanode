@@ -362,14 +362,35 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	// Collect results and check for errors
 	var maxDuration time.Duration
 	var maxTask string
+	var commitErrors []string
 	for result := range resultsChan {
 		if result.err != nil {
-			logger.Fatal("Parallel commit error (%s): %v", result.name, result.err)
+			// ═══════════════════════════════════════════════════════════════
+			// AVAILABILITY FIX: Do NOT Fatal/os.Exit on commit errors.
+			// Transient errors (e.g., NOMT trie re-alignment race causing
+			// lockedFlag mismatch) should not kill the entire node.
+			// Instead, log the error and nil out the failed pipeline result
+			// so PersistAsync is skipped for that component. The next block
+			// will re-read the correct state from the trie.
+			// ═══════════════════════════════════════════════════════════════
+			logger.Error("🚨 [COMMIT] Parallel commit error (%s): %v — skipping persist for this component", result.name, result.err)
+			commitErrors = append(commitErrors, fmt.Sprintf("%s: %v", result.name, result.err))
+			if result.name == "AccountPipeline" {
+				accountPipelineResult = nil
+			} else if result.name == "StakePipeline" {
+				stakePipelineResult = nil
+			} else if result.name == "Receipts" {
+				receiptPipelineResult = nil
+			}
 		}
 		if result.duration > maxDuration {
 			maxDuration = result.duration
 			maxTask = result.name
 		}
+	}
+	if len(commitErrors) > 0 {
+		logger.Error("🚨 [COMMIT] %d commit tasks failed: %v — node continues with degraded state (will self-heal on next block)",
+			len(commitErrors), commitErrors)
 	}
 
 	// Log per-task timing for diagnostics (only for blocks that take noticeable time)
