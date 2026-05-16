@@ -522,7 +522,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 }
 
 // ProcessTransactionsInPool retrieves transactions from the pool and processes them
-func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool) (
+func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTime uint64) (
 	tx_processor.ProcessResult,
 	error,
 ) {
@@ -587,7 +587,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool) (
 		baseCtx = ctx
 		rootSpan = nil
 	}
-	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, uint64(time.Now().Unix()))
+	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime)
 }
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding

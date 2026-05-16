@@ -133,7 +133,19 @@ func (bp *BlockProcessor) ProcessorPool() {
 			// during the entire block commit cycle (71% of wall time).
 			// AccountStateDB.lockedFlag provides the necessary safety.
 			setEmptyBlock := false
-			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock)
+
+			// CRITICAL FORK-SAFETY FIX: Use deterministic blockTime passed from consensus
+			// (epoch start) to ensure EVM execution is identical across the cluster, preventing StateRoot forks.
+			blockTimeSec := bp.chainState.GetCurrentEpochStartTimestampMs() / 1000
+			if blockTimeSec == 0 {
+				if lastHeader := bp.chainState.GetcurrentBlockHeader(); lastHeader != nil {
+					blockTimeSec = lastHeader.TimeStamp() + 1
+				} else {
+					blockTimeSec = uint64(time.Now().Unix()) // Absolute fallback
+				}
+			}
+
+			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec)
 			if err == nil {
 				bp.inputTxCounter.Add(int64(len(processResult.Transactions)))
 				bp.ProcessedInputTxCount.Add(uint64(len(processResult.Transactions)))
