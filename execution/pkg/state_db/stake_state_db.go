@@ -565,15 +565,25 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		// ═══════════════════════════════════════════════════════════════
 
 	} else {
+		// ═══════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY: When called from Commit (lockProcess=false),
+		// DO NOT iterate or process dirtyValidators at all.
+		//
+		// IntermediateRoot(true) already:
+		// 1. Applied ALL dirty validators to the in-memory trie
+		// 2. Cleared dirtyValidators immediately after
+		// 3. Computed and cached the correct hash
+		// ═══════════════════════════════════════════════════════════════
 		if !db.lockedFlag.Load() {
 			err := errors.New("IntermediateRoot (lockProcess=false): db.lockedFlag is not locked")
 			logger.Error(err.Error())
 			return common.Hash{}, err
 		}
 		defer func() {
-			db.dirtyValidators.Clear()
 			db.lockedFlag.Store(false)
 		}()
+		
+		return db.trie.Hash(), nil
 	}
 
 	if db.trie == nil {
@@ -694,6 +704,12 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			}
 		}
 	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// CRITICAL FORK-SAFETY: Clear dirtyValidators IMMEDIATELY after
+	// applying to the trie.
+	// ═══════════════════════════════════════════════════════════════
+	db.dirtyValidators.Clear()
 
 	if updateErr != nil {
 		return common.Hash{}, updateErr
