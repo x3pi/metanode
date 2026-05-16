@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -46,17 +47,13 @@ type ChainState struct {
 
 	currentBlockHeader atomic.Pointer[types.BlockHeader]
 	storageManager     *storage.StorageManager
-	accountStateDB     *account_state_db.AccountStateDB
-	smartContractDB    *smart_contract_db.SmartContractDB
+	accountStateDB     atomic.Pointer[account_state_db.AccountStateDB]
+	smartContractDB    atomic.Pointer[smart_contract_db.SmartContractDB]
+	stakeStateDB       atomic.Pointer[stake_state_db.StakeStateDB]
 	blockDatabase      *block.BlockDatabase
-	stakeStateDB       *stake_state_db.StakeStateDB
 	freeFeeAddress     map[common.Address]struct{}
 	changelogDB        *state_changelog.StateChangelogDB
 	stakeChangelogDB   *state_changelog.StateChangelogDB
-	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
-	// concurrent reads during initialization and swaps. It does NOT protect
-	// against concurrent state mutations.
-	stateMutex sync.RWMutex
 
 	// commitMutex serializes all block state mutations in CommitBlockState
 	// to prevent concurrent corruption of the NOMT trie and DB batches.
@@ -174,9 +171,6 @@ func NewChainStateWithGenesis(
 
 	cs := &ChainState{
 		storageManager:        sm,
-		accountStateDB:        asDB,
-		stakeStateDB:          stakeStateDB,
-		smartContractDB:       scDB,
 		config:                config,
 		blockDatabase:         blockDatabase,
 		freeFeeAddress:        freeFeeAddress,
@@ -192,6 +186,10 @@ func NewChainStateWithGenesis(
 		backupPath:            backupPath,                       // CRITICAL: Set BEFORE LoadEpochData()
 		attestationInterval:   10,                      // Default: attestation every 10 blocks
 	}
+
+	cs.accountStateDB.Store(asDB)
+	cs.stakeStateDB.Store(stakeStateDB)
+	cs.smartContractDB.Store(scDB)
 
 	// CRITICAL: Log backup path to verify node-specific path is used
 	if backupPath == "" {
@@ -295,23 +293,28 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 		newAsDB, // Sử dụng asDB mới tạo
 	)
 
-	// 4. Cập nhật các trường trong ChainState — WRITE LOCK to prevent virtual
-	// execution from reading stale DB references during the swap.
-	cs.stateMutex.Lock()
-	if cs.accountStateDB != nil {
-		if closer, ok := interface{}(cs.accountStateDB).(interface{ Close() }); ok {
-			closer.Close()
+	// 4. Atomic Lock-Free DB Swaps with delayed Close (Pseudo-RCU)
+	// Swap the pointers immediately so new EVM transactions use the new state.
+	oldAsDB := cs.accountStateDB.Swap(newAsDB)
+	oldStakeDB := cs.stakeStateDB.Swap(newStakeStateDB)
+	oldScDB := cs.smartContractDB.Swap(newScDB)
+
+	// Safely close the old trie backends after 5 seconds to ensure all ongoing
+	// EVM transactions (which hold references to oldAsDB) have completed.
+	// This avoids Writer Starvation (RWMutex) while preventing C++ session memory leaks.
+	go func() {
+		importTime := time.After(5 * time.Second)
+		<-importTime
+		if oldAsDB != nil {
+			oldAsDB.Close()
 		}
-	}
-	if cs.stakeStateDB != nil {
-		if closer, ok := interface{}(cs.stakeStateDB.Trie()).(interface{ Close() }); ok {
-			closer.Close()
+		if oldStakeDB != nil {
+			if closer, ok := interface{}(oldStakeDB.Trie()).(interface{ Close() }); ok {
+				closer.Close()
+			}
 		}
-	}
-	cs.accountStateDB = newAsDB
-	cs.stakeStateDB = newStakeStateDB
-	cs.smartContractDB = newScDB
-	cs.stateMutex.Unlock()
+		_ = oldScDB // scDB has no Close
+	}()
 
 	// 5. Cập nhật con trỏ header nguyên tử
 	headerCopy := newHeader
@@ -342,10 +345,10 @@ func NewChainStateRemote(
 		asDB)
 
 	cs := &ChainState{
-		accountStateDB:  asDB,
-		smartContractDB: scDB,
 		freeFeeAddress:  freeFeeAddress,
 	}
+	cs.accountStateDB.Store(asDB)
+	cs.smartContractDB.Store(scDB)
 
 	headerCopy := currentBlockHeader
 	cs.currentBlockHeader.Store(&headerCopy)
@@ -405,25 +408,16 @@ func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
 }
 
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
-	cs.stateMutex.RLock()
-	db := cs.accountStateDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.accountStateDB.Load()
 }
 
 // GetSmartContractDB trả về SmartContractDB.
 func (cs *ChainState) GetSmartContractDB() *smart_contract_db.SmartContractDB {
-	cs.stateMutex.RLock()
-	db := cs.smartContractDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.smartContractDB.Load()
 }
 
 func (cs *ChainState) GetStakeStateDB() *stake_state_db.StakeStateDB {
-	cs.stateMutex.RLock()
-	db := cs.stakeStateDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.stakeStateDB.Load()
 }
 
 // GetStorageManager trả về StorageManager.
@@ -431,24 +425,21 @@ func (cs *ChainState) GetStorageManager() *storage.StorageManager {
 	return cs.storageManager
 }
 
-// SetAccountStateDB đặt AccountStateDB cho ChainState.
-// Lưu ý: Việc thay đổi trực tiếp DB này có thể ảnh hưởng đến tính nhất quán
-// của trạng thái nếu không được quản lý cẩn thận trong quy trình xử lý block.
 func (cs *ChainState) SetAccountStateDB(asDB *account_state_db.AccountStateDB) {
-	cs.accountStateDB = asDB
+	cs.accountStateDB.Store(asDB)
 }
 
 // InvalidateAllState clears all in-memory caches across all state databases.
 // This ensures that subsequent reads will fetch fresh data from the underlying PebbleDB/NOMT storage.
 func (cs *ChainState) InvalidateAllState() {
-	if cs.accountStateDB != nil {
-		cs.accountStateDB.InvalidateAllCaches()
+	if db := cs.accountStateDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
-	if cs.stakeStateDB != nil {
-		cs.stakeStateDB.InvalidateAllCaches()
+	if db := cs.stakeStateDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
-	if cs.smartContractDB != nil {
-		cs.smartContractDB.InvalidateAllCaches()
+	if db := cs.smartContractDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
 }
 

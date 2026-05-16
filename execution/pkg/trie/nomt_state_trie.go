@@ -600,13 +600,18 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 				keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 				hexKey := hex.EncodeToString(key)
 
-				// Read old value from NOMT (thread-safe concurrent read)
+				// CRITICAL FORK-SAFETY FIX: Use n.Get(key) instead of n.handle.Read(keyPath).
+				// n.handle.Read() only sees data flushed to disk via CommitPayload.
+				// If a previous block modified this key but hasn't flushed yet,
+				// handle.Read() returns STALE data. This stale data becomes the `oldValue`
+				// passed to NOMT C++, resulting in a divergent Merkle hash (CHAIN BROKEN).
+				// n.Get() correctly checks wDirty, view.dirty, and view.committing first.
 				var oldVal []byte
 				var loaded bool
-				val, found, err := n.handle.Read(keyPath)
-				if err == nil {
+				val, getErr := n.Get(keyCopy)
+				if getErr == nil {
 					loaded = true
-					if found && len(val) > 0 {
+					if len(val) > 0 {
 						oldVal = val
 					}
 				}

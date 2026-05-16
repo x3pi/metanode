@@ -367,9 +367,12 @@ impl CommitProcessor {
         let mut pending_local_commits: BTreeMap<u32, CommittedSubDag> = BTreeMap::new();
         let mut pending_local_timestamps: BTreeMap<u32, std::time::Instant> = BTreeMap::new();
         // At 50k+ TPS (~1000 commits/sec), epoch transitions can stall
-        // for 5-10s = 5000-10000 commits. Set to 500 for local commits
-        // (most resolve via DIGEST-GATE POLL within 200ms cycles).
-        const MAX_PENDING_LOCAL_COMMITS: usize = 500;
+        // for 5-10s = 5000-10000 commits. Set to 2000 for local commits
+        // to absorb 10+ seconds of sustained high-TPS commits.
+        // Previously 500, which caused cascade failure: buffer full → drops
+        // → re-delivery → more drops. 2000 provides sufficient headroom
+        // while COLD-START-BYPASS (10s) resolves the verification deadlock.
+        const MAX_PENDING_LOCAL_COMMITS: usize = 2000;
 
         // ═══════════════════════════════════════════════════════════════
         // LAYER-4 WAL: Write-Ahead Log for crash-safe FFI tracking.
@@ -545,7 +548,7 @@ impl CommitProcessor {
                                 let quorum_gc_bypass = qci_val > local_idx + 50_000;
 
                                 // ═══════════════════════════════════════════════════════
-                                // COLD-START-BYPASS (May 2026):
+                                // COLD-START-BYPASS (May 2026, Tuned May 16):
                                 // After epoch transition, CommitVoteMonitor restarts with
                                 // no history. digest_verifier always returns None because
                                 // no votes exist yet. quorum_commit_index stays at 0.
@@ -553,23 +556,33 @@ impl CommitProcessor {
                                 // verification that can never arrive.
                                 //
                                 // Fix: If qci==0 (verification infrastructure entirely
-                                // non-functional) AND the commit has waited >=30s,
+                                // non-functional) AND the commit has waited >=10s,
                                 // dispatch it. Once qci>0, normal verification resumes.
+                                //
+                                // SUSTAINED-LOAD-BYPASS: Under high TPS, buffer can fill
+                                // before the 10s timeout. If buffer >= 50% AND qci==0
+                                // AND commit waited >= 5s, dispatch early to prevent
+                                // cascade failure (buffer full → drops → re-delivery).
                                 //
                                 // Fork safety: qci==0 means NO node in the cluster has
                                 // quorum data for this epoch yet. All nodes are in the
                                 // same cold-start state producing identical local commits.
                                 // ═══════════════════════════════════════════════════════
-                                let cold_start_bypass = if qci_val == 0 {
+                                let (cold_start_bypass, sustained_load_bypass) = if qci_val == 0 {
                                     if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
                                         let now = std::time::Instant::now();
                                         let age = now.duration_since(*pending_ts);
-                                        age.as_secs() >= 30
+                                        let cold = age.as_secs() >= 10;
+                                        // SUSTAINED-LOAD-BYPASS: 5s timeout when buffer pressure is high
+                                        let sustained = !cold
+                                            && age.as_secs() >= 5
+                                            && pending_local_commits.len() >= MAX_PENDING_LOCAL_COMMITS / 2;
+                                        (cold, sustained)
                                     } else {
-                                        false
+                                        (false, false)
                                     }
                                 } else {
-                                    false
+                                    (false, false)
                                 };
 
                                 if quorum_gc_bypass {
@@ -582,11 +595,22 @@ impl CommitProcessor {
                                     verified_indices.push(local_idx);
                                 } else if cold_start_bypass {
                                     warn!(
-                                        "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 30s wait. \
+                                        "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 10s wait. \
                                          quorum_commit_index=0 (verification infrastructure non-functional). \
                                          This is expected during epoch transition cold-start. \
                                          Normal DIGEST-GATE verification will resume once qci>0.",
                                         local_idx
+                                    );
+                                    verified_indices.push(local_idx);
+                                } else if sustained_load_bypass {
+                                    warn!(
+                                        "⚡ [DIGEST-GATE SUSTAINED-LOAD-BYPASS] Commit {} dispatching after 5s \
+                                         (buffer at {}/{} = {}%). qci=0, dispatching early to prevent \
+                                         cascade buffer saturation.",
+                                        local_idx,
+                                        pending_local_commits.len(),
+                                        MAX_PENDING_LOCAL_COMMITS,
+                                        (pending_local_commits.len() * 100) / MAX_PENDING_LOCAL_COMMITS
                                     );
                                     verified_indices.push(local_idx);
                                 } else {
