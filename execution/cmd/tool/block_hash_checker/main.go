@@ -840,6 +840,23 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		return false
 	}
 
+	// BLOCK-HEIGHT-GAP DETECTION (May 2026): Warn when some nodes are
+	// significantly behind the majority. This is a diagnostic indicator —
+	// the lagging node may have stale state (e.g., from resolve_leader_address
+	// timeout) that produces different block content at the same height.
+	if maxBlock > 0 && minBlock > 0 {
+		gap := maxBlock - minBlock
+		if gap > 50 {
+			fmt.Printf(" ⚠️ [HEIGHT-GAP] Block height gap = %d (min=%d, max=%d). ", gap, minBlock, maxBlock)
+			for _, r := range results {
+				if r.err == nil && r.block < maxBlock-50 {
+					fmt.Printf("%s is %d blocks behind! ", r.name, maxBlock-r.block)
+				}
+			}
+			fmt.Printf("Hash comparison limited to block %d→%d (lagging node range).\n", minBlock-uint64(checkLast)+1, minBlock)
+		}
+	}
+
 	from := minBlock
 	if from > uint64(checkLast) {
 		from = minBlock - uint64(checkLast) + 1

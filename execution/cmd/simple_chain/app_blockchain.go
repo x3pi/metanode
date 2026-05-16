@@ -812,7 +812,19 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 	}
 	logger.Info("Stake state committed successfully, hash=%s", commitHash.Hex())
 
-	app.startLastBlock.Header().SetStakeStatesRoot(hashStake)
+	// GENESIS-FIX (May 2026): Use commitHash (post-Commit authoritative root)
+	// instead of hashStake (pre-Commit IntermediateRoot).
+	// ROOT CAUSE: On NOMT backend, IntermediateRoot() returns 0x0 BEFORE the
+	// commit runs because NOMT only computes the real root during Commit().
+	// Using hashStake=0x0 causes a false STARTUP error on every fresh boot:
+	//   "NOMT stake_db handle root (0x7f2b...) differs from header StakeStatesRoot (0x0...)"
+	// The self-healing code patches it, but the error log is misleading.
+	stakeRoot := commitHash
+	if stakeRoot == (e_common.Hash{}) && hashStake != (e_common.Hash{}) {
+		// Fallback for non-NOMT backends where Commit returns empty but IntermediateRoot is valid
+		stakeRoot = hashStake
+	}
+	app.startLastBlock.Header().SetStakeStatesRoot(stakeRoot)
 	saveErr := blockDatabase.SaveLastBlock(app.startLastBlock)
 	if saveErr != nil {
 		logger.Error("❌ [GENESIS] Failed to SaveLastBlock: %v", saveErr)
