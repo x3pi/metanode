@@ -573,9 +573,9 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	response := &pb.LastBlockNumberResponse{
-		LastBlockNumber:        returnBlockNumber,
-		LastGlobalExecIndex:    lastGEI,
-		IsReady:                isReady,
+		LastBlockNumber:     returnBlockNumber,
+		LastGlobalExecIndex: lastGEI,
+		IsReady:             isReady,
 		// CRITICAL FIX: Return the actual BlockHash in the LastExecutedCommitHash field.
 		// POST-GATE-VERIFY in Rust relies on this to compare against the peer's block_hash.
 		// Returning the DAG commit hash here caused a state mismatch false positive!
@@ -1176,10 +1176,10 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	if upperBound > lastBlockNumber {
 		upperBound = lastBlockNumber
 	}
-	
+
 	lastHandledCommit := storage.GetLastHandledCommitIndex()
 	lastHandledEpoch := storage.GetLastHandledCommitEpoch()
-	
+
 	for blockNum := startBlock; blockNum <= upperBound; blockNum++ {
 		if uint64(len(blocks)) >= maxBatch {
 			break
@@ -1199,7 +1199,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		header := blk.Header()
-		
+
 		// ═══════════════════════════════════════════════════════════════════
 		// CRITICAL FORK-SAFETY (May 2026): Prevent serving partial commits!
 		// m1 uses these blocks to set its lastHandledCommitIndex. If we send blocks
@@ -1207,7 +1207,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 		// commit when consensus resumes.
 		// ═══════════════════════════════════════════════════════════════════
 		if header.Epoch() > lastHandledEpoch || (header.Epoch() == lastHandledEpoch && header.CommitIndex() > uint64(lastHandledCommit)) {
-			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)", 
+			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)",
 				blockNum, header.CommitIndex(), lastHandledCommit, lastHandledEpoch)
 			break
 		}
@@ -1409,7 +1409,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				commitIdx32 := uint32(header.CommitIndex())
 				currentEpoch := header.Epoch()
 				lastEpoch := storage.GetLastHandledCommitEpoch()
-				
+
 				if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 					storage.ForceSetLastHandledCommitIndex(commitIdx32)
 					storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1445,7 +1445,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			commitIdx32 := uint32(header.CommitIndex())
 			currentEpoch := header.Epoch()
 			lastEpoch := storage.GetLastHandledCommitEpoch()
-			
+
 			if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 				storage.ForceSetLastHandledCommitIndex(commitIdx32)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1479,7 +1479,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				var hasRootBefore bool
 				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
 					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
-					
+
 					// ═══════════════════════════════════════════════════════════════
 					// PRE-EXECUTION VERIFICATION:
 					// Metanode block headers store the PRE-EXECUTION state root.
@@ -1510,7 +1510,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						expectedAccountRoot := header.AccountStatesRoot()
-						
+
 						// Show before→after delta when available
 						if hasRootBefore {
 							logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): beforeApply=%s → afterApply=%s, headerExpected(pre)=%s",
@@ -1634,25 +1634,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						"handleRoot=%s, trieRoot=%s, block=#%d. "+
 						"This indicates a stale NomtStateTrie — state reads will return wrong data!",
 						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
-				}
-
-				// Verify NOMT handle root matches block header expected root
-				if hasNomtRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
-					if nomtHandleRoot != expectedRoot {
-						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
-							"handleRoot=%s, expected=%s, block=#%d. "+
-							"Batch apply was incomplete or corrupted. HALTING sync to prevent fork (pending instead).",
-							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
-						
-						// Return error to halt sync and prevent forking (better pending than forking)
-						return &pb.SyncBlocksResponse{
-							Error: fmt.Sprintf("NOMT stateRoot mismatch at block %d: handle=%s expected=%s",
-								blockNum, nomtHandleRoot.Hex()[:18], expectedRoot.Hex()[:18]),
-						}, fmt.Errorf("NOMT stateRoot mismatch at block %d", blockNum)
-					} else {
-						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
-							blockNum, nomtHandleRoot.Hex()[:18]+"...")
-					}
 				}
 
 				// ═══════════════════════════════════════════════════════════════
@@ -1823,7 +1804,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				currentEpoch := rh.chainState.GetCurrentEpoch()
 				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
-				
+
 				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
 					var batch [][2][]byte
 					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
