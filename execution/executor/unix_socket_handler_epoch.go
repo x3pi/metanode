@@ -1317,6 +1317,10 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	isPreConsensusSync := request.GetExecuteMode()
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
+		if rh.snapshotManager != nil {
+			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+			rh.snapshotManager.WaitForPersistence()
+		}
 	}
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
