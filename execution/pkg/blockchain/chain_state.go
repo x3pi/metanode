@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -293,28 +292,22 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 		newAsDB, // Sử dụng asDB mới tạo
 	)
 
-	// 4. Atomic Lock-Free DB Swaps with delayed Close (Pseudo-RCU)
+	// 4. Atomic Lock-Free DB Swaps (no delayed Close)
 	// Swap the pointers immediately so new EVM transactions use the new state.
 	oldAsDB := cs.accountStateDB.Swap(newAsDB)
 	oldStakeDB := cs.stakeStateDB.Swap(newStakeStateDB)
 	oldScDB := cs.smartContractDB.Swap(newScDB)
 
-	// Safely close the old trie backends after 5 seconds to ensure all ongoing
-	// EVM transactions (which hold references to oldAsDB) have completed.
-	// This avoids Writer Starvation (RWMutex) while preventing C++ session memory leaks.
-	go func() {
-		importTime := time.After(5 * time.Second)
-		<-importTime
-		if oldAsDB != nil {
-			oldAsDB.Close()
-		}
-		if oldStakeDB != nil {
-			if closer, ok := interface{}(oldStakeDB.Trie()).(interface{ Close() }); ok {
-				closer.Close()
-			}
-		}
-		_ = oldScDB // scDB has no Close
-	}()
+	// OLD DB LIFECYCLE: Let Go's GC handle cleanup naturally.
+	// CRITICAL FIX (May 2026 — Fork at Block 4690):
+	// The previous pseudo-RCU goroutine called oldAsDB.Close() after 5 seconds.
+	// NOMT C++ sessions share underlying mmap'd storage between old and new tries.
+	// Closing the old session while the new session is actively reading causes
+	// non-deterministic IntermediateRoot() across nodes → stateRoot divergence → FORK.
+	// The old *AccountStateDB will be GC'd once all goroutine references are dropped.
+	_ = oldAsDB
+	_ = oldStakeDB
+	_ = oldScDB
 
 	// 5. Cập nhật con trỏ header nguyên tử
 	headerCopy := newHeader
