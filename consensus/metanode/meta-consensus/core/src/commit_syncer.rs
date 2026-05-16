@@ -203,11 +203,15 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
 
 /// Hysteresis threshold for entering CatchingUp from Healthy.
 /// Prevents rapid CatchingUp↔Healthy oscillation when the node is
-/// perpetually 1-2 commits behind:
+/// perpetually 1 commit behind:
 ///   - Enter CatchingUp: lag > CATCHING_UP_ENTER_THRESHOLD
 ///   - Stay in CatchingUp: lag > 0
 ///   - Enter Healthy: lag == 0
-const CATCHING_UP_ENTER_THRESHOLD: u32 = 5;
+///
+/// LIVENESS-HARDENING (May 16): Reduced from 5→2 because under sustained
+/// high TPS, 5 commits of lag represents thousands of transactions.
+/// Earlier CatchingUp detection triggers faster CommitSyncer recovery.
+const CATCHING_UP_ENTER_THRESHOLD: u32 = 2;
 
 /// All inputs needed for phase determination — gathered once, used immutably.
 /// This struct intentionally captures a snapshot of all state so that
@@ -971,7 +975,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             self.last_known_local_commit = local_commit;
                         }
                         let liveness_stall_duration = now.duration_since(self.last_local_commit_change_at);
-                        if liveness_stall_duration >= Duration::from_secs(60)
+                        if liveness_stall_duration >= Duration::from_secs(10)
                             && local_commit > 0
                             && self.coordination_hub.is_healthy()
                         {
