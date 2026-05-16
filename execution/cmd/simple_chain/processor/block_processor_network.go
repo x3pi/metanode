@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -263,6 +264,23 @@ PROCESS_LOOP:
 					currentBlockNumber = actualLastBlockDB
 					logger.Info("🔄 [TRANSITION SYNC] Advanced block number from DB: %d → %d",
 						oldBlockNumber, currentBlockNumber)
+
+					// ═══════════════════════════════════════════════════════════
+					// NOMT TRIE RE-ALIGNMENT: Since the DB fast-forwarded via
+					// SyncBlocksRequest, the in-memory NomtStateTrie may still
+					// hold the old state root. We MUST re-align it to the new
+					// block's header before processing the next consensus block.
+					// ═══════════════════════════════════════════════════════════
+					if bp.chainState.GetAccountStateDB().Trie().GetStateBackend() == trie.BackendNOMT {
+						lastBlock := bp.GetLastBlock()
+						if lastBlock != nil {
+							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)", 
+								currentBlockNumber, actualLastGEI)
+							if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
+								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
+							}
+						}
+					}
 				}
 
 				if oldNextExpected != nextExpectedGlobalExecIndex {
