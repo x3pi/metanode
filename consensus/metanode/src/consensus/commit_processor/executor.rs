@@ -66,18 +66,6 @@ pub async fn dispatch_commit(
     // Same immutability pattern as global_exec_index — set once, never recalculated.
     let leader_address = subdag.leader_address.clone();
 
-    if total_transactions > 0 || has_system_tx {
-        trace!(
-                "🔷 [batch_id={}] [Global Index: {}] Executing commit #{} (epoch={}): {} blocks, {} txs, has_system_tx={}",
-                batch_id, global_exec_index, commit_index, epoch, subdag.blocks.len(), total_transactions, has_system_tx
-            );
-    } else {
-        // Still log empty commits but as trace/debug to avoid spam
-        tracing::trace!(
-                "⏭️ [batch_id={}] [TX FLOW] Forwarding empty commit to Go Master (for sequence sync): global_exec_index={}, commit_index={}",
-                batch_id, global_exec_index, commit_index
-            );
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // GEI GUARD: Skip commits that Go has already executed.
@@ -154,8 +142,13 @@ pub async fn dispatch_commit(
                         }
                     });
 
-                    trace!("✅ [batch_id={}] [TX FLOW] Successfully pipelined committed subdag to DeliveryManager: global_exec_index={}, commit_index={}, expected_geis_consumed={}",
-                                batch_id, global_exec_index, commit_index, geis_consumed);
+                    info!(
+                        "📤 [TX-FLOW-TRACE] ▶ PHASE 3.2→3.3: Commit sent to BlockDeliveryManager | \
+                         batch_id={}, commit_index={}, gei={}, txs={}, fragments={}, \
+                         leader_addr_len={}, has_system_tx={}",
+                        batch_id, commit_index, global_exec_index, total_transactions,
+                        geis_consumed, leader_address.len(), has_system_tx
+                    );
 
                     // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.
 

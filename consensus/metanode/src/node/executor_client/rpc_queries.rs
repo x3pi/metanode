@@ -48,7 +48,7 @@ impl ExecutorClient {
         // FFI INTEGRATION: Send request directly via CGo callback
         let response_buf = self.execute_rpc_request(&request_buf).await?;
 
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, decoding...",
             response_buf.len()
         );
@@ -62,8 +62,8 @@ impl ExecutorClient {
             )
         })?;
 
-        info!("🔍 [EXECUTOR-REQ] Decoded response successfully");
-        info!(
+        trace!("🔍 [EXECUTOR-REQ] Decoded response successfully");
+        trace!(
             "🔍 [EXECUTOR-REQ] Response payload type: {:?}",
             response.payload
         );
@@ -266,7 +266,7 @@ impl ExecutorClient {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, hex={}, decoding...",
             response_buf.len(),
             hex_preview
@@ -281,7 +281,7 @@ impl ExecutorClient {
                 Err(anyhow::anyhow!("Unexpected NotifyEpochChangeResponse"))
             }
             Some(proto::response::Payload::LastBlockNumberResponse(r)) => {
-                info!("✅ [EXECUTOR-REQ] Received LastBlockNumber: {}, GEI: {}, Epoch: {}, IsReady: {}", 
+                trace!("✅ [EXECUTOR-REQ] Received LastBlockNumber: {}, GEI: {}, Epoch: {}, IsReady: {}", 
                     r.last_block_number, r.last_global_exec_index, r.last_epoch, r.is_ready);
                 let mut hash = [0u8; 32];
                 if r.last_executed_commit_hash.len() == 32 {

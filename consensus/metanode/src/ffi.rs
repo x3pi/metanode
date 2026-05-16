@@ -139,8 +139,12 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
     };
 
     // try_send is non-blocking and synchronous
+    let batch_size = tx_data.len();
     match sender.try_send(tx_data) {
-        Ok(_) => true,
+        Ok(_) => {
+            info!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
+            true
+        }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Channel is full. Go side will see `false` and automatically sleep/retry.
             false

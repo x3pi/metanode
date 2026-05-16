@@ -873,8 +873,15 @@ impl CommitProcessor {
             match recv_result {
                 Some(subdag) => {
                     let commit_index: u32 = subdag.commit_ref.index;
-                    trace!("📥 [COMMIT PROCESSOR] Received committed subdag: commit_index={}, leader={:?}, blocks={}",
-                        commit_index, subdag.leader, subdag.blocks.len());
+                    let total_txs: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
+                    let is_local = subdag.decided_with_local_blocks;
+                    info!(
+                        "📥 [TX-FLOW-TRACE] ▶ PHASE 3 ENTRY: CommitProcessor received CommittedSubDag | \
+                         commit_index={}, leader={:?}, blocks={}, total_txs={}, \
+                         decided_local={}, digest={}, epoch={}",
+                        commit_index, subdag.leader, subdag.blocks.len(), total_txs,
+                        is_local, hex::encode(&subdag.commit_ref.digest.into_inner()[..4]), current_epoch
+                    );
 
                     // Heartbeat logic
                     if commit_index >= last_heartbeat_commit + HEARTBEAT_INTERVAL {
@@ -997,8 +1004,8 @@ impl CommitProcessor {
                                 dispatch_subdag = Some(subdag);
                             } else {
                                 info!(
-                                    "🛡️ [DIGEST-GATE] Local commit {} buffered (leader={:?}, digest={}). \
-                                     Waiting for digest verification or CertifiedCommit. (buffered={})",
+                                    "🛡️ [TX-FLOW-TRACE DIGEST-GATE] ▶ PHASE 3 DIGEST-GATE: Local commit BUFFERED | \
+                                     commit_index={}, leader={:?}, digest={}, buffered_count={}",
                                     commit_index, subdag.leader, hex::encode(&local_digest[..4]),
                                     pending_local_commits.len() + 1
                                 );
@@ -1103,9 +1110,11 @@ impl CommitProcessor {
                                 }
                             } else {
                                 info!(
-                                    "📥 [DISPATCH:CERTIFIED-COMMIT] CertifiedCommit {} received directly. Dispatching.",
+                                    "📥 [TX-FLOW-TRACE DISPATCH:CERTIFIED-COMMIT] ▶ PHASE 3 CERTIFIED: CertifiedCommit received directly | \
+                                     commit_index={}, dispatching immediately",
                                     commit_index
                                 );
+                               
                             }
                             dispatch_subdag = Some(subdag);
                         }
@@ -1151,13 +1160,18 @@ impl CommitProcessor {
                                 .map(|a| format!("0x{}", hex::encode(a)))
                                 .unwrap_or_else(|| "UNRESOLVED".to_string())
                         };
+                        // Consolidated dispatch + forensic + audit log (was 3 separate logs)
+                        let per_block: Vec<String> = subdag.blocks.iter().map(|b| {
+                            format!("{}:{}", b.reference(), b.transactions().len())
+                        }).collect();
                         info!(
-                            "📊 [FORK-FORENSIC] commit_index={}, path={}, gei={}, epoch={}, \
-                             leader={:?} (auth_idx={}, eth={}), digest={}, txs={}, \
-                             decided_local={}, timestamp_ms={}",
+                            "📊 [TX-AUDIT] commit_index={} | path={} | gei={} | epoch={} | \
+                             digest={} | txs={} | blocks={} | per_block=[{}] | \
+                             leader={:?} (auth_idx={}, eth={}) | decided_local={} | timestamp={}",
                             commit_index, dispatch_path, gei, current_epoch,
-                            subdag.leader, leader_author_idx, leader_eth_hex,
                             hex::encode(&commit_digest[..4]), total_txs_in_commit,
+                            subdag.blocks.len(), per_block.join(", "),
+                            subdag.leader, leader_author_idx, leader_eth_hex,
                             subdag.decided_with_local_blocks, subdag.timestamp_ms
                         );
 

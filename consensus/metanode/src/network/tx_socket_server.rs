@@ -6,7 +6,7 @@ use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -169,7 +169,8 @@ impl TxSocketServer {
             return;
         }
 
-        debug!("✅ [FFI TX FLOW] Zero-copy extracted {} TXs", individual_txs.len());
+        info!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
+            individual_txs.len(), data_len);
         let transactions_to_submit = individual_txs;
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
@@ -299,6 +300,7 @@ impl TxSocketServer {
             }
 
             if all_succeeded {
+                info!("✅ [TX-FLOW-TRACE] ▶ PHASE 1.5 DONE: All {} TXs submitted to consensus DAG core", total_tx_count);
                 return; // Everything submitted cleanly
             }
 

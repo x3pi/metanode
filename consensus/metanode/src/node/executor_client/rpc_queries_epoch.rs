@@ -11,7 +11,7 @@
 use anyhow::Result;
 use prost::Message;
 
-use tracing::info;
+use tracing::{debug, info, trace};
 
 use super::proto::{
     self, GetCurrentEpochRequest, GetEpochStartTimestampRequest, Request, Response, ValidatorInfo,
@@ -45,7 +45,7 @@ impl ExecutorClient {
         // FFI INTEGRATION: Send request directly via CGo callback
         let response_buf = self.execute_rpc_request(&request_buf).await?;
 
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, decoding...",
             response_buf.len()
         );
@@ -59,8 +59,8 @@ impl ExecutorClient {
             )
         })?;
 
-        info!("🔍 [EXECUTOR-REQ] Decoded response successfully");
-        info!(
+        trace!("🔍 [EXECUTOR-REQ] Decoded response successfully");
+        trace!(
             "🔍 [EXECUTOR-REQ] Response payload type: {:?}",
             response.payload
         );
@@ -71,7 +71,7 @@ impl ExecutorClient {
             }
             Some(proto::response::Payload::GetCurrentEpochResponse(get_current_epoch_response)) => {
                 let current_epoch = get_current_epoch_response.epoch;
-                info!(
+                debug!(
                     "✅ [EXECUTOR-REQ] Received current epoch from Go FFI: {}",
                     current_epoch
                 );
@@ -106,7 +106,7 @@ impl ExecutorClient {
         // FFI INTEGRATION: Send request directly via CGo callback
         let response_buf = self.execute_rpc_request(&request_buf).await?;
 
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, decoding...",
             response_buf.len()
         );

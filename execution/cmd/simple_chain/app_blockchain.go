@@ -865,7 +865,7 @@ func (app *App) loadFreeFeeAddresses() {
 				}
 				key := e_common.HexToAddress(addr)
 				FreeFeeAddresses[key] = struct{}{}
-				logger.Info("FreeFeeAddresses: ", key)
+				// logger.Info("FreeFeeAddresses: ", key)
 			}
 		}
 	} else {
