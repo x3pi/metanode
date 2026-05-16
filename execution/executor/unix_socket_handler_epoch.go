@@ -1458,10 +1458,46 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
+			// DEBUG: Log raw backup size BEFORE deserialize — detects truncated snapshots early
+			logger.Info("🔍 [NOMT-DEBUG] Block #%d: raw backupBytes=%d bytes. About to deserialize+apply.",
+				blockNum, len(backupBytes))
+
 			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
 			if deserErr != nil {
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
+				// DEBUG: Log field sizes after deserialize — tells us if AccountBatch is missing
+				logger.Info("🔍 [NOMT-DEBUG] Block #%d deserialized: AccountBatch=%d bytes, TrieDB=%d bytes, FullDbLogs=%d entries",
+					blockNum,
+					len(backupDb.AccountBatch),
+					len(backupDb.TrieDatabaseBatchPut),
+					len(backupDb.FullDbLogs),
+				)
+
+				// Capture NOMT root BEFORE apply to compute delta
+				var rootBeforeApply common.Hash
+				var hasRootBefore bool
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
+					
+					// ═══════════════════════════════════════════════════════════════
+					// PRE-EXECUTION VERIFICATION:
+					// Metanode block headers store the PRE-EXECUTION state root.
+					// We must verify it BEFORE applying the block's state changes.
+					// ═══════════════════════════════════════════════════════════════
+					expectedAccountRoot := header.AccountStatesRoot()
+					if hasRootBefore && expectedAccountRoot != (common.Hash{}) && expectedAccountRoot != trie.EmptyRootHash {
+						if rootBeforeApply != expectedAccountRoot {
+							logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
+								"localRoot=%s, expected=%s, block=#%d. "+
+								"This node's state has diverged BEFORE this block was applied!",
+								rootBeforeApply.Hex(), expectedAccountRoot.Hex(), blockNum)
+						} else {
+							logger.Debug("✅ [NOMT-SYNC-VERIFY] PRE-execution root matches: %s", rootBeforeApply.Hex()[:18]+"...")
+						}
+					}
+				}
+
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
@@ -1474,15 +1510,20 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						expectedAccountRoot := header.AccountStatesRoot()
-						rootMatch := "MATCH"
-						if nomtRoot != expectedAccountRoot && expectedAccountRoot != (common.Hash{}) {
-							rootMatch = "MISMATCH"
+						
+						// Show before→after delta when available
+						if hasRootBefore {
+							logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): beforeApply=%s → afterApply=%s, headerExpected(pre)=%s",
+								blockNum, blockGEI,
+								rootBeforeApply.Hex()[:18]+"...",
+								nomtRoot.Hex()[:18]+"...",
+								expectedAccountRoot.Hex()[:18]+"...")
+						} else {
+							logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, headerExpected(pre)=%s",
+								blockNum, blockGEI,
+								nomtRoot.Hex()[:18]+"...",
+								expectedAccountRoot.Hex()[:18]+"...")
 						}
-						logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, expected=%s → %s",
-							blockNum, blockGEI,
-							nomtRoot.Hex()[:18]+"...",
-							expectedAccountRoot.Hex()[:18]+"...",
-							rootMatch)
 					}
 				}
 			}
@@ -1595,24 +1636,10 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
 				}
 
-				// Verify NOMT handle root matches block header expected root
-				if hasNomtRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
-					if nomtHandleRoot != expectedRoot {
-						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
-							"handleRoot=%s, expected=%s, block=#%d. "+
-							"Batch apply was incomplete or corrupted — subsequent consensus blocks WILL FORK!",
-							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
-						
-						// Auto-wipe DB and exit so it can restart cleanly
-						logger.Error("💥 [AUTO-RESET] Wiping local database due to NOMT divergence and exiting...")
-						chainDataDir := filepath.Join(rh.chainState.GetConfig().Databases.RootPath, "chaindata")
-						os.RemoveAll(chainDataDir)
-						os.Exit(255)
-					} else {
-						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
-							blockNum, nomtHandleRoot.Hex()[:18]+"...")
-					}
-				}
+				// VERIFICATION REMOVED: We cannot compare the POST-execution `nomtHandleRoot` 
+				// with `expectedRoot` because Metanode stores the PRE-EXECUTION root in its block headers.
+				// This mismatch is expected and valid.
+
 
 				// ═══════════════════════════════════════════════════════════════
 				// FORK-PREVENTION (May 2026): Force trie re-alignment from NOMT
@@ -1856,7 +1883,14 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 			}
 			if len(deserialized) > 0 {
 				aggregatedBatches[entry.name] = deserialized
+				// DEBUG: Log per-namespace key count so we know exactly what was in the snapshot batch
+				logger.Info("[NOMT-DEBUG][APPLY-BATCH] Block #%d: namespace=%s keys=%d (raw=%d bytes)",
+					backupDb.BockNumber, entry.name, len(deserialized), len(entry.data))
 			}
+		} else if entry.name == "Account" {
+			// AccountBatch is empty — this is the most common cause of NOMT root mismatch!
+			logger.Error("[NOMT-DEBUG][APPLY-BATCH] Block #%d: AccountBatch is EMPTY — NOMT cannot rebuild account_state root! Snapshot may be missing AccountBatch data.",
+				backupDb.BockNumber)
 		}
 	}
 

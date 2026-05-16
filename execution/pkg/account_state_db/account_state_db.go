@@ -359,7 +359,7 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 
 	if len(bData) == 0 {
 		// New account: return fresh state WITHOUT storing in dirty cache
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty → returning fresh account (nonce=0, no BLS key)", address.Hex())
+		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty (dirty=miss, loaded=miss, lru=miss, trie=empty) → new account, no BLS key expected", address.Hex())
 		return state.NewAccountState(address), nil
 	}
 	loadedAs := &state.AccountState{}
@@ -367,7 +367,8 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 		return nil, fmt.Errorf("error unmarshalling %s from Trie: %w", address.Hex(), err)
 	}
 	if len(loadedAs.PublicKeyBls()) == 0 {
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): found data but PublicKeyBls is EMPTY, nonce=%d", address.Hex(), loadedAs.Nonce())
+		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): data found (len=%d bytes) but PublicKeyBls is EMPTY. nonce=%d balance=%s. Data came from TRIE/LRU (not dirty cache). Possible causes: (1) block committed before AccountBatch replicated, (2) Unmarshal dropped BLS field.",
+			address.Hex(), len(bData), loadedAs.Nonce(), loadedAs.TotalBalance().String())
 	}
 	if pooledSlice != nil {
 		byteSlicePool.Put(pooledSlice)
