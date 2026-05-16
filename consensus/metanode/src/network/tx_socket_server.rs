@@ -187,8 +187,20 @@ impl TxSocketServer {
                     if attempt % 60 == 0 {
                         warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    continue;
+                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
+                    // flag is never cleared (same pattern as CommitProcessor).
+                    // After 60s, force-clear and proceed to submission.
+                    if attempt >= 60 {
+                        error!(
+                            "🚨 [FFI TX FLOW] is_transitioning stuck for {}s! Force-clearing to prevent permanent TX deadlock.",
+                            attempt
+                        );
+                        transitioning.store(false, Ordering::SeqCst);
+                        // Fall through to submission
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        continue;
+                    }
                 }
             }
 

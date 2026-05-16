@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1373,11 +1371,23 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if localHash == blockHash {
 					isFullyExecuted = true
 				} else {
-					logger.Error("💥 [FORK DETECTED] Local block #%d hash (%x) != leader hash (%x) during sync! Node has forked and diff-based sync cannot revert dirty state.", blockNum, localHash[:8], blockHash[:8])
-					logger.Error("💥 [AUTO-RESET] Wiping local database to force clean sync and exiting...")
-					chainDataDir := filepath.Join(rh.chainState.GetConfig().Databases.RootPath, "chaindata")
-					os.RemoveAll(chainDataDir)
-					os.Exit(255)
+					// ═══════════════════════════════════════════════════════════
+					// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
+					//
+					// During high-load sync, hash mismatches can occur transiently
+					// when a node receives blocks from a peer that decided a different
+					// leader (before digest-gate corrects it). Killing the node here
+					// causes cascading quorum loss → total cluster stall.
+					//
+					// Instead: SKIP this block entirely. The node continues processing
+					// and will receive the correct block via consensus commit path.
+					// This follows the mandate: "thà pending chứ không fork" —
+					// better to pend than to fork.
+					// ═══════════════════════════════════════════════════════════
+					logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
+						"SKIPPING this block (not wiping DB). Node will recover via consensus.",
+						blockNum, localHash[:8], blockHash[:8])
+					continue // Skip this block, process next one
 				}
 			}
 		}

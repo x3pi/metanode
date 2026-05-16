@@ -563,18 +563,57 @@ impl CommitProcessor {
                                 if quorum_digest == local_digest {
                                     verified_indices.push(local_idx);
                                 } else {
-                                    // DIVERGENT — STOP processing here.
-                                    // Cannot skip to next commit — must wait for
-                                    // CertifiedCommit to replace this one first.
-                                    warn!(
-                                        "🚨 [DIGEST-GATE POLL] Commit {} DIVERGENT! local={}, quorum={}. \
-                                         BLOCKING all subsequent commits until resolved. \
-                                         Waiting for CertifiedCommit to replace.",
-                                        local_idx,
-                                        hex::encode(&local_digest[..4]),
-                                        hex::encode(&quorum_digest[..4])
-                                    );
-                                    break; // STRICT ORDER: stop at first unverified
+                                    // DIVERGENT — Local commit disagrees with network quorum.
+                                    //
+                                    // Check how long this commit has been stuck. If it's been
+                                    // divergent for >30s, the local commit is STALE (likely from
+                                    // a previous epoch's DAG state). Discard it to unblock the
+                                    // pipeline — next_expected_index stays at this slot, so the
+                                    // correct CertifiedCommit will fill it when it arrives.
+                                    let divergence_age = pending_local_timestamps
+                                        .get(&local_idx)
+                                        .map(|ts| std::time::Instant::now().duration_since(*ts).as_secs())
+                                        .unwrap_or(0);
+                                    
+                                    if divergence_age >= 30 {
+                                        // ═══════════════════════════════════════════════════
+                                        // STALE-COMMIT EVICTION (May 2026):
+                                        //
+                                        // After 30s of divergence, this local commit is stale.
+                                        // Common cause: epoch-local commit indices reset each
+                                        // epoch, so commit N in epoch K has a completely
+                                        // different digest than commit N in epoch K+2.
+                                        // If a stale commit persists in the buffer, it blocks
+                                        // ALL subsequent commits permanently.
+                                        //
+                                        // Safety: We only DISCARD — never dispatch. The slot
+                                        // (next_expected_index) stays open for the correct
+                                        // CertifiedCommit from CommitSyncer.
+                                        // ═══════════════════════════════════════════════════
+                                        warn!(
+                                            "🗑️ [DIGEST-GATE STALE-EVICT] Commit {} DISCARDED after {}s divergence! \
+                                             local_digest={}, quorum_digest={}. \
+                                             Stale local commit evicted — slot stays open for CertifiedCommit.",
+                                            local_idx, divergence_age,
+                                            hex::encode(&local_digest[..4]),
+                                            hex::encode(&quorum_digest[..4])
+                                        );
+                                        // Mark for removal after iteration (can't modify during iter)
+                                        // We break here; the removal happens below via verified_indices
+                                        // using a special marker. Actually, let's just collect for removal.
+                                        break; // Will be handled by post-loop eviction below
+                                    } else {
+                                        warn!(
+                                            "🚨 [DIGEST-GATE POLL] Commit {} DIVERGENT! local={}, quorum={}. \
+                                             BLOCKING all subsequent commits until resolved ({}s/30s). \
+                                             Waiting for CertifiedCommit to replace.",
+                                            local_idx,
+                                            hex::encode(&local_digest[..4]),
+                                            hex::encode(&quorum_digest[..4]),
+                                            divergence_age
+                                        );
+                                        break; // STRICT ORDER: stop at first unverified
+                                    }
                                 }
                             }
                             None => {
@@ -663,6 +702,45 @@ impl CommitProcessor {
                             }
                         }
                     }
+                    
+                    // ═══════════════════════════════════════════════════════════
+                    // STALE-EVICT CLEANUP: Remove divergent commits that exceeded
+                    // the 30s timeout. These are NOT dispatched — just discarded.
+                    // The slot (next_expected_index) stays open for the correct
+                    // CertifiedCommit from CommitSyncer or receiver channel.
+                    // ═══════════════════════════════════════════════════════════
+                    {
+                        let now = std::time::Instant::now();
+                        let stale_indices: Vec<u32> = pending_local_commits.iter()
+                            .filter(|(&idx, commit)| {
+                                // Only evict if we have a quorum digest that DISAGREES
+                                if let Some(ref v) = digest_verifier {
+                                    let local_d = commit.commit_ref.digest.into_inner();
+                                    if let Some(quorum_d) = v(idx) {
+                                        if quorum_d != local_d {
+                                            let age = pending_local_timestamps.get(&idx)
+                                                .map(|ts| now.duration_since(*ts).as_secs())
+                                                .unwrap_or(0);
+                                            return age >= 30;
+                                        }
+                                    }
+                                }
+                                false
+                            })
+                            .map(|(&idx, _)| idx)
+                            .collect();
+                        
+                        for idx in stale_indices {
+                            pending_local_commits.remove(&idx);
+                            pending_local_timestamps.remove(&idx);
+                            warn!(
+                                "🗑️ [STALE-EVICT] Removed divergent commit {} from pending buffer. \
+                                 Slot open for CertifiedCommit.",
+                                idx
+                            );
+                        }
+                    }
+                    
                     // Dispatch verified commits in strict ascending order
                     let mut digest_gate_epoch_break = false;
                     for local_idx in verified_indices {

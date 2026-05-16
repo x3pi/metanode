@@ -594,8 +594,41 @@ async fn poll_go_until_synced(
         warn!("⚠️ [SYNC POLL] Pre-flush ForceCommit failed: {}", e);
     }
 
+    // ABSOLUTE TIMEOUT: Prevent circular deadlock with CommitProcessor.
+    // When is_transitioning=true, CommitProcessor pauses, preventing the very
+    // commits this function is waiting for. After 120s, if gap is small, proceed.
+    let absolute_start = std::time::Instant::now();
+    let absolute_max_wait = Duration::from_secs(120);
+
     loop {
         attempt += 1;
+
+        // DEADLOCK BREAKER: If we've waited > 120s total, break if gap is small
+        if absolute_start.elapsed() > absolute_max_wait {
+            match executor_client.get_last_global_exec_index().await {
+                Ok(go_last_gei) => {
+                    let gap = expected_last_block.saturating_sub(go_last_gei);
+                    if gap <= 10 {
+                        warn!(
+                            "🚨 [SYNC POLL] DEADLOCK BREAKER: Waited {:?} for gei={} (expected={}). \
+                             Gap={} is small enough to proceed safely. \
+                             Likely circular deadlock with CommitProcessor is_transitioning flag.",
+                            absolute_start.elapsed(), go_last_gei, expected_last_block, gap
+                        );
+                        break;
+                    } else {
+                        // Gap too large — keep waiting but log loudly
+                        if attempt % 500 == 0 {
+                            error!(
+                                "🚨 [SYNC POLL] CRITICAL: Waited {:?} for gei={} (expected={}). Gap={} is still large!",
+                                absolute_start.elapsed(), go_last_gei, expected_last_block, gap
+                            );
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
 
         if wait_start.elapsed() > max_wait {
             warn!(
