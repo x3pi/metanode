@@ -596,7 +596,59 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 	if setEmptyBlock {
 		txs = make([]types.Transaction, 0)
 	} else {
-		txs, _ = vp.transactionPool.TransactionsWithAggSign()
+		allTxs, _ := vp.transactionPool.TransactionsWithAggSign()
+		
+		if len(allTxs) == 0 {
+			return allTxs
+		}
+
+		// Sort by FromAddress and Nonce to ensure contiguous evaluation
+		sort.Slice(allTxs, func(i, j int) bool {
+			cmp := allTxs[i].FromAddress().Cmp(allTxs[j].FromAddress())
+			if cmp != 0 {
+				return cmp < 0
+			}
+			return allTxs[i].GetNonce() < allTxs[j].GetNonce()
+		})
+
+		var validTxs []types.Transaction
+		var futureTxs []types.Transaction
+		nonceMap := make(map[common.Address]uint64)
+
+		for _, tx := range allTxs {
+			from := tx.FromAddress()
+			if _, ok := nonceMap[from]; !ok {
+				as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(from)
+				if err == nil && as != nil {
+					nonceMap[from] = as.Nonce()
+				} else {
+					nonceMap[from] = 0
+				}
+			}
+
+			expected := nonceMap[from]
+			actual := tx.GetNonce()
+
+			if actual > expected {
+				// Future nonce, missing predecessors -> defer to next cycle
+				futureTxs = append(futureTxs, tx)
+			} else if actual == expected {
+				// Valid contiguous nonce
+				validTxs = append(validTxs, tx)
+				nonceMap[from]++
+			} else {
+				// Past nonce (actual < expected) -> drop permanently
+				// Note: we just don't add it to validTxs or futureTxs
+				// It will be garbage collected and removed from pending manager later via timeout
+			}
+		}
+
+		// Re-add future transactions back to the pool
+		if len(futureTxs) > 0 {
+			vp.transactionPool.AddTransactions(futureTxs)
+		}
+
+		txs = validTxs
 	}
 	return txs
 }
