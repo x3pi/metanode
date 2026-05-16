@@ -816,27 +816,26 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		}
 		logger.Info("✅ [EPOCH BOUNDARY] Epoch 0 using GENESIS timestamp: %d ms", epochTimestamp)
 	} else {
-		// EPOCH N (N >= 1): Try to use boundary block header timestamp
-		blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
-		if ok {
-			boundaryBlockData, err := rh.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
-			if err == nil {
-				epochTimestamp = boundaryBlockData.Header().TimeStamp() * 1000
-				logger.Info("✅ [EPOCH BOUNDARY] Epoch %d using BOUNDARY BLOCK %d timestamp: %d ms (deterministic)",
-					epoch, boundaryBlock, epochTimestamp)
-			} else {
-				// Block hash exists but data not readable - use stored timestamp
-				epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
-				syncComplete = false
-				logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d hash exists but data not readable. "+
-					"Using stored timestamp %d ms.", epoch, boundaryBlock, epochTimestamp)
-			}
+		// EPOCH N (N >= 1): Strictly use the timestamp provided by Rust during AdvanceEpoch.
+		// FORK-SAFETY FIX (G-C4): The local block header timestamp is non-deterministic
+		// across nodes, leading to divergent genesis blocks and 'InvalidGenesisAncestor' stalls.
+		// Rust passes the authoritative consensus timestamp which Go stored.
+		epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+
+		if epochTimestamp == 0 {
+			logger.Error("🚨 [EPOCH BOUNDARY] CRITICAL: Epoch %d start timestamp is 0! "+
+				"AdvanceEpoch must have failed to record the timestamp.", epoch)
+			epochTimestamp = 1 // Fallback to avoid division by zero crashes
 		} else {
-			// Block not synced yet - use stored timestamp from advance_epoch
-			epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+			logger.Info("✅ [EPOCH BOUNDARY] Epoch %d strictly using authoritative stored timestamp: %d ms",
+				epoch, epochTimestamp)
+		}
+
+		// Check if boundary block is fully synced to correctly handle NOMT queries below
+		_, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		if !ok {
 			syncComplete = false
-			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. "+
-				"Using stored timestamp %d ms (sync pending).", epoch, boundaryBlock, epochTimestamp)
+			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. (sync pending)", epoch, boundaryBlock)
 		}
 	}
 

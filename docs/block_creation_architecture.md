@@ -80,11 +80,11 @@ flowchart TB
         WL1 --> WL2 --> WL3
     end
 
-    subgraph Layer5["🛡️ Lớp 5: DB Write Lock"]
+    subgraph Layer5["🛡️ Lớp 5: CommitMutex + Atomic Pointer Isolation"]
         direction LR
-        DB1["Go acquire exclusive lock"]
-        DB2["ProcessBlock chạy độc quyền"]
-        DB3["P2P/Sub-node bị block"]
+        DB1["commitMutex serialize block writes"]
+        DB2["atomic.Pointer swap state DBs"]
+        DB3["GC-managed old DB lifecycle"]
         DB1 --> DB2 --> DB3
     end
 
@@ -120,7 +120,7 @@ flowchart TB
 * **Lớp 2 (Immutable Leader):** `LeaderAddress` được gắn cứng 1 lần và lưu xuống `LeaderStore`. Khi restart, Node ưu tiên đọc từ cache đĩa này thay vì tính lại, chống trôi LeaderAddress.
 * **Lớp 3 (DIGEST-GATE):** Local commit không được thực thi ngay mà bị buffer cho đến khi mạng lưới đồng thuận (2f+1 peers xác nhận chung 1 digest).
 * **Lớp 4 (WAL + Idempotent Execution):** Rust sử dụng Write-Ahead Log (WAL) ghi nhận trạng thái commit. Ở phía Go, hàm thực thi kiểm tra `commit_index`; nếu là bản sao (duplicate) thì sẽ tự động bỏ qua (Skip) để đảm bảo không làm trôi `GlobalExecIndex` (GEI).
-* **Lớp 5 (DB Write Lock Isolation):** Toàn bộ hàm thực thi ghi xuống cơ sở dữ liệu State Trie (NOMT) được khóa độc quyền (`Mutex`). Không luồng P2P nào có thể gây nhiễu ("Nhiễm độc" State Trie).
+* **Lớp 5 (CommitMutex + Atomic Pointer Isolation):** `CommitBlockState()` sử dụng `commitMutex` để serialize toàn bộ block write. State DB pointers (`accountStateDB`, `stakeStateDB`, `smartContractDB`) sử dụng `atomic.Pointer` với `Swap()` để cập nhật lock-free. Old DB objects được Go GC thu hồi tự nhiên — **KHÔNG dùng delayed Close()** (xem Sự Cố Fork Block 4690).
 * **Lớp 6 (Inline Hash Verification):** Mỗi 10 blocks, Rust truy vấn hash từ Go và kiểm tra chéo với các peers. Nếu phát hiện rẽ nhánh, Node lập tức HALT để ngăn lỗi lan rộng.
 * **Lớp 7 (Epoch Committee Assert):** Khi chuyển Epoch, Node sinh ra `transition_hash` (băm của Committee mới) và RPC chéo các peers. Nếu không có đa số đồng thuận, Node sẽ dừng chuyển Epoch và retry.
 
@@ -227,8 +227,9 @@ mindmap
         INV2["2. GEI<br/>Chỉ tăng khi commit thành công<br/>WAL đảm bảo crash-safe"]
         INV3["3. Block Execution<br/>Idempotent: gọi N lần = 1 lần"]
         INV4["4. FFI Data<br/>100% qua Protobuf schema<br/>Cấm ép kiểu thủ công"]
-        INV5["5. State DB<br/>Exclusive write lock<br/>1 writer tại 1 thời điểm"]
+        INV5["5. State DB<br/>commitMutex + atomic.Pointer<br/>GC-managed old DB lifecycle"]
         INV6["6. Epoch Transition<br/>Committee hash verified<br/>bởi 2f+1 peers trước khi chuyển"]
+        INV7["7. TransactionPool<br/>Channel-based Actor Pattern<br/>Lock-free, O(1) hash lookup"]
 ```
 
 ---
@@ -277,16 +278,68 @@ Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (
 | ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | 200ms poll loop. CertifiedCommit thay thế. Buffer giới hạn (MAX=100) | 🟢 **AN TOÀN** |
 | ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | 200ms poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
 | ④ | Runtime Fork Guard | Go đạt `next_check_block` | Background task, Backoff 60s khi peers fail | 🟢 **AN TOÀN** |
-| ⑤ | DB Write Lock | ProcessBlock hoàn tất | `defer Unlock()`. Single-writer. | 🟢 **AN TOÀN** |
-| ⑥ | ProcessBlock I/O | NOMT trie flush | Bounded I/O | 🟢 **AN TOÀN** |
+| ⑤ | CommitMutex | CommitBlockState hoàn tất | `commitMutex.Lock()/Unlock()`. Single-writer. Atomic pointer swap cho readers. | 🟢 **AN TOÀN** |
+| ⑥ | ProcessBlock I/O | NOMT trie flush | Bounded I/O. PersistAsync chạy inline trong commitToMemoryParallel. | 🟢 **AN TOÀN** |
 | ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout). 1 match = Accept. | 🟢 **AN TOÀN** |
 | ⑧ | CommitSyncer | Peer trả blocks | RPC timeout + retry peer khác | 🟢 **AN TOÀN** |
+| ⑨ | TransactionPool Actor | Channel send/receive | Non-blocking Actor loop. NotifyChan cho event-driven wake. | 🟢 **AN TOÀN** |
 
 **Định lý Liveness:**
 > Với N node trong cluster (N ≥ 3f+1), nếu ≥ 2f+1 node online và có thể giao tiếp qua mạng, hệ thống Metanode **luôn tạo block mới** trong thời gian hữu hạn. Hệ thống **TUYỆT ĐỐI KHÔNG fork** trong mọi kịch bản.
 
 Cơ chế Seed (Cold-Start toàn cluster):
 Khi TẤT CẢ node restart đồng thời: Node sẽ vào retry loop (chờ peers). Khi các node online, chúng sẽ cross-verify lẫn nhau và cùng tiếp tục (cơ chế tự nhiên từ retry loop, không cần seed node đặc biệt).
+
+### 6.1 Kiến Trúc ChainState: Atomic Pointer + GC Lifecycle (May 2026)
+
+ChainState quản lý trạng thái toàn cục với mô hình **lock-free read, serialized write**:
+
+```
+ChainState {
+    currentBlockHeader  atomic.Pointer[BlockHeader]      // lock-free read
+    accountStateDB      atomic.Pointer[AccountStateDB]   // lock-free read
+    smartContractDB     atomic.Pointer[SmartContractDB]  // lock-free read
+    stakeStateDB        atomic.Pointer[StakeStateDB]     // lock-free read
+    commitMutex         sync.Mutex                       // serializes writes
+    epochMutex          sync.RWMutex                     // epoch map access
+}
+```
+
+**Write Path** (`CommitBlockState` → `UpdateStateForNewHeader`):
+1. `commitMutex.Lock()` — chỉ 1 block write tại 1 thời điểm
+2. Tạo mới AccountStateDB, StakeStateDB, SmartContractDB từ header roots mới
+3. `atomic.Pointer.Swap()` — cập nhật pointer nguyên tử, readers thấy state mới ngay lập tức
+4. Old DB objects: **Go GC tự thu hồi** khi không còn goroutine nào tham chiếu
+
+**Read Path** (EVM, RPC, Virtual Processor):
+- `cs.accountStateDB.Load()` — đọc lock-free, luôn nhận được state mới nhất hoặc state đang xử lý
+- Không bao giờ bị block bởi writer
+
+> ⚠️ **KHÔNG ĐƯỢC dùng delayed Close()** trên old DB objects. NOMT C++ sessions chia sẻ mmap'd storage — Close() trên session cũ phá hủy reads từ session mới (xem Sự Cố Block 4690).
+
+### 6.2 Kiến Trúc TransactionPool: Channel-Based Actor Pattern (May 2026)
+
+TransactionPool sử dụng mô hình **Actor Pattern** (channel-based, lock-free) thay vì `sync.Mutex`:
+
+```
+TransactionPool {
+    addTxCh        chan addTxReq           // ingestion channel
+    addTxsCh       chan []Transaction      // batch ingestion
+    getTxsCh       chan getTxsReq          // drain all TXs
+    countCh        chan countReq           // pool size query
+    getTxByHashCh  chan getTxReq           // O(1) hash lookup
+    NotifyChan     chan struct{}           // event-driven wake
+}
+```
+
+**Background `loop()` goroutine** sở hữu toàn bộ state:
+- `transactions []Transaction` — danh sách TX pending
+- `transactionKeys map[string]bool` — dedup key (from+nonce)
+- `txHashMap map[Hash]Transaction` — O(1) lookup by hash
+
+**Ưu điểm so với Mutex cũ:**
+- ❌ Mutex cũ: O(N) scan trong `GetTransactionByHash`, reader starvation dưới high TPS
+- ✅ Actor mới: O(1) lookup, zero contention, không deadlock, event-driven wake thay vì busy-wait
 
 ---
 
@@ -500,3 +553,64 @@ Khi 2 partitions chọn leader khác nhau → sub-dag khác → tập giao dịc
 - Việc phục hồi leader của các commit cũ hiện nay dựa hoàn toàn vào **network sync** (các struct `Commit` sync từ peer đã được embedded sẵn `leader_address` chính xác) hoặc tính toán trực tiếp từ `epoch_eth_addresses` nếu tự build DAG.
 - Việc xoá `LeaderStore` đảm bảo **100% không inject stale data** vào các node bị wipe DAG, giúp cluster luôn tiến về phía trước một cách đồng thuận tuyệt đối trên cùng cấu trúc DAG và transaction roots.
 2. **Leader election determinism audit:** Kiểm tra `Linearizer::linearize_sub_dag()` để đảm bảo DAG traversal là hoàn toàn deterministic bất kể thứ tự nhận block.
+
+---
+
+## 9. Phân Tích Sự Cố Fork — Block 4690 (2026-05-16): StateRoot Divergence
+
+### 9.1 Hiện Tượng Quan Sát Được
+
+Từ `hash_mismatch_alert.log` (2026-05-16 02:25:06):
+- **Fork Point:** Block 4690 (GEI=4690, Epoch=8)
+- **Phân vùng:** m0/m4 (2 nodes) vs m1/m2/m3 (3 nodes = quorum)
+
+| Trường | m0/m4 (lệch) | m1/m2/m3 (đúng — quorum) | Phân tích |
+|---|---|---|---|
+| `parentHash` | `0xfb6fddbb...` | `0xfb6fddbb...` | **✅ GIỐNG** |
+| `txRoot` | `0x23dd0232...` | `0x23dd0232...` | **✅ GIỐNG** |
+| `receiptsRoot` | `0x9c043950...` | `0x9c043950...` | **✅ GIỐNG** |
+| `stakeRoot` | `0x7f2bffd5...` | `0x7f2bffd5...` | **✅ GIỐNG** |
+| `leader` | `0xb7C5C524...` | `0xb7C5C524...` | **✅ GIỐNG** |
+| `time` | `0x6a07d57d` | `0x6a07d57d` | **✅ GIỐNG** |
+| `stateRoot` | `0x5a955138...` | `0x45131bc4...` | **❌ KHÁC — ROOT CAUSE** |
+
+> ⚠️ **Điểm khác biệt quan trọng so với Block 146 và Block 15:** Block 4690 có **MỌI trường giống** ngoại trừ `stateRoot`. Cùng transactions, cùng receipts, cùng leader — nhưng **account state trie root khác nhau**. Đây là lỗi **execution layer** (non-deterministic trie read), KHÔNG phải lỗi consensus.
+
+### 9.2 Nguyên Nhân Gốc: Pseudo-RCU `Close()` Goroutine
+
+```mermaid
+flowchart TD
+    RC["🔴 ROOT CAUSE: Pseudo-RCU Close goroutine"] --> L1["UpdateStateForNewHeader swap pointers"]
+    L1 --> L2["go func: time.After 5s → oldAsDB.Close"]
+    L2 --> L3["NOMT C++ sessions share mmap storage"]
+    L3 --> L4["Close old session → corrupt shared mmap"]
+    L4 --> L5["IntermediateRoot trả giá trị khác nhau trên các node"]
+    L5 --> BH["stateRoot khác → Block hash khác → FORK"]
+    
+    style RC fill:rgba(255,50,50,0.3),stroke:#ff3333,color:#ff3333
+    style BH fill:rgba(255,50,50,0.3),stroke:#ff3333,color:#ff3333
+```
+
+**Chuỗi nguyên nhân chi tiết:**
+1. `UpdateStateForNewHeader()` tạo trie mới và `atomic.Pointer.Swap()` để thay thế.
+2. Goroutine chạy `time.After(5s)` rồi gọi `oldAsDB.Close()` trên session NOMT cũ.
+3. NOMT C++ engine **chia sẻ underlying mmap'd storage** giữa old và new session.
+4. `Close()` trên session cũ **phá hủy shared mmap data** mà session mới đang đọc.
+5. Tùy timing: node m0/m4 bị Close() fire lúc đang đọc trie → `IntermediateRoot()` sai. Node m1/m2/m3 xong block trước khi Close() fire → đúng.
+
+### 9.3 Fix Đã Triển Khai
+
+| Fix | File | Mô tả | Trạng thái |
+|---|---|---|---|
+| **Xóa Pseudo-RCU Close()** | `chain_state.go:295-310` | Xóa hoàn toàn goroutine `time.After(5s) + oldAsDB.Close()`. Để Go GC tự thu hồi old DB objects. | ✅ Đã triển khai |
+| **Xóa import `time`** | `chain_state.go:12` | Import không còn sử dụng sau khi xóa goroutine | ✅ Đã triển khai |
+
+### 9.4 Bài Học Kiến Trúc
+
+> **⚠️ NOMT C++ sessions share mmap'd storage. KHÔNG BAO GIỜ gọi `Close()` trên session cũ khi session mới đang hoạt động.** Sử dụng Go GC để quản lý lifecycle của old DB objects là an toàn và đủ nhanh.
+
+| Quy tắc | Chi tiết |
+|---|---|
+| **INV-NOMT-LIFECYCLE** | Old NOMT sessions phải được GC tự thu hồi, KHÔNG được Close() thủ công |
+| **INV-DETERMINISTIC-READ** | Mọi trie read trong 1 block phải trả kết quả giống hệt trên mọi node |
+| **INV-NO-TIMED-CLEANUP** | KHÔNG dùng `time.After`/`time.AfterFunc` để cleanup shared state |
