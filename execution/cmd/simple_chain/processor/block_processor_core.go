@@ -516,8 +516,6 @@ func NewBlockProcessor(
 
 // GetLastBlock returns the last processed block
 func (bp *BlockProcessor) GetLastBlock() types.Block {
-	bp.lastBlockMutex.Lock()
-	defer bp.lastBlockMutex.Unlock()
 	value := bp.lastBlock.Load()
 	if value == nil {
 		return nil
@@ -525,7 +523,7 @@ func (bp *BlockProcessor) GetLastBlock() types.Block {
 	return value.(types.Block)
 }
 
-// GetLastBlockMutex exposes the last block mutex for synchronization
+// GetLastBlockMutex exposes the last block mutex for synchronization (writers only)
 func (bp *BlockProcessor) GetLastBlockMutex() *sync.Mutex {
 	return &bp.lastBlockMutex
 }
@@ -548,10 +546,10 @@ func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
 
 // SetLastBlock sets the last processed block
 func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
-	bp.lastBlockMutex.Lock()
-	defer bp.lastBlockMutex.Unlock()
 	if lastBlock != nil {
+		bp.lastBlockMutex.Lock()
 		bp.lastBlock.Store(lastBlock)
+		bp.lastBlockMutex.Unlock()
 	}
 }
 
