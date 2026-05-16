@@ -241,6 +241,23 @@ func main() {
 	rpcClient := rpc.NewRPCClient(rpcUrl)
 	fmt.Printf("  🌐 Chế độ Single Node IP (RPC): %s\n", rpcUrl)
 
+	// Wait for RPC node to be ready before starting concurrent requests
+	fmt.Printf("\n⏳ Waiting for RPC node to be ready...\n")
+	for i := 0; i < 120; i++ {
+		_, err := rpcClient.GetAccountState(toSend[0].Address)
+		if err == nil {
+			fmt.Printf("  ✅ Node %s is ready\n", rpcClient.Endpoint)
+			break
+		}
+		if i%10 == 0 {
+			fmt.Printf("    Still waiting for %s... (err: %v)\n", rpcClient.Endpoint, err)
+		}
+		time.Sleep(1 * time.Second)
+		if i == 119 {
+			log.Fatalf("❌ Node %s failed to become ready after 120s: %v", rpcClient.Endpoint, err)
+		}
+	}
+
 	// Fetch nonce for ALL accounts concurrently
 	fmt.Printf("  🔍 Fetching nonces for %d accounts...\n", len(toSend))
 	nonceMap := make(map[string]uint64) // address -> nonce

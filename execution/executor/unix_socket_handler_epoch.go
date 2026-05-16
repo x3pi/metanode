@@ -1369,8 +1369,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		currentGEI := storage.GetLastGlobalExecIndex()
 		isFullyExecuted := false
 		if blockGEI > 0 && blockGEI <= currentGEI {
-			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
-				isFullyExecuted = true
+			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
+				if localHash == blockHash {
+					isFullyExecuted = true
+				} else {
+					logger.Error("💥 [FORK DETECTED] Local block #%d hash (%x) != leader hash (%x) during sync! Node has forked and diff-based sync cannot revert dirty state.", blockNum, localHash[:8], blockHash[:8])
+					logger.Error("💥 [AUTO-RESET] Wiping local database to force clean sync and exiting...")
+					chainDataDir := filepath.Join(rh.chainState.GetConfig().Databases.RootPath, "chaindata")
+					os.RemoveAll(chainDataDir)
+					os.Exit(255)
+				}
 			}
 		}
 

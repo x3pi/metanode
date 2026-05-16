@@ -260,8 +260,6 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 				}
 			}
 		}
-		// Sau khi đã cập nhật trie, xóa danh sách dirty
-		db.dirtyTransactions = make(map[common.Hash]types.Transaction)
 		logger.Info("✅ [txDB Phase 1] Marshalling & Trie BatchUpdate completed in %v", time.Since(marshalTimeStart))
 	} else {
 		logger.Debug("Commit: No dirty transactions to process. Proceeding to commit current trie state.")
@@ -330,6 +328,10 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("failed to reset trie to empty state: %w", err)
 	}
 	db.originRootHash = trie.EmptyRootHash
+	
+	// Reset dirtyTransactions AFTER they have been successfully written to the DB
+	db.dirtyTransactions = make(map[common.Hash]types.Transaction)
+	
 	logger.Debug(fmt.Sprintf("✅ [Phase 4] Cleanup and Reset completed in %v", time.Since(cleanupTimeStart)))
 
 	logger.Debug(fmt.Sprintf("🚀 Total Commit execution time: %v", time.Since(totalTimeStart)))
