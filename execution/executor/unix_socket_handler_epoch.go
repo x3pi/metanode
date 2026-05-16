@@ -1600,10 +1600,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					if nomtHandleRoot != expectedRoot {
 						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
 							"handleRoot=%s, expected=%s, block=#%d. "+
-							"Batch apply was incomplete or corrupted. Bypassing fatal wipe to allow recovery.",
+							"Batch apply was incomplete or corrupted. HALTING sync to prevent fork (pending instead).",
 							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
 						
-						// Removed Auto-wipe DB and os.Exit(255) to prevent catastrophic state loss during load tests
+						// Return error to halt sync and prevent forking (better pending than forking)
+						return &pb.SyncBlocksResponse{
+							Error: fmt.Sprintf("NOMT stateRoot mismatch at block %d: handle=%s expected=%s",
+								blockNum, nomtHandleRoot.Hex()[:18], expectedRoot.Hex()[:18]),
+						}, fmt.Errorf("NOMT stateRoot mismatch at block %d", blockNum)
 					} else {
 						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
 							blockNum, nomtHandleRoot.Hex()[:18]+"...")
