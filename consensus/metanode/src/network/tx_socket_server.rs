@@ -60,18 +60,19 @@ impl TxSocketServer {
             let peer_discovery_addresses_ref = peer_discovery_addresses.clone();
             let tx_recycler_ref = tx_recycler.clone();
 
-            tokio::spawn(async move {
-                Self::process_ffi_batch(
-                    tx_data,
-                    client_ref,
-                    node_ref,
-                    is_transitioning_ref,
-                    peer_rpc_addresses_ref,
-                    peer_discovery_addresses_ref,
-                    tx_recycler_ref,
-                )
-                .await;
-            });
+            // DO NOT spawn a new task. Process sequentially to exert backpressure 
+            // on the bounded FFI channel (capacity 1000). If we spawn, unbounded tasks
+            // pile up during epoch transitions, causing a livelock.
+            Self::process_ffi_batch(
+                tx_data,
+                client_ref,
+                node_ref,
+                is_transitioning_ref,
+                peer_rpc_addresses_ref,
+                peer_discovery_addresses_ref,
+                tx_recycler_ref,
+            )
+            .await;
         }
         Ok(())
     }

@@ -138,6 +138,12 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
         guard.clone().unwrap()
     };
 
+    // Instrumentation: Queue Saturation metrics
+    let remaining_capacity = sender.capacity();
+    if remaining_capacity < 100 {
+        tracing::warn!("⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/1000", remaining_capacity);
+    }
+
     // try_send is non-blocking and synchronous
     match sender.try_send(tx_data) {
         Ok(_) => true,

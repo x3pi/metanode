@@ -177,14 +177,15 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				if !success {
 					logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
 						batchNum, totalBatches, len(batchTxs))
-					// Re-add to transaction pool for retry in the next tick
-					bf.transactionProcessor.transactionPool.AddTransactions(batchTxs)
-					for _, tx := range batchTxs {
+					// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
+					remainingTxs := txs[batchStart:]
+					bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
+					for _, tx := range remainingTxs {
 						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
 					}
 					// Slow down slightly on backpressure
 					time.Sleep(50 * time.Millisecond)
-					continue
+					break // Break out of the batch loop to wait for the next tick
 				} else {
 					if shouldLogSend {
 						logger.Info("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
