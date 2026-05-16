@@ -147,14 +147,7 @@ impl CoreThread {
             tokio::select! {
                 command = self.receiver.recv() => {
                     let Some(command) = command else {
-                        tracing::warn!("🔴 [CORE THREAD] Command receiver CLOSED - sender was dropped!");
-                        // Capture backtrace to identify where the drop occurred
-                        let backtrace = std::backtrace::Backtrace::capture();
-                        if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
-                            tracing::warn!("🔴 [CORE THREAD] Backtrace at receiver close:\n{}", backtrace);
-                        } else {
-                            tracing::warn!("🔴 [CORE THREAD] Backtrace not available (set RUST_BACKTRACE=1)");
-                        }
+                        tracing::info!("✅ [CORE THREAD] Command receiver closed. Shutting down CoreThread gracefully (normal during epoch transition).");
                         break;
                     };
                     self.context.metrics.node_metrics.core_lock_dequeued.inc();

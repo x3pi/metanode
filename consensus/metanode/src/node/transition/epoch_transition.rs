@@ -630,47 +630,16 @@ async fn poll_go_until_synced(
             }
         }
 
+        // Wait without active fallback to prevent race condition with Go's FFI executor pipeline.
+        // We removed the active peer sync fetch here because if Go is simply slow (e.g., 20k TPS backlog),
+        // injecting SyncBlocksRequest concurrently while Go is natively executing causes NOMT state corruption.
         if wait_start.elapsed() > max_wait {
             warn!(
                 "⏱️ [SYNC POLL] Go is taking longer than {:?} to process commits (expected={}). \
-                 This happens during heavy catch-up or if Go missed blocks. Attempting active peer sync...",
+                 Continuing to wait gracefully without active peer sync...",
                 max_wait,
                 expected_last_block
             );
-
-            // Active Fallback: If Go is stuck, fetch the missing blocks from peers and force-feed them!
-            match executor_client.get_last_block_number().await {
-                Ok((go_block, _, _, _, _)) => {
-                    if go_block < expected_last_block && !config.peer_rpc_addresses.is_empty() {
-                        use rand::seq::SliceRandom;
-                        let mut shuffled_peers = config.peer_rpc_addresses.clone();
-                        shuffled_peers.shuffle(&mut rand::thread_rng());
-
-                        warn!("🔄 [SYNC POLL] Fetching blocks {}-{} from peers to unblock Go...", go_block + 1, expected_last_block);
-                        match crate::network::peer_rpc::fetch_blocks_from_peer(
-                            &shuffled_peers,
-                            go_block + 1,
-                            expected_last_block,
-                        ).await {
-                            Ok(blocks) if !blocks.is_empty() => {
-                                warn!("✅ [SYNC POLL] Fetched {} missing blocks. Injecting to Go...", blocks.len());
-                                if let Err(e) = executor_client.sync_and_execute_blocks(blocks).await {
-                                    error!("❌ [SYNC POLL] sync_and_execute_blocks failed: {}", e);
-                                } else {
-                                    info!("✅ [SYNC POLL] Successfully injected missing blocks! Go should advance now.");
-                                }
-                            }
-                            _ => warn!("⚠️ [SYNC POLL] Failed to fetch missing blocks from peers."),
-                        }
-                    } else if config.peer_rpc_addresses.is_empty() {
-                        warn!("⚠️ [SYNC POLL] No peer addresses configured. Cannot fetch missing blocks.");
-                    }
-                }
-                Err(e) => warn!("⚠️ [SYNC POLL] Could not get last block number from Go: {}", e),
-            }
-
-            // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
-            // Reset wait_start to avoid spamming the log and retry logic.
             wait_start = std::time::Instant::now();
         }
 
