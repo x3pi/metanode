@@ -574,7 +574,12 @@ impl ExecutorClient {
                         "🚀 [TX-FLOW-TRACE] ▶ PHASE 4 FFI: cgo_execute_block() called | gei={}, payload_size={} bytes",
                         idx, data.len()
                     );
-                    let success = c_fn(data.as_ptr(), data.len());
+                    let data_clone = data.clone();
+                    let success = tokio::task::spawn_blocking(move || {
+                        c_fn(data_clone.as_ptr(), data_clone.len())
+                    })
+                    .await
+                    .unwrap_or(false);
                     if success {
                         info!(
                             "✅ [TX-FLOW-TRACE] ▶ PHASE 4 FFI DONE: Go accepted block | gei={}",
@@ -852,7 +857,12 @@ impl ExecutorClient {
 
         // FFI INTEGRATION: Send directly to Go via CGo callback
         if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
-            let success = c_fn(epoch_data_bytes.as_ptr(), epoch_data_bytes.len());
+            let data_vec = epoch_data_bytes.to_vec();
+            let success = tokio::task::spawn_blocking(move || {
+                c_fn(data_vec.as_ptr(), data_vec.len())
+            })
+            .await
+            .unwrap_or(false);
             if success {
                 trace!("📤 [TX FLOW] Sent committed sub-DAG to Go executor via FFI: global_exec_index={}, commit_index={}, epoch={}, data_size={} bytes", 
                     global_exec_index, commit_index, epoch, epoch_data_bytes.len());
