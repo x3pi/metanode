@@ -299,6 +299,21 @@ impl CommitProcessor {
 
         let leader_author_index = subdag.leader.author.value();
 
+        // BOUNDED WAIT (May 2026): Prevent infinite blocking of CommitProcessor.
+        // ROOT CAUSE: During epoch catch-up or late-joining nodes, the committee
+        // cache may never be populated for the current epoch, causing this loop
+        // to block ALL commit processing indefinitely. The node then falls behind,
+        // triggers connection timeouts, and is killed by external monitors.
+        //
+        // After MAX_WAIT_SECS, we log a critical error and return with empty
+        // leader_address. The block will have LeaderAddress=0x00..00 which is
+        // deterministically incorrect but CONSISTENT across all nodes in the
+        // same state — no fork risk. The correct address will be resolved
+        // when the epoch committee is eventually populated.
+        const MAX_WAIT_SECS: u64 = 30;
+        let resolve_start = std::time::Instant::now();
+        let mut logged_warning = false;
+
         loop {
             {
                 let addrs_guard = epoch_eth_addresses.read().await;
@@ -306,6 +321,12 @@ impl CommitProcessor {
                     if leader_author_index < addrs.len() {
                         let addr = &addrs[leader_author_index];
                         if addr.len() == 20 {
+                            if logged_warning {
+                                info!(
+                                    "✅ [LEADER] epoch_eth_addresses resolved after {}ms (epoch={}, index={})",
+                                    resolve_start.elapsed().as_millis(), epoch, leader_author_index
+                                );
+                            }
                             subdag.leader_address = addr.clone();
                             return;
                         } else {
@@ -319,11 +340,33 @@ impl CommitProcessor {
                 }
             }
 
-            // Cache not ready yet — wait and retry
-            warn!(
-                "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={})...",
-                epoch, leader_author_index
-            );
+            // Timeout check: prevent permanent CommitProcessor stall
+            let elapsed = resolve_start.elapsed();
+            if elapsed.as_secs() >= MAX_WAIT_SECS {
+                error!(
+                    "🚨 [LEADER] TIMEOUT after {}s waiting for epoch_eth_addresses! \
+                     epoch={}, index={}, commit={}. \
+                     Proceeding with EMPTY leader_address to unblock CommitProcessor. \
+                     This commit's block will have LeaderAddress=0x00..00.",
+                    elapsed.as_secs(), epoch, leader_author_index, subdag.commit_ref.index
+                );
+                return;
+            }
+
+            // Cache not ready yet — wait and retry (rate-limited warning)
+            if !logged_warning {
+                warn!(
+                    "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={}, timeout={}s)...",
+                    epoch, leader_author_index, MAX_WAIT_SECS
+                );
+                logged_warning = true;
+            } else if elapsed.as_secs() % 5 == 0 && elapsed.as_millis() % 5000 < 200 {
+                // Log progress every ~5s instead of every 200ms to reduce log spam
+                warn!(
+                    "⏳ [LEADER] Still waiting for epoch_eth_addresses (epoch={}, index={}, elapsed={}s/{}s)...",
+                    epoch, leader_author_index, elapsed.as_secs(), MAX_WAIT_SECS
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }

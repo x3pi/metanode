@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1317,6 +1319,10 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	isPreConsensusSync := request.GetExecuteMode()
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
+		if rh.snapshotManager != nil {
+			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+			rh.snapshotManager.WaitForPersistence()
+		}
 	}
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
@@ -1588,8 +1594,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 							"handleRoot=%s, expected=%s, block=#%d. "+
 							"Batch apply was incomplete or corrupted — subsequent consensus blocks WILL FORK!",
 							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
-						// Don't halt sync — the node can still attempt to recover via consensus.
-						// But this error MUST be investigated immediately.
+						
+						// Auto-wipe DB and exit so it can restart cleanly
+						logger.Error("💥 [AUTO-RESET] Wiping local database due to NOMT divergence and exiting...")
+						chainDataDir := filepath.Join(rh.chainState.GetConfig().Databases.RootPath, "chaindata")
+						os.RemoveAll(chainDataDir)
+						os.Exit(255)
 					} else {
 						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
 							blockNum, nomtHandleRoot.Hex()[:18]+"...")

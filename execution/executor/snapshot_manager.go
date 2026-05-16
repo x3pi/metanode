@@ -231,6 +231,18 @@ func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
 	sm.waitPersistenceCallback = cb
 }
 
+// WaitForPersistence manually triggers the waitPersistenceCallback to wait for the commit pipeline to flush.
+// This is used to prevent concurrent NOMT mutations between STARTUP-SYNC and commitWorker.
+func (sm *SnapshotManager) WaitForPersistence() {
+	sm.mu.Lock()
+	cb := sm.waitPersistenceCallback
+	sm.mu.Unlock()
+	if cb != nil {
+		logger.Info("⏳ [SNAPSHOT-MANAGER] Manually triggering wait persistence callback to flush pipeline...")
+		cb()
+	}
+}
+
 // SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
 func (sm *SnapshotManager) SetSnapshotFrequency(frequency int) {
 	if frequency < 0 {
