@@ -945,7 +945,7 @@ PROCESS_BLOCK:
 
 	// ⚠️ VALIDATION: Check if any transaction is missing its receipt
 	if len(accumulatedResults.Receipts) != len(allTransactions) {
-		logger.Error("❌ [RECEIPT VALIDATION] MISMATCH: block #%d has %d transactions but only %d receipts!",
+		logger.Warn("⚠️ [RECEIPT VALIDATION] MISMATCH: block #%d has %d transactions but only %d receipts! (Likely due to duplicate/stale TXs being dropped)",
 			*currentBlockNumber, len(allTransactions), len(accumulatedResults.Receipts))
 
 		// Build map of existing receipts
@@ -960,11 +960,11 @@ PROCESS_BLOCK:
 			txHash := tx.Hash()
 			if !receiptMap[txHash] {
 				missingReceipts = append(missingReceipts, txHash.Hex())
-				logger.Error("   ❌ [MISSING RECEIPT] Transaction without receipt: hash=%s, from=%s, to=%s, nonce=%d",
+				logger.Warn("   ⚠️ [DROPPED TX] Transaction bị Node loại bỏ (do lỗi Nonce/trùng lặp): hash=%s, from=%s, to=%s, tx.Nonce=%d",
 					txHash.Hex(), tx.FromAddress().Hex(), tx.ToAddress().Hex(), tx.GetNonce())
 			}
 		}
-		logger.Error("   📋 [MISSING RECEIPT] Total missing receipts: %d. Missing tx hashes: %v",
+		logger.Warn("   📋 [DROPPED TX] Total dropped txs: %d. Hashes: %v",
 			len(missingReceipts), missingReceipts)
 	} else {
 		logger.Debug("✅ [RECEIPT VALIDATION] All %d transactions have receipts for block #%d",

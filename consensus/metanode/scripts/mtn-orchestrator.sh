@@ -222,19 +222,43 @@ start_go_master() {
         pprof_flag="--pprof-addr="
     fi
 
+    # Build command with crash diagnostics wrapper
     local cmd="ulimit -n 100000; "
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
-    cmd+="export GOMEMLIMIT=500MiB && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="set -o pipefail; "
+    cmd+="echo \"═══ [NODE ${node_id}] PID=\$\$ Started at \$(date '+%Y-%m-%d %H:%M:%S') ═══\"; "
     cmd+="./simple_chain -config=${config} ${pprof_flag} 2>&1 | tee -a \"${log_file}\"; "
+    cmd+="EXIT_CODE=\$?; "
+    cmd+="echo ''; "
+    cmd+="echo '╔═══════════════════════════════════════════════════════════╗'; "
+    cmd+="echo '║  🚨 NODE ${node_id} PROCESS EXITED                       ║'; "
+    cmd+="echo '╚═══════════════════════════════════════════════════════════╝'; "
+    cmd+="echo \"  ⏰ Time: \$(date '+%Y-%m-%d %H:%M:%S')\"; "
+    cmd+="echo \"  📊 Exit code: \$EXIT_CODE\"; "
+    cmd+="if [ \$EXIT_CODE -gt 128 ]; then "
+    cmd+="  SIG=\$((EXIT_CODE - 128)); "
+    cmd+="  echo \"  ⚡ Killed by signal: \$SIG (\$(kill -l \$SIG 2>/dev/null || echo UNKNOWN))\"; "
+    cmd+="fi; "
+    cmd+="echo \"  📁 Log: ${log_file}\"; "
+    cmd+="echo ''; "
+    cmd+="echo '  💡 Pane is kept alive (remain-on-exit). Press q or type exit to close.'; "
+    cmd+="echo '  💡 Use: tmux attach -t ${session}  to reconnect'; "
 
-    cd "$GO_DIR" && tmux new-session -d -s "$session" "bash -c '$cmd'"
-    # tmux set-option -t "$session" remain-on-exit on
-    log_step "Go Master node${node_id} → process started via tmux (remain-on-exit enabled)"
+    local script_file="/tmp/run_node_${node_id}.sh"
+    echo "#!/bin/bash" > "$script_file"
+    echo "cd \"$GO_DIR\"" >> "$script_file"
+    echo "$cmd" >> "$script_file"
+    chmod +x "$script_file"
+
+    tmux new-session -d -s "$session" "$script_file"
+    # Enable remain-on-exit: keep tmux pane alive after process exits
+    # This allows attaching to see crash output, exit code, and signal info
+    tmux set-option -t "$session" remain-on-exit on
+    log_step "Go Master node${node_id} → process started via tmux (remain-on-exit ON)"
 }
 
 

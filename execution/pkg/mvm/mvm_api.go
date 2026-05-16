@@ -325,7 +325,7 @@ func ClearAllMVMApi() {
 	apiInstances.Range(func(key, value interface{}) bool {
 		mvmId := key.(common.Address)
 		if _, protected := protectedApiInstances.Load(mvmId); !protected {
-			logger.Error("ClearMVM: 7", mvmId)
+			// logger.Error("ClearMVM: 7", mvmId)
 			ClearMVMApi(mvmId)
 		} else {
 			logger.Debug("Skipping protected MVMApi instance during ClearAll:", mvmId.Hex())
