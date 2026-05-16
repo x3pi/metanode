@@ -121,8 +121,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		if len(txs) == 0 {
 			if poolSizeBefore > 0 {
-				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions",
+				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions. Sleeping 10ms to prevent spin.",
 					poolSizeBefore, poolSizeAfter, pendingPoolSizeBefore, pendingPoolSizeAfter)
+				// Backoff to prevent 100% CPU spin loop when pool contains only future nonces
+				time.Sleep(10 * time.Millisecond)
 			}
 			continue
 		}
