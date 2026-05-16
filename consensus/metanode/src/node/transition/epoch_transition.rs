@@ -189,6 +189,12 @@ pub async fn transition_to_epoch_from_system_tx(
             );
         }
     }
+    // Clear TxRecycler pending map — prevents 100k+ stale entries from accumulating
+    // across epochs. These TXs are tracked separately in epoch_pending_transactions
+    // for recovery purposes, so clearing here is safe and necessary.
+    if let Some(ref recycler) = node.tx_recycler {
+        recycler.clear_pending().await;
+    }
     node.update_execution_lock_epoch(new_epoch).await;
 
     info!(
