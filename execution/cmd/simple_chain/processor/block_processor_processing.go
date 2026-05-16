@@ -138,10 +138,17 @@ func (bp *BlockProcessor) ProcessorPool() {
 			// (epoch start) to ensure EVM execution is identical across the cluster, preventing StateRoot forks.
 			blockTimeSec := bp.chainState.GetCurrentEpochStartTimestampMs() / 1000
 			if blockTimeSec == 0 {
-				if lastHeader := bp.chainState.GetcurrentBlockHeader(); lastHeader != nil {
+				if lastHeaderPtr := bp.chainState.GetcurrentBlockHeader(); lastHeaderPtr != nil && *lastHeaderPtr != nil {
+					lastHeader := *lastHeaderPtr
 					blockTimeSec = lastHeader.TimeStamp() + 1
 				} else {
-					blockTimeSec = uint64(time.Now().Unix()) // Absolute fallback
+					// 🚨 FORK-GUARD: Tuyệt đối KHÔNG sử dụng time.Now()
+					// Nếu chưa có genesis timestamp từ Rust consensus, transaction pool
+					// phải chuyển sang trạng thái pending (chờ) để tránh sinh ra StateRoot bị lệch.
+					logger.Error("🚨 [FORK-GUARD] Missing consensus timestamp and last header! Pausing tx processing to prevent state fork.")
+					<-bp.processingLockChan // Giải phóng lock
+					time.Sleep(1 * time.Second) // Pending 1 giây rồi kiểm tra lại
+					continue
 				}
 			}
 
