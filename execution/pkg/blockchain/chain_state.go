@@ -254,6 +254,53 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if newHeader == nil {
 		return fmt.Errorf("cannot update state with a nil header")
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT FAST-PATH: Lightweight root re-alignment (~1µs vs ~10ms full rebuild)
+	//
+	// For NOMT backend, the C++ engine already has the authoritative state.
+	// We only need to update Go's in-memory root hash pointers to match.
+	// This avoids:
+	//   - loadRegistryFromFile() disk I/O per namespace
+	//   - handle.Root() FFI calls
+	//   - NewAccountStateDB/NewStakeStateDB constructor overhead
+	//   - Atomic DB pointer swaps + GC pressure from discarded old DBs
+	//
+	// FORK-SAFETY: RealignRoot only updates readView.rootHash. It does NOT
+	// modify the C++ NOMT state. Subsequent Commit() calls will compute
+	// the correct root from dirty entries against the C++ engine.
+	// ═══════════════════════════════════════════════════════════════════════
+	if trie.GetStateBackend() == trie.BackendNOMT {
+		newAccountRoot := newHeader.AccountStatesRoot()
+		newStakeRoot := common.Hash(newHeader.StakeStatesRoot())
+
+		// Realign account state trie
+		if asDB := cs.GetAccountStateDB(); asDB != nil {
+			if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newAccountRoot)
+			}
+		}
+		// Realign stake state trie
+		if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+			if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newStakeRoot)
+			}
+		}
+
+		// Update header pointer atomically
+		headerCopy := newHeader
+		cs.currentBlockHeader.Store(&headerCopy)
+
+		logger.Info("🔧 [NOMT-FAST-PATH] UpdateStateForNewHeader lightweight re-alignment for block #%d (accountRoot=%s, stakeRoot=%s)",
+			newHeader.BlockNumber(), newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+		return nil
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FULL REBUILD PATH: For MPT/Flat/Verkle backends
+	// Creates new trie instances from header roots and swaps DB pointers.
+	// ═══════════════════════════════════════════════════════════════════════
+
 	// 1. Khởi tạo lại AccountStateDB với root mới
 	accountStorage := cs.storageManager.GetStorageAccount()
 	newAccountRoot := newHeader.AccountStatesRoot() // Lấy root từ header mới

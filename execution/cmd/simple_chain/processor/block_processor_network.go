@@ -271,7 +271,7 @@ PROCESS_LOOP:
 					// hold the old state root. We MUST re-align it to the new
 					// block's header before processing the next consensus block.
 					// ═══════════════════════════════════════════════════════════
-					if bp.chainState.GetAccountStateDB().Trie().GetStateBackend() == trie.BackendNOMT {
+					if trie.GetStateBackend() == trie.BackendNOMT {
 						lastBlock := bp.GetLastBlock()
 						if lastBlock != nil {
 							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)", 
