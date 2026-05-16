@@ -238,7 +238,16 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 
 		// FORK-SAFETY: Sort by txHash for deterministic trie insertion order
 		sort.Slice(resultsList, func(i, j int) bool {
-			return resultsList[i].hash.Cmp(resultsList[j].hash) < 0
+			// Compare hashes directly byte by byte
+			for k := 0; k < len(resultsList[i].hash); k++ {
+				if resultsList[i].hash[k] < resultsList[j].hash[k] {
+					return true
+				}
+				if resultsList[i].hash[k] > resultsList[j].hash[k] {
+					return false
+				}
+			}
+			return false
 		})
 
 		batchKeys := make([][]byte, len(resultsList))
