@@ -361,6 +361,25 @@ func main() {
 	// Round-robin counter cho nonce fetching
 	var rpcPoolIdx int64
 
+	// Wait for all RPC nodes to be ready before starting concurrent requests
+	fmt.Printf("\n⏳ Waiting for all RPC nodes to be ready...\n")
+	for _, rc := range rpcPool {
+		for i := 0; i < 120; i++ {
+			_, err := rc.GetAccountState(toSend[0].Address)
+			if err == nil {
+				fmt.Printf("  ✅ Node %s is ready\n", rc.Endpoint)
+				break
+			}
+			if i%10 == 0 {
+				fmt.Printf("    Still waiting for %s... (err: %v)\n", rc.Endpoint, err)
+			}
+			time.Sleep(1 * time.Second)
+			if i == 119 {
+				log.Fatalf("❌ Node %s failed to become ready after 120s: %v", rc.Endpoint, err)
+			}
+		}
+	}
+
 	// fetchNonce: luôn dùng rcPool[0] (tức là node master/local) để lấy nonce
 	// Việc dùng round-robin rpcPool (poolSize > 1) sẽ gây ra lỗi "invalid nonce" vì
 	// các sub-node thường bị lag 1 chút (replication lag). Khi lấy state từ sub-node bị lag,
