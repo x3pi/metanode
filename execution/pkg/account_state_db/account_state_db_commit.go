@@ -551,6 +551,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		}
 		db.lockedFlag.Store(true) // CHANGED: Use atomic Store
 
+		// FORK-SAFETY FIX: Use cacheEpoch as a SeqLock to prevent concurrent mempool
+		// validators (AccountStateReadOnly) from poisoning the lruCache with stale
+		// trie data while IntermediateRoot is actively mutating the trie.
+		db.cacheEpoch.Add(1)
+		defer db.cacheEpoch.Add(1)
+
 		// ═══════════════════════════════════════════════════════════════
 		// PIPELINE OVERLAP: persistReady wait has been MOVED to AFTER the
 		// CPU-bound marshal phase (below), just before BatchUpdate which

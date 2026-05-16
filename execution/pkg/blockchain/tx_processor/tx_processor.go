@@ -527,11 +527,10 @@ func processSingleGroup(
 		if tx.IsDeployContract() {
 			toAddress = common.Address{}
 		}
-		// ❗ Nếu sender đã có lỗi trước đó, tạo receipt lỗi cho tx này và bài bỏ
+		// ❗ Nếu sender đã có lỗi trước đó, bài bỏ tx này mà không đưa vào block.
+		// FORK-SAFETY & DATA INTEGRITY: Do NOT include skipped TXs in the block.
+		// Including them without incrementing their nonce violates blockchain invariants.
 		if failedSenders[tx.FromAddress()] {
-			rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("skipped due to previous transaction failure"))
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -559,9 +558,10 @@ func processSingleGroup(
 			// CRITICAL FIX: Downgrade from Error to Debug to prevent massive lock contention
 			// when a client (e.g. tps_blast) resends duplicated batches under heavy load.
 			logger.Debug("❌ [NONCE-REJECT] %v for tx %s", err, tx.Hash().Hex())
-			rcp := createErrorReceipt(tx, toAddress, err)
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
+			
+			// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
+			// Including them causes duplicate TX hashes across multiple blocks when a client
+			// resends a batch, inflating the block's TX count and bloating the ledger.
 			failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
 			continue
 		}

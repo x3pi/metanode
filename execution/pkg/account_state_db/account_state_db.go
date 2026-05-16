@@ -178,7 +178,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 	db.originRootHash = rootHash
 	db.dirtyAccounts.Clear()  // Clear dirty accounts under lock
 	db.loadedAccounts.Clear() // Clear loaded accounts too
-	db.cacheEpoch.Add(1)      // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2)      // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -447,7 +447,7 @@ func (db *AccountStateDB) InvalidateAllCaches() {
 	<-db.persistReady
 
 	db.loadedAccounts.Clear()
-	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -467,7 +467,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	// Clear dirty accounts first
 	db.dirtyAccounts.Clear()
 	db.loadedAccounts.Clear()
-	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -542,12 +542,20 @@ func (db *AccountStateDB) Close() {
 
 // setLruCacheSafe safely inserts into the LRU cache, preventing stale data poisoning.
 // It checks if InvalidateAllCaches was called during the read operation.
-func (db *AccountStateDB) setLruCacheSafe(addr common.Address, data []byte, readEpoch uint64) {
+func (db *AccountStateDB) setLruCacheSafe(address common.Address, bData []byte, readEpoch uint64) {
 	db.lruMu.Lock()
-	if db.cacheEpoch.Load() == readEpoch {
-		db.lruCache[addr] = data
+	defer db.lruMu.Unlock()
+	
+	// SeqLock FORK-SAFETY FIX: If readEpoch is odd, a commit pipeline (IntermediateRoot)
+	// is actively mutating the trie and cache. Do NOT insert stale data.
+	if readEpoch%2 != 0 {
+		return
 	}
-	db.lruMu.Unlock()
+
+	// If InvalidateAllCaches was called during our read, cacheEpoch would have increased
+	if db.cacheEpoch.Load() == readEpoch {
+		db.lruCache[address] = bData
+	}
 }
 
 // --- Internal Helper Methods ---
@@ -1026,7 +1034,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 
 	if db.lruCache != nil {
 		db.lruMu.Lock()
-		db.cacheEpoch.Add(1) // FORK-SAFETY
+		db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 		db.lruCache = make(map[common.Address][]byte, 200000)
 		db.lruCacheOld = make(map[common.Address][]byte)
 		db.lruMu.Unlock()
