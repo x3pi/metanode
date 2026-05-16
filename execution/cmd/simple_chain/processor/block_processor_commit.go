@@ -133,6 +133,14 @@ func (bp *BlockProcessor) commitWorker() {
 		if bp.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp()) {
 			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
 				header.BlockNumber(), header.Epoch())
+				
+			// FORK-SAFETY FIX: Flush PebbleDB to SST files at epoch boundary
+			// This ensures that all authoritative state (AccountState, StakeDB)
+			// modifications from the ending epoch are durably synced.
+			logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST to ensure synchronization point.")
+			if err := bp.storageManager.FlushAll(); err != nil {
+				logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
+			}
 		}
 
 		// logger.Debug("✅ [TX COMMIT] Block #%d saved to database successfully: hash=%s, tx_count=%d",
