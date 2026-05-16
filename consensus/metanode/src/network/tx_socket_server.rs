@@ -266,11 +266,30 @@ impl TxSocketServer {
 
                 if let Some(epoch_pending_mutex) = epoch_pending_ptr {
                     let mut epoch_pending = epoch_pending_mutex.lock().await;
-                    epoch_pending.extend(chunk_vec.clone());
+                    for tx in chunk_vec.clone() {
+                        let hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(&tx);
+                        epoch_pending.insert(hash, tx);
+                    }
+                    
+                    if epoch_pending.len() % 5000 == 0 && epoch_pending.len() > 0 {
+                        tracing::debug!(
+                            "🗑️ [DEBUG-RÁC] epoch_pending_transactions đang chứa {} giao dịch đang chờ commit",
+                            epoch_pending.len()
+                        );
+                    }
                 }
 
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
+                    
+                    // DEBUG LOG: Hiển thị lượng rác đang bị kẹt trong TxRecycler
+                    let (pending, _, _, _) = recycler.stats().await;
+                    if pending % 5000 == 0 || pending > 50000 {
+                        tracing::warn!(
+                            "🗑️ [DEBUG-RÁC] TxRecycler đang giữ {} giao dịch chưa được confirm_committed!",
+                            pending
+                        );
+                    }
                 }
 
                 match current_client.submit_no_wait(chunk_vec).await {

@@ -204,11 +204,18 @@ pub async fn dispatch_commit(
                                             if let Ok(guard) = node_arc_clone.try_lock() {
                                                 let mut hashes_guard =
                                                     guard.committed_transaction_hashes.lock().await;
+                                                let mut epoch_pending = 
+                                                    guard.epoch_pending_transactions.lock().await;
                                                 let mut count = 0;
                                                 for block_txs in &subdag_blocks {
                                                     for tx_data in block_txs {
                                                         let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
-                                                        hashes_guard.insert(tx_hash);
+                                                        hashes_guard.insert(tx_hash.clone());
+                                                        
+                                                        // O(1) garbage collection of pending txs
+                                                        let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx_data);
+                                                        epoch_pending.remove(&raw_hash);
+                                                        
                                                         count += 1;
                                                     }
                                                 }
@@ -228,6 +235,7 @@ pub async fn dispatch_commit(
                             }
                         };
                         let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
+                        let mut epoch_pending = node_guard.epoch_pending_transactions.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
@@ -238,6 +246,11 @@ pub async fn dispatch_commit(
                                         tx.data(),
                                     );
                                 hashes_guard.insert(tx_hash.clone());
+                                
+                                // O(1) garbage collection of pending txs
+                                let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx.data());
+                                epoch_pending.remove(&raw_hash);
+                                
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
                             }

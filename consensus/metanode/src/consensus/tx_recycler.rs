@@ -55,7 +55,7 @@ impl TxRecycler {
     }
 
     /// Hash TX data using SHA-256 (same as Rust consensus TX identity)
-    fn hash_tx(data: &[u8]) -> [u8; 32] {
+    pub fn hash_tx(data: &[u8]) -> [u8; 32] {
         let mut hasher = Keccak256::new();
         hasher.update(data);
         hasher.finalize().into()
