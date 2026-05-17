@@ -187,7 +187,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	// MEMORY FIX: Create FileLogger once (not per-epoch-data) to avoid leaking os.File handles
 	epochFileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("runSocketExecutor_" + ".log"))
 
-	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan (fire-and-forget FFI, batch-drain enabled)...")
+	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (hybrid: sync+5s timeout)...")
 	authQueue := executor.GetAuthoritativeBlockQueue()
 
 	// STALL DETECTOR (May 2026): Non-blocking heartbeat to log diagnostic state
