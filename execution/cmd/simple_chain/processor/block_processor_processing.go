@@ -41,8 +41,8 @@ func (bp *BlockProcessor) GenerateBlock() {
 		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
 		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
 		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
-		bp.snapshotGate.RLock()
-		bp.snapshotGate.RUnlock()
+		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+		bp.waitSnapshotGate()
 
 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
 		// Go's native select has uniform random selection when multiple cases are ready.
@@ -118,8 +118,8 @@ func (bp *BlockProcessor) ProcessorPool() {
 	for {
 		// SNAPSHOT GATE: Block transaction processing while NOMT snapshot is in progress.
 		// Without this, ProcessorPool continues NOMT writes, causing CloseForSnapshot() deadlock.
-		bp.snapshotGate.RLock()
-		bp.snapshotGate.RUnlock()
+		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+		bp.waitSnapshotGate()
 
 		// Only check when transaction pool has data or excluded items left to avoid unnecessary loops
 		if bp.transactionProcessor.transactionPool.CountTransactions() > 0 || bp.transactionProcessor.GetExcludedItemsCount() > 0 {
