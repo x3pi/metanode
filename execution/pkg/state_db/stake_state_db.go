@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -610,8 +611,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		return bytes.Compare(a[:], b[:])
 	})
 
-	_, isNomt := db.trie.(*p_trie.NomtStateTrie)
-
 	for _, address := range dirtyAddresses {
 		value, ok := db.dirtyValidators.Load(address)
 		if !ok {
@@ -647,7 +646,11 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		isNOMT := false
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			isNOMT = true
+			waitStart := time.Now()
 			<-db.persistReady // MUST wait for trie swap before any trie reads
+			if d := time.Since(waitStart); d > 50*time.Millisecond {
+				logger.Warn("🔥 [SATURATION] StakeStateDB (NOMT): IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+			}
 
 			// 100% FORK-SAFETY GUARANTEE: Read old values directly from NOMT FFI.
 			// No caching. No race conditions. This ensures that NOMT is strictly
@@ -660,7 +663,11 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		
 		if !isNOMT {
 			// For MPT, we MUST wait for the old trie pointer swap to complete
+			waitStart := time.Now()
 			<-db.persistReady
+			if d := time.Since(waitStart); d > 50*time.Millisecond {
+				logger.Warn("🔥 [SATURATION] StakeStateDB (MPT): IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+			}
 			for i, key := range batchKeys {
 				if err := db.trie.Update(key, batchValues[i]); err != nil {
 					updateErr = fmt.Errorf("trie update error for key %x: %w", key, err)

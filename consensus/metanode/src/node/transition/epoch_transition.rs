@@ -578,6 +578,7 @@ async fn poll_go_until_synced(
     let mut wait_start = std::time::Instant::now();
     let mut attempt = 0u64;
     let mut last_force_commit = std::time::Instant::now();
+    let mut last_log = std::time::Instant::now();
 
     // CRITICAL FIX (2026-05-05): GEI_TOLERANCE REMOVED.
     // The timeout + ForceCommit is sufficient for Go to process all commits.
@@ -667,11 +668,12 @@ async fn poll_go_until_synced(
                 }
 
                 // Periodic progress logging
-                if attempt.is_multiple_of(50) {
+                if last_log.elapsed() > Duration::from_secs(2) {
                     warn!(
-                        "⏳ [SYNC WAIT] gei={}, expected={}, gap={} (waiting {:?})",
-                        go_last_gei, expected_last_block, remaining, wait_start.elapsed()
+                        "⏳ [LIVENESS] Still waiting for Go to sync boundary block {}. Current Go block: {} (gap={}, waiting {:?})",
+                        expected_last_block, go_last_gei, remaining, wait_start.elapsed()
                     );
+                    last_log = std::time::Instant::now();
                 }
             }
             Err(e) => {

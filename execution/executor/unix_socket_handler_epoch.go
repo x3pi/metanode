@@ -588,6 +588,12 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 
 // HandleGetCurrentEpochRequest processes a GetCurrentEpochRequest and returns the current epoch from Go state (Sui-style)
 func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpochRequest) (*pb.GetCurrentEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetCurrentEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Debug("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
 
 	// Get current epoch from blockchain state
@@ -627,6 +633,12 @@ func (rh *RequestHandler) HandleGetEpochStartTimestampRequest(request *pb.GetEpo
 
 // HandleAdvanceEpochRequest processes a AdvanceEpochRequest and advances Go state epoch (Sui-style completion)
 func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequest) (*pb.AdvanceEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleAdvanceEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Info("Handling AdvanceEpochRequest (Sui-style epoch transition completion)",
 		"new_epoch", request.NewEpoch,
 		"timestamp_ms", request.EpochStartTimestampMs,
@@ -764,6 +776,12 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 // HandleGetEpochBoundaryDataRequest processes a GetEpochBoundaryDataRequest and returns unified epoch boundary data
 // This is the single authoritative source for epoch transition data, ensuring consistency
 func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetEpochBoundaryDataRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	epoch := request.GetEpoch()
 	logger.Info("📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest", "epoch", epoch)
 

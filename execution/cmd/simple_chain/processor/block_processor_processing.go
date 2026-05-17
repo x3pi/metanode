@@ -464,15 +464,32 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Send job to commitWorker.
 	// Block until commitChannel has space (natural backpressure)
+	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
+		logger.Warn("🔥 [SATURATION] commitChannel is %d/%d full (Pipeline stalled)!", len(bp.commitChannel), cap(bp.commitChannel))
+	}
 	bp.commitChannel <- job
 
 	// FORK-SAFETY: Wait for commit to complete before returning.
 	// This ensures the trie is fully updated before the next block reads it.
 	if doneChan != nil {
-		// Unlock ExecutionMutex to prevent deadlock with snapshot's PauseExecution
-		// bp.ExecutionMutex.RUnlock()
+		// ═══════════════════════════════════════════════════════════════
+		// DEADLOCK FIX (May 2026): Release ExecutionMutex.RLock BEFORE
+		// blocking on DoneChan.
+		//
+		// ROOT CAUSE: processRustEpochData holds ExecutionMutex.RLock()
+		// and blocks on DoneChan. commitWorker (which signals DoneChan)
+		// can trigger a snapshot via OnBlockCommitted → PauseExecution().
+		// PauseExecution() needs ExecutionMutex.Lock() (exclusive) but
+		// cannot acquire it because processRustEpochData holds RLock.
+		// Result: 3-way circular deadlock (FFI ↔ processRustEpochData ↔ snapshot).
+		//
+		// FIX: Release RLock before waiting. blockWriteMutex still
+		// serializes all block writes, so no state corruption is possible
+		// during this window. Re-acquire RLock after DoneChan returns.
+		// ═══════════════════════════════════════════════════════════════
+		bp.ExecutionMutex.RUnlock()
 		<-doneChan
-		// bp.ExecutionMutex.RLock()
+		bp.ExecutionMutex.RLock()
 		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
 

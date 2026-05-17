@@ -129,19 +129,17 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("[batch_id=%s] 📋 [MASTER] Block #%d committed (tx_count=%d, save=%v): %s",
 			batchID, header.BlockNumber(), txCount, saveDuration, header.String())
 
-		// Auto-update epoch from incoming blocks (critical for late-joining nodes)
-		if bp.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp()) {
-			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
-				header.BlockNumber(), header.Epoch())
-				
-			// FORK-SAFETY FIX: Flush PebbleDB to SST files at epoch boundary
-			// This ensures that all authoritative state (AccountState, StakeDB)
-			// modifications from the ending epoch are durably synced.
-			logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST to ensure synchronization point.")
-			if err := bp.storageManager.FlushAll(); err != nil {
-				logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
-			}
-		}
+		// ══════════════════════════════════════════════════════════════════
+		// DEADLOCK FIX (May 2026): Epoch auto-update and FlushAll MOVED
+		// to AFTER DoneChan signal. See below (after line "DoneChan <- ...").
+		//
+		// ROOT CAUSE: CheckAndUpdateEpochFromBlock can trigger
+		// OnEpochAdvanced → snapshot → PauseExecution() → needs
+		// ExecutionMutex.Lock(). But processRustEpochData holds
+		// ExecutionMutex.RLock() and is blocked on DoneChan.
+		// commitWorker is the goroutine that signals DoneChan,
+		// but it was stuck here doing FlushAll BEFORE signaling.
+		// ══════════════════════════════════════════════════════════════════
 
 		// logger.Debug("✅ [TX COMMIT] Block #%d saved to database successfully: hash=%s, tx_count=%d",
 		// 	blockNum, blockHash[:16]+"...", txCount)
@@ -196,6 +194,27 @@ func (bp *BlockProcessor) commitWorker() {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
 			job.DoneChan <- struct{}{}
+		}
+
+		// ══════════════════════════════════════════════════════════════════
+		// EPOCH AUTO-SYNC (MOVED HERE — was before DoneChan, caused deadlock)
+		// Safe to run AFTER DoneChan because:
+		//   1. Block data is already fully persisted (CommitBlockState above)
+		//   2. processRustEpochData has been unblocked by DoneChan signal
+		//   3. ExecutionMutex.RLock() is no longer held (Fix 1 releases it)
+		//   4. If this triggers a snapshot, PauseExecution() can now succeed
+		// ══════════════════════════════════════════════════════════════════
+		if bp.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp()) {
+			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
+				header.BlockNumber(), header.Epoch())
+				
+			// FORK-SAFETY FIX: Flush PebbleDB to SST files at epoch boundary
+			// This ensures that all authoritative state (AccountState, StakeDB)
+			// modifications from the ending epoch are durably synced.
+			logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST to ensure synchronization point.")
+			if err := bp.storageManager.FlushAll(); err != nil {
+				logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
+			}
 		}
 
 		// ══════════════════════════════════════════════════════════════════

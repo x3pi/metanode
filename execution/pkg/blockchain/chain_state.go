@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -595,7 +596,11 @@ func (cs *ChainState) AdvanceEpoch(newEpoch uint64, epochStartTimestampMs uint64
 // SIMPLIFIED: Go just stores what Rust tells it. Rust is the single source of truth.
 // No validation, no block checks - Rust controls epoch transitions.
 func (cs *ChainState) AdvanceEpochWithBoundary(newEpoch uint64, epochStartTimestampMs uint64, boundaryBlock uint64, boundaryGei uint64) error {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in AdvanceEpochWithBoundary took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	logger.Info("🔄 [ADVANCE EPOCH] Rust says advance to epoch %d (timestamp=%d, boundary=%d, gei=%d)",
@@ -647,7 +652,11 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 //   1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
 //   2. BlockDatabase parent-chain traversal (always available)
 func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in ForceAlignEpochFromBlockHeader took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	if blockEpoch != cs.currentEpoch {
@@ -784,7 +793,11 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 // MULTI-EPOCH SUPPORT: For jumps > 1 epoch, directly advance to target epoch using current storage state.
 // This handles restart catch-up scenarios where Go Sub receives blocks from a much later epoch.
 func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimestamp uint64) bool {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in CheckAndUpdateEpochFromBlock took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 	if blockEpoch > cs.currentEpoch {
 		epochDiff := blockEpoch - cs.currentEpoch

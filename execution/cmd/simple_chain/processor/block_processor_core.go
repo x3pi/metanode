@@ -711,22 +711,46 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 
 // WaitForPersistence blocks until all pending async persistence jobs are processed.
 // This ensures that memory buffers and trie nodes are fully written out before snapshots.
+//
+// DEADLOCK SAFETY (May 2026): Added 30s timeout as safety net. If commitWorker is
+// stuck (e.g., due to an unforeseen circular dependency), this prevents the entire
+// system from hanging forever. The timeout is generous — normal drain takes <100ms.
 func (bp *BlockProcessor) WaitForPersistence() {
-	// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates 
-	// that were forwarded to commitChannel before this call)
-	commitDone := make(chan struct{})
-	bp.commitChannel <- CommitJob{DoneChan: commitDone}
-	<-commitDone
+	const drainTimeout = 30 * time.Second
+	done := make(chan struct{})
 
-	// 2. Drain Persist Worker (LevelDB trie nodes)
-	persistDone := make(chan struct{})
-	bp.persistChannel <- PersistJob{
-		DoneSignal: persistDone,
+	go func() {
+		defer close(done)
+
+		// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates
+		// that were forwarded to commitChannel before this call)
+		commitDone := make(chan struct{})
+		bp.commitChannel <- CommitJob{DoneChan: commitDone}
+		<-commitDone
+
+		// 2. Drain Persist Worker (LevelDB trie nodes)
+		persistDone := make(chan struct{})
+		bp.persistChannel <- PersistJob{
+			DoneSignal: persistDone,
+		}
+		<-persistDone
+
+		// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex and block backup data is written)
+		bp.backupDbWg.Wait()
+	}()
+
+	select {
+	case <-done:
+		// All workers drained successfully
+	case <-time.After(drainTimeout):
+		logger.Error("🚨 [DEADLOCK-TIMEOUT] WaitForPersistence timed out after %v! "+
+			"commitWorker or persistWorker may be stuck. "+
+			"Returning to prevent cascading deadlock. "+
+			"commitChannel=%d/%d, persistChannel=%d/%d",
+			drainTimeout,
+			len(bp.commitChannel), cap(bp.commitChannel),
+			len(bp.persistChannel), cap(bp.persistChannel))
 	}
-	<-persistDone
-
-	// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex and block backup data is written)
-	bp.backupDbWg.Wait()
 }
 
 // StopWait safely drains all background worker channels before shutting down.
