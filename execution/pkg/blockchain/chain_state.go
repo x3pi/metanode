@@ -946,12 +946,24 @@ func (cs *ChainState) SetBackupPath(path string) {
 	cs.backupPath = path
 	logger.Info("📁 [EPOCH PERSISTENCE] Set node-specific backup path: %s", path)
 
+	// CRITICAL FIX: Reset the epoch state BEFORE reloading to prevent pollution
+	// from the shared /tmp/epoch_data_backup.json loaded during NewChainState().
+	// If the node-specific file doesn't exist, we must start from a clean state (epoch 0).
+	cs.epochMutex.Lock()
+	cs.currentEpoch = 0
+	cs.epochStartTimestampMs = 0
+	cs.epochStartTimestamps = make(map[uint64]uint64)
+	cs.epochBoundaryBlocks = make(map[uint64]uint64)
+	cs.epochBoundaryGeis = make(map[uint64]uint64)
+	cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
+	cs.epochMutex.Unlock()
+
 	// CRITICAL: Reload epoch data from the correct node-specific path
 	// This is necessary because NewChainState() calls LoadEpochData() before SetBackupPath()
 	// which may load stale data from /tmp/epoch_data_backup.json (shared fallback)
 	logger.Info("🔄 [EPOCH PERSISTENCE] Reloading epoch data from node-specific backup path...")
 	if err := cs.LoadEpochData(); err != nil {
-		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping current values", "error", err)
+		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping clean state", "error", err)
 	} else {
 		logger.Info("✅ [EPOCH PERSISTENCE] Successfully reloaded epoch data from node-specific path - current_epoch=%d, epoch_timestamp_ms=%d",
 			cs.currentEpoch, cs.epochStartTimestampMs)
