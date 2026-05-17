@@ -468,19 +468,15 @@ func NewBlockProcessor(
 			bp.WaitForPersistence()
 		})
 
-		// Wrap the force flush callback to also wait for persistence
+		// Wrap the force flush callback
 		if storageMgr := bp.chainState.GetStorageManager(); storageMgr != nil {
 			snapshotManager.SetForceFlushCallback(func() error {
-				logger.Info("💾 [SNAPSHOT] Waiting for background persistence queue to drain...")
-				bp.WaitForPersistence()
-				logger.Info("💾 [SNAPSHOT] Background persistence finished. Flushing to disk...")
+				logger.Info("💾 [SNAPSHOT] Flushing memory tables to disk...")
 				return storageMgr.FlushAll()
 			})
 
-			// Override checkpoint callback to also wait for persistence
+			// Override checkpoint callback
 			snapshotManager.SetCheckpointCallback(func(destPath string) error {
-				logger.Info("💾 [SNAPSHOT] Waiting for background persistence before checkpoint...")
-				bp.WaitForPersistence()
 				logger.Info("💾 [SNAPSHOT] Creating PebbleDB checkpoints...")
 				if err := storageMgr.CheckpointAll(destPath); err != nil {
 					return err
