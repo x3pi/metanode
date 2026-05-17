@@ -208,15 +208,17 @@ func (bp *BlockProcessor) commitWorker() {
 			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
 				header.BlockNumber(), header.Epoch())
 
-			// STALL-PREVENTION (May 2026): FlushAll deferred to background goroutine.
+			// STALL-PREVENTION (May 2026): FlushAll deferred to background goroutine
+			// to avoid blocking commitWorker from processing the next block's CommitJob.
 			// PebbleDB flushes can take 100-500ms under heavy write load.
-			// Blocking commitWorker here delays the NEXT block's CommitJob processing,
-			// causing queue buildup and progressive throughput degradation.
-			// PebbleDB already flushes memtables to SSTables asynchronously —
-			// this explicit flush is a durability optimization, not a correctness
-			// requirement. Delaying it by a few hundred ms is safe.
+			//
+			// FORK-SAFETY: Tracked by backupDbWg so WaitForPersistence() catches it
+			// before any snapshot. Without this, snapshot could capture state before
+			// PebbleDB memtable is flushed → fork on restore.
+			bp.backupDbWg.Add(1)
 			go func() {
-				logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST (background).")
+				defer bp.backupDbWg.Done()
+				logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST (background, tracked).")
 				if err := bp.storageManager.FlushAll(); err != nil {
 					logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
 				}

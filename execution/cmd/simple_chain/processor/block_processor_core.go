@@ -228,26 +228,39 @@ func (bp *BlockProcessor) PauseExecution() {
 	bp.closeSnapshotGate()
 
 	// 2. Lock execution mutex (gates network handlers)
-	// DEADLOCK-GUARD (May 2026): Use a goroutine + select to timeout.
-	// Normal acquisition takes <1ms. If it takes >60s, something is
-	// fundamentally stuck (e.g., commitWorker blocked on FlushAll while
-	// processRustEpochData holds RLock waiting on DoneChan).
-	// Proceeding without the lock is preferable to hanging forever.
+	// FORK-SAFETY (May 2026): ALWAYS block until lock is acquired.
+	// Proceeding without the lock could cause snapshot to capture inconsistent
+	// state → fork on restore. Prefer pending over fork.
+	//
+	// Diagnostic goroutine logs warnings every 10s if the lock is held for
+	// unusually long, providing visibility without breaking safety invariants.
 	lockAcquired := make(chan struct{})
 	go func() {
 		bp.ExecutionMutex.Lock()
 		close(lockAcquired)
 	}()
-	select {
-	case <-lockAcquired:
-		// Normal path — lock acquired
-	case <-time.After(60 * time.Second):
-		logger.Error("🚨 [DEADLOCK-GUARD] PauseExecution: ExecutionMutex.Lock() timed out after 60s! " +
-			"Proceeding without lock to prevent system-wide stall. " +
-			"commitChannel=%d/%d, snapshotGateOpen=%v",
-			len(bp.commitChannel), cap(bp.commitChannel),
-			bp.snapshotGateOpen.Load())
+	// Diagnostic: log warnings while waiting, but NEVER proceed without lock
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	waitStart := time.Now()
+	for {
+		select {
+		case <-lockAcquired:
+			// Normal path — lock acquired
+			if d := time.Since(waitStart); d > 1*time.Second {
+				logger.Warn("⚠️ [PAUSE-DIAG] PauseExecution: ExecutionMutex.Lock() took %v (slow but safe)", d)
+			}
+			goto LOCK_ACQUIRED
+		case <-ticker.C:
+			logger.Warn("🔒 [PAUSE-DIAG] PauseExecution: still waiting for ExecutionMutex.Lock() after %v. "+
+				"commitChannel=%d/%d, snapshotGateOpen=%v. "+
+				"Blocking until acquired (thà pending không fork).",
+				time.Since(waitStart),
+				len(bp.commitChannel), cap(bp.commitChannel),
+				bp.snapshotGateOpen.Load())
+		}
 	}
+LOCK_ACQUIRED:
 
 	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
 	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
@@ -822,11 +835,11 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 // WaitForPersistence blocks until all pending async persistence jobs are processed.
 // This ensures that memory buffers and trie nodes are fully written out before snapshots.
 //
-// DEADLOCK SAFETY (May 2026): Added 30s timeout as safety net. If commitWorker is
-// stuck (e.g., due to an unforeseen circular dependency), this prevents the entire
-// system from hanging forever. The timeout is generous — normal drain takes <100ms.
+// FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
+// If commitWorker or persistWorker is slow/stuck, we wait and log diagnostics.
+// Returning early would allow snapshot to capture incomplete state → FORK on restore.
+// Principle: thà pending không fork.
 func (bp *BlockProcessor) WaitForPersistence() {
-	const drainTimeout = 30 * time.Second
 	done := make(chan struct{})
 
 	go func() {
@@ -845,31 +858,44 @@ func (bp *BlockProcessor) WaitForPersistence() {
 		}
 		<-persistDone
 
-		// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex and block backup data is written)
+		// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex, block backup, and
+		// epoch-boundary FlushAll are all completed)
 		bp.backupDbWg.Wait()
 	}()
 
-	select {
-	case <-done:
-		// All workers drained successfully
-	case <-time.After(drainTimeout):
-		logger.Error("🚨 [DEADLOCK-TIMEOUT] WaitForPersistence timed out after %v! "+
-			"commitWorker or persistWorker may be stuck. "+
-			"Returning to prevent cascading deadlock. "+
-			"commitChannel=%d/%d, persistChannel=%d/%d",
-			drainTimeout,
-			len(bp.commitChannel), cap(bp.commitChannel),
-			len(bp.persistChannel), cap(bp.persistChannel))
+	// Block indefinitely with diagnostic logging — NEVER return early
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	waitStart := time.Now()
+	for {
+		select {
+		case <-done:
+			// All workers drained successfully
+			if d := time.Since(waitStart); d > 1*time.Second {
+				logger.Warn("⚠️ [PERSIST-DIAG] WaitForPersistence took %v (slow but complete)", d)
+			}
+			return
+		case <-ticker.C:
+			logger.Warn("🔒 [PERSIST-DIAG] WaitForPersistence: still draining after %v. "+
+				"commitChannel=%d/%d, persistChannel=%d/%d. "+
+				"Blocking until complete (thà pending không fork).",
+				time.Since(waitStart),
+				len(bp.commitChannel), cap(bp.commitChannel),
+				len(bp.persistChannel), cap(bp.persistChannel))
+		}
 	}
 }
 
 // StopWait safely drains all background worker channels before shutting down.
 // It sequences flush signals through the pipeline (commit -> broadcast -> persist)
 // to guarantee all in-flight blocks are fully processed and saved to disk.
+//
+// FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
+// Returning before drain completes risks data loss → fork on restart.
+// Principle: thà pending không fork.
 func (bp *BlockProcessor) StopWait() {
 	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline channels sequentially...")
 
-	timeout := time.After(12 * time.Second)
 	done := make(chan struct{})
 
 	go func() {
@@ -879,20 +905,30 @@ func (bp *BlockProcessor) StopWait() {
 		<-commitDone
 		logger.Debug("✅ [SHUTDOWN] commitWorker drained.")
 
-
-
-		// 3. Drain Persist Worker
+		// 2. Drain Persist Worker + Backup Db Worker
 		bp.WaitForPersistence()
 		logger.Debug("✅ [SHUTDOWN] persistWorker drained.")
 
 		close(done)
 	}()
 
-	select {
-	case <-done:
-		logger.Info("✅ [SHUTDOWN] BlockProcessor channels perfectly drained. Safe to flush.")
-	case <-timeout:
-		logger.Warn("⚠️  [SHUTDOWN] Timed out waiting for BlockProcessor channels to drain. Data loss may occur.")
+	// Block indefinitely with diagnostic logging
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	waitStart := time.Now()
+	for {
+		select {
+		case <-done:
+			logger.Info("✅ [SHUTDOWN] BlockProcessor channels perfectly drained. Safe to flush. (took %v)", time.Since(waitStart))
+			return
+		case <-ticker.C:
+			logger.Warn("🔒 [SHUTDOWN-DIAG] StopWait: still draining after %v. "+
+				"commitChannel=%d/%d, persistChannel=%d/%d. "+
+				"Blocking until complete (thà pending không fork).",
+				time.Since(waitStart),
+				len(bp.commitChannel), cap(bp.commitChannel),
+				len(bp.persistChannel), cap(bp.persistChannel))
+		}
 	}
 }
 
