@@ -208,10 +208,14 @@ type BlockProcessor struct {
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
 func (bp *BlockProcessor) PauseExecution() {
+	logger.Info("🔒 [PAUSE] PauseExecution: ENTER — commitChannel=%d/%d, snapshotGate=%v",
+		len(bp.commitChannel), cap(bp.commitChannel), bp.snapshotGateOpen.Load())
+
 	// 1. Gate all NOMT-writing goroutines (ProcessorPool, GenerateBlock).
 	//    This MUST come first — it blocks new NOMT sessions from starting,
 	//    which is required for CloseForSnapshot() to complete without deadlock.
 	bp.closeSnapshotGate()
+	logger.Info("🔒 [PAUSE] PauseExecution: snapshotGate CLOSED, waiting for ExecutionMutex.Lock()...")
 
 	// 2. Lock execution mutex (gates network handlers)
 	// FORK-SAFETY (May 2026): ALWAYS block until lock is acquired.
@@ -247,11 +251,14 @@ func (bp *BlockProcessor) PauseExecution() {
 		}
 	}
 LOCK_ACQUIRED:
+	logger.Info("🔒 [PAUSE] PauseExecution: ExecutionMutex.Lock() ACQUIRED")
 
 	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
 	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
 	// preventing truncated/partial snapshots where metadata.json has a newer StateRoot than the disk.
+	logger.Info("🔒 [PAUSE] PauseExecution: calling WaitForPersistence...")
 	bp.WaitForPersistence()
+	logger.Info("🔒 [PAUSE] PauseExecution: WaitForPersistence DONE — system fully paused")
 }
 
 // ResumeExecution releases the exclusive execution lock
@@ -828,6 +835,7 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 //   1. Drain commitWorker via fence job
 //   2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
 func (bp *BlockProcessor) WaitForPersistence() {
+	logger.Info("⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=%d/%d", len(bp.commitChannel), cap(bp.commitChannel))
 	done := make(chan struct{})
 
 	go func() {
@@ -835,12 +843,16 @@ func (bp *BlockProcessor) WaitForPersistence() {
 
 		// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates
 		// that were forwarded to commitChannel before this call)
+		logger.Info("⏳ [PERSIST] WaitForPersistence: sending commit fence...")
 		commitDone := make(chan struct{})
 		bp.commitChannel <- CommitJob{DoneChan: commitDone}
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...")
 		<-commitDone
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE. Starting backupDbWg.Wait()...")
 
 		// 2. Wait for background persistence (FlushAll + BackupDb)
 		bp.backupDbWg.Wait()
+		logger.Info("⏳ [PERSIST] WaitForPersistence: backupDbWg.Wait() DONE — all persistence complete")
 	}()
 
 	// Block indefinitely with diagnostic logging — NEVER return early

@@ -28,11 +28,13 @@ func (bp *BlockProcessor) commitWorker() {
 	logger.Info("✅ Commit Worker initiated")
 	for job := range bp.commitChannel {
 		if job.Block == nil {
+			logger.Info("🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=%d/%d)", len(bp.commitChannel), cap(bp.commitChannel))
 			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
+				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
 			}
 			continue
 		}

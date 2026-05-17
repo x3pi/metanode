@@ -488,7 +488,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		// during this window. Re-acquire RLock after DoneChan returns.
 		// ═══════════════════════════════════════════════════════════════
 		bp.ExecutionMutex.RUnlock()
+		logger.Info("🔓 [SYNC-COMMIT] Block #%d: RLock RELEASED before DoneChan wait (GEI=%d)", currentBlockNumber, globalExecIndex)
 		<-doneChan
+		logger.Info("🔓 [SYNC-COMMIT] Block #%d: DoneChan received, re-acquiring RLock... (GEI=%d)", currentBlockNumber, globalExecIndex)
 		bp.ExecutionMutex.RLock()
 		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
