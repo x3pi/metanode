@@ -112,6 +112,16 @@ pub fn get_go_state_root() -> String {
     String::new()
 }
 
+/// Returns the current number of items in the FFI TX queue.
+pub fn get_ffi_tx_queue_depth() -> usize {
+    if let Ok(guard) = FFI_TX_SENDER.lock() {
+        if let Some(sender) = guard.as_ref() {
+            return sender.max_capacity() - sender.capacity();
+        }
+    }
+    0
+}
+
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
 #[no_mangle]
 pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {

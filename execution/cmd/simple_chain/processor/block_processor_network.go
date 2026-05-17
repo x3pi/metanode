@@ -5,7 +5,6 @@ package processor
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -15,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -74,7 +74,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 	dataDir := bp.config.Databases.RootPath
 	if err := executor.InitFFIBridge(rustConfigPath, dataDir, reqHandler, blockQueue); err != nil {
 		logger.Error("❌ [FFI BRIDGE] Error starting FFI Bridge: %v", err)
-		os.Exit(1)
+		fatal.Exit("Fatal exit from block_processor_network.go")
 	}
 
 	logger.Info("✅ [FFI BRIDGE] MetaNode Consensus initialized via FFI")
@@ -108,7 +108,7 @@ func (bp *BlockProcessor) runSocketExecutor(path string) {
 	// 2. Start listening (non-blocking)
 	if err := listener.Start(); err != nil {
 		logger.Error("Could not start listener: %v", err)
-		os.Exit(1)
+		fatal.Exit("Fatal exit from block_processor_network.go")
 	}
 
 	// Create a goroutine to handle safe program shutdown
@@ -890,7 +890,7 @@ func (bp *BlockProcessor) StartupCatchUp() {
 			logger.Error("  └─────────────────────────────────────────────────────┘")
 			logger.Error("")
 			logger.Error("  🛑 Sub-node is HALTING to prevent running with corrupted state.")
-			os.Exit(1)
+			fatal.Exit("Fatal exit from block_processor_network.go")
 		}
 
 		logger.Info("╔══════════════════════════════════════════════════════════╗")

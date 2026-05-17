@@ -14,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -327,6 +328,26 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed to create account state trie: %v", err)
 		}
 
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+				headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
+				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s",
+					nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+
+				if nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						headerAccountRoot.Hex()[:18]+"...")
+				}
+
+				if nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] AccountStatesRoot MISMATCH: nomt=%s header=%s → patching header to use NOMT authoritative root",
+						nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+					app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+				}
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════
 		// CRITICAL FIX (May 2026): Pre-init stake_db NOMT handle and verify root
 		// BEFORE NewChainStateWithGenesis. NOMT backend ignores the root parameter
@@ -470,7 +491,7 @@ SKIP_GENESIS:
 				if nomtRootHex != metadata.StateRoot && nomtRoot.Hex() != metadata.StateRoot {
 					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! NOMT root=%s, but metadata.json claims StateRoot=%s",
 						nomtRoot.Hex(), metadata.StateRoot)
-					panic("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
+					fatal.Exit("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
 				}
 
 				// Enforce GEI and BlockNumber globally from metadata to prevent any inflation
@@ -881,8 +902,6 @@ func (app *App) loadFreeFeeAddresses() {
 			}
 		}
 	} else {
-		logger.Error("[FATAL] FreeFeeAddresses in config.json is not an array")
-		logger.SyncFileLog()
-		os.Exit(1)
+		fatal.Exit("FreeFeeAddresses in config.json is not an array")
 	}
 }

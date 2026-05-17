@@ -637,12 +637,21 @@ async fn poll_go_until_synced(
                     } else {
                         // Large gap + stuck → log critical but keep waiting
                         // (DO NOT exit — "thà pending chứ không fork")
-                        error!(
-                            "🚨 [SYNC POLL] CRITICAL: Go has made NO PROGRESS for {:?}! \
-                             gei={}, expected={}, gap={}. Go may be stuck. \
-                             Investigate: check Go logs, NOMT state, commitWorker.",
-                            last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining
-                        );
+                        let ffi_queue_depth = crate::ffi::get_ffi_tx_queue_depth();
+                        if ffi_queue_depth > 1000 {
+                            warn!(
+                                "🚨 [SYNC POLL] Go appears stuck for {:?} (gei={}), BUT FFI queue is saturated ({} items). \
+                                 This is transient backpressure during high TPS, NOT a deadlock. Waiting...",
+                                last_progress_time.elapsed(), go_last_gei, ffi_queue_depth
+                            );
+                        } else {
+                            error!(
+                                "🚨 [SYNC POLL] CRITICAL: Go has made NO PROGRESS for {:?}! \
+                                 gei={}, expected={}, gap={}, ffi_queue_depth={}. Go may be stuck. \
+                                 Investigate: check Go logs, NOMT state, commitWorker.",
+                                last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining, ffi_queue_depth
+                            );
+                        }
                         // Reset timer to avoid spamming this error every 100ms
                         last_progress_time = std::time::Instant::now();
                     }

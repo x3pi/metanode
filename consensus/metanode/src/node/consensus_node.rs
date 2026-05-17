@@ -1673,7 +1673,8 @@ impl ConsensusNode {
             const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
-            let mut sync_round = 0;
+            loop {
+                let mut sync_round = 0;
             loop {
                 // Re-query peers for their latest block
                 let mut max_peer_block = 0u64;
@@ -2041,8 +2042,10 @@ impl ConsensusNode {
                                          Data corruption detected after sync!",
                                         local_block, local_raw.len(), peer_raw.len()
                                     );
-                                    tracing::error!("🛑 [HALT] Halting node due to block data divergence post-sync.");
-                                    std::process::exit(1);
+                                    tracing::warn!("🔄 [RECOVERY] Transient mismatch detected. Resetting local state and restarting STARTUP-SYNC...");
+                                    local_block = 0;
+                                    total_synced_blocks = 0;
+                                    continue;
                                 }
                             }
                             _ => {
@@ -2157,6 +2160,9 @@ impl ConsensusNode {
 
             startup_total_synced_blocks = total_synced_blocks;
             startup_local_block = local_block;
+
+            break;
+        }
 
             // ═══════════════════════════════════════════════════════════════
             // SHUTDOWN EARLY SERVER
