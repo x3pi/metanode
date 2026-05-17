@@ -189,6 +189,15 @@ func (sm *SnapshotManager) SetPauseCallback(cb func()) {
 	sm.pauseCallback = cb
 }
 
+// IsSnapshotInProgress returns true if a snapshot is currently being created.
+// Used by RPC handlers to refuse NOMT-heavy operations (e.g. SyncBlocksRequest EXECUTE mode)
+// during snapshot to prevent CloseForSnapshot deadlock from ungated NOMT sessions.
+func (sm *SnapshotManager) IsSnapshotInProgress() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.isCreating
+}
+
 // SetStateRootCallback registers a callback to fetch the current NOMT state root.
 func (sm *SnapshotManager) SetStateRootCallback(cb func() string) {
 	sm.mu.Lock()

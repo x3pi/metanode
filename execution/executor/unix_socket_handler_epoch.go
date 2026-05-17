@@ -1305,6 +1305,22 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// DEADLOCK PREVENTION (May 2026): Reject EXECUTE mode requests during snapshot.
+	// HandleSyncBlocksRequest opens NOMT sessions that are NOT gated by snapshotGate
+	// or ExecutionMutex. If a snapshot triggers while these sessions are active,
+	// CloseForSnapshot waits forever → DEADLOCK.
+	// Rust will retry this RPC after the snapshot completes.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if request.GetExecuteMode() && rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
+		logger.Warn("⏸️ [SYNC] SyncBlocksRequest EXECUTE mode rejected: snapshot in progress. Rust should retry.")
+		return &pb.SyncBlocksResponse{
+			SyncedCount:     0,
+			LastSyncedBlock: 0,
+			Error:           "snapshot in progress, retry later",
+		}, nil
+	}
+
 	if blockCount == 0 {
 		return &pb.SyncBlocksResponse{
 			SyncedCount:     0,
