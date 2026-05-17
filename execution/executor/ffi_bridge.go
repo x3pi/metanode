@@ -110,29 +110,26 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
 	// ═══════════════════════════════════════════════════════════════════
-	// HYBRID FIX (May 2026): Synchronous dispatch via authQueue with
-	// BOUNDED wait — prevents both CGo thread starvation AND block flood.
+	// BACKPRESSURE FIX (May 2026): Synchronous dispatch via authQueue
+	// with HONEST indefinite wait — provides natural backpressure.
 	//
-	// PROBLEM WITH FIRE-AND-FORGET (previous attempt):
-	// Dispatching directly to dataChan (50k buffer) removed all
-	// backpressure. Blocks piled up → processRustEpochData held RLock
-	// continuously → PauseExecution(snapshot) couldn't acquire Lock() →
-	// WaitForPersistence deadlocked because commitWorker was blocked.
+	// KEY INSIGHT: Rust calls cgo_execute_block via spawn_blocking(),
+	// which runs on a dedicated thread pool. Blocking here does NOT
+	// block Rust's async runtime (tokio). This means we can safely
+	// wait indefinitely — Rust can still process consensus, RPCs, etc.
 	//
-	// PROBLEM WITH ORIGINAL SYNCHRONOUS (before that):
-	// Waiting for responseCh indefinitely (300s) blocked Rust's
-	// CommitProcessor thread for the full Go processing duration.
-	// As NOMT got slower (~3000+ blocks), pipeline stalled at ~11k TXs.
+	// WHY NOT TIMEOUT:
+	// The previous 5s timeout returned true (lied to Rust), causing:
+	// - Rust thought block was processed → sent next block immediately
+	// - Gap accumulated: 121+ blocks between Rust GEI and Go GEI
+	// - At epoch boundary, poll_go_until_synced waited 30+s for Go
+	// - If Go couldn't catch up → crash
 	//
-	// FIX: Keep authQueue for natural rate-limiting (1 block at a time),
-	// but bound the CGo wait to 5 seconds. If Go hasn't finished in 5s,
-	// return true and let Rust continue. processRustEpochData will still
-	// send the response to the (now-abandoned) responseCh harmlessly.
-	//
-	// This gives the BEST of both approaches:
-	// - Rate-limiting: Rust typically waits for Go → natural gaps for snapshot
-	// - No starvation: 5s timeout prevents permanent CGo thread blockage
-	// - No flood: authQueue (1000 buffer) provides moderate backpressure
+	// HONEST WAIT gives natural backpressure:
+	// - Rust can only send 1 block per spawn_blocking thread at a time
+	// - Go processing time directly limits Rust's send rate
+	// - Gap stays small (< authQueue buffer size)
+	// - "thà pending chứ không fork" — prefer stall over divergence
 	// ═══════════════════════════════════════════════════════════════════
 	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
@@ -145,7 +142,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		// If queue is full, Go is severely behind — drop block.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
-			// Block dispatched. Now wait for response WITH TIMEOUT.
+			// Block dispatched. Now wait for response INDEFINITELY.
 		default:
 			logger.Error("[FFI Bridge] 🚨 authQueue full (1000)! Block GEI=%d dropped. "+
 				"Go block processing is severely behind.",
@@ -153,28 +150,33 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 			return C.bool(false)
 		}
 
-		// Wait for Go to finish processing — but with bounded timeout.
-		// 5s is long enough for normal block processing (~50-500ms)
-		// but short enough to prevent CGo thread starvation during
-		// snapshot operations (which can take 2-3s).
-		select {
-		case resp := <-responseCh:
-			if resp != nil && resp.Success {
-				return C.bool(true)
+		// Wait for Go to finish processing — INDEFINITELY with progress logging.
+		// Rust uses spawn_blocking() so blocking here is safe.
+		// This provides honest backpressure: Rust send rate = Go processing rate.
+		waitStart := time.Now()
+		logInterval := 5 * time.Second
+		gei := subDag.GetGlobalExecIndex()
+		for {
+			select {
+			case resp := <-responseCh:
+				if resp != nil && resp.Success {
+					elapsed := time.Since(waitStart)
+					if elapsed > 3*time.Second {
+						logger.Info("[FFI Bridge] ✅ Block GEI=%d processed after %v (slow but OK)",
+							gei, elapsed)
+					}
+					return C.bool(true)
+				}
+				if resp != nil {
+					logger.Error("[FFI Bridge] Block processing failed: %s", resp.Error)
+				}
+				return C.bool(false)
+			case <-time.After(logInterval):
+				elapsed := time.Since(waitStart)
+				logger.Warn("[FFI Bridge] ⏳ Block GEI=%d still processing after %v. "+
+					"authQueue depth=%d. Waiting (backpressure active).",
+					gei, elapsed, len(defaultAuthoritativeBlockQueue))
 			}
-			if resp != nil {
-				logger.Error("[FFI Bridge] Block processing failed: %s", resp.Error)
-			}
-			return C.bool(false)
-		case <-time.After(5 * time.Second):
-			// TIMEOUT: Go is slow (likely snapshot/NOMT commit in progress).
-			// Return true to unblock Rust — the block IS queued in authQueue
-			// and WILL be processed. Response will be sent to the abandoned
-			// responseCh (buffered, so no goroutine leak).
-			logger.Warn("[FFI Bridge] ⏱️ Block GEI=%d processing timeout (5s). "+
-				"Block is queued and will be processed. Unblocking Rust.",
-				subDag.GetGlobalExecIndex())
-			return C.bool(true)
 		}
 	}
 

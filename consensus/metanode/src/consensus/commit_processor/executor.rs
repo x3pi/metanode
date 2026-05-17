@@ -133,7 +133,9 @@ pub async fn dispatch_commit(
 
                     // PIPELINE FIX: We return expected_fragments immediately to unblock CommitProcessor.
                     // This eliminates the IPC serialization bottleneck. Backpressure is now handled
-                    // natively by the bounded capacity of `delivery_sender` (10,000 commits).
+                    // natively by the bounded capacity of `delivery_sender` (100 commits).
+                    // With FIX-1A (honest FFI wait), BlockDeliveryManager blocks per block,
+                    // so this buffer fills when Go is ~100 blocks behind → natural throttle.
                     let geis_consumed = expected_fragments;
 
                     tokio::spawn(async move {

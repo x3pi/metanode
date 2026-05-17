@@ -1283,8 +1283,14 @@ impl ConsensusNode {
             );
         }
 
-        // Stage 4 Conveyor Belt Buffer: Huge buffer to absorb transaction spikes without halting Core
-        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
+        // Stage 4 Conveyor Belt Buffer: BACKPRESSURE-TUNED buffer size.
+        // With FIX-1A (honest FFI wait), BlockDeliveryManager blocks on each FFI
+        // call until Go finishes processing (~200ms/block). A 100-block buffer
+        // provides burst absorption (~20s worth at 5 blocks/s) while creating
+        // effective backpressure when Go falls behind — dispatch_commit blocks
+        // on channel send, naturally throttling CommitProcessor.
+        // Previously 10,000 which accumulated massive gaps before any backpressure.
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
         // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
         // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
