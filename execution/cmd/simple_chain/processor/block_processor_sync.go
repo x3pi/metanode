@@ -893,8 +893,11 @@ PROCESS_BLOCK:
 				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-				// Invalidate state caches (no EVM mutations happened, this is just safety)
-				bp.chainState.InvalidateAllState()
+				// NOTE (May 2026): InvalidateAllState() REMOVED here.
+				// No EVM mutations happened (commit dropped BEFORE execution),
+				// so state caches are still valid. Invalidating would destroy
+				// the 200k-entry LRU cache, causing ~20k NOMT FFI reads on
+				// the next block and contributing to pipeline stalls.
 
 				// Process any pending blocks
 				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
@@ -928,8 +931,10 @@ PROCESS_BLOCK:
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
 			
-			// Invalidate state to ensure next block reads fresh from NOMT
-			bp.chainState.InvalidateAllState()
+			// NOTE (May 2026): InvalidateAllState() REMOVED here.
+			// All transactions were duplicates — no state mutation occurred.
+			// IntermediateRoot(true) already cleared dirty accounts during
+			// ProcessTransactions. Invalidating would thrash the LRU cache.
 			
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 			

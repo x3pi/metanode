@@ -110,46 +110,37 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
 	// ═══════════════════════════════════════════════════════════════════
-	// SYNCHRONOUS MODE (Enforced for ALL blocks)
-	// We dispatch via AuthoritativeBlockRequest and WAIT for the response.
-	// This is synchronous (blocking) but safe because CommitProcessor
-	// already serializes commits (one at a time).
-	// ═══════════════════════════════════════════════════════════════════
-	if defaultAuthoritativeBlockQueue != nil {
-		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
-		req := &AuthoritativeBlockRequest{
-			Block:      &subDag,
-			ResponseCh: responseCh,
-		}
-
-		// Send request (blocking if queue is full — natural backpressure)
-		defaultAuthoritativeBlockQueue <- req
-
-		// Wait for response with timeout
-		select {
-		case resp := <-responseCh:
-			if resp != nil && resp.Success {
-				logger.Debug("[FFI Bridge] Authoritative GEI assigned: actual_gei=%d, geis_consumed=%d",
-					resp.ActualGei, resp.GeisConsumed)
-				return C.bool(true)
-			}
-			if resp != nil {
-				logger.Error("[FFI Bridge] Authoritative block processing failed: %s", resp.Error)
-			}
-			return C.bool(false)
-		case <-time.After(300 * time.Second):
-			logger.Error("[FFI Bridge] Authoritative block processing timed out (300s)")
-			return C.bool(false)
-		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════════
-	// LEGACY MODE: Fire-and-forget (original behavior)
+	// THROUGHPUT FIX (May 2026): Fire-and-forget dispatch via dataChan.
+	//
+	// ROOT CAUSE OF STALL AT ~11,470 TXs:
+	// The previous synchronous mode waited for responseCh inside the CGo
+	// callback. This BLOCKED Rust's CommitProcessor thread for the entire
+	// duration of Go block processing (ProcessTransactions + CommitPipeline
+	// + NOMT CommitPayload + DoneChan wait). As NOMT CommitPayload gets
+	// slower with accumulated pendingSessions (~3000+ blocks), the CGo
+	// thread was blocked for increasingly long periods → Rust couldn't
+	// send the next block → pipeline stall.
+	//
+	// FIX: Dispatch to dataChan (50k buffer) and return immediately.
+	// Go's processRustEpochData loop handles GEI tracking internally.
+	// Rust only needs the bool return (success/failure), not ActualGei
+	// (which was only logged, never returned to Rust via C ABI).
+	//
+	// SAFETY: dataChan has 50k capacity. At ~1000 blocks/s processing
+	// rate, this provides >50s of buffering — more than sufficient.
+	// If full, something is critically wrong and we return false so
+	// Rust can handle the error (log/retry/reconnect).
 	// ═══════════════════════════════════════════════════════════════════
 	if defaultListenerBlockQueue != nil {
-		// Blocking send, exactly as listener.go
-		defaultListenerBlockQueue <- &subDag
-		return C.bool(true)
+		select {
+		case defaultListenerBlockQueue <- &subDag:
+			return C.bool(true)
+		default:
+			logger.Error("[FFI Bridge] 🚨 CRITICAL: dataChan full (50k)! Block GEI=%d dropped. "+
+				"Go block processing is not draining. Check for deadlock.",
+				subDag.GetGlobalExecIndex())
+			return C.bool(false)
+		}
 	}
 
 	logger.Error("[FFI Bridge] Block queue is not initialized!")

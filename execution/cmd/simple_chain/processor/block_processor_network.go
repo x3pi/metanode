@@ -187,8 +187,15 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	// MEMORY FIX: Create FileLogger once (not per-epoch-data) to avoid leaking os.File handles
 	epochFileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("runSocketExecutor_" + ".log"))
 
-	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (batch-drain enabled)...")
+	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan (fire-and-forget FFI, batch-drain enabled)...")
 	authQueue := executor.GetAuthoritativeBlockQueue()
+
+	// STALL DETECTOR (May 2026): Non-blocking heartbeat to log diagnostic state
+	// when no blocks are processed for 15 seconds. This provides visibility
+	// into pipeline stalls without breaking any safety invariants.
+	stallTicker := time.NewTicker(15 * time.Second)
+	defer stallTicker.Stop()
+	lastProcessedTime := time.Now()
 
 PROCESS_LOOP:
 	for {
@@ -209,6 +216,21 @@ PROCESS_LOOP:
 				break PROCESS_LOOP
 			}
 			epochData = data
+		case <-stallTicker.C:
+			// STALL DETECTOR: Log diagnostic state when no blocks are being processed
+			stallDuration := time.Since(lastProcessedTime)
+			if stallDuration > 15*time.Second {
+				logger.Warn("🔒 [STALL-DETECT] No blocks processed for %v. "+
+					"dataChan=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
+					"nextExpectedGEI=%d, currentBlock=%d. "+
+					"Investigate: is dataChan not receiving? is processing blocked?",
+					stallDuration,
+					len(dataChan), cap(dataChan),
+					len(bp.commitChannel), cap(bp.commitChannel),
+					bp.snapshotGateOpen.Load(),
+					nextExpectedGlobalExecIndex, currentBlockNumber)
+			}
+			continue
 		}
 
 		// Self-monitoring queue and processing rate
@@ -384,9 +406,15 @@ PROCESS_LOOP:
 						// Now process the non-empty/non-consecutive commit
 						logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", nextGEI)
 						
+						blockStart := time.Now()
 						bp.ExecutionMutex.RLock()
 						bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 						bp.ExecutionMutex.RUnlock()
+						lastProcessedTime = time.Now()
+						if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+							logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
+								blockDur, nextGEI, len(next.Transactions))
+						}
 						
 						drainTimeout.Stop()
 						goto BATCH_DONE
@@ -414,18 +442,29 @@ PROCESS_LOOP:
 			// Check pending blocks after batch drain
 			if pendingBlock, exists := pendingBlocks[nextExpectedGlobalExecIndex]; exists {
 				delete(pendingBlocks, nextExpectedGlobalExecIndex)
+				blockStart := time.Now()
 				bp.ExecutionMutex.RLock()
 				bp.processSingleEpochData(pendingBlock, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 				bp.ExecutionMutex.RUnlock()
+				lastProcessedTime = time.Now()
+				if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+					logger.Warn("🐌 [SLOW-BLOCK] Pending block processing took %v", blockDur)
+				}
 			}
 		BATCH_DONE:
 			continue
 		} else {
 			// Non-empty commit, authoritative, or non-sequential — full processing path
 			logger.Info("📥 [PROCESSOR] Read block from channel: global_exec_index=%d, auth=%v", epochData.GetGlobalExecIndex(), authRespCh != nil)
+			blockStart := time.Now()
 			bp.ExecutionMutex.RLock()
 			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 			bp.ExecutionMutex.RUnlock()
+			lastProcessedTime = time.Now()
+			if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+				logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
+					blockDur, epochData.GetGlobalExecIndex(), len(epochData.Transactions))
+			}
 
 			// GO-AUTHORITATIVE GEI: Send Response
 			if authRespCh != nil {
