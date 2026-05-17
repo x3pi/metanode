@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -24,7 +23,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/txsender"
@@ -79,17 +77,9 @@ type CommitJob struct {
 	SerializedBackup []byte
 }
 
-// PersistJob is used for fence/drain signaling in the persist pipeline.
-// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel.
-// This struct is retained only for DoneSignal fence operations used by
-// WaitForPersistence() and StopWait().
-type PersistJob struct {
-	BlockNum      uint64
-	AccountResult *account_state_db.PipelineCommitResult
-	StakeResult   *stake_state_db.StakePipelineCommitResult
-	ReceiptResult *types.ReceiptPipelineResult
-	DoneSignal    chan struct{}
-}
+// PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs
+// inline in commitToMemoryParallel. WaitForPersistence now drains via
+// commitChannel fence + backupDbWg.Wait() directly.
 
 // AsyncGEIUpdate bundles GEI and CommitIndex updates together to ensure they are persisted atomically
 type AsyncGEIUpdate struct {
@@ -153,10 +143,6 @@ type BlockProcessor struct {
 
 	// Channel để đảm bảo chỉ một ProcessTransactionsInPool chạy tại một thời điểm
 	processingLockChan chan struct{}
-
-	// Pipeline commit: fence-only channel for WaitForPersistence/StopWait drain signals.
-	// PersistAsync now runs inline in commitToMemoryParallel (May 2026 fork fix).
-	persistChannel chan PersistJob
 
 	// Backup DB Coalescing
 	backupDbChannel chan CommitJob
@@ -462,8 +448,6 @@ func NewBlockProcessor(
 		txClient:          txClient,
 		// Khởi tạo channel khóa với buffer size là 1
 		processingLockChan: make(chan struct{}, 1),
-		// Pipeline commit: async persistence channel
-		persistChannel: make(chan PersistJob, 100),
 		backupDbChannel: make(chan CommitJob, 1000),
 		geiUpdateChan: make(chan AsyncGEIUpdate, 100),
 
@@ -534,7 +518,6 @@ func NewBlockProcessor(
 	}
 	if serviceType == p_common.ServiceTypeMaster {
 		go bp.commitWorker()
-		go bp.persistWorker()   // Fence-only: drain endpoint for WaitForPersistence/StopWait
 		go bp.backupDbWorker()  // Coalesced BackupDb builder
 		go bp.geiWorker()       // Coalesced GEI updates
 	}
@@ -836,9 +819,14 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 // This ensures that memory buffers and trie nodes are fully written out before snapshots.
 //
 // FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
-// If commitWorker or persistWorker is slow/stuck, we wait and log diagnostics.
+// If commitWorker is slow/stuck, we wait and log diagnostics.
 // Returning early would allow snapshot to capture incomplete state → FORK on restore.
 // Principle: thà pending không fork.
+//
+// SIMPLIFICATION (May 2026): Removed persistChannel fence — persistWorker was
+// a no-op (PersistAsync runs inline since May 2026). Now only 2 steps:
+//   1. Drain commitWorker via fence job
+//   2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
 func (bp *BlockProcessor) WaitForPersistence() {
 	done := make(chan struct{})
 
@@ -851,15 +839,7 @@ func (bp *BlockProcessor) WaitForPersistence() {
 		bp.commitChannel <- CommitJob{DoneChan: commitDone}
 		<-commitDone
 
-		// 2. Drain Persist Worker (LevelDB trie nodes)
-		persistDone := make(chan struct{})
-		bp.persistChannel <- PersistJob{
-			DoneSignal: persistDone,
-		}
-		<-persistDone
-
-		// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex, block backup, and
-		// epoch-boundary FlushAll are all completed)
+		// 2. Wait for background persistence (FlushAll + BackupDb)
 		bp.backupDbWg.Wait()
 	}()
 
@@ -877,59 +857,28 @@ func (bp *BlockProcessor) WaitForPersistence() {
 			return
 		case <-ticker.C:
 			logger.Warn("🔒 [PERSIST-DIAG] WaitForPersistence: still draining after %v. "+
-				"commitChannel=%d/%d, persistChannel=%d/%d. "+
+				"commitChannel=%d/%d. "+
 				"Blocking until complete (thà pending không fork).",
 				time.Since(waitStart),
-				len(bp.commitChannel), cap(bp.commitChannel),
-				len(bp.persistChannel), cap(bp.persistChannel))
+				len(bp.commitChannel), cap(bp.commitChannel))
 		}
 	}
 }
 
 // StopWait safely drains all background worker channels before shutting down.
-// It sequences flush signals through the pipeline (commit -> broadcast -> persist)
-// to guarantee all in-flight blocks are fully processed and saved to disk.
 //
-// FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
+// SIMPLIFICATION (May 2026): Previously sent a redundant commit fence then called
+// WaitForPersistence (which sent ANOTHER commit fence). Now just calls
+// WaitForPersistence directly — it already drains commitWorker + backupDb.
+//
+// FORK-SAFETY: Blocks indefinitely — NEVER returns early.
 // Returning before drain completes risks data loss → fork on restart.
 // Principle: thà pending không fork.
 func (bp *BlockProcessor) StopWait() {
-	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline channels sequentially...")
-
-	done := make(chan struct{})
-
-	go func() {
-		// 1. Drain Commit Worker
-		commitDone := make(chan struct{})
-		bp.commitChannel <- CommitJob{DoneChan: commitDone}
-		<-commitDone
-		logger.Debug("✅ [SHUTDOWN] commitWorker drained.")
-
-		// 2. Drain Persist Worker + Backup Db Worker
-		bp.WaitForPersistence()
-		logger.Debug("✅ [SHUTDOWN] persistWorker drained.")
-
-		close(done)
-	}()
-
-	// Block indefinitely with diagnostic logging
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline...")
 	waitStart := time.Now()
-	for {
-		select {
-		case <-done:
-			logger.Info("✅ [SHUTDOWN] BlockProcessor channels perfectly drained. Safe to flush. (took %v)", time.Since(waitStart))
-			return
-		case <-ticker.C:
-			logger.Warn("🔒 [SHUTDOWN-DIAG] StopWait: still draining after %v. "+
-				"commitChannel=%d/%d, persistChannel=%d/%d. "+
-				"Blocking until complete (thà pending không fork).",
-				time.Since(waitStart),
-				len(bp.commitChannel), cap(bp.commitChannel),
-				len(bp.persistChannel), cap(bp.persistChannel))
-		}
-	}
+	bp.WaitForPersistence()
+	logger.Info("✅ [SHUTDOWN] BlockProcessor pipeline drained. Safe to flush. (took %v)", time.Since(waitStart))
 }
 
 // StartBackgroundWorkers initializes the essential background goroutines that persist
@@ -937,8 +886,7 @@ func (bp *BlockProcessor) StopWait() {
 // These MUST be running regardless of Single/Multi node mode.
 func (bp *BlockProcessor) StartBackgroundWorkers() {
 	go bp.commitWorker()
-	go bp.persistWorker()
-	logger.Info("✅ Started background persistence workers (commit, persist-fence)")
+	logger.Info("✅ Started background persistence worker (commit)")
 }
 
 // TxsProcessor2 is an adapter to start the TxBatchForwarder (Phase 7 Refactoring)

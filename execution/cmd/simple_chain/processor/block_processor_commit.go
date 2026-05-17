@@ -488,25 +488,9 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	}
 }
 
-// persistWorker is a background goroutine that serves as a fence/drain endpoint.
-//
-// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel to
-// eliminate the fork race condition (Block 10136). This worker no longer processes
-// real PersistJobs. It only handles DoneSignal fence operations used by:
-//   - WaitForPersistence() — snapshot system drain gate
-//   - StopWait() — graceful shutdown drain
-func (bp *BlockProcessor) persistWorker() {
-	logger.Info("✅ Persist Worker initiated (fence-only mode — PersistAsync runs inline since May 2026)")
-	for job := range bp.persistChannel {
-		if job.DoneSignal != nil {
-			close(job.DoneSignal)
-			continue
-		}
-		// No-op: PersistAsync is now handled synchronously inline in commitToMemoryParallel.
-		// Any real PersistJob arriving here is a programming error.
-		logger.Warn("⚠️ [PERSIST WORKER] Received unexpected PersistJob with data (should be handled inline). Ignoring.")
-	}
-}
+// persistWorker REMOVED (May 2026): Was a no-op fence goroutine. PersistAsync
+// runs inline in commitToMemoryParallel. WaitForPersistence now drains via
+// commitChannel fence + backupDbWg.Wait() directly — no persist fence needed.
 
 // backupDbWorker processes BackupDb serialization in the background using a fixed worker pool.
 // Previously spawned one goroutine per block (unbounded), which under high load could create
