@@ -70,6 +70,12 @@ pub struct CommitProcessor {
     /// Takes commit_index, returns Some(digest_bytes) if 2f+1 authorities agree on digest,
     /// None if not enough votes yet. Used to verify local commit content matches network.
     digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
+    /// COLD-START-FIX (May 2026): Callback to check if CommitVoteMonitor has received
+    /// any actual digest vote data from P2P blocks. Returns true when digest verification
+    /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer's
+    /// peer queries), this reflects actual digest observation capability.
+    /// When this returns false, COLD-START-BYPASS is eligible regardless of QCI value.
+    digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl CommitProcessor {
@@ -99,6 +105,7 @@ impl CommitProcessor {
             quorum_commit_index: None,
             committee_size: 0,
             digest_verifier: None,
+            digest_data_checker: None,
         }
     }
 
@@ -275,6 +282,18 @@ impl CommitProcessor {
         self
     }
 
+    /// COLD-START-FIX (May 2026): Set callback to check if CommitVoteMonitor has
+    /// actual digest data. Used to correctly detect cold-start conditions after
+    /// epoch transitions, where CommitSyncer may have set quorum_commit_index > 0
+    /// from peer queries but CommitVoteMonitor has no actual digest votes yet.
+    pub fn with_digest_data_checker<F>(mut self, checker: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        self.digest_data_checker = Some(Arc::new(checker));
+        self
+    }
+
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
@@ -391,6 +410,7 @@ impl CommitProcessor {
         let _quorum_commit_index_ref = self.quorum_commit_index.clone();
         let committee_size = self.committee_size;
         let digest_verifier = self.digest_verifier.clone();
+        let digest_data_checker = self.digest_data_checker.clone();
         // BFT quorum threshold: 2f+1 where n=3f+1, so quorum = ceil(2n/3)
         // For n=5: quorum=4, n=4: quorum=3, n=7: quorum=5
         let _quorum_threshold = if committee_size > 0 {
@@ -630,27 +650,31 @@ impl CommitProcessor {
                                 let quorum_gc_bypass = qci_val > local_idx + 50_000;
 
                                 // ═══════════════════════════════════════════════════════
-                                // COLD-START-BYPASS (May 2026, Tuned May 16):
+                                // COLD-START-BYPASS (May 2026, Fixed May 17):
                                 // After epoch transition, CommitVoteMonitor restarts with
                                 // no history. digest_verifier always returns None because
-                                // no votes exist yet. quorum_commit_index stays at 0.
-                                // This creates a PERMANENT DEADLOCK: the gate requires
-                                // verification that can never arrive.
+                                // no votes exist yet.
                                 //
-                                // Fix: If qci==0 (verification infrastructure entirely
-                                // non-functional) AND the commit has waited >=10s,
-                                // dispatch it. Once qci>0, normal verification resumes.
+                                // CRITICAL FIX: We CANNOT use qci==0 to detect this!
+                                // CommitSyncer sets qci>0 from peer queries BEFORE
+                                // CommitVoteMonitor receives any actual digest votes.
+                                // This caused a permanent deadlock in epoch 21 under
+                                // high TPS — qci>0 disabled COLD-START-BYPASS while
+                                // digest_verifier had no data, trapping all commits.
                                 //
-                                // SUSTAINED-LOAD-BYPASS: Under high TPS, buffer can fill
-                                // before the 10s timeout. If buffer >= 50% AND qci==0
-                                // AND commit waited >= 5s, dispatch early to prevent
-                                // cascade failure (buffer full → drops → re-delivery).
+                                // FIX: Use digest_data_checker (queries CommitVoteMonitor.
+                                // has_any_digest_data()) to detect true cold-start state.
+                                // When digest data is unavailable, bypass is eligible.
                                 //
-                                // Fork safety: qci==0 means NO node in the cluster has
-                                // quorum data for this epoch yet. All nodes are in the
-                                // same cold-start state producing identical local commits.
+                                // Fork safety: During cold-start ALL nodes have empty
+                                // CommitVoteMonitors, producing identical local commits.
                                 // ═══════════════════════════════════════════════════════
-                                let (cold_start_bypass, sustained_load_bypass) = if qci_val == 0 {
+                                let digest_has_data = if let Some(ref checker) = digest_data_checker {
+                                    checker()
+                                } else {
+                                    false // No checker → assume no data → allow bypass
+                                };
+                                let (cold_start_bypass, sustained_load_bypass) = if !digest_has_data {
                                     if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
                                         let now = std::time::Instant::now();
                                         let age = now.duration_since(*pending_ts);
@@ -678,16 +702,15 @@ impl CommitProcessor {
                                 } else if cold_start_bypass {
                                     warn!(
                                         "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 10s wait. \
-                                         quorum_commit_index=0 (verification infrastructure non-functional). \
-                                         This is expected during epoch transition cold-start. \
-                                         Normal DIGEST-GATE verification will resume once qci>0.",
+                                         CommitVoteMonitor has no digest data (epoch cold-start). \
+                                         Normal DIGEST-GATE verification will resume once digest votes arrive.",
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
                                 } else if sustained_load_bypass {
                                     warn!(
                                         "⚡ [DIGEST-GATE SUSTAINED-LOAD-BYPASS] Commit {} dispatching after 5s \
-                                         (buffer at {}/{} = {}%). qci=0, dispatching early to prevent \
+                                         (buffer at {}/{} = {}%). No digest data yet, dispatching early to prevent \
                                          cascade buffer saturation.",
                                         local_idx,
                                         pending_local_commits.len(),
@@ -883,15 +906,23 @@ impl CommitProcessor {
                                         next_expected_index, qci_val
                                     );
                                     true
-                                } else if qci_val == 0 {
+                                } else if !{
+                                    // COLD-START-FIX: Check actual digest data availability
+                                    // instead of qci==0 (which CommitSyncer corrupts early)
+                                    if let Some(ref checker) = digest_data_checker {
+                                        checker()
+                                    } else {
+                                        false
+                                    }
+                                } {
                                     // COLD-START-BYPASS: Same rationale as DIGEST-GATE POLL.
                                     // In OOO path, commit was already waiting in pending_commits
                                     // (arrived out of order). If qci==0, verification infra is
                                     // non-functional — safe to dispatch.
                                     warn!(
                                         "⚡ [DIGEST-GATE-OOO COLD-START-BYPASS] Commit {} dispatching. \
-                                         quorum_commit_index=0 (epoch cold-start). Normal verification \
-                                         will resume once qci>0.",
+                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
+                                         Normal verification will resume once digest votes arrive.",
                                         next_expected_index
                                     );
                                     true
@@ -1134,7 +1165,25 @@ impl CommitProcessor {
                                                 );
                                                 true
                                             } else {
-                                                false // No quorum yet — buffer
+                                                // COLD-START-FIX (May 2026): Check if digest data is available.
+                                                // If CommitVoteMonitor has no data yet (epoch cold-start),
+                                                // allow immediate dispatch instead of buffering.
+                                                let digest_has_data = if let Some(ref checker) = digest_data_checker {
+                                                    checker()
+                                                } else {
+                                                    false
+                                                };
+                                                if !digest_has_data {
+                                                    warn!(
+                                                        "⚡ [DIGEST-GATE-IMMEDIATE COLD-START-BYPASS] Commit {} dispatching. \
+                                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
+                                                         Normal verification will resume once digest votes arrive.",
+                                                        commit_index
+                                                    );
+                                                    true
+                                                } else {
+                                                    false // Digest infra functional but no quorum yet — buffer
+                                                }
                                             }
                                         } else {
                                             false // No quorum ref — buffer

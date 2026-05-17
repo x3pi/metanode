@@ -134,6 +134,11 @@ pub struct ConsensusCoordinationHub {
     /// Takes commit_index (u32), returns Some([u8; 32]) if 2f+1 authorities
     /// voted for the same digest at this index, None otherwise.
     digest_verifier: Arc<RwLock<Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>>>,
+    /// COLD-START-FIX (May 2026): Callback to check if CommitVoteMonitor has
+    /// received any actual digest vote data. Returns true when digest verification
+    /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer),
+    /// this reflects actual P2P block observation.
+    digest_data_checker: Arc<RwLock<Option<Arc<dyn Fn() -> bool + Send + Sync>>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -152,6 +157,7 @@ impl ConsensusCoordinationHub {
             override_dag_gc_guard: Arc::new(AtomicBool::new(false)),
 
             digest_verifier: Arc::new(RwLock::new(None)),
+            digest_data_checker: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -223,6 +229,26 @@ impl ConsensusCoordinationHub {
     pub fn get_digest_verifier(&self) -> Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>> {
         let guard = self.digest_verifier.read();
         guard.clone()
+    }
+
+    /// COLD-START-FIX (May 2026): Set the digest data checker callback.
+    /// Called from authority_node after CommitVoteMonitor creation.
+    pub fn set_digest_data_checker<F>(&self, checker: F)
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let mut guard = self.digest_data_checker.write();
+        *guard = Some(Arc::new(checker));
+    }
+
+    /// COLD-START-FIX (May 2026): Check if CommitVoteMonitor has digest data.
+    /// Returns false if checker not set or checker returns false.
+    pub fn has_digest_data(&self) -> bool {
+        let guard = self.digest_data_checker.read();
+        match guard.as_ref() {
+            Some(checker) => checker(),
+            None => false,
+        }
     }
 
     /// Retrieve the current consensus phase.
@@ -500,6 +526,7 @@ impl ConsensusCoordinationHub {
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
 
             digest_verifier: Arc::new(RwLock::new(None)),
+            digest_data_checker: Arc::new(RwLock::new(None)),
         }
     }
 

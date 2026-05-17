@@ -470,6 +470,18 @@ where
             });
         }
 
+        // COLD-START-FIX (May 2026): Wire CommitVoteMonitor.has_any_digest_data() into
+        // CoordinationHub so CommitProcessor can detect true cold-start conditions.
+        // This is the definitive fix for the epoch transition deadlock where CommitSyncer
+        // sets quorum_commit_index > 0 from peer queries BEFORE CommitVoteMonitor has
+        // received any actual digest votes, permanently disabling COLD-START-BYPASS.
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            coordination_hub.set_digest_data_checker(move || {
+                monitor_ref.has_any_digest_data()
+            });
+        }
+
         let synchronizer = Synchronizer::start(
             network_client.clone(),
             context.clone(),

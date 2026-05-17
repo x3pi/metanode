@@ -105,6 +105,14 @@ pub(super) async fn setup_validator_consensus(
         }
     });
 
+    // COLD-START-FIX (May 2026): Wire digest data checker to CommitVoteMonitor.
+    // This callback returns true ONLY when CommitVoteMonitor has received actual
+    // digest votes from P2P blocks, NOT when CommitSyncer has merely set QCI > 0.
+    let digest_checker_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_data_checker(move || {
+        digest_checker_hub.has_digest_data()
+    });
+
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
         .with_committee_size(committee.size())
         .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
@@ -256,6 +264,12 @@ pub(super) async fn setup_synconly_sync(
         } else {
             None // Monitor not yet initialized
         }
+    });
+
+    // COLD-START-FIX (May 2026): Wire digest data checker (same logic as Validator path)
+    let digest_checker_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_data_checker(move || {
+        digest_checker_hub.has_digest_data()
     });
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
