@@ -571,7 +571,7 @@ async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
     expected_last_block: u64,
     _new_epoch: u64,
-    config: &crate::config::NodeConfig,
+    _config: &crate::config::NodeConfig,
 ) {
     let poll_interval = Duration::from_millis(100);
     let max_wait = Duration::from_secs(30);

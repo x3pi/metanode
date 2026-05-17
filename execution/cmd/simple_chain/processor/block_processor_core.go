@@ -346,8 +346,8 @@ func NewBlockProcessor(
 		processingLockChan: make(chan struct{}, 1),
 		// Pipeline commit: async persistence channel
 		persistChannel: make(chan PersistJob, 100),
-		backupDbChannel: make(chan CommitJob, 1),
-		geiUpdateChan: make(chan AsyncGEIUpdate, 1),
+		backupDbChannel: make(chan CommitJob, 1000),
+		geiUpdateChan: make(chan AsyncGEIUpdate, 100),
 
 		forceCommitChan:  make(chan struct{}, 64),
 		lastRateCheckTime: time.Now(),

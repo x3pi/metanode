@@ -158,7 +158,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
-	if totalTxsQuick == 0 {
+	if totalTxsQuick == 0 && len(epochData.GetSystemTransactions()) == 0 {
 		// ORDERING: Must still validate sequential order
 		if globalExecIndex < *nextExpectedGlobalExecIndex {
 			// Old/duplicate — skip silently
