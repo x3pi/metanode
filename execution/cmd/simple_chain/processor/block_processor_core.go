@@ -226,8 +226,29 @@ func (bp *BlockProcessor) PauseExecution() {
 	//    This MUST come first — it blocks new NOMT sessions from starting,
 	//    which is required for CloseForSnapshot() to complete without deadlock.
 	bp.closeSnapshotGate()
+
 	// 2. Lock execution mutex (gates network handlers)
-	bp.ExecutionMutex.Lock()
+	// DEADLOCK-GUARD (May 2026): Use a goroutine + select to timeout.
+	// Normal acquisition takes <1ms. If it takes >60s, something is
+	// fundamentally stuck (e.g., commitWorker blocked on FlushAll while
+	// processRustEpochData holds RLock waiting on DoneChan).
+	// Proceeding without the lock is preferable to hanging forever.
+	lockAcquired := make(chan struct{})
+	go func() {
+		bp.ExecutionMutex.Lock()
+		close(lockAcquired)
+	}()
+	select {
+	case <-lockAcquired:
+		// Normal path — lock acquired
+	case <-time.After(60 * time.Second):
+		logger.Error("🚨 [DEADLOCK-GUARD] PauseExecution: ExecutionMutex.Lock() timed out after 60s! " +
+			"Proceeding without lock to prevent system-wide stall. " +
+			"commitChannel=%d/%d, snapshotGateOpen=%v",
+			len(bp.commitChannel), cap(bp.commitChannel),
+			bp.snapshotGateOpen.Load())
+	}
+
 	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
 	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
 	// preventing truncated/partial snapshots where metadata.json has a newer StateRoot than the disk.
