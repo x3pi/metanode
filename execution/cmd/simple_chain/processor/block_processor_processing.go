@@ -516,8 +516,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// ═══════════════════════════════════════════════════════════════
 	// TPS PIPELINE: No blocking wait. commitWorker processes the job
 	// asynchronously. The next block can begin EVM execution immediately.
-	// commitChannel (cap=10000) provides natural backpressure if Go
-	// can't persist fast enough.
+	// commitChannel (cap=8) provides natural backpressure if Go
+	// can't persist fast enough — bounded pipeline depth prevents
+	// memory accumulation and GC thrashing.
 	// ═══════════════════════════════════════════════════════════════
 	logger.Debug("⚡ [PIPELINE] Block #%d commit dispatched (non-blocking, GEI=%d, pending=%d)",
 		currentBlockNumber, globalExecIndex, len(bp.commitChannel))
