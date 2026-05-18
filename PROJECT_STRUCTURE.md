@@ -334,3 +334,5 @@ When to update this file:
 - ✅ Cross-layer communication channel added/removed
 - ✅ File renamed or moved
 - ❌ Internal implementation changes (no structural change)
+
+
