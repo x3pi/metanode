@@ -726,7 +726,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	// processRustEpochData reads the old GEI before the async persist completes.
 	storage.UpdateLastGlobalExecIndex(request.BoundaryGei)
 	if rh.pushAsyncGEIUpdateCallback != nil {
-		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil, uint32(request.BoundaryBlock))
+		rh.pushAsyncGEIUpdateCallback(request.BoundaryGei, nil, 0, request.NewEpoch)
 	}
 
 	logger.Info("✅ Successfully advanced Go state epoch",
@@ -1831,17 +1831,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
 			// Find the last commit index to sync that as well
 			var lastCommitIdx uint32 = 0
+			var lastEpoch uint64 = 0
 			if len(blocks) > 0 {
 				lastBlockBytes := blocks[len(blocks)-1].GetRawBlockBytes()
 				if len(lastBlockBytes) > 0 {
 					lastBlk := &block.Block{}
 					if err := lastBlk.Unmarshal(lastBlockBytes); err == nil {
 						lastCommitIdx = uint32(lastBlk.Header().CommitIndex())
+						lastEpoch = lastBlk.Header().Epoch()
 					}
 				}
 			}
-			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx)
-			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d)", lastExecutedGEI, lastCommitIdx)
+			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx, lastEpoch)
+			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d, epoch: %d)", lastExecutedGEI, lastCommitIdx, lastEpoch)
 
 			// ═══════════════════════════════════════════════════════════════════════════
 			// CRITICAL FIX: SYNCHRONOUSLY PERSIST LAST HANDLED COMMIT INDEX AND EPOCH

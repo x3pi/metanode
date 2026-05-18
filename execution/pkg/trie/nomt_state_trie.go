@@ -1343,16 +1343,8 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]No
 					if _, _, _, err := t.Commit(true); err != nil {
 						return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
 					}
-					
-					t.sessionMu.Lock()
-					fs := t.pendingFinishedSession
-					t.pendingFinishedSession = nil
-					t.sessionMu.Unlock()
-					if fs != nil {
-						sessionsToFlush = append(sessionsToFlush, NomtSessionToFlush{
-							Session: fs,
-							Handle:  handle,
-						})
+					if err := t.CommitPayload(); err != nil {
+						return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					totalKeys += len(group.keys)
 				}
@@ -1383,16 +1375,8 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]No
 				if _, _, _, err := trie.Commit(true); err != nil {
 					return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
-				
-				trie.sessionMu.Lock()
-				fs := trie.pendingFinishedSession
-				trie.pendingFinishedSession = nil
-				trie.sessionMu.Unlock()
-				if fs != nil {
-					sessionsToFlush = append(sessionsToFlush, NomtSessionToFlush{
-						Session: fs,
-						Handle:  handle,
-					})
+				if err := trie.CommitPayload(); err != nil {
+					return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch: %w", err)
 				}
 
 				// FORK-DIAG: Log handle root AFTER sync
