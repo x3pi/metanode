@@ -71,6 +71,7 @@ type CommitJob struct {
 	// Snapshot Fix: Track the rust consensus commit index
 	GlobalExecIndex uint64
 	CommitIndex     uint32
+	Epoch           uint64
 
 	// Crash-Safety Fix: Synchronously prepared backup data so it can be written to disk
 	// before we unblock Rust via DoneChan.
@@ -85,6 +86,7 @@ type CommitJob struct {
 type AsyncGEIUpdate struct {
 	GlobalExecIndex uint64
 	CommitIndex     uint32
+	Epoch           uint64
 }
 
 // BlockProcessor handles block processing operations
