@@ -128,6 +128,22 @@ type nomtDirtyEntry struct {
 // Compile-time check: NomtStateTrie must implement StateTrie.
 var _ StateTrie = (*NomtStateTrie)(nil)
 
+// NomtSessionToFlush holds a finished session and its associated handle for deferred flushing.
+type NomtSessionToFlush struct {
+	Session *nomt_ffi.FinishedSession
+	Handle  *nomt_ffi.Handle
+}
+
+// FlushNomtSessions performs disk I/O synchronously for a batch of sessions.
+func FlushNomtSessions(sessions []NomtSessionToFlush) error {
+	for _, s := range sessions {
+		if err := s.Session.CommitPayload(s.Handle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // nomtRegistryKeyPrefix is used to store the keys registry in NOMT.
 // DEPRECATED: Registry is now stored in a separate file, NOT in the NOMT Merkle trie.
 const nomtRegistryKeyPrefix = "__nomt_registry__:"
@@ -1218,9 +1234,11 @@ func (n *NomtStateTrie) GetCommitBatch() [][2][]byte {
 // commit takes 4+ minutes, completely stalling sub-node sync. Instead, we simply strip the
 // 'nomt:' prefix and keep the data in the PebbleDB batch for fast downstream writes.
 // This reduces block apply time from minutes to milliseconds.
-func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error {
+func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]NomtSessionToFlush, error) {
+	var sessionsToFlush []NomtSessionToFlush
+
 	if globalStateBackend != BackendNOMT {
-		return nil
+		return sessionsToFlush, nil
 	}
 
 	// We apply NOMT batches for BOTH Master and Sub nodes.
@@ -1266,7 +1284,7 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 		if len(nomtKeys) > 0 {
 			handle, err := GetOrInitNomtHandle(namespace)
 			if err != nil {
-				return fmt.Errorf("failed to init NOMT handle for sync: %w", err)
+				return sessionsToFlush, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
 			}
 
 			if batchName == "SC Storage" {
@@ -1320,13 +1338,21 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					t := NewNomtStateTrie(handle, false, keyPrefix)
 					t.SetReplicationSync(true)
 					if err := t.BatchUpdate(group.keys, group.values); err != nil {
-						return fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					if _, _, _, err := t.Commit(true); err != nil {
-						return fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
 					}
-					if err := t.CommitPayload(); err != nil {
-						return fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
+					
+					t.sessionMu.Lock()
+					fs := t.pendingFinishedSession
+					t.pendingFinishedSession = nil
+					t.sessionMu.Unlock()
+					if fs != nil {
+						sessionsToFlush = append(sessionsToFlush, NomtSessionToFlush{
+							Session: fs,
+							Handle:  handle,
+						})
 					}
 					totalKeys += len(group.keys)
 				}
@@ -1352,13 +1378,21 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 				}
 				
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
-					return fmt.Errorf("failed to apply nomt sync batch: %w", err)
+					return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}
 				if _, _, _, err := trie.Commit(true); err != nil {
-					return fmt.Errorf("failed to commit nomt sync batch: %w", err)
+					return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
-				if err := trie.CommitPayload(); err != nil {
-					return fmt.Errorf("failed to flush nomt sync batch: %w", err)
+				
+				trie.sessionMu.Lock()
+				fs := trie.pendingFinishedSession
+				trie.pendingFinishedSession = nil
+				trie.sessionMu.Unlock()
+				if fs != nil {
+					sessionsToFlush = append(sessionsToFlush, NomtSessionToFlush{
+						Session: fs,
+						Handle:  handle,
+					})
 				}
 
 				// FORK-DIAG: Log handle root AFTER sync
@@ -1396,5 +1430,5 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 		}
 	}
 
-	return nil
+	return sessionsToFlush, nil
 }

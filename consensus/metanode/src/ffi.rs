@@ -21,6 +21,9 @@ pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = N
 /// Tracks whether pause is active (for auto-resume timeout thread)
 static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Tracks the unique session ID of the pause to prevent stale watchdogs from dropping locks
+static PAUSE_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Maximum time (in seconds) to hold the pause lock before auto-resuming.
 /// This prevents permanent deadlock if Go never calls metanode_resume_consensus.
 const PAUSE_TIMEOUT_SECS: u64 = 30;
@@ -63,16 +66,17 @@ pub extern "C" fn metanode_pause_consensus() {
         PAUSE_GUARD = Some(std::mem::transmute(guard));
     }
     PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED.");
+    let session_id = PAUSE_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED. Session={}", session_id);
 
     // Spawn watchdog thread: auto-resume after PAUSE_TIMEOUT_SECS if Go never calls resume
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(PAUSE_TIMEOUT_SECS));
-        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) && PAUSE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst) == session_id {
             error!(
-                "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s. \
+                "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s for Session={}. \
                  Auto-resuming to prevent permanent deadlock!",
-                PAUSE_TIMEOUT_SECS
+                PAUSE_TIMEOUT_SECS, session_id
             );
             // Force-resume by dropping the guard
             PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
