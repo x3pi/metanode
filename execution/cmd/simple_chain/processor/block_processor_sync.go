@@ -1002,6 +1002,19 @@ PROCESS_BLOCK:
 	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// REVERT GATE HANDLER: If createBlockFromResults returned nil, the draft
+	// block was discarded by verifyDraftBlock (local corruption detected).
+	// Do NOT advance GEI — Rust will retry this commit on the next cycle.
+	// State has been reset to the parent block by revertDraftBlock.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if newBlock == nil {
+		logger.Error("🔄 [REVERT] Block #%d (GEI=%d) was REVERTED. "+
+			"State reset to parent. Waiting for Rust retry or CertifiedCommit.",
+			*currentBlockNumber, globalExecIndex)
+		return
+	}
+
 	blockHash := newBlock.Header().Hash().Hex()
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)

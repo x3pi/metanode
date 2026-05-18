@@ -285,7 +285,7 @@ func (bp *BlockProcessor) commitWorker() {
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // PersistAsync runs inline (synchronous) to guarantee trie swap completes before
 // the next block starts processing — eliminating the fork race condition.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) error {
 	overallStart := time.Now()
 
 	// ═══════════════════════════════════════════════════════════════
@@ -320,7 +320,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		// a severe race condition occurs causing non-deterministic StateRoots (i.e. cluster forks).
 		scStart := time.Now()
 		if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
-			logger.Fatal("Sequential SmartContractDB commit error: %v", err)
+			logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
+			return fmt.Errorf("SmartContractDB commit failed: %w", err)
 		}
 		logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
 
@@ -418,7 +419,16 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 	}
 	if len(commitErrors) > 0 {
-		logger.Error("🚨 [COMMIT] %d commit tasks failed: %v — node continues with degraded state (will self-heal on next block)",
+		// Check if ANY critical task failed (AccountPipeline or StakePipeline).
+		// These are the trie-state producers — if they fail, the block's
+		// stateRoot/stakeRoot will be wrong on the NEXT block → FORK.
+		for _, errStr := range commitErrors {
+			if len(errStr) > 15 && (errStr[:15] == "AccountPipeline" || errStr[:13] == "StakePipeline") {
+				logger.Error("🚨 [COMMIT] CRITICAL pipeline task failed: %s — block MUST be reverted to prevent fork", errStr)
+				return fmt.Errorf("critical commit failure: %s", errStr)
+			}
+		}
+		logger.Error("🚨 [COMMIT] %d non-critical commit tasks failed: %v — node continues (will self-heal)",
 			len(commitErrors), commitErrors)
 	}
 
@@ -461,7 +471,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if accountPipelineResult != nil {
 		startPersist := time.Now()
 		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for AccountStateDB: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
+			return fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
@@ -471,7 +482,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if stakePipelineResult != nil {
 		startPersist := time.Now()
 		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for StakeStateDB: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
+			return fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
@@ -481,13 +493,15 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if receiptPipelineResult != nil {
 		startPersist := time.Now()
 		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for Receipts: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
+			return fmt.Errorf("Receipts PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", persistDuration)
 		}
 	}
+	return nil
 }
 
 // persistWorker REMOVED (May 2026): Was a no-op fence goroutine. PersistAsync

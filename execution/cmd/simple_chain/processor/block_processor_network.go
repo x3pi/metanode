@@ -456,6 +456,24 @@ PROCESS_LOOP:
 		} else {
 			// Non-empty commit, authoritative, or non-sequential — full processing path
 			logger.Info("📥 [PROCESSOR] Read block from channel: global_exec_index=%d, auth=%v", epochData.GetGlobalExecIndex(), authRespCh != nil)
+
+			// ═══════════════════════════════════════════════════════════════
+			// BOUNDED CONCURRENCY GUARD: Prevent unbounded map growth.
+			// If a permanent GEI gap causes pendingBlocks to grow forever,
+			// this cap prevents OOM. The cleared entries will be re-sent
+			// by Rust on the next retry cycle.
+			// ═══════════════════════════════════════════════════════════════
+			if len(pendingBlocks) > 1000 {
+				logger.Error("🚨 [BOUNDED] pendingBlocks overflow (%d entries) — clearing to prevent OOM. "+
+					"Possible permanent GEI gap. Rust will retry.", len(pendingBlocks))
+				pendingBlocks = make(map[uint64]*pb.ExecutableBlock)
+			}
+			if len(skippedCommitsWithTxs) > 500 {
+				logger.Error("🚨 [BOUNDED] skippedCommitsWithTxs overflow (%d entries) — clearing to prevent OOM.",
+					len(skippedCommitsWithTxs))
+				skippedCommitsWithTxs = make(map[uint64]*pb.ExecutableBlock)
+			}
+
 			blockStart := time.Now()
 			bp.ExecutionMutex.RLock()
 			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)

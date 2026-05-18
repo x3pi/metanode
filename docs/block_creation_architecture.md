@@ -44,7 +44,7 @@ sequenceDiagram
 
 ## 2. Kiến Trúc Phòng Vệ Chống Rẽ Nhánh (Fork-Proof Architecture)
 
-Hệ thống được bảo vệ bởi **7 lớp phòng vệ** (Defense Layers) được thiết kế để chặn đứng bất kỳ nguy cơ mất đồng bộ nào giữa Go và Rust, cũng như giữa các Node trong mạng.
+Hệ thống được bảo vệ bởi **10 lớp phòng vệ** (Defense Layers) được thiết kế để chặn đứng bất kỳ nguy cơ mất đồng bộ nào giữa Go và Rust, cũng như giữa các Node trong mạng.
 
 ```mermaid
 flowchart TB
@@ -110,7 +110,8 @@ flowchart TB
     Layer4 -->|"Execution an toàn"| Layer5
     Layer5 -->|"State sạch"| Layer6
     Layer6 -->|"Block đồng nhất"| Layer7
-    Layer7 -->|"Epoch an toàn"| SAFE["✅ FORK-FREE"]
+    Layer7 -->|"Epoch an toàn"| Layer8
+    Layer8["🛡️ Lớp 8-10: NOMT Root + Timestamp + Revert Gate"] -->|"State verified"| SAFE["✅ FORK-FREE"]
 
     style SAFE fill:rgba(0,200,100,0.2),stroke:#00c853,stroke-width:3px,color:#00c853
 ```
@@ -218,7 +219,7 @@ sequenceDiagram
 
 ## 4. Quy Tắc Bất Biến (Invariants)
 
-Kiến trúc đảm bảo 6 quy tắc bất biến tuyệt đối:
+Kiến trúc đảm bảo **16 quy tắc bất biến** (xem Section 13 cho danh sách đầy đủ). Dưới đây là 7 quy tắc cốt lõi:
 
 ```mermaid
 mindmap
@@ -283,6 +284,7 @@ Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (
 | ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout). 1 match = Accept. | 🟢 **AN TOÀN** |
 | ⑧ | CommitSyncer | Peer trả blocks | RPC timeout + retry peer khác | 🟢 **AN TOÀN** |
 | ⑨ | TransactionPool Actor | Channel send/receive | Non-blocking Actor loop. NotifyChan cho event-driven wake. | 🟢 **AN TOÀN** |
+| ⑩ | Revert Gate (Block-as-Package) | verifyDraftBlock trước commit | 2 hash compare (~2ns). Nếu fail → revertDraftBlock (~1-5ms, bounded map clear + 1 PebbleDB write) | 🟢 **AN TOÀN** |
 
 **Định lý Liveness:**
 > Với N node trong cluster (N ≥ 3f+1), nếu ≥ 2f+1 node online và có thể giao tiếp qua mạng, hệ thống Metanode **luôn tạo block mới** trong thời gian hữu hạn. Hệ thống **TUYỆT ĐỐI KHÔNG fork** trong mọi kịch bản.
@@ -647,7 +649,6 @@ Tài liệu này mô tả chính xác luồng xử lý block từ khi Rust gửi
 │  ├─ NOMT RE-EXECUTION GUARD: Skip if block already in DB               │
 │  ├─ TIMESTAMP REGRESSION GUARD: Drop if ts >30s behind parent          │
 │  ├─ FORK-PREVENTION: Verify NOMT handle root == trie root              │
-│  ├─ InvalidateAllState() → force fresh trie reads                      │
 │  ├─ ProcessTransactions() → EVM execution (deterministic blockTime)    │
 │  └─ createBlockFromResults()                                           │
 └────────────────────────────┬────────────────────────────────────────────┘
@@ -656,6 +657,7 @@ Tài liệu này mô tả chính xác luồng xử lý block từ khi Rust gửi
 │  STAGE 3: createBlockFromResults (under blockWriteMutex)               │
 │  ├─ Phase 1: Parallel root calculation (txsRoot ∥ receiptsRoot)        │
 │  ├─ Phase 2: GenerateBlockData (header, hash, parentHash)              │
+│  ├─ ★ REVERT GATE: verifyDraftBlock() — discard if corrupt (Layer-10) │
 │  ├─ Phase 3: commitToMemoryParallel()                                  │
 │  │   ├─ SmartContractDB.Commit() — SEQUENTIAL (StorageRoot late-bind)  │
 │  │   ├─ AccountStateDB.CommitPipeline() ─┐                             │
@@ -694,11 +696,11 @@ Tài liệu này mô tả chính xác luồng xử lý block từ khi Rust gửi
 |---|---|---|
 | Stage 1, line 274 | TRANSITION SYNC + NOMT RealignRoot | Re-align trie root sau DB fast-forward |
 | Stage 2, line 46 | LAYER-4 Idempotent | Chặn duplicate commit từ Rust retry |
-| Stage 2, line 812 | InvalidateAllState | Xóa cache cũ trước EVM execution |
 | Stage 2, line 824 | FORK-PREVENTION handle root check | Verify NOMT C++ root == Go trie root |
 | Stage 2, line 864 | TIMESTAMP REGRESSION | Drop commit có timestamp lùi >30s |
 | Stage 3, line 288 | SmartContractDB sequential | StorageRoot late-bind phải xong trước AccountPipeline |
 | Stage 3, line 432 | PersistAsync INLINE | Trie swap xong trước block tiếp theo đọc |
+| Stage 3, line 386 | REVERT GATE (verifyDraftBlock) | Discard draft block nếu root=0x0 (Layer-10) |
 | Stage 3, line 471 | doneChan sync wait | Block N commit xong → Block N+1 mới bắt đầu |
 | Stage 4, line 79 | commitMutex | Single writer cho toàn bộ state DB |
 
@@ -709,7 +711,7 @@ Tài liệu này mô tả chính xác luồng xử lý block từ khi Rust gửi
 Nguyên tắc này được enforce bởi 3 cơ chế:
 1. **doneChan**: `createBlockFromResults()` block trên `<-doneChan` cho đến khi `commitWorker` signal
 2. **PersistAsync inline**: Trie swap chạy đồng bộ trong `commitToMemoryParallel()`, không async
-3. **InvalidateAllState**: Xóa mọi cache trước khi đọc trie cho block mới
+3. **Revert Gate**: `verifyDraftBlock()` chặn block có root=0x0 TRƯỚC khi trie bị mutation
 
 ---
 
@@ -791,9 +793,9 @@ if trie.GetStateBackend() == trie.BackendNOMT {
 
 ---
 
-## 12. Mô Hình Phòng Vệ 9 Lớp (Updated May 2026)
+## 12. Mô Hình Phòng Vệ 10 Lớp (Updated May 2026)
 
-Cập nhật từ 7 lớp lên **9 lớp** sau các sự cố fork tại Block 146, 15, 4690:
+Cập nhật từ 9 lớp lên **10 lớp** sau kiến trúc Block-as-Package:
 
 | Lớp | Tên | File | Mô tả |
 |---|---|---|---|
@@ -806,6 +808,7 @@ Cập nhật từ 7 lớp lên **9 lớp** sau các sự cố fork tại Block 1
 | 7 | Epoch Committee Assert | `authority_node.rs` | Keccak256 sorted validators, 2f+1 verify |
 | **8** | **NOMT Fork-Prevention** | `block_processor_sync.go:824` | Verify NOMT handle root == trie root TRƯỚC mỗi block |
 | **9** | **Deterministic Timestamp** | `block_processor_sync.go:864` | Reject commit có timestamp lùi >30s so với parent |
+| **10** | **Revert Gate (Block-as-Package)** | `block_processor_processing.go` | `verifyDraftBlock` → corrupt? `revertDraftBlock` → discard + reset. Rust retry. |
 
 ### 12.1 Lớp 8: NOMT Fork-Prevention (Mới)
 
@@ -823,6 +826,38 @@ Khi Rust local committer evaluate sparse DAG (sau restart/restore), có thể ch
 if blockTimeSec < parentTs && regression > 30s → DROP commit
 ```
 Block đúng sẽ đến qua CertifiedCommit từ network.
+
+### 12.3 Lớp 10: Revert Gate — Block-as-Package (Mới)
+
+Mỗi block được xem như "gói hàng". Gói hàng lỗi bị **bỏ đi** trước khi commit:
+
+```
+  Rust Commit → Validate → EVM Execute → Build Draft Block
+                                               │
+                                         REVERT GATE
+                                       verifyDraftBlock()
+                                               │
+                                    ┌──────────┴──────────┐
+                                    │                     │
+                                  PASS ✅               FAIL ❌
+                                    │                     │
+                                    ▼                     ▼
+                              SetLastBlock         revertDraftBlock()
+                              commitToMemory       ├─ Discard trie state
+                              commitWorker         ├─ Reset to parent
+                              PebbleDB persist     └─ return nil
+                                    │                     │
+                                    ▼                     ▼
+                              ✅ BLOCK COMMITTED    🔄 RUST RETRY
+```
+
+**Checks:**
+- `AccountStatesRoot ≠ 0x0` (NOMT handle corruption → permanent fork nếu commit)
+- `StakeStatesRoot ≠ 0x0` (stake trie corruption → permanent fork nếu commit)
+
+**Revert Cost:** ~1-5ms (map clear + atomic swap + 1 PebbleDB write). Deadlock-free.
+
+> **INV-BLOCK-REVERT:** Block lỗi PHẢI bị discard TRƯỚC `CommitBlockState`. Sau persist = không thể revert, chỉ có thể restart + STARTUP-SYNC.
 
 ---
 
@@ -845,6 +880,7 @@ Block đúng sẽ đến qua CertifiedCommit từ network.
 | 13 | **INV-NOMT-ROOT-VERIFY** | Check handle root == trie root trước EVM | LAYER-8 |
 | 14 | **INV-MASTER-NO-P2P** | Master KHÔNG import P2P blocks | `ProcessBlockData()` drop |
 | 15 | **INV-EPOCH-SYNC-NO-FALLBACK** | Cấm Rust ép Go đồng bộ qua P2P khi Go đang chạy chậm | Xóa active fallback trong `poll_go_until_synced` |
+| 16 | **INV-BLOCK-REVERT** | Block lỗi PHẢI bị discard TRƯỚC CommitBlockState | LAYER-10: `verifyDraftBlock` → `revertDraftBlock` → return nil |
 
 ---
 
