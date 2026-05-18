@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
@@ -25,12 +26,11 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/txsender"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
-	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
-	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
 // State represents the processor state
@@ -87,8 +87,6 @@ type AsyncGEIUpdate struct {
 	CommitIndex     uint32
 }
 
-
-
 // BlockProcessor handles block processing operations
 type BlockProcessor struct {
 	lastBlock atomic.Value
@@ -139,7 +137,7 @@ type BlockProcessor struct {
 	txClient      *txsender.Client // Legacy TCP client (for backward compatibility)
 
 	// Phase 7 Decomposition
-	txBatchForwarder     *TxBatchForwarder
+	txBatchForwarder *TxBatchForwarder
 
 	// Channel để đảm bảo chỉ một ProcessTransactionsInPool chạy tại một thời điểm
 	processingLockChan chan struct{}
@@ -149,14 +147,14 @@ type BlockProcessor struct {
 	backupDbWg      sync.WaitGroup // Track active backupDbWorker tasks
 	// GEI Coalescing
 	geiUpdateChan chan AsyncGEIUpdate
-    
+
 	forceCommitChan chan struct{}
 
 	// Self-monitoring fields
-	processedBlockCount  uint64
-	lastRateCheckTime    time.Time
-	lastRateCheckCount   uint64
-	lastLazyRefreshTime  time.Time
+	processedBlockCount uint64
+	lastRateCheckTime   time.Time
+	lastRateCheckCount  uint64
+	lastLazyRefreshTime time.Time
 
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
@@ -175,8 +173,8 @@ type BlockProcessor struct {
 	//   Close:     set flag + swap channel (snapshot goroutine)
 	//   Open:      set flag + close old channel (broadcast wakeup)
 	// ═══════════════════════════════════════════════════════════════
-	snapshotGateOpen atomic.Bool    // true = open (normal), false = closed (snapshot)
-	snapshotGateCh   chan struct{}  // closed = gate re-opened (broadcast wakeup)
+	snapshotGateOpen atomic.Bool   // true = open (normal), false = closed (snapshot)
+	snapshotGateCh   chan struct{} // closed = gate re-opened (broadcast wakeup)
 	snapshotGateMu   sync.Mutex    // serializes close/open transitions
 
 	// FORK-SAFETY: Track Rust FFI session GEI baseline.
@@ -444,7 +442,7 @@ func NewBlockProcessor(
 		// Giảm buffer size để tránh rò rỉ bộ nhớ
 		// Nếu channels đầy, producer sẽ bị block thay vì tích lũy memory
 		ProcessedVirtualTransactionChain: make(chan []byte, 10000),    // Giảm từ 100k xuống 10k để giảm memory
-		commitChannel:                    make(chan CommitJob, 10000), // Tăng buffer để absorb burst empty blocks
+		commitChannel:                    make(chan CommitJob, 8),     // TPS PIPELINE: Small buffer for bounded pipeline depth. EVM runs max 8 blocks ahead of PebbleDB persist. Prevents memory accumulation (each CommitJob ~1-5MB) and GC thrashing.
 		indexingChannel:                  make(chan uint64, 50000),    // Giữ nguyên 50k (chỉ 8 bytes mỗi entry)
 		// Khởi tạo các trường mới cho kiến trúc committer và sub-node buffering
 		createdBlocksChan: make(chan *block.Block, 200),
@@ -455,11 +453,11 @@ func NewBlockProcessor(
 		txClient:          txClient,
 		// Khởi tạo channel khóa với buffer size là 1
 		processingLockChan: make(chan struct{}, 1),
-		backupDbChannel: make(chan CommitJob, 1000),
-		geiUpdateChan: make(chan AsyncGEIUpdate, 100),
+		backupDbChannel:    make(chan CommitJob, 1000),
+		geiUpdateChan:      make(chan AsyncGEIUpdate, 100),
 
-		forceCommitChan:  make(chan struct{}, 64),
-		lastRateCheckTime: time.Now(),
+		forceCommitChan:     make(chan struct{}, 64),
+		lastRateCheckTime:   time.Now(),
 		lastLazyRefreshTime: time.Now(),
 	}
 
@@ -475,8 +473,6 @@ func NewBlockProcessor(
 		connectionsManager,
 		messageSender,
 	)
-
-
 
 	// Initialize BLS block signer for Master nodes
 	if serviceType == p_common.ServiceTypeMaster && config.Databases.BLSPrivateKey != "" {
@@ -524,9 +520,9 @@ func NewBlockProcessor(
 		go bp.startIndexingProcess()
 	}
 	if serviceType == p_common.ServiceTypeMaster {
-		go bp.commitWorker()
-		go bp.backupDbWorker()  // Coalesced BackupDb builder
-		go bp.geiWorker()       // Coalesced GEI updates
+		// go bp.commitWorker()
+		go bp.backupDbWorker() // Coalesced BackupDb builder
+		go bp.geiWorker()      // Coalesced GEI updates
 	}
 	go bp.inputTPSWorker()
 	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
@@ -539,11 +535,11 @@ func NewBlockProcessor(
 	snapshotManager := executor.InitSnapshotSystem(config, bp.chainState)
 	if snapshotManager != nil {
 		logger.Info("📸 [SNAPSHOT-INIT] ✅ Block commit callback registered (log rotation + snapshot)")
-		
+
 		// Wire up the pause and resume callbacks for atomic database snapshots
 		snapshotManager.SetPauseCallback(func() { bp.PauseExecution() })
 		snapshotManager.SetResumeCallback(func() { bp.ResumeExecution() })
-		
+
 		// Set callback to fetch atomic StateRoot during snapshot
 		snapshotManager.SetStateRootCallback(func() string {
 			if root, ok := mt_trie.GetNomtHandleRoot("account_state"); ok {
@@ -592,7 +588,7 @@ func NewBlockProcessor(
 				if err := storageMgr.CheckpointAll(destPath); err != nil {
 					return err
 				}
-				
+
 				return nil
 			})
 		}
@@ -604,8 +600,6 @@ func NewBlockProcessor(
 		// go bp.runPeerDiscoverySocket(config.PeerRPCPort)
 		logger.Info("🌐 [PEER DISCOVERY] Go Master TCP socket listener is intentionally disabled to avoid port conflict with Rust PeerRpcServer")
 	}
-
-
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// SYNC-ONLY BLOCK REFRESHER: For SyncOnly Master nodes, Rust sync_node
@@ -641,12 +635,12 @@ func (bp *BlockProcessor) GetLastBlockMutex() *sync.Mutex {
 func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
 	bp.lastBlockMutex.Lock()
 	defer bp.lastBlockMutex.Unlock()
-	
+
 	if blk != nil {
 		bp.lastBlock.Store(blk)
 		// Update nextBlockNumber
 		bp.nextBlockNumber.Store(blk.Header().BlockNumber() + 1)
-		
+
 		// Update header atomically
 		headerCopy := blk.Header()
 		bp.chainState.SetcurrentBlockHeader(&headerCopy)
@@ -777,10 +771,6 @@ func (bp *BlockProcessor) calculateReceiptsRoot(receiptList []types.Receipt) (ty
 	return receipts, rcpRoot
 }
 
-
-
-
-
 // GetLeaderAddressByIndex looks up the validator address for the given authority index
 // CRITICAL FORK-SAFETY: This ensures all nodes use the same leader address for the same commit
 // Validators are sorted by AuthorityKey (matching Rust committee ordering)
@@ -832,8 +822,8 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 //
 // SIMPLIFICATION (May 2026): Removed persistChannel fence — persistWorker was
 // a no-op (PersistAsync runs inline since May 2026). Now only 2 steps:
-//   1. Drain commitWorker via fence job
-//   2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
+//  1. Drain commitWorker via fence job
+//  2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
 func (bp *BlockProcessor) WaitForPersistence() {
 	logger.Info("⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=%d/%d", len(bp.commitChannel), cap(bp.commitChannel))
 	done := make(chan struct{})

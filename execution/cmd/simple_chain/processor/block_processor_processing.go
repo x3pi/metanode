@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -359,19 +360,17 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			expectedParentHash := lastConfirmedForCheck.Header().Hash()
 			actualParentHash := bl.Header().LastBlockHash()
 			if actualParentHash != expectedParentHash {
-				logger.Warn(
-					"⚠️ [FORK-GUARD] CHAIN BREAK DETECTED at block #%d! "+
+				panic(fmt.Sprintf(
+					"🚨 [FORK-GUARD] FATAL CHAIN BREAK DETECTED at block #%d! "+
 						"parentHash=%s ≠ lastBlock hash=%s. "+
-						"NOTE: This is a cosmetic warning. Block Hash() excludes LastBlockHash. "+
-						"The chain will continue unless StateRoot also diverges. "+
-						"GEI=%d, leader=%s, timestamp=%d",
+						"GEI=%d, leader=%s, timestamp=%d. Halting node to prevent fork propagation.",
 					currentBlockNumber,
 					actualParentHash.Hex(),
 					expectedParentHash.Hex(),
 					globalExecIndex,
 					blockLeaderAddress.Hex(),
 					timestampSec,
-				)
+				))
 			}
 		}
 	}
@@ -507,6 +506,25 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		CommitIndex:               commitIndex,
 	}
 
+	// ═══════════════════════════════════════════════════════════════
+	// PIPELINE EPOCH-SAFETY: Update in-memory GEI BEFORE dispatch.
+	//
+	// CRITICAL: With pipeline mode (non-blocking commit), commitWorker
+	// updates GEI asynchronously. But Rust's poll_go_until_synced()
+	// reads GEI via RPC immediately after sending EndOfEpoch.
+	// If GEI hasn't been updated yet → Rust sees stale GEI → epoch
+	// transition race → FORK.
+	//
+	// FIX: Update in-memory atomic GEI here (instant, thread-safe).
+	// commitWorker still persists GEI to disk for crash recovery.
+	// ═══════════════════════════════════════════════════════════════
+	if globalExecIndex > 0 {
+		storage.UpdateLastGlobalExecIndex(globalExecIndex)
+	}
+	if commitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(commitIndex)
+	}
+
 	// Send job to commitWorker.
 	// Block until commitChannel has space (natural backpressure)
 	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
@@ -517,8 +535,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// ═══════════════════════════════════════════════════════════════
 	// TPS PIPELINE: No blocking wait. commitWorker processes the job
 	// asynchronously. The next block can begin EVM execution immediately.
-	// commitChannel (cap=10000) provides natural backpressure if Go
-	// can't persist fast enough.
+	// commitChannel (cap=8) provides natural backpressure if Go
+	// can't persist fast enough — bounded pipeline depth prevents
+	// memory accumulation and GC thrashing.
 	// ═══════════════════════════════════════════════════════════════
 	logger.Debug("⚡ [PIPELINE] Block #%d commit dispatched (non-blocking, GEI=%d, pending=%d)",
 		currentBlockNumber, globalExecIndex, len(bp.commitChannel))
