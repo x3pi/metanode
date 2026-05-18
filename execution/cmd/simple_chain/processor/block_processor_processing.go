@@ -666,7 +666,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(lastBlockNumber)
 	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
 	bp.SetLastBlock(lastBl)
 	bp.chainState.GetBlockDatabase().SaveLastBlock(lastBl)
@@ -717,7 +717,7 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
 
 	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
 	parentBlockNumber := failedBlockNumber - 1

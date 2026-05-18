@@ -530,9 +530,22 @@ func (bc *BlockChain) Commit() error {
 	return nil
 }
 
-// Discard hủy bỏ thay đổi
+// Discard hủy bỏ thay đổi toàn bộ (CẢNH BÁO: Không dùng trong pipeline xử lý block vì sẽ xóa block đang chờ commit)
 func (bc *BlockChain) Discard() {
 	bc.dirtyLock.Lock()
 	defer bc.dirtyLock.Unlock()
 	bc.dirtyStorage = new(sync.Map)
+}
+
+func (bc *BlockChain) removeFromDirty(key string) {
+	bc.dirtyLock.RLock()
+	defer bc.dirtyLock.RUnlock()
+	bc.dirtyStorage.Delete(key)
+}
+
+// DiscardBlockMappings safely removes only the mappings associated with a specific block number
+func (bc *BlockChain) DiscardBlockMappings(blockNumber uint64) {
+	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber)
+	bc.removeFromDirty(key)
+	bc.blockNumberToHashCache.Delete(blockNumber)
 }
