@@ -410,11 +410,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	phase3Start := time.Now()
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
-	// Synchronous mapping population for Master Node cache so RPC queries don't return null
-	blockchain.GetBlockChainInstance().SetBlockNumberToHash(currentBlockNumber, bl.Header().Hash())
-	for _, txHash := range bl.Transactions() {
-		blockchain.GetBlockChainInstance().SetTxHashMapBlockNumber(txHash, currentBlockNumber)
-	}
 	var mappingWg sync.WaitGroup // Keep this as dummy to satisfy Job signature if needed
 
 	phase31Elapsed := time.Since(phase3Start)
