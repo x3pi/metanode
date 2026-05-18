@@ -29,9 +29,9 @@ func (bp *BlockProcessor) commitWorker() {
 	for job := range bp.commitChannel {
 		if job.Block == nil {
 			logger.Info("🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=%d/%d)", len(bp.commitChannel), cap(bp.commitChannel))
-			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
-				// FENCE jobs have no block — use epoch 0 (safe: FENCE is only for empty commits)
-				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, 0)
+			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 || job.Epoch > 0 {
+				// FENCE jobs have no block — use job.Epoch from async update
+				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Epoch)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)

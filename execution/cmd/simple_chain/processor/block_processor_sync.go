@@ -181,7 +181,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		}
 
 		// Sequential empty commit — update GEI and advance
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 		// ═══════════════════════════════════════════════════════════════
@@ -519,7 +519,7 @@ PROCESS_BLOCK:
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 			// Update GlobalExecIndex tracking (persistent)
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 
 			// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 			if globalExecIndex > 0 {
@@ -629,7 +629,7 @@ PROCESS_BLOCK:
 			logger.Info("🛡️ [GHOST-BLOCK-GUARD] len(allTransactions) is 0 after unmarshal, but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 
 			// CRITICAL FORK-SAFETY: Update next expected global_exec_index and process pending blocks
 			if globalExecIndex > 0 {
@@ -679,7 +679,7 @@ PROCESS_BLOCK:
 		logger.Info("⏭️  [BLOCK-NUM] Skipping empty commit from Rust (GEI=%d, commitIndex=%d) - PREVENTING INFLATION", globalExecIndex, commitIndex)
 		
 		// Still update GEI counter so the processor advances past this commit
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 		*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 		// Check pending blocks
@@ -743,7 +743,7 @@ PROCESS_BLOCK:
 				globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
 			// Still update GEI counter so the processor advances past this commit
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 			*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 			// Check pending blocks
@@ -876,7 +876,7 @@ PROCESS_BLOCK:
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
 
 				// Update GEI so processor advances past this commit
-				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
 				// NOTE (May 2026): InvalidateAllState() REMOVED here.
@@ -922,7 +922,7 @@ PROCESS_BLOCK:
 			// IntermediateRoot(true) already cleared dirty accounts during
 			// ProcessTransactions. Invalidating would thrash the LRU cache.
 			
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 			
 			if globalExecIndex > 0 {
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
@@ -1086,7 +1086,7 @@ PROCESS_BLOCK:
 	}
 
 	// Update GlobalExecIndex tracking (persistent)
-	bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+	bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 
 	logger.Debug("Lastblock header: %v", newBlock.Header())
 	logger.Debug("Transactions in block: %d TXs", len(newBlock.Transactions()))

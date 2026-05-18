@@ -68,21 +68,21 @@ func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex
 		batch = append(batch, [2][]byte{storage.LastGlobalExecIndexHashKey.Bytes(), utils.Uint64ToBytes(gei)})
 	}
 
-	if commitIndex > 0 {
-		storage.UpdateLastHandledCommitIndex(commitIndex)
-
-		// PIPELINE-SAFE: Use blockEpoch from CommitJob, not bp.GetLastBlock()
-		currentEpoch := blockEpoch
-
-		storage.UpdateLastHandledCommitEpoch(currentEpoch)
-
-		geiAuthority := GetGEIAuthority()
-		if geiAuthority != nil {
-			geiAuthority.RecordCommitIndexWithEpoch(commitIndex, currentEpoch)
+	if commitIndex > 0 || blockEpoch > 0 {
+		if commitIndex > 0 {
+			storage.UpdateLastHandledCommitIndex(commitIndex)
+			batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(commitIndex)})
+			
+			geiAuthority := GetGEIAuthority()
+			if geiAuthority != nil {
+				geiAuthority.RecordCommitIndexWithEpoch(commitIndex, blockEpoch)
+			}
 		}
 
-		batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(commitIndex)})
-		batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
+		if blockEpoch > 0 {
+			storage.UpdateLastHandledCommitEpoch(blockEpoch)
+			batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(blockEpoch)})
+		}
 	}
 
 	if bp.storageManager != nil && bp.storageManager.GetStorageBackupDb() != nil && len(batch) > 0 {
@@ -106,6 +106,7 @@ func (bp *BlockProcessor) geiWorker() {
 	for update := range bp.geiUpdateChan {
 		latestGEI := update.GlobalExecIndex
 		latestCommit := update.CommitIndex
+		latestEpoch := update.Epoch
 		drained := 0
 	DRAIN_LOOP:
 		for {
@@ -114,6 +115,7 @@ func (bp *BlockProcessor) geiWorker() {
 				if u.GlobalExecIndex > latestGEI {
 					latestGEI = u.GlobalExecIndex
 					latestCommit = u.CommitIndex
+					latestEpoch = u.Epoch
 				}
 				drained++
 			default:
@@ -125,6 +127,7 @@ func (bp *BlockProcessor) geiWorker() {
 			Block:           nil,
 			GlobalExecIndex: latestGEI,
 			CommitIndex:     latestCommit,
+			Epoch:           latestEpoch,
 		}
 		select {
 		case bp.commitChannel <- job:
@@ -137,7 +140,7 @@ func (bp *BlockProcessor) geiWorker() {
 // PushAsyncGEIUpdate pushes an empty commit update to the commitChannel.
 // This ensures that the global_exec_index is persisted to DB *strictly after*
 // any pending blocks with transactions. Prevents GEI from racing ahead of lost async blocks.
-func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIndex uint32) {
+func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIndex uint32, epoch uint64) {
 	if index == 0 {
 		return
 	}
@@ -153,6 +156,7 @@ func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIn
 	update := AsyncGEIUpdate{
 		GlobalExecIndex: index,
 		CommitIndex:     commitIndex,
+		Epoch:           epoch,
 	}
 
 	select {
