@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -43,6 +44,7 @@ import (
 var (
 	apiInstances          sync.Map
 	protectedApiInstances sync.Map
+	apiInstanceCount      atomic.Int32
 )
 
 type AccountStateDB interface {
@@ -231,20 +233,24 @@ func GetOrCreateMVMApi(
 	}
 
 	// Chúng ta là người đầu tiên Store thành công
+	apiInstanceCount.Add(1)
 	return newApi
 }
 
 func LenApiInstances() int {
-	count := 0
-	apiInstances.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	return count
+	return int(apiInstanceCount.Load())
 }
 
 func RemoveOldApiInstances() {
 	const targetSize = 50000
+	
+	// Lớp bảo vệ 1: Fast-path check với atomic counter
+	// Nếu tổng số instance (bao gồm cả protected) còn nhỏ hơn targetSize,
+	// thì chắc chắn số unprotected cũng nhỏ hơn, không cần quét map.
+	if int(apiInstanceCount.Load()) < targetSize {
+		return
+	}
+
 	type apiInstanceInfo struct {
 		key       common.Address
 		createdAt time.Time
@@ -272,9 +278,11 @@ func RemoveOldApiInstances() {
 	numToRemove := currentTotalCount - targetSize
 
 	// Chỉ sắp xếp nếu THỰC SỰ cần dọn bớt
-	sort.Slice(instancesToRemove, func(i, j int) bool {
-		return instancesToRemove[i].createdAt.Before(instancesToRemove[j].createdAt)
-	})
+	if numToRemove > 0 {
+		sort.Slice(instancesToRemove, func(i, j int) bool {
+			return instancesToRemove[i].createdAt.Before(instancesToRemove[j].createdAt)
+		})
+	}
 
 	if numToRemove > len(instancesToRemove) {
 		numToRemove = len(instancesToRemove)
@@ -289,8 +297,8 @@ func RemoveOldApiInstances() {
 			logger.Debug("Removed old unprotected MVMApi instance:", instanceInfo.key.Hex(), "created at:", instanceInfo.createdAt)
 		}
 	}
-	logger.Info("🧹 [MVM CLEANUP] scan=%v, total=%d, unprotected=%d, removed=%d",
-		scanDuration, currentTotalCount, len(instancesToRemove), deletedCount)
+	logger.Info("🧹 [MVM CLEANUP] scan=%v, total=%d, unprotected=%d, removed=%d, remaining_atomic=%d",
+		scanDuration, currentTotalCount, len(instancesToRemove), deletedCount, apiInstanceCount.Load())
 }
 
 func GetMVMApi(mvmId common.Address) *MVMApi {
@@ -306,17 +314,17 @@ func ClearMVMApi(mvmId common.Address) {
 		logger.Debug("Skipping deletion of protected MVMApi instance:", mvmId.Hex())
 		return
 	}
-	instance, ok := apiInstances.Load(mvmId)
-	if !ok {
+	instance, loaded := apiInstances.LoadAndDelete(mvmId)
+	if !loaded {
 		return
 	}
+	apiInstanceCount.Add(-1)
+	
 	mvmApi, ok := instance.(*MVMApi)
 	if !ok || mvmApi == nil {
-		apiInstances.Delete(mvmId)
 		logger.Debug("Removed invalid/nil MVMApi entry from map:", mvmId.Hex())
 		return
 	}
-	apiInstances.Delete(mvmId)
 	logger.Debug("Cleared unprotected MVMApi instance:", mvmId.Hex())
 }
 

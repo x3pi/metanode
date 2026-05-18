@@ -253,7 +253,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				time.Sleep(100 * time.Millisecond)
 				masterConnections = bf.connectionsManager.ConnectionsByType(p_common.MapConnectionTypeToIndex(p_common.MASTER_CONNECTION_TYPE))
 				if len(masterConnections) == 0 {
-					logger.Warn("TxsProcessor2: vẫn không tìm thấy master connection sau retry")
+					logger.Warn("TxsProcessor2: vẫn không tìm thấy master connection sau retry. Re-adding %d txs to pool.", len(txs))
+					bf.transactionProcessor.transactionPool.AddTransactions(txs)
+					for _, tx := range txs {
+						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+					}
 					continue
 				}
 			}
@@ -308,13 +312,24 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 						done <- bf.messageSender.SendBytes(c, p_common.TransactionsFromSubTopic, txData)
 					}()
 
+					var sendSuccess bool
 					select {
 					case sendErr := <-done:
 						if sendErr != nil {
 							logger.Error("TxsProcessor2: lỗi khi gửi transaction đến %s: %v", addr.Hex(), sendErr)
+						} else {
+							sendSuccess = true
 						}
 					case <-time.After(5 * time.Second):
 						logger.Error("TxsProcessor2: timeout khi gửi transaction đến %s", addr.Hex())
+					}
+					
+					if !sendSuccess {
+						logger.Warn("⚠️ [TX FLOW] Sub node TCP send failed, re-adding %d txs to pool", len(txs))
+						bf.transactionProcessor.transactionPool.AddTransactions(txs)
+						for _, tx := range txs {
+							bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+						}
 					}
 				}(conn, address, bTransactionCopy)
 			}
