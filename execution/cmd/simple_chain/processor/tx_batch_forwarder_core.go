@@ -63,6 +63,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	const maxConcurrentSends = MaxConcurrentSends
 	semaphore := make(chan struct{}, maxConcurrentSends)
 
+	// TBAB: Throughput-Based Adaptive Batching state
+	emaTPS := 0.0
+	lastBatchTime := time.Now()
+
 	for {
 		<-ticker.C
 
@@ -80,9 +84,18 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// BATCH ACCUMULATION: Wait for pool to fill up before draining.
-		const batchAccumulationTimeout = 50 * time.Millisecond      
-		const batchAccumulationCheckInterval = 5 * time.Millisecond 
+		// BATCH ACCUMULATION: Throughput-Based Adaptive Batching (TBAB)
+		// Dynamically adjust timeout based on real-time TPS
+		var batchAccumulationTimeout time.Duration
+		if emaTPS < 1000 {
+			batchAccumulationTimeout = 5 * time.Millisecond // Low latency for low load
+		} else if emaTPS < 10000 {
+			batchAccumulationTimeout = 20 * time.Millisecond // Balanced
+		} else {
+			batchAccumulationTimeout = 50 * time.Millisecond // Max throughput for extreme load
+		}
+		
+		const batchAccumulationCheckInterval = 1 * time.Millisecond 
 		const minBatchSize = MaxTransactionsPerBatch                
 
 		accumulationStart := time.Now()
@@ -102,7 +115,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			if currentPoolSize == lastPoolSize {
 				stagnantCycles++
-				if stagnantCycles >= 3 { 
+				// ADAPTIVE BATCHING: If no new TXs arrive for 2ms, flush immediately
+				if stagnantCycles >= 2 { 
 					break
 				}
 			} else {
@@ -119,6 +133,16 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		poolSizeAfter := bf.transactionProcessor.transactionPool.CountTransactions()
 		pendingPoolSizeAfter := bf.transactionProcessor.pendingTxManager.Count()
 
+		// TBAB: Update TPS
+		totalTxs := len(txs)
+		now := time.Now()
+		elapsedSecs := now.Sub(lastBatchTime).Seconds()
+		if elapsedSecs > 0 {
+			currentTPS := float64(totalTxs) / elapsedSecs
+			emaTPS = (emaTPS * 0.8) + (currentTPS * 0.2) // EMA smoothing
+		}
+		lastBatchTime = now
+
 		if len(txs) == 0 {
 			if poolSizeBefore > 0 {
 				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions. Sleeping 10ms to prevent spin.",
@@ -130,7 +154,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		}
 
 		// Chia nhỏ batch nếu có quá nhiều transaction để tránh quá tải
-		totalTxs := len(txs)
 		if totalTxs > maxTransactionsPerBatch {
 			logger.Info("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions, splitting into batches of %d",
 				totalTxs, maxTransactionsPerBatch)
@@ -141,7 +164,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		// Chia nhỏ thành các batch nhỏ hơn để gửi
 		for batchStart := 0; batchStart < totalTxs; batchStart += maxTransactionsPerBatch {
-			<-rateLimiter.C
+			// OPTIMIZED FOR LATENCY: Only apply rate limiting for TCP connections, NOT zero-copy FFI
+			if bf.serviceType == string(p_common.ServiceTypeReadonly) {
+				<-rateLimiter.C
+			}
 
 			batchEnd := batchStart + maxTransactionsPerBatch
 			if batchEnd > totalTxs {
