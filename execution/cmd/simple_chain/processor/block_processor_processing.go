@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -359,19 +360,17 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			expectedParentHash := lastConfirmedForCheck.Header().Hash()
 			actualParentHash := bl.Header().LastBlockHash()
 			if actualParentHash != expectedParentHash {
-				logger.Warn(
-					"⚠️ [FORK-GUARD] CHAIN BREAK DETECTED at block #%d! "+
+				panic(fmt.Sprintf(
+					"🚨 [FORK-GUARD] FATAL CHAIN BREAK DETECTED at block #%d! "+
 						"parentHash=%s ≠ lastBlock hash=%s. "+
-						"NOTE: This is a cosmetic warning. Block Hash() excludes LastBlockHash. "+
-						"The chain will continue unless StateRoot also diverges. "+
-						"GEI=%d, leader=%s, timestamp=%d",
+						"GEI=%d, leader=%s, timestamp=%d. Halting node to prevent fork propagation.",
 					currentBlockNumber,
 					actualParentHash.Hex(),
 					expectedParentHash.Hex(),
 					globalExecIndex,
 					blockLeaderAddress.Hex(),
 					timestampSec,
-				)
+				))
 			}
 		}
 	}
