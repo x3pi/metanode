@@ -114,7 +114,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// preventing the Rust consensus from skipping un-saved blocks after a restart.
 		if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
 			// PIPELINE-SAFE: Use epoch from this block's header, not bp.GetLastBlock()
-			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, header.Epoch())
+			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Block.Header().Epoch())
 		}
 
 		logger.Debug("[PERF] Block Commit phase 1 (Save DB): %v, block: %v", saveDuration, blockNum)
