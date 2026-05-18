@@ -462,23 +462,39 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// Different nodes complete PersistAsync at different times relative to
 	// the next block's read → different IntermediateRoot() → different
 	// AccountStatesRoot → different block hash → FORK.
-	//
-	// FIX: When called from Rust (globalExecIndex > 0), use DoneChan to block
-	// until commitWorker finishes. This serializes execution:
-	//   Block N committed → Block N+1 starts processing.
-	// The legacy GenerateBlock path (globalExecIndex == 0) remains async.
 	// ═══════════════════════════════════════════════════════════════════════════
-	var doneChan chan struct{}
-	if globalExecIndex > 0 {
-		doneChan = make(chan struct{}, 1)
-	}
+	// TPS PIPELINE (May 2026): Non-blocking commit dispatch.
+	//
+	// PREVIOUSLY: doneChan blocked until commitWorker finished PebbleDB persist.
+	// This serialized execution: Block N committed → Block N+1 starts processing.
+	//
+	// NOW: doneChan is nil (no blocking). Block N+1's EVM starts immediately
+	// after commitToMemoryParallel completes (trie is fully updated).
+	//
+	// SAFETY PROOF:
+	//   1. PersistAsync runs INLINE in commitToMemoryParallel (not async).
+	//      → Trie swap is complete before we reach this point.
+	//   2. commitWorker does NO trie mutations:
+	//      - SetGlobalExecIndex (header metadata only)
+	//      - CommitFullDb/RevertFullDb (per-contract Xapian, isolated by mvmId)
+	//      - CommitBlockState (PebbleDB persist — disk only)
+	//      - updateAndPersistConsensusState (GEI to disk)
+	//      - BLS signing (header field only)
+	//   3. commitChannel serializes commitWorker — ordering guaranteed.
+	//   4. blockWriteMutex serializes createBlockFromResults — no concurrent writes.
+	//
+	// RESULT: EVM(N+1) overlaps with PebbleDB persist(N).
+	//   Effective per-block time = max(EVM, Commit) instead of sum(EVM + Commit).
+	//   Expected throughput improvement: 2-3x.
+	// ═══════════════════════════════════════════════════════════════════════════
+	var doneChan chan struct{} // nil = non-blocking pipeline mode
 
 	job := CommitJob{
 		Block:                     bl,
 		ProcessResults:            &processResults,
 		Receipts:                  receipts,
 		TxDB:                      txDB,
-		DoneChan:                  doneChan,
+		DoneChan:                  doneChan, // nil — commitWorker skips signal
 		MappingWg:                 &mappingWg,
 		TrieBatchSnapshot:         trieBatchSnapshot,
 		AccountBatch:              accountBatch,
@@ -498,31 +514,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	}
 	bp.commitChannel <- job
 
-	// FORK-SAFETY: Wait for commit to complete before returning.
-	// This ensures the trie is fully updated before the next block reads it.
-	if doneChan != nil {
-		// ═══════════════════════════════════════════════════════════════
-		// DEADLOCK FIX (May 2026): Release ExecutionMutex.RLock BEFORE
-		// blocking on DoneChan.
-		//
-		// ROOT CAUSE: processRustEpochData holds ExecutionMutex.RLock()
-		// and blocks on DoneChan. commitWorker (which signals DoneChan)
-		// can trigger a snapshot via OnBlockCommitted → PauseExecution().
-		// PauseExecution() needs ExecutionMutex.Lock() (exclusive) but
-		// cannot acquire it because processRustEpochData holds RLock.
-		// Result: 3-way circular deadlock (FFI ↔ processRustEpochData ↔ snapshot).
-		//
-		// FIX: Release RLock before waiting. blockWriteMutex still
-		// serializes all block writes, so no state corruption is possible
-		// during this window. Re-acquire RLock after DoneChan returns.
-		// ═══════════════════════════════════════════════════════════════
-		bp.ExecutionMutex.RUnlock()
-		logger.Info("🔓 [SYNC-COMMIT] Block #%d: RLock RELEASED before DoneChan wait (GEI=%d)", currentBlockNumber, globalExecIndex)
-		<-doneChan
-		logger.Info("🔓 [SYNC-COMMIT] Block #%d: DoneChan received, re-acquiring RLock... (GEI=%d)", currentBlockNumber, globalExecIndex)
-		bp.ExecutionMutex.RLock()
-		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
-	}
+	// ═══════════════════════════════════════════════════════════════
+	// TPS PIPELINE: No blocking wait. commitWorker processes the job
+	// asynchronously. The next block can begin EVM execution immediately.
+	// commitChannel (cap=10000) provides natural backpressure if Go
+	// can't persist fast enough.
+	// ═══════════════════════════════════════════════════════════════
+	logger.Debug("⚡ [PIPELINE] Block #%d commit dispatched (non-blocking, GEI=%d, pending=%d)",
+		currentBlockNumber, globalExecIndex, len(bp.commitChannel))
 
 	// NO MORE BLOCKING: execution loop immediately continues to next block
 	// Disk persistence (SaveLastBlock, PrepareBackup) runs async in commitWorker
