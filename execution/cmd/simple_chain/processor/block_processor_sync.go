@@ -165,33 +165,19 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			return
 		}
 		if globalExecIndex > *nextExpectedGlobalExecIndex {
-			// Apply epoch boundary gap skip for fresh start
 			gapSize := globalExecIndex - *nextExpectedGlobalExecIndex
-			actualLastBlockDB := storage.GetLastBlockNumber()
-			persistedGEI := storage.GetLastGlobalExecIndex()
-			if gapSize <= 16 && actualLastBlockDB == 0 {
-				*nextExpectedGlobalExecIndex = globalExecIndex
-				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-SKIP] GEI Jump (Fresh Start): nextExpected → %d (gap=%d)", globalExecIndex, gapSize)
-			} else if persistedGEI > 0 && persistedGEI >= *nextExpectedGlobalExecIndex {
-				// Sync GEI from persisted state (GEI tracks ALL commits including empty)
-				*nextExpectedGlobalExecIndex = persistedGEI + 1
-				*currentBlockNumber = actualLastBlockDB
-				if globalExecIndex < *nextExpectedGlobalExecIndex {
-					return
-				} else if globalExecIndex > *nextExpectedGlobalExecIndex {
-					pendingBlocks[globalExecIndex] = epochData
-					return
-				}
-			} else if gapSize > 20 && actualLastBlockDB > 0 && persistedGEI > 0 && persistedGEI < globalExecIndex {
-				// SNAPSHOT-RESTORE GAP BRIDGE (same as full-path, see line ~420)
-				*nextExpectedGlobalExecIndex = globalExecIndex
-				*currentBlockNumber = actualLastBlockDB
-				logger.Info("📡 [TELEMETRY] [FAST-EMPTY-GAP-BRIDGE] GEI Jump (Snapshot Restore): nextExpected → %d (gap=%d, persistedGEI=%d, DB=%d)",
-					globalExecIndex, gapSize, persistedGEI, actualLastBlockDB)
-			} else {
-				pendingBlocks[globalExecIndex] = epochData
-				return
+			oldExpected := *nextExpectedGlobalExecIndex
+			
+			// Adopt the new GEI from Rust (100% deterministic)
+			*nextExpectedGlobalExecIndex = globalExecIndex
+			
+			// Ensure block number is synced for System Txs if we just started/restored
+			if *currentBlockNumber == 0 {
+				*currentBlockNumber = storage.GetLastBlockNumber()
 			}
+			
+			logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d) in Fast-Path. Adopting new GEI.",
+				oldExpected, globalExecIndex, gapSize)
 		}
 
 		// Sequential empty commit — update GEI and advance
