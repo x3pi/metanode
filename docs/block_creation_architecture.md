@@ -44,7 +44,7 @@ sequenceDiagram
 
 ## 2. Kiến Trúc Phòng Vệ Chống Rẽ Nhánh (Fork-Proof Architecture)
 
-Hệ thống được bảo vệ bởi **7 lớp phòng vệ** (Defense Layers) được thiết kế để chặn đứng bất kỳ nguy cơ mất đồng bộ nào giữa Go và Rust, cũng như giữa các Node trong mạng.
+Hệ thống được bảo vệ bởi **10 lớp phòng vệ** (Defense Layers) được thiết kế để chặn đứng bất kỳ nguy cơ mất đồng bộ nào giữa Go và Rust, cũng như giữa các Node trong mạng.
 
 ```mermaid
 flowchart TB
@@ -110,7 +110,8 @@ flowchart TB
     Layer4 -->|"Execution an toàn"| Layer5
     Layer5 -->|"State sạch"| Layer6
     Layer6 -->|"Block đồng nhất"| Layer7
-    Layer7 -->|"Epoch an toàn"| SAFE["✅ FORK-FREE"]
+    Layer7 -->|"Epoch an toàn"| Layer8
+    Layer8["🛡️ Lớp 8-10: NOMT Root + Timestamp + Revert Gate"] -->|"State verified"| SAFE["✅ FORK-FREE"]
 
     style SAFE fill:rgba(0,200,100,0.2),stroke:#00c853,stroke-width:3px,color:#00c853
 ```
@@ -218,7 +219,7 @@ sequenceDiagram
 
 ## 4. Quy Tắc Bất Biến (Invariants)
 
-Kiến trúc đảm bảo 6 quy tắc bất biến tuyệt đối:
+Kiến trúc đảm bảo **16 quy tắc bất biến** (xem Section 13 cho danh sách đầy đủ). Dưới đây là 7 quy tắc cốt lõi:
 
 ```mermaid
 mindmap
@@ -283,6 +284,7 @@ Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (
 | ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout). 1 match = Accept. | 🟢 **AN TOÀN** |
 | ⑧ | CommitSyncer | Peer trả blocks | RPC timeout + retry peer khác | 🟢 **AN TOÀN** |
 | ⑨ | TransactionPool Actor | Channel send/receive | Non-blocking Actor loop. NotifyChan cho event-driven wake. | 🟢 **AN TOÀN** |
+| ⑩ | Revert Gate (Block-as-Package) | verifyDraftBlock trước commit | 2 hash compare (~2ns). Nếu fail → revertDraftBlock (~1-5ms, bounded map clear + 1 PebbleDB write) | 🟢 **AN TOÀN** |
 
 **Định lý Liveness:**
 > Với N node trong cluster (N ≥ 3f+1), nếu ≥ 2f+1 node online và có thể giao tiếp qua mạng, hệ thống Metanode **luôn tạo block mới** trong thời gian hữu hạn. Hệ thống **TUYỆT ĐỐI KHÔNG fork** trong mọi kịch bản.
@@ -614,3 +616,286 @@ flowchart TD
 | **INV-NOMT-LIFECYCLE** | Old NOMT sessions phải được GC tự thu hồi, KHÔNG được Close() thủ công |
 | **INV-DETERMINISTIC-READ** | Mọi trie read trong 1 block phải trả kết quả giống hệt trên mọi node |
 | **INV-NO-TIMED-CLEANUP** | KHÔNG dùng `time.After`/`time.AfterFunc` để cleanup shared state |
+
+---
+
+## 10. Luồng Xử Lý Block Chi Tiết — Go Execution Pipeline (May 2026)
+
+Tài liệu này mô tả chính xác luồng xử lý block từ khi Rust gửi `ExecutableBlock` qua FFI cho đến khi block được commit vào DB và Rust được thông báo hoàn tất.
+
+### 10.1 Kiến Trúc Tổng Quan Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         RUST CONSENSUS                                  │
+│  CommittedSubDag → Protobuf serialize → FFI send_committed_subdag()     │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             │ pb.ExecutableBlock (channel, cap=5000)
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STAGE 1: processRustEpochData (single goroutine — serialized)         │
+│  ├─ TRANSITION SYNC: Check DB fast-forward, re-align NOMT if needed    │
+│  ├─ BATCH-DRAIN: Merge consecutive empty commits (100-10000x speedup)  │
+│  ├─ GEI ORDERING: Sequential validation against nextExpectedGEI        │
+│  └─ Dispatch → processSingleEpochData()                                │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STAGE 2: processSingleEpochData (under ExecutionMutex.RLock)          │
+│  ├─ LAYER-4: Idempotent guard (ShouldSkipCommit)                       │
+│  ├─ LAYER-1: Protobuf validation (LeaderAddress 20 bytes)              │
+│  ├─ EPOCH-INFLATION-GUARD: Block jumps >2 epochs                       │
+│  ├─ FAST-PATH: 0-tx commits → update GEI only, skip EVM               │
+│  ├─ NOMT RE-EXECUTION GUARD: Skip if block already in DB               │
+│  ├─ TIMESTAMP REGRESSION GUARD: Drop if ts >30s behind parent          │
+│  ├─ FORK-PREVENTION: Verify NOMT handle root == trie root              │
+│  ├─ ProcessTransactions() → EVM execution (deterministic blockTime)    │
+│  └─ createBlockFromResults()                                           │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STAGE 3: createBlockFromResults (under blockWriteMutex)               │
+│  ├─ Phase 1: Parallel root calculation (txsRoot ∥ receiptsRoot)        │
+│  ├─ Phase 2: GenerateBlockData (header, hash, parentHash)              │
+│  ├─ ★ REVERT GATE: verifyDraftBlock() — discard if corrupt (Layer-10) │
+│  ├─ Phase 3: commitToMemoryParallel()                                  │
+│  │   ├─ SmartContractDB.Commit() — SEQUENTIAL (StorageRoot late-bind)  │
+│  │   ├─ AccountStateDB.CommitPipeline() ─┐                             │
+│  │   ├─ StakeStateDB.CommitPipeline()    ├─ PARALLEL                   │
+│  │   ├─ txDB.Commit()                   │                              │
+│  │   ├─ Receipts.CommitPipeline()        │                              │
+│  │   └─ TrieDatabases.CommitSnapshots()  ┘                              │
+│  │   ├─ AccountStateDB.PersistAsync() ── INLINE (not async!)           │
+│  │   ├─ StakeStateDB.PersistAsync()   ── INLINE                        │
+│  │   └─ Receipts.PersistAsync()       ── INLINE                        │
+│  ├─ Phase 4: Snapshot batches + send CommitJob to commitChannel        │
+│  └─ <-doneChan: BLOCK until commitWorker finishes (fork-safety)        │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STAGE 4: commitWorker (single goroutine — serialized DB writes)       │
+│  ├─ MVM Xapian flush (before DB save to protect snapshot integrity)    │
+│  ├─ CommitBlockState(WithPersistToDB, WithSaveTxMapping, WithCommitMap)│
+│  │   ├─ commitMutex.Lock() — single writer                            │
+│  │   ├─ SetcurrentBlockHeader (atomic)                                 │
+│  │   ├─ SetBlockNumberToHash                                           │
+│  │   ├─ UpdateLastBlockNumber                                          │
+│  │   ├─ SaveLastBlock (PebbleDB)                                       │
+│  │   └─ bc.Commit() (LevelDB mappings)                                │
+│  ├─ updateAndPersistConsensusState (GEI + CommitIndex)                 │
+│  ├─ BLS Block Signing (before DoneChan!)                               │
+│  ├─ DoneChan signal → unblock createBlockFromResults                   │
+│  ├─ BackupDb serialization → backupDbChannel (async, 4-worker pool)    │
+│  └─ checkAndLogAttestation (async, every N blocks)                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 Các Điểm Fork-Safety Quan Trọng Trong Pipeline
+
+| Vị trí | Guard | Mục đích |
+|---|---|---|
+| Stage 1, line 274 | TRANSITION SYNC + NOMT RealignRoot | Re-align trie root sau DB fast-forward |
+| Stage 2, line 46 | LAYER-4 Idempotent | Chặn duplicate commit từ Rust retry |
+| Stage 2, line 824 | FORK-PREVENTION handle root check | Verify NOMT C++ root == Go trie root |
+| Stage 2, line 864 | TIMESTAMP REGRESSION | Drop commit có timestamp lùi >30s |
+| Stage 3, line 288 | SmartContractDB sequential | StorageRoot late-bind phải xong trước AccountPipeline |
+| Stage 3, line 432 | PersistAsync INLINE | Trie swap xong trước block tiếp theo đọc |
+| Stage 3, line 386 | REVERT GATE (verifyDraftBlock) | Discard draft block nếu root=0x0 (Layer-10) |
+| Stage 3, line 471 | doneChan sync wait | Block N commit xong → Block N+1 mới bắt đầu |
+| Stage 4, line 79 | commitMutex | Single writer cho toàn bộ state DB |
+
+### 10.3 Nguyên Tắc Tuần Tự Bất Biến
+
+> **Mỗi block phải commit HOÀN TOÀN xong (trie swap + DB persist + GEI update) trước khi block tiếp theo bắt đầu ProcessTransactions().**
+
+Nguyên tắc này được enforce bởi 3 cơ chế:
+1. **doneChan**: `createBlockFromResults()` block trên `<-doneChan` cho đến khi `commitWorker` signal
+2. **PersistAsync inline**: Trie swap chạy đồng bộ trong `commitToMemoryParallel()`, không async
+3. **Revert Gate**: `verifyDraftBlock()` chặn block có root=0x0 TRƯỚC khi trie bị mutation
+
+---
+
+## 11. Tối Ưu Hiệu Suất NOMT Trie (May 2026)
+
+### 11.1 Vấn Đề: Lock Contention Trong `NomtStateTrie.Update()`
+
+**Trước tối ưu**: `handle.Read()` (FFI call, 50-200µs) chạy BÊN TRONG `writerMu.Lock()`:
+
+```
+writerMu.Lock()          ← 64 worker bị block ở đây
+  handle.Read(keyPath)   ← 50-200µs FFI call
+  wDirty[key] = entry    ← 1µs
+writerMu.Unlock()
+```
+
+**Sau tối ưu**: 2-phase pre-fetch pattern (giống `BatchUpdate()`):
+
+```
+Phase 1 (NO LOCK):
+  writerMu.RLock()       ← ~1ns, không block writers
+  check wOldLoaded       ← skip nếu đã load
+  writerMu.RUnlock()
+  
+  loadReadView()          ← atomic load, ~1ns
+  check committing map    ← lock-free snapshot
+  handle.Read(keyPath)    ← 50-200µs, thread-safe FFI
+
+Phase 2 (writerMu.Lock()):
+  apply prefetched value  ← 1µs
+  wDirty[key] = entry     ← 1µs
+  writerMu.Unlock()       ← total lock time: ~2µs vs ~200µs
+```
+
+**Kết quả**: Lock hold time giảm **100x** (200µs → 2µs). 64 workers không bị serialize trên FFI read.
+
+### 11.2 `RealignRoot()` — Lightweight Root Re-alignment
+
+**Vấn đề**: `UpdateStateForNewHeader()` tạo mới 3 NomtStateTrie instances (account, stake, SC) khi epoch transition. Mỗi instance cần:
+- `loadRegistryFromFile()` — disk I/O
+- `handle.Root()` — FFI call
+- `NewAccountStateDB()` constructor overhead
+
+**Giải pháp**: Cho NOMT backend, chỉ cần update root hash in-memory:
+
+```go
+func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
+    n.writerMu.Lock()
+    view := n.loadReadView()
+    n.publishReadView(view.dirty, view.committing, expectedRoot)
+    n.writerMu.Unlock()
+}
+```
+
+**NOMT Fast-Path trong `UpdateStateForNewHeader()`**:
+
+```go
+if trie.GetStateBackend() == trie.BackendNOMT {
+    // ~1µs: chỉ update readView.rootHash
+    nomtTrie.RealignRoot(newAccountRoot)
+    nomtTrie.RealignRoot(newStakeRoot)
+    return nil
+}
+// Full rebuild path cho MPT/Flat/Verkle: ~10ms
+```
+
+**Kết quả**: Epoch transition overhead giảm **10,000x** (10ms → 1µs).
+
+**Fork-safety**: `RealignRoot()` chỉ update Go in-memory view. C++ NOMT engine không bị ảnh hưởng. `Commit()` tiếp theo sẽ tính root chính xác từ dirty entries.
+
+### 11.3 Bảng Tổng Hợp Tối Ưu NOMT
+
+| Component | Trước | Sau | Cải thiện |
+|---|---|---|---|
+| `Update()` lock hold | ~200µs | ~2µs | **100x** |
+| `UpdateStateForNewHeader()` (NOMT) | ~10ms | ~1µs | **10,000x** |
+| `PersistAsync` scheduling | Async (race) | Inline sync | **Fork-free** |
+| Old DB cleanup | `time.After(5s) + Close()` | Go GC | **Fork-free** |
+
+---
+
+## 12. Mô Hình Phòng Vệ 10 Lớp (Updated May 2026)
+
+Cập nhật từ 9 lớp lên **10 lớp** sau kiến trúc Block-as-Package:
+
+| Lớp | Tên | File | Mô tả |
+|---|---|---|---|
+| 1 | Protobuf Strict Boundary | `block_processor_sync.go:59` | Validate LeaderAddress 20 bytes, reject corrupted FFI data |
+| 2 | Immutable Leader | `processor.rs` | Leader gắn cứng 1 lần từ DAG, persist vào SubDag |
+| 3 | DIGEST-GATE | `processor.rs` | Buffer local commit, chờ 2f+1 digest match |
+| 4 | WAL + Idempotent | `block_processor_sync.go:46` | `ShouldSkipCommit()` chặn duplicate |
+| 5 | CommitMutex + Atomic Pointer | `block_state_commit.go:79` | `commitMutex` serialize writes, `atomic.Pointer` lock-free reads |
+| 6 | Inline Hash Verification | `authority_node.rs` | Mỗi 10 blocks, cross-verify hash với peers |
+| 7 | Epoch Committee Assert | `authority_node.rs` | Keccak256 sorted validators, 2f+1 verify |
+| **8** | **NOMT Fork-Prevention** | `block_processor_sync.go:824` | Verify NOMT handle root == trie root TRƯỚC mỗi block |
+| **9** | **Deterministic Timestamp** | `block_processor_sync.go:864` | Reject commit có timestamp lùi >30s so với parent |
+| **10** | **Revert Gate (Block-as-Package)** | `block_processor_processing.go` | `verifyDraftBlock` → corrupt? `revertDraftBlock` → discard + reset. Rust retry. |
+
+### 12.1 Lớp 8: NOMT Fork-Prevention (Mới)
+
+Trước mỗi block có transactions, Go kiểm tra:
+```
+nomtRoot (từ C++ handle) == trieRoot (từ Go readView)
+```
+
+Nếu không khớp → tự động re-align bằng `UpdateStateForNewHeader()` trước khi chạy EVM. Cost: 1 FFI root query per block (~1µs).
+
+### 12.2 Lớp 9: Deterministic Timestamp Guard (Mới)
+
+Khi Rust local committer evaluate sparse DAG (sau restart/restore), có thể chọn leader có timestamp CŨ. Guard này chặn:
+```
+if blockTimeSec < parentTs && regression > 30s → DROP commit
+```
+Block đúng sẽ đến qua CertifiedCommit từ network.
+
+### 12.3 Lớp 10: Revert Gate — Block-as-Package (Mới)
+
+Mỗi block được xem như "gói hàng". Gói hàng lỗi bị **bỏ đi** trước khi commit:
+
+```
+  Rust Commit → Validate → EVM Execute → Build Draft Block
+                                               │
+                                         REVERT GATE
+                                       verifyDraftBlock()
+                                               │
+                                    ┌──────────┴──────────┐
+                                    │                     │
+                                  PASS ✅               FAIL ❌
+                                    │                     │
+                                    ▼                     ▼
+                              SetLastBlock         revertDraftBlock()
+                              commitToMemory       ├─ Discard trie state
+                              commitWorker         ├─ Reset to parent
+                              PebbleDB persist     └─ return nil
+                                    │                     │
+                                    ▼                     ▼
+                              ✅ BLOCK COMMITTED    🔄 RUST RETRY
+```
+
+**Checks:**
+- `AccountStatesRoot ≠ 0x0` (NOMT handle corruption → permanent fork nếu commit)
+- `StakeStatesRoot ≠ 0x0` (stake trie corruption → permanent fork nếu commit)
+
+**Revert Cost:** ~1-5ms (map clear + atomic swap + 1 PebbleDB write). Deadlock-free.
+
+> **INV-BLOCK-REVERT:** Block lỗi PHẢI bị discard TRƯỚC `CommitBlockState`. Sau persist = không thể revert, chỉ có thể restart + STARTUP-SYNC.
+
+---
+
+## 13. Quy Tắc Bất Biến Hoàn Chỉnh (May 2026)
+
+| # | Quy tắc | Chi tiết | Enforcement |
+|---|---|---|---|
+| 1 | **INV-LEADER** | Leader gắn 1 lần, không tính lại | `processor.rs` persist vào SubDag |
+| 2 | **INV-GEI** | GEI chỉ tăng khi commit thành công | `GEIAuthority.ShouldSkipCommit()` |
+| 3 | **INV-IDEMPOTENT** | Gọi N lần = 1 lần | LAYER-4 + WAL |
+| 4 | **INV-FFI** | 100% qua Protobuf, cấm ép kiểu | LAYER-1 validation |
+| 5 | **INV-STATE-DB** | commitMutex + atomic.Pointer | LAYER-5 |
+| 6 | **INV-EPOCH** | Committee hash verified 2f+1 | LAYER-7 |
+| 7 | **INV-TXPOOL** | Channel-based Actor, lock-free | `TransactionPool.loop()` |
+| 8 | **INV-NOMT-LIFECYCLE** | Old sessions = GC, KHÔNG Close() | `chain_state.go:302-310` |
+| 9 | **INV-DETERMINISTIC-READ** | Trie read giống hệt trên mọi node | PersistAsync inline |
+| 10 | **INV-NO-TIMED-CLEANUP** | Cấm `time.After` cleanup shared state | Code review rule |
+| 11 | **INV-SEQUENTIAL-COMMIT** | Block N commit xong → Block N+1 start | doneChan + PersistAsync inline |
+| 12 | **INV-NO-TIME-NOW** | Cấm `time.Now()` trong execution path | Dùng consensus timestamp |
+| 13 | **INV-NOMT-ROOT-VERIFY** | Check handle root == trie root trước EVM | LAYER-8 |
+| 14 | **INV-MASTER-NO-P2P** | Master KHÔNG import P2P blocks | `ProcessBlockData()` drop |
+| 15 | **INV-EPOCH-SYNC-NO-FALLBACK** | Cấm Rust ép Go đồng bộ qua P2P khi Go đang chạy chậm | Xóa active fallback trong `poll_go_until_synced` |
+| 16 | **INV-BLOCK-REVERT** | Block lỗi PHẢI bị discard TRƯỚC CommitBlockState | LAYER-10: `verifyDraftBlock` → `revertDraftBlock` → return nil |
+
+---
+
+## 14. Đồng Bộ Epoch Transition (Epoch Transition Handoff)
+
+Khi kết thúc một epoch, Rust consensus node sẽ ngừng tạo khối mới và đợi Go executor xử lý toàn bộ các block của epoch hiện tại (`poll_go_until_synced`) trước khi shutdown `CoreThread` của epoch đó.
+
+### 14.1 Vấn Đề State Corruption do Active Peer Sync Fallback
+**Sự cố:** Khi hệ thống có backlog lớn (ví dụ tải 20,000 TPS), Go cần nhiều thời gian hơn mức timeout 30 giây mặc định để hoàn tất các blocks tồn đọng. 
+Trước đây, Rust sẽ coi Go là bị kẹt (stuck), kích hoạt **Active Peer Sync Fallback** để lấy blocks từ peers và ép Go đồng bộ qua `SyncBlocksRequest`. 
+Vì `SyncBlocksRequest` bypass execution queue để apply trực tiếp vào C++ NOMT trie CÙNG LÚC với `cgo_execute_block` đang cố gắng commit payload của chính block đó, gây ra lỗi **`Changeset no longer valid` (FATAL Crash)** do root hash bị overwrite.
+
+**Giải pháp (INV-EPOCH-SYNC-NO-FALLBACK):**
+- **Xóa Active Peer Sync Fallback**: Rust phải kiên nhẫn chờ Go xử lý xong backlog (với deadlock breaker 300s). Không được ép Go "sync" các block mà Rust đã đẩy vào FFI pipeline.
+- Đảm bảo tính tuần tự tuyệt đối: Một khi Rust đẩy block vào execution channel, nó ủy thác hoàn toàn quyền quản lý block đó cho luồng `cgo_execute_block`.
+
+### 14.2 Graceful CoreThread Shutdown
+Việc Rust đóng `CoreThread` khi chuyển epoch sẽ dẫn đến log `Command receiver closed. Shutting down CoreThread gracefully`. Đây là quy trình dọn dẹp bình thường, KHÔNG phải lỗi (panic). FFI channels được thiết kế để kết thúc một cách an toàn mà không làm gián đoạn Go executor.

@@ -158,7 +158,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
-	if totalTxsQuick == 0 {
+	if totalTxsQuick == 0 && len(epochData.GetSystemTransactions()) == 0 {
 		// ORDERING: Must still validate sequential order
 		if globalExecIndex < *nextExpectedGlobalExecIndex {
 			// Old/duplicate — skip silently
@@ -799,17 +799,29 @@ PROCESS_BLOCK:
 	// FORK-SAFETY: Deduplication and sorting are now handled consistently by Rust in block_sending.rs
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// FORK-SAFETY FIX 2: Invalidate all in-memory state caches before executing.
+	// FORK-SAFETY FIX 2 REVISED (May 2026): Cache invalidation REMOVED.
 	//
-	// The async commit pipeline (CommitPipeline → PersistAsync) for the PREVIOUS
-	// block may leave stale entries in loadedAccounts, SmartContractDB caches, etc.
-	// Even with synchronous DoneChan (Fix 1), CommitBlockState does NOT clear the
-	// in-memory caches — it only persists to DB. If a cached account state object
-	// from Block N-1 is still in loadedAccounts, Block N's ProcessTransactions will
-	// read the cached (pre-commit) version instead of the freshly-committed version.
-	// This invalidation forces all reads to go through the committed trie.
+	// ORIGINAL PURPOSE: When PersistAsync ran asynchronously (pre-May 2026),
+	// Block N+1 could start reading from loadedAccounts/lruCache while Block N's
+	// trie swap hadn't completed — causing stale reads and state divergence.
+	//
+	// WHY SAFE TO REMOVE: Since May 2026, PersistAsync runs INLINE in
+	// commitToMemoryParallel, and DoneChan blocks until PersistAsync completes.
+	// This guarantees:
+	//   1. Trie swap is done before createBlockFromResults returns
+	//   2. persistReady is closed before DoneChan signals
+	//   3. IntermediateRoot(true) already clears dirtyAccounts + loadedAccounts
+	//      on every block (account_state_db_commit.go lines 1022-1038)
+	//   4. IntermediateRoot(true) waits on persistReady before any trie access
+	//
+	// PERFORMANCE IMPACT OF REMOVAL: InvalidateAllState() was destroying the
+	// 200K-entry lruCache on EVERY block, forcing ~20,000 NOMT FFI reads per
+	// block (~100-200ms). Over 1500+ blocks, the repeated map alloc/dealloc
+	// caused progressive GC pressure → throughput degradation → stall at ~1672.
+	//
+	// C++ State::instances is cleared by mvm.CallClearAllStateInstances() in
+	// the appropriate places (LAZY REFRESH, epoch transition).
 	// ═══════════════════════════════════════════════════════════════════════════
-	bp.chainState.InvalidateAllState()
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// FORK-PREVENTION SAFETY NET (May 2026): Verify NOMT handle root matches
@@ -881,8 +893,11 @@ PROCESS_BLOCK:
 				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 				*nextExpectedGlobalExecIndex = globalExecIndex + 1
 
-				// Invalidate state caches (no EVM mutations happened, this is just safety)
-				bp.chainState.InvalidateAllState()
+				// NOTE (May 2026): InvalidateAllState() REMOVED here.
+				// No EVM mutations happened (commit dropped BEFORE execution),
+				// so state caches are still valid. Invalidating would destroy
+				// the 200k-entry LRU cache, causing ~20k NOMT FFI reads on
+				// the next block and contributing to pipeline stalls.
 
 				// Process any pending blocks
 				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
@@ -916,8 +931,10 @@ PROCESS_BLOCK:
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
 			
-			// Invalidate state to ensure next block reads fresh from NOMT
-			bp.chainState.InvalidateAllState()
+			// NOTE (May 2026): InvalidateAllState() REMOVED here.
+			// All transactions were duplicates — no state mutation occurred.
+			// IntermediateRoot(true) already cleared dirty accounts during
+			// ProcessTransactions. Invalidating would thrash the LRU cache.
 			
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 			
@@ -984,6 +1001,19 @@ PROCESS_BLOCK:
 
 	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// REVERT GATE HANDLER: If createBlockFromResults returned nil, the draft
+	// block was discarded by verifyDraftBlock (local corruption detected).
+	// Do NOT advance GEI — Rust will retry this commit on the next cycle.
+	// State has been reset to the parent block by revertDraftBlock.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if newBlock == nil {
+		logger.Error("🔄 [REVERT] Block #%d (GEI=%d) was REVERTED. "+
+			"State reset to parent. Waiting for Rust retry or CertifiedCommit.",
+			*currentBlockNumber, globalExecIndex)
+		return
+	}
 
 	blockHash := newBlock.Header().Hash().Hex()
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",

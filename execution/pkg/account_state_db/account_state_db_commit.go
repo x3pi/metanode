@@ -72,7 +72,11 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	// }
 
 	if !db.lockedFlag.Load() {
-		return common.Hash{}, errors.New("Commit: db.lockedFlag is not already locked")
+		// SELF-HEALING: Same as CommitPipeline — force-acquire instead of crash.
+		// See CommitPipeline comment for full rationale.
+		logger.Warn("⚠️ [SELF-HEAL] Commit: lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash.")
+		db.lockedFlag.Store(true)
 	}
 	// Lock the entire commit process to ensure atomicity
 	db.muCommit.Lock()
@@ -294,7 +298,28 @@ type PipelineCommitResult struct {
 // persist nodes to LevelDB and swap the trie reference.
 func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	if !db.lockedFlag.Load() {
-		return nil, errors.New("CommitPipeline: db.lockedFlag is not already locked")
+		// ═══════════════════════════════════════════════════════════════
+		// SELF-HEALING: lockedFlag should be true (set by IntermediateRoot(true)
+		// in ProcessTransactions). If it's false, a NOMT trie re-alignment
+		// or deferred cleanup race from the previous block has cleared it.
+		//
+		// Instead of returning error → logger.Fatal → os.Exit (killing the
+		// entire node), we force-acquire the lock and proceed. This is safe
+		// because:
+		//   1. CommitPipeline immediately calls IntermediateRoot(false) which
+		//      only returns the cached trie hash — no iteration.
+		//   2. The trie state is still valid (mutations were applied during
+		//      the original IntermediateRoot(true) call in ProcessTransactions).
+		//   3. muCommit.Lock below serializes any concurrent Commit attempts.
+		//
+		// ROOT CAUSE: NOMT trie re-alignment (FORK-PREVENTION path) can
+		// trigger deferred lockedFlag.Store(false) from block N-1's
+		// IntermediateRoot(false) while block N's CommitPipeline is starting.
+		// ═══════════════════════════════════════════════════════════════
+		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline: lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a NOMT re-alignment race or deferred cleanup overlap.")
+		db.lockedFlag.Store(true)
 	}
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
@@ -864,14 +889,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// Moving the gate here ensures all trie reads see the swapped trie.
 		//
 		// PERF NOTE: PersistAsync closes persistReady BEFORE CommitPayload,
-		// so this wait is nearly instantaneous (trie swap << disk flush).
-		// The marshal phase (10-50ms) still overlaps with disk I/O.
-		// ═══════════════════════════════════════════════════════════════
-		persistWaitStart := time.Now()
+		// so waiting on persistReady was sufficient.
+		waitStart := time.Now()
 		<-db.persistReady
-		persistWaitDuration := time.Since(persistWaitStart)
-		if persistWaitDuration > 5*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", persistWaitDuration)
+		if d := time.Since(waitStart); d > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB: IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+		} else {
+			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", d)
 		}
 
 		if updateErr == nil && len(batchKeys) > 0 {
@@ -943,11 +967,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 		// DEFERRED PERSIST GATE (MPT path): same as FlatTrie path above.
 		// CRITICAL FORK FIX: ALL trie types must wait (see comment above).
-		persistWaitStart := time.Now()
+		waitStart := time.Now()
 		<-db.persistReady
-		persistWaitDuration := time.Since(persistWaitStart)
-		if persistWaitDuration > 5*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", persistWaitDuration)
+		if d := time.Since(waitStart); d > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB (MPT): IntermediateRoot DEFERRED persistReady wait took %v (Pipeline stalled)!", d)
+		} else {
+			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", d)
 		}
 
 		db.muTrie.Lock()

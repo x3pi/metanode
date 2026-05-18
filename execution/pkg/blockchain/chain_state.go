@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -254,6 +255,53 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if newHeader == nil {
 		return fmt.Errorf("cannot update state with a nil header")
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT FAST-PATH: Lightweight root re-alignment (~1µs vs ~10ms full rebuild)
+	//
+	// For NOMT backend, the C++ engine already has the authoritative state.
+	// We only need to update Go's in-memory root hash pointers to match.
+	// This avoids:
+	//   - loadRegistryFromFile() disk I/O per namespace
+	//   - handle.Root() FFI calls
+	//   - NewAccountStateDB/NewStakeStateDB constructor overhead
+	//   - Atomic DB pointer swaps + GC pressure from discarded old DBs
+	//
+	// FORK-SAFETY: RealignRoot only updates readView.rootHash. It does NOT
+	// modify the C++ NOMT state. Subsequent Commit() calls will compute
+	// the correct root from dirty entries against the C++ engine.
+	// ═══════════════════════════════════════════════════════════════════════
+	if trie.GetStateBackend() == trie.BackendNOMT {
+		newAccountRoot := newHeader.AccountStatesRoot()
+		newStakeRoot := common.Hash(newHeader.StakeStatesRoot())
+
+		// Realign account state trie
+		if asDB := cs.GetAccountStateDB(); asDB != nil {
+			if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newAccountRoot)
+			}
+		}
+		// Realign stake state trie
+		if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+			if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newStakeRoot)
+			}
+		}
+
+		// Update header pointer atomically
+		headerCopy := newHeader
+		cs.currentBlockHeader.Store(&headerCopy)
+
+		logger.Info("🔧 [NOMT-FAST-PATH] UpdateStateForNewHeader lightweight re-alignment for block #%d (accountRoot=%s, stakeRoot=%s)",
+			newHeader.BlockNumber(), newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+		return nil
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FULL REBUILD PATH: For MPT/Flat/Verkle backends
+	// Creates new trie instances from header roots and swaps DB pointers.
+	// ═══════════════════════════════════════════════════════════════════════
+
 	// 1. Khởi tạo lại AccountStateDB với root mới
 	accountStorage := cs.storageManager.GetStorageAccount()
 	newAccountRoot := newHeader.AccountStatesRoot() // Lấy root từ header mới
@@ -548,7 +596,11 @@ func (cs *ChainState) AdvanceEpoch(newEpoch uint64, epochStartTimestampMs uint64
 // SIMPLIFIED: Go just stores what Rust tells it. Rust is the single source of truth.
 // No validation, no block checks - Rust controls epoch transitions.
 func (cs *ChainState) AdvanceEpochWithBoundary(newEpoch uint64, epochStartTimestampMs uint64, boundaryBlock uint64, boundaryGei uint64) error {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in AdvanceEpochWithBoundary took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	logger.Info("🔄 [ADVANCE EPOCH] Rust says advance to epoch %d (timestamp=%d, boundary=%d, gei=%d)",
@@ -600,7 +652,11 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 //   1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
 //   2. BlockDatabase parent-chain traversal (always available)
 func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in ForceAlignEpochFromBlockHeader took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	if blockEpoch != cs.currentEpoch {
@@ -737,7 +793,11 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 // MULTI-EPOCH SUPPORT: For jumps > 1 epoch, directly advance to target epoch using current storage state.
 // This handles restart catch-up scenarios where Go Sub receives blocks from a much later epoch.
 func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimestamp uint64) bool {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in CheckAndUpdateEpochFromBlock took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 	if blockEpoch > cs.currentEpoch {
 		epochDiff := blockEpoch - cs.currentEpoch
@@ -899,12 +959,24 @@ func (cs *ChainState) SetBackupPath(path string) {
 	cs.backupPath = path
 	logger.Info("📁 [EPOCH PERSISTENCE] Set node-specific backup path: %s", path)
 
+	// CRITICAL FIX: Reset the epoch state BEFORE reloading to prevent pollution
+	// from the shared /tmp/epoch_data_backup.json loaded during NewChainState().
+	// If the node-specific file doesn't exist, we must start from a clean state (epoch 0).
+	cs.epochMutex.Lock()
+	cs.currentEpoch = 0
+	cs.epochStartTimestampMs = 0
+	cs.epochStartTimestamps = make(map[uint64]uint64)
+	cs.epochBoundaryBlocks = make(map[uint64]uint64)
+	cs.epochBoundaryGeis = make(map[uint64]uint64)
+	cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
+	cs.epochMutex.Unlock()
+
 	// CRITICAL: Reload epoch data from the correct node-specific path
 	// This is necessary because NewChainState() calls LoadEpochData() before SetBackupPath()
 	// which may load stale data from /tmp/epoch_data_backup.json (shared fallback)
 	logger.Info("🔄 [EPOCH PERSISTENCE] Reloading epoch data from node-specific backup path...")
 	if err := cs.LoadEpochData(); err != nil {
-		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping current values", "error", err)
+		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping clean state", "error", err)
 	} else {
 		logger.Info("✅ [EPOCH PERSISTENCE] Successfully reloaded epoch data from node-specific path - current_epoch=%d, epoch_timestamp_ms=%d",
 			cs.currentEpoch, cs.epochStartTimestampMs)

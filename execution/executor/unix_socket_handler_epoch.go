@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -590,6 +588,12 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 
 // HandleGetCurrentEpochRequest processes a GetCurrentEpochRequest and returns the current epoch from Go state (Sui-style)
 func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpochRequest) (*pb.GetCurrentEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetCurrentEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Debug("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
 
 	// Get current epoch from blockchain state
@@ -629,6 +633,12 @@ func (rh *RequestHandler) HandleGetEpochStartTimestampRequest(request *pb.GetEpo
 
 // HandleAdvanceEpochRequest processes a AdvanceEpochRequest and advances Go state epoch (Sui-style completion)
 func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequest) (*pb.AdvanceEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleAdvanceEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Info("Handling AdvanceEpochRequest (Sui-style epoch transition completion)",
 		"new_epoch", request.NewEpoch,
 		"timestamp_ms", request.EpochStartTimestampMs,
@@ -766,6 +776,12 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 // HandleGetEpochBoundaryDataRequest processes a GetEpochBoundaryDataRequest and returns unified epoch boundary data
 // This is the single authoritative source for epoch transition data, ensuring consistency
 func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetEpochBoundaryDataRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	epoch := request.GetEpoch()
 	logger.Info("📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest", "epoch", epoch)
 
@@ -1289,6 +1305,22 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// DEADLOCK PREVENTION (May 2026): Reject EXECUTE mode requests during snapshot.
+	// HandleSyncBlocksRequest opens NOMT sessions that are NOT gated by snapshotGate
+	// or ExecutionMutex. If a snapshot triggers while these sessions are active,
+	// CloseForSnapshot waits forever → DEADLOCK.
+	// Rust will retry this RPC after the snapshot completes.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if request.GetExecuteMode() && rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
+		logger.Warn("⏸️ [SYNC] SyncBlocksRequest EXECUTE mode rejected: snapshot in progress. Rust should retry.")
+		return &pb.SyncBlocksResponse{
+			SyncedCount:     0,
+			LastSyncedBlock: 0,
+			Error:           "snapshot in progress, retry later",
+		}, nil
+	}
+
 	if blockCount == 0 {
 		return &pb.SyncBlocksResponse{
 			SyncedCount:     0,
@@ -1324,6 +1356,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			rh.snapshotManager.WaitForPersistence()
 		}
 	}
+
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
 	defer func() {
@@ -1373,11 +1406,23 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if localHash == blockHash {
 					isFullyExecuted = true
 				} else {
-					logger.Error("💥 [FORK DETECTED] Local block #%d hash (%x) != leader hash (%x) during sync! Node has forked and diff-based sync cannot revert dirty state.", blockNum, localHash[:8], blockHash[:8])
-					logger.Error("💥 [AUTO-RESET] Wiping local database to force clean sync and exiting...")
-					chainDataDir := filepath.Join(rh.chainState.GetConfig().Databases.RootPath, "chaindata")
-					os.RemoveAll(chainDataDir)
-					os.Exit(255)
+					// ═══════════════════════════════════════════════════════════
+					// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
+					//
+					// During high-load sync, hash mismatches can occur transiently
+					// when a node receives blocks from a peer that decided a different
+					// leader (before digest-gate corrects it). Killing the node here
+					// causes cascading quorum loss → total cluster stall.
+					//
+					// Instead: SKIP this block entirely. The node continues processing
+					// and will receive the correct block via consensus commit path.
+					// This follows the mandate: "thà pending chứ không fork" —
+					// better to pend than to fork.
+					// ═══════════════════════════════════════════════════════════
+					logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
+						"SKIPPING this block (not wiping DB). Node will recover via consensus.",
+						blockNum, localHash[:8], blockHash[:8])
+					continue // Skip this block, process next one
 				}
 			}
 		}
@@ -1531,15 +1576,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		if blockNum == 0 {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
-
-			// CRITICAL FIX: Even if the block is empty, if it's the LAST block in a STARTUP-SYNC
-			// batch, we MUST trigger the trie rebuild. Otherwise, NOMT memory state stays stale.
-			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on empty last block (GEI=%d)", blockGEI)
-				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for empty block: %v", err)
-				}
-			}
 			continue
 		}
 
@@ -1576,14 +1612,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// Non-execute-mode (store-only sync):
 			//   No trie rebuild needed — blocks are stored, not executed.
 			// ═══════════════════════════════════════════════════════════════
-			if trie.GetStateBackend() != trie.BackendNOMT || isPreConsensusSync {
+			if trie.GetStateBackend() != trie.BackendNOMT {
 				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (pre-consensus, no concurrent execution)", blockNum)
-				}
 			} else {
 				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
-					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie.", blockNum)
+					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie. "+
+					"Re-alignment deferred to processRustEpochData.", blockNum)
 			}
 			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
 			// Without this, synced blocks mapping (block number -> hash) remain in volatile

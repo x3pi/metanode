@@ -2056,6 +2056,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let mut peers_at_higher_epoch = 0u32;
             let mut higher_epoch_stake: u64 = 0;
             let mut highest_peer_epoch: u64 = self.inner.context.committee.epoch() as u64;
+            // Track peers at immediately preceding epoch (for deadlock breaking)
+            let mut peers_at_prev_epoch = 0u32;
             
             for (authority, authority_info) in self.inner.context.committee.authorities() {
                 if authority == self.inner.context.own_index {
@@ -2070,6 +2072,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         peers_at_higher_epoch += 1;
                         higher_epoch_stake += authority_info.stake;
                         highest_peer_epoch = std::cmp::max(highest_peer_epoch, status.epoch as u64);
+                    } else if status.epoch + 1 == self.inner.context.committee.epoch() {
+                        // Peer is at epoch N-1 (the immediately preceding epoch)
+                        peers_at_prev_epoch += 1;
                     }
                 }
             }
@@ -2082,6 +2087,46 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     max_peer_commit, polled_peers, attempt
                 );
                 self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
+                break;
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // EXIT CONDITION 1b: PREVIOUS-EPOCH PEERS — EPOCH BOUNDARY
+            // DEADLOCK BREAKER
+            //
+            // Scenario: This node transitioned to epoch N first. Peers are
+            // still at epoch N-1 because they lost quorum when this node
+            // left (need 2f+1 but one validator is gone). They will never
+            // advance to epoch N without this node's participation in epoch
+            // N-1 consensus, creating a permanent deadlock:
+            //   - This node waits for epoch-N peers → none exist
+            //   - Peers wait for epoch-N-1 quorum → this node already left
+            //
+            // Fix: After sufficient attempts (to allow normal same-epoch
+            // peer discovery first), if we see peers at epoch N-1, seed
+            // quorum with commit_index=0. This is ALWAYS correct because
+            // a new epoch starts at commit_index=0.
+            //
+            // Fork safety:
+            //   L1: PHASE-GUARD blocks local committer during catch-up
+            //   L2: SPARSE-DAG-GUARD blocks until DAG is dense
+            //   L3: QUORUM-REQUIREMENT needs 2f+1 to commit
+            //   L4: CertifiedCommit OVERRIDE forces network data
+            //
+            // The node won't actually propose blocks until peers also
+            // transition to epoch N and enough DAG density is reached.
+            // ════════════════════════════════════════════════════════════════
+            if polled_peers == 0 && peers_at_prev_epoch > 0 && peers_at_higher_epoch == 0 && attempt >= 3 {
+                let our_epoch = self.inner.context.committee.epoch();
+                tracing::warn!(
+                    "🔓 [BOOTSTRAP] EXIT 1b: EPOCH BOUNDARY DEADLOCK BREAKER — \
+                     {} peer(s) at previous epoch {} (our epoch={}). \
+                     Peers likely lost quorum after this node transitioned first. \
+                     Seeding quorum with commit_index=0 to unblock epoch {} startup. \
+                     L1-L4 guards prevent proposals until DAG is ready. (attempt {})",
+                    peers_at_prev_epoch, our_epoch - 1, our_epoch, our_epoch, attempt
+                );
+                self.coordination_hub.update_quorum_commit_index(0);
                 break;
             }
 

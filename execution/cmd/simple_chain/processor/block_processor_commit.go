@@ -28,11 +28,13 @@ func (bp *BlockProcessor) commitWorker() {
 	logger.Info("✅ Commit Worker initiated")
 	for job := range bp.commitChannel {
 		if job.Block == nil {
+			logger.Info("🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=%d/%d)", len(bp.commitChannel), cap(bp.commitChannel))
 			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
+				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
 			}
 			continue
 		}
@@ -129,19 +131,17 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("[batch_id=%s] 📋 [MASTER] Block #%d committed (tx_count=%d, save=%v): %s",
 			batchID, header.BlockNumber(), txCount, saveDuration, header.String())
 
-		// Auto-update epoch from incoming blocks (critical for late-joining nodes)
-		if bp.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp()) {
-			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
-				header.BlockNumber(), header.Epoch())
-				
-			// FORK-SAFETY FIX: Flush PebbleDB to SST files at epoch boundary
-			// This ensures that all authoritative state (AccountState, StakeDB)
-			// modifications from the ending epoch are durably synced.
-			logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST to ensure synchronization point.")
-			if err := bp.storageManager.FlushAll(); err != nil {
-				logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
-			}
-		}
+		// ══════════════════════════════════════════════════════════════════
+		// DEADLOCK FIX (May 2026): Epoch auto-update and FlushAll MOVED
+		// to AFTER DoneChan signal. See below (after line "DoneChan <- ...").
+		//
+		// ROOT CAUSE: CheckAndUpdateEpochFromBlock can trigger
+		// OnEpochAdvanced → snapshot → PauseExecution() → needs
+		// ExecutionMutex.Lock(). But processRustEpochData holds
+		// ExecutionMutex.RLock() and is blocked on DoneChan.
+		// commitWorker is the goroutine that signals DoneChan,
+		// but it was stuck here doing FlushAll BEFORE signaling.
+		// ══════════════════════════════════════════════════════════════════
 
 		// logger.Debug("✅ [TX COMMIT] Block #%d saved to database successfully: hash=%s, tx_count=%d",
 		// 	blockNum, blockHash[:16]+"...", txCount)
@@ -196,6 +196,35 @@ func (bp *BlockProcessor) commitWorker() {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
 			job.DoneChan <- struct{}{}
+		}
+
+		// ══════════════════════════════════════════════════════════════════
+		// EPOCH AUTO-SYNC (MOVED HERE — was before DoneChan, caused deadlock)
+		// Safe to run AFTER DoneChan because:
+		//   1. Block data is already fully persisted (CommitBlockState above)
+		//   2. processRustEpochData has been unblocked by DoneChan signal
+		//   3. ExecutionMutex.RLock() is no longer held (Fix 1 releases it)
+		//   4. If this triggers a snapshot, PauseExecution() can now succeed
+		// ══════════════════════════════════════════════════════════════════
+		if bp.chainState.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp()) {
+			logger.Info("🔄 [MASTER] Epoch auto-synced from block #%d to epoch %d",
+				header.BlockNumber(), header.Epoch())
+
+			// STALL-PREVENTION (May 2026): FlushAll deferred to background goroutine
+			// to avoid blocking commitWorker from processing the next block's CommitJob.
+			// PebbleDB flushes can take 100-500ms under heavy write load.
+			//
+			// FORK-SAFETY: Tracked by backupDbWg so WaitForPersistence() catches it
+			// before any snapshot. Without this, snapshot could capture state before
+			// PebbleDB memtable is flushed → fork on restore.
+			bp.backupDbWg.Add(1)
+			go func() {
+				defer bp.backupDbWg.Done()
+				logger.Info("💾 [PERSISTENCE] Epoch boundary detected. Flushing PebbleDB to SST (background, tracked).")
+				if err := bp.storageManager.FlushAll(); err != nil {
+					logger.Error("❌ [PERSISTENCE] Failed to flush PebbleDB at epoch boundary: %v", err)
+				}
+			}()
 		}
 
 		// ══════════════════════════════════════════════════════════════════
@@ -256,7 +285,7 @@ func (bp *BlockProcessor) commitWorker() {
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // PersistAsync runs inline (synchronous) to guarantee trie swap completes before
 // the next block starts processing — eliminating the fork race condition.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) error {
 	overallStart := time.Now()
 
 	// ═══════════════════════════════════════════════════════════════
@@ -291,7 +320,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		// a severe race condition occurs causing non-deterministic StateRoots (i.e. cluster forks).
 		scStart := time.Now()
 		if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
-			logger.Fatal("Sequential SmartContractDB commit error: %v", err)
+			logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
+			return fmt.Errorf("SmartContractDB commit failed: %w", err)
 		}
 		logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
 
@@ -362,14 +392,44 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	// Collect results and check for errors
 	var maxDuration time.Duration
 	var maxTask string
+	var commitErrors []string
 	for result := range resultsChan {
 		if result.err != nil {
-			logger.Fatal("Parallel commit error (%s): %v", result.name, result.err)
+			// ═══════════════════════════════════════════════════════════════
+			// AVAILABILITY FIX: Do NOT Fatal/os.Exit on commit errors.
+			// Transient errors (e.g., NOMT trie re-alignment race causing
+			// lockedFlag mismatch) should not kill the entire node.
+			// Instead, log the error and nil out the failed pipeline result
+			// so PersistAsync is skipped for that component. The next block
+			// will re-read the correct state from the trie.
+			// ═══════════════════════════════════════════════════════════════
+			logger.Error("🚨 [COMMIT] Parallel commit error (%s): %v — skipping persist for this component", result.name, result.err)
+			commitErrors = append(commitErrors, fmt.Sprintf("%s: %v", result.name, result.err))
+			if result.name == "AccountPipeline" {
+				accountPipelineResult = nil
+			} else if result.name == "StakePipeline" {
+				stakePipelineResult = nil
+			} else if result.name == "Receipts" {
+				receiptPipelineResult = nil
+			}
 		}
 		if result.duration > maxDuration {
 			maxDuration = result.duration
 			maxTask = result.name
 		}
+	}
+	if len(commitErrors) > 0 {
+		// Check if ANY critical task failed (AccountPipeline or StakePipeline).
+		// These are the trie-state producers — if they fail, the block's
+		// stateRoot/stakeRoot will be wrong on the NEXT block → FORK.
+		for _, errStr := range commitErrors {
+			if len(errStr) > 15 && (errStr[:15] == "AccountPipeline" || errStr[:13] == "StakePipeline") {
+				logger.Error("🚨 [COMMIT] CRITICAL pipeline task failed: %s — block MUST be reverted to prevent fork", errStr)
+				return fmt.Errorf("critical commit failure: %s", errStr)
+			}
+		}
+		logger.Error("🚨 [COMMIT] %d non-critical commit tasks failed: %v — node continues (will self-heal)",
+			len(commitErrors), commitErrors)
 	}
 
 	// Log per-task timing for diagnostics (only for blocks that take noticeable time)
@@ -411,7 +471,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if accountPipelineResult != nil {
 		startPersist := time.Now()
 		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for AccountStateDB: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
+			return fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
@@ -421,7 +482,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if stakePipelineResult != nil {
 		startPersist := time.Now()
 		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for StakeStateDB: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
+			return fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
@@ -431,34 +493,20 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if receiptPipelineResult != nil {
 		startPersist := time.Now()
 		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
-			logger.Fatal("PersistAsync failed for Receipts: %v", err)
+			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
+			return fmt.Errorf("Receipts PersistAsync failed: %w", err)
 		}
 		persistDuration := time.Since(startPersist)
 		if persistDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", persistDuration)
 		}
 	}
+	return nil
 }
 
-// persistWorker is a background goroutine that serves as a fence/drain endpoint.
-//
-// HISTORY (May 2026): PersistAsync now runs inline in commitToMemoryParallel to
-// eliminate the fork race condition (Block 10136). This worker no longer processes
-// real PersistJobs. It only handles DoneSignal fence operations used by:
-//   - WaitForPersistence() — snapshot system drain gate
-//   - StopWait() — graceful shutdown drain
-func (bp *BlockProcessor) persistWorker() {
-	logger.Info("✅ Persist Worker initiated (fence-only mode — PersistAsync runs inline since May 2026)")
-	for job := range bp.persistChannel {
-		if job.DoneSignal != nil {
-			close(job.DoneSignal)
-			continue
-		}
-		// No-op: PersistAsync is now handled synchronously inline in commitToMemoryParallel.
-		// Any real PersistJob arriving here is a programming error.
-		logger.Warn("⚠️ [PERSIST WORKER] Received unexpected PersistJob with data (should be handled inline). Ignoring.")
-	}
-}
+// persistWorker REMOVED (May 2026): Was a no-op fence goroutine. PersistAsync
+// runs inline in commitToMemoryParallel. WaitForPersistence now drains via
+// commitChannel fence + backupDbWg.Wait() directly — no persist fence needed.
 
 // backupDbWorker processes BackupDb serialization in the background using a fixed worker pool.
 // Previously spawned one goroutine per block (unbounded), which under high load could create

@@ -155,6 +155,20 @@ impl CommitVoteMonitor {
         None
     }
 
+    /// Returns true if the monitor has received ANY digest vote data from observe_block().
+    /// Used by COLD-START-BYPASS to differentiate between:
+    ///   - quorum_commit_index > 0 set by CommitSyncer (peer count, NOT digest verification)
+    ///   - Actual digest verification capability from P2P block observation
+    ///
+    /// After epoch transition, CommitVoteMonitor is re-created empty. CommitSyncer
+    /// may set quorum_commit_index > 0 from peer queries within seconds, but digest
+    /// verification is NOT functional until observe_block() accumulates real votes.
+    /// If this returns false, COLD-START-BYPASS should be active regardless of qci.
+    pub fn has_any_digest_data(&self) -> bool {
+        let state = self.state.lock();
+        !state.digest_history.is_empty()
+    }
+
     /// Seeds the quorum from Go execution state to break the chicken-and-egg
     /// deadlock where blocks need quorum to be produced, but quorum needs blocks
     /// to be computed via observe_block().

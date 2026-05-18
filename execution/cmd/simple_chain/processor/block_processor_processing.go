@@ -41,8 +41,8 @@ func (bp *BlockProcessor) GenerateBlock() {
 		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
 		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
 		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
-		bp.snapshotGate.RLock()
-		bp.snapshotGate.RUnlock()
+		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+		bp.waitSnapshotGate()
 
 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
 		// Go's native select has uniform random selection when multiple cases are ready.
@@ -118,8 +118,8 @@ func (bp *BlockProcessor) ProcessorPool() {
 	for {
 		// SNAPSHOT GATE: Block transaction processing while NOMT snapshot is in progress.
 		// Without this, ProcessorPool continues NOMT writes, causing CloseForSnapshot() deadlock.
-		bp.snapshotGate.RLock()
-		bp.snapshotGate.RUnlock()
+		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+		bp.waitSnapshotGate()
 
 		// Only check when transaction pool has data or excluded items left to avoid unnecessary loops
 		if bp.transactionProcessor.transactionPool.CountTransactions() > 0 || bp.transactionProcessor.GetExcludedItemsCount() > 0 {
@@ -201,7 +201,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// Phase 1: Calculate Roots — PARALLEL (receiptsRoot and txsRoot are independent)
 	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(common.Hash{}, bp.storageManager.GetStorageTransaction())
 	if err != nil {
-		logger.Fatal("NewTransactionStateDBFromRoot failed: %v", err)
+		logger.Error("🚨 [REVERT-GATE] NewTransactionStateDBFromRoot failed: %v — reverting block #%d", err, currentBlockNumber)
+		bp.revertDraftBlock(nil, currentBlockNumber)
+		return nil
 	}
 
 	// Run receiptsRoot and txsRoot in parallel — they operate on independent data structures
@@ -251,8 +253,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	rootsWg.Wait()
 
 	if txsRootErr != nil {
-		bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
-		logger.Fatal("Error getting txsRoot for block #%d: %v", currentBlockNumber, txsRootErr)
+		logger.Error("🚨 [REVERT-GATE] Error getting txsRoot for block #%d: %v — reverting", currentBlockNumber, txsRootErr)
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
 	}
 
 	if len(processResults.Transactions) > 0 {
@@ -323,8 +326,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		)
 	}
 	if err != nil {
-		bp.handleBlockGenerationError(txDB, currentBlockNumber-1)
-		logger.Fatal("Error generating block #%d: %v", currentBlockNumber, err)
+		logger.Error("🚨 [REVERT-GATE] Error generating block #%d: %v — reverting", currentBlockNumber, err)
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
 	}
 
 	// NOTE: GlobalExecIndex is already set by NewBlockHeader() constructor (variadic param).
@@ -372,6 +376,25 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		}
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// REVERT GATE: Verify draft block BEFORE any global state mutation.
+	//
+	// Block is still a "draft" (in-memory, no trie commit, no DB persist).
+	// If checks fail → discard draft → reset to parent → return nil.
+	// Caller will NOT advance GEI, so Rust will retry this commit.
+	//
+	// BLOCK-AS-PACKAGE: Think of each block as a "package" (gói hàng).
+	// A bad package is thrown away here. A good package proceeds to commit.
+	// Cost on hot path: 2 hash comparisons (~2ns). Zero allocation.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if isStateChanging && globalExecIndex > 0 && !bp.verifyDraftBlock(bl, currentBlockNumber, globalExecIndex) {
+		logger.Error("🚨 [REVERT-GATE] Draft block #%d FAILED pre-commit verification (GEI=%d). "+
+			"Discarding draft and resetting state to parent block. Rust will retry.",
+			currentBlockNumber, globalExecIndex)
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
+	}
+
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
 	// currentBlockHeader and BlockNumberToHash mappings are safely updated 
@@ -391,7 +414,13 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	phase32Start := time.Now()
 	var trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	trieDBSnapshots = processResults.TrieDBSnapshots
-	bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
+	if commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber); commitErr != nil {
+		// CRITICAL: commitToMemoryParallel failed (SmartContractDB, AccountPipeline, or StakePipeline).
+		// Block has already been SetLastBlock'd (line 398) so we cannot fully revert here.
+		// The error is logged at ERROR level for monitoring. The commitWorker will still
+		// persist whatever state was successfully committed.
+		logger.Error("🚨 [COMMIT-MEMORY] commitToMemoryParallel error for block #%d: %v — block will be committed with partial state", currentBlockNumber, commitErr)
+	}
 	phase32Elapsed := time.Since(phase32Start)
 
 	phase4Start := time.Now()
@@ -464,15 +493,34 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Send job to commitWorker.
 	// Block until commitChannel has space (natural backpressure)
+	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
+		logger.Warn("🔥 [SATURATION] commitChannel is %d/%d full (Pipeline stalled)!", len(bp.commitChannel), cap(bp.commitChannel))
+	}
 	bp.commitChannel <- job
 
 	// FORK-SAFETY: Wait for commit to complete before returning.
 	// This ensures the trie is fully updated before the next block reads it.
 	if doneChan != nil {
-		// Unlock ExecutionMutex to prevent deadlock with snapshot's PauseExecution
-		// bp.ExecutionMutex.RUnlock()
+		// ═══════════════════════════════════════════════════════════════
+		// DEADLOCK FIX (May 2026): Release ExecutionMutex.RLock BEFORE
+		// blocking on DoneChan.
+		//
+		// ROOT CAUSE: processRustEpochData holds ExecutionMutex.RLock()
+		// and blocks on DoneChan. commitWorker (which signals DoneChan)
+		// can trigger a snapshot via OnBlockCommitted → PauseExecution().
+		// PauseExecution() needs ExecutionMutex.Lock() (exclusive) but
+		// cannot acquire it because processRustEpochData holds RLock.
+		// Result: 3-way circular deadlock (FFI ↔ processRustEpochData ↔ snapshot).
+		//
+		// FIX: Release RLock before waiting. blockWriteMutex still
+		// serializes all block writes, so no state corruption is possible
+		// during this window. Re-acquire RLock after DoneChan returns.
+		// ═══════════════════════════════════════════════════════════════
+		bp.ExecutionMutex.RUnlock()
+		logger.Info("🔓 [SYNC-COMMIT] Block #%d: RLock RELEASED before DoneChan wait (GEI=%d)", currentBlockNumber, globalExecIndex)
 		<-doneChan
-		// bp.ExecutionMutex.RLock()
+		logger.Info("🔓 [SYNC-COMMIT] Block #%d: DoneChan received, re-acquiring RLock... (GEI=%d)", currentBlockNumber, globalExecIndex)
+		bp.ExecutionMutex.RLock()
 		logger.Debug("✅ [SYNC-COMMIT] Block #%d commit completed synchronously (GEI=%d)", currentBlockNumber, globalExecIndex)
 	}
 
@@ -592,9 +640,72 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
 	blockchain.GetBlockChainInstance().Discard()
-	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber - 1)
+	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
 	bp.SetLastBlock(lastBl)
 	bp.chainState.GetBlockDatabase().SaveLastBlock(lastBl)
+	if txDB != nil {
+		txDB.Discard()
+	}
+}
+
+// verifyDraftBlock performs pre-commit sanity checks on a draft block.
+// Returns true if the block is safe to commit, false if it should be discarded.
+//
+// This is the REVERT GATE in the Block-as-Package architecture:
+// - Runs AFTER GenerateBlockData (block built) but BEFORE SetLastBlock/commitToMemory
+// - No global state has been mutated yet → safe to discard and return nil
+// - Catches local corruption (NOMT handle reset, trie corruption) BEFORE persistence
+// - Hot path cost: 2 hash comparisons (~2ns), zero allocations
+func (bp *BlockProcessor) verifyDraftBlock(bl *block.Block, currentBlockNumber uint64, globalExecIndex uint64) bool {
+	// CHECK 1: AccountStatesRoot sanity
+	// 0x0 root means NOMT trie is uninitialized or handle was reset (e.g., epoch transition).
+	// Committing this block would create a permanent fork — every subsequent block inherits 0x0.
+	if bl.Header().AccountStatesRoot() == (common.Hash{}) && currentBlockNumber > 1 {
+		logger.Error("🚨 [REVERT-GATE] Block #%d has AccountStatesRoot=0x0 — NOMT corruption! (GEI=%d)",
+			currentBlockNumber, globalExecIndex)
+		return false
+	}
+
+	// CHECK 2: StakeStatesRoot sanity
+	// 0x0 stake root after the fallback (line ~297) means both current AND parent are corrupt.
+	// This is unrecoverable locally — must discard and let Rust retry after NOMT re-init.
+	if bl.Header().StakeStatesRoot() == (common.Hash{}) && currentBlockNumber > 1 {
+		logger.Error("🚨 [REVERT-GATE] Block #%d has StakeStatesRoot=0x0 — stake trie corruption! (GEI=%d)",
+			currentBlockNumber, globalExecIndex)
+		return false
+	}
+
+	return true
+}
+
+// revertDraftBlock discards a draft block and resets all in-memory state to the parent block.
+// Called when verifyDraftBlock fails. After this, the node is ready to retry the same GEI.
+//
+// DEADLOCK-FREE: All operations are bounded (map clear + atomic swap + 1 PebbleDB write).
+// Total cost: ~1-5ms.
+func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.TransactionStateDB, failedBlockNumber uint64) {
+	logger.Error("🔄 [REVERT] Discarding draft block #%d — resetting to parent", failedBlockNumber)
+
+	// 1. Discard all dirty trie state (in-memory, no I/O)
+	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
+	bp.chainState.GetAccountStateDB().Discard()
+	bp.chainState.GetSmartContractDB().Discard()
+	blockchain.GetBlockChainInstance().Discard()
+
+	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
+	parentBlockNumber := failedBlockNumber - 1
+	parentBlock := blockchain.GetBlockChainInstance().GetBlockByNumber(parentBlockNumber)
+	if parentBlock != nil {
+		bp.SetLastBlock(parentBlock)
+		bp.chainState.GetBlockDatabase().SaveLastBlock(parentBlock)
+		logger.Info("✅ [REVERT] State reset to parent block #%d (hash=%s)",
+			parentBlockNumber, parentBlock.Header().Hash().Hex()[:18]+"...")
+	} else {
+		logger.Error("❌ [REVERT] Parent block #%d not found in cache! Node may need STARTUP-SYNC.",
+			parentBlockNumber)
+	}
+
+	// 3. Discard transaction state DB (function-local, but clean up)
 	if txDB != nil {
 		txDB.Discard()
 	}

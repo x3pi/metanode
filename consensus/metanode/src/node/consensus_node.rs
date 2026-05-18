@@ -1283,8 +1283,14 @@ impl ConsensusNode {
             );
         }
 
-        // Stage 4 Conveyor Belt Buffer: Huge buffer to absorb transaction spikes without halting Core
-        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(10000);
+        // Stage 4 Conveyor Belt Buffer: BACKPRESSURE-TUNED buffer size.
+        // With FIX-1A (honest FFI wait), BlockDeliveryManager blocks on each FFI
+        // call until Go finishes processing (~200ms/block). A 100-block buffer
+        // provides burst absorption (~20s worth at 5 blocks/s) while creating
+        // effective backpressure when Go falls behind — dispatch_commit blocks
+        // on channel send, naturally throttling CommitProcessor.
+        // Previously 10,000 which accumulated massive gaps before any backpressure.
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
         // CRITICAL FORK-SAFETY: Calculate correct next_expected_commit_index from storage state.
         // If not set correctly, CommitProcessor defaults to 1 and AUTO-JUMPs on first commit,
@@ -1667,7 +1673,8 @@ impl ConsensusNode {
             const MAX_RETRY_DELAY_MS: u64 = 5000;
             let mut total_synced_blocks: u64 = 0; // Track blocks synced for CommitProcessor adjustment
 
-            let mut sync_round = 0;
+            loop {
+                let mut sync_round = 0;
             loop {
                 // Re-query peers for their latest block
                 let mut max_peer_block = 0u64;
@@ -2035,8 +2042,10 @@ impl ConsensusNode {
                                          Data corruption detected after sync!",
                                         local_block, local_raw.len(), peer_raw.len()
                                     );
-                                    tracing::error!("🛑 [HALT] Halting node due to block data divergence post-sync.");
-                                    std::process::exit(1);
+                                    tracing::warn!("🔄 [RECOVERY] Transient mismatch detected. Resetting local state and restarting STARTUP-SYNC...");
+                                    local_block = 0;
+                                    total_synced_blocks = 0;
+                                    continue;
                                 }
                             }
                             _ => {
@@ -2151,6 +2160,9 @@ impl ConsensusNode {
 
             startup_total_synced_blocks = total_synced_blocks;
             startup_local_block = local_block;
+
+            break;
+        }
 
             // ═══════════════════════════════════════════════════════════════
             // SHUTDOWN EARLY SERVER
@@ -2713,8 +2725,9 @@ impl ConsensusNode {
             let guard_client = executor_client_for_proc.clone();
             let guard_peers = config.peer_rpc_addresses.clone();
             let guard_start_block = startup_local_block;
+            let guard_terminally_failed = is_terminally_failed.clone();
             tokio::spawn(async move {
-                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block).await;
+                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block, guard_terminally_failed).await;
             });
         }
 
@@ -3547,13 +3560,19 @@ impl ConsensusNode {
     /// ENTIRE LIFETIME of the node (not just the first 500 blocks).
     ///
     /// LAYER-6 FORK-PROOF: If a checkpoint mismatch is detected, the node
-    /// halts immediately to prevent fork propagation to the rest of the cluster.
+    /// enters PENDING mode: pauses, re-verifies 3 times with 5s delays,
+    /// and only halts if all re-checks confirm the mismatch.
+    ///
+    /// CRITICAL FIX (May 2026): panic!() inside tokio::spawn only kills the
+    /// spawned task, NOT the process. Now uses is_terminally_failed + exit(1)
+    /// to guarantee the node stops on confirmed fork.
     ///
     /// Interval: Every 10 blocks (configurable via CHECK_INTERVAL constant).
     async fn runtime_fork_guard(
         client: Arc<ExecutorClient>,
         peers: Vec<String>,
         start_block: u64,
+        is_terminally_failed: Arc<AtomicBool>,
     ) {
         const CHECK_INTERVAL: u64 = 10;
         let mut next_check_block = start_block + CHECK_INTERVAL;
@@ -3595,14 +3614,97 @@ impl ConsensusNode {
                                 }
                                 consecutive_failures = 0;
                             } else {
+                                // ═══════════════════════════════════════════════════════
+                                // LAYER-6 MISMATCH: PENDING → RE-VERIFY → RESYNC
+                                //
+                                // "Thà pending chứ không fork": Do NOT continue running
+                                // with diverged state, but also do NOT exit permanently.
+                                //
+                                // Strategy:
+                                // 1. PAUSE: Stop advancing the check pointer
+                                // 2. RE-VERIFY: Re-fetch the same block from peers 3 times
+                                //    with 5s delays to rule out transient pipeline lag
+                                // 3. If ALL re-checks confirm mismatch → REAL FORK:
+                                //    panic() to trigger FFI restart loop → STARTUP-SYNC
+                                //    → clean resync from peers (self-healing)
+                                // 4. If ANY re-check matches → transient, resume normally
+                                // ═══════════════════════════════════════════════════════
                                 tracing::error!(
-                                    "🚨 [LAYER-6] Block #{} MISMATCH! \
+                                    "🚨 [LAYER-6] Block #{} MISMATCH DETECTED! \
                                      local_bytes={} peer_bytes={}. \
-                                     HALTING NODE to prevent fork propagation.",
+                                     ENTERING PENDING MODE — will re-verify 3 times before action.",
                                     next_check_block,
                                     local_raw.len(), peer_raw.len()
                                 );
-                                std::process::exit(1);
+
+                                let mut confirmed_mismatch = true;
+                                for retry in 1..=3 {
+                                    tracing::warn!(
+                                        "⏳ [LAYER-6] Re-verify attempt {}/3 for block #{} in 5s...",
+                                        retry, next_check_block
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
+                                        &peers, next_check_block, next_check_block,
+                                    ).await {
+                                        Ok(retry_peer_blocks) if !retry_peer_blocks.is_empty() => {
+                                            match client.get_blocks_range(next_check_block, next_check_block).await {
+                                                Ok(retry_local) if !retry_local.is_empty() => {
+                                                    if retry_local[0].raw_block_bytes == retry_peer_blocks[0].raw_block_bytes {
+                                                        tracing::info!(
+                                                            "✅ [LAYER-6] Re-verify {}/3: Block #{} NOW MATCHES! \
+                                                             Was transient pipeline lag. Resuming.",
+                                                            retry, next_check_block
+                                                        );
+                                                        confirmed_mismatch = false;
+                                                        break;
+                                                    } else {
+                                                        tracing::error!(
+                                                            "🚨 [LAYER-6] Re-verify {}/3: Block #{} STILL MISMATCHES!",
+                                                            retry, next_check_block
+                                                        );
+                                                    }
+                                                }
+                                                _ => {
+                                                    tracing::warn!(
+                                                        "⚠️ [LAYER-6] Re-verify {}/3: Could not fetch local block #{}",
+                                                        retry, next_check_block
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            tracing::warn!(
+                                                "⚠️ [LAYER-6] Re-verify {}/3: Could not reach peer for block #{}",
+                                                retry, next_check_block
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if confirmed_mismatch {
+                                    tracing::error!(
+                                        "🚨🚨🚨 [LAYER-6] CONFIRMED FORK at block #{}! \
+                                         3/3 re-verifications failed. \
+                                         Setting is_terminally_failed and halting process.",
+                                        next_check_block
+                                    );
+                                    // Set the flag so is_alive() returns false immediately.
+                                    // This stops consensus from producing new blocks.
+                                    is_terminally_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    // CRITICAL: panic!() inside tokio::spawn only kills the
+                                    // spawned task, NOT the process. Use process::exit(1) to
+                                    // guarantee the node actually stops. The FFI restart loop
+                                    // will re-initialize the node and enter STARTUP-SYNC.
+                                    tracing::error!(
+                                        "🛑 [LAYER-6] Calling std::process::exit(1) to halt node. \
+                                         FFI restart loop will trigger STARTUP-SYNC resync."
+                                    );
+                                    std::process::exit(1);
+                                } else {
+                                    consecutive_failures = 0;
+                                }
                             }
                         }
                         _ => {

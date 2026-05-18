@@ -318,14 +318,6 @@ void MyGlobalState::add_addresses_add_balance_change(const Address &addr,
 void MyGlobalState::set_addresses_nonce_change(const Address &addr,
                                                const uint256_t &nonce) {
   addresses_nonce_change[addr] = nonce;
-
-    // 🔒 NONCE-FIX: Also update State::instances cache immediately.
-    // This is critical for CREATE opcode (deploy transactions) which calls
-    // set_addresses_nonce_change but doesn't go through incrementSenderNonce().
-    // Without this, State cache stays stale and next TX in same block gets wrong nonce.
-    if (isCache && State::instanceExists(addr)) {
-      State::getInstance(addr)->setNonce(nonce);
-    }
 };
 
 void MyGlobalState::add_addresses_sub_balance_change(const Address &addr,
@@ -333,7 +325,7 @@ void MyGlobalState::add_addresses_sub_balance_change(const Address &addr,
   addresses_sub_balance_change[addr] += amount;
 };
 
-const std::vector<std::vector<uint8_t>> MyGlobalState::get_newly_deploy() {
+const std::vector<std::vector<uint8_t>> MyGlobalState::get_newly_deploy(bool apply_to_cache) {
   std::vector<std::vector<uint8_t>> result;
 
   for (const auto &p : addresses_newly_deploy) {
@@ -343,7 +335,7 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_newly_deploy() {
                 p.second.size());
     result.push_back(address_with_code);
   }
-  if (this->isCache) {
+  if (this->isCache && apply_to_cache) {
     iterate_newly_deployed([](const mvm::Address &addr, const mvm::Code &code) {
       auto state = State::getInstance(addr);
       state->setCode(code);
@@ -352,7 +344,7 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_newly_deploy() {
   return result;
 }
 
-const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_change() {
+const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_change(bool apply_to_cache) {
   int size = addresses_storage_change.size();
   std::vector<std::vector<uint8_t>> result(size);
   int count = 0;
@@ -376,7 +368,7 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_change() {
     result[count] = address_with_storage_change;
     count++;
   }
-  if (this->isCache) {
+  if (this->isCache && apply_to_cache) {
     iterate_storage_changes(
         [](const Address &addr, const uint256_t &key, const uint256_t &value) {
           uint8_t b_key[32];
@@ -389,7 +381,7 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_change() {
 }
 
 const std::vector<std::vector<uint8_t>>
-MyGlobalState::get_add_balance_change() {
+MyGlobalState::get_add_balance_change(bool apply_to_cache) {
   int size = addresses_add_balance_change.size();
   std::vector<std::vector<uint8_t>> result(size);
   int count = 0;
@@ -401,7 +393,7 @@ MyGlobalState::get_add_balance_change() {
     result[count] = address_with_add_balance_change;
     count++;
   }
-  if (this->isCache) {
+  if (this->isCache && apply_to_cache) {
     iterate_add_balance_changes(
         [](const mvm::Address &addr, const uint256_t &value) {
           auto state = State::getInstance(addr);
@@ -413,7 +405,7 @@ MyGlobalState::get_add_balance_change() {
 }
 
 const std::vector<std::vector<uint8_t>>
-MyGlobalState::get_sub_balance_change() {
+MyGlobalState::get_sub_balance_change(bool apply_to_cache) {
   int size = addresses_sub_balance_change.size();
   std::vector<std::vector<uint8_t>> result(size);
   int count = 0;
@@ -425,7 +417,7 @@ MyGlobalState::get_sub_balance_change() {
     result[count] = address_with_sub_balance_change;
     count++;
   }
-  if (this->isCache) {
+  if (this->isCache && apply_to_cache) {
     iterate_sub_balance_changes(
         [](const mvm::Address &addr, const uint256_t &value) {
           auto state = State::getInstance(addr);
@@ -436,7 +428,7 @@ MyGlobalState::get_sub_balance_change() {
   return result;
 }
 
-const std::vector<std::vector<uint8_t>> MyGlobalState::get_nonce_change() {
+const std::vector<std::vector<uint8_t>> MyGlobalState::get_nonce_change(bool apply_to_cache) {
   int size = addresses_nonce_change.size();
   std::vector<std::vector<uint8_t>> result(size);
   int count = 0;
@@ -448,7 +440,7 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_nonce_change() {
     result[count] = address_with_nonce_change;
     count++;
   }
-  if (this->isCache) {
+  if (this->isCache && apply_to_cache) {
     iterate_nonce_changes([](const mvm::Address &addr, const uint256_t &nonce) {
       State::getInstance(addr)->setNonce(nonce);
     });
