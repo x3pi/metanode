@@ -103,6 +103,12 @@ func (bp *BlockProcessor) GenerateBlock() {
 				accumulatedResults = nil
 				currentBlockNumber++
 				logger.Info("Created block #%d with %d txs (event-driven flush)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+			case <-time.After(MaxWaitTime):
+				// Timeout-driven flush — create block with whatever we have after MaxWaitTime (50ms)
+				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+				accumulatedResults = nil
+				currentBlockNumber++
+				logger.Info("Created block #%d with %d txs (timeout flush %v)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()), MaxWaitTime)
 			}
 		} else if !drained {
 			// No pending results and no new data — blocking wait for first result

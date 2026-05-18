@@ -14,6 +14,9 @@ use tracing::{error, info, trace, warn};
 static DEFERRED_TASK_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(64)));
 
+static LAST_FORCE_COMMIT: std::sync::LazyLock<std::sync::atomic::AtomicU64> =
+    std::sync::LazyLock::new(|| std::sync::atomic::AtomicU64::new(0));
+
 use crate::node::executor_client::ExecutorClient;
 
 pub async fn dispatch_commit(
@@ -293,21 +296,32 @@ pub async fn dispatch_commit(
 
                     // NEW: Send ForceCommit request to Go via isolated deferred task
                     // This triggers Event-Driven Block Generation in the Go execution engine
-                    let client_clone = client.clone();
-                    let reason = format!("commit_g{}_e{}", global_exec_index, epoch);
-                    let sem = DEFERRED_TASK_SEMAPHORE.clone();
-                    match sem.try_acquire_owned() {
-                        Ok(permit) => {
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                if let Err(e) = client_clone.send_force_commit(reason).await {
-                                    trace!("📝 [FORCE COMMIT] Failed to send ForceCommit (non-critical): {}", e);
-                                }
-                            });
+                    // RATE-LIMIT: Only trigger ForceCommit on EndOfEpoch OR once every 500ms
+                    // This prevents TCP socket saturation under high TPS.
+                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let last_ms = LAST_FORCE_COMMIT.load(std::sync::atomic::Ordering::Relaxed);
+                    let should_force_commit = has_system_tx || (now_ms.saturating_sub(last_ms) >= 500);
+
+                    if should_force_commit {
+                        LAST_FORCE_COMMIT.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        let client_clone = client.clone();
+                        let reason = format!("commit_g{}_e{}", global_exec_index, epoch);
+                        let sem = DEFERRED_TASK_SEMAPHORE.clone();
+                        match sem.try_acquire_owned() {
+                            Ok(permit) => {
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    if let Err(e) = client_clone.send_force_commit(reason).await {
+                                        trace!("📝 [FORCE COMMIT] Failed to send ForceCommit (non-critical): {}", e);
+                                    }
+                                });
+                            }
+                            Err(_) => {
+                                trace!("📝 [FORCE COMMIT] Semaphore full (64 tasks), skipping force commit trigger");
+                            }
                         }
-                        Err(_) => {
-                            trace!("📝 [FORCE COMMIT] Semaphore full (64 tasks), skipping force commit trigger");
-                        }
+                    } else {
+                        trace!("📝 [FORCE COMMIT] Rate-limited force commit trigger for commit_g{}_e{}", global_exec_index, epoch);
                     }
 
                     return Ok(geis_consumed);
