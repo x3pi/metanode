@@ -31,93 +31,93 @@ import (
 )
 
 // GenerateBlock generates blocks
-func (bp *BlockProcessor) GenerateBlock() {
-	currentBlockNumber := storage.GetLastBlockNumber() + 1
-	var accumulatedResults *tx_processor.ProcessResult = nil
-	// Use centralized constants from constants.go
-	const minTxsForImmediateBlock = MinTxsForImmediateBlock
-	const maxTxsInAccumulatedResults = MaxTxsInAccumulatedResults
+// func (bp *BlockProcessor) GenerateBlock() {
+// 	currentBlockNumber := storage.GetLastBlockNumber() + 1
+// 	var accumulatedResults *tx_processor.ProcessResult = nil
+// 	// Use centralized constants from constants.go
+// 	const minTxsForImmediateBlock = MinTxsForImmediateBlock
+// 	const maxTxsInAccumulatedResults = MaxTxsInAccumulatedResults
 
-	for {
-		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
-		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
-		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
-		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
-		bp.waitSnapshotGate()
+// 	for {
+// 		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
+// 		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
+// 		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
+// 		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+// 		bp.waitSnapshotGate()
 
-		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
-		// Go's native select has uniform random selection when multiple cases are ready.
-		// Under high load, timeoutChan may fire while ProcessResultChan also has data,
-		// causing premature flush with fewer TXs. This pattern drains all available
-		// results first, then checks if we should flush.
+// 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
+// 		// Go's native select has uniform random selection when multiple cases are ready.
+// 		// Under high load, timeoutChan may fire while ProcessResultChan also has data,
+// 		// causing premature flush with fewer TXs. This pattern drains all available
+// 		// results first, then checks if we should flush.
 
-		// Phase 1: Non-blocking drain of all available results
-		drained := false
-		for {
-			select {
-			case processResults := <-bp.transactionProcessor.ProcessResultChan:
-				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-				if accumulatedResults == nil {
-					accumulatedResults = &processResults
-				} else {
-					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
-					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
-					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
-				}
-				drained = true
+// 		// Phase 1: Non-blocking drain of all available results
+// 		drained := false
+// 		for {
+// 			select {
+// 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
+// 				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+// 				if accumulatedResults == nil {
+// 					accumulatedResults = &processResults
+// 				} else {
+// 					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
+// 					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
+// 					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
+// 				}
+// 				drained = true
 
-				// Check max size limit to avoid memory leak
-				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
-					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
-					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-					accumulatedResults = nil
-					currentBlockNumber++
-				}
-			default:
-				goto FLUSH_CHECK
-			}
-		}
+// 				// Check max size limit to avoid memory leak
+// 				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
+// 					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
+// 					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// 					accumulatedResults = nil
+// 					currentBlockNumber++
+// 				}
+// 			default:
+// 				goto FLUSH_CHECK
+// 			}
+// 		}
 
-	FLUSH_CHECK:
-		// Phase 2: Check if we should flush or wait
-		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
-			// Enough TXs accumulated — flush immediately
-			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-			accumulatedResults = nil
-			currentBlockNumber++
-			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
-			continue
-		}
+// 	FLUSH_CHECK:
+// 		// Phase 2: Check if we should flush or wait
+// 		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
+// 			// Enough TXs accumulated — flush immediately
+// 			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// 			accumulatedResults = nil
+// 			currentBlockNumber++
+// 			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+// 			continue
+// 		}
 
-		if !drained && accumulatedResults != nil && len(accumulatedResults.Transactions) > 0 {
-			// No new results arrived and we have pending data — use timer to flush
-			select {
-			case processResults := <-bp.transactionProcessor.ProcessResultChan:
-				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-				accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
-				accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
-				accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
-			case <-bp.forceCommitChan:
-				// Event-driven flush — create block with whatever we have immediately
-				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-				accumulatedResults = nil
-				currentBlockNumber++
-				logger.Info("Created block #%d with %d txs (event-driven flush)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
-			case <-time.After(MaxWaitTime):
-				// Timeout-driven flush — create block with whatever we have after MaxWaitTime (50ms)
-				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-				accumulatedResults = nil
-				currentBlockNumber++
-				logger.Info("Created block #%d with %d txs (timeout flush %v)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()), MaxWaitTime)
-			}
-		} else if !drained {
-			// No pending results and no new data — blocking wait for first result
-			processResults := <-bp.transactionProcessor.ProcessResultChan
-			bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-			accumulatedResults = &processResults
-		}
-	}
-}
+// 		if !drained && accumulatedResults != nil && len(accumulatedResults.Transactions) > 0 {
+// 			// No new results arrived and we have pending data — use timer to flush
+// 			select {
+// 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
+// 				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+// 				accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
+// 				accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
+// 				accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
+// 			case <-bp.forceCommitChan:
+// 				// Event-driven flush — create block with whatever we have immediately
+// 				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// 				accumulatedResults = nil
+// 				currentBlockNumber++
+// 				logger.Info("Created block #%d with %d txs (event-driven flush)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+// 			case <-time.After(MaxWaitTime):
+// 				// Timeout-driven flush — create block with whatever we have after MaxWaitTime (50ms)
+// 				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// 				accumulatedResults = nil
+// 				currentBlockNumber++
+// 				logger.Info("Created block #%d with %d txs (timeout flush %v)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()), MaxWaitTime)
+// 			}
+// 		} else if !drained {
+// 			// No pending results and no new data — blocking wait for first result
+// 			processResults := <-bp.transactionProcessor.ProcessResultChan
+// 			bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+// 			accumulatedResults = &processResults
+// 		}
+// 	}
+// }
 
 // ProcessorPool ensures only one goroutine executes ProcessTransactionsInPool at a time.
 // T2-3: Uses blocking channel send instead of spin-wait to avoid burning CPU when lock is held.
@@ -153,7 +153,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 					// Nếu chưa có genesis timestamp từ Rust consensus, transaction pool
 					// phải chuyển sang trạng thái pending (chờ) để tránh sinh ra StateRoot bị lệch.
 					logger.Error("🚨 [FORK-GUARD] Missing consensus timestamp and last header! Pausing tx processing to prevent state fork.")
-					<-bp.processingLockChan // Giải phóng lock
+					<-bp.processingLockChan     // Giải phóng lock
 					time.Sleep(1 * time.Second) // Pending 1 giây rồi kiểm tra lại
 					continue
 				}
@@ -402,7 +402,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
-	// currentBlockHeader and BlockNumberToHash mappings are safely updated 
+	// currentBlockHeader and BlockNumberToHash mappings are safely updated
 	// synchronously inside CommitBlockState (via commitWorker) under commitMutex
 	// to guarantee no race condition with P2P sync blocks.
 

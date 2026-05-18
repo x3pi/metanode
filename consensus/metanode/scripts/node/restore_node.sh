@@ -1,11 +1,11 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
 #  RESTORE NODE TỪ SNAPSHOT — SEQUENTIAL & FORK-SAFE
-#  Usage: ./restore_node.sh <node_id> [snapshot_name]
+#  Usage: ./restore_node.sh <node_id> [snapshot_name] [source_node_id]
 # ═══════════════════════════════════════════════════════════════
 set -e
 
-NODE_ID="${1:?❌ Usage: $0 <node_id> [snapshot_name]}"
+NODE_ID="${1:?❌ Usage: $0 <node_id> [snapshot_name] [source_node_id]}"
 
 if [[ ! "$NODE_ID" =~ ^[0-4]$ ]]; then
     echo "❌ node_id phải từ 0-4, nhận được: $NODE_ID"
@@ -29,7 +29,13 @@ LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"
 
 # Snapshot source — HTTP server
-SNAP_SERVER="${SNAP_SERVER:-http://localhost:8600}"
+SOURCE_NODE="${3:-0}"
+if [[ ! "$SOURCE_NODE" =~ ^[0-4]$ ]]; then
+    echo "❌ source_node_id phải từ 0-4, nhận được: $SOURCE_NODE"
+    exit 1
+fi
+SNAP_PORT=$((8600 + SOURCE_NODE))
+SNAP_SERVER="${SNAP_SERVER:-http://localhost:$SNAP_PORT}"
 SNAP_API="$SNAP_SERVER/api/snapshots"
 SNAP_FILES_URL="$SNAP_SERVER/files"
 

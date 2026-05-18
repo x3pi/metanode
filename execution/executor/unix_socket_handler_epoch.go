@@ -1105,7 +1105,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	fromBlock := request.GetFromBlock()
 	toBlock := request.GetToBlock()
 
-	logger.Debug("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
+	logger.Info("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
 
 	// Limit batch size to prevent DoS
 	maxBatch := uint64(5000)
@@ -1179,10 +1179,15 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			}
 		}
 		if !found {
-			logger.Debug("📦 [BLOCK SYNC] No blocks found >= %d (lastBlock=%d)", fromBlock, lastBlockNumber)
+			logger.Info("📦 [BLOCK SYNC] ❌ No blocks found >= %d (lastBlock=%d, counter_stale=%v). "+
+				"BlockHashByNumber lookup failed for ALL numbers in range [%d..%d]. "+
+				"Possible cause: blocks not indexed or GC'd.",
+				fromBlock, lastBlockNumber, lastBlockErr == nil && lastBlock != nil && lastBlock.Header().BlockNumber() > storage.GetLastBlockNumber(),
+				fromBlock, lastBlockNumber)
 		}
 	}
-	logger.Debug("📦 [BLOCK SYNC] Using BlockNumber mode: from=%d (start=%d), to=%d (lastBlock=%d)", fromBlock, startBlock, toBlock, lastBlockNumber)
+	logger.Info("📦 [BLOCK SYNC] Using BlockNumber mode: from=%d (start=%d), to=%d (lastBlock=%d, lastHandledCommit=%d, lastHandledEpoch=%d)",
+		fromBlock, startBlock, toBlock, lastBlockNumber, storage.GetLastHandledCommitIndex(), storage.GetLastHandledCommitEpoch())
 
 	var blocks []*pb.BlockData
 
@@ -1288,7 +1293,13 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	}
 
 	count := uint64(len(blocks))
-	logger.Debug("📦 [BLOCK SYNC] Returning %d blocks (from=%d, to=%d)", count, fromBlock, toBlock)
+	if count == 0 {
+		logger.Info("📦 [BLOCK SYNC] ⚠️ Returning 0 blocks (from=%d, to=%d, lastBlock=%d). "+
+			"Check: (1) BlockHashByNumber index missing? (2) Backup data not ready? (3) Epoch/commit filter?",
+			fromBlock, toBlock, lastBlockNumber)
+	} else {
+		logger.Info("📦 [BLOCK SYNC] ✅ Returning %d blocks (from=%d, to=%d)", count, fromBlock, toBlock)
+	}
 
 	return &pb.GetBlocksRangeResponse{
 		Blocks: blocks,
@@ -1661,14 +1672,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					}(),
 					expectedRoot.Hex()[:18]+"...",
 					hasNomtRoot)
-
-				// Verify NOMT handle root matches the trie's cached root
-				if hasNomtRoot && nomtHandleRoot != localRoot {
-					logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT handle root DIFFERS from trie root! "+
-						"handleRoot=%s, trieRoot=%s, block=#%d. "+
-						"This indicates a stale NomtStateTrie — state reads will return wrong data!",
-						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
-				}
 
 				// ═══════════════════════════════════════════════════════════════
 				// FORK-PREVENTION (May 2026): Force trie re-alignment from NOMT
