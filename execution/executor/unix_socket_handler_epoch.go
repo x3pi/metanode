@@ -1369,6 +1369,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 	}()
 
+	var allNomtSessions []trie.NomtSessionToFlush
+
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
 		shouldCommitState := isLastBlock || (i > 0 && i%50 == 0)
@@ -1543,8 +1545,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					}
 				}
 
-				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
+				sessions, applyErr := rh.applyBackupDbBatches(&backupDb)
+				if applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
+				} else {
+					allNomtSessions = append(allNomtSessions, sessions...)
 				}
 
 				// ═══════════════════════════════════════════════════════════════
@@ -1770,6 +1775,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 	}
 
+	// Flush all accumulated NOMT sessions for the chunk
+	if len(allNomtSessions) > 0 {
+		logger.Info("🔧 [NOMT-SYNC] Flushing %d deferred NOMT sessions to disk after chunk completion", len(allNomtSessions))
+		if err := trie.FlushNomtSessions(allNomtSessions); err != nil {
+			logger.Error("❌ [NOMT-SYNC] Failed to flush deferred NOMT sessions: %v", err)
+		}
+	}
+
 	// Commit block number→hash mappings
 	if err := bc.Commit(); err != nil {
 		logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to commit block number mappings: %v", err)
@@ -1883,7 +1896,7 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.
 // This mirrors applyBlockBatch from BlockProcessor but is adapted for the executor package.
 // It writes Account, Block, Code, SmartContract, Receipt, Transaction, StakeState, and TrieDB batches.
-func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error {
+func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]trie.NomtSessionToFlush, error) {
 	// Map batch data fields to their corresponding storages
 	type batchEntry struct {
 		name    string
@@ -1908,7 +1921,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 		if len(entry.data) > 0 {
 			deserialized, err := storage.DeserializeBatch(entry.data)
 			if err != nil {
-				return fmt.Errorf("error deserializing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
+				return nil, fmt.Errorf("error deserializing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
 			}
 			if len(deserialized) > 0 {
 				aggregatedBatches[entry.name] = deserialized
@@ -1930,15 +1943,16 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 	// becomes completely unaware of the state updates, leading to stale
 	// 'nomt_read' queries later (fixing persistent nonce mismatches on restart!!).
 	// ═══════════════════════════════════════════════════════════════════════════
-	if err := trie.ApplyNomtReplicationBatches(aggregatedBatches); err != nil {
-		return fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
+	sessions, err := trie.ApplyNomtReplicationBatches(aggregatedBatches)
+	if err != nil {
+		return nil, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
 	}
 
 	// Now apply the remaining batches (where 'nomt:' prefixed keys were stripped)
 	for _, entry := range entries {
 		if batch, ok := aggregatedBatches[entry.name]; ok && len(batch) > 0 && entry.storage != nil {
 			if err := entry.storage.BatchPut(batch); err != nil {
-				return fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
+				return nil, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
 			}
 		}
 	}
@@ -1946,7 +1960,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 	// Apply TrieDB batches
 	if len(backupDb.TrieDatabaseBatchPut) > 0 {
 		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber); err != nil {
-			return fmt.Errorf("error writing TrieDB batches for block %d: %w", backupDb.BockNumber, err)
+			return nil, fmt.Errorf("error writing TrieDB batches for block %d: %w", backupDb.BockNumber, err)
 		}
 	}
 
@@ -1969,17 +1983,17 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 		if mappingStorage != nil {
 			deserialized, err := storage.DeserializeBatch(backupDb.MapppingBatch)
 			if err != nil {
-				return fmt.Errorf("error deserializing mapping batch for block %d: %w", backupDb.BockNumber, err)
+				return nil, fmt.Errorf("error deserializing mapping batch for block %d: %w", backupDb.BockNumber, err)
 			}
 			if len(deserialized) > 0 {
 				if err := mappingStorage.BatchPut(deserialized); err != nil {
-					return fmt.Errorf("error writing mapping batch for block %d: %w", backupDb.BockNumber, err)
+					return nil, fmt.Errorf("error writing mapping batch for block %d: %w", backupDb.BockNumber, err)
 				}
 			}
 		}
 	}
 
-	return nil
+	return sessions, nil
 }
 
 // applyTrieDbBatches applies TrieDB batch data from a BackUpDb to the local TrieDB LevelDB storages.
