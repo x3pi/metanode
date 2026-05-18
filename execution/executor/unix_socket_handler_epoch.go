@@ -1153,6 +1153,9 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 				}
 				blk = parentBlk
 			}
+			// CRITICAL FIX: Flush the rebuilt mappings from dirtyStorage to LevelDB
+			// Without this, the mappings are lost on restart or cache expiry, causing eth_getBlockByNumber to return null
+			bc.Commit()
 		}
 	}
 
