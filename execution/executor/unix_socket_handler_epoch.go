@@ -1105,7 +1105,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	fromBlock := request.GetFromBlock()
 	toBlock := request.GetToBlock()
 
-	logger.Info("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
+	// logger.Info("📦 [BLOCK SYNC] Handling GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
 
 	// Limit batch size to prevent DoS
 	maxBatch := uint64(5000)
@@ -1179,11 +1179,11 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			}
 		}
 		if !found {
-			logger.Info("📦 [BLOCK SYNC] ❌ No blocks found >= %d (lastBlock=%d, counter_stale=%v). "+
-				"BlockHashByNumber lookup failed for ALL numbers in range [%d..%d]. "+
-				"Possible cause: blocks not indexed or GC'd.",
-				fromBlock, lastBlockNumber, lastBlockErr == nil && lastBlock != nil && lastBlock.Header().BlockNumber() > storage.GetLastBlockNumber(),
-				fromBlock, lastBlockNumber)
+			// logger.Info("📦 [BLOCK SYNC] ❌ No blocks found >= %d (lastBlock=%d, counter_stale=%v). "+
+			// 	"BlockHashByNumber lookup failed for ALL numbers in range [%d..%d]. "+
+			// 	"Possible cause: blocks not indexed or GC'd.",
+			// 	fromBlock, lastBlockNumber, lastBlockErr == nil && lastBlock != nil && lastBlock.Header().BlockNumber() > storage.GetLastBlockNumber(),
+			// 	fromBlock, lastBlockNumber)
 		}
 	}
 	logger.Info("📦 [BLOCK SYNC] Using BlockNumber mode: from=%d (start=%d), to=%d (lastBlock=%d, lastHandledCommit=%d, lastHandledEpoch=%d)",
