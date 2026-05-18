@@ -506,6 +506,25 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		CommitIndex:               commitIndex,
 	}
 
+	// ═══════════════════════════════════════════════════════════════
+	// PIPELINE EPOCH-SAFETY: Update in-memory GEI BEFORE dispatch.
+	//
+	// CRITICAL: With pipeline mode (non-blocking commit), commitWorker
+	// updates GEI asynchronously. But Rust's poll_go_until_synced()
+	// reads GEI via RPC immediately after sending EndOfEpoch.
+	// If GEI hasn't been updated yet → Rust sees stale GEI → epoch
+	// transition race → FORK.
+	//
+	// FIX: Update in-memory atomic GEI here (instant, thread-safe).
+	// commitWorker still persists GEI to disk for crash recovery.
+	// ═══════════════════════════════════════════════════════════════
+	if globalExecIndex > 0 {
+		storage.UpdateLastGlobalExecIndex(globalExecIndex)
+	}
+	if commitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(commitIndex)
+	}
+
 	// Send job to commitWorker.
 	// Block until commitChannel has space (natural backpressure)
 	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
