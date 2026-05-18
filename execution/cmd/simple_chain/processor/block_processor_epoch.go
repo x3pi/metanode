@@ -49,7 +49,14 @@ func (bp *BlockProcessor) updateAndPersistLastHandledCommitIndex(index uint32) {
 
 // updateAndPersistConsensusState atomically persists GEI, CommitIndex, and Epoch to BackupDB
 // to prevent sequence shifting forks during crash recovery.
-func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex uint32) {
+//
+// PIPELINE-SAFETY: `blockEpoch` MUST be passed from the CommitJob's block header
+// (captured at dispatch time). Previously used bp.GetLastBlock().Header().Epoch()
+// which races with EVM thread in pipeline mode — EVM may have already created
+// Block N+1 (new epoch) by the time commitWorker processes Block N (old epoch).
+// Using stale epoch → RecordCommitIndexWithEpoch attributes commitIndex to
+// wrong epoch → crash recovery replays from wrong position → FORK.
+func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex uint32, blockEpoch uint64) {
 	if gei == 0 && commitIndex == 0 {
 		return
 	}
@@ -64,12 +71,8 @@ func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex
 	if commitIndex > 0 {
 		storage.UpdateLastHandledCommitIndex(commitIndex)
 
-		// Determine current epoch from last block
-		var currentEpoch uint64
-		lastBlock := bp.GetLastBlock()
-		if lastBlock != nil {
-			currentEpoch = lastBlock.Header().Epoch()
-		}
+		// PIPELINE-SAFE: Use blockEpoch from CommitJob, not bp.GetLastBlock()
+		currentEpoch := blockEpoch
 
 		storage.UpdateLastHandledCommitEpoch(currentEpoch)
 

@@ -30,7 +30,8 @@ func (bp *BlockProcessor) commitWorker() {
 		if job.Block == nil {
 			logger.Info("🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=%d/%d)", len(bp.commitChannel), cap(bp.commitChannel))
 			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
-				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
+				// FENCE jobs have no block — use epoch 0 (safe: FENCE is only for empty commits)
+				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, 0)
 			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
@@ -112,7 +113,8 @@ func (bp *BlockProcessor) commitWorker() {
 		// Ensures block data is safely on disk before GEI advances,
 		// preventing the Rust consensus from skipping un-saved blocks after a restart.
 		if job.GlobalExecIndex > 0 || job.CommitIndex > 0 {
-			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex)
+			// PIPELINE-SAFE: Use epoch from this block's header, not bp.GetLastBlock()
+			bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, header.Epoch())
 		}
 
 		logger.Debug("[PERF] Block Commit phase 1 (Save DB): %v, block: %v", saveDuration, blockNum)
