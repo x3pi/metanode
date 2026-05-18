@@ -3,11 +3,8 @@
 package processor
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -27,7 +23,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/txsender"
@@ -82,15 +77,9 @@ type CommitJob struct {
 	SerializedBackup []byte
 }
 
-// PersistJob holds pipeline commit results for async LevelDB persistence.
-// Sent to persistWorker via persistChannel after CommitPipeline() completes.
-type PersistJob struct {
-	BlockNum      uint64
-	AccountResult *account_state_db.PipelineCommitResult
-	StakeResult   *stake_state_db.StakePipelineCommitResult
-	ReceiptResult *types.ReceiptPipelineResult
-	DoneSignal    chan struct{}
-}
+// PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs
+// inline in commitToMemoryParallel. WaitForPersistence now drains via
+// commitChannel fence + backupDbWg.Wait() directly.
 
 // AsyncGEIUpdate bundles GEI and CommitIndex updates together to ensure they are persisted atomically
 type AsyncGEIUpdate struct {
@@ -155,9 +144,6 @@ type BlockProcessor struct {
 	// Channel để đảm bảo chỉ một ProcessTransactionsInPool chạy tại một thời điểm
 	processingLockChan chan struct{}
 
-	// Pipeline commit: async persistence of trie nodes to LevelDB
-	persistChannel chan PersistJob
-
 	// Backup DB Coalescing
 	backupDbChannel chan CommitJob
 	backupDbWg      sync.WaitGroup // Track active backupDbWorker tasks
@@ -175,11 +161,23 @@ type BlockProcessor struct {
 	// ExecutionMutex ensures atomic snapshots by pausing the dataChan loop
 	ExecutionMutex sync.RWMutex
 
-	// snapshotGate gates ProcessorPool and GenerateBlock during NOMT snapshots.
-	// Snapshot goroutine holds Write lock; all NOMT-writing goroutines hold Read lock.
-	// This prevents the deadlock where CloseForSnapshot() waits for active NOMT sessions
-	// while ProcessorPool keeps opening new ones.
-	snapshotGate sync.RWMutex
+	// ═══════════════════════════════════════════════════════════════
+	// SNAPSHOT GATE: Channel-based gate pattern (May 2026 optimization)
+	//
+	// Replaced sync.RWMutex with atomic.Bool + broadcast channel.
+	// The RWMutex was used as a pure gate (RLock→RUnlock immediately
+	// with NO critical section), causing unnecessary cache-line
+	// contention (~2 atomic ops per call) on the hot path.
+	//
+	// New pattern:
+	//   Hot path:  atomic.Bool check (zero cost when gate is open)
+	//   Cold path: channel wait (only during snapshot)
+	//   Close:     set flag + swap channel (snapshot goroutine)
+	//   Open:      set flag + close old channel (broadcast wakeup)
+	// ═══════════════════════════════════════════════════════════════
+	snapshotGateOpen atomic.Bool    // true = open (normal), false = closed (snapshot)
+	snapshotGateCh   chan struct{}  // closed = gate re-opened (broadcast wakeup)
+	snapshotGateMu   sync.Mutex    // serializes close/open transitions
 
 	// FORK-SAFETY: Track Rust FFI session GEI baseline.
 	// After DAG-wipe + restart, Rust sends commits with GEIs lower than Go's existing
@@ -187,27 +185,159 @@ type BlockProcessor struct {
 	// new-session commits. Set to true when a GEI backward jump is detected in
 	// processRustEpochData (new Rust session), reset when GEI catches up.
 	rustSessionRestarted atomic.Bool
+
+	// ═══════════════════════════════════════════════════════════════
+	// LAYER-8: DB Write Lock Isolation
+	// Serializes all block write operations (createBlockFromResults)
+	// to prevent concurrent writes from processRustEpochData and
+	// ProcessBlockData (network sync). Without this, two goroutines
+	// could simultaneously modify state DBs causing corrupted roots.
+	// ═══════════════════════════════════════════════════════════════
+	blockWriteMutex sync.Mutex
+
+	// ═══════════════════════════════════════════════════════════════
+	// LAYER-9: Leader Address Persistence
+	// Caches the last known leader address per GEI in BackupDB.
+	// When Rust DAG-wipe occurs, the leader address is lost since
+	// it's computed from DAG state. This cache allows recovery by
+	// reading from Go's persisted storage.
+	// Key: "leader_addr:<gei>" → 20-byte address
+	// ═══════════════════════════════════════════════════════════════
+	leaderAddrCache sync.Map // GEI → common.Address (in-memory LRU)
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
 func (bp *BlockProcessor) PauseExecution() {
+	logger.Info("🔒 [PAUSE] PauseExecution: ENTER — commitChannel=%d/%d, snapshotGate=%v",
+		len(bp.commitChannel), cap(bp.commitChannel), bp.snapshotGateOpen.Load())
+
 	// 1. Gate all NOMT-writing goroutines (ProcessorPool, GenerateBlock).
 	//    This MUST come first — it blocks new NOMT sessions from starting,
 	//    which is required for CloseForSnapshot() to complete without deadlock.
-	bp.snapshotGate.Lock()
+	bp.closeSnapshotGate()
+	logger.Info("🔒 [PAUSE] PauseExecution: snapshotGate CLOSED, waiting for ExecutionMutex.Lock()...")
+
 	// 2. Lock execution mutex (gates network handlers)
-	bp.ExecutionMutex.Lock()
+	// FORK-SAFETY (May 2026): ALWAYS block until lock is acquired.
+	// Proceeding without the lock could cause snapshot to capture inconsistent
+	// state → fork on restore. Prefer pending over fork.
+	//
+	// Diagnostic goroutine logs warnings every 10s if the lock is held for
+	// unusually long, providing visibility without breaking safety invariants.
+	lockAcquired := make(chan struct{})
+	go func() {
+		bp.ExecutionMutex.Lock()
+		close(lockAcquired)
+	}()
+	// Diagnostic: log warnings while waiting, but NEVER proceed without lock
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	waitStart := time.Now()
+	for {
+		select {
+		case <-lockAcquired:
+			// Normal path — lock acquired
+			if d := time.Since(waitStart); d > 1*time.Second {
+				logger.Warn("⚠️ [PAUSE-DIAG] PauseExecution: ExecutionMutex.Lock() took %v (slow but safe)", d)
+			}
+			goto LOCK_ACQUIRED
+		case <-ticker.C:
+			logger.Warn("🔒 [PAUSE-DIAG] PauseExecution: still waiting for ExecutionMutex.Lock() after %v. "+
+				"commitChannel=%d/%d, snapshotGateOpen=%v. "+
+				"Blocking until acquired (thà pending không fork).",
+				time.Since(waitStart),
+				len(bp.commitChannel), cap(bp.commitChannel),
+				bp.snapshotGateOpen.Load())
+		}
+	}
+LOCK_ACQUIRED:
+	logger.Info("🔒 [PAUSE] PauseExecution: ExecutionMutex.Lock() ACQUIRED")
+
 	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
 	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
 	// preventing truncated/partial snapshots where metadata.json has a newer StateRoot than the disk.
+	logger.Info("🔒 [PAUSE] PauseExecution: calling WaitForPersistence...")
 	bp.WaitForPersistence()
+	logger.Info("🔒 [PAUSE] PauseExecution: WaitForPersistence DONE — system fully paused")
 }
 
 // ResumeExecution releases the exclusive execution lock
 func (bp *BlockProcessor) ResumeExecution() {
 	bp.ExecutionMutex.Unlock()
 	// Release snapshotGate AFTER ExecutionMutex to maintain lock ordering
-	bp.snapshotGate.Unlock()
+	bp.openSnapshotGate()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SNAPSHOT GATE METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// initSnapshotGate initializes the gate in the open state.
+// Must be called once during BlockProcessor construction.
+func (bp *BlockProcessor) initSnapshotGate() {
+	bp.snapshotGateOpen.Store(true)
+	bp.snapshotGateCh = make(chan struct{})
+}
+
+// waitSnapshotGate blocks the caller if a snapshot is in progress.
+// On the hot path (gate open), this is a single atomic.Bool load — zero contention.
+// On the cold path (gate closed), blocks until the snapshot completes.
+func (bp *BlockProcessor) waitSnapshotGate() {
+	if bp.snapshotGateOpen.Load() {
+		return // Fast path: gate open, no contention
+	}
+	// Slow path: snapshot in progress.
+	// Read current channel under lock to avoid race with openSnapshotGate.
+	bp.snapshotGateMu.Lock()
+	waitCh := bp.snapshotGateCh
+	bp.snapshotGateMu.Unlock()
+
+	// Double-check: gate may have reopened between atomic check and lock
+	if bp.snapshotGateOpen.Load() {
+		return
+	}
+
+	logger.Debug("⏳ [SNAPSHOT-GATE] Waiting for snapshot to complete...")
+	<-waitCh // Blocks until openSnapshotGate closes this channel
+	logger.Debug("✅ [SNAPSHOT-GATE] Gate reopened, resuming")
+}
+
+// closeSnapshotGate closes the gate, blocking all hot-path callers.
+// Called by PauseExecution before acquiring ExecutionMutex.
+func (bp *BlockProcessor) closeSnapshotGate() {
+	bp.snapshotGateMu.Lock()
+	defer bp.snapshotGateMu.Unlock()
+
+	if !bp.snapshotGateOpen.Load() {
+		logger.Warn("⚠️  [SNAPSHOT-GATE] Gate already closed (double-close?)")
+		return
+	}
+
+	// Create a NEW wait channel for this snapshot cycle.
+	// Any goroutine that enters waitSnapshotGate after this point
+	// will block on this channel.
+	bp.snapshotGateCh = make(chan struct{})
+	bp.snapshotGateOpen.Store(false)
+	logger.Debug("🔒 [SNAPSHOT-GATE] Gate closed")
+}
+
+// openSnapshotGate reopens the gate, unblocking all waiting goroutines.
+// Called by ResumeExecution after releasing ExecutionMutex.
+func (bp *BlockProcessor) openSnapshotGate() {
+	bp.snapshotGateMu.Lock()
+	defer bp.snapshotGateMu.Unlock()
+
+	if bp.snapshotGateOpen.Load() {
+		logger.Warn("⚠️  [SNAPSHOT-GATE] Gate already open (double-open?)")
+		return
+	}
+
+	bp.snapshotGateOpen.Store(true)
+	// Close the channel → broadcast wakeup to ALL blocked goroutines.
+	// This is the Go idiom for a one-shot broadcast: close(ch) unblocks
+	// all <-ch receivers simultaneously.
+	close(bp.snapshotGateCh)
+	logger.Debug("🔓 [SNAPSHOT-GATE] Gate opened")
 }
 
 // GetTxClient returns the txClient for transaction forwarding (used by Go Sub to forward transactions to Rust)
@@ -325,15 +455,16 @@ func NewBlockProcessor(
 		txClient:          txClient,
 		// Khởi tạo channel khóa với buffer size là 1
 		processingLockChan: make(chan struct{}, 1),
-		// Pipeline commit: async persistence channel
-		persistChannel: make(chan PersistJob, 100),
-		backupDbChannel: make(chan CommitJob, 1),
-		geiUpdateChan: make(chan AsyncGEIUpdate, 1),
+		backupDbChannel: make(chan CommitJob, 1000),
+		geiUpdateChan: make(chan AsyncGEIUpdate, 100),
 
-		forceCommitChan:  make(chan struct{}, 8),
+		forceCommitChan:  make(chan struct{}, 64),
 		lastRateCheckTime: time.Now(),
 		lastLazyRefreshTime: time.Now(),
 	}
+
+	// Initialize snapshot gate (must be done before any goroutine starts)
+	bp.initSnapshotGate()
 
 	// Phase 7: Initialize decoupled components
 	bp.txBatchForwarder = NewTxBatchForwarder(
@@ -394,7 +525,6 @@ func NewBlockProcessor(
 	}
 	if serviceType == p_common.ServiceTypeMaster {
 		go bp.commitWorker()
-		go bp.persistWorker()   // Pipeline commit: async LevelDB persistence
 		go bp.backupDbWorker()  // Coalesced BackupDb builder
 		go bp.geiWorker()       // Coalesced GEI updates
 	}
@@ -449,19 +579,15 @@ func NewBlockProcessor(
 			bp.WaitForPersistence()
 		})
 
-		// Wrap the force flush callback to also wait for persistence
+		// Wrap the force flush callback
 		if storageMgr := bp.chainState.GetStorageManager(); storageMgr != nil {
 			snapshotManager.SetForceFlushCallback(func() error {
-				logger.Info("💾 [SNAPSHOT] Waiting for background persistence queue to drain...")
-				bp.WaitForPersistence()
-				logger.Info("💾 [SNAPSHOT] Background persistence finished. Flushing to disk...")
+				logger.Info("💾 [SNAPSHOT] Flushing memory tables to disk...")
 				return storageMgr.FlushAll()
 			})
 
-			// Override checkpoint callback to also wait for persistence
+			// Override checkpoint callback
 			snapshotManager.SetCheckpointCallback(func(destPath string) error {
-				logger.Info("💾 [SNAPSHOT] Waiting for background persistence before checkpoint...")
-				bp.WaitForPersistence()
 				logger.Info("💾 [SNAPSHOT] Creating PebbleDB checkpoints...")
 				if err := storageMgr.CheckpointAll(destPath); err != nil {
 					return err
@@ -497,8 +623,6 @@ func NewBlockProcessor(
 
 // GetLastBlock returns the last processed block
 func (bp *BlockProcessor) GetLastBlock() types.Block {
-	bp.lastBlockMutex.Lock()
-	defer bp.lastBlockMutex.Unlock()
 	value := bp.lastBlock.Load()
 	if value == nil {
 		return nil
@@ -506,7 +630,9 @@ func (bp *BlockProcessor) GetLastBlock() types.Block {
 	return value.(types.Block)
 }
 
-// GetLastBlockMutex exposes the last block mutex for synchronization
+// GetLastBlockMutex is DEPRECATED — no external callers exist.
+// Kept as a no-op to avoid breaking any future code that may reference it.
+// TODO: Remove in next major cleanup.
 func (bp *BlockProcessor) GetLastBlockMutex() *sync.Mutex {
 	return &bp.lastBlockMutex
 }
@@ -529,10 +655,10 @@ func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
 
 // SetLastBlock sets the last processed block
 func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
-	bp.lastBlockMutex.Lock()
-	defer bp.lastBlockMutex.Unlock()
 	if lastBlock != nil {
+		bp.lastBlockMutex.Lock()
 		bp.lastBlock.Store(lastBlock)
+		bp.lastBlockMutex.Unlock()
 	}
 }
 
@@ -659,148 +785,112 @@ func (bp *BlockProcessor) calculateReceiptsRoot(receiptList []types.Receipt) (ty
 // CRITICAL FORK-SAFETY: This ensures all nodes use the same leader address for the same commit
 // Validators are sorted by AuthorityKey (matching Rust committee ordering)
 // Returns the validator's Ethereum address, or falls back to bp.validatorAddress if lookup fails
-func (bp *BlockProcessor) GetLeaderAddressByIndex(leaderAuthorIndex uint32) common.Address {
-	if bp.chainState == nil {
-		logger.Warn("⚠️ [LEADER LOOKUP] chainState is nil, falling back to validatorAddress")
-		return bp.validatorAddress
-	}
-
-	// Get all validators from stake state
-	validators, err := bp.chainState.GetStakeStateDB().GetAllValidators()
-	if err != nil {
-		logger.Warn("⚠️ [LEADER LOOKUP] Failed to get validators: %v, falling back to validatorAddress", err)
-		return bp.validatorAddress
-	}
-
-	if len(validators) == 0 {
-		logger.Warn("⚠️ [LEADER LOOKUP] No validators found, falling back to validatorAddress")
-		return bp.validatorAddress
-	}
-
-	// CRITICAL: Sort validators by AuthorityKey to match Rust committee ordering
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// We MUST decode the Base64 strings to bytes before comparing, because Base64
-	// character values do not monotonically map to the underlying byte values.
-	sort.Slice(validators, func(i, j int) bool {
-		aBytes, _ := base64.StdEncoding.DecodeString(validators[i].AuthorityKey())
-		bBytes, _ := base64.StdEncoding.DecodeString(validators[j].AuthorityKey())
-		return bytes.Compare(aBytes, bBytes) < 0
-	})
-
-	// Filter only active validators (not jailed, has stake > 0)
-	var activeValidators []common.Address
-	for _, v := range validators {
-		if v.IsJailed() {
-			continue
-		}
-		stake := v.TotalStakedAmount()
-		if stake == nil || stake.Sign() <= 0 {
-			continue
-		}
-		activeValidators = append(activeValidators, v.Address())
-	}
-
-	if len(activeValidators) == 0 {
-		// CRITICAL: No active validators is fatal
-		logger.Error("🚨 [FATAL] No active validators found! Cannot determine leader.")
-		logger.Error("🚨 [FATAL] This indicates consensus corruption. System cannot continue safely.")
-		logger.Fatal("FORK-SAFETY: No active validators - cannot determine leader")
-	}
-
-	// Lookup by index with DETERMINISTIC FALLBACK (not node-specific address)
-	if int(leaderAuthorIndex) >= len(activeValidators) {
-		// DETERMINISTIC FALLBACK: Use modulo to wrap index
-		// This ensures ALL nodes pick the SAME fallback leader
-		safeIndex := int(leaderAuthorIndex) % len(activeValidators)
-		logger.Warn("⚠️ [LEADER LOOKUP] leaderAuthorIndex=%d out of range (active=%d), using deterministic fallback index=%d",
-			leaderAuthorIndex, len(activeValidators), safeIndex)
-		return activeValidators[safeIndex]
-	}
-
-	leaderAddr := activeValidators[leaderAuthorIndex]
-	logger.Debug("✅ [LEADER LOOKUP] Found leader address for index %d: %s", leaderAuthorIndex, leaderAddr.Hex())
-	return leaderAddr
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GetLeaderAddress - PRIMARY ENTRY POINT FOR LEADER LOOKUP
-// ═══════════════════════════════════════════════════════════════════════════════
-// RUST-DRIVEN: Rust MUST provide valid 20-byte leader_address
-// Go only falls back to index lookup as SAFETY NET, not primary mechanism
-// ═══════════════════════════════════════════════════════════════════════════════
 func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorIndex uint32) common.Address {
-	// PREFERRED PATH: Rust provided valid 20-byte Ethereum address
-	if len(leaderAddress) == 20 {
-		addr := common.BytesToAddress(leaderAddress)
-		logger.Debug("✅ [LEADER] Using direct address from Rust: %s", addr.Hex())
-		return addr
+	// ═══════════════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY INVARIANT #1: Immutable Leader
+	// Go MUST NEVER calculate the leader address. It must strictly use the address
+	// determined by the Rust consensus layer to prevent forks.
+	// ═══════════════════════════════════════════════════════════════════════════════
+	if len(leaderAddress) != 20 {
+		// ═══════════════════════════════════════════════════════════════
+		// AVAILABILITY FIX: System transactions (EndOfEpoch) do not carry
+		// a leader address because they are consensus-internal messages,
+		// not user blocks with a real leader. Crashing here kills the node
+		// at every epoch boundary.
+		//
+		// Fall back to ZERO ADDRESS (deterministic). This is safe because:
+		//   1. System TX blocks only contain EndOfEpoch markers
+		//   2. All nodes use the same zero address → identical block hash
+		//   3. Zero address is never a valid validator, so it's unambiguous
+		//
+		// CRITICAL: Do NOT use bp.validatorAddress here — each node has a
+		// different validator address, which would produce different block
+		// hashes → FORK.
+		//
+		// For non-system-TX blocks, this would indicate a genuine FFI error
+		// and should be investigated (hence Error, not Warn).
+		// ═══════════════════════════════════════════════════════════════
+		logger.Error("⚠️ [LEADER-FALLBACK] Rust sent leader_address with length %d (expected 20). "+
+			"Using zero address for deterministic fallback. "+
+			"This is expected for EndOfEpoch system transactions.",
+			len(leaderAddress))
+		return common.Address{}
 	}
 
-	// SAFETY NET: Rust did not provide valid address
-	// This should be RARE with fixed Rust code
-	// Use deterministic index lookup as fallback
-	if len(leaderAddress) > 0 {
-		logger.Warn("⚠️ [LEADER] Rust sent leader_address with invalid length %d (expected 20). Using index fallback.", len(leaderAddress))
-	} else {
-		logger.Warn("⚠️ [LEADER] Rust sent EMPTY leader_address. Using index fallback. This may indicate Rust bug!")
-	}
-
-	// Fallback to deterministic index lookup
-	// GetLeaderAddressByIndex now uses modulo for deterministic fallback
-	return bp.GetLeaderAddressByIndex(leaderAuthorIndex)
+	addr := common.BytesToAddress(leaderAddress)
+	logger.Debug("✅ [LEADER] Using deterministic address from Rust Consensus: %s", addr.Hex())
+	return addr
 }
 
 // WaitForPersistence blocks until all pending async persistence jobs are processed.
 // This ensures that memory buffers and trie nodes are fully written out before snapshots.
+//
+// FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
+// If commitWorker is slow/stuck, we wait and log diagnostics.
+// Returning early would allow snapshot to capture incomplete state → FORK on restore.
+// Principle: thà pending không fork.
+//
+// SIMPLIFICATION (May 2026): Removed persistChannel fence — persistWorker was
+// a no-op (PersistAsync runs inline since May 2026). Now only 2 steps:
+//   1. Drain commitWorker via fence job
+//   2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
 func (bp *BlockProcessor) WaitForPersistence() {
-	// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates 
-	// that were forwarded to commitChannel before this call)
-	commitDone := make(chan struct{})
-	bp.commitChannel <- CommitJob{DoneChan: commitDone}
-	<-commitDone
-
-	// 2. Drain Persist Worker (LevelDB trie nodes)
-	persistDone := make(chan struct{})
-	bp.persistChannel <- PersistJob{
-		DoneSignal: persistDone,
-	}
-	<-persistDone
-
-	// 3. Drain Backup Db Worker (Ensure GEI/CommitIndex and block backup data is written)
-	bp.backupDbWg.Wait()
-}
-
-// StopWait safely drains all background worker channels before shutting down.
-// It sequences flush signals through the pipeline (commit -> broadcast -> persist)
-// to guarantee all in-flight blocks are fully processed and saved to disk.
-func (bp *BlockProcessor) StopWait() {
-	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline channels sequentially...")
-
-	timeout := time.After(12 * time.Second)
+	logger.Info("⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=%d/%d", len(bp.commitChannel), cap(bp.commitChannel))
 	done := make(chan struct{})
 
 	go func() {
-		// 1. Drain Commit Worker
+		defer close(done)
+
+		// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates
+		// that were forwarded to commitChannel before this call)
+		logger.Info("⏳ [PERSIST] WaitForPersistence: sending commit fence...")
 		commitDone := make(chan struct{})
 		bp.commitChannel <- CommitJob{DoneChan: commitDone}
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...")
 		<-commitDone
-		logger.Debug("✅ [SHUTDOWN] commitWorker drained.")
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE. Starting backupDbWg.Wait()...")
 
-
-
-		// 3. Drain Persist Worker
-		bp.WaitForPersistence()
-		logger.Debug("✅ [SHUTDOWN] persistWorker drained.")
-
-		close(done)
+		// 2. Wait for background persistence (FlushAll + BackupDb)
+		bp.backupDbWg.Wait()
+		logger.Info("⏳ [PERSIST] WaitForPersistence: backupDbWg.Wait() DONE — all persistence complete")
 	}()
 
-	select {
-	case <-done:
-		logger.Info("✅ [SHUTDOWN] BlockProcessor channels perfectly drained. Safe to flush.")
-	case <-timeout:
-		logger.Warn("⚠️  [SHUTDOWN] Timed out waiting for BlockProcessor channels to drain. Data loss may occur.")
+	// Block indefinitely with diagnostic logging — NEVER return early
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	waitStart := time.Now()
+	for {
+		select {
+		case <-done:
+			// All workers drained successfully
+			if d := time.Since(waitStart); d > 1*time.Second {
+				logger.Warn("⚠️ [PERSIST-DIAG] WaitForPersistence took %v (slow but complete)", d)
+			}
+			return
+		case <-ticker.C:
+			logger.Warn("🔒 [PERSIST-DIAG] WaitForPersistence: still draining after %v. "+
+				"commitChannel=%d/%d. "+
+				"Blocking until complete (thà pending không fork).",
+				time.Since(waitStart),
+				len(bp.commitChannel), cap(bp.commitChannel))
+		}
 	}
+}
+
+// StopWait safely drains all background worker channels before shutting down.
+//
+// SIMPLIFICATION (May 2026): Previously sent a redundant commit fence then called
+// WaitForPersistence (which sent ANOTHER commit fence). Now just calls
+// WaitForPersistence directly — it already drains commitWorker + backupDb.
+//
+// FORK-SAFETY: Blocks indefinitely — NEVER returns early.
+// Returning before drain completes risks data loss → fork on restart.
+// Principle: thà pending không fork.
+func (bp *BlockProcessor) StopWait() {
+	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline...")
+	waitStart := time.Now()
+	bp.WaitForPersistence()
+	logger.Info("✅ [SHUTDOWN] BlockProcessor pipeline drained. Safe to flush. (took %v)", time.Since(waitStart))
 }
 
 // StartBackgroundWorkers initializes the essential background goroutines that persist
@@ -808,8 +898,7 @@ func (bp *BlockProcessor) StopWait() {
 // These MUST be running regardless of Single/Multi node mode.
 func (bp *BlockProcessor) StartBackgroundWorkers() {
 	go bp.commitWorker()
-	go bp.persistWorker()
-	logger.Info("✅ Started background persistence workers (commit, persist)")
+	logger.Info("✅ Started background persistence worker (commit)")
 }
 
 // TxsProcessor2 is an adapter to start the TxBatchForwarder (Phase 7 Refactoring)
@@ -819,4 +908,52 @@ func (bp *BlockProcessor) TxsProcessor2() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYER-9: Leader Address Persistence
+// Persist leader addresses to BackupDB so they survive DAG-wipe + restart.
+// Without this, Rust must recompute leader addresses from DAG state,
+// which is lost after DAG-wipe, causing leader address divergence.
+// ═══════════════════════════════════════════════════════════════════════════
 
+// PersistLeaderAddress saves the leader address for a given GEI to BackupDB.
+// Called after successful block creation to ensure crash-safe persistence.
+func (bp *BlockProcessor) PersistLeaderAddress(gei uint64, addr common.Address) {
+	if addr == (common.Address{}) {
+		return // Don't persist zero addresses
+	}
+	// In-memory cache
+	bp.leaderAddrCache.Store(gei, addr)
+
+	// Persist to BackupDB
+	if bp.storageManager != nil {
+		backupDB := bp.storageManager.GetStorageBackupDb()
+		if backupDB != nil {
+			key := fmt.Sprintf("leader_addr:%d", gei)
+			backupDB.Put(common.BytesToHash([]byte(key)).Bytes(), addr.Bytes())
+		}
+	}
+}
+
+// GetPersistedLeaderAddress retrieves a persisted leader address for DAG-wipe recovery.
+// Returns (address, true) if found, (zero, false) if not persisted.
+func (bp *BlockProcessor) GetPersistedLeaderAddress(gei uint64) (common.Address, bool) {
+	// Check in-memory cache first
+	if cached, ok := bp.leaderAddrCache.Load(gei); ok {
+		return cached.(common.Address), true
+	}
+
+	// Fallback to BackupDB
+	if bp.storageManager != nil {
+		backupDB := bp.storageManager.GetStorageBackupDb()
+		if backupDB != nil {
+			key := fmt.Sprintf("leader_addr:%d", gei)
+			data, err := backupDB.Get(common.BytesToHash([]byte(key)).Bytes())
+			if err == nil && len(data) == 20 {
+				addr := common.BytesToAddress(data)
+				bp.leaderAddrCache.Store(gei, addr) // Promote to cache
+				return addr, true
+			}
+		}
+	}
+	return common.Address{}, false
+}

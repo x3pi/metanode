@@ -112,6 +112,16 @@ pub fn get_go_state_root() -> String {
     String::new()
 }
 
+/// Returns the current number of items in the FFI TX queue.
+pub fn get_ffi_tx_queue_depth() -> usize {
+    if let Ok(guard) = FFI_TX_SENDER.lock() {
+        if let Some(sender) = guard.as_ref() {
+            return sender.max_capacity() - sender.capacity();
+        }
+    }
+    0
+}
+
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
 #[no_mangle]
 pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {
@@ -138,9 +148,19 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
         guard.clone().unwrap()
     };
 
+    // Instrumentation: Queue Saturation metrics
+    let remaining_capacity = sender.capacity();
+    if remaining_capacity < 1000 {
+        tracing::warn!("⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000", remaining_capacity);
+    }
+
     // try_send is non-blocking and synchronous
+    let batch_size = tx_data.len();
     match sender.try_send(tx_data) {
-        Ok(_) => true,
+        Ok(_) => {
+            info!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
+            true
+        }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Channel is full. Go side will see `false` and automatically sleep/retry.
             false

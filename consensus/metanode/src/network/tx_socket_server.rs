@@ -6,7 +6,7 @@ use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -60,18 +60,19 @@ impl TxSocketServer {
             let peer_discovery_addresses_ref = peer_discovery_addresses.clone();
             let tx_recycler_ref = tx_recycler.clone();
 
-            tokio::spawn(async move {
-                Self::process_ffi_batch(
-                    tx_data,
-                    client_ref,
-                    node_ref,
-                    is_transitioning_ref,
-                    peer_rpc_addresses_ref,
-                    peer_discovery_addresses_ref,
-                    tx_recycler_ref,
-                )
-                .await;
-            });
+            // DO NOT spawn a new task. Process sequentially to exert backpressure 
+            // on the bounded FFI channel (capacity 1000). If we spawn, unbounded tasks
+            // pile up during epoch transitions, causing a livelock.
+            Self::process_ffi_batch(
+                tx_data,
+                client_ref,
+                node_ref,
+                is_transitioning_ref,
+                peer_rpc_addresses_ref,
+                peer_discovery_addresses_ref,
+                tx_recycler_ref,
+            )
+            .await;
         }
         Ok(())
     }
@@ -169,7 +170,8 @@ impl TxSocketServer {
             return;
         }
 
-        debug!("✅ [FFI TX FLOW] Zero-copy extracted {} TXs", individual_txs.len());
+        info!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
+            individual_txs.len(), data_len);
         let transactions_to_submit = individual_txs;
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
@@ -185,8 +187,20 @@ impl TxSocketServer {
                     if attempt % 60 == 0 {
                         warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    continue;
+                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
+                    // flag is never cleared (same pattern as CommitProcessor).
+                    // After 60s, force-clear and proceed to submission.
+                    if attempt >= 60 {
+                        error!(
+                            "🚨 [FFI TX FLOW] is_transitioning stuck for {}s! Force-clearing to prevent permanent TX deadlock.",
+                            attempt
+                        );
+                        transitioning.store(false, Ordering::SeqCst);
+                        // Fall through to submission
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        continue;
+                    }
                 }
             }
 
@@ -215,7 +229,7 @@ impl TxSocketServer {
                                 drop(node_guard);
                                 attempt += 1;
                                 if attempt % 60 == 0 {
-                                    warn!("⏳ [FFI TX FLOW] Node still catching up. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
+                                    tracing::warn!("⚠️ [FFI TX FLOW] [DEADLOCK-MONITOR] Backpressure: Rust FFI transaction channel is full (50K capacity)!");
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                                 continue;
@@ -256,19 +270,50 @@ impl TxSocketServer {
                 // let chunk_len = chunk_vec.len();
                 
                 let epoch_pending_ptr = if let Some(ref node_mutex) = node {
-                    let node_guard = node_mutex.lock().await;
-                    Some(node_guard.epoch_pending_transactions.clone())
+                    let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_mutex.lock()).await;
+                    match lock_result {
+                        Ok(node_guard) => Some(node_guard.epoch_pending_transactions.clone()),
+                        Err(_) => {
+                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending_ptr extraction due to node lock timeout");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
 
                 if let Some(epoch_pending_mutex) = epoch_pending_ptr {
-                    let mut epoch_pending = epoch_pending_mutex.lock().await;
-                    epoch_pending.extend(chunk_vec.clone());
+                    match tokio::time::timeout(std::time::Duration::from_millis(200), epoch_pending_mutex.lock()).await {
+                        Ok(mut epoch_pending) => {
+                            for tx in chunk_vec.clone() {
+                                let hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(&tx);
+                                epoch_pending.insert(hash, tx);
+                            }
+                            
+                            if epoch_pending.len() % 5000 == 0 && epoch_pending.len() > 0 {
+                                tracing::debug!(
+                                    "🗑️ [DEBUG-RÁC] epoch_pending_transactions đang chứa {} giao dịch đang chờ commit",
+                                    epoch_pending.len()
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending insertion due to mutex lock timeout");
+                        }
+                    }
                 }
 
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
+                    
+                    // DEBUG LOG: Hiển thị lượng rác đang bị kẹt trong TxRecycler
+                    let (pending, _, _, _) = recycler.stats().await;
+                    if pending % 5000 == 0 || pending > 50000 {
+                        tracing::warn!(
+                            "🗑️ [DEBUG-RÁC] TxRecycler đang giữ {} giao dịch chưa được confirm_committed!",
+                            pending
+                        );
+                    }
                 }
 
                 match current_client.submit_no_wait(chunk_vec).await {
@@ -299,6 +344,7 @@ impl TxSocketServer {
             }
 
             if all_succeeded {
+                info!("✅ [TX-FLOW-TRACE] ▶ PHASE 1.5 DONE: All {} TXs submitted to consensus DAG core", total_tx_count);
                 return; // Everything submitted cleanly
             }
 

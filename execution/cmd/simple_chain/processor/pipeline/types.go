@@ -9,10 +9,8 @@ package pipeline
 import (
 	"sync"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -59,14 +57,6 @@ type CommitJob struct {
 
 
 
-// PersistJob holds pipeline commit results for async LevelDB persistence.
-// Sent to persistWorker via persistChannel after CommitPipeline() completes.
-type PersistJob struct {
-	BlockNum      uint64
-	AccountResult *account_state_db.PipelineCommitResult
-	StakeResult   *stake_state_db.StakePipelineCommitResult
-	ReceiptResult *types.ReceiptPipelineResult
-	DoneSignal    chan struct{}
-}
-
-
+// PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs
+// inline in commitToMemoryParallel. WaitForPersistence drains via commitChannel
+// fence + backupDbWg.Wait() directly.

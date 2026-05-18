@@ -66,18 +66,6 @@ pub async fn dispatch_commit(
     // Same immutability pattern as global_exec_index — set once, never recalculated.
     let leader_address = subdag.leader_address.clone();
 
-    if total_transactions > 0 || has_system_tx {
-        trace!(
-                "🔷 [batch_id={}] [Global Index: {}] Executing commit #{} (epoch={}): {} blocks, {} txs, has_system_tx={}",
-                batch_id, global_exec_index, commit_index, epoch, subdag.blocks.len(), total_transactions, has_system_tx
-            );
-    } else {
-        // Still log empty commits but as trace/debug to avoid spam
-        tracing::trace!(
-                "⏭️ [batch_id={}] [TX FLOW] Forwarding empty commit to Go Master (for sequence sync): global_exec_index={}, commit_index={}",
-                batch_id, global_exec_index, commit_index
-            );
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // GEI GUARD: Skip commits that Go has already executed.
@@ -143,17 +131,26 @@ pub async fn dispatch_commit(
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
 
-                    // Fix 4 Revert: Use direct indefinite wait (no 90s timeout) to enforce backpressure
-                    let geis_consumed = match response_rx.await {
-                        Ok(c) => c,
-                        Err(_) => {
-                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
-                            anyhow::bail!("DeliveryManager response channel closed.");
-                        }
-                    };
+                    // PIPELINE FIX: We return expected_fragments immediately to unblock CommitProcessor.
+                    // This eliminates the IPC serialization bottleneck. Backpressure is now handled
+                    // natively by the bounded capacity of `delivery_sender` (100 commits).
+                    // With FIX-1A (honest FFI wait), BlockDeliveryManager blocks per block,
+                    // so this buffer fills when Go is ~100 blocks behind → natural throttle.
+                    let geis_consumed = expected_fragments;
 
-                    trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
-                                batch_id, global_exec_index, commit_index, geis_consumed);
+                    tokio::spawn(async move {
+                        if let Err(_) = response_rx.await {
+                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                        }
+                    });
+
+                    info!(
+                        "📤 [TX-FLOW-TRACE] ▶ PHASE 3.2→3.3: Commit sent to BlockDeliveryManager | \
+                         batch_id={}, commit_index={}, gei={}, txs={}, fragments={}, \
+                         leader_addr_len={}, has_system_tx={}",
+                        batch_id, commit_index, global_exec_index, total_transactions,
+                        geis_consumed, leader_address.len(), has_system_tx
+                    );
 
                     // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.
 
@@ -209,11 +206,18 @@ pub async fn dispatch_commit(
                                             if let Ok(guard) = node_arc_clone.try_lock() {
                                                 let mut hashes_guard =
                                                     guard.committed_transaction_hashes.lock().await;
+                                                let mut epoch_pending = 
+                                                    guard.epoch_pending_transactions.lock().await;
                                                 let mut count = 0;
                                                 for block_txs in &subdag_blocks {
                                                     for tx_data in block_txs {
                                                         let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
-                                                        hashes_guard.insert(tx_hash);
+                                                        hashes_guard.insert(tx_hash.clone());
+                                                        
+                                                        // O(1) garbage collection of pending txs
+                                                        let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx_data);
+                                                        epoch_pending.remove(&raw_hash);
+                                                        
                                                         count += 1;
                                                     }
                                                 }
@@ -233,6 +237,7 @@ pub async fn dispatch_commit(
                             }
                         };
                         let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
+                        let mut epoch_pending = node_guard.epoch_pending_transactions.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
@@ -243,6 +248,11 @@ pub async fn dispatch_commit(
                                         tx.data(),
                                     );
                                 hashes_guard.insert(tx_hash.clone());
+                                
+                                // O(1) garbage collection of pending txs
+                                let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx.data());
+                                epoch_pending.remove(&raw_hash);
+                                
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
                             }

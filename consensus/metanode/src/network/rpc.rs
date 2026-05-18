@@ -46,7 +46,7 @@ impl RpcServer {
         let semaphore = Arc::new(Semaphore::new(500));
 
         loop {
-            info!("🔌 [TX FLOW] Waiting for new connection on RPC server...");
+            debug!("🔌 [TX FLOW] Waiting for new connection on RPC server...");
             let (mut stream, peer_addr) = match listener.accept().await {
                 Ok((s, addr)) => (s, addr),
                 Err(e) => {
@@ -54,7 +54,7 @@ impl RpcServer {
                     continue;
                 }
             };
-            info!(
+            debug!(
                 "🔌 [TX FLOW] New connection accepted from {:?} (local={:?})",
                 peer_addr,
                 stream.local_addr().ok()
@@ -70,7 +70,7 @@ impl RpcServer {
             let permit = semaphore.clone().acquire_owned().await;
 
             tokio::spawn(async move {
-                info!(
+                debug!(
                     "📥 [TX FLOW] Spawned handler for connection from {:?}",
                     peer_addr
                 );
@@ -492,7 +492,7 @@ impl RpcServer {
                         } else {
                             hex::encode(&tx.from_address)
                         };
-                        info!(
+                        debug!(
                             "   ✅ TX[{}] included: hash={}, from={}, nonce={}, block_index={}",
                             i,
                             tx_hash,
@@ -501,7 +501,7 @@ impl RpcServer {
                             index
                         );
                     } else {
-                        info!(
+                        debug!(
                             "   ✅ TX[{}] included: hash={}, block_index={}",
                             i, tx_hash, index
                         );
@@ -631,7 +631,7 @@ impl RpcServer {
             }
         }
 
-        info!(
+        debug!(
             "📤 [TX FLOW] Sent binary response: success={}, message={}, message_len={}",
             success, message, message_len
         );

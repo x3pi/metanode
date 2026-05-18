@@ -527,11 +527,10 @@ func processSingleGroup(
 		if tx.IsDeployContract() {
 			toAddress = common.Address{}
 		}
-		// ❗ Nếu sender đã có lỗi trước đó, tạo receipt lỗi cho tx này và bài bỏ
+		// ❗ Nếu sender đã có lỗi trước đó, bài bỏ tx này mà không đưa vào block.
+		// FORK-SAFETY & DATA INTEGRITY: Do NOT include skipped TXs in the block.
+		// Including them without incrementing their nonce violates blockchain invariants.
 		if failedSenders[tx.FromAddress()] {
-			rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("skipped due to previous transaction failure"))
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -556,13 +555,16 @@ func processSingleGroup(
 		}
 		if tx.GetNonce() != as.Nonce() {
 			err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
-			// CRITICAL FIX: Downgrade from Error to Debug to prevent massive lock contention
-			// when a client (e.g. tps_blast) resends duplicated batches under heavy load.
-			logger.Debug("❌ [NONCE-REJECT] %v for tx %s", err, tx.Hash().Hex())
-			rcp := createErrorReceipt(tx, toAddress, err)
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
+			// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
+			logger.Warn("❌ [NONCE-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", err, tx.Hash().Hex(), tx.FromAddress().Hex())
+
+			// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
+			// Including them causes duplicate TX hashes across multiple blocks when a client
+			// resends a batch, inflating the block's TX count and bloating the ledger.
 			failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+			if enableTrace && txSpan != nil {
+				txSpan.End()
+			}
 			continue
 		}
 		var rcp types.Receipt
@@ -572,7 +574,13 @@ func processSingleGroup(
 				logger.Error("Lỗi khi tạo ValidatorHandler: %v", err)
 				rcp = createErrorReceipt(tx, toAddress, err)
 				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
+	
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 			rcp, exRs, txFailed := validatorHandler.HandleTransaction(txCtx, chainState, tx, enableTrace, blockTime)
@@ -583,6 +591,11 @@ func processSingleGroup(
 			}
 			if txFailed {
 				failedSenders[tx.FromAddress()] = true
+
+			}
+
+			if enableTrace && txSpan != nil {
+				txSpan.End()
 			}
 			continue // Chuyển sang transaction tiếp theo
 		}
@@ -615,6 +628,7 @@ func processSingleGroup(
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
 					failedSenders[tx.FromAddress()] = true
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -642,7 +656,9 @@ func processSingleGroup(
 				logger.Error("Lỗi khi tạo CrossChainHandler: %v", err)
 				rcp = createErrorReceipt(tx, toAddress, err)
 				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}
@@ -657,6 +673,7 @@ func processSingleGroup(
 			}
 			if txFailed {
 				failedSenders[tx.FromAddress()] = true
+
 			}
 			if enableTrace && txSpan != nil {
 				txSpan.End()
@@ -672,6 +689,10 @@ func processSingleGroup(
 				gRs.Receipts = append(gRs.Receipts, rcp)
 				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 
@@ -717,6 +738,7 @@ func processSingleGroup(
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
 					logger.Error("SetPublicKeyBls failed for tx %s: %v", tx.Hash().Hex(), setErr)
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -764,6 +786,7 @@ func processSingleGroup(
 					rcp := createErrorReceipt(tx, toAddress, err)
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -798,6 +821,10 @@ func processSingleGroup(
 				gRs.Transactions = append(gRs.Transactions, tx)
 				logger.Error("Transaction failed for tx %s: %v", tx.Hash().Hex(), err)
 				failedSenders[tx.FromAddress()] = true
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 
@@ -822,6 +849,10 @@ func processSingleGroup(
 				gRs.Transactions = append(gRs.Transactions, tx)
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 			rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
@@ -864,6 +895,11 @@ func processSingleGroup(
 			gRs.Transactions = append(gRs.Transactions, tx)
 			logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 			failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+
+	
+			if enableTrace && txSpan != nil {
+				txSpan.End()
+			}
 			continue
 		}
 		logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)

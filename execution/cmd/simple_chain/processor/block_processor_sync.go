@@ -35,6 +35,33 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	commitIndex := epochData.GetCommitIndex()
 	epochNum := epochData.GetEpoch()
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAYER-4: Idempotent Execution Guard
+	// Check if this commit was already processed BEFORE any state mutation.
+	// This prevents GEI drift when Rust retries the same commit after
+	// timeout/crash. Must check before epoch transition logic to avoid
+	// double-resetting commitIndex.
+	// ═══════════════════════════════════════════════════════════════════════════
+	geiAuthLayer4 := GetGEIAuthority()
+	if geiAuthLayer4.ShouldSkipCommit(commitIndex, epochNum) {
+		logger.Info("🛡️ [LAYER-4] Idempotent guard triggered: returning early for commit=%d epoch=%d GEI=%d",
+			commitIndex, epochNum, globalExecIndex)
+		return
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAYER-1: Protobuf Strict Boundary — Go-side validation
+	// Reject blocks with invalid LeaderAddress. Valid values:
+	//   - Exactly 20 bytes (valid Ethereum address from Rust)
+	//   - Empty (0 bytes) — allowed for backward compatibility, uses index fallback
+	// Any other length indicates corrupted FFI data → REJECT to prevent fork.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if leaderAddrLen := len(epochData.LeaderAddress); leaderAddrLen != 20 && leaderAddrLen != 0 {
+		logger.Error("🛡️ [LAYER-1] REJECT: LeaderAddress must be 20 bytes or empty, got %d bytes (commit=%d, GEI=%d, epoch=%d). Dropping block to prevent fork.",
+			leaderAddrLen, commitIndex, globalExecIndex, epochNum)
+		return
+	}
+
 	// Compute the next GEI from Go's persisted state
 	lastPersistedGEI := storage.GetLastGlobalExecIndex()
 	if lastPersistedGEI >= *nextExpectedGlobalExecIndex && lastPersistedGEI > 0 {
@@ -131,7 +158,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
-	if totalTxsQuick == 0 {
+	if totalTxsQuick == 0 && len(epochData.GetSystemTransactions()) == 0 {
 		// ORDERING: Must still validate sequential order
 		if globalExecIndex < *nextExpectedGlobalExecIndex {
 			// Old/duplicate — skip silently
@@ -681,6 +708,33 @@ PROCESS_BLOCK:
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FORENSIC COMMIT FINGERPRINT (Phase 3 — Fork Diagnosis)
+	//
+	// Log the complete identity of every commit dispatched from Rust.
+	// This enables immediate fork diagnosis by comparing logs across nodes
+	// without needing to correlate Rust consensus logs.
+	// ═══════════════════════════════════════════════════════════════════════════
+	{
+		leaderBytes := epochData.GetLeaderAddress()
+		commitDigest := epochData.GetCommitDigest()
+		leaderHex := fmt.Sprintf("0x%x", leaderBytes)
+		if len(leaderBytes) == 20 {
+			leaderHex = fmt.Sprintf("0x%X", leaderBytes)
+		}
+		digestHex := "nil"
+		if len(commitDigest) > 0 {
+			if len(commitDigest) >= 4 {
+				digestHex = fmt.Sprintf("0x%x", commitDigest[:4])
+			} else {
+				digestHex = fmt.Sprintf("0x%x", commitDigest)
+			}
+		}
+		logger.Info("🔍 [COMMIT-FINGERPRINT] block=#%d GEI=%d epoch=%d commitIdx=%d leader=%s digest=%s txs=%d",
+			*currentBlockNumber, globalExecIndex, epochNum, commitIndex,
+			leaderHex, digestHex, len(allTransactions))
+	}
+
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
@@ -745,17 +799,29 @@ PROCESS_BLOCK:
 	// FORK-SAFETY: Deduplication and sorting are now handled consistently by Rust in block_sending.rs
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// FORK-SAFETY FIX 2: Invalidate all in-memory state caches before executing.
+	// FORK-SAFETY FIX 2 REVISED (May 2026): Cache invalidation REMOVED.
 	//
-	// The async commit pipeline (CommitPipeline → PersistAsync) for the PREVIOUS
-	// block may leave stale entries in loadedAccounts, SmartContractDB caches, etc.
-	// Even with synchronous DoneChan (Fix 1), CommitBlockState does NOT clear the
-	// in-memory caches — it only persists to DB. If a cached account state object
-	// from Block N-1 is still in loadedAccounts, Block N's ProcessTransactions will
-	// read the cached (pre-commit) version instead of the freshly-committed version.
-	// This invalidation forces all reads to go through the committed trie.
+	// ORIGINAL PURPOSE: When PersistAsync ran asynchronously (pre-May 2026),
+	// Block N+1 could start reading from loadedAccounts/lruCache while Block N's
+	// trie swap hadn't completed — causing stale reads and state divergence.
+	//
+	// WHY SAFE TO REMOVE: Since May 2026, PersistAsync runs INLINE in
+	// commitToMemoryParallel, and DoneChan blocks until PersistAsync completes.
+	// This guarantees:
+	//   1. Trie swap is done before createBlockFromResults returns
+	//   2. persistReady is closed before DoneChan signals
+	//   3. IntermediateRoot(true) already clears dirtyAccounts + loadedAccounts
+	//      on every block (account_state_db_commit.go lines 1022-1038)
+	//   4. IntermediateRoot(true) waits on persistReady before any trie access
+	//
+	// PERFORMANCE IMPACT OF REMOVAL: InvalidateAllState() was destroying the
+	// 200K-entry lruCache on EVERY block, forcing ~20,000 NOMT FFI reads per
+	// block (~100-200ms). Over 1500+ blocks, the repeated map alloc/dealloc
+	// caused progressive GC pressure → throughput degradation → stall at ~1672.
+	//
+	// C++ State::instances is cleared by mvm.CallClearAllStateInstances() in
+	// the appropriate places (LAZY REFRESH, epoch transition).
 	// ═══════════════════════════════════════════════════════════════════════════
-	bp.chainState.InvalidateAllState()
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// FORK-PREVENTION SAFETY NET (May 2026): Verify NOMT handle root matches
@@ -787,7 +853,63 @@ PROCESS_BLOCK:
 		}
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// TIMESTAMP REGRESSION GUARD (May 2026): Reject stale DAG commits BEFORE
+	// executing any transactions. This MUST run before ProcessTransactions()
+	// because EVM execution mutates in-memory state (account balances, nonces,
+	// storage). If we detect regression after execution, the state is already
+	// corrupted and cannot be cleanly reverted.
+	//
+	// ROOT CAUSE: When Rust's local committer evaluates a sparse/incomplete DAG
+	// (e.g., after snapshot restore or during network partition), it may decide
+	// a different leader whose commit has an OLD timestamp. This produces a block
+	// with timestamp BEHIND the parent → different block hash → FORK.
+	//
+	// Observed: Block 2718 fork — m2's timestamp was 122 seconds behind the
+	// cluster (leader 0xb014 vs cluster's 0xCCc7, timestamp 0x6a04b115 vs
+	// 0x6a04b18f). Different leader = different TX set = different txRoot.
+	//
+	// SAFETY: Legitimate blocks NEVER regress >30s because Rust's
+	// calculate_commit_timestamp() uses median stake-weighted algorithm which
+	// always produces monotonically increasing timestamps under normal conditions.
+	// ═══════════════════════════════════════════════════════════════════════════
 	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
+	if lastBlock != nil && blockTimeSec > 0 {
+		parentTs := lastBlock.Header().TimeStamp()
+		if parentTs > 0 && blockTimeSec < parentTs {
+			regression := parentTs - blockTimeSec
+			if regression > 30 {
+				leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
+				logger.Error("🚨 [TIMESTAMP-REGRESSION] DROPPING commit BEFORE execution: "+
+					"block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
+					"Stale Rust commit from sparse DAG local committer "+
+					"(leader=%s, GEI=%d, epoch=%d, txs=%d). "+
+					"Correct block will arrive via CertifiedCommit.",
+					*currentBlockNumber, blockTimeSec, regression,
+					lastBlock.Header().BlockNumber(), parentTs,
+					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
+
+				// Update GEI so processor advances past this commit
+				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
+				// NOTE (May 2026): InvalidateAllState() REMOVED here.
+				// No EVM mutations happened (commit dropped BEFORE execution),
+				// so state caches are still valid. Invalidating would destroy
+				// the 200k-entry LRU cache, causing ~20k NOMT FFI reads on
+				// the next block and contributing to pipeline stalls.
+
+				// Process any pending blocks
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+				return
+			}
+		}
+	}
+
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
 	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, preloadChan)
@@ -809,8 +931,10 @@ PROCESS_BLOCK:
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
 			
-			// Invalidate state to ensure next block reads fresh from NOMT
-			bp.chainState.InvalidateAllState()
+			// NOTE (May 2026): InvalidateAllState() REMOVED here.
+			// All transactions were duplicates — no state mutation occurred.
+			// IntermediateRoot(true) already cleared dirty accounts during
+			// ProcessTransactions. Invalidating would thrash the LRU cache.
 			
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex)
 			
@@ -838,7 +962,7 @@ PROCESS_BLOCK:
 
 	// ⚠️ VALIDATION: Check if any transaction is missing its receipt
 	if len(accumulatedResults.Receipts) != len(allTransactions) {
-		logger.Error("❌ [RECEIPT VALIDATION] MISMATCH: block #%d has %d transactions but only %d receipts!",
+		logger.Warn("⚠️ [RECEIPT VALIDATION] MISMATCH: block #%d has %d transactions but only %d receipts! (Likely due to duplicate/stale TXs being dropped)",
 			*currentBlockNumber, len(allTransactions), len(accumulatedResults.Receipts))
 
 		// Build map of existing receipts
@@ -853,11 +977,11 @@ PROCESS_BLOCK:
 			txHash := tx.Hash()
 			if !receiptMap[txHash] {
 				missingReceipts = append(missingReceipts, txHash.Hex())
-				logger.Error("   ❌ [MISSING RECEIPT] Transaction without receipt: hash=%s, from=%s, to=%s, nonce=%d",
+				logger.Warn("   ⚠️ [DROPPED TX] Transaction bị Node loại bỏ (do lỗi Nonce/trùng lặp): hash=%s, from=%s, to=%s, tx.Nonce=%d",
 					txHash.Hex(), tx.FromAddress().Hex(), tx.ToAddress().Hex(), tx.GetNonce())
 			}
 		}
-		logger.Error("   📋 [MISSING RECEIPT] Total missing receipts: %d. Missing tx hashes: %v",
+		logger.Warn("   📋 [DROPPED TX] Total dropped txs: %d. Hashes: %v",
 			len(missingReceipts), missingReceipts)
 	} else {
 		logger.Debug("✅ [RECEIPT VALIDATION] All %d transactions have receipts for block #%d",
@@ -878,9 +1002,25 @@ PROCESS_BLOCK:
 	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// REVERT GATE HANDLER: If createBlockFromResults returned nil, the draft
+	// block was discarded by verifyDraftBlock (local corruption detected).
+	// Do NOT advance GEI — Rust will retry this commit on the next cycle.
+	// State has been reset to the parent block by revertDraftBlock.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if newBlock == nil {
+		logger.Error("🔄 [REVERT] Block #%d (GEI=%d) was REVERTED. "+
+			"State reset to parent. Waiting for Rust retry or CertifiedCommit.",
+			*currentBlockNumber, globalExecIndex)
+		return
+	}
+
 	blockHash := newBlock.Header().Hash().Hex()
 	logger.Debug("⏱️  [PERF] createBlockFromResults: %d txs in %v for block #%d (hash=%s, gei=%d)",
 		len(newBlock.Transactions()), createBlockDuration, *currentBlockNumber, blockHash[:16]+"...", globalExecIndex)
+
+	// LAYER-9: Persist leader address for DAG-wipe recovery
+	bp.PersistLeaderAddress(globalExecIndex, leaderAddr)
 
 	// Save SystemTransactions if present
 	sysTxs := epochData.GetSystemTransactions()

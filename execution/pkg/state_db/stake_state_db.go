@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -163,7 +164,7 @@ func (db *StakeStateDB) CreateRegister(
 ) error {
 	// Backward compatible: use name as hostname, pubKeyBls as authorityKey
 	return db.CreateRegisterWithKeys(address, name, description, website, image, commissionRate, minSelfDelegation,
-		primaryAddress, workerAddress, p2pAddress, pubKeyBls, pubKeySecp, pubKeySecp, name, pubKeyBls)
+		primaryAddress, workerAddress, p2pAddress, pubKeyBls, []byte(pubKeySecp), []byte(pubKeySecp), name, []byte(pubKeyBls))
 }
 
 // CreateRegisterWithKeys registers a validator with separate protocol_key and network_key
@@ -180,10 +181,10 @@ func (db *StakeStateDB) CreateRegisterWithKeys(
 	workerAddress string,
 	p2pAddress string,
 	pubKeyBls string,
-	protocolKey string,
-	networkKey string,
+	protocolKey []byte,
+	networkKey []byte,
 	hostname string,
-	authorityKey string,
+	authorityKey []byte,
 ) error {
 	if db.lockedFlag.Load() {
 		return errors.New("CreateRegister: db is locked")
@@ -565,15 +566,25 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		// ═══════════════════════════════════════════════════════════════
 
 	} else {
+		// ═══════════════════════════════════════════════════════════════
+		// CRITICAL FORK-SAFETY: When called from Commit (lockProcess=false),
+		// DO NOT iterate or process dirtyValidators at all.
+		//
+		// IntermediateRoot(true) already:
+		// 1. Applied ALL dirty validators to the in-memory trie
+		// 2. Cleared dirtyValidators immediately after
+		// 3. Computed and cached the correct hash
+		// ═══════════════════════════════════════════════════════════════
 		if !db.lockedFlag.Load() {
 			err := errors.New("IntermediateRoot (lockProcess=false): db.lockedFlag is not locked")
 			logger.Error(err.Error())
 			return common.Hash{}, err
 		}
 		defer func() {
-			db.dirtyValidators.Clear()
 			db.lockedFlag.Store(false)
 		}()
+		
+		return db.trie.Hash(), nil
 	}
 
 	if db.trie == nil {
@@ -581,11 +592,10 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 	}
 
 	var (
-		updateErr      error
-		hasChanges     bool = false
-		batchKeys      [][]byte
-		batchValues    [][]byte
-		batchOldValues [][]byte
+		updateErr   error
+		hasChanges  bool = false
+		batchKeys   [][]byte
+		batchValues [][]byte
 	)
 
 	var dirtyAddresses []common.Address
@@ -626,21 +636,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 
 		batchKeys = append(batchKeys, address.Bytes())
 		batchValues = append(batchValues, bytesToStore)
-
-		// CRITICAL FIX: NOMT requires the OLD value to correctly compute the Merkle root.
-		// If we pass nil for oldValues, NOMT treats all updates as NEW leaf insertions,
-		// which corrupts the internal tree and results in `0x0` or wrong hashes!
-		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
-			var oldData []byte
-			if db.trie != nil {
-				oldData, _ = db.trie.Get(address.Bytes())
-			}
-			if len(oldData) == 0 {
-				batchOldValues = append(batchOldValues, nil)
-			} else {
-				batchOldValues = append(batchOldValues, oldData)
-			}
-		}
 	}
 
 	if updateErr != nil {
@@ -651,15 +646,28 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		isNOMT := false
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			isNOMT = true
-			<-db.persistReady // For NOMT, we MUST wait for the C++ CommitPayload to complete
-			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
-				updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
+			waitStart := time.Now()
+			<-db.persistReady // MUST wait for trie swap before any trie reads
+			if d := time.Since(waitStart); d > 50*time.Millisecond {
+				logger.Warn("🔥 [SATURATION] StakeStateDB (NOMT): IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+			}
+
+			// 100% FORK-SAFETY GUARANTEE: Read old values directly from NOMT FFI.
+			// No caching. No race conditions. This ensures that NOMT is strictly
+			// a lock-free structure that derives correctly from its own C++ state,
+			// preventing `0x0` root hashes.
+			if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
+				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
 		} 
 		
 		if !isNOMT {
 			// For MPT, we MUST wait for the old trie pointer swap to complete
+			waitStart := time.Now()
 			<-db.persistReady
+			if d := time.Since(waitStart); d > 50*time.Millisecond {
+				logger.Warn("🔥 [SATURATION] StakeStateDB (MPT): IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+			}
 			for i, key := range batchKeys {
 				if err := db.trie.Update(key, batchValues[i]); err != nil {
 					updateErr = fmt.Errorf("trie update error for key %x: %w", key, err)
@@ -668,6 +676,12 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			}
 		}
 	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// CRITICAL FORK-SAFETY: Clear dirtyValidators IMMEDIATELY after
+	// applying to the trie.
+	// ═══════════════════════════════════════════════════════════════
+	db.dirtyValidators.Clear()
 
 	if updateErr != nil {
 		return common.Hash{}, updateErr

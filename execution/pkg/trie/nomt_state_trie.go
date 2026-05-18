@@ -502,29 +502,60 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 }
 
 // Update sets the value for a key. Buffers in dirty map — O(1).
-// Uses writerMu (fast, no FFI under lock). Readers are NEVER blocked.
+// PERFORMANCE FIX (May 2026): Old-value FFI read moved OUTSIDE writerMu.Lock().
+// Previously, handle.Read() (50-200µs FFI call) was called under writer lock,
+// blocking all concurrent Get() calls from 64 server workers. Now pre-fetched
+// using lock-free readView + thread-safe handle.Read(), matching BatchUpdate() pattern.
 func (n *NomtStateTrie) Update(key, value []byte) error {
 	hexKey := hex.EncodeToString(key)
 	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 
-	n.writerMu.Lock()
-	// Load old value for replication tracking (only once per key per block)
-	if !n.wOldLoaded[hexKey] {
-		// Check committing from readView (lock-free read of immutable map)
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 1: PRE-FETCH old value OUTSIDE writerMu (NO lock contention)
+	// handle.Read() is thread-safe. readView is lock-free atomic load (~1ns).
+	// ═══════════════════════════════════════════════════════════════════════
+	var prefetchedOldVal []byte
+	var prefetchedLoaded bool
+
+	// Quick check: if writer already loaded this key, skip prefetch entirely.
+	// writerMu.RLock is cheap (~1ns) and doesn't block other readers.
+	n.writerMu.RLock()
+	alreadyLoaded := n.wOldLoaded[hexKey]
+	// Also check if key is already in wDirty — if so, old value was captured
+	// when the first Update() for this key ran, no need to prefetch again.
+	_, alreadyDirty := n.wDirty[hexKey]
+	n.writerMu.RUnlock()
+
+	if !alreadyLoaded && !alreadyDirty {
+		// Check committing from readView (lock-free, immutable snapshot)
 		view := n.loadReadView()
 		if view.committing != nil {
 			if commEntry, ok := view.committing[hexKey]; ok {
-				n.wOldValues[hexKey] = commEntry.value
-				n.wOldLoaded[hexKey] = true
+				prefetchedOldVal = commEntry.value
+				prefetchedLoaded = true
 			}
 		}
-		if !n.wOldLoaded[hexKey] {
+		if !prefetchedLoaded {
+			// Thread-safe FFI read — NO lock held
 			oldVal, found, err := n.handle.Read(keyPath)
 			if err == nil && found && len(oldVal) > 0 {
-				n.wOldValues[hexKey] = oldVal
+				prefetchedOldVal = oldVal
 			}
-			n.wOldLoaded[hexKey] = true
+			prefetchedLoaded = true
 		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 2: ACQUIRE writerMu and mutate dirty map (fast, no FFI under lock)
+	// ═══════════════════════════════════════════════════════════════════════
+	n.writerMu.Lock()
+
+	// Apply prefetched old value (only if not already loaded by a concurrent Update)
+	if prefetchedLoaded && !n.wOldLoaded[hexKey] {
+		if len(prefetchedOldVal) > 0 {
+			n.wOldValues[hexKey] = prefetchedOldVal
+		}
+		n.wOldLoaded[hexKey] = true
 	}
 
 	keyCopy := make([]byte, len(key))
@@ -600,13 +631,18 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 				keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 				hexKey := hex.EncodeToString(key)
 
-				// Read old value from NOMT (thread-safe concurrent read)
+				// CRITICAL FORK-SAFETY FIX: Use n.Get(key) instead of n.handle.Read(keyPath).
+				// n.handle.Read() only sees data flushed to disk via CommitPayload.
+				// If a previous block modified this key but hasn't flushed yet,
+				// handle.Read() returns STALE data. This stale data becomes the `oldValue`
+				// passed to NOMT C++, resulting in a divergent Merkle hash (CHAIN BROKEN).
+				// n.Get() correctly checks wDirty, view.dirty, and view.committing first.
 				var oldVal []byte
 				var loaded bool
-				val, found, err := n.handle.Read(keyPath)
-				if err == nil {
+				val, getErr := n.Get(keyCopy)
+				if getErr == nil {
 					loaded = true
-					if found && len(val) > 0 {
+					if len(val) > 0 {
 						oldVal = val
 					}
 				}
@@ -826,6 +862,31 @@ func (n *NomtStateTrie) PreWarm(keys [][]byte) {
 // LOCK-FREE: reads from atomic readView.
 func (n *NomtStateTrie) Hash() e_common.Hash {
 	return n.loadReadView().rootHash
+}
+
+// RealignRoot updates the in-memory root hash to match the C++ NOMT engine's
+// authoritative state after a DB fast-forward (e.g., P2P block sync via
+// HandleSyncBlocksRequest). This is O(1) — no FFI calls, no file I/O.
+//
+// WHEN TO USE: After NOMT C++ has been updated via ApplyNomtReplicationBatches
+// or direct CommitPayload, and Go's readView.rootHash is stale.
+//
+// WHEN NOT TO USE: During normal consensus execution — Commit() already
+// updates rootHash atomically.
+//
+// FORK-SAFETY: This ONLY updates the in-memory view. It does NOT modify
+// the C++ NOMT state. If the expectedRoot doesn't match the actual C++ handle
+// root, subsequent Commit() calls will compute the correct root from dirty state.
+func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
+	n.writerMu.Lock()
+	view := n.loadReadView()
+	oldRoot := view.rootHash
+	n.publishReadView(view.dirty, view.committing, expectedRoot)
+	n.writerMu.Unlock()
+	if oldRoot != expectedRoot {
+		logger.Info("🔧 [NOMT-REALIGN] namespace=%s, root %s → %s",
+			string(n.namespace), oldRoot.Hex()[:18], expectedRoot.Hex()[:18])
+	}
 }
 
 // Commit finalizes changes: writes all dirty entries to NOMT via batch session.

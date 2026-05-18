@@ -307,25 +307,47 @@ impl DefaultSystemTransactionProvider {
 
                 if healthy_duration_s >= unsuppress_threshold {
                     self.epoch_change_suppressed.store(false, Ordering::SeqCst);
-                    // FORK-SAFETY FIX (May 2026): Do NOT reset epoch_start to now_ms!
-                    // Each node auto-unsuppresses at a slightly different wall-clock time.
-                    // If each sets epoch_start = now_ms, they compute different elapsed times
-                    // and trigger EndOfEpoch at different consensus rounds → txRoot fork.
+                    // FORK-SAFETY FIX v2 (May 2026): MUST reset epoch_start to now_ms!
                     //
-                    // Instead, keep the original (stale) epoch_start. All nodes have the
-                    // SAME stale timestamp (from genesis/snapshot), so they all compute
-                    // the same elapsed_seconds >> epoch_duration → all trigger EndOfEpoch
-                    // immediately. The first leader block containing EndOfEpoch gets committed,
-                    // and all nodes process it deterministically via update_epoch().
+                    // Previous logic (v1) kept the stale epoch_start, assuming all nodes
+                    // auto-unsuppress simultaneously (full cluster restart) and trigger
+                    // EndOfEpoch deterministically via the same stale timestamp.
+                    //
+                    // BUG: In PARTIAL RESTORE (most common scenario), only the restored
+                    // node has the stale timestamp. After auto-unsuppress, it immediately
+                    // triggers EndOfEpoch (elapsed >> duration), while healthy nodes are
+                    // still mid-epoch. This creates a permanent epoch divergence fork:
+                    //   - Restored node transitions to epoch N+1 (solo)
+                    //   - Cluster stays in epoch N
+                    //   - Restored node's stateRoot freezes (no real TXs in solo epoch)
+                    //
+                    // FIX: Reset epoch_start to now_ms. The node waits a FULL
+                    // epoch_duration before proposing EndOfEpoch. By that time:
+                    //   - If cluster already triggered → update_epoch() received fresh
+                    //     timestamp → suppression cleared earlier → this code never runs
+                    //   - If nobody triggered (full restart) → all nodes reset to now_ms
+                    //     at approximately the same time → deterministic within seconds
+                    //
+                    // Minor timing variance between nodes (~seconds) is SAFE because:
+                    //   1. Only ONE leader block per round includes the EndOfEpoch tx
+                    //   2. All nodes commit the SAME leader block via consensus
+                    //   3. All nodes process the same EndOfEpoch → same epoch transition
+                    {
+                        let mut ts_guard = self.epoch_start_timestamp_ms.write()
+                            .unwrap_or_else(|p| p.into_inner());
+                        *ts_guard = now_ms;
+                    }
                     info!(
                         "✅ SystemTransactionProvider: AUTO-UNSUPPRESSED after {}s in Healthy phase \
-                         (threshold={}s). Keeping original epoch_start for deterministic trigger. \
-                         Node will propose EndOfEpoch on next block proposal.",
-                        healthy_duration_s, unsuppress_threshold
+                         (threshold={}s). Reset epoch_start to now_ms={} to prevent immediate \
+                         EndOfEpoch trigger from stale timestamp. Node will wait {}s before \
+                         proposing EndOfEpoch.",
+                        healthy_duration_s, unsuppress_threshold, now_ms,
+                        self.epoch_duration_seconds
                     );
-                    // Fall through to normal epoch check — WILL trigger immediately
-                    // because stale epoch_start means elapsed >> duration. This is correct:
-                    // all unsuppressed nodes trigger at the same time (deterministic).
+                    // Fall through to normal epoch check — will NOT trigger immediately
+                    // because epoch_start = now_ms → elapsed ≈ 0 < duration.
+                    // Node waits full epoch_duration before proposing EndOfEpoch.
                 } else {
                     tracing::debug!(
                         "🛡️ SystemTransactionProvider: EndOfEpoch SUPPRESSED. \

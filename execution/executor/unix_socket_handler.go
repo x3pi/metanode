@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 
@@ -102,7 +103,7 @@ func (rh *RequestHandler) HandleBlockRequest(request *pb.BlockRequest) (*pb.Vali
 	// HandleGetActiveValidatorsRequest, HandleGetValidatorsAtBlockRequest, etc.
 	// which all sort by AuthorityKey(). Committee mismatch → fork.
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 	})
 
 	// Map the database validators to protobuf validators.

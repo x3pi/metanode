@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::node::executor_client::ExecutorClient;
 
@@ -268,7 +268,7 @@ impl PeerRpcServer {
             error!("🌐 [PEER RPC] Failed to write response: {}", e);
         }
 
-        info!(
+        debug!(
             "🌐 [PEER RPC] Served /peer_info: epoch={}, last_block={}, global_exec_index={}",
             epoch, last_block, last_global_exec_index
         );

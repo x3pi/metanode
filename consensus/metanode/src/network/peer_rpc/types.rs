@@ -55,9 +55,9 @@ pub struct ValidatorInfoSimple {
     pub name: String,
     pub address: String,
     pub stake: u64,
-    pub protocol_key: String,
-    pub network_key: String,
-    pub authority_key: String,
+    pub protocol_key: Vec<u8>,
+    pub network_key: Vec<u8>,
+    pub authority_key: Vec<u8>,
     /// P2P address (Multiaddr format) — needed for committee building
     #[serde(default)]
     pub p2p_address: String,

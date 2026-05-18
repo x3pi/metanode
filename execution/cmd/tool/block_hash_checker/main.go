@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 )
 
@@ -95,6 +96,7 @@ func main() {
 	watchMode := flag.Bool("watch", false, "Chế độ giám sát liên tục — kiểm tra block mới nhất định kỳ")
 	watchInterval := flag.Duration("interval", 10*time.Second, "Khoảng thời gian giữa mỗi lần check (watch mode)")
 	checkLast := flag.Int("check-last", 5, "Số block gần nhất cần check mỗi cycle (watch mode)")
+	scanFork := flag.Bool("scan-fork", false, "Quét từ block 1 đến mới nhất để tìm block LỆCH ĐẦU TIÊN và dừng")
 	flag.Parse()
 
 	if *nodesFlag == "" {
@@ -106,6 +108,9 @@ func main() {
 		fmt.Println()
 		fmt.Println(`  # Giám sát liên tục:`)
 		fmt.Println(`  ./block_hash_checker --watch --nodes "master=http://localhost:8747,node4=http://localhost:10748" --interval 10s`)
+		fmt.Println()
+		fmt.Println(`  # Quét tìm block lệch đầu tiên:`)
+		fmt.Println(`  ./block_hash_checker --scan-fork --nodes "master=http://localhost:8747,node4=http://localhost:10748"`)
 		os.Exit(1)
 	}
 
@@ -130,15 +135,28 @@ func main() {
 		return
 	}
 
+	// Nếu --scan-fork được bật
+	if *scanFork {
+		*fromBlock = 1
+		*toBlock = 0
+	}
+
 	// Nếu --to=0, query block mới nhất từ node đầu tiên
 	if *toBlock == 0 {
-		latest, err := getLatestBlockNumber(client, nodes[0].URL)
-		if err != nil {
-			fmt.Printf("❌ Không thể lấy block mới nhất từ %s: %v\n", nodes[0].Name, err)
+		var latest uint64
+		var err error
+		for _, n := range nodes {
+			latest, err = getLatestBlockNumber(client, n.URL)
+			if err == nil && latest > 0 {
+				*toBlock = latest
+				fmt.Printf("📊 Block mới nhất: %d (từ %s)\n", *toBlock, n.Name)
+				break
+			}
+		}
+		if *toBlock == 0 {
+			fmt.Println("❌ Không thể lấy block mới nhất từ bất kỳ node nào")
 			os.Exit(1)
 		}
-		*toBlock = latest
-		fmt.Printf("📊 Block mới nhất trên %s: %d\n", nodes[0].Name, *toBlock)
 	}
 
 	totalBlocks := *toBlock - *fromBlock + 1
@@ -163,6 +181,11 @@ func main() {
 		errorCount += batchErrors
 		skipCount += batchSkips
 
+		// Nếu đang scan tìm fork point, dừng ngay khi phát hiện mismatch
+		if *scanFork && len(allMismatches) > 0 {
+			break
+		}
+
 		// Progress
 		checked := batchEnd - *fromBlock + 1
 		elapsed := time.Since(startTime)
@@ -185,13 +208,23 @@ func main() {
 			matchCount, len(allMismatches), errorCount, elapsed.Seconds())
 
 		// Chi tiết từng mismatch
-		maxShow := 50
-		for i, m := range allMismatches {
-			if i >= maxShow {
-				fmt.Printf("   ... và %d blocks lệch khác (bỏ qua)\n", len(allMismatches)-maxShow)
-				break
+		if *scanFork {
+			fmt.Println("\n🛑 ĐIỂM CHIA NHÁNH (FORK POINT) ĐẦU TIÊN TÌM THẤY:")
+			// Sắp xếp các mismatches theo block number (vì chạy song song trong checkBatch)
+			sort.Slice(allMismatches, func(i, j int) bool {
+				return allMismatches[i].BlockNumber < allMismatches[j].BlockNumber
+			})
+			printMismatchDetail(allMismatches[0], nodes)
+			fmt.Println("\n⚠️ DỪNG SCAN VÌ ĐÃ TÌM THẤY ĐIỂM LỆCH ĐẦU TIÊN (--scan-fork).")
+		} else {
+			maxShow := 50
+			for i, m := range allMismatches {
+				if i >= maxShow {
+					fmt.Printf("   ... và %d blocks lệch khác (bỏ qua)\n", len(allMismatches)-maxShow)
+					break
+				}
+				printMismatchDetail(m, nodes)
 			}
-			printMismatchDetail(m, nodes)
 		}
 
 		// Xuất file CSV
@@ -536,7 +569,7 @@ func getPeerInfo(client *http.Client, rpcURL string) (uint64, uint64, error) {
 // ===== Print mismatch detail =====
 
 func printMismatchDetail(m mismatch, nodes []nodeInfo) {
-	fmt.Printf("\n⚠\ufe0f  Block %d:\n", m.BlockNumber)
+	fmt.Printf("\n⚠️  Block %d:\n", m.BlockNumber)
 
 	// Collect valid blocks to show which fields actually differ
 	var validBlocks []blockInfo
@@ -581,69 +614,44 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 		}
 	}
 
-	// Print diff summary
-	var diffs []string
-	if hashDiff {
-		diffs = append(diffs, "hash")
-	}
-	if parentDiff {
-		diffs = append(diffs, "parentHash")
-	}
-	if stateDiff {
-		diffs = append(diffs, "stateRoot")
-	}
-	if stakeDiff {
-		diffs = append(diffs, "stakeStatesRoot")
-	}
-	if txDiff {
-		diffs = append(diffs, "txRoot")
-	}
-	if rcpDiff {
-		diffs = append(diffs, "receiptsRoot")
-	}
-	if leaderDiff {
-		diffs = append(diffs, "leaderAddress")
-	}
-	if timeDiff {
-		diffs = append(diffs, "timestamp")
-	}
-	if len(diffs) > 0 {
-		fmt.Printf("   ⚠\ufe0f  Fields differ: %s\n", strings.Join(diffs, ", "))
-	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "   \tNODE\tERROR\tHASH\tPARENT\tSTATE\tSTAKE\tTX\tRECEIPT\tLEADER\tTIME\tGEI")
 
 	for _, n := range nodes {
 		bi, ok := m.Blocks[n.Name]
 		if !ok {
-			fmt.Printf("   %-12s (kh\u00f4ng c\u00f3 d\u1eef li\u1ec7u)\n", n.Name+":")
+			fmt.Fprintf(w, "   \t%s\t%s\t\t\t\t\t\t\t\t\n", n.Name, "(không có dữ liệu)")
 			continue
 		}
 		if bi.IsError() {
-			fmt.Printf("   %-12s %s\n", n.Name+":", bi.Error)
+			fmt.Fprintf(w, "   \t%s\t%s\t\t\t\t\t\t\t\t\n", n.Name, bi.Error)
 			continue
 		}
-		fmt.Printf("   %-12s hash=%s leader=%s gei=%d epoch=%d\n", n.Name+":", bi.Hash, bi.LeaderAddress, parseHexStr(bi.GlobalExecIndex), parseHexStr(bi.Epoch))
-		if parentDiff {
-			fmt.Printf("   %-12s parentHash=%s\n", "", bi.ParentHash)
+		
+		// Shorten hashes for display if they match, show full if they differ, or maybe just show first/last chars
+		shortHash := func(h string, diff bool) string {
+			if len(h) < 10 {
+				return h
+			}
+			if diff {
+				return h[:6] + "..." + h[len(h)-4:]
+			}
+			return h[:10] + "..."
 		}
-		if stateDiff {
-			fmt.Printf("   %-12s stateRoot=%s\n", "", bi.StateRoot)
-		}
-		if stakeDiff {
-			fmt.Printf("   %-12s stakeStatesRoot=%s\n", "", bi.StakeStatesRoot)
-		}
-		if txDiff {
-			fmt.Printf("   %-12s txRoot=%s\n", "", bi.TransactionsRoot)
-		}
-		if rcpDiff {
-			fmt.Printf("   %-12s receiptsRoot=%s\n", "", bi.ReceiptsRoot)
-		}
-		if leaderDiff {
-			fmt.Printf("   %-12s leaderAddress=%s\n", "", bi.LeaderAddress)
-		}
-		if timeDiff {
-			fmt.Printf("   %-12s timestamp=%s\n", "", bi.Timestamp)
-		}
+		
+		fmt.Fprintf(w, "   \t%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+			n.Name,
+			shortHash(bi.Hash, hashDiff),
+			shortHash(bi.ParentHash, parentDiff),
+			shortHash(bi.StateRoot, stateDiff),
+			shortHash(bi.StakeStatesRoot, stakeDiff),
+			shortHash(bi.TransactionsRoot, txDiff),
+			shortHash(bi.ReceiptsRoot, rcpDiff),
+			shortHash(bi.LeaderAddress, leaderDiff),
+			shortHash(bi.Timestamp, timeDiff),
+			parseHexStr(bi.GlobalExecIndex))
 	}
+	w.Flush()
 	fmt.Println()
 }
 
@@ -830,6 +838,23 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	if respondingNodes < 2 {
 		fmt.Printf(" ⚠️ chỉ %d/%d node phản hồi — KHÔNG THỂ SO SÁNH hash\n", respondingNodes, len(nodes))
 		return false
+	}
+
+	// BLOCK-HEIGHT-GAP DETECTION (May 2026): Warn when some nodes are
+	// significantly behind the majority. This is a diagnostic indicator —
+	// the lagging node may have stale state (e.g., from resolve_leader_address
+	// timeout) that produces different block content at the same height.
+	if maxBlock > 0 && minBlock > 0 {
+		gap := maxBlock - minBlock
+		if gap > 50 {
+			fmt.Printf(" ⚠️ [HEIGHT-GAP] Block height gap = %d (min=%d, max=%d). ", gap, minBlock, maxBlock)
+			for _, r := range results {
+				if r.err == nil && r.block < maxBlock-50 {
+					fmt.Printf("%s is %d blocks behind! ", r.name, maxBlock-r.block)
+				}
+			}
+			fmt.Printf("Hash comparison limited to block %d→%d (lagging node range).\n", minBlock-uint64(checkLast)+1, minBlock)
+		}
 	}
 
 	from := minBlock

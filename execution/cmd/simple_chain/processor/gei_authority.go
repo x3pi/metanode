@@ -204,3 +204,31 @@ func (ga *GEIAuthority) PersistState() {
 	storage.UpdateLastGlobalExecIndex(gei)
 }
 
+// ShouldSkipCommit implements Layer 4: Idempotent Execution Guard.
+// Returns true if this commit was already processed — caller MUST skip execution.
+// This prevents GEI drift when Rust retries the same commit after timeout/crash.
+//
+// FORK-SAFETY: Without this guard, a retry would cause Go to execute the same
+// transactions again, incrementing GEI twice for the same commit_index.
+// This creates permanent state drift that cascades into block hash mismatches.
+func (ga *GEIAuthority) ShouldSkipCommit(commitIndex uint32, epoch uint64) bool {
+	lastEpoch := ga.lastHandledCommitEpoch.Load()
+	lastCommit := ga.lastHandledCommitIndex.Load()
+
+	// Same epoch, already handled this commit or an older one
+	if epoch == lastEpoch && commitIndex > 0 && commitIndex <= lastCommit {
+		logger.Info("🛡️ [LAYER-4] Idempotent SKIP: commit=%d epoch=%d (last_handled=%d/%d)",
+			commitIndex, epoch, lastCommit, lastEpoch)
+		return true
+	}
+
+	// Older epoch entirely — definitely already processed
+	if epoch > 0 && epoch < lastEpoch {
+		logger.Info("🛡️ [LAYER-4] Idempotent SKIP (stale epoch): commit=%d epoch=%d < current_epoch=%d",
+			commitIndex, epoch, lastEpoch)
+		return true
+	}
+
+	return false
+}
+

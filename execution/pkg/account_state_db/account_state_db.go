@@ -76,12 +76,6 @@ type AccountStateDB struct {
 	// completed its trie swap yet (race condition causing stateRoot divergence).
 	persistReady chan struct{}
 
-	// nomtCommitGuard serializes BatchUpdateWithCachedOldValues and CommitPayload
-	// for NomtStateTrie. CommitPayload is pushed to the background, but we still
-	// need to prevent concurrent modifications to the NOMT structure during disk flush.
-	// This acts as a lightweight, channel-based mutex.
-	nomtCommitGuard chan struct{}
-
 	// cacheEpoch tracks the generation of the trie/LRU caches. It is incremented
 	// by InvalidateAllCaches, ReloadTrie, and Discard to prevent stale reads
 	// from poisoning the newly constructed read caches concurrently.
@@ -124,10 +118,6 @@ func NewAccountStateDB(
 	initReady := make(chan struct{})
 	close(initReady)
 
-	// Initialize nomtCommitGuard with capacity 1 to act as a mutex
-	guard := make(chan struct{}, 1)
-	guard <- struct{}{} // Initialize as unlocked
-
 	// TPS OPT: Cache trie type once to avoid repeated type assertions in hot-path.
 	// Both FlatStateTrie and NomtStateTrie are thread-safe for concurrent reads,
 	// allowing us to skip muTrie.Lock on Get() calls.
@@ -143,7 +133,6 @@ func NewAccountStateDB(
 		lruCache:       cacheCurrent,
 		lruCacheOld:    cacheOld,
 		persistReady:   initReady,
-		nomtCommitGuard: guard,
 		isFlatTrie:     isThreadSafeRead,
 	}
 	for i := 0; i < 256; i++ {
@@ -189,7 +178,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 	db.originRootHash = rootHash
 	db.dirtyAccounts.Clear()  // Clear dirty accounts under lock
 	db.loadedAccounts.Clear() // Clear loaded accounts too
-	db.cacheEpoch.Add(1)      // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2)      // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -370,7 +359,7 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 
 	if len(bData) == 0 {
 		// New account: return fresh state WITHOUT storing in dirty cache
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty → returning fresh account (nonce=0, no BLS key)", address.Hex())
+		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty (dirty=miss, loaded=miss, lru=miss, trie=empty) → new account, no BLS key expected", address.Hex())
 		return state.NewAccountState(address), nil
 	}
 	loadedAs := &state.AccountState{}
@@ -378,7 +367,8 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 		return nil, fmt.Errorf("error unmarshalling %s from Trie: %w", address.Hex(), err)
 	}
 	if len(loadedAs.PublicKeyBls()) == 0 {
-		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): found data but PublicKeyBls is EMPTY, nonce=%d", address.Hex(), loadedAs.Nonce())
+		logger.Warn("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): data found (len=%d bytes) but PublicKeyBls is EMPTY. nonce=%d balance=%s. Data came from TRIE/LRU (not dirty cache). Possible causes: (1) block committed before AccountBatch replicated, (2) Unmarshal dropped BLS field.",
+			address.Hex(), len(bData), loadedAs.Nonce(), loadedAs.TotalBalance().String())
 	}
 	if pooledSlice != nil {
 		byteSlicePool.Put(pooledSlice)
@@ -445,18 +435,27 @@ func (db *AccountStateDB) GetAll() (map[common.Address]types.AccountState, error
 // (e.g. mtn_getAccountState, eth_getBalance) will return stale cached values
 // instead of the freshly synced data — making the Sub node appear out of sync.
 //
-// This is safe to call at any time: it only affects read caches and will cause
-// the next read to go through trie.Get() which reads fresh data from NOMT/PebbleDB.
+// FORK-SAFETY FIX (May 2026): Wait for persistReady BEFORE clearing caches.
+// If PersistAsync from the previous block hasn't completed its trie swap yet,
+// clearing caches here would cause subsequent trie.Get() calls to read from
+// the OLD (pre-swap) trie and repopulate the fresh caches with stale data.
+// Waiting on persistReady ensures the trie is fully up-to-date before clearing.
 func (db *AccountStateDB) InvalidateAllCaches() {
+	// FORK-SAFETY: Ensure previous block's PersistAsync has completed the trie swap.
+	// This is a defense-in-depth measure — with inline PersistAsync (May 2026 fix),
+	// persistReady should already be closed by the time this is called.
+	// The channel is pre-closed at initialization, so this is a no-op for the first block.
+	<-db.persistReady
+
 	db.loadedAccounts.Clear()
-	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
 		db.lruCacheOld = make(map[common.Address][]byte)
 		db.lruMu.Unlock()
 	}
-	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe)")
+	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe, persistReady waited)")
 }
 
 // Discard reverts all uncommitted changes by clearing the dirty cache
@@ -469,7 +468,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	// Clear dirty accounts first
 	db.dirtyAccounts.Clear()
 	db.loadedAccounts.Clear()
-	db.cacheEpoch.Add(1) // FORK-SAFETY: invalidate concurrent reads
+	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 	if db.lruCache != nil {
 		db.lruMu.Lock()
 		db.lruCache = make(map[common.Address][]byte, 200000)
@@ -544,12 +543,20 @@ func (db *AccountStateDB) Close() {
 
 // setLruCacheSafe safely inserts into the LRU cache, preventing stale data poisoning.
 // It checks if InvalidateAllCaches was called during the read operation.
-func (db *AccountStateDB) setLruCacheSafe(addr common.Address, data []byte, readEpoch uint64) {
+func (db *AccountStateDB) setLruCacheSafe(address common.Address, bData []byte, readEpoch uint64) {
 	db.lruMu.Lock()
-	if db.cacheEpoch.Load() == readEpoch {
-		db.lruCache[addr] = data
+	defer db.lruMu.Unlock()
+	
+	// SeqLock FORK-SAFETY FIX: If readEpoch is odd, a commit pipeline (IntermediateRoot)
+	// is actively mutating the trie and cache. Do NOT insert stale data.
+	if readEpoch%2 != 0 {
+		return
 	}
-	db.lruMu.Unlock()
+
+	// If InvalidateAllCaches was called during our read, cacheEpoch would have increased
+	if db.cacheEpoch.Load() == readEpoch {
+		db.lruCache[address] = bData
+	}
 }
 
 // --- Internal Helper Methods ---
@@ -1028,7 +1035,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 
 	if db.lruCache != nil {
 		db.lruMu.Lock()
-		db.cacheEpoch.Add(1) // FORK-SAFETY
+		db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 		db.lruCache = make(map[common.Address][]byte, 200000)
 		db.lruCacheOld = make(map[common.Address][]byte)
 		db.lruMu.Unlock()

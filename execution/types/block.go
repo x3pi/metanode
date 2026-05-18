@@ -37,7 +37,7 @@ type BlockHeader interface {
 	LeaderAddress() e_common.Address
 	AggregateSignature() []byte
 	SetAggregateSignature([]byte)
-	HashWithoutSignature() e_common.Hash
+
 	String() string
 	TransactionsRoot() e_common.Hash
 	Epoch() uint64

@@ -19,8 +19,9 @@ import (
 
 // BlockValidator cung cấp các phương thức để xác thực và xử lý một block.
 type BlockValidator struct {
-	storageManager *storage.StorageManager
-	chainState     *blockchain.ChainState
+	storageManager  *storage.StorageManager
+	chainState      *blockchain.ChainState
+	blockWriteMutex sync.Mutex
 }
 
 // NewBlockValidator tạo một BlockValidator mới.
@@ -61,6 +62,9 @@ func (bv *BlockValidator) ValidateAndGetParentBlock(blockData block.Block) (type
 // ProcessBlock xác thực và xử lý các giao dịch trong một block.
 // Nó nhận blockData làm tham số và trả về kết quả xử lý.
 func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Block) (tx_processor.ProcessResult, error) {
+	bv.blockWriteMutex.Lock()
+	defer bv.blockWriteMutex.Unlock()
+
 	oldBlockData, err := bv.ValidateAndGetParentBlock(blockData)
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: validation and parent block retrieval failed: %w", err)

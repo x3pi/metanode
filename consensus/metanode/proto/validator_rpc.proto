@@ -216,9 +216,9 @@ message ValidatorInfo {
     // RENAMED: address = Ethereum wallet address (matches ValidatorState.Address())
     string address = 1;        // Ethereum wallet address (e.g., "0x1234...abcd")
     string stake = 2;          // Stake amount (string) - khớp với "stake" trong committee.json (sau khi normalize)
-    string authority_key = 3;   // BLS public key (base64) - khớp với "authority_key" trong committee.json
-    string protocol_key = 4;   // Ed25519 protocol key (base64) - khớp với "protocol_key" trong committee.json
-    string network_key = 5;    // Ed25519 network key (base64) - khớp với "network_key" trong committee.json
+    bytes authority_key = 3;   // BLS public key - khớp với "authority_key" trong committee.json
+    bytes protocol_key = 4;   // Ed25519 protocol key - khớp với "protocol_key" trong committee.json
+    bytes network_key = 5;    // Ed25519 network key - khớp với "network_key" trong committee.json
     
     // Metadata
     string name = 6;                // Tên validator

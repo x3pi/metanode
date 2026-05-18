@@ -124,6 +124,9 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 			logger.Info("[PERF-VIRTUAL] EVM execution (Call): %v, hash: %v, block#%d",
 				evmDuration, tx.Hash().Hex(), blHeader.BlockNumber())
 		} else if tx.IsDeployContract() {
+			if !tx.ValidDeployData() {
+				return nil, fmt.Errorf("deploy data is nil or invalid"), nil
+			}
 			// Thực thi giao dịch hợp đồng deploy
 			startEVM := time.Now()
 			exRs, statusUpdate, err = vmP.ExecuteTransactionWithMvmIdSubDeploy(ctx, tx, mvmId, true)

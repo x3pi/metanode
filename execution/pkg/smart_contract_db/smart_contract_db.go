@@ -304,7 +304,9 @@ func (db *SmartContractDB) CommitAllStorage() error {
 			if trie.GetStateBackend() == trie.BackendNOMT {
 				logger.Debug("[SmartContractDB] NOMT late storage root bind for %s: %s -> %s",
 					address.Hex(), as.SmartContractState().StorageRoot().Hex(), root.Hex())
-				as.SmartContractState().SetStorageRoot(root)
+				// CRITICAL FORK FIX: Use as.SetStorageRoot() to ensure MarkDirty()
+				// is called, preventing silent drops by setDirtyAccountState.
+				as.SetStorageRoot(root)
 				db.accountStateDB.SetState(as)
 			} else {
 				logger.Error("Storage root mismatch for address:", address,
@@ -455,7 +457,12 @@ func (db *SmartContractDB) LateBindRoots() error {
 		if as.SmartContractState().StorageRoot() != root {
 			logger.Debug("[SmartContractDB] LateBindRoots: early root bind for %s: %s -> %s",
 				address.Hex(), as.SmartContractState().StorageRoot().Hex(), root.Hex())
-			as.SmartContractState().SetStorageRoot(root)
+			// CRITICAL FORK FIX: Use as.SetStorageRoot() instead of
+			// as.SmartContractState().SetStorageRoot(). The latter does NOT call
+			// as.MarkDirty(), causing setDirtyAccountState to skip the update
+			// when the account has no other mutations (balance/nonce unchanged).
+			// This silently drops the StorageRoot change from the trie.
+			as.SetStorageRoot(root)
 			db.accountStateDB.SetState(as)
 		}
 	}

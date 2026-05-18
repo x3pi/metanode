@@ -116,6 +116,9 @@ pub struct ConsensusCoordinationHub {
     /// the entire session lifetime. It ensures the local committer guard
     /// remains active even after RecoveryBarrier transitions to Ready.
     recovery_was_activated: Arc<AtomicBool>,
+    
+    /// Override flag for the DAG-GC-GUARD. Used to break cold start deadlocks.
+    override_dag_gc_guard: Arc<AtomicBool>,
 
 
     /// SPARSE DAG BOUNDARY (Architectural Fix for Snapshot Recovery Fork):
@@ -124,7 +127,18 @@ pub struct ConsensusCoordinationHub {
     /// leader support evaluation (FORK).
     /// This boundary defines the round below which the local committer MUST NOT evaluate.
     /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
-    sparse_dag_boundary: Arc<RwLock<Option<u32>>>,
+
+
+    /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
+    /// Wraps CommitVoteMonitor.quorum_commit_digest() for cross-crate access.
+    /// Takes commit_index (u32), returns Some([u8; 32]) if 2f+1 authorities
+    /// voted for the same digest at this index, None otherwise.
+    digest_verifier: Arc<RwLock<Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>>>,
+    /// COLD-START-FIX (May 2026): Callback to check if CommitVoteMonitor has
+    /// received any actual digest vote data. Returns true when digest verification
+    /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer),
+    /// this reflects actual P2P block observation.
+    digest_data_checker: Arc<RwLock<Option<Arc<dyn Fn() -> bool + Send + Sync>>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -140,7 +154,10 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(false)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            sparse_dag_boundary: Arc::new(RwLock::new(None)),
+            override_dag_gc_guard: Arc::new(AtomicBool::new(false)),
+
+            digest_verifier: Arc::new(RwLock::new(None)),
+            digest_data_checker: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -191,6 +208,47 @@ impl ConsensusCoordinationHub {
     /// Retrieve the highest quorum commit index
     pub fn get_quorum_commit_index(&self) -> u32 {
         self.quorum_commit_index.load(Ordering::Relaxed)
+    }
+
+    /// Retrieve the shared reference to the quorum commit index (for cross-component sharing)
+    /// Used by CommitProcessor's QUORUM-GATE to hold local commits until quorum confirms them.
+    pub fn get_quorum_commit_index_ref(&self) -> Arc<std::sync::atomic::AtomicU32> {
+        self.quorum_commit_index.clone()
+    }
+
+    /// Set the digest verifier callback (called from authority_node after CommitVoteMonitor creation)
+    pub fn set_digest_verifier<F>(&self, verifier: F)
+    where
+        F: Fn(u32) -> Option<[u8; 32]> + Send + Sync + 'static,
+    {
+        let mut guard = self.digest_verifier.write();
+        *guard = Some(Arc::new(verifier));
+    }
+
+    /// Get a clone of the digest verifier callback for passing to CommitProcessor
+    pub fn get_digest_verifier(&self) -> Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>> {
+        let guard = self.digest_verifier.read();
+        guard.clone()
+    }
+
+    /// COLD-START-FIX (May 2026): Set the digest data checker callback.
+    /// Called from authority_node after CommitVoteMonitor creation.
+    pub fn set_digest_data_checker<F>(&self, checker: F)
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let mut guard = self.digest_data_checker.write();
+        *guard = Some(Arc::new(checker));
+    }
+
+    /// COLD-START-FIX (May 2026): Check if CommitVoteMonitor has digest data.
+    /// Returns false if checker not set or checker returns false.
+    pub fn has_digest_data(&self) -> bool {
+        let guard = self.digest_data_checker.read();
+        match guard.as_ref() {
+            Some(checker) => checker(),
+            None => false,
+        }
     }
 
     /// Retrieve the current consensus phase.
@@ -426,35 +484,22 @@ impl ConsensusCoordinationHub {
         self.recovery_was_activated.load(Ordering::Acquire)
     }
 
-
-
-    /// Sets the sparse DAG boundary based on Round.
-    pub fn set_sparse_dag_boundary(&self, boundary_round: consensus_types::block::Round) {
-        let mut lock = self.sparse_dag_boundary.write();
-        *lock = Some(boundary_round);
-        tracing::info!(
-            "🛡️ [SPARSE-DAG-BOUNDARY] Boundary set to round {}. \
-             Local committer will be BLOCKED until gc_round > this boundary to prevent sparse DAG evaluation.",
-            boundary_round
-        );
-    }
-
-    /// Gets the current sparse DAG boundary.
-    pub fn sparse_dag_boundary(&self) -> Option<u32> {
-        *self.sparse_dag_boundary.read()
-    }
-
-    /// Clears the sparse DAG boundary.
-    pub fn clear_sparse_dag_boundary(&self) {
-        let mut lock = self.sparse_dag_boundary.write();
-        if lock.is_some() {
-            *lock = None;
-            tracing::info!(
-                "🔓 [SPARSE-DAG-BOUNDARY] Boundary cleared! \
-                 Local DAG has passed the sparse zone. Local committer UNLOCKED."
-            );
+    /// Override the DAG-GC-GUARD. Used by the Cold Start Deadlock Breaker.
+    pub fn set_override_dag_gc_guard(&self, override_guard: bool) {
+        self.override_dag_gc_guard.store(override_guard, Ordering::Release);
+        if override_guard {
+            tracing::warn!("🔓 [DEADLOCK-BREAKER] DAG-GC-GUARD override activated!");
         }
     }
+
+    /// Returns true if the DAG-GC-GUARD is currently overridden.
+    pub fn is_dag_gc_guard_overridden(&self) -> bool {
+        self.override_dag_gc_guard.load(Ordering::Acquire)
+    }
+
+
+
+
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -479,7 +524,9 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
-            sparse_dag_boundary: Arc::new(RwLock::new(None)),
+
+            digest_verifier: Arc::new(RwLock::new(None)),
+            digest_data_checker: Arc::new(RwLock::new(None)),
         }
     }
 

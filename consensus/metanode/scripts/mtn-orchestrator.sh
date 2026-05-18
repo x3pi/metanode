@@ -28,6 +28,18 @@ LOG_BASE="$RUST_DIR/logs"
 # ─── Số lượng node ────────────────────────────────────────────────
 NUM_NODES=5  # node 0..4
 
+# ─── Protected tmux sessions (sẽ KHÔNG bao giờ bị kill) ──────────
+# Thêm tên session cần bảo vệ vào đây, ví dụ: ngrok, dev, monitor...
+PROTECTED_SESSIONS=("ngrok")
+
+# Auto-detect: nếu script đang chạy bên trong tmux, bảo vệ session hiện tại
+if [ -n "${TMUX:-}" ]; then
+    _CURRENT_TMUX_SESSION=$(tmux display-message -p '#S' 2>/dev/null || true)
+    if [ -n "$_CURRENT_TMUX_SESSION" ]; then
+        PROTECTED_SESSIONS+=("$_CURRENT_TMUX_SESSION")
+    fi
+fi
+
 # ─── Màu sắc ─────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -77,6 +89,26 @@ log_step()    { echo -e "  ${BLUE}►${NC} $*"; }
 # Kiểm tra tmux session có tồn tại không
 session_exists() {
     tmux has-session -t "$1" 2>/dev/null
+}
+
+# Kiểm tra session có nằm trong danh sách bảo vệ không
+is_protected_session() {
+    local session="$1"
+    for protected in "${PROTECTED_SESSIONS[@]}"; do
+        if [ "$session" = "$protected" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Kiểm tra session có phải do orchestrator tạo ra không
+is_orchestrator_session() {
+    local session="$1"
+    case "$session" in
+        go-master-*|metanode-*|rpc-proxy) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Lấy PID của process chính trong tmux session
@@ -190,18 +222,43 @@ start_go_master() {
         pprof_flag="--pprof-addr="
     fi
 
+    # Build command with crash diagnostics wrapper
     local cmd="ulimit -n 100000; "
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
-    cmd+="export GOMEMLIMIT=500MiB && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
-    cmd+="exec ./simple_chain -config=${config} ${pprof_flag} "
-    cmd+=">> \"${log_file}\" 2>&1"
+    cmd+="set -o pipefail; "
+    cmd+="echo \"═══ [NODE ${node_id}] PID=\$\$ Started at \$(date '+%Y-%m-%d %H:%M:%S') ═══\"; "
+    cmd+="./simple_chain -config=${config} ${pprof_flag} 2>&1 | tee >(sed -u 's/\x1b\[[0-9;]*[mGK]//g' >> \"${log_file}\"); "
+    cmd+="EXIT_CODE=\${PIPESTATUS[0]}; "
+    cmd+="echo ''; "
+    cmd+="echo '╔═══════════════════════════════════════════════════════════╗'; "
+    cmd+="echo '║  🚨 NODE ${node_id} PROCESS EXITED                       ║'; "
+    cmd+="echo '╚═══════════════════════════════════════════════════════════╝'; "
+    cmd+="echo \"  ⏰ Time: \$(date '+%Y-%m-%d %H:%M:%S')\"; "
+    cmd+="echo \"  📊 Exit code: \$EXIT_CODE\"; "
+    cmd+="if [ \$EXIT_CODE -gt 128 ]; then "
+    cmd+="  SIG=\$((EXIT_CODE - 128)); "
+    cmd+="  echo \"  ⚡ Killed by signal: \$SIG (\$(kill -l \$SIG 2>/dev/null || echo UNKNOWN))\"; "
+    cmd+="fi; "
+    cmd+="echo \"  📁 Log: ${log_file}\"; "
+    cmd+="echo ''; "
+    cmd+="echo '  💡 Pane is kept alive (remain-on-exit). Press q or type exit to close.'; "
+    cmd+="echo '  💡 Use: tmux attach -t ${session}  to reconnect'; "
 
-    cd "$GO_DIR" && tmux new-session -d -s "$session" "bash -c '$cmd'"
-    log_step "Go Master node${node_id} → process started via tmux"
+    local script_file="/tmp/run_node_${node_id}.sh"
+    echo "#!/bin/bash" > "$script_file"
+    echo "cd \"$GO_DIR\"" >> "$script_file"
+    echo "$cmd" >> "$script_file"
+    chmod +x "$script_file"
+
+    tmux new-session -d -s "$session" "$script_file"
+    # Enable remain-on-exit: keep tmux pane alive after process exits
+    # This allows attaching to see crash output, exit code, and signal info
+    tmux set-option -t "$session" remain-on-exit on
+    log_step "Go Master node${node_id} → process started via tmux (remain-on-exit ON)"
 }
 
 
@@ -386,7 +443,7 @@ cmd_start() {
         session_exists "go-master-${i}" && existing=$((existing + 1))
         session_exists "metanode-${i}" && existing=$((existing + 1))
     done
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
+    local orphans=$(pgrep -f "simple_chain.*config-master-node" 2>/dev/null | wc -l || true)
     if [ $existing -gt 0 ] || [ $orphans -gt 0 ]; then
         log_warn "Phát hiện $existing session + $orphans orphan process đang chạy!"
         if ! $fresh; then
@@ -395,7 +452,10 @@ cmd_start() {
         fi
         log_warn "Chế độ --fresh: Dừng tất cả session cũ + kill orphan processes..."
         cmd_stop
-        pkill -9 -f "simple_chain" 2>/dev/null || true
+        # Chỉ kill các process simple_chain có config cụ thể (không kill rộng)
+        for i in $(seq 0 $((NUM_NODES - 1))); do
+            pkill -9 -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+        done
         echo ""
     fi
 
@@ -525,17 +585,21 @@ cmd_stop() {
     echo -e "${GREEN}${BOLD}║  ✅ CLUSTER ĐÃ DỪNG AN TOÀN!                           ║${NC}"
     echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
-    # Tự động kill orphan process (thay vì chỉ cảnh báo)
-    local orphans=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
+    # Tự động kill orphan process (chỉ kill các node config cụ thể, không kill rộng)
+    local orphans=$(pgrep -f "simple_chain.*config-master-node" 2>/dev/null | wc -l || true)
     if [ $orphans -gt 0 ]; then
         log_warn "⚠️  Phát hiện ${orphans} Go orphan process — đang kill..."
-        pkill -TERM -f "simple_chain.*config-" 2>/dev/null || true
+        for i in $(seq 0 $((NUM_NODES - 1))); do
+            pkill -TERM -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+        done
         sleep 3
         # Force kill nếu vẫn còn
-        local remaining=$(pgrep -f "simple_chain.*config-" 2>/dev/null | wc -l || true)
+        local remaining=$(pgrep -f "simple_chain.*config-master-node" 2>/dev/null | wc -l || true)
         if [ $remaining -gt 0 ]; then
             log_warn "⚠️  Vẫn còn ${remaining} orphan → SIGKILL"
-            pkill -9 -f "simple_chain.*config-" 2>/dev/null || true
+            for i in $(seq 0 $((NUM_NODES - 1))); do
+                pkill -9 -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+            done
             sleep 1
         fi
         log_info "✅ Đã dọn sạch orphan processes"

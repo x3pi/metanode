@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/hex"
 	"math/big"
 	"sort"
 	"time"
@@ -27,10 +28,10 @@ type ValidatorState interface {
 	P2PAddress() string
 	PubKeyBls() string
 	PubKeySecp() string
-	ProtocolKey() string  // Protocol key (Ed25519) - tương thích với committee.json
-	NetworkKey() string   // Network key (Ed25519) - tương thích với committee.json
+	ProtocolKey() []byte  // Protocol key (Ed25519) - tương thích với committee.json
+	NetworkKey() []byte   // Network key (Ed25519) - tương thích với committee.json
 	Hostname() string     // Hostname - tương thích với committee.json
-	AuthorityKey() string // Authority key (BLS) - tương thích với committee.json
+	AuthorityKey() []byte // Authority key (BLS) - tương thích với committee.json
 
 	MinSelfDelegation() *big.Int
 	AccumulatedRewardsPerShare() *big.Int
@@ -54,10 +55,10 @@ type ValidatorState interface {
 	SetP2PAddress(address string)
 	SetPubKeyBls(pubKey string)
 	SetPubKeySecp(pubKey string)
-	SetProtocolKey(pubKey string)  // Set protocol key (Ed25519) - tương thích với committee.json
-	SetNetworkKey(pubKey string)   // Set network key (Ed25519) - tương thích với committee.json
+	SetProtocolKey(pubKey []byte)  // Set protocol key (Ed25519) - tương thích với committee.json
+	SetNetworkKey(pubKey []byte)   // Set network key (Ed25519) - tương thích với committee.json
 	SetHostname(name string)       // Set hostname
-	SetAuthorityKey(pubKey string) // Set authority key (BLS) - tương thích với committee.json
+	SetAuthorityKey(pubKey []byte) // Set authority key (BLS) - tương thích với committee.json
 
 	// Serialization
 	Marshal() ([]byte, error)
@@ -124,26 +125,26 @@ func (vs *validatorStateImpl) PubKeyBls() string {
 func (vs *validatorStateImpl) PubKeySecp() string {
 	return vs.GetPubkeySecp()
 }
-func (vs *validatorStateImpl) ProtocolKey() string {
+func (vs *validatorStateImpl) ProtocolKey() []byte {
 	// Ưu tiên dùng protocol_key, fallback về pubkey_secp
-	if protocolKey := vs.GetProtocolKey(); protocolKey != "" {
+	if protocolKey := vs.GetProtocolKey(); len(protocolKey) != 0 {
 		return protocolKey
 	}
-	return vs.GetPubkeySecp()
+	return []byte(vs.GetPubkeySecp())
 }
-func (vs *validatorStateImpl) NetworkKey() string {
+func (vs *validatorStateImpl) NetworkKey() []byte {
 	// Ưu tiên dùng network_key, fallback về pubkey_secp
-	if networkKey := vs.GetNetworkKey(); networkKey != "" {
+	if networkKey := vs.GetNetworkKey(); len(networkKey) != 0 {
 		return networkKey
 	}
-	return vs.GetPubkeySecp()
+	return []byte(vs.GetPubkeySecp())
 }
-func (vs *validatorStateImpl) AuthorityKey() string {
+func (vs *validatorStateImpl) AuthorityKey() []byte {
 	// Ưu tiên dùng authority_key, fallback về pubkey_bls
-	if authorityKey := vs.GetAuthorityKey(); authorityKey != "" {
+	if authorityKey := vs.GetAuthorityKey(); len(authorityKey) != 0 {
 		return authorityKey
 	}
-	return vs.GetPubkeyBls()
+	return []byte(vs.GetPubkeyBls())
 }
 
 // --- Các hàm Setter ---
@@ -181,24 +182,24 @@ func (vs *validatorStateImpl) SetPubKeyBls(pubKey string) {
 func (vs *validatorStateImpl) SetPubKeySecp(pubKey string) {
 	vs.Validator.PubkeySecp = pubKey
 }
-func (vs *validatorStateImpl) SetProtocolKey(pubKey string) {
+func (vs *validatorStateImpl) SetProtocolKey(pubKey []byte) {
 	vs.Validator.ProtocolKey = pubKey
 	// Also set pubkey_secp for backward compatibility
-	if vs.Validator.PubkeySecp == "" {
-		vs.Validator.PubkeySecp = pubKey
+	if vs.Validator.PubkeySecp == "" && len(pubKey) > 0 {
+		vs.Validator.PubkeySecp = hex.EncodeToString(pubKey)
 	}
 }
-func (vs *validatorStateImpl) SetNetworkKey(pubKey string) {
+func (vs *validatorStateImpl) SetNetworkKey(pubKey []byte) {
 	vs.Validator.NetworkKey = pubKey
 }
 func (vs *validatorStateImpl) SetHostname(name string) {
 	vs.Validator.Hostname = name
 }
-func (vs *validatorStateImpl) SetAuthorityKey(pubKey string) {
+func (vs *validatorStateImpl) SetAuthorityKey(pubKey []byte) {
 	vs.Validator.AuthorityKey = pubKey
 	// Also set pubkey_bls for backward compatibility
-	if vs.Validator.PubkeyBls == "" {
-		vs.Validator.PubkeyBls = pubKey
+	if vs.Validator.PubkeyBls == "" && len(pubKey) > 0 {
+		vs.Validator.PubkeyBls = hex.EncodeToString(pubKey)
 	}
 }
 func (vs *validatorStateImpl) SetCommissionRate(rate uint64) error {

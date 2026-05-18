@@ -127,11 +127,11 @@ namespace mvm
         virtual void add_addresses_sub_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void set_addresses_nonce_change(const Address &addr, const uint256_t &nonce) override;
 
-        const std::vector<std::vector<uint8_t>> get_newly_deploy();
-        const std::vector<std::vector<uint8_t>> get_storage_change();
-        const std::vector<std::vector<uint8_t>> get_add_balance_change();
-        const std::vector<std::vector<uint8_t>> get_sub_balance_change();
-        const std::vector<std::vector<uint8_t>> get_nonce_change();
+        const std::vector<std::vector<uint8_t>> get_newly_deploy(bool apply_to_cache = true);
+        const std::vector<std::vector<uint8_t>> get_storage_change(bool apply_to_cache = true);
+        const std::vector<std::vector<uint8_t>> get_add_balance_change(bool apply_to_cache = true);
+        const std::vector<std::vector<uint8_t>> get_sub_balance_change(bool apply_to_cache = true);
+        const std::vector<std::vector<uint8_t>> get_nonce_change(bool apply_to_cache = true);
 
         /**
          * For tests which require some initial state, allow manual insertion of

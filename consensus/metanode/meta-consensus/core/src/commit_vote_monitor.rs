@@ -1,45 +1,98 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use crate::{
     block::{BlockAPI as _, VerifiedBlock},
-    commit::GENESIS_COMMIT_INDEX,
+    commit::{CommitDigest, GENESIS_COMMIT_INDEX},
     context::Context,
     CommitIndex,
 };
 
+struct VoteState {
+    // Highest commit index voted by each authority.
+    highest_voted_commits: Vec<CommitIndex>,
+    // FORK-FIX (May 2026): Full digest history per commit index.
+    // GC: entries below quorum_commit_index - DIGEST_HISTORY_RETAIN are pruned
+    digest_history: BTreeMap<CommitIndex, HashMap<CommitDigest, u64>>,
+    // Tracks which authority has already voted for which commit index.
+    authority_voted_indices: Vec<std::collections::HashSet<CommitIndex>>,
+}
+
 /// Monitors the progress of consensus commits across the network.
 pub struct CommitVoteMonitor {
     context: Arc<Context>,
-    // Highest commit index voted by each authority.
-    highest_voted_commits: Mutex<Vec<CommitIndex>>,
+    state: Mutex<VoteState>,
     // Notifier for when quorum index might have advanced
     pub quorum_advanced_notify: tokio::sync::Notify,
 }
 
+/// Number of commit indices to retain in digest_history below the current
+/// quorum_commit_index. Prevents unbounded memory growth while ensuring
+/// recently-buffered local commits can still be verified.
+///
+/// Sizing: At 50k+ TPS (~1000 commits/sec), epoch transitions can stall
+/// CommitProcessor for 5-10s = 5k-10k commits. Set to 50k for 50× headroom.
+/// Memory: ~50k entries × ~100 bytes = ~5MB — negligible.
+const DIGEST_HISTORY_RETAIN: u32 = 50_000;
+
 impl CommitVoteMonitor {
     pub(crate) fn new(context: Arc<Context>) -> Self {
-        let highest_voted_commits = Mutex::new(vec![0; context.committee.size()]);
+        let size = context.committee.size();
+        let state = VoteState {
+            highest_voted_commits: vec![0; size],
+            digest_history: BTreeMap::new(),
+            authority_voted_indices: (0..size).map(|_| std::collections::HashSet::new()).collect(),
+        };
         Self {
             context,
-            highest_voted_commits,
+            state: Mutex::new(state),
             quorum_advanced_notify: tokio::sync::Notify::new(),
         }
     }
 
     /// Keeps track of the highest commit voted by each authority.
+    /// Also accumulates digest stake votes per commit index for DIGEST-GATE.
     pub(crate) fn observe_block(&self, block: &VerifiedBlock) {
         let mut updated = false;
+        let author = block.author();
         {
-            let mut highest_voted_commits = self.highest_voted_commits.lock();
+            let mut state = self.state.lock();
+
             for vote in block.commit_votes() {
-                if vote.index > highest_voted_commits[block.author()] {
-                    highest_voted_commits[block.author()] = vote.index;
+                // Update highest voted commit (for quorum_commit_index calculation)
+                if vote.index > state.highest_voted_commits[author] {
+                    state.highest_voted_commits[author] = vote.index;
                     updated = true;
+                }
+
+                // Accumulate digest vote for this specific commit index.
+                // Only count each (authority, commit_index) pair ONCE to prevent
+                // double-counting from duplicate blocks during catch-up.
+                if state.authority_voted_indices[author].insert(vote.index) {
+                    let authority_stake = self.context.committee.authority(author).stake;
+                    let entry = state.digest_history
+                        .entry(vote.index)
+                        .or_insert_with(HashMap::new);
+                    *entry.entry(vote.digest).or_insert(0) += authority_stake;
+                }
+            }
+
+            // GC: Prune old digest history entries to prevent unbounded growth.
+            // Keep entries from (quorum - RETAIN) onwards.
+            let gc_below = self.compute_quorum_index_inner(&state.highest_voted_commits)
+                .saturating_sub(DIGEST_HISTORY_RETAIN);
+            if gc_below > 0 {
+                // Split off entries below gc_below
+                let to_keep = state.digest_history.split_off(&gc_below);
+                state.digest_history = to_keep;
+                // Also clean authority_voted for pruned indices
+                for voted_set in state.authority_voted_indices.iter_mut() {
+                    voted_set.retain(|idx| *idx >= gc_below);
                 }
             }
         }
@@ -48,27 +101,72 @@ impl CommitVoteMonitor {
         }
     }
 
-    // Finds the highest commit index certified by a quorum.
-    // When an authority votes for commit index S, it is also voting for all commit indices 1 <= i < S.
-    // So the quorum commit index is the smallest index S such that the sum of stakes of authorities
-    // voting for commit indices >= S passes the quorum threshold.
-    pub(crate) fn quorum_commit_index(&self) -> CommitIndex {
-        let highest_voted_commits = self.highest_voted_commits.lock();
-        let mut highest_voted_commits = highest_voted_commits
+    /// Internal helper: compute quorum commit index from a locked highest_voted_commits vec.
+    fn compute_quorum_index_inner(&self, highest_voted_commits: &[CommitIndex]) -> CommitIndex {
+        let mut votes: Vec<(CommitIndex, u64)> = highest_voted_commits
             .iter()
             .zip(self.context.committee.authorities())
             .map(|(commit_index, (_, a))| (*commit_index, a.stake))
-            .collect::<Vec<_>>();
-        // Sort by commit index then stake, in descending order.
-        highest_voted_commits.sort_by(|a, b| a.cmp(b).reverse());
+            .collect();
+        votes.sort_by(|a, b| a.cmp(b).reverse());
         let mut total_stake = 0;
-        for (commit_index, stake) in highest_voted_commits {
+        for (commit_index, stake) in votes {
             total_stake += stake;
             if total_stake >= self.context.committee.quorum_threshold() {
                 return commit_index;
             }
         }
         GENESIS_COMMIT_INDEX
+    }
+
+    // Finds the highest commit index certified by a quorum.
+    // When an authority votes for commit index S, it is also voting for all commit indices 1 <= i < S.
+    // So the quorum commit index is the smallest index S such that the sum of stakes of authorities
+    // voting for commit indices >= S passes the quorum threshold.
+    pub(crate) fn quorum_commit_index(&self) -> CommitIndex {
+        let state = self.state.lock();
+        self.compute_quorum_index_inner(&state.highest_voted_commits)
+    }
+
+    /// Returns the quorum-agreed digest for a specific commit index.
+    /// If 2f+1 authorities voted for the same digest at this index, returns Some(digest).
+    /// If there's no quorum agreement on digest (divergent DAG), returns None.
+    ///
+    /// FORK-FIX (May 2026): Now queries from persistent `digest_history` instead of
+    /// `highest_voted_digests`. This means digest votes are NOT lost when authorities
+    /// advance to higher commit indices, fixing the deadlock where DIGEST-GATE
+    /// could never verify any commit because votes were always overwritten.
+    pub fn quorum_commit_digest(&self, target_index: CommitIndex) -> Option<CommitDigest> {
+        let state = self.state.lock();
+
+        let digest_stakes = match state.digest_history.get(&target_index) {
+            Some(stakes) => stakes,
+            None => return None, // No votes recorded for this index (GC'd or never seen)
+        };
+
+        // Find the digest that reached quorum
+        if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
+            if *best_stake >= self.context.committee.quorum_threshold() {
+                return Some(*best_digest);
+            }
+        }
+
+        // No single digest reached quorum at this index
+        None
+    }
+
+    /// Returns true if the monitor has received ANY digest vote data from observe_block().
+    /// Used by COLD-START-BYPASS to differentiate between:
+    ///   - quorum_commit_index > 0 set by CommitSyncer (peer count, NOT digest verification)
+    ///   - Actual digest verification capability from P2P block observation
+    ///
+    /// After epoch transition, CommitVoteMonitor is re-created empty. CommitSyncer
+    /// may set quorum_commit_index > 0 from peer queries within seconds, but digest
+    /// verification is NOT functional until observe_block() accumulates real votes.
+    /// If this returns false, COLD-START-BYPASS should be active regardless of qci.
+    pub fn has_any_digest_data(&self) -> bool {
+        let state = self.state.lock();
+        !state.digest_history.is_empty()
     }
 
     /// Seeds the quorum from Go execution state to break the chicken-and-egg
@@ -85,24 +183,10 @@ impl CommitVoteMonitor {
         if commit_index == 0 {
             return false;
         }
-        let mut highest_voted_commits = self.highest_voted_commits.lock();
-        
+        let mut state = self.state.lock();
+
         // Calculate the current quorum directly from the locked state
-        let mut sorted_votes = highest_voted_commits
-            .iter()
-            .zip(self.context.committee.authorities())
-            .map(|(v, (_, a))| (*v, a.stake))
-            .collect::<Vec<_>>();
-        sorted_votes.sort_by(|a, b| a.cmp(b).reverse());
-        let mut total_stake = 0;
-        let mut current_quorum = GENESIS_COMMIT_INDEX;
-        for (v, stake) in sorted_votes {
-            total_stake += stake;
-            if total_stake >= self.context.committee.quorum_threshold() {
-                current_quorum = v;
-                break;
-            }
-        }
+        let current_quorum = self.compute_quorum_index_inner(&state.highest_voted_commits);
 
         // Only seed if current quorum is 0. If it's > 0, we already have real network agreement.
         if current_quorum > 0 {
@@ -110,13 +194,13 @@ impl CommitVoteMonitor {
         }
 
         let mut updated = false;
-        for slot in highest_voted_commits.iter_mut() {
+        for slot in state.highest_voted_commits.iter_mut() {
             if *slot < commit_index {
                 *slot = commit_index;
                 updated = true;
             }
         }
-        drop(highest_voted_commits);
+        drop(state);
         if updated {
             self.quorum_advanced_notify.notify_waiters();
         }

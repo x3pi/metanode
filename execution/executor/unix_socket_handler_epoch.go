@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -33,11 +34,10 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 		return nil, fmt.Errorf("could not get all validators from stake DB: %w", err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// Go must use the SAME string comparison to produce identical ordering
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
+	// to ensure consistent bit-level ordering with Rust.
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -167,18 +167,18 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
 				}
 
-				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
+				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as bytes to ensure consistent ordering with Rust
 				sort.Slice(validatorInfoList.Validators, func(i, j int) bool {
-					return validatorInfoList.Validators[i].AuthorityKey < validatorInfoList.Validators[j].AuthorityKey
+					return bytes.Compare(validatorInfoList.Validators[i].AuthorityKey, validatorInfoList.Validators[j].AuthorityKey) < 0
 				})
 
 				for i, val := range validatorInfoList.Validators {
 					authKeyPreview := val.AuthorityKey
 					if len(authKeyPreview) > 50 {
-						authKeyPreview = authKeyPreview[:50] + "..."
+						authKeyPreview = authKeyPreview[:50]
 					}
 					logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] Genesis ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s",
-						i, val.Address, val.Stake, val.Name, authKeyPreview)
+						i, val.Address, val.Stake, val.Name, string(authKeyPreview)+"...")
 				}
 			} else {
 				// Fallback to current state ONLY if genesis.json is missing (should not happen in prod)
@@ -195,7 +195,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 				// Sort
 				sort.Slice(validators, func(i, j int) bool {
-					return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+					return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 				})
 
 				for _, dbValidator := range validators {
@@ -342,11 +342,10 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
 	}
 
-	// CRITICAL: Sort validators by AuthorityKey (BLS public key) as STRING to ensure consistent ordering with Rust
-	// Rust uses: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// Go must use the SAME string comparison to produce identical ordering
+	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
+	// to ensure consistent bit-level ordering with Rust.
 	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -409,11 +408,11 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		}
 
 		// CRITICAL: Log ValidatorInfo exactly as Rust will receive it
-		authKeyPreview := val.AuthorityKey
+		authKeyPreview := fmt.Sprintf("%x", val.AuthorityKey)
 		if len(authKeyPreview) > 50 {
 			authKeyPreview = authKeyPreview[:50] + "..."
 		}
-		logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%s, network_key=%s",
+		logger.Debug("🔍 [EPOCH] 📤 [GO→RUST] ValidatorInfo[%d]: address=%s, stake=%s, name=%s, authority_key=%s, protocol_key=%x, network_key=%x",
 			len(validatorInfoList.Validators), val.Address, val.Stake, val.Name, authKeyPreview, val.ProtocolKey, val.NetworkKey)
 
 		validatorInfoList.Validators = append(validatorInfoList.Validators, val)
@@ -572,9 +571,9 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	response := &pb.LastBlockNumberResponse{
-		LastBlockNumber:        returnBlockNumber,
-		LastGlobalExecIndex:    lastGEI,
-		IsReady:                isReady,
+		LastBlockNumber:     returnBlockNumber,
+		LastGlobalExecIndex: lastGEI,
+		IsReady:             isReady,
 		// CRITICAL FIX: Return the actual BlockHash in the LastExecutedCommitHash field.
 		// POST-GATE-VERIFY in Rust relies on this to compare against the peer's block_hash.
 		// Returning the DAG commit hash here caused a state mismatch false positive!
@@ -589,6 +588,12 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 
 // HandleGetCurrentEpochRequest processes a GetCurrentEpochRequest and returns the current epoch from Go state (Sui-style)
 func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpochRequest) (*pb.GetCurrentEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetCurrentEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Debug("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
 
 	// Get current epoch from blockchain state
@@ -628,6 +633,12 @@ func (rh *RequestHandler) HandleGetEpochStartTimestampRequest(request *pb.GetEpo
 
 // HandleAdvanceEpochRequest processes a AdvanceEpochRequest and advances Go state epoch (Sui-style completion)
 func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequest) (*pb.AdvanceEpochResponse, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleAdvanceEpochRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	logger.Info("Handling AdvanceEpochRequest (Sui-style epoch transition completion)",
 		"new_epoch", request.NewEpoch,
 		"timestamp_ms", request.EpochStartTimestampMs,
@@ -765,6 +776,12 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 // HandleGetEpochBoundaryDataRequest processes a GetEpochBoundaryDataRequest and returns unified epoch boundary data
 // This is the single authoritative source for epoch transition data, ensuring consistency
 func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error) {
+	defer func(start time.Time) {
+		if d := time.Since(start); d > 100*time.Millisecond {
+			logger.Warn("⚠️ [FFI STALL] HandleGetEpochBoundaryDataRequest took %v (Slow!)", d)
+		}
+	}(time.Now())
+
 	epoch := request.GetEpoch()
 	logger.Info("📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest", "epoch", epoch)
 
@@ -817,27 +834,26 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		}
 		logger.Info("✅ [EPOCH BOUNDARY] Epoch 0 using GENESIS timestamp: %d ms", epochTimestamp)
 	} else {
-		// EPOCH N (N >= 1): Try to use boundary block header timestamp
-		blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
-		if ok {
-			boundaryBlockData, err := rh.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
-			if err == nil {
-				epochTimestamp = boundaryBlockData.Header().TimeStamp() * 1000
-				logger.Info("✅ [EPOCH BOUNDARY] Epoch %d using BOUNDARY BLOCK %d timestamp: %d ms (deterministic)",
-					epoch, boundaryBlock, epochTimestamp)
-			} else {
-				// Block hash exists but data not readable - use stored timestamp
-				epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
-				syncComplete = false
-				logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d hash exists but data not readable. "+
-					"Using stored timestamp %d ms.", epoch, boundaryBlock, epochTimestamp)
-			}
+		// EPOCH N (N >= 1): Strictly use the timestamp provided by Rust during AdvanceEpoch.
+		// FORK-SAFETY FIX (G-C4): The local block header timestamp is non-deterministic
+		// across nodes, leading to divergent genesis blocks and 'InvalidGenesisAncestor' stalls.
+		// Rust passes the authoritative consensus timestamp which Go stored.
+		epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+
+		if epochTimestamp == 0 {
+			logger.Error("🚨 [EPOCH BOUNDARY] CRITICAL: Epoch %d start timestamp is 0! "+
+				"AdvanceEpoch must have failed to record the timestamp.", epoch)
+			epochTimestamp = 1 // Fallback to avoid division by zero crashes
 		} else {
-			// Block not synced yet - use stored timestamp from advance_epoch
-			epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+			logger.Info("✅ [EPOCH BOUNDARY] Epoch %d strictly using authoritative stored timestamp: %d ms",
+				epoch, epochTimestamp)
+		}
+
+		// Check if boundary block is fully synced to correctly handle NOMT queries below
+		_, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		if !ok {
 			syncComplete = false
-			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. "+
-				"Using stored timestamp %d ms (sync pending).", epoch, boundaryBlock, epochTimestamp)
+			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. (sync pending)", epoch, boundaryBlock)
 		}
 	}
 
@@ -1176,10 +1192,10 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 	if upperBound > lastBlockNumber {
 		upperBound = lastBlockNumber
 	}
-	
+
 	lastHandledCommit := storage.GetLastHandledCommitIndex()
 	lastHandledEpoch := storage.GetLastHandledCommitEpoch()
-	
+
 	for blockNum := startBlock; blockNum <= upperBound; blockNum++ {
 		if uint64(len(blocks)) >= maxBatch {
 			break
@@ -1199,7 +1215,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			continue
 		}
 		header := blk.Header()
-		
+
 		// ═══════════════════════════════════════════════════════════════════
 		// CRITICAL FORK-SAFETY (May 2026): Prevent serving partial commits!
 		// m1 uses these blocks to set its lastHandledCommitIndex. If we send blocks
@@ -1207,7 +1223,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 		// commit when consensus resumes.
 		// ═══════════════════════════════════════════════════════════════════
 		if header.Epoch() > lastHandledEpoch || (header.Epoch() == lastHandledEpoch && header.CommitIndex() > uint64(lastHandledCommit)) {
-			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)", 
+			logger.Warn("📦 [BLOCK SYNC] Stopping at block #%d: CommitIndex %d is beyond fully-handled commit %d (epoch %d)",
 				blockNum, header.CommitIndex(), lastHandledCommit, lastHandledEpoch)
 			break
 		}
@@ -1289,6 +1305,22 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// DEADLOCK PREVENTION (May 2026): Reject EXECUTE mode requests during snapshot.
+	// HandleSyncBlocksRequest opens NOMT sessions that are NOT gated by snapshotGate
+	// or ExecutionMutex. If a snapshot triggers while these sessions are active,
+	// CloseForSnapshot waits forever → DEADLOCK.
+	// Rust will retry this RPC after the snapshot completes.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if request.GetExecuteMode() && rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
+		logger.Warn("⏸️ [SYNC] SyncBlocksRequest EXECUTE mode rejected: snapshot in progress. Rust should retry.")
+		return &pb.SyncBlocksResponse{
+			SyncedCount:     0,
+			LastSyncedBlock: 0,
+			Error:           "snapshot in progress, retry later",
+		}, nil
+	}
+
 	if blockCount == 0 {
 		return &pb.SyncBlocksResponse{
 			SyncedCount:     0,
@@ -1319,11 +1351,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	isPreConsensusSync := request.GetExecuteMode()
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
+		if rh.snapshotManager != nil {
+			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+			rh.snapshotManager.WaitForPersistence()
+		}
 	}
-	// ═══════════════════════════════════════════════════════════════════════════
-	// CACHING GEI (Optimization 4): Read GEI once per batch, update in loop
-	// ═══════════════════════════════════════════════════════════════════════════
-	currentGEI := storage.GetLastGlobalExecIndex()
 
 	// R7: Crash-guard for Cache Invalidation
 	// Guarantee cache is invalidated on exit if any blocks were executed
@@ -1363,14 +1395,35 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
-		// CRITICAL FIX: To prevent state divergence after crashes, we must ALSO verify
-		// that the block hash actually exists in our local database. Sometimes PebbleDB
-		// persists the GEI counter but fails to flush the actual block data.
+		// CRITICAL FIX: We MUST read GEI freshly in the loop. Caching it outside
+		// the loop causes this sync to blindly overwrite blocks that were concurrently
+		// processed by the live consensus goroutine (processRustEpochData).
 		// ═══════════════════════════════════════════════════════════════════════════
+		currentGEI := storage.GetLastGlobalExecIndex()
 		isFullyExecuted := false
 		if blockGEI > 0 && blockGEI <= currentGEI {
-			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
-				isFullyExecuted = true
+			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
+				if localHash == blockHash {
+					isFullyExecuted = true
+				} else {
+					// ═══════════════════════════════════════════════════════════
+					// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
+					//
+					// During high-load sync, hash mismatches can occur transiently
+					// when a node receives blocks from a peer that decided a different
+					// leader (before digest-gate corrects it). Killing the node here
+					// causes cascading quorum loss → total cluster stall.
+					//
+					// Instead: SKIP this block entirely. The node continues processing
+					// and will receive the correct block via consensus commit path.
+					// This follows the mandate: "thà pending chứ không fork" —
+					// better to pend than to fork.
+					// ═══════════════════════════════════════════════════════════
+					logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
+						"SKIPPING this block (not wiping DB). Node will recover via consensus.",
+						blockNum, localHash[:8], blockHash[:8])
+					continue // Skip this block, process next one
+				}
 			}
 		}
 
@@ -1401,7 +1454,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				commitIdx32 := uint32(header.CommitIndex())
 				currentEpoch := header.Epoch()
 				lastEpoch := storage.GetLastHandledCommitEpoch()
-				
+
 				if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 					storage.ForceSetLastHandledCommitIndex(commitIdx32)
 					storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1437,7 +1490,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			commitIdx32 := uint32(header.CommitIndex())
 			currentEpoch := header.Epoch()
 			lastEpoch := storage.GetLastHandledCommitEpoch()
-			
+
 			if currentEpoch > lastEpoch || (currentEpoch == lastEpoch && commitIdx32 > storage.GetLastHandledCommitIndex()) {
 				storage.ForceSetLastHandledCommitIndex(commitIdx32)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
@@ -1450,10 +1503,46 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// This writes the pre-computed state diffs so NOMT can rebuild from them.
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
+			// DEBUG: Log raw backup size BEFORE deserialize — detects truncated snapshots early
+			logger.Info("🔍 [NOMT-DEBUG] Block #%d: raw backupBytes=%d bytes. About to deserialize+apply.",
+				blockNum, len(backupBytes))
+
 			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
 			if deserErr != nil {
 				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
 			} else {
+				// DEBUG: Log field sizes after deserialize — tells us if AccountBatch is missing
+				logger.Info("🔍 [NOMT-DEBUG] Block #%d deserialized: AccountBatch=%d bytes, TrieDB=%d bytes, FullDbLogs=%d entries",
+					blockNum,
+					len(backupDb.AccountBatch),
+					len(backupDb.TrieDatabaseBatchPut),
+					len(backupDb.FullDbLogs),
+				)
+
+				// Capture NOMT root BEFORE apply to compute delta
+				var rootBeforeApply common.Hash
+				var hasRootBefore bool
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
+
+					// ═══════════════════════════════════════════════════════════════
+					// PRE-EXECUTION VERIFICATION:
+					// Metanode block headers store the PRE-EXECUTION state root.
+					// We must verify it BEFORE applying the block's state changes.
+					// ═══════════════════════════════════════════════════════════════
+					expectedAccountRoot := header.AccountStatesRoot()
+					if hasRootBefore && expectedAccountRoot != (common.Hash{}) && expectedAccountRoot != trie.EmptyRootHash {
+						if rootBeforeApply != expectedAccountRoot {
+							logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
+								"localRoot=%s, expected=%s, block=#%d. "+
+								"This node's state has diverged BEFORE this block was applied!",
+								rootBeforeApply.Hex(), expectedAccountRoot.Hex(), blockNum)
+						} else {
+							logger.Debug("✅ [NOMT-SYNC-VERIFY] PRE-execution root matches: %s", rootBeforeApply.Hex()[:18]+"...")
+						}
+					}
+				}
+
 				if applyErr := rh.applyBackupDbBatches(&backupDb); applyErr != nil {
 					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
 				}
@@ -1466,15 +1555,20 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						expectedAccountRoot := header.AccountStatesRoot()
-						rootMatch := "MATCH"
-						if nomtRoot != expectedAccountRoot && expectedAccountRoot != (common.Hash{}) {
-							rootMatch = "MISMATCH"
+
+						// Show before→after delta when available
+						if hasRootBefore {
+							logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): beforeApply=%s → afterApply=%s, headerExpected(pre)=%s",
+								blockNum, blockGEI,
+								rootBeforeApply.Hex()[:18]+"...",
+								nomtRoot.Hex()[:18]+"...",
+								expectedAccountRoot.Hex()[:18]+"...")
+						} else {
+							logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, headerExpected(pre)=%s",
+								blockNum, blockGEI,
+								nomtRoot.Hex()[:18]+"...",
+								expectedAccountRoot.Hex()[:18]+"...")
 						}
-						logger.Info("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, expected=%s → %s",
-							blockNum, blockGEI,
-							nomtRoot.Hex()[:18]+"...",
-							expectedAccountRoot.Hex()[:18]+"...",
-							rootMatch)
 					}
 				}
 			}
@@ -1482,33 +1576,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		if blockNum == 0 {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
-
-			// CRITICAL FIX: Even if the block is empty, if it's the LAST block in a STARTUP-SYNC
-			// batch, we MUST trigger the trie rebuild. Otherwise, NOMT memory state stays stale.
-			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on empty last block (GEI=%d)", blockGEI)
-				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for empty block: %v", err)
-				}
-			}
 			continue
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 2: Save block to LevelDB (by hash + number→hash mapping)
+		// STEP 2: Block Saving and Mappings are now deferred to CommitBlockState
+		// to guarantee they are protected by commitMutex and SEQUENTIAL GUARD.
 		// ═══════════════════════════════════════════════════════════════════════════
-		if err := blockDatabase.SaveBlockByHash(blk); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to save block #%d: %v", blockNum, err)
-			continue
-		}
-		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-		}
-		for _, txHash := range blk.Transactions() {
-			bc.SetTxHashMapBlockNumber(txHash, blockNum)
-		}
 
-		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 3: REBUILD TRIES (conditionally) — sync memory state with DB.
 		//
 		// CRITICAL FIX (Apr 2026): On NOMT backend, WithRebuildTries() MUST NOT
@@ -1537,14 +1612,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// Non-execute-mode (store-only sync):
 			//   No trie rebuild needed — blocks are stored, not executed.
 			// ═══════════════════════════════════════════════════════════════
-			if trie.GetStateBackend() != trie.BackendNOMT || isPreConsensusSync {
+			if trie.GetStateBackend() != trie.BackendNOMT {
 				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-					logger.Info("🔧 [STARTUP-SYNC] NOMT trie rebuild ENABLED for block #%d (pre-consensus, no concurrent execution)", blockNum)
-				}
 			} else {
 				logger.Info("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
-					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie.", blockNum)
+					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie. "+
+					"Re-alignment deferred to processRustEpochData.", blockNum)
 			}
 			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
 			// Without this, synced blocks mapping (block number -> hash) remain in volatile
@@ -1595,21 +1668,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						"handleRoot=%s, trieRoot=%s, block=#%d. "+
 						"This indicates a stale NomtStateTrie — state reads will return wrong data!",
 						nomtHandleRoot.Hex(), localRoot.Hex(), blockNum)
-				}
-
-				// Verify NOMT handle root matches block header expected root
-				if hasNomtRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
-					if nomtHandleRoot != expectedRoot {
-						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: NOMT state root MISMATCH after STARTUP-SYNC! "+
-							"handleRoot=%s, expected=%s, block=#%d. "+
-							"Batch apply was incomplete or corrupted — subsequent consensus blocks WILL FORK!",
-							nomtHandleRoot.Hex(), expectedRoot.Hex(), blockNum)
-						// Don't halt sync — the node can still attempt to recover via consensus.
-						// But this error MUST be investigated immediately.
-					} else {
-						logger.Info("✅ [NOMT-SYNC-VERIFY] NOMT state root VERIFIED: block=#%d root=%s",
-							blockNum, nomtHandleRoot.Hex()[:18]+"...")
-					}
 				}
 
 				// ═══════════════════════════════════════════════════════════════
@@ -1780,7 +1838,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				currentEpoch := rh.chainState.GetCurrentEpoch()
 				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
 				storage.UpdateLastHandledCommitEpoch(currentEpoch)
-				
+
 				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
 					var batch [][2][]byte
 					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
@@ -1854,7 +1912,14 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) error
 			}
 			if len(deserialized) > 0 {
 				aggregatedBatches[entry.name] = deserialized
+				// DEBUG: Log per-namespace key count so we know exactly what was in the snapshot batch
+				logger.Info("[NOMT-DEBUG][APPLY-BATCH] Block #%d: namespace=%s keys=%d (raw=%d bytes)",
+					backupDb.BockNumber, entry.name, len(deserialized), len(entry.data))
 			}
+		} else if entry.name == "Account" {
+			// AccountBatch is empty — this is the most common cause of NOMT root mismatch!
+			logger.Error("[NOMT-DEBUG][APPLY-BATCH] Block #%d: AccountBatch is EMPTY — NOMT cannot rebuild account_state root! Snapshot may be missing AccountBatch data.",
+				backupDb.BockNumber)
 		}
 	}
 

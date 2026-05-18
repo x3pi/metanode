@@ -54,8 +54,25 @@ impl TxRecycler {
         }
     }
 
+    /// Clear all pending TXs during epoch transitions to prevent unbounded memory growth.
+    /// TXs from the old epoch are no longer relevant — they were either committed (and
+    /// confirm_committed missed them due to CommitProcessor halting) or will be recovered
+    /// via `recover_epoch_pending_transactions` which tracks them separately.
+    pub async fn clear_pending(&self) {
+        let mut pending = self.pending.lock().await;
+        let count = pending.len();
+        pending.clear();
+        pending.shrink_to_fit();
+        if count > 0 {
+            info!(
+                "🧹 [TX RECYCLER] Epoch transition: cleared {} pending TXs to prevent memory leak",
+                count
+            );
+        }
+    }
+
     /// Hash TX data using SHA-256 (same as Rust consensus TX identity)
-    fn hash_tx(data: &[u8]) -> [u8; 32] {
+    pub fn hash_tx(data: &[u8]) -> [u8; 32] {
         let mut hasher = Keccak256::new();
         hasher.update(data);
         hasher.finalize().into()

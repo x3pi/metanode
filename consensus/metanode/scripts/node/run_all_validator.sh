@@ -103,14 +103,21 @@ for i in "${!NODES[@]}"; do
     id=${NODES[$i]}
     DATA="${GO_DATA_DIR[$i]}"
     XAPIAN="sample/$DATA/data/data/xapian_node"
+    SESSION="${GO_MASTER_SESSION[$i]}"
+    LOG_FILE="$LOG_DIR/node_$id/go-master-stdout.log"
 
-    echo -e "${GREEN}  🚀 Starting Go Master $id (${GO_MASTER_SESSION[$i]})...${NC}"
+    echo -e "${GREEN}  🚀 Starting Go Master $id ($SESSION)...${NC}"
     PPROF_ARG=""
     if [ "$id" -eq "0" ]; then
         PPROF_ARG="--pprof-addr=localhost:6060"
     fi
-    tmux new-session -d -s "${GO_MASTER_SESSION[$i]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=${GO_MASTER_CONFIG[$i]} $PPROF_ARG >> \"$LOG_DIR/node_$id/go-master-stdout.log\" 2>&1"
+
+    # Use tee to show output on terminal AND write to log file
+    # Add post-mortem diagnostics so crash info stays visible
+    tmux new-session -d -s "$SESSION" -c "$GO_SIMPLE_ROOT" \
+        "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export XAPIAN_BASE_PATH='$XAPIAN' && export MVM_LOG_DIR='$LOG_DIR/node_$id' && echo \"═══ [NODE $id] PID=\$\$ Started at \$(date '+%Y-%m-%d %H:%M:%S') ═══\" && ./simple_chain -config=${GO_MASTER_CONFIG[$i]} $PPROF_ARG 2>&1 | tee -a \"$LOG_FILE\"; EXIT_CODE=\$?; echo ''; echo '╔═══════════════════════════════════════════════════════════╗'; echo '║  🚨 NODE $id PROCESS EXITED                              ║'; echo '╚═══════════════════════════════════════════════════════════╝'; echo \"  ⏰ Time: \$(date '+%Y-%m-%d %H:%M:%S')\"; echo \"  📊 Exit code: \$EXIT_CODE\"; if [ \$EXIT_CODE -gt 128 ]; then SIG=\$((EXIT_CODE - 128)); echo \"  ⚡ Killed by signal: \$SIG (\$(kill -l \$SIG 2>/dev/null || echo UNKNOWN))\"; fi; echo \"  📁 Log: $LOG_FILE\"; echo '  💡 Use: tmux attach -t $SESSION  to reconnect'"
+    # Keep tmux pane alive after process exits for crash analysis
+    tmux set-option -t "$SESSION" remain-on-exit on
 
     sleep 2
 done
@@ -127,10 +134,13 @@ for i in "${!NODES[@]}"; do
     id=${NODES[$i]}
     DATA="${GO_DATA_DIR[$i]}"
     XAPIAN="sample/$DATA/data-write/data/xapian_node"
+    SESSION="${GO_SUB_SESSION[$i]}"
+    LOG_FILE="$LOG_DIR/node_$id/go-sub-stdout.log"
 
-    echo -e "${GREEN}  🚀 Starting Go Sub $id (${GO_SUB_SESSION[$i]})...${NC}"
-    tmux new-session -d -s "${GO_SUB_SESSION[$i]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=${GO_SUB_CONFIG[$i]} >> \"$LOG_DIR/node_$id/go-sub-stdout.log\" 2>&1"
+    echo -e "${GREEN}  🚀 Starting Go Sub $id ($SESSION)...${NC}"
+    tmux new-session -d -s "$SESSION" -c "$GO_SIMPLE_ROOT" \
+        "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export XAPIAN_BASE_PATH='$XAPIAN' && export MVM_LOG_DIR='$LOG_DIR/node_$id' && echo \"═══ [SUB $id] PID=\$\$ Started at \$(date '+%Y-%m-%d %H:%M:%S') ═══\" && ./simple_chain -config=${GO_SUB_CONFIG[$i]} 2>&1 | tee -a \"$LOG_FILE\"; EXIT_CODE=\$?; echo ''; echo '╔═══════════════════════════════════════════════════════════╗'; echo '║  🚨 SUB $id PROCESS EXITED                               ║'; echo '╚═══════════════════════════════════════════════════════════╝'; echo \"  ⏰ Time: \$(date '+%Y-%m-%d %H:%M:%S')\"; echo \"  📊 Exit code: \$EXIT_CODE\"; if [ \$EXIT_CODE -gt 128 ]; then SIG=\$((EXIT_CODE - 128)); echo \"  ⚡ Killed by signal: \$SIG (\$(kill -l \$SIG 2>/dev/null || echo UNKNOWN))\"; fi; echo '  💡 Use: tmux attach -t $SESSION  to reconnect'"
+    tmux set-option -t "$SESSION" remain-on-exit on
 
     sleep 1
 done

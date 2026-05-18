@@ -101,8 +101,31 @@ func (h *Handle) CloseForSnapshot() {
 	h.closing = true
 
 	// 2. Wait for all active sessions to either Close() or turn into FinishedSessions
+	// DIAGNOSTIC (May 2026): Background goroutine logs stuck state every 2s
+	waitStart := time.Now()
+	diagDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-diagDone:
+				return
+			case <-ticker.C:
+				h.sessionsMu.Lock()
+				ac, ps := h.activeCount, len(h.pendingSessions)
+				h.sessionsMu.Unlock()
+				fmt.Printf("🔒 [NOMT-DIAG] CloseForSnapshot WAITING at %s: activeCount=%d, pendingSessions=%d, elapsed=%v\n",
+					h.path, ac, ps, time.Since(waitStart))
+			}
+		}
+	}()
 	for h.activeCount > len(h.pendingSessions) {
 		h.activeCond.Wait()
+	}
+	close(diagDone)
+	if d := time.Since(waitStart); d > 100*time.Millisecond {
+		fmt.Printf("⚠️ [NOMT-DIAG] CloseForSnapshot session drain at %s took %v\n", h.path, d)
 	}
 
 	// At this point, ALL sessions are either fully closed or sitting in pendingSessions.

@@ -35,14 +35,22 @@ func (dd *DeployData) Unmarshal(b []byte) error {
 }
 
 func (dd *DeployData) Marshal() ([]byte, error) {
-	return proto.MarshalOptions{Deterministic: true}.Marshal(dd.proto)
+	if dd.proto == nil {
+		return nil, nil
+	}
+	return proto.Marshal(dd.proto)
 }
 
-// geter
 func (dd *DeployData) Code() []byte {
+	if dd.proto == nil {
+		return nil
+	}
 	return dd.proto.Code
 }
 
 func (dd *DeployData) StorageAddress() common.Address {
+	if dd.proto == nil {
+		return common.Address{}
+	}
 	return common.BytesToAddress(dd.proto.StorageAddress)
 }

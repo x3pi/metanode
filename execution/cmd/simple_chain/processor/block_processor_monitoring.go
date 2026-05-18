@@ -80,18 +80,9 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 			logger.Error("RESOURCE_MONITOR: 🚨 Very high memory system usage: %d MB (possible memory leak!)", sysMB)
 		}
 
-		// Fix 5: Pipeline health monitoring
-		persistChannelLen := len(bp.persistChannel)
-		persistChannelCap := cap(bp.persistChannel)
+		// Pipeline health monitoring
 		backupDbLen := len(bp.backupDbChannel)
 		forceCommitLen := len(bp.forceCommitChan)
-
-		// Detect stuck pipeline: commitChannel has items + persistChannel full = likely deadlock
-		if commitChannelLen > 0 && persistChannelLen >= persistChannelCap {
-			logger.Error("🚨 PIPELINE_STALL_DETECTED: commitChannel=%d AND persistChannel FULL (%d/%d). "+
-				"commitWorker may be blocked on persistence. Check NOMT/PebbleDB I/O.",
-				commitChannelLen, persistChannelLen, persistChannelCap)
-		}
 
 		// Log summary every 5 minutes (10 times)
 		if time.Now().Unix()%300 < 30 { // Log in first 30 seconds of each 5 minutes
@@ -102,9 +93,8 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 				createdBlocksChanLen, createdBlocksChanCap,
 				stateCommitBufferSize, subNodeBlockBufferSize,
 				goroutineCount, allocMB, sysMB)
-			logger.Info("PIPELINE_MONITOR: Channels[Commit:%d/%d, Persist:%d/%d, Backup:%d/%d, ForceCommit:%d/%d]",
+			logger.Info("PIPELINE_MONITOR: Channels[Commit:%d/%d, Backup:%d/%d, ForceCommit:%d/%d]",
 				commitChannelLen, commitChannelCap,
-				persistChannelLen, persistChannelCap,
 				backupDbLen, cap(bp.backupDbChannel),
 				forceCommitLen, cap(bp.forceCommitChan))
 		}
