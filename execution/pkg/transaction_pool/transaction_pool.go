@@ -75,7 +75,7 @@ func (tp *TransactionPool) loop() {
 	for {
 		select {
 		case req := <-tp.addTxCh:
-			key := req.tx.FromAddress().String() + strconv.FormatUint(req.tx.GetNonce(), 10)
+			key := req.tx.FromAddress().String() + "-" + strconv.FormatUint(req.tx.GetNonce(), 10)
 			if transactionKeys[key] {
 				logger.Info("Transaction already exists in pool, skipping", "key", key)
 				req.reply <- fmt.Errorf("transaction already exists in pool, skipping")
@@ -91,12 +91,9 @@ func (tp *TransactionPool) loop() {
 			transactions = append(transactions, req.tx)
 			transactionKeys[key] = true
 			
-			ethTx := req.tx.ToEthTransaction()
-			if ethTx != nil {
-				h := ethTx.Hash()
-				if h != (common.Hash{}) {
-					txHashMap[h] = req.tx
-				}
+			h := req.tx.Hash()
+			if h != (common.Hash{}) {
+				txHashMap[h] = req.tx
 			}
 
 			tp.notifyWork()
@@ -110,12 +107,9 @@ func (tp *TransactionPool) loop() {
 					transactions = append(transactions, tx)
 					transactionKeys[key] = true
 					
-					ethTx := tx.ToEthTransaction()
-					if ethTx != nil {
-						h := ethTx.Hash()
-						if h != (common.Hash{}) {
-							txHashMap[h] = tx
-						}
+					h := tx.Hash()
+					if h != (common.Hash{}) {
+						txHashMap[h] = tx
 					}
 					addedAny = true
 				}
