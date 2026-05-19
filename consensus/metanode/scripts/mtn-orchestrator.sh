@@ -223,7 +223,7 @@ start_go_master() {
     fi
 
     # Build command with crash diagnostics wrapper
-    local cmd="ulimit -n 100000; "
+    local cmd="ulimit -n 100000; ulimit -c unlimited; "
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
