@@ -239,18 +239,13 @@ func (bp *BlockProcessor) commitWorker() {
 			case bp.backupDbChannel <- job:
 				// enqueued successfully
 			default:
-				// queue full, drop oldest and try again
-				select {
-				case <-bp.backupDbChannel:
-					bp.backupDbWg.Done() // The dropped job will never be processed
-				default:
-				}
-				// push newest
-				select {
-				case bp.backupDbChannel <- job:
-				default:
-					bp.backupDbWg.Done() // If still full (rare), we drop it
-				}
+				// queue full, DO NOT DROP! Spawn a transient worker to prevent data loss
+				// without blocking the commitWorker pipeline.
+				logger.Warn("⚠️ [BACKUP] backupDbChannel full, spawning transient worker for block #%d to prevent SyncOnly stall", blockNum)
+				go func(j CommitJob) {
+					bp.persistBackupDbAsync(j)
+					bp.backupDbWg.Done()
+				}(job)
 			}
 		}
 
