@@ -1743,8 +1743,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
 			logger.Error("❌ [SNAPSHOT-RESUME] Failed to set block->hash mapping for block #%d: %v", blockNum, err)
 		}
-		if err := bc.SaveTransactions(blk); err != nil {
-			logger.Error("❌ [SNAPSHOT-RESUME] Failed to set tx->block mapping for block #%d: %v", blockNum, err)
+		for _, txHash := range blk.Transactions() {
+			bc.SetTxHashMapBlockNumber(txHash, blockNum)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
