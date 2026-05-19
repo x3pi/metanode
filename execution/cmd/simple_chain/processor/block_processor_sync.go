@@ -157,7 +157,12 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// During sync, ~95%+ of commits are empty consensus rounds (0 transactions).
 	// The full processing path does LAZY REFRESH (DB queries), epoch detection,
 	// Case 1/2/3 ordering, block creation — all unnecessary for empty commits.
-	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
+	//
+	// CRITICAL FIX (May 2026): Check epoch boundary and ghost-block-guard BEFORE
+	// advancing GEI. Previously, GEI was advanced first (PushAsyncGEIUpdate),
+	// then undone if ghost-block-guard fired. This fragile undo pattern caused
+	// block gaps when the undo was missed or the GEI was already persisted.
+	// New order: validate ordering → check if block creation needed → advance GEI → return.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
 	if totalTxsQuick == 0 && len(epochData.GetSystemTransactions()) == 0 {
@@ -182,43 +187,10 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				oldExpected, globalExecIndex, gapSize)
 		}
 
-		// Sequential empty commit — update GEI and advance
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-		*nextExpectedGlobalExecIndex = globalExecIndex + 1
-
 		// ═══════════════════════════════════════════════════════════════
-		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
-		// when there are 0 user transactions. Without this, EndOfEpoch
-		// system txs attached to empty commits are silently dropped,
-		// making them invisible to eth_getSystemTransactionsByBlockNumber.
-		// ═══════════════════════════════════════════════════════════════
-		fastPathSysTxs := epochData.GetSystemTransactions()
-		if len(fastPathSysTxs) > 0 {
-			// Use the current block number from the last persisted block
-			sysTxBlockNum := *currentBlockNumber
-			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
-				sysTxBlockNum = lastBlock.Header().BlockNumber()
-			}
-			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
-			if err != nil {
-				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
-			} else {
-				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
-			}
-		}
-
-		// ═══════════════════════════════════════════════════════════════
-		// LAZY REFRESH: DISABLED (FORK-SAFETY FIX 2026-04-29)
-		//
-		// This block imported P2P-synced blocks from LevelDB into the
-		// in-memory state (bp.lastBlock, currentBlockNumber, chainState).
-		// processSingleEpochData only runs on Master nodes, which MUST NOT
-		// adopt P2P blocks — their state is managed by consensus execution.
-		// Importing P2P blocks here corrupts the trie state and causes
-		// hash mismatches in subsequent blocks.
-		//
-		// Original purpose (SyncOnly nodes) is now handled by
-		// syncLastBlockFromDB goroutine in block_processor_db_sync.go.
+		// BLOCK-CREATION CHECKS: Must be done BEFORE GEI advance.
+		// If any of these fire, we fall through to the full processing
+		// path which creates a block. GEI will be advanced there.
 		// ═══════════════════════════════════════════════════════════════
 
 		// EPOCH AUTO-ADVANCE: Check epoch from block data (cheap — only field access)
@@ -245,8 +217,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 					lastBlockEpoch, epochNum, globalExecIndex)
 				// Don't return — fall through to full processing path below
 				// The full path will create a block with 0 transactions.
-				// CRITICAL FIX: Undo the GEI advance from line 85 so the full path doesn't reject it as a duplicate.
-				*nextExpectedGlobalExecIndex = globalExecIndex
+				// NOTE: GEI has NOT been advanced yet — full path handles it.
 				goto EPOCH_BOUNDARY_FALLTHROUGH
 			}
 		}
@@ -255,12 +226,45 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// GHOST-BLOCK-GUARD: If Rust explicitly assigned a block number
 		// for this 0-tx commit, we MUST create an empty block to prevent
 		// sequence gaps in the Go chain.
+		//
+		// CRITICAL FIX (May 2026): This check is now BEFORE GEI advance.
+		// Previously it was after PushAsyncGEIUpdate, requiring a fragile
+		// undo of nextExpectedGEI. Now we simply fall through without
+		// having advanced anything — the full path handles GEI correctly.
 		// ═══════════════════════════════════════════════════════════════
 		if epochData.GetBlockNumber() > 0 {
 			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Rust assigned block_number=%d for 0-tx commit (GEI=%d). Creating empty block to prevent sequence gap.",
 				epochData.GetBlockNumber(), globalExecIndex)
-			*nextExpectedGlobalExecIndex = globalExecIndex
+			// NOTE: GEI has NOT been advanced yet — full path handles it.
 			goto EPOCH_BOUNDARY_FALLTHROUGH
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// SAFE TO SKIP: No epoch boundary, no block number assigned.
+		// This is a pure empty consensus round — advance GEI and return.
+		// ═══════════════════════════════════════════════════════════════
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+		*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
+		// ═══════════════════════════════════════════════════════════════
+		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
+		// when there are 0 user transactions. Without this, EndOfEpoch
+		// system txs attached to empty commits are silently dropped,
+		// making them invisible to eth_getSystemTransactionsByBlockNumber.
+		// ═══════════════════════════════════════════════════════════════
+		fastPathSysTxs := epochData.GetSystemTransactions()
+		if len(fastPathSysTxs) > 0 {
+			// Use the current block number from the last persisted block
+			sysTxBlockNum := *currentBlockNumber
+			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
+				sysTxBlockNum = lastBlock.Header().BlockNumber()
+			}
+			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
+			if err != nil {
+				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
+			} else {
+				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
+			}
 		}
 
 		// Drain pending blocks
