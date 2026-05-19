@@ -267,53 +267,24 @@ impl TxSocketServer {
 
             let mut all_succeeded = true;
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
-                // let chunk_len = chunk_vec.len();
-                
-                let epoch_pending_ptr = if let Some(ref node_mutex) = node {
-                    let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_mutex.lock()).await;
-                    match lock_result {
-                        Ok(node_guard) => Some(node_guard.epoch_pending_transactions.clone()),
-                        Err(_) => {
-                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending_ptr extraction due to node lock timeout");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(epoch_pending_mutex) = epoch_pending_ptr {
-                    match tokio::time::timeout(std::time::Duration::from_millis(200), epoch_pending_mutex.lock()).await {
-                        Ok(mut epoch_pending) => {
-                            for tx in chunk_vec.clone() {
-                                let hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(&tx);
-                                epoch_pending.insert(hash, tx);
-                            }
-                            
-                            if epoch_pending.len() % 5000 == 0 && epoch_pending.len() > 0 {
-                                tracing::debug!(
-                                    "🗑️ [DEBUG-RÁC] epoch_pending_transactions đang chứa {} giao dịch đang chờ commit",
-                                    epoch_pending.len()
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            tracing::warn!("⏳ [FFI TX FLOW] [DEADLOCK-MONITOR] Skipping epoch_pending insertion due to mutex lock timeout");
-                        }
-                    }
-                }
+                // STABILITY FIX: epoch_pending_transactions tracking REMOVED from hot path.
+                //
+                // ROOT CAUSE OF TX LOSS: Previously, every TX was inserted into 
+                // epoch_pending_transactions HashMap here. After 8 rounds × 20K TXs = 160K entries,
+                // the HashMap caused severe mutex lock contention. When the 200ms lock timeout
+                // fired, TXs were submitted to consensus but NOT tracked in epoch_pending.
+                // During epoch transition, recover_epoch_pending_transactions would only recover
+                // tracked TXs → untracked TXs lost forever.
+                //
+                // FIX: TxRecycler already tracks ALL submitted TXs with bounded capacity (100K)
+                // and persists them to disk. Epoch transition now drains TxRecycler pending
+                // instead of epoch_pending_transactions. This eliminates:
+                // 1. Unbounded HashMap growth (160K+ entries)
+                // 2. Mutex lock contention on submission hot path
+                // 3. Lock timeout causing untracked TXs that can't be recovered
 
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
-                    
-                    // DEBUG LOG: Hiển thị lượng rác đang bị kẹt trong TxRecycler
-                    let (pending, _, _, _) = recycler.stats().await;
-                    if pending % 5000 == 0 || pending > 50000 {
-                        tracing::warn!(
-                            "🗑️ [DEBUG-RÁC] TxRecycler đang giữ {} giao dịch chưa được confirm_committed!",
-                            pending
-                        );
-                    }
                 }
 
                 match current_client.submit_no_wait(chunk_vec).await {
