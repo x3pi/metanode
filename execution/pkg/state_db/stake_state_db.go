@@ -722,7 +722,10 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 	defer db.muCommit.Unlock()
 
 	if !db.lockedFlag.Load() {
-		return common.Hash{}, errors.New("Commit: db is not already locked")
+		logger.Warn("⚠️ [SELF-HEAL] Commit (StakeStateDB): lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a ghost-block boundary where ProcessTransactions was skipped.")
+		db.lockedFlag.Store(true)
 	}
 
 	// CRITICAL FIX: IntermediateRoot MUST be called BEFORE trie.Commit().
@@ -859,7 +862,10 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	defer db.muCommit.Unlock()
 
 	if !db.lockedFlag.Load() {
-		return nil, errors.New("CommitPipeline: db is not already locked")
+		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline (StakeStateDB): lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a ghost-block boundary where ProcessTransactions was skipped.")
+		db.lockedFlag.Store(true)
 	}
 
 	// ═══════════════════════════════════════════════════════════════
