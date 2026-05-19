@@ -996,6 +996,25 @@ PROCESS_BLOCK:
 					*currentBlockNumber = epochData.GetBlockNumber()
 					emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 					if emptyBlock != nil {
+						// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
+						bp.SetLastBlock(emptyBlock)
+						bp.AddPendingCommitBlock(emptyBlock)
+
+						// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
+						tsrJob := CommitJob{
+							Block:           emptyBlock,
+							ProcessResults:  &emptyResult,
+							MappingWg:       &sync.WaitGroup{},
+							GlobalExecIndex: globalExecIndex,
+							CommitIndex:     commitIndex,
+						}
+						select {
+						case bp.commitChannel <- tsrJob:
+						default:
+							logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
+							bp.commitChannel <- tsrJob
+						}
+
 						select {
 						case bp.createdBlocksChan <- emptyBlock:
 						default:
@@ -1059,6 +1078,25 @@ PROCESS_BLOCK:
 			*currentBlockNumber = epochData.GetBlockNumber()
 			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 			if emptyBlock != nil {
+				// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
+				bp.SetLastBlock(emptyBlock)
+				bp.AddPendingCommitBlock(emptyBlock)
+
+				// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
+				job := CommitJob{
+					Block:           emptyBlock,
+					ProcessResults:  &emptyResult,
+					MappingWg:       &sync.WaitGroup{},
+					GlobalExecIndex: globalExecIndex,
+					CommitIndex:     commitIndex,
+				}
+				select {
+				case bp.commitChannel <- job:
+				default:
+					logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
+					bp.commitChannel <- job
+				}
+
 				select {
 				case bp.createdBlocksChan <- emptyBlock:
 				default:
