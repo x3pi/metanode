@@ -148,8 +148,8 @@ func (b *BlockHeader) Hash() common.Hash {
 	
 	pbHeader := blockHeaderPbPool.Get().(*pb.BlockHeader)
 	defer func() {
-		// Clear fields to avoid memory leaks of byte slices
-		*pbHeader = pb.BlockHeader{}
+		// Clear fields to avoid memory leaks of byte slices safely
+		proto.Reset(pbHeader)
 		blockHeaderPbPool.Put(pbHeader)
 	}()
 

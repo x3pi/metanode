@@ -576,8 +576,8 @@ func (t *Transaction) Hash() common.Hash {
 
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
 	defer func() {
-		// Clear to avoid memory leaks of referenced slices
-		*hashPb = pb.TransactionHashData{}
+		// Clear to avoid memory leaks of referenced slices safely
+		proto.Reset(hashPb)
 		txHashDataPool.Put(hashPb)
 	}()
 
@@ -629,8 +629,8 @@ func (t *Transaction) RHash() common.Hash {
 
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
 	defer func() {
-		// Clear to avoid memory leaks
-		*hashPb = pb.TransactionHashData{}
+		// Clear to avoid memory leaks safely
+		proto.Reset(hashPb)
 		txHashDataPool.Put(hashPb)
 	}()
 
