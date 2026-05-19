@@ -564,6 +564,12 @@ func (cs *ChainState) GetEpochBoundaryGei(epoch uint64) uint64 {
 func (cs *ChainState) SetEpochValidators(epoch uint64, serializedValidators json.RawMessage) {
 	cs.epochMutex.Lock()
 	defer cs.epochMutex.Unlock()
+	cs.setEpochValidatorsLocked(epoch, serializedValidators)
+}
+
+// setEpochValidatorsLocked is the unlocked version of SetEpochValidators.
+// Caller MUST hold cs.epochMutex.Lock().
+func (cs *ChainState) setEpochValidatorsLocked(epoch uint64, serializedValidators json.RawMessage) {
 	if cs.epochValidatorsCache == nil {
 		cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
 	}
@@ -793,161 +799,178 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 // MULTI-EPOCH SUPPORT: For jumps > 1 epoch, directly advance to target epoch using current storage state.
 // This handles restart catch-up scenarios where Go Sub receives blocks from a much later epoch.
 func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimestamp uint64) bool {
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FAST PATH (RLock): Check if epoch update is needed before doing any heavy I/O
+	// ═══════════════════════════════════════════════════════════════════════════
+	cs.epochMutex.RLock()
+	currentEpoch := cs.currentEpoch
+	needsUpdate := blockEpoch > currentEpoch
+	cs.epochMutex.RUnlock()
+
+	if !needsUpdate {
+		return false // No update needed
+	}
+
+	epochDiff := blockEpoch - currentEpoch
+	if epochDiff > 1 {
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Multi-epoch jump: current=%d → target=%d (diff=%d). "+
+			"Advancing directly using current storage state.",
+			currentEpoch, blockEpoch, epochDiff)
+	} else {
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Detected higher epoch from incoming block",
+			"block_epoch", blockEpoch,
+			"current_epoch", currentEpoch,
+			"block_timestamp", blockTimestamp)
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// I/O PHASE (Lockless): Do heavy LevelDB backwards search WITHOUT epochMutex
+	// ═══════════════════════════════════════════════════════════════════════════
+	// STEP 1: Calculate boundary block
+	// CRITICAL FIX (April 2026): Find the exact boundary block deterministically.
+	// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
+	searchBlock := storage.GetLastBlockNumber()
+	var boundaryBlock uint64 = 0
+	
+	for searchBlock > 0 {
+		hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
+		if !ok {
+			searchBlock--
+			continue
+		}
+		blockData, err := cs.GetBlockDatabase().GetBlockByHash(hash)
+		if err != nil {
+			searchBlock--
+			continue
+		}
+		if blockData.Header().Epoch() < blockEpoch {
+			boundaryBlock = searchBlock
+			break
+		}
+		searchBlock--
+	}
+
+	// STEP 2: MUST read boundary block - NO FALLBACK ALLOWED
+	// If boundary block is not available, DEFER the epoch update
+	// ═══════════════════════════════════════════════════════════════════════════
+	// WRITE PHASE (Locked): Apply updates and cache safely
+	// ═══════════════════════════════════════════════════════════════════════════
 	lockStart := time.Now()
 	cs.epochMutex.Lock()
 	if d := time.Since(lockStart); d > 50*time.Millisecond {
 		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in CheckAndUpdateEpochFromBlock took %v", d)
 	}
 	defer cs.epochMutex.Unlock()
-	if blockEpoch > cs.currentEpoch {
-		epochDiff := blockEpoch - cs.currentEpoch
 
-		if epochDiff > 1 {
-			logger.Info("🔄 [AUTO-EPOCH SYNC] Multi-epoch jump: current=%d → target=%d (diff=%d). "+
-				"Advancing directly using current storage state.",
-				cs.currentEpoch, blockEpoch, epochDiff)
-		} else {
-			logger.Info("🔄 [AUTO-EPOCH SYNC] Detected higher epoch from incoming block",
-				"block_epoch", blockEpoch,
-				"current_epoch", cs.currentEpoch,
-				"block_timestamp", blockTimestamp)
+	// DOUBLE-CHECK: Ensure no other goroutine advanced the epoch while we were doing I/O
+	if blockEpoch <= cs.currentEpoch {
+		return false 
+	}
+
+	var epochTimestampMs uint64
+	var boundaryGei uint64
+	if boundaryBlock > 0 {
+		// Get boundary block's timestamp - REQUIRED, no fallback
+		blockHash, ok := GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		if !ok {
+			// CRITICAL: Boundary block not in chain yet - DEFER epoch update
+			// This can happen if blocks arrive out-of-order
+			logger.Error("❌ [AUTO-EPOCH SYNC] Boundary block %d hash not found in chain. "+
+				"Block sync may be out-of-order. DEFERRING epoch update until boundary is available.",
+				boundaryBlock)
+			return false // ← DEFER epoch update
 		}
 
-		// STEP 1: Calculate boundary block
-		// ══════════════════════════════════════════════════════════════════
-		// CRITICAL FIX (April 2026): Find the exact boundary block deterministically.
-		// Depending on where this function is called (before or after block is saved),
-		// lastBlockNum could be the newly written block, or the previous one.
-		// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
-		// ══════════════════════════════════════════════════════════════════
-		searchBlock := storage.GetLastBlockNumber()
-		var boundaryBlock uint64 = 0
-		
-		for searchBlock > 0 {
-			hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
-			if !ok {
-				searchBlock--
-				continue
-			}
-			blockData, err := cs.GetBlockDatabase().GetBlockByHash(hash)
-			if err != nil {
-				searchBlock--
-				continue
-			}
-			if blockData.Header().Epoch() < blockEpoch {
-				boundaryBlock = searchBlock
-				break
-			}
-			searchBlock--
+		boundaryBlockData, err := cs.GetBlockDatabase().GetBlockByHash(blockHash)
+		if err != nil {
+			// CRITICAL: Cannot read boundary block data - DEFER epoch update
+			logger.Error("❌ [AUTO-EPOCH SYNC] Cannot read boundary block %d data: %v. "+
+				"DEFERRING epoch update.", boundaryBlock, err)
+			return false // ← DEFER epoch update
 		}
 
-		// STEP 2: MUST read boundary block - NO FALLBACK ALLOWED
-		// If boundary block is not available, DEFER the epoch update
-		var epochTimestampMs uint64
-		var boundaryGei uint64
-		if boundaryBlock > 0 {
-			// Get boundary block's timestamp - REQUIRED, no fallback
-			blockHash, ok := GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
-			if !ok {
-				// CRITICAL: Boundary block not in chain yet - DEFER epoch update
-				// This can happen if blocks arrive out-of-order
-				logger.Error("❌ [AUTO-EPOCH SYNC] Boundary block %d hash not found in chain. "+
-					"Block sync may be out-of-order. DEFERRING epoch update until boundary is available.",
-					boundaryBlock)
-				return false // ← DEFER epoch update
-			}
+		epochTimestampMs = boundaryBlockData.Header().TimeStamp() * 1000
+		boundaryGei = boundaryBlockData.Header().GlobalExecIndex()
+		logger.Info("✅ [AUTO-EPOCH SYNC] Using BOUNDARY BLOCK timestamp and GEI (deterministic, no fallback)",
+			"boundary_block", boundaryBlock,
+			"epoch_timestamp_ms", epochTimestampMs,
+			"boundary_gei", boundaryGei)
+	} else {
+		// Genesis case (epoch 1 from epoch 0): boundary = 0
+		// Use genesis timestamp (should be set from genesis config)
+		// For safety, use 0 and let Rust provide authoritative timestamp via AdvanceEpoch
+		epochTimestampMs = 0
+		boundaryGei = 0
+		logger.Info("📝 [AUTO-EPOCH SYNC] Genesis epoch boundary (block=0), using placeholder timestamp=0. " +
+			"Rust will provide authoritative timestamp via AdvanceEpoch RPC.")
+	}
 
-			boundaryBlockData, err := cs.GetBlockDatabase().GetBlockByHash(blockHash)
-			if err != nil {
-				// CRITICAL: Cannot read boundary block data - DEFER epoch update
-				logger.Error("❌ [AUTO-EPOCH SYNC] Cannot read boundary block %d data: %v. "+
-					"DEFERRING epoch update.", boundaryBlock, err)
-				return false // ← DEFER epoch update
-			}
+	// === SINGLE WRITE PATH: advanceEpochLocked ===
+	cs.advanceEpochLocked(blockEpoch, epochTimestampMs, boundaryBlock, boundaryGei)
 
-			epochTimestampMs = boundaryBlockData.Header().TimeStamp() * 1000
-			boundaryGei = boundaryBlockData.Header().GlobalExecIndex()
-			logger.Info("✅ [AUTO-EPOCH SYNC] Using BOUNDARY BLOCK timestamp and GEI (deterministic, no fallback)",
-				"boundary_block", boundaryBlock,
-				"epoch_timestamp_ms", epochTimestampMs,
-				"boundary_gei", boundaryGei)
-		} else {
-			// Genesis case (epoch 1 from epoch 0): boundary = 0
-			// Use genesis timestamp (should be set from genesis config)
-			// For safety, use 0 and let Rust provide authoritative timestamp via AdvanceEpoch
-			epochTimestampMs = 0
-			boundaryGei = 0
-			logger.Info("📝 [AUTO-EPOCH SYNC] Genesis epoch boundary (block=0), using placeholder timestamp=0. " +
-				"Rust will provide authoritative timestamp via AdvanceEpoch RPC.")
-		}
+	// EVENT-DRIVEN NOTIFICATION: Notify Rust about the detected epoch change
+	if cs.epochNotificationCallback != nil {
+		logger.Info("📣 [AUTO-EPOCH SYNC] Triggering epoch notification callback for epoch %d", cs.currentEpoch)
+		go cs.epochNotificationCallback(cs.currentEpoch, cs.epochStartTimestampMs, boundaryBlock)
+	}
 
-		// === SINGLE WRITE PATH: advanceEpochLocked ===
-		cs.advanceEpochLocked(blockEpoch, epochTimestampMs, boundaryBlock, boundaryGei)
+	// AGGRESSIVE CACHING: Proactively cache validators for the new epoch
+	// RUN SYNCHRONOUSLY: We must NOT run this in a goroutine because it calls
+	// stakeDB.GetAllValidators() -> Nomt.GetAll() -> handle.Read() which would
+	// RACE with the background PersistAsync() -> CommitPayload() of the boundary block!
+	if boundaryBlock > 0 {
+		targetEpoch := blockEpoch
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Proactively caching validators for epoch %d at boundary block %d", targetEpoch, boundaryBlock)
+		stakeDB := cs.GetStakeStateDB()
+		if stakeDB != nil {
+			validators, err := stakeDB.GetAllValidators()
+			if err != nil || len(validators) == 0 {
+				logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to actively cache validators: %v (len=%d) - NOMT knownKeys amnesia likely.", err, len(validators))
+			} else {
+				validatorInfoList := &pb.ValidatorInfoList{
+					EpochTimestampMs:    epochTimestampMs,
+					LastGlobalExecIndex: boundaryGei,
+				}
 
-		// EVENT-DRIVEN NOTIFICATION: Notify Rust about the detected epoch change
-		if cs.epochNotificationCallback != nil {
-			logger.Info("📣 [AUTO-EPOCH SYNC] Triggering epoch notification callback for epoch %d", cs.currentEpoch)
-			go cs.epochNotificationCallback(cs.currentEpoch, cs.epochStartTimestampMs, boundaryBlock)
-		}
+				for _, v := range validators {
+					stakeNormalized := big.NewInt(1000000)
+					if totalStake := v.TotalStakedAmount(); totalStake != nil && totalStake.Sign() > 0 {
+						stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(1_000_000_000_000_000_000))
+						if stakeNormalized.Sign() <= 0 {
+							stakeNormalized = big.NewInt(1)
+						}
+					}
+					
+					val := &pb.ValidatorInfo{
+						Address:                    v.Address().Hex(),
+						Stake:                      stakeNormalized.String(),
+						AuthorityKey:               v.AuthorityKey(),
+						ProtocolKey:                v.ProtocolKey(),
+						NetworkKey:                 v.NetworkKey(),
+						Name:                       v.Name(),
+						Description:                v.Description(),
+						Website:                    v.Website(),
+						Image:                      v.Image(),
+						CommissionRate:             v.CommissionRate(),
+						MinSelfDelegation:          v.MinSelfDelegation().String(),
+						AccumulatedRewardsPerShare: v.AccumulatedRewardsPerShare().String(),
+						P2PAddress:                 v.P2PAddress(),
+					}
+					validatorInfoList.Validators = append(validatorInfoList.Validators, val)
+				}
 
-		// AGGRESSIVE CACHING: Proactively cache validators for the new epoch
-		// RUN SYNCHRONOUSLY: We must NOT run this in a goroutine because it calls
-		// stakeDB.GetAllValidators() -> Nomt.GetAll() -> handle.Read() which would
-		// RACE with the background PersistAsync() -> CommitPayload() of the boundary block!
-		if boundaryBlock > 0 {
-			targetEpoch := blockEpoch
-			logger.Info("🔄 [AUTO-EPOCH SYNC] Proactively caching validators for epoch %d at boundary block %d", targetEpoch, boundaryBlock)
-			stakeDB := cs.GetStakeStateDB()
-			if stakeDB != nil {
-				validators, err := stakeDB.GetAllValidators()
-				if err != nil || len(validators) == 0 {
-					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to actively cache validators: %v (len=%d) - NOMT knownKeys amnesia likely.", err, len(validators))
+				if serializedData, err := json.Marshal(validatorInfoList); err == nil {
+					// CRITICAL FIX: Use unlocked version to prevent deadlock (we already hold epochMutex.Lock())
+					cs.setEpochValidatorsLocked(targetEpoch, serializedData)
+					logger.Info("✅ [AUTO-EPOCH SYNC] Successfully cached %d validators for epoch %d", len(validatorInfoList.Validators), targetEpoch)
 				} else {
-					validatorInfoList := &pb.ValidatorInfoList{
-						EpochTimestampMs:    epochTimestampMs,
-						LastGlobalExecIndex: boundaryGei,
-					}
-
-					for _, v := range validators {
-						stakeNormalized := big.NewInt(1000000)
-						if totalStake := v.TotalStakedAmount(); totalStake != nil && totalStake.Sign() > 0 {
-							stakeNormalized = new(big.Int).Div(totalStake, big.NewInt(1_000_000_000_000_000_000))
-							if stakeNormalized.Sign() <= 0 {
-								stakeNormalized = big.NewInt(1)
-							}
-						}
-						
-						val := &pb.ValidatorInfo{
-							Address:                    v.Address().Hex(),
-							Stake:                      stakeNormalized.String(),
-							AuthorityKey:               v.AuthorityKey(),
-							ProtocolKey:                v.ProtocolKey(),
-							NetworkKey:                 v.NetworkKey(),
-							Name:                       v.Name(),
-							Description:                v.Description(),
-							Website:                    v.Website(),
-							Image:                      v.Image(),
-							CommissionRate:             v.CommissionRate(),
-							MinSelfDelegation:          v.MinSelfDelegation().String(),
-							AccumulatedRewardsPerShare: v.AccumulatedRewardsPerShare().String(),
-							P2PAddress:                 v.P2PAddress(),
-						}
-						validatorInfoList.Validators = append(validatorInfoList.Validators, val)
-					}
-
-					if serializedData, err := json.Marshal(validatorInfoList); err == nil {
-						cs.SetEpochValidators(targetEpoch, serializedData)
-						logger.Info("✅ [AUTO-EPOCH SYNC] Successfully cached %d validators for epoch %d", len(validatorInfoList.Validators), targetEpoch)
-					} else {
-						logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to serialize validators for cache: %v", err)
-					}
+					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to serialize validators for cache: %v", err)
 				}
 			}
 		}
-
-		return true // Epoch was updated
 	}
-	return false // No update needed
+
+	return true // Epoch was updated
 }
 
 // SetBackupPath sets the node-specific backup path for epoch data persistence
