@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
@@ -627,6 +628,44 @@ PROCESS_BLOCK:
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		if epochData.GetBlockNumber() > 0 {
 			logger.Info("🛡️ [GHOST-BLOCK-GUARD] len(allTransactions) is 0 after unmarshal, but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+			lastB := bp.GetLastBlock()
+			if lastB != nil {
+				emptyResult.Root = lastB.Header().AccountStatesRoot()
+				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+			}
+			leaderBytes := epochData.GetLeaderAddress()
+			var leader common.Address
+			if len(leaderBytes) == 20 {
+				leader = common.BytesToAddress(leaderBytes)
+			}
+			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+			*currentBlockNumber = epochData.GetBlockNumber()
+			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+			if emptyBlock != nil {
+				select {
+				case bp.createdBlocksChan <- emptyBlock:
+				default:
+					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+					bp.createdBlocksChan <- emptyBlock
+				}
+			}
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+			}
+			return
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] SILENT DROP: len(allTransactions) is 0 after unmarshal: global_exec_index=%d. totalTxsFromRust=%d", globalExecIndex, totalTxsFromRust)
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
@@ -914,6 +953,44 @@ PROCESS_BLOCK:
 		if epochData.GetBlockNumber() > 0 {
 			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", 
 				len(allTransactions), epochData.GetBlockNumber(), globalExecIndex)
+			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+			lastB := bp.GetLastBlock()
+			if lastB != nil {
+				emptyResult.Root = lastB.Header().AccountStatesRoot()
+				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+			}
+			leaderBytes := epochData.GetLeaderAddress()
+			var leader common.Address
+			if len(leaderBytes) == 20 {
+				leader = common.BytesToAddress(leaderBytes)
+			}
+			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+			*currentBlockNumber = epochData.GetBlockNumber()
+			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+			if emptyBlock != nil {
+				select {
+				case bp.createdBlocksChan <- emptyBlock:
+				default:
+					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+					bp.createdBlocksChan <- emptyBlock
+				}
+			}
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+			}
+			return
 		} else {
 			logger.Info("⏭️  [SKIP-EMPTY] LATE SILENT DROP: all transactions were duplicates: global_exec_index=%d", globalExecIndex)
 			
