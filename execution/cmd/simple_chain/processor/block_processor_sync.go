@@ -5,6 +5,7 @@ package processor
 // Go build cache invalidation comment: Force relink of Rust FFI library
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
