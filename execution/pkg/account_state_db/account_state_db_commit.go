@@ -318,8 +318,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 		// ═══════════════════════════════════════════════════════════════
 		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline: lockedFlag was false (expected true). " +
 			"Force-acquiring lock to prevent node crash. " +
-			"This indicates a NOMT re-alignment race or deferred cleanup overlap.")
+			"This indicates a NOMT re-alignment race or ghost-block boundary where ProcessTransactions was skipped.")
 		db.lockedFlag.Store(true)
+		db.muTrie.Lock()
 	}
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
