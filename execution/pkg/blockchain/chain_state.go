@@ -279,12 +279,14 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 		if asDB := cs.GetAccountStateDB(); asDB != nil {
 			if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
 				nomtTrie.RealignRoot(newAccountRoot)
+				asDB.SetOriginRootHash(newAccountRoot)
 			}
 		}
 		// Realign stake state trie
 		if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
 			if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
 				nomtTrie.RealignRoot(newStakeRoot)
+				stakeDB.SetOriginRootHash(newStakeRoot)
 			}
 		}
 

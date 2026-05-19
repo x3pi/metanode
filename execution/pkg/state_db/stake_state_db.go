@@ -73,6 +73,12 @@ func (db *StakeStateDB) SetHistoricalContext(changelogDB *state_changelog.StateC
 	db.historicalBlockNumber = blockNumber
 }
 
+// SetOriginRootHash explicitly updates the origin root hash.
+// This is critical for Sub nodes when applying block states from the network.
+func (db *StakeStateDB) SetOriginRootHash(hash common.Hash) {
+	db.originRootHash = hash
+}
+
 // Trie returns the underlying StateTrie instance.
 func (db *StakeStateDB) Trie() p_trie.StateTrie {
 	return db.trie
