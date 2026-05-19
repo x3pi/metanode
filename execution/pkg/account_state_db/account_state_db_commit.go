@@ -719,6 +719,18 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	if totalDirty > 0 {
 		hasChanges = true
+		if isLockProcess {
+			// FORENSIC LOGGING: Print DirtyContentHash for deterministic diffing
+			hasher := crypto.NewKeccakState()
+			for _, entry := range keysToProcess {
+				hasher.Write(entry.addr.Bytes())
+				b, _ := entry.state.Marshal()
+				hasher.Write(b)
+			}
+			var h common.Hash
+			hasher.Read(h[:])
+			logger.Info("🔍 [FORENSIC] AccountStateDB DirtyContentHash: %s (totalDirty=%d)", h.Hex(), totalDirty)
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
