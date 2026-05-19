@@ -1739,6 +1739,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to SaveLastBlock for #%d: %v", blockNum, err)
 		}
 
+		// CRITICAL FIX: Save mappings so RPC can resolve these synced blocks
+		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("❌ [SNAPSHOT-RESUME] Failed to set block->hash mapping for block #%d: %v", blockNum, err)
+		}
+		if err := bc.SaveTransactions(blk); err != nil {
+			logger.Error("❌ [SNAPSHOT-RESUME] Failed to set tx->block mapping for block #%d: %v", blockNum, err)
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 5: Update persistent counters (block number + GEI)
 		// These must advance AFTER CommitBlockState so that any query to Go's GEI
