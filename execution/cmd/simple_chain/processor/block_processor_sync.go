@@ -657,6 +657,25 @@ PROCESS_BLOCK:
 
 		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 		if emptyBlock != nil {
+			// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
+			bp.SetLastBlock(emptyBlock)
+			bp.AddPendingCommitBlock(emptyBlock)
+
+			// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
+			job := CommitJob{
+				Block:           emptyBlock,
+				ProcessResults:  &emptyResult,
+				MappingWg:       &sync.WaitGroup{},
+				GlobalExecIndex: globalExecIndex,
+				CommitIndex:     commitIndex,
+			}
+			select {
+			case bp.commitChannel <- job:
+			default:
+				logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
+				bp.commitChannel <- job
+			}
+
 			select {
 			case bp.createdBlocksChan <- emptyBlock:
 			default:
@@ -671,20 +690,14 @@ PROCESS_BLOCK:
 				logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
 				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
 				epochData = pendingBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
+				goto PROCESS_SINGLE_EPOCH_DATA_START
 			}
 
 			if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
 				logger.Info("✅ [LAG-HANDLING] Found skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
 				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
 				epochData = skippedBlock
-				globalExecIndex = epochData.GetGlobalExecIndex()
-				commitIndex = epochData.GetCommitIndex()
-				epochNum = epochData.GetEpoch()
-				goto PROCESS_BLOCK
+				goto PROCESS_SINGLE_EPOCH_DATA_START
 			}
 		}
 		return
@@ -774,29 +787,57 @@ PROCESS_BLOCK:
 				"This commit was already executed — not creating duplicate block.",
 				globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
-			if epochData.GetBlockNumber() > 0 {
-				logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for GEI-REGRESSION to prevent gap. block_number=%d, GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
-				emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
-				lastB := bp.GetLastBlock()
-				if lastB != nil {
-					emptyResult.Root = lastB.Header().AccountStatesRoot()
-					emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+			bNum := epochData.GetBlockNumber()
+			if bNum == 0 {
+				lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
+				if lastCommittedBlockNumber == 0 {
+					lastCommittedBlockNumber = storage.GetLastBlockNumber()
 				}
-				leaderBytes := epochData.GetLeaderAddress()
-				var leader common.Address
-				if len(leaderBytes) == 20 {
-					leader = common.BytesToAddress(leaderBytes)
+				bNum = lastCommittedBlockNumber + 1
+			}
+
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for GEI-REGRESSION to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d", epochData.GetBlockNumber(), bNum, globalExecIndex)
+			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+			lastB := bp.GetLastBlock()
+			if lastB != nil {
+				emptyResult.Root = lastB.Header().AccountStatesRoot()
+				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+			}
+			leaderBytes := epochData.GetLeaderAddress()
+			var leader common.Address
+			if len(leaderBytes) == 20 {
+				leader = common.BytesToAddress(leaderBytes)
+			}
+			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+			*currentBlockNumber = bNum
+			storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
+
+			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+			if emptyBlock != nil {
+				// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
+				bp.SetLastBlock(emptyBlock)
+				bp.AddPendingCommitBlock(emptyBlock)
+
+				// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
+				job := CommitJob{
+					Block:           emptyBlock,
+					ProcessResults:  &emptyResult,
+					MappingWg:       &sync.WaitGroup{},
+					GlobalExecIndex: globalExecIndex,
+					CommitIndex:     commitIndex,
 				}
-				batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
-				*currentBlockNumber = epochData.GetBlockNumber()
-				emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
-				if emptyBlock != nil {
-					select {
-					case bp.createdBlocksChan <- emptyBlock:
-					default:
-						logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
-						bp.createdBlocksChan <- emptyBlock
-					}
+				select {
+				case bp.commitChannel <- job:
+				default:
+					logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
+					bp.commitChannel <- job
+				}
+
+				select {
+				case bp.createdBlocksChan <- emptyBlock:
+				default:
+					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+					bp.createdBlocksChan <- emptyBlock
 				}
 			}
 
