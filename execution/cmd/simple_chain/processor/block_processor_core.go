@@ -447,7 +447,7 @@ func NewBlockProcessor(
 		commitChannel:                    make(chan CommitJob, 8),     // TPS PIPELINE: Small buffer for bounded pipeline depth. EVM runs max 8 blocks ahead of PebbleDB persist. Prevents memory accumulation (each CommitJob ~1-5MB) and GC thrashing.
 		indexingChannel:                  make(chan uint64, 50000),    // Giữ nguyên 50k (chỉ 8 bytes mỗi entry)
 		// Khởi tạo các trường mới cho kiến trúc committer và sub-node buffering
-		createdBlocksChan: make(chan *block.Block, 200),
+		createdBlocksChan: make(chan *block.Block, 2000),
 		CacheManager:      NewCacheManager(),
 		BlockBuffers:      NewBlockBuffers(),
 		ReceiptTracker:    NewReceiptTracker(),

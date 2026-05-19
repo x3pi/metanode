@@ -781,6 +781,32 @@ PROCESS_BLOCK:
 				"This commit was already executed — not creating duplicate block.",
 				globalExecIndex, lastBlockGEI, *currentBlockNumber)
 
+			if epochData.GetBlockNumber() > 0 {
+				logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for GEI-REGRESSION to prevent gap. block_number=%d, GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+				emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+				lastB := bp.GetLastBlock()
+				if lastB != nil {
+					emptyResult.Root = lastB.Header().AccountStatesRoot()
+					emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+				}
+				leaderBytes := epochData.GetLeaderAddress()
+				var leader common.Address
+				if len(leaderBytes) == 20 {
+					leader = common.BytesToAddress(leaderBytes)
+				}
+				batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+				*currentBlockNumber = epochData.GetBlockNumber()
+				emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+				if emptyBlock != nil {
+					select {
+					case bp.createdBlocksChan <- emptyBlock:
+					default:
+						logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+						bp.createdBlocksChan <- emptyBlock
+					}
+				}
+			}
+
 			// Still update GEI counter so the processor advances past this commit
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
 			*nextExpectedGlobalExecIndex = globalExecIndex + 1
@@ -913,6 +939,32 @@ PROCESS_BLOCK:
 					*currentBlockNumber, blockTimeSec, regression,
 					lastBlock.Header().BlockNumber(), parentTs,
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
+
+				if epochData.GetBlockNumber() > 0 {
+					logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for TIMESTAMP-REGRESSION to prevent gap. block_number=%d, GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+					emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+					lastB := bp.GetLastBlock()
+					if lastB != nil {
+						emptyResult.Root = lastB.Header().AccountStatesRoot()
+						emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+					}
+					leaderBytes := epochData.GetLeaderAddress()
+					var leader common.Address
+					if len(leaderBytes) == 20 {
+						leader = common.BytesToAddress(leaderBytes)
+					}
+					batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+					*currentBlockNumber = epochData.GetBlockNumber()
+					emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+					if emptyBlock != nil {
+						select {
+						case bp.createdBlocksChan <- emptyBlock:
+						default:
+							logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+							bp.createdBlocksChan <- emptyBlock
+						}
+					}
+				}
 
 				// Update GEI so processor advances past this commit
 				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
