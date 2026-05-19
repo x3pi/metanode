@@ -466,8 +466,22 @@ PROCESS_BLOCK:
 	nextBlockToCreate := *currentBlockNumber + 1
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
 		if len(epochData.Transactions) > 0 {
-			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d). "+
-				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber())
+			logger.Warn("🛡️ [NOMT-GUARD] Block #%d already in DB (#%d). Skipping EVM but advancing GEI=%d. "+
+				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex)
+			// CRITICAL FIX (May 2026): Must advance GEI even when skipping execution,
+			// otherwise the block number gap causes CHAIN BROKEN on all nodes.
+			// Previously this was a bare `return` which silently dropped the block
+			// without advancing any counters → permanent gap at this block number.
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			*currentBlockNumber = nextBlockToCreate
+
+			// Check pending blocks
+			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+				epochData = pendingBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
+			}
 			return
 		}
 	}
@@ -1061,13 +1075,31 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		if epochData.GetBlockNumber() > 0 {
-			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", 
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all rejected by nonce/dedup), "+
+				"but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d",
 				len(allTransactions), epochData.GetBlockNumber(), globalExecIndex)
-			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+			// CRITICAL FIX (May 2026): Use the ACTUAL stateRoot from ProcessTransactions()
+			// (which called IntermediateRoot internally) instead of blindly copying from
+			// lastBlock. If ProcessTransactions caused any side-effect (even cleanup),
+			// the root from IntermediateRoot reflects the true state.
+			// When all TXs are rejected (no mutation), accumulatedResults.Root will be
+			// identical to lastBlock.Root — but this is self-consistent, not a blind copy.
+			emptyResult := tx_processor.ProcessResult{
+				Transactions:    nil,
+				Receipts:        nil,
+				Root:            accumulatedResults.Root,
+				StakeStatesRoot: accumulatedResults.StakeStatesRoot,
+				TrieDBSnapshots: accumulatedResults.TrieDBSnapshots,
+			}
+			// DIAGNOSTIC: Log the stateRoot comparison so block_hash_checker can verify
 			lastB := bp.GetLastBlock()
 			if lastB != nil {
-				emptyResult.Root = lastB.Header().AccountStatesRoot()
-				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+				parentRoot := lastB.Header().AccountStatesRoot()
+				if accumulatedResults.Root != parentRoot {
+					logger.Warn("⚠️ [GHOST-BLOCK-GUARD] stateRoot CHANGED despite 0 valid txs! "+
+						"actualRoot=%s parentRoot=%s — ProcessTransactions had side-effects",
+						accumulatedResults.Root.Hex()[:18]+"...", parentRoot.Hex()[:18]+"...")
+				}
 			}
 			leaderBytes := epochData.GetLeaderAddress()
 			var leader common.Address
