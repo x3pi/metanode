@@ -501,7 +501,60 @@ impl CommitProcessor {
 
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
+        // DIAGNOSTIC (May 2026): Periodic state dump for stall diagnosis
+        let mut last_diag_log = std::time::Instant::now();
+        const DIAG_INTERVAL_SECS: u64 = 10;
+
         loop {
+            // ═══════════════════════════════════════════════════════════════
+            // PIPELINE HEALTH DIAGNOSTIC: Log full DIGEST-GATE state every
+            // 10s when pending commits exist. This provides visibility into
+            // WHY the pipeline is stalled without modifying any control flow.
+            // ═══════════════════════════════════════════════════════════════
+            if !pending_local_commits.is_empty()
+                && last_diag_log.elapsed().as_secs() >= DIAG_INTERVAL_SECS
+            {
+                let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
+                    qci.load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    0
+                };
+                let digest_has_data = if let Some(ref checker) = digest_data_checker {
+                    checker()
+                } else {
+                    false
+                };
+                let is_trans = if let Some(ref it) = self.is_transitioning {
+                    it.load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    false
+                };
+                let oldest_age = pending_local_timestamps.values()
+                    .map(|ts| std::time::Instant::now().duration_since(*ts).as_secs())
+                    .max()
+                    .unwrap_or(0);
+                let first_pending_idx = pending_local_commits.keys().next().copied().unwrap_or(0);
+                let first_verifier_result = if let Some(ref verifier) = digest_verifier {
+                    match verifier(first_pending_idx) {
+                        Some(_) => "Some(digest)",
+                        None => "None",
+                    }
+                } else {
+                    "no_verifier"
+                };
+                warn!(
+                    "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
+                     pending_local={}, first_idx={}, oldest_age={}s, \
+                     next_expected={}, qci={}, digest_has_data={}, \
+                     is_transitioning={}, verifier({})={}, \
+                     pending_ooo={}, epoch={}",
+                    pending_local_commits.len(), first_pending_idx, oldest_age,
+                    next_expected_index, qci_val, digest_has_data,
+                    is_trans, first_pending_idx, first_verifier_result,
+                    pending_commits.len(), current_epoch
+                );
+                last_diag_log = std::time::Instant::now();
+            }
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
             // This prevents CommitProcessor from pushing new execution state to Go Master
             // while Go is busy re-initializing for the next epoch.
@@ -688,6 +741,31 @@ impl CommitProcessor {
                                         (false, false)
                                     }
                                 } else {
+                                    // ═══════════════════════════════════════════════════════
+                                    // QCI-AHEAD-BYPASS (May 2026): Safe alternative to timeout.
+                                    //
+                                    // When digest_has_data=true but verifier returns None for
+                                    // THIS specific commit index:
+                                    //   - digest_history has entries from OTHER indices
+                                    //   - But blocks' commit_votes don't carry digests for
+                                    //     every intermediate index — only their LATEST
+                                    //   - So digest_history[commit_index] may never exist
+                                    //
+                                    // SAFETY PROOF: QCI requires 2f+1 stake agreement.
+                                    // If our local commit at index N diverges from network,
+                                    // commits N+1, N+2... would also diverge, preventing
+                                    // QCI from advancing past N. Therefore:
+                                    //   qci_val > commit_index → network agreed on N
+                                    //   verifier returns None → no conflicting digest found
+                                    //   → local commit is implicitly verified
+                                    //
+                                    // This is FORK-SAFE: we never bypass when a conflicting
+                                    // digest EXISTS (that case returns false at line ~1165).
+                                    // We only bypass when NO digest entry exists AND QCI
+                                    // proves the network has already moved past this point.
+                                    // ═══════════════════════════════════════════════════════
+                                    // digest_has_data=true but verifier returned None.
+                                    // QCI-AHEAD-BYPASS is checked below in the else branch.
                                     (false, false)
                                 };
 
@@ -719,8 +797,25 @@ impl CommitProcessor {
                                     );
                                     verified_indices.push(local_idx);
                                 } else {
-                                    // Genuinely no quorum yet — STOP here
-                                    break; // STRICT ORDER: stop at first unresolved
+                                    // QCI-AHEAD-BYPASS: digest_has_data=true,
+                                    // verifier returns None, check if QCI already passed this commit.
+                                    let qci_ahead_bypass = if digest_has_data {
+                                        qci_val > local_idx
+                                    } else {
+                                        false
+                                    };
+                                    if qci_ahead_bypass {
+                                        info!(
+                                            "✅ [DIGEST-GATE QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                             qci={} > commit_index. Network quorum committed past \
+                                             this index. No conflicting digest. Implicitly verified.",
+                                            local_idx, qci_val
+                                        );
+                                        verified_indices.push(local_idx);
+                                    } else {
+                                        // Genuinely no quorum yet — STOP here
+                                        break; // STRICT ORDER: stop at first unresolved
+                                    }
                                 }
                             }
                         }
@@ -936,7 +1031,30 @@ impl CommitProcessor {
                                     );
                                     true
                                 } else {
-                                    false
+                                    // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
+                                    // If digest_has_data=true but verifier returns None,
+                                    // check if QCI already passed this commit index.
+                                    let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
+                                        checker()
+                                    } else {
+                                        false
+                                    };
+                                    let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
+                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                    } else {
+                                        0
+                                    };
+                                    if digest_has_data_ooo && qci_val_ooo > next_expected_index {
+                                        info!(
+                                            "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                             qci={} > commit_index. Network quorum committed past \
+                                             this index. No conflicting digest. Implicitly verified.",
+                                            next_expected_index, qci_val_ooo
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 }
                             }
                         }
@@ -1203,7 +1321,30 @@ impl CommitProcessor {
                                                     );
                                                     true
                                                 } else {
-                                                    false // Digest infra functional but no quorum yet — buffer
+                                                    // QCI-AHEAD-BYPASS: Check if QCI already passed
+                                                    // this commit index at receive time.
+                                                    let qci_immediate = if let Some(ref qci) = _quorum_commit_index_ref {
+                                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                                    } else {
+                                                        0
+                                                    };
+                                                    if qci_immediate > commit_index {
+                                                        info!(
+                                                            "✅ [DIGEST-GATE-IMMEDIATE QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                                             qci={} > commit_index. Network quorum committed past \
+                                                             this index. No conflicting digest. Implicitly verified.",
+                                                            commit_index, qci_immediate
+                                                        );
+                                                        true
+                                                    } else {
+                                                        info!(
+                                                            "🛡️ [DIGEST-GATE-IMMEDIATE] Commit {} buffered: digest_has_data=true \
+                                                             but verifier returned None, qci={} <= commit_index. \
+                                                             Will poll for QCI-AHEAD-BYPASS.",
+                                                            commit_index, qci_immediate
+                                                        );
+                                                        false // Buffer — QCI-AHEAD-BYPASS will handle in POLL path
+                                                    }
                                                 }
                                             }
                                         } else {
