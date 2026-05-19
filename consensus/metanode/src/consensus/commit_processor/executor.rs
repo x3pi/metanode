@@ -209,19 +209,20 @@ pub async fn dispatch_commit(
                                             if let Ok(guard) = node_arc_clone.try_lock() {
                                                 let mut hashes_guard =
                                                     guard.committed_transaction_hashes.lock().await;
-                                                let mut epoch_pending = 
-                                                    guard.epoch_pending_transactions.lock().await;
                                                 let mut count = 0;
+                                                let mut all_committed_data: Vec<Vec<u8>> = Vec::new();
                                                 for block_txs in &subdag_blocks {
                                                     for tx_data in block_txs {
                                                         let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
                                                         hashes_guard.insert(tx_hash.clone());
-                                                        
-                                                        // O(1) garbage collection of pending txs
-                                                        let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx_data);
-                                                        epoch_pending.remove(&raw_hash);
-                                                        
+                                                        all_committed_data.push(tx_data.clone());
                                                         count += 1;
+                                                    }
+                                                }
+                                                // Confirm committed TXs in TxRecycler (deferred path)
+                                                if !all_committed_data.is_empty() {
+                                                    if let Some(ref recycler) = guard.tx_recycler {
+                                                        recycler.confirm_committed(&all_committed_data).await;
                                                     }
                                                 }
                                                 if count > 0 {
@@ -240,10 +241,11 @@ pub async fn dispatch_commit(
                             }
                         };
                         let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
-                        let mut epoch_pending = node_guard.epoch_pending_transactions.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
+                        // Collect committed TX data for TxRecycler confirmation
+                        let mut committed_tx_data: Vec<Vec<u8>> = Vec::new();
                         for block in &subdag.blocks {
                             for tx in block.transactions() {
                                 let tx_hash =
@@ -252,12 +254,20 @@ pub async fn dispatch_commit(
                                     );
                                 hashes_guard.insert(tx_hash.clone());
                                 
-                                // O(1) garbage collection of pending txs
-                                let raw_hash = crate::consensus::tx_recycler::TxRecycler::hash_tx(tx.data());
-                                epoch_pending.remove(&raw_hash);
-                                
+                                committed_tx_data.push(tx.data().to_vec());
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
+                            }
+                        }
+
+                        // STABILITY FIX: Confirm committed TXs in TxRecycler.
+                        // Previously, TxRecycler.confirm_committed() was NEVER called from the
+                        // commit path. This caused pending TXs to accumulate indefinitely (up to
+                        // MAX_PENDING_TXS=100K), triggering stale TX re-submission every 15s
+                        // via collect_stale() → nonce conflicts → chain stall.
+                        if !committed_tx_data.is_empty() {
+                            if let Some(ref recycler) = node_guard.tx_recycler {
+                                recycler.confirm_committed(&committed_tx_data).await;
                             }
                         }
 
