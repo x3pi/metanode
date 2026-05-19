@@ -541,37 +541,40 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			// EPOCH-BOUNDARY FIX: Counter reports block N but hash not persisted yet.
 			// This happens when snapshot metadata records the epoch boundary block number,
 			// but the block itself hasn't been committed to the chain DB.
-			// Scan backward to find the most recent block with a valid persisted hash.
-			// Max scan depth of 10 prevents pathological scanning.
+			// 
+			// CRITICAL FIX (May 2026): The backward scan MUST NOT modify returnBlockNumber!
+			// Previously, returnBlockNumber was overwritten with the fallback block number,
+			// causing Rust to set next_block_number too low → block number overlap/gap.
+			// The scan is only used to find hash/epoch metadata for Rust's POST-GATE-VERIFY.
 			logger.Warn("⚠️ [INIT] Block %d exists in counter but hash not found in DB. "+
-				"Scanning backward for nearest persisted block (epoch boundary race condition).",
+				"Using counter value (hash will be empty). Rust must use block NUMBER as authoritative.",
 				returnBlockNumber)
+			// Keep returnBlockNumber unchanged — it's the correct max(committed, assigned)
+			// Only scan backwards for epoch metadata (not for block number)
 			const maxFallbackScan = 10
-			found := false
 			for delta := uint64(1); delta <= maxFallbackScan && delta <= returnBlockNumber; delta++ {
 				fallbackBlock := returnBlockNumber - delta
 				if fallbackBlock == 0 {
-					break // Don't fall back to genesis
+					break
 				}
 				fallbackHash, fallbackOk := blockchainInstance.GetBlockHashByNumber(fallbackBlock)
 				if fallbackOk && fallbackHash != (common.Hash{}) {
-					blockHashBytes = fallbackHash.Bytes()
-					returnBlockNumber = fallbackBlock
+					// Found a persisted block — use its epoch for metadata
 					block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(fallbackHash)
 					if err == nil && block != nil {
 						lastEpoch = block.Header().Epoch()
 					}
-					logger.Info("✅ [INIT] Using fallback block %d (delta=-%d) with hash %s",
-						returnBlockNumber, delta, fallbackHash.Hex())
-					found = true
+					logger.Info("✅ [INIT] Block %d hash not found, but found epoch=%d from nearby block %d (delta=-%d). "+
+						"Returning block=%d (unchanged) with empty hash.",
+						returnBlockNumber, lastEpoch, fallbackBlock, delta, returnBlockNumber)
 					break
 				}
 			}
-			if !found {
-				logger.Error("🚨 [INIT] CRITICAL: Could not find ANY persisted block hash within %d blocks of counter=%d. "+
-					"Returning block=0 to force STARTUP-SYNC from scratch.",
-					maxFallbackScan, committedBlockNumber)
-				returnBlockNumber = 0
+			// If no nearby block found for epoch, use current epoch
+			if lastEpoch == 0 {
+				lastEpoch = rh.chainState.GetCurrentEpoch()
+				logger.Info("✅ [INIT] No nearby block found for epoch lookup. Using current epoch=%d. block=%d",
+					lastEpoch, returnBlockNumber)
 			}
 		}
 	}
