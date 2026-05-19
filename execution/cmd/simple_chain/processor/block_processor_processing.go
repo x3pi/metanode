@@ -712,6 +712,7 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
+	bp.chainState.GetStakeStateDB().Discard() // CRITICAL FIX: Prevent stake state divergence
 	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
 
 	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
