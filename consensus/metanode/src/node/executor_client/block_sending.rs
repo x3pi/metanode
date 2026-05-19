@@ -159,17 +159,14 @@ impl ExecutorClient {
                     continue;
                 }
 
+                if self.send_buffer.lock().await.contains_key(&fragment_gei) {
+                    trace!("⏭️  [SEQUENTIAL-BUFFER] Fragment GEI={} is already in buffer, skipping entirely to preserve its valid block_number", fragment_gei);
+                    continue;
+                }
+
                 let block_number = {
-                    let _next_expected_guard = self.next_expected_index.lock().await;
-                    if self.send_buffer.lock().await.contains_key(&fragment_gei) {
-                        trace!(
-                            "⏭️  [BLOCK-NUM] Fragment GEI={} is already in buffer, keeping BN=0",
-                            fragment_gei
-                        );
-                        0
-                    } else {
-                        let mut next_bn = self.next_block_number.lock().await;
-                        let mut last_ep = self.last_processed_epoch.lock().await;
+                    let mut next_bn = self.next_block_number.lock().await;
+                    let mut last_ep = self.last_processed_epoch.lock().await;
 
                         let is_epoch_boundary = epoch > *last_ep;
                         if is_epoch_boundary {
@@ -185,7 +182,6 @@ impl ExecutorClient {
                         let bn = *next_bn;
                         *next_bn += 1;
                         bn
-                    }
                 };
 
                 let subdag_commit_idx = subdag.commit_ref.index;
