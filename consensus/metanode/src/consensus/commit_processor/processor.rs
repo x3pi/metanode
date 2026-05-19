@@ -866,6 +866,15 @@ impl CommitProcessor {
             // we MUST drain `pending_commits` here before `receiver.recv().await` blocks us forever.
             let mut should_break = false;
             while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
+                // Check transitioning state before processing buffered OOO commits
+                if let Some(ref is_trans) = self.is_transitioning {
+                    if is_trans.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("🛑 [STATION 3: PROCESSOR] OOO Drain Loop paused: Node is transitioning. Buffering commit {}.", next_expected_index);
+                        pending_commits.insert(next_expected_index, pending);
+                        break;
+                    }
+                }
+                
                 // ═══════════════════════════════════════════════════════
                 // DIGEST-GATE (OOO PATH): Same logic as main path.
                 // ═══════════════════════════════════════════════════════
@@ -983,6 +992,18 @@ impl CommitProcessor {
                 };
 
                 Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
+
+                if let Some(ref recycler) = self.tx_recycler {
+                    let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
+                    if total_txs > 0 {
+                        let committed_tx_data: Vec<Vec<u8>> = pending
+                            .blocks
+                            .iter()
+                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                            .collect();
+                        recycler.confirm_committed(&committed_tx_data).await;
+                    }
+                }
 
                 if let Some(ref mut wal) = commit_wal {
                     let _ = wal.write_pending(pending_commit_index, pending_gei, current_epoch);
