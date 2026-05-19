@@ -106,6 +106,9 @@ func (bp *BlockProcessor) commitWorker() {
 		// AFTER it is populated, rather than asynchronously via commitToMemoryParallel.
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
+		} else {
+			// Remove from pending store now that it is fully committed
+			bp.RemovePendingCommitBlock(blockNum)
 		}
 		saveDuration := time.Since(startSave)
 
