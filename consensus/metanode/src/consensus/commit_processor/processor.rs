@@ -49,8 +49,8 @@ pub struct CommitProcessor {
     epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     /// TX recycler for confirming committed TXs
     tx_recycler: Option<Arc<TxRecycler>>,
-
-    /// RS-2: Storage path for persistence
+    /// Committed transaction hashes for deduplication
+    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
     storage_path: Option<std::path::PathBuf>,
     /// Channel sender for emitting lag alerts
     lag_alert_sender: Option<
@@ -100,6 +100,7 @@ impl CommitProcessor {
                 std::collections::HashMap::new(),
             )),
             tx_recycler: None,
+            committed_transaction_hashes: None,
             storage_path: None,
             lag_alert_sender: None,
             quorum_commit_index: None,
@@ -239,6 +240,15 @@ impl CommitProcessor {
     /// Set TX recycler for confirming committed TXs
     pub fn with_tx_recycler(mut self, recycler: Arc<TxRecycler>) -> Self {
         self.tx_recycler = Some(recycler);
+        self
+    }
+
+    /// Set committed transaction hashes
+    pub fn with_committed_transaction_hashes(
+        mut self,
+        hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    ) -> Self {
+        self.committed_transaction_hashes = Some(hashes);
         self
     }
 
@@ -407,6 +417,9 @@ impl CommitProcessor {
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
         let epoch_eth_addresses = self.epoch_eth_addresses;
+        let tx_recycler = self.tx_recycler;
+        let storage_path = self.storage_path;
+        let committed_transaction_hashes = self.committed_transaction_hashes;
         let _quorum_commit_index_ref = self.quorum_commit_index.clone();
         let committee_size = self.committee_size;
         let digest_verifier = self.digest_verifier.clone();
@@ -442,7 +455,7 @@ impl CommitProcessor {
         // Records PENDING before FFI call, COMMITTED after Go confirms.
         // On restart, pending entries indicate crash mid-FFI → log warning.
         // ═══════════════════════════════════════════════════════════════
-        let mut commit_wal = if let Some(ref sp) = self.storage_path {
+        let mut commit_wal = if let Some(ref sp) = storage_path {
             match super::wal::CommitWAL::open(sp) {
                 Ok(wal) => {
                     // Recovery: check for pending entries (crash during FFI)
@@ -896,6 +909,9 @@ impl CommitProcessor {
                                 current_epoch,
                                 executor_client.clone(),
                                 delivery_sender.clone(),
+                                tx_recycler.clone(),
+                                committed_transaction_hashes.clone(),
+                                storage_path.clone(),
                             )
                             .await?;
                             // WAL: Record COMMITTED after Go confirms
@@ -906,7 +922,7 @@ impl CommitProcessor {
                                 let mut gei_guard = shared_gei.lock().await;
                                 *gei_guard += geis_consumed;
                             }
-                            if let Some(ref recycler) = self.tx_recycler {
+                            if let Some(ref recycler) = tx_recycler {
                                 let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
                                 if total_txs > 0 {
                                     let committed_tx_data: Vec<Vec<u8>> = confirmed
@@ -1111,7 +1127,7 @@ impl CommitProcessor {
 
                 Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
-                if let Some(ref recycler) = self.tx_recycler {
+                if let Some(ref recycler) = tx_recycler {
                     let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
                     if total_txs > 0 {
                         let committed_tx_data: Vec<Vec<u8>> = pending
@@ -1132,6 +1148,9 @@ impl CommitProcessor {
                     current_epoch,
                     executor_client.clone(),
                     delivery_sender.clone(),
+                    tx_recycler.clone(),
+                    committed_transaction_hashes.clone(),
+                    storage_path.clone(),
                 )
                 .await?;
                 if let Some(ref mut wal) = commit_wal {
@@ -1570,6 +1589,9 @@ impl CommitProcessor {
                             current_epoch,
                             executor_client.clone(),
                             delivery_sender.clone(),
+                            tx_recycler.clone(),
+                            committed_transaction_hashes.clone(),
+                            storage_path.clone(),
                         )
                         .await?;
                         // WAL: Record COMMITTED after Go confirms
@@ -1584,7 +1606,7 @@ impl CommitProcessor {
                         }
                         
                         // ♻️ TX RECYCLER: Confirm committed TXs
-                        if let Some(ref recycler) = self.tx_recycler {
+                        if let Some(ref recycler) = tx_recycler {
                             if total_txs_in_commit > 0 {
                                 let committed_tx_data: Vec<Vec<u8>> = subdag
                                     .blocks
@@ -1742,6 +1764,9 @@ impl CommitProcessor {
                                     current_epoch,
                                     executor_client.clone(),
                                     delivery_sender.clone(),
+                                    tx_recycler.clone(),
+                                    committed_transaction_hashes.clone(),
+                                    storage_path.clone(),
                                 )
                                 .await?;
                                 // WAL: Record COMMITTED after Go confirms
@@ -1759,7 +1784,7 @@ impl CommitProcessor {
                                     commit_index, exec_gei, certified.leader,
                                     hex::encode(&certified_digest[..4])
                                 );
-                                if let Some(ref recycler) = self.tx_recycler {
+                                if let Some(ref recycler) = tx_recycler {
                                     let total_txs: usize = certified.blocks.iter().map(|b| b.transactions().len()).sum();
                                     if total_txs > 0 {
                                         let committed_tx_data: Vec<Vec<u8>> = certified

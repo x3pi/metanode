@@ -4,7 +4,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
-use tokio::time::Duration;
+
 use tracing::{error, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
@@ -25,6 +25,9 @@ pub async fn dispatch_commit(
     epoch: u64,
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
+    tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
+    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    storage_path: Option<std::path::PathBuf>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -175,72 +178,11 @@ pub async fn dispatch_commit(
                     // Track committed transaction hashes to prevent duplicates during epoch transitions
                     // CRITICAL: Only track when commit is actually processed, not just submitted
                     //
-                    // FIX C1: When try_lock() fails (transition handler holds node lock),
-                    // spawn a deferred task to retry tracking after a short backoff.
-                    // Previously, we simply skipped tracking, which could cause tx_recycler
-                    // to resubmit already-committed TXs in the new epoch.
-                    if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                        // Use try_lock() instead of lock().await to avoid blocking
-                        let node_guard = match node_arc.try_lock() {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                // Lock held by transition handler — defer tracking to a background task
-                                trace!("⏭️ [TX TRACKING] Deferring tracking for commit {} — node lock held by transition handler", commit_index);
-                                let node_arc_clone = node_arc.clone();
-                                let subdag_blocks: Vec<Vec<Vec<u8>>> = subdag
-                                    .blocks
-                                    .iter()
-                                    .map(|b| {
-                                        b.transactions()
-                                            .iter()
-                                            .map(|tx| tx.data().to_vec())
-                                            .collect()
-                                    })
-                                    .collect();
-                                let deferred_commit_index = commit_index;
-                                // T2-5: Bounded deferred task — acquire semaphore permit before spawning
-                                let sem = DEFERRED_TASK_SEMAPHORE.clone();
-                                match sem.try_acquire_owned() {
-                                    Ok(permit) => {
-                                        tokio::spawn(async move {
-                                            let _permit = permit; // held until task completes
-                                                                  // Wait for transition handler to release lock
-                                            tokio::time::sleep(Duration::from_millis(500)).await;
-                                            if let Ok(guard) = node_arc_clone.try_lock() {
-                                                let mut hashes_guard =
-                                                    guard.committed_transaction_hashes.lock().await;
-                                                let mut count = 0;
-                                                let mut all_committed_data: Vec<Vec<u8>> = Vec::new();
-                                                for block_txs in &subdag_blocks {
-                                                    for tx_data in block_txs {
-                                                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
-                                                        hashes_guard.insert(tx_hash.clone());
-                                                        all_committed_data.push(tx_data.clone());
-                                                        count += 1;
-                                                    }
-                                                }
-                                                // Confirm committed TXs in TxRecycler (deferred path)
-                                                if !all_committed_data.is_empty() {
-                                                    if let Some(ref recycler) = guard.tx_recycler {
-                                                        recycler.confirm_committed(&all_committed_data).await;
-                                                    }
-                                                }
-                                                if count > 0 {
-                                                    info!("💾 [TX TRACKING DEFERRED] Successfully tracked {} hashes for commit #{} after backoff", count, deferred_commit_index);
-                                                }
-                                            } else {
-                                                warn!("⚠️ [TX TRACKING DEFERRED] Still cannot acquire lock for commit #{}. TX tracking skipped.", deferred_commit_index);
-                                            }
-                                        });
-                                    }
-                                    Err(_) => {
-                                        warn!("⚠️ [TX TRACKING DEFERRED] Semaphore full (64 tasks in-flight). Dropping deferred tracking for commit #{}.", deferred_commit_index);
-                                    }
-                                }
-                                return Ok(geis_consumed);
-                            }
-                        };
-                        let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
+                    // We now pass committed_transaction_hashes and tx_recycler directly to avoid acquiring
+                    // the Node lock, which under high TPS is heavily contended (e.g. by UdsServer), causing
+                    // tracking to fail and dropping transactions into a re-submission loop.
+                    if let Some(hashes_arc) = &committed_transaction_hashes {
+                        let mut hashes_guard = hashes_arc.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
@@ -266,7 +208,7 @@ pub async fn dispatch_commit(
                         // MAX_PENDING_TXS=100K), triggering stale TX re-submission every 15s
                         // via collect_stale() → nonce conflicts → chain stall.
                         if !committed_tx_data.is_empty() {
-                            if let Some(ref recycler) = node_guard.tx_recycler {
+                            if let Some(ref recycler) = tx_recycler {
                                 recycler.confirm_committed(&committed_tx_data).await;
                             }
                         }
@@ -274,7 +216,7 @@ pub async fn dispatch_commit(
                         // TPS OPT: Defer disk persist to background — TX hashes are only used for
                         // epoch transition recovery, not state computation. Async persist is fork-safe.
                         if !batch_hashes.is_empty() {
-                            let storage_path = node_guard.storage_path.clone();
+                            let storage_path_clone = storage_path.clone();
                             let hashes_count = batch_hashes.len();
                             let persist_epoch = epoch;
                             // T2-5: Bounded persistence task — acquire semaphore permit
@@ -283,13 +225,15 @@ pub async fn dispatch_commit(
                                 Ok(permit) => {
                                     tokio::spawn(async move {
                                         let _permit = permit; // held until task completes
-                                        if let Err(e) = crate::node::transition::save_committed_transaction_hashes_batch(
-                                                    &storage_path, persist_epoch, &batch_hashes
-                                                ).await {
-                                                warn!("⚠️ [TX TRACKING] Failed to persist committed hashes after commit: {}", e);
-                                            } else {
-                                                trace!("💾 [TX TRACKING] Persisted {} committed hashes for epoch {}", hashes_count, persist_epoch);
-                                            }
+                                        if let Some(ref p) = storage_path_clone {
+                                            if let Err(e) = crate::node::transition::save_committed_transaction_hashes_batch(
+                                                        p, persist_epoch, &batch_hashes
+                                                    ).await {
+                                                    warn!("⚠️ [TX TRACKING] Failed to persist committed hashes after commit: {}", e);
+                                                } else {
+                                                    trace!("💾 [TX TRACKING] Persisted {} committed hashes for epoch {}", hashes_count, persist_epoch);
+                                                }
+                                        }
                                     });
                                 }
                                 Err(_) => {
