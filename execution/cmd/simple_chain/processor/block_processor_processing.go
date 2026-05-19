@@ -278,9 +278,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// CRITICAL FORK-SAFETY: Convert commitTimestampMs (from Rust) to seconds for BlockHeader
 	timestampSec := commitTimestampMs / 1000 // 0 if commitTimestampMs is 0 (fallback to time.Now())
 
-	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, else fallback to local validator
+	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, even if it's the zero address.
+	// The zero address is used intentionally as a deterministic fallback for system transactions (EndOfEpoch)
+	// which do not have a Rust leader. Falling back to bp.validatorAddress would cause a fork!
 	blockLeaderAddress := bp.validatorAddress
-	if len(leaderAddressOverride) > 0 && leaderAddressOverride[0] != (common.Address{}) {
+	if len(leaderAddressOverride) > 0 {
 		blockLeaderAddress = leaderAddressOverride[0]
 	}
 
