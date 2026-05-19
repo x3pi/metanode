@@ -37,6 +37,32 @@ var (
 	// Increased to 500,000 to prevent L0 compaction stalls during 50k+ TPS burst tests.
 	// The 157GB server RAM easily sustains this cache size before asynchronous background flush.
 	FlushThresholdTxs uint64 = 500000
+
+	// Memory Pools for zero-allocation parallel processing
+	txSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.Transaction, 0, 128)
+			return &s
+		},
+	}
+	receiptSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.Receipt, 0, 128)
+			return &s
+		},
+	}
+	scResultSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.ExecuteSCResult, 0, 128)
+			return &s
+		},
+	}
+	mvmIdMapPool = sync.Pool{
+		New: func() interface{} {
+			m := make(map[common.Hash]common.Address, 128)
+			return &m
+		},
+	}
 )
 
 type ProcessResult struct {
@@ -49,6 +75,15 @@ type ProcessResult struct {
 	EventLogs        map[common.Address][]types.EventLog
 	MvmIdMap         map[common.Hash]common.Address
 	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
+}
+
+type groupResultExt struct {
+	txPtr         *[]types.Transaction
+	rcpPtr        *[]types.Receipt
+	exPtr         *[]types.ExecuteSCResult
+	mvmPtr        *map[common.Hash]common.Address
+	Error         error
+	DirtyAccounts []types.AccountState
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -322,7 +357,7 @@ func processGroupsConcurrently(
 	// Goroutines write to results[i] (by group index), ensuring deterministic merge order
 	// regardless of which goroutine finishes first. This prevents receipt ordering differences
 	// between nodes that cause receiptsRoot divergence → fork.
-	results := make([]grouptxns.GroupResult, len(groupedGroups))
+	results := make([]groupResultExt, len(groupedGroups))
 
 	// ═══════════════════════════════════════════════════════════════
 	// WORKER POOL: Use bounded goroutines instead of 1-per-group.
@@ -442,8 +477,8 @@ func processGroupsConcurrently(
 	var totalTxs int
 	var totalSCResults int
 	for _, gRs := range results {
-		totalTxs += len(gRs.Transactions)
-		totalSCResults += len(gRs.ExecuteSCResults)
+		totalTxs += len(*gRs.txPtr)
+		totalSCResults += len(*gRs.exPtr)
 	}
 
 	allTransactions := make([]types.Transaction, 0, totalTxs)
@@ -452,12 +487,18 @@ func processGroupsConcurrently(
 	allMvmIdMap := make(map[common.Hash]common.Address, totalTxs)
 
 	for _, gRs := range results {
-		allTransactions = append(allTransactions, gRs.Transactions...)
-		allReceipts = append(allReceipts, gRs.Receipts...)
-		allExecuteSCResults = append(allExecuteSCResults, gRs.ExecuteSCResults...)
-		for h, addr := range gRs.MvmIdMap {
+		allTransactions = append(allTransactions, *gRs.txPtr...)
+		allReceipts = append(allReceipts, *gRs.rcpPtr...)
+		allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
+		for h, addr := range *gRs.mvmPtr {
 			allMvmIdMap[h] = addr
 		}
+		
+		// Return slices and maps to pools to prevent GC overhead
+		txSlicePool.Put(gRs.txPtr)
+		receiptSlicePool.Put(gRs.rcpPtr)
+		scResultSlicePool.Put(gRs.exPtr)
+		mvmIdMapPool.Put(gRs.mvmPtr)
 	}
 	mergeDuration := time.Since(startMerge)
 
@@ -491,14 +532,27 @@ func processSingleGroup(
 	enableTrace bool,
 	isCache bool,
 	blockTime uint64,
-) grouptxns.GroupResult {
-	// PRE-ALLOCATE: Prevent internal slice re-allocation during block execution.
+) groupResultExt {
+	// Acquire slices from memory pools to eliminate GC pressure
+	txPtr := txSlicePool.Get().(*[]types.Transaction)
+	txs := (*txPtr)[:0]
+	
+	rcpPtr := receiptSlicePool.Get().(*[]types.Receipt)
+	rcps := (*rcpPtr)[:0]
+	
+	exPtr := scResultSlicePool.Get().(*[]types.ExecuteSCResult)
+	exs := (*exPtr)[:0]
+	
+	mvmMapPtr := mvmIdMapPool.Get().(*map[common.Hash]common.Address)
+	mvmMap := *mvmMapPtr
+	clear(mvmMap) // Go 1.21+ fast clear
+
 	gRs := grouptxns.GroupResult{
-		Transactions:     make([]types.Transaction, 0, len(groupItems)),
-		Receipts:         make([]types.Receipt, 0, len(groupItems)),
-		ExecuteSCResults: make([]types.ExecuteSCResult, 0, len(groupItems)),
+		Transactions:     txs,
+		Receipts:         rcps,
+		ExecuteSCResults: exs,
 		Error:            nil,
-		MvmIdMap:         make(map[common.Hash]common.Address, len(groupItems)),
+		MvmIdMap:         mvmMap,
 	}
 	startGroup := time.Now()
 
@@ -928,7 +982,21 @@ func processSingleGroup(
 	}
 	logger.Debug("⏱️ [PERF-GROUP] txCount=%d | groupTime=%v | avg=%v/tx",
 		txCount, elapsed, avgPerTx)
-	return gRs
+
+	// Update slice headers in pools before returning
+	*txPtr = gRs.Transactions
+	*rcpPtr = gRs.Receipts
+	*exPtr = gRs.ExecuteSCResults
+	*mvmMapPtr = gRs.MvmIdMap
+
+	return groupResultExt{
+		txPtr:         txPtr,
+		rcpPtr:        rcpPtr,
+		exPtr:         exPtr,
+		mvmPtr:        mvmMapPtr,
+		Error:         gRs.Error,
+		DirtyAccounts: gRs.DirtyAccounts,
+	}
 }
 
 func createErrorReceipt(tx types.Transaction, toAddress common.Address, err error) types.Receipt {

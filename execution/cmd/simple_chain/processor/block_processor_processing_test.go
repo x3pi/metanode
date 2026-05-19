@@ -224,3 +224,71 @@ func TestGetLeaderAddress_LeaderOverride(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// TestVerifyDraftBlock
+// Tests the FORK-GUARD logic that prevents 0x0 roots from being committed
+// ============================================================================
+func TestVerifyDraftBlock(t *testing.T) {
+	bp := &BlockProcessor{}
+	validHash := e_common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	zeroHash := e_common.Hash{}
+
+	tests := []struct {
+		name               string
+		accountRoot        e_common.Hash
+		stakeRoot          e_common.Hash
+		currentBlockNumber uint64
+		expected           bool
+	}{
+		{
+			name:               "Valid block with both roots",
+			accountRoot:        validHash,
+			stakeRoot:          validHash,
+			currentBlockNumber: 100,
+			expected:           true,
+		},
+		{
+			name:               "Block 1 is allowed to have 0x0 roots (genesis state)",
+			accountRoot:        zeroHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 1,
+			expected:           true,
+		},
+		{
+			name:               "Block > 1 with 0x0 AccountStatesRoot should be rejected",
+			accountRoot:        zeroHash,
+			stakeRoot:          validHash,
+			currentBlockNumber: 2,
+			expected:           false,
+		},
+		{
+			name:               "Block > 1 with 0x0 StakeStatesRoot should be rejected",
+			accountRoot:        validHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 100,
+			expected:           false,
+		},
+		{
+			name:               "Block > 1 with both 0x0 roots should be rejected",
+			accountRoot:        zeroHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 50,
+			expected:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create dummy block with specific header roots
+			header := block.NewBlockHeader(
+				e_common.Hash{}, 0, tt.accountRoot, tt.stakeRoot,
+				e_common.Hash{}, e_common.Address{}, 0, e_common.Hash{}, 1,
+			)
+			bl := block.NewBlock(header, nil, nil)
+			
+			result := bp.verifyDraftBlock(bl, tt.currentBlockNumber, 1)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
