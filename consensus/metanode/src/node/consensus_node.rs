@@ -915,6 +915,12 @@ impl ConsensusNode {
             epoch_base_exec_index, current_epoch, boundary_block
         );
 
+        // FORK-SAFETY FIX: Initialize executor_client state (block numbers, epoch) before recovery.
+        // If we don't do this, executor_client has last_processed_epoch=0 and next_block_number=0.
+        // When it replays a commit from the current epoch, it incorrectly thinks it's an Epoch Boundary,
+        // assigns block_number=0, and causes "CHAIN BROKEN" state divergence on Go.
+        executor_client.initialize_from_go().await;
+
         // Recovery check
         if config.executor_read_enabled && last_global_exec_index > 0 {
             if let Err(e) = recovery::perform_block_recovery_check(
