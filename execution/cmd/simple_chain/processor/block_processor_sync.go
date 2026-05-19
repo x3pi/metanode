@@ -641,6 +641,7 @@ PROCESS_BLOCK:
 			}
 			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
 			*currentBlockNumber = epochData.GetBlockNumber()
+			storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
 			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 			if emptyBlock != nil {
 				select {
@@ -712,6 +713,7 @@ PROCESS_BLOCK:
 	// We no longer assign sequential block numbers internally in Go.
 	if epochData.GetBlockNumber() > 0 {
 		*currentBlockNumber = epochData.GetBlockNumber()
+		storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
 	} else {
 		// CRITICAL FORK-SAFETY FIX: Rust sets block_number = 0 for empty commits.
 		// We MUST skip creating a Go block for them to prevent block inflation.

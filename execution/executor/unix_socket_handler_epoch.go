@@ -477,18 +477,17 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	logger.Debug("🔍 [INIT] Handling GetLastBlockNumberRequest (Rust executor_client initializing next_expected_index)")
 
 	// Get last block number from counter
-	counterBlockNumber := storage.GetLastBlockNumber()
-	logger.Debug("🔍 [INIT] Block counter from storage: %d", counterBlockNumber)
+	committedBlockNumber := storage.GetLastBlockNumber()
+	assignedBlockNumber := storage.GetLastAssignedBlockNumber()
+	logger.Debug("🔍 [INIT] Block counter from storage: committed=%d, assigned=%d", committedBlockNumber, assignedBlockNumber)
 
 	// CRITICAL FIX: With blockchainInitDone, the counter is AUTHORITATIVE.
-	// initBlockchain() loads the actual last block from DB, then updates the counter,
-	// then sets blockchainInitDone. The backwards-validation loop below was causing
-	// false negatives because BlockChain.Commit() only runs for state-changing blocks;
-	// empty commits set SetBlockNumberToHash in dirty cache but never Commit() to DB.
-	// After restart, GetBlockHashByNumber can't find those mappings and decrements
-	// to the last state-changing block — a STALE value that causes Rust to re-execute
-	// existing blocks → permanent fork.
-	validatedBlockNumber := counterBlockNumber
+	// We return the maximum of committed and assigned to prevent block numbering overlap
+	// during epoch transitions where the pipeline is not fully flushed.
+	validatedBlockNumber := committedBlockNumber
+	if assignedBlockNumber > committedBlockNumber {
+		validatedBlockNumber = assignedBlockNumber
+	}
 
 	// Guard against nil blockchain instance (during early startup or tests)
 	blockchainInstance := blockchain.GetBlockChainInstance()
@@ -531,6 +530,13 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			if err == nil && block != nil {
 				lastEpoch = block.Header().Epoch()
 			}
+		} else if returnBlockNumber > committedBlockNumber {
+			// PIPELINE FIX: This block was assigned by Rust but hasn't been committed to DB yet.
+			// It is safely buffered in Go's memory. Do NOT scan backwards, as that would return 
+			// a stale block number and cause duplicate numbering in the next epoch.
+			// We return the assigned block number with an empty hash.
+			logger.Info("✅ [INIT] Block %d is in pipeline (assigned > committed). Bypassing backward scan.", returnBlockNumber)
+			lastEpoch = rh.chainState.GetCurrentEpoch()
 		} else {
 			// EPOCH-BOUNDARY FIX: Counter reports block N but hash not persisted yet.
 			// This happens when snapshot metadata records the epoch boundary block number,
