@@ -255,19 +255,33 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 60000;
+            const MAX_BUNDLE_SIZE: usize = 60000; // REVERT FOR TESTING: back to old value to confirm TX-DROP-GUARD log fires
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
             let chunks_list: Vec<Vec<Vec<u8>>> = if total_tx_count <= MAX_BUNDLE_SIZE {
                 vec![transactions_to_submit.clone()]
             } else {
+                let num_chunks = total_tx_count.div_ceil(MAX_BUNDLE_SIZE);
+                warn!(
+                    "⚠️ [TX-BUNDLE] Batch of {} TXs exceeds MAX_BUNDLE_SIZE={} — splitting into {} chunks. \
+                     (If this fires before fix, TransactionConsumer would have DROPPED this entire batch!)",
+                    total_tx_count, MAX_BUNDLE_SIZE, num_chunks
+                );
                 transactions_to_submit.chunks(MAX_BUNDLE_SIZE).map(|c| c.to_vec()).collect()
             };
 
             let mut all_succeeded = true;
-            for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
-                // let chunk_len = chunk_vec.len();
+            for (chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
+                let chunk_len = chunk_vec.len();
+                if chunk_idx > 0 {
+                    debug!(
+                        "📦 [TX-BUNDLE] Submitting chunk {}/{} | txs={}",
+                        chunk_idx + 1,
+                        total_tx_count.div_ceil(MAX_BUNDLE_SIZE),
+                        chunk_len
+                    );
+                }
                 
                 let epoch_pending_ptr = if let Some(ref node_mutex) = node {
                     let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_mutex.lock()).await;

@@ -158,6 +158,23 @@ impl TransactionConsumer {
 
         if let Some(t) = self.pending_transactions.take() {
             if let Some(pending_transactions) = handle_txs(t) {
+                // ⚠️ TX-DROP-GUARD: This batch is too large to fit even in an EMPTY block.
+                // Root cause: Caller sent a single TransactionGuard with more TXs than
+                // max_num_transactions_in_block OR total bytes exceed max_transactions_in_block_bytes.
+                // Fix: the FFI layer (tx_socket_server.rs) must chunk batches to MAX_BUNDLE_SIZE
+                // BEFORE calling submit_no_wait() so this path is NEVER hit.
+                let drop_count = pending_transactions.transactions.len();
+                let drop_bytes: usize = pending_transactions.transactions.iter()
+                    .map(|tx| tx.data().len())
+                    .sum();
+                tracing::error!(
+                    "🚫 [TX-DROP-GUARD] Dropping {} transactions ({} bytes) — batch exceeds block limits \
+                     (max_txs={}, max_bytes={}). CALLER BUG: FFI layer must pre-chunk to <= MAX_BUNDLE_SIZE.",
+                    drop_count,
+                    drop_bytes,
+                    self.max_num_transactions_in_block,
+                    self.max_transactions_in_block_bytes
+                );
                 debug_fatal!(
                     "Previously pending transaction(s) should fit into an empty block! Dropping: {:?}",
                     pending_transactions.transactions
