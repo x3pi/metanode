@@ -89,7 +89,7 @@ func (bp *BlockProcessor) GenerateBlock() {
 			continue
 		}
 
-		if !drained && accumulatedResults != nil && len(accumulatedResults.Transactions) > 0 {
+		if drained && accumulatedResults != nil && len(accumulatedResults.Transactions) > 0 {
 			// No new results arrived and we have pending data — use timer to flush
 			select {
 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
@@ -110,11 +110,27 @@ func (bp *BlockProcessor) GenerateBlock() {
 				currentBlockNumber++
 				logger.Info("Created block #%d with %d txs (timeout flush %v)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()), MaxWaitTime)
 			}
-		} else if !drained {
+		} else if drained {
 			// No pending results and no new data — blocking wait for first result
-			processResults := <-bp.transactionProcessor.ProcessResultChan
-			bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-			accumulatedResults = &processResults
+			select {
+			case processResults := <-bp.transactionProcessor.ProcessResultChan:
+				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+				if accumulatedResults == nil {
+					accumulatedResults = &processResults
+				} else {
+					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
+					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
+					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
+				}
+			case <-bp.forceCommitChan:
+				if accumulatedResults == nil {
+					accumulatedResults = &tx_processor.ProcessResult{}
+				}
+				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+				accumulatedResults = nil
+				currentBlockNumber++
+				logger.Info("Created block #%d with %d txs (event-driven flush - empty block)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+			}
 		}
 	}
 }
