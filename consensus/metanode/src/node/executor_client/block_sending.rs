@@ -181,6 +181,8 @@ impl ExecutorClient {
                         // (whose empty TxRecycler will allow TXs through).
                         let bn = *next_bn;
                         *next_bn += 1;
+                        info!("📊 [BLOCK-NUM-ASSIGN] Fragment: block_number={} for GEI={}, epoch={}, frag={}/{}, txs_user={}, txs_sys={}",
+                            bn, fragment_gei, epoch, frag_idx+1, actual_fragments, all_proto_txs.len(), all_system_txs.len());
                         bn
                 };
 
@@ -273,6 +275,8 @@ impl ExecutorClient {
             // explicitly create an empty block to prevent "Ghost block" sequence gaps.
             let bn = *next_bn;
             *next_bn += 1;
+            info!("📊 [BLOCK-NUM-ASSIGN] Assigned block_number={} for GEI={}, epoch={}, commit_idx={}, txs_user={}, txs_sys={}",
+                bn, global_exec_index, epoch, subdag.commit_ref.index, all_proto_txs.len(), all_system_txs.len());
             bn
         };
 
