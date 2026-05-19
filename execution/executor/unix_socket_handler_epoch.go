@@ -570,7 +570,7 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			if !found {
 				logger.Error("🚨 [INIT] CRITICAL: Could not find ANY persisted block hash within %d blocks of counter=%d. "+
 					"Returning block=0 to force STARTUP-SYNC from scratch.",
-					maxFallbackScan, counterBlockNumber)
+					maxFallbackScan, committedBlockNumber)
 				returnBlockNumber = 0
 			}
 		}
@@ -588,7 +588,7 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d, epoch=%d (counter=%d, validated=%d, is_ready=%v)",
-		returnBlockNumber, lastGEI, lastEpoch, counterBlockNumber, validatedBlockNumber, isReady)
+		returnBlockNumber, lastGEI, lastEpoch, committedBlockNumber, validatedBlockNumber, isReady)
 	return response, nil
 }
 
