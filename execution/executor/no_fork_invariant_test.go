@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"sort"
 	"testing"
 
@@ -12,28 +13,38 @@ import (
 // No-Fork Invariant Tests: Validator Ordering & Boundary Block Consistency
 //
 // CRITICAL CONTEXT (Pillar-47 Advance-First Protocol):
-//   - Validators must be sorted by AuthorityKey (BLS public key) as STRING
-//   - This sort is identical in Go and Rust:
-//       Go:   sort.Slice(v, func(i, j) => v[i].AuthorityKey() < v[j].AuthorityKey())
-//       Rust: sorted_validators.sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
+//   - Validators must be sorted by AuthorityKey (BLS public key) as BYTES
+//   - If AuthorityKeys are equal/empty, fallback to Address and then P2PAddress
+//   - Go:   sort.SliceStable(v, func(i, j) => ...)
+//   - Rust: sorted_validators.sort_by(|a, b| ...)
 //   - Any divergence in sort order causes different committee hash → FORK
 //   - BoundaryBlock from Rust is authoritative for epoch timestamps → no-fork
 // ============================================================================
 
 // simulatedValidator mirrors the AuthorityKey() used in production Go code.
 type simulatedValidator struct {
-	authorityKey string
+	authorityKey []byte
 	address      string
+	p2pAddress   string
 }
 
-func (v simulatedValidator) AuthorityKey() string { return v.authorityKey }
+func (v simulatedValidator) AuthorityKey() []byte { return v.authorityKey }
 func (v simulatedValidator) Address() string      { return v.address }
+func (v simulatedValidator) P2PAddress() string   { return v.p2pAddress }
 
 // sortValidatorsByAuthorityKey is the exact sort used in unix_socket_handler_epoch.go.
-// CRITICAL: Must use string comparison, not byte comparison.
 func sortValidatorsByAuthorityKey(validators []simulatedValidator) {
-	sort.Slice(validators, func(i, j int) bool {
-		return validators[i].AuthorityKey() < validators[j].AuthorityKey()
+	sort.SliceStable(validators, func(i, j int) bool {
+		cmp := bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey())
+		if cmp == 0 {
+			addrI := validators[i].Address()
+			addrJ := validators[j].Address()
+			if addrI == addrJ {
+				return validators[i].P2PAddress() < validators[j].P2PAddress()
+			}
+			return addrI < addrJ
+		}
+		return cmp < 0
 	})
 }
 
@@ -44,9 +55,9 @@ func sortValidatorsByAuthorityKey(validators []simulatedValidator) {
 
 func TestNoFork_ValidatorSort_Deterministic(t *testing.T) {
 	validators := []simulatedValidator{
-		{authorityKey: "bls-key-zzzzz", address: "0xC"},
-		{authorityKey: "bls-key-aaaaa", address: "0xA"},
-		{authorityKey: "bls-key-mmmmm", address: "0xB"},
+		{authorityKey: []byte("bls-key-zzzzz"), address: "0xC", p2pAddress: "p2p-c"},
+		{authorityKey: []byte("bls-key-aaaaa"), address: "0xA", p2pAddress: "p2p-a"},
+		{authorityKey: []byte("bls-key-mmmmm"), address: "0xB", p2pAddress: "p2p-b"},
 	}
 
 	// Sort original order
@@ -56,9 +67,9 @@ func TestNoFork_ValidatorSort_Deterministic(t *testing.T) {
 
 	// Sort reversed order — must get same result
 	v2 := []simulatedValidator{
-		{authorityKey: "bls-key-mmmmm", address: "0xB"},
-		{authorityKey: "bls-key-zzzzz", address: "0xC"},
-		{authorityKey: "bls-key-aaaaa", address: "0xA"},
+		{authorityKey: []byte("bls-key-mmmmm"), address: "0xB", p2pAddress: "p2p-b"},
+		{authorityKey: []byte("bls-key-zzzzz"), address: "0xC", p2pAddress: "p2p-c"},
+		{authorityKey: []byte("bls-key-aaaaa"), address: "0xA", p2pAddress: "p2p-a"},
 	}
 	sortValidatorsByAuthorityKey(v2)
 
@@ -71,28 +82,28 @@ func TestNoFork_ValidatorSort_Deterministic(t *testing.T) {
 
 func TestNoFork_ValidatorSort_AscendingOrder(t *testing.T) {
 	validators := []simulatedValidator{
-		{authorityKey: "z-key"},
-		{authorityKey: "a-key"},
-		{authorityKey: "m-key"},
-		{authorityKey: "b-key"},
+		{authorityKey: []byte("z-key"), address: "0x04"},
+		{authorityKey: []byte("a-key"), address: "0x01"},
+		{authorityKey: []byte("m-key"), address: "0x03"},
+		{authorityKey: []byte("b-key"), address: "0x02"},
 	}
 	sortValidatorsByAuthorityKey(validators)
 
-	// Must be strictly ascending string order
+	// Must be strictly ascending order
 	for i := 1; i < len(validators); i++ {
-		assert.Less(t, validators[i-1].AuthorityKey(), validators[i].AuthorityKey(),
+		assert.True(t, bytes.Compare(validators[i-1].AuthorityKey(), validators[i].AuthorityKey()) < 0,
 			"validators must be sorted ascending by AuthorityKey at position %d", i)
 	}
-	assert.Equal(t, "a-key", validators[0].AuthorityKey(), "smallest key must be first")
-	assert.Equal(t, "z-key", validators[len(validators)-1].AuthorityKey(), "largest key must be last")
+	assert.Equal(t, []byte("a-key"), validators[0].AuthorityKey(), "smallest key must be first")
+	assert.Equal(t, []byte("z-key"), validators[len(validators)-1].AuthorityKey(), "largest key must be last")
 }
 
 func TestNoFork_ValidatorSort_SingleValidator(t *testing.T) {
 	validators := []simulatedValidator{
-		{authorityKey: "only-key", address: "0xAA"},
+		{authorityKey: []byte("only-key"), address: "0xAA"},
 	}
 	sortValidatorsByAuthorityKey(validators)
-	assert.Equal(t, "only-key", validators[0].AuthorityKey(), "single validator sort should be stable")
+	assert.Equal(t, []byte("only-key"), validators[0].AuthorityKey(), "single validator sort should be stable")
 }
 
 func TestNoFork_ValidatorSort_EmptyList(t *testing.T) {
@@ -103,47 +114,59 @@ func TestNoFork_ValidatorSort_EmptyList(t *testing.T) {
 }
 
 func TestNoFork_ValidatorSort_DuplicateKeys(t *testing.T) {
-	// In production this should not happen, but sort must not panic
+	// If AuthorityKeys are identical/duplicate, sorting must fall back deterministically
+	// to Address and then P2PAddress.
 	validators := []simulatedValidator{
-		{authorityKey: "same-key", address: "0x01"},
-		{authorityKey: "same-key", address: "0x02"},
-		{authorityKey: "other-key", address: "0x03"},
+		{authorityKey: []byte("same-key"), address: "0x02", p2pAddress: "p2p-y"},
+		{authorityKey: []byte("same-key"), address: "0x01", p2pAddress: "p2p-z"},
+		{authorityKey: []byte("same-key"), address: "0x02", p2pAddress: "p2p-x"},
+		{authorityKey: []byte("other-key"), address: "0x03", p2pAddress: "p2p-w"},
 	}
-	// Must not panic
+	
 	sortValidatorsByAuthorityKey(validators)
-	assert.Len(t, validators, 3)
+	assert.Len(t, validators, 4)
+
+	// "other-key" must come first because "other-key" < "same-key" lexicographically
+	assert.Equal(t, []byte("other-key"), validators[0].AuthorityKey())
+
+	// For the remaining three "same-key" validators, they should be sorted by Address:
+	// "0x01" must come before "0x02"
+	assert.Equal(t, "0x01", validators[1].Address())
+
+	// For the two with Address = "0x02", they should be sorted by P2PAddress:
+	// "p2p-x" must come before "p2p-y"
+	assert.Equal(t, "0x02", validators[2].Address())
+	assert.Equal(t, "p2p-x", validators[2].P2PAddress())
+
+	assert.Equal(t, "0x02", validators[3].Address())
+	assert.Equal(t, "p2p-y", validators[3].P2PAddress())
 }
 
 func TestNoFork_ValidatorSort_GoRustParity(t *testing.T) {
-	// Simulate the exact BLS key format used in production (hex-encoded)
-	// and verify that string comparison matches expected ordering.
-	//
-	// Rust: .sort_by(|a, b| a.authority_key.cmp(&b.authority_key))
-	// Go:   sort.Slice(..., func(i, j) => v[i].AuthorityKey() < v[j].AuthorityKey())
-	//
-	// Both use lexicographic string comparison — this test validates parity.
-	blsKeys := []string{
-		"a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8",
-		"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12",
-		"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fe",
-		"0000000000000000000000000000000000000000000000000000000000000001",
+	// Simulate the exact BLS key format used in production (hex-encoded bytes)
+	// and verify that comparison matches expected ordering.
+	blsKeys := [][]byte{
+		[]byte("a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8c3d1e2f3a4b8"),
+		[]byte("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"),
+		[]byte("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fe"),
+		[]byte("0000000000000000000000000000000000000000000000000000000000000001"),
 	}
 
 	validators := make([]simulatedValidator, len(blsKeys))
 	for i, k := range blsKeys {
-		validators[i] = simulatedValidator{authorityKey: k, address: "0x" + k[:4]}
+		validators[i] = simulatedValidator{authorityKey: k, address: "0x" + string(k[:4])}
 	}
 
 	sortValidatorsByAuthorityKey(validators)
 
 	// Verify sorted keys are in strictly ascending order
 	for i := 1; i < len(validators); i++ {
-		assert.True(t, validators[i-1].AuthorityKey() < validators[i].AuthorityKey(),
+		assert.True(t, bytes.Compare(validators[i-1].AuthorityKey(), validators[i].AuthorityKey()) < 0,
 			"BLS keys must be in ascending lexicographic order at position %d", i)
 	}
 
 	// The "0000..." key must come first (lexicographically smallest)
-	assert.Equal(t, "0000000000000000000000000000000000000000000000000000000000000001",
+	assert.Equal(t, []byte("0000000000000000000000000000000000000000000000000000000000000001"),
 		validators[0].AuthorityKey(), "smallest BLS key must be first")
 }
 
@@ -266,15 +289,15 @@ func TestNoFork_CommitteeHash_RequiresSameValidatorOrder(t *testing.T) {
 	computeFingerprint := func(validators []simulatedValidator) string {
 		result := ""
 		for _, v := range validators {
-			result += v.AuthorityKey() + "|"
+			result += string(v.AuthorityKey()) + "|"
 		}
 		return result
 	}
 
 	validators := []simulatedValidator{
-		{authorityKey: "key-C"},
-		{authorityKey: "key-A"},
-		{authorityKey: "key-B"},
+		{authorityKey: []byte("key-C")},
+		{authorityKey: []byte("key-A")},
+		{authorityKey: []byte("key-B")},
 	}
 
 	// Sorted (deterministic)
@@ -296,9 +319,9 @@ func TestNoFork_CommitteeHash_RequiresSameValidatorOrder(t *testing.T) {
 
 	// Two independently sorted lists must have identical fingerprints
 	sorted2 := []simulatedValidator{
-		{authorityKey: "key-B"},
-		{authorityKey: "key-C"},
-		{authorityKey: "key-A"},
+		{authorityKey: []byte("key-B")},
+		{authorityKey: []byte("key-C")},
+		{authorityKey: []byte("key-A")},
 	}
 	sortValidatorsByAuthorityKey(sorted2)
 	assert.Equal(t, sortedFingerprint, computeFingerprint(sorted2),
