@@ -29,6 +29,9 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 	logger.Info("Handling GetActiveValidatorsRequest for epoch transition")
 
 	// Get all validators from current state
+	if rh.chainState == nil || rh.chainState.GetStakeStateDB() == nil {
+		return nil, fmt.Errorf("ChainState or StakeStateDB is not initialized")
+	}
 	validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
 	if err != nil {
 		return nil, fmt.Errorf("could not get all validators from stake DB: %w", err)
@@ -126,7 +129,12 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 	// Get block at blockNumber
 	// Special handling for block 0 (genesis) — may not exist if Go Master hasn't initialized genesis yet
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	var blockHash common.Hash
+	var ok bool
+	blockchainInstance := blockchain.GetBlockChainInstance()
+	if blockchainInstance != nil {
+		blockHash, ok = blockchainInstance.GetBlockHashByNumber(blockNumber)
+	}
 	logger.Debug("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
 	if !ok {
 		if blockNumber == 0 {
@@ -201,6 +209,10 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			} else {
 				// Fallback to current state ONLY if genesis.json is missing (should not happen in prod)
 				logger.Warn("⚠️ [EPOCH] Using current StakeStateDB as fallback for genesis committee. This is NOT fork-safe!")
+				if rh.chainState == nil || rh.chainState.GetStakeStateDB() == nil {
+					logger.Error("🚨 [FORK-SAFETY] ChainState or StakeStateDB is nil, cannot fallback to current state for genesis validators!")
+					return nil, fmt.Errorf("cannot get validators from current state: ChainState or StakeStateDB is nil")
+				}
 				validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
 				if err != nil {
 					logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
@@ -762,6 +774,22 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	err := rh.chainState.AdvanceEpochWithBoundary(request.NewEpoch, timestampMs, request.BoundaryBlock, request.BoundaryGei)
 	if err != nil {
 		return nil, fmt.Errorf("could not advance epoch to %d: %w", request.NewEpoch, err)
+	}
+
+	// CRITICAL FORK-SAFETY FIX (May 2026): Reset commit index and epoch in GEIAuthority and DB.
+	// When advancing to a new epoch via FFI, the new epoch commits will start with commitIndex=0 or 1.
+	// We MUST synchronously reset Go's lastHandledCommitIndex to 0 and advance lastHandledCommitEpoch to newEpoch.
+	// Otherwise, the idempotent execution guard (ShouldSkipCommit) will compare the new epoch's small commitIndex
+	// against the old epoch's high commitIndex and incorrectly SKIP the first blocks of the new epoch!
+	logger.Info("🔄 [ADVANCE EPOCH] Synchronously resetting GEIAuthority and storage commit index to 0 for new epoch %d", request.NewEpoch)
+	storage.ForceSetLastHandledCommitIndex(0)
+	storage.UpdateLastHandledCommitEpoch(request.NewEpoch)
+	if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
+		rh.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(0))
+		rh.storageManager.GetStorageBackupDb().Put(storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(request.NewEpoch))
+	}
+	if rh.resetCommitIndexCallback != nil {
+		rh.resetCommitIndexCallback(request.NewEpoch)
 	}
 
 	// CRITICAL FIX: Push an async GEI update so that Go's LastGlobalExecIndex

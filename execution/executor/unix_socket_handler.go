@@ -25,6 +25,7 @@ type RequestHandler struct {
 	updateLastBlockCallback func(blk types.Block)                                              // Callback to let Rust explicitly update Go memory state
 	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
 	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte, commitIndex uint32, epoch uint64)                                   // Callback to advance GEI asynchronously
+	resetCommitIndexCallback func(newEpoch uint64)                                                  // Callback to reset commit index on epoch advancement
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -64,6 +65,11 @@ func (rh *RequestHandler) SetBroadcastCallback(cb func(blk *block.Block, backupD
 // SetPushAsyncGEIUpdateCallback allows RequestHandler to asynchronously advance GEI for empty commits
 func (rh *RequestHandler) SetPushAsyncGEIUpdateCallback(cb func(gei uint64, hash []byte, commitIndex uint32, epoch uint64)) {
 	rh.pushAsyncGEIUpdateCallback = cb
+}
+
+// SetResetCommitIndexCallback allows RequestHandler to synchronously reset Go's commit index on epoch advancement
+func (rh *RequestHandler) SetResetCommitIndexCallback(cb func(newEpoch uint64)) {
+	rh.resetCommitIndexCallback = cb
 }
 
 
