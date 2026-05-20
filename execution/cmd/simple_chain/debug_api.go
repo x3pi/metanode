@@ -236,7 +236,7 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
-	processResult, err := tx_processor.ProcessTransactions(tracedCtx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()))
+	processResult, err := tx_processor.ProcessTransactions(tracedCtx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress())
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}

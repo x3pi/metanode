@@ -1018,7 +1018,8 @@ PROCESS_BLOCK:
 
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
-	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, preloadChan)
+	leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
+	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, leaderAddr, preloadChan)
 	processTxDuration := time.Since(processTxStart)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to process transactions for block #%d: %v", *currentBlockNumber, err)
@@ -1137,7 +1138,7 @@ PROCESS_BLOCK:
 	// STEP 4: Create a single block from all processed transactions
 	logger.Debug("🔨 [TX FLOW] Creating Go block #%d from merged transactions", *currentBlockNumber)
 	// CRITICAL FORK-SAFETY: Get leader address from Rust consensus for deterministic block hash
-	leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
+	leaderAddr = bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
 	createBlockStart := time.Now()
 
 	// CC-1: Construct standard batch_id for end-to-end tracing
