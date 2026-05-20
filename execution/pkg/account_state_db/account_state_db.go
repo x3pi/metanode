@@ -195,6 +195,13 @@ func (db *AccountStateDB) GetOriginRootHash() common.Hash {
 	return db.originRootHash
 }
 
+// SetOriginRootHash explicitly updates the origin root hash.
+// This is critical for Sub nodes when applying block states from the network,
+// so that subsequent empty blocks don't incorrectly return an old origin root hash.
+func (db *AccountStateDB) SetOriginRootHash(hash common.Hash) {
+	db.originRootHash = hash
+}
+
 // Trie returns the underlying StateTrie instance.
 func (db *AccountStateDB) Trie() p_trie.StateTrie {
 	db.muTrie.RLock()

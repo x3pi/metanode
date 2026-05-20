@@ -44,6 +44,7 @@ while strictly avoiding over-engineering.
 | **No Blocking Async** | NEVER use synchronous blocking I/O inside async loops or event engines. |
 | **Deterministic Merging** | NEVER trust local unverified state over network consensus hashes. |
 | **Output Language** | Code comments in English. Post-process summary in Vietnamese (see Part 5). |
+| **Build Verification** | ALWAYS run or ask the user to run `build_check.sh` inside `consensus/metanode/scripts/` after editing code to verify that both Go, Rust, and FFI build correctly. Never assume code is correct without compiling. |
 
 ---
 
@@ -89,6 +90,15 @@ npx gitnexus query --symbol <SymbolName>
 ```bash
 # Find all usages of a symbol
 grep -rn "<SymbolName>" ./execution ./consensus --include="*.go" --include="*.rs"
+```
+
+### Build Verification (after modifying code)
+
+**Primary verification method:**
+ALWAYS run or ask the user to run the build check script to verify both Go, Rust, and FFI components compile successfully:
+```bash
+cd ./consensus/metanode/scripts
+./build_check.sh
 ```
 
 ---

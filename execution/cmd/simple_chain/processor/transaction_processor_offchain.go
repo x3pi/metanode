@@ -125,7 +125,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		return nil, err
 	}
 
-	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp())
+	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
@@ -269,7 +269,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	mvmId := common.BytesToAddress(ethAddressBytes)
 	lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
 
-	vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, lastBlockHeader.TimeStamp())
+	vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, v.chainState.GetSmartContractDB(), v.chainState.GetAccountStateDB(), true)
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
@@ -376,7 +376,7 @@ func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, block 
 	ctx := context.Background()
 
 	if tx.IsCallContract() || tx.IsDeployContract() {
-		vmP := vm_processor.NewVmProcessor(v.chainState, tx.ToAddress(), false, block.Header().TimeStamp())
+		vmP := vm_processor.NewVmProcessor(v.chainState, tx.ToAddress(), false, block.Header().TimeStamp(), common.Address{})
 		exRs, err := vmP.ExecuteTransactionWithMvmIdDebug(ctx, tx, false)
 		if err != nil {
 			logger.Error("Error executing transaction in debug mode: %v", err)

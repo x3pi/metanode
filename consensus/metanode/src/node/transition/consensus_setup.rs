@@ -94,7 +94,12 @@ pub(super) async fn setup_validator_consensus(
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-        .with_storage_path(node.storage_path.clone());
+        .with_storage_path(node.storage_path.clone())
+        .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
+
+    if let Some(ref tx_recycler) = node.tx_recycler {
+        processor = processor.with_tx_recycler(tx_recycler.clone());
+    }
 
     let digest_verifier_hub = node.coordination_hub.clone();
     processor = processor.with_digest_verifier(move |index: u32| {
@@ -255,7 +260,12 @@ pub(super) async fn setup_synconly_sync(
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-        .with_storage_path(node.storage_path.clone());
+        .with_storage_path(node.storage_path.clone())
+        .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
+
+    if let Some(ref tx_recycler) = node.tx_recycler {
+        processor = processor.with_tx_recycler(tx_recycler.clone());
+    }
 
     let digest_verifier_hub = node.coordination_hub.clone();
     processor = processor.with_digest_verifier(move |index: u32| {

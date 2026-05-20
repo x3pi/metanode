@@ -159,7 +159,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 				}
 			}
 
-			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec)
+			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec, bp.validatorAddress)
 			if err == nil {
 				bp.inputTxCounter.Add(int64(len(processResult.Transactions)))
 				bp.ProcessedInputTxCount.Add(uint64(len(processResult.Transactions)))
@@ -278,9 +278,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// CRITICAL FORK-SAFETY: Convert commitTimestampMs (from Rust) to seconds for BlockHeader
 	timestampSec := commitTimestampMs / 1000 // 0 if commitTimestampMs is 0 (fallback to time.Now())
 
-	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, else fallback to local validator
+	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, even if it's the zero address.
+	// The zero address is used intentionally as a deterministic fallback for system transactions (EndOfEpoch)
+	// which do not have a Rust leader. Falling back to bp.validatorAddress would cause a fork!
 	blockLeaderAddress := bp.validatorAddress
-	if len(leaderAddressOverride) > 0 && leaderAddressOverride[0] != (common.Address{}) {
+	if len(leaderAddressOverride) > 0 {
 		blockLeaderAddress = leaderAddressOverride[0]
 	}
 
@@ -410,11 +412,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	phase3Start := time.Now()
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
-	// Synchronous mapping population for Master Node cache so RPC queries don't return null
-	blockchain.GetBlockChainInstance().SetBlockNumberToHash(currentBlockNumber, bl.Header().Hash())
-	for _, txHash := range bl.Transactions() {
-		blockchain.GetBlockChainInstance().SetTxHashMapBlockNumber(txHash, currentBlockNumber)
-	}
 	var mappingWg sync.WaitGroup // Keep this as dummy to satisfy Job signature if needed
 
 	phase31Elapsed := time.Since(phase3Start)
@@ -666,7 +663,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(lastBlockNumber)
 	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
 	bp.SetLastBlock(lastBl)
 	bp.chainState.GetBlockDatabase().SaveLastBlock(lastBl)
@@ -717,7 +714,8 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	bp.chainState.GetStakeStateDB().Discard() // CRITICAL FIX: Prevent stake state divergence
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
 
 	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
 	parentBlockNumber := failedBlockNumber - 1

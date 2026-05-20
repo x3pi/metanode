@@ -2873,7 +2873,8 @@ impl ConsensusNode {
 
         commit_processor = commit_processor
             .with_executor_client(executor_client_for_proc.clone())
-            .with_tx_recycler(tx_recycler.clone());
+            .with_tx_recycler(tx_recycler.clone())
+            .with_committed_transaction_hashes(committed_transaction_hashes.clone());
 
         let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::unbounded_channel::<
             crate::consensus::commit_processor::lag_monitor::LagAlert,

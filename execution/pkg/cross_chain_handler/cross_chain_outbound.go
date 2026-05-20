@@ -82,7 +82,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	// BURN: processNativeMintBurn(operationType=1)
 	var exRs types.ExecuteSCResult
 	if ctx != nil {
-		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
 		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
@@ -208,7 +208,7 @@ func (h *CrossChainHandler) handleSendMessage(
 	// BURN: Nếu có msg.value > 0 → burn coin từ sender
 	var exRs types.ExecuteSCResult
 	if amount.Sign() > 0 && ctx != nil {
-		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
 		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)

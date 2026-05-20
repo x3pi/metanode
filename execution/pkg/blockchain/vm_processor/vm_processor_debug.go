@@ -129,7 +129,7 @@ func (vmP *VmProcessor) callDebug(
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -155,7 +155,7 @@ func (vmP *VmProcessor) callDebug(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
@@ -322,7 +322,7 @@ func (vmP *VmProcessor) onlyCall(
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -347,7 +347,7 @@ func (vmP *VmProcessor) onlyCall(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
@@ -517,7 +517,7 @@ func (vmP *VmProcessor) onlyDeploy(
 			"codeSize":    len(tx.DeployData().Code()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -542,7 +542,7 @@ func (vmP *VmProcessor) onlyDeploy(
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), tx.Hash().Bytes(), tx.GetIsDebug(), false, true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.GetIsDebug(), false, true,
 	)
 
 	if span != nil { // GUARD
@@ -622,7 +622,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		span.AddEvent("CallingMvmNoncePlusOne", map[string]interface{}{
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 	}
 
@@ -639,7 +639,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		vmP.blockTime,
 		mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1,
-		lastBlockHeader.LeaderAddress(),
+		vmP.getLeaderAddress(lastBlockHeader),
 		vmP.mvmId,
 	)
 

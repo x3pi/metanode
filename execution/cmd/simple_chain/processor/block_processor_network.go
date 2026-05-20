@@ -220,15 +220,24 @@ PROCESS_LOOP:
 			// STALL DETECTOR: Log diagnostic state when no blocks are being processed
 			stallDuration := time.Since(lastProcessedTime)
 			if stallDuration > 15*time.Second {
+				// Enhanced diagnostics: full pipeline state
+				pendingTxCount := bp.transactionProcessor.pendingTxManager.Count()
+				poolSize := bp.transactionProcessor.transactionPool.CountTransactions()
+				authQueueDepth := len(authQueue)
+				authQueueCap := cap(authQueue)
+
 				logger.Warn("🔒 [STALL-DETECT] No blocks processed for %v. "+
-					"dataChan=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
-					"nextExpectedGEI=%d, currentBlock=%d. "+
-					"Investigate: is dataChan not receiving? is processing blocked?",
+					"dataChan=%d/%d, authQueue=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
+					"nextExpectedGEI=%d, currentBlock=%d, "+
+					"pendingTx=%d, poolSize=%d. "+
+					"Investigate: Rust CommitProcessor may be stuck in DIGEST-GATE.",
 					stallDuration,
 					len(dataChan), cap(dataChan),
+					authQueueDepth, authQueueCap,
 					len(bp.commitChannel), cap(bp.commitChannel),
 					bp.snapshotGateOpen.Load(),
-					nextExpectedGlobalExecIndex, currentBlockNumber)
+					nextExpectedGlobalExecIndex, currentBlockNumber,
+					pendingTxCount, poolSize)
 			}
 			continue
 		}

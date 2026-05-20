@@ -234,7 +234,7 @@ if $DO_BUILD; then
     log_info "Building Rust metanode..."
     (
         cd "${LOCAL_METANODE}"
-        cargo +${RUST_TOOLCHAIN} build --release --bin metanode 2>&1 | tail -3
+        cargo build --release --bin metanode 2>&1 | tail -3
     )
     log_ok "Rust binary: ${LOCAL_METANODE}/target/release/metanode"
 

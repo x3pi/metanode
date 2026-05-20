@@ -157,29 +157,51 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
     let max_retries = 5u64;
     let max_delay_ms: u64 = 5000; // Cap per-retry delay at 5s
 
-    for tx_data in transactions {
-        // Check total timeout before each transaction
+    let chunk_size = 10000;
+    let mut chunks = transactions.chunks(chunk_size).peekable();
+
+    while let Some(chunk) = chunks.next() {
+        // Check total timeout before each chunk
         if total_start.elapsed() > total_timeout {
             warn!(
                 "⏱️ [TX FLOW] Total timeout ({:?}) reached. Re-queuing remaining transactions.",
                 total_timeout
             );
             let mut q = node.pending_transactions_queue.lock().await;
-            q.push(tx_data);
-            requeued_count += 1;
-            continue;
+            for tx in chunk {
+                q.push(tx.clone());
+                requeued_count += 1;
+            }
+            // Queue all remaining chunks
+            for remaining_chunk in chunks {
+                for tx in remaining_chunk {
+                    q.push(tx.clone());
+                    requeued_count += 1;
+                }
+            }
+            break;
         }
 
-        if SystemTransaction::from_bytes(&tx_data).is_ok()
-            || !crate::types::tx_hash::verify_transaction_protobuf(&tx_data)
-        {
+        let mut all_valid = Vec::with_capacity(chunk.len());
+        for tx_data in chunk {
+            if SystemTransaction::from_bytes(tx_data).is_ok()
+                || !crate::types::tx_hash::verify_transaction_protobuf(tx_data)
+            {
+                continue;
+            }
+            all_valid.push(tx_data.clone());
+        }
+
+        if all_valid.is_empty() {
             continue;
         }
 
         if node.transaction_client_proxy.is_none() {
             let mut q = node.pending_transactions_queue.lock().await;
-            q.push(tx_data);
-            requeued_count += 1;
+            for tx in all_valid {
+                q.push(tx);
+                requeued_count += 1;
+            }
             continue;
         }
 
@@ -196,19 +218,21 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
                 Some(p) => p,
                 None => {
                     let mut q = node.pending_transactions_queue.lock().await;
-                    q.push(tx_data.clone());
-                    requeued_count += 1;
-                    break;
+                    for tx in all_valid.iter() {
+                        q.push(tx.clone());
+                        requeued_count += 1;
+                    }
+                    break; // break retry loop, move to next chunk which will fail at the proxy check
                 }
             };
             // Use a timeout so that if the consensus channel is full/stalled, we don't hang the thread FOREVER.
             // If it times out, we treat it as a failure and let the retry/total_timeout logic handle it.
             match tokio::time::timeout(
                 std::time::Duration::from_millis(5000),
-                proxy.submit(vec![tx_data.clone()])
+                proxy.submit(all_valid.clone())
             ).await {
                 Ok(Ok(_)) => {
-                    successful_count += 1;
+                    successful_count += all_valid.len();
                     submitted = true;
                     break;
                 }
@@ -217,7 +241,7 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
                     // Cap delay to prevent exponential explosion
                     let delay = std::cmp::min(200 * (1u64 << (retry - 1)), max_delay_ms);
                     warn!(
-                        "⚠️ Failed to submit (attempt {}/{}): {}. Retry in {}ms",
+                        "⚠️ Failed to submit chunk (attempt {}/{}): {}. Retry in {}ms",
                         retry, max_retries, e, delay
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -226,7 +250,7 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
                     retry += 1;
                     let delay = std::cmp::min(200 * (1u64 << (retry - 1)), max_delay_ms);
                     warn!(
-                        "⚠️ Timeout submitting tx (attempt {}/{}). Retry in {}ms",
+                        "⚠️ Timeout submitting chunk txs (attempt {}/{}). Retry in {}ms",
                         retry, max_retries, delay
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -235,10 +259,12 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
         }
 
         if !submitted {
-            error!("❌ Failed to submit tx after retries. Re-queuing.");
+            error!("❌ Failed to submit chunk txs after retries. Re-queuing.");
             let mut q = node.pending_transactions_queue.lock().await;
-            q.push(tx_data);
-            requeued_count += 1;
+            for tx in all_valid {
+                q.push(tx);
+                requeued_count += 1;
+            }
         }
     }
 
