@@ -17,6 +17,27 @@ members = [
     "meta-consensus/config",
 ]
 
+[workspace.dependencies]
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
+serde = { version = "1.0.144", features = ["derive", "rc"] }
+tokio = "=1.47.1"
+tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+bcs = "0.1.4"
+anyhow = "1.0.71"
+thiserror = "1.0.40"
+tracing = "0.1.37"
+parking_lot = { version = "0.12.3", features = ["arc_lock"] }
+itertools = "0.13.0"
+prometheus = "0.13.3"
+rand = "0.8.5"
+async-trait = "0.1.80"
+prost = "0.14.1"
+tonic = { version = "0.14.2", features = ["tls-webpki-roots", "transport", "zstd"] }
+tonic-prost = "0.14.2"
+tonic-build = "0.14.2"
+base64 = "0.21.2"
+tempfile = "3.8"
+
 [dependencies]
 # Meta Consensus dependencies - using local copies
 consensus-core = { path = "meta-consensus/core" }
@@ -24,21 +45,21 @@ consensus-config = { path = "meta-consensus/config" }
 consensus-types = { path = "meta-consensus/types" }
 
 # Async runtime
-tokio = "=1.47.1"
-tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 # Serialization
-serde = { version = "1.0.144", features = ["derive", "rc"] }
+serde = { workspace = true }
 serde_json = { version = "1.0.95", features = ["preserve_order"] }
-bcs = "0.1.4"
+bcs = { workspace = true }
 
 # Error handling
-anyhow = "1.0.71"
-thiserror = "1.0.40"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Logging
-tracing = "0.1.37"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.15", default-features = false, features = ["std", "env-filter", "fmt"] }
 
 # Network
@@ -53,20 +74,20 @@ typed-store = { path = "../../crates/typed-store" }
 meta-protocol-config = { path = "../../crates/meta-protocol-config" }
 
 # Crypto - use git source
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
+fastcrypto = { workspace = true }
 shared-crypto = { path = "../../crates/shared-crypto" }
 
 # Utilities
-parking_lot = { version = "0.12.3", features = ["arc_lock"] }
-itertools = "0.13.0"
-prometheus = "0.13.3"
-rand = "0.8.5"
+parking_lot = { workspace = true }
+itertools = { workspace = true }
+prometheus = { workspace = true }
+rand = { workspace = true }
 toml = { version = "0.7.4", features = ["preserve_order"] }
-base64 = "0.21.2"
+base64 = { workspace = true }
 hex = "0.4.3"
 hostname = "0.3.1"
-async-trait = "0.1.80"
-prost = "0.14.1"
+async-trait = { workspace = true }
+prost = { workspace = true }
 sha3 = "0.10.6"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 socket2 = "0.5"  # For TCP socket keepalive support
@@ -82,7 +103,7 @@ rayon = "1.11.0"
 prost-build = "0.14.1"
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = { workspace = true }
 
 # Patch dependencies to fix axum-server compilation issue
 [patch.crates-io]

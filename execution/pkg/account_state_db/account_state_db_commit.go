@@ -357,7 +357,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 		logger.Debug("[PERF-COMMIT] trie.Commit(true) took: %v", trieCommitDuration)
 	}
 
-	// Sanity check
+	// Sanity check: intermediateHash (from IntermediateRoot) must match committedHash (from Commit).
+	// With NOMT inline commit fix (May 2026), IntermediateRoot calls Commit() for NOMT,
+	// so CommitPipeline's Commit() sees empty wDirty and returns the same hash.
 	if intermediateHash != committedHash {
 		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); !isNomt {
 			db.muTrie.Unlock()
@@ -368,6 +370,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 				intermediateHash, committedHash,
 			)
 		}
+		// NOMT: should not happen with inline commit, but log for diagnostics
+		logger.Warn("⚠️ [NOMT] CommitPipeline: intermediateHash=%s != committedHash=%s (unexpected after inline commit)",
+			intermediateHash.Hex()[:18], committedHash.Hex()[:18])
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -1071,7 +1076,39 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// CRITICAL FIX: Must compute the actual trie hash NOW so that
 		// ProcessTransactions returns the correct post-state root for the block header.
 		startHash := time.Now()
-		newHash = db.trie.Hash()
+
+		// ═══════════════════════════════════════════════════════════════
+		// NOMT STATEROOT FIX (May 2026):
+		//
+		// For NOMT trie, Hash() returns readView.rootHash — a cached value
+		// that is ONLY updated by Commit(). Calling Hash() here returns the
+		// PREVIOUS block's root, causing STATEROOT_FREEZE: the block header
+		// shows stale stateRoot despite 170+ successful TXs.
+		//
+		// Fix: Call Commit() for NOMT during IntermediateRoot(true).
+		// This runs the NOMT session (RecordRead + BatchWrite + Finish),
+		// computes the actual Merkle root, and updates readView.rootHash.
+		//
+		// CommitPipeline's subsequent trie.Commit() call will see empty
+		// wDirty and return immediately (no-op) with the correct hash.
+		//
+		// For MPT/Flat tries, Hash() correctly computes from in-memory
+		// trie state — no change needed.
+		// ═══════════════════════════════════════════════════════════════
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			committedHash, _, _, commitErr := db.trie.Commit(true)
+			if commitErr != nil {
+				logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during IntermediateRoot failed: %v", commitErr)
+				newHash = db.trie.Hash() // fallback to stale hash
+			} else {
+				newHash = committedHash
+				logger.Debug("[NOMT-INLINE-COMMIT] IntermediateRoot got real root: %s (was: %s)",
+					newHash.Hex()[:18]+"...", db.originRootHash.Hex()[:18]+"...")
+			}
+		} else {
+			newHash = db.trie.Hash()
+		}
+
 		hashDuration := time.Since(startHash)
 		if hashDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] IntermediateRoot Hash: %v (%d dirty)", hashDuration, totalDirty)

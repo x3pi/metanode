@@ -406,7 +406,7 @@ cmd_start() {
     # Build processes
     if $build_nomt; then
         log_info "🛠  Đang build NOMT FFI (Rust)..."
-        (cd "$BASE_DIR/execution/pkg/nomt_ffi/rust_lib" && cargo +nightly build --release) || exit 1
+        (cd "$BASE_DIR/execution/pkg/nomt_ffi/rust_lib" && cargo build --release) || exit 1
     fi
     if $build_evm; then
         log_info "🛠  Đang build EVM (C++ MVM)..."
@@ -414,7 +414,7 @@ cmd_start() {
     fi
     if $build_rust; then
         log_info "🛠  Đang build Rust (metanode)..."
-        (cd "$RUST_DIR" && cargo +nightly build --release) || exit 1
+        (cd "$RUST_DIR" && cargo build --release) || exit 1
         
         # CRITICAL FIX: Clean the Go build cache so it relinks the new libmetanode.a.
         # This replaces the need to 'touch' source files manually.

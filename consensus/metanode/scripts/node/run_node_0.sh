@@ -51,7 +51,7 @@ sleep 2
 echo -e "${BLUE}📋 Step 1.5: Build Rust and Go binaries...${NC}"
 echo "  🔄 Building Rust metanode..."
 export PATH="/home/abc/protoc3/bin:$PATH"
-cd "$METANODE_ROOT" && cargo +nightly build --release --bin metanode
+cd "$METANODE_ROOT" && cargo build --release --bin metanode
 echo "  🔄 Building Go simple_chain..."
 cd "$GO_SIMPLE_ROOT" && go build -o simple_chain .
 echo -e "${GREEN}  ✅ Binaries ready${NC}"
