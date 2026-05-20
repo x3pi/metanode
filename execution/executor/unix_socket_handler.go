@@ -102,8 +102,17 @@ func (rh *RequestHandler) HandleBlockRequest(request *pb.BlockRequest) (*pb.Vali
 	// Previously sorted by Address().Hex() which produces a DIFFERENT order than
 	// HandleGetActiveValidatorsRequest, HandleGetValidatorsAtBlockRequest, etc.
 	// which all sort by AuthorityKey(). Committee mismatch → fork.
-	sort.Slice(validators, func(i, j int) bool {
-		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
+	sort.SliceStable(validators, func(i, j int) bool {
+		cmp := bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey())
+		if cmp == 0 {
+			addrI := validators[i].Address().Hex()
+			addrJ := validators[j].Address().Hex()
+			if addrI == addrJ {
+				return validators[i].P2PAddress() < validators[j].P2PAddress()
+			}
+			return addrI < addrJ
+		}
+		return cmp < 0
 	})
 
 	// Map the database validators to protobuf validators.

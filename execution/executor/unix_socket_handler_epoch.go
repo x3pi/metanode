@@ -36,8 +36,17 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 
 	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
 	// to ensure consistent bit-level ordering with Rust.
-	sort.Slice(validators, func(i, j int) bool {
-		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
+	sort.SliceStable(validators, func(i, j int) bool {
+		cmp := bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey())
+		if cmp == 0 {
+			addrI := validators[i].Address().Hex()
+			addrJ := validators[j].Address().Hex()
+			if addrI == addrJ {
+				return validators[i].P2PAddress() < validators[j].P2PAddress()
+			}
+			return addrI < addrJ
+		}
+		return cmp < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
@@ -168,8 +177,17 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 				}
 
 				// CRITICAL: Sort validators by AuthorityKey (BLS public key) as bytes to ensure consistent ordering with Rust
-				sort.Slice(validatorInfoList.Validators, func(i, j int) bool {
-					return bytes.Compare(validatorInfoList.Validators[i].AuthorityKey, validatorInfoList.Validators[j].AuthorityKey) < 0
+				sort.SliceStable(validatorInfoList.Validators, func(i, j int) bool {
+					cmp := bytes.Compare(validatorInfoList.Validators[i].AuthorityKey, validatorInfoList.Validators[j].AuthorityKey)
+					if cmp == 0 {
+						addrI := validatorInfoList.Validators[i].Address
+						addrJ := validatorInfoList.Validators[j].Address
+						if addrI == addrJ {
+							return validatorInfoList.Validators[i].P2PAddress < validatorInfoList.Validators[j].P2PAddress
+						}
+						return addrI < addrJ
+					}
+					return cmp < 0
 				})
 
 				for i, val := range validatorInfoList.Validators {
@@ -194,8 +212,17 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 				}
 
 				// Sort
-				sort.Slice(validators, func(i, j int) bool {
-					return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
+				sort.SliceStable(validators, func(i, j int) bool {
+					cmp := bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey())
+					if cmp == 0 {
+						addrI := validators[i].Address().Hex()
+						addrJ := validators[j].Address().Hex()
+						if addrI == addrJ {
+							return validators[i].P2PAddress() < validators[j].P2PAddress()
+						}
+						return addrI < addrJ
+					}
+					return cmp < 0
 				})
 
 				for _, dbValidator := range validators {
@@ -344,8 +371,17 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
 	// to ensure consistent bit-level ordering with Rust.
-	sort.Slice(validators, func(i, j int) bool {
-		return bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey()) < 0
+	sort.SliceStable(validators, func(i, j int) bool {
+		cmp := bytes.Compare(validators[i].AuthorityKey(), validators[j].AuthorityKey())
+		if cmp == 0 {
+			addrI := validators[i].Address().Hex()
+			addrJ := validators[j].Address().Hex()
+			if addrI == addrJ {
+				return validators[i].P2PAddress() < validators[j].P2PAddress()
+			}
+			return addrI < addrJ
+		}
+		return cmp < 0
 	})
 
 	// Filter: only active validators (not jailed, with stake > 0)
