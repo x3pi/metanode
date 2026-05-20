@@ -123,12 +123,25 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 			if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(number.Int64())); ok {
 				blockData = pendingBlock
 			} else {
-				return nil
+				// SECONDARY FALLBACK: Check if it's the absolute last block processed in memory
+				if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil && lastBlock.Header().BlockNumber() == uint64(number.Int64()) {
+					blockData = lastBlock
+				} else {
+					return nil
+				}
 			}
 		} else {
 			blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
 			if blockData == nil {
-				return nil
+				// DEFENSE IN DEPTH: If mapping exists but block loading from PebbleDB/cache returned nil,
+				// fall back to the active blockProcessor memory block to prevent race condition returns.
+				if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil && lastBlock.Header().BlockNumber() == uint64(number.Int64()) {
+					blockData = lastBlock
+				} else if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(number.Int64())); ok {
+					blockData = pendingBlock
+				} else {
+					return nil
+				}
 			}
 		}
 	}
