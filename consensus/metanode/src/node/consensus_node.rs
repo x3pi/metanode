@@ -915,6 +915,13 @@ impl ConsensusNode {
             epoch_base_exec_index, current_epoch, boundary_block
         );
 
+        // Initialize executor client memory state from Go Master before WAL recovery replay
+        if config.executor_read_enabled {
+            info!("📊 [STARTUP] Synchronizing executor client memory state from Go Master prior to recovery check...");
+            executor_client.initialize_from_go().await;
+            info!("✅ [STARTUP] Executor client memory state synchronized successfully (block/GEI guards updated).");
+        }
+
         // Recovery check
         if config.executor_read_enabled && last_global_exec_index > 0 {
             if let Err(e) = recovery::perform_block_recovery_check(
