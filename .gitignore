@@ -426,3 +426,4 @@ venv/
 **/*.xz
 **/*.zip
 .gitnexus
+execution/cmd/simple_chain/metanode_btrfs.img
