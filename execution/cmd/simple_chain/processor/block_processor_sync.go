@@ -97,7 +97,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// ═════════════════════════════════════════════════════════════════════
 	if epochNum > currentEpoch && lastBlock != nil {
 		epochJump := epochNum - currentEpoch
-		if epochJump > 2 {
+		if epochJump > 4 {
 			logger.Error("🚨 [EPOCH-INFLATION-GUARD] Suspicious epoch jump %d→%d (delta=%d, GEI=%d). "+
 				"This indicates replayed/corrupt commit data. BLOCKING epoch reset to prevent inflation.",
 				currentEpoch, epochNum, epochJump, globalExecIndex)
