@@ -71,7 +71,7 @@ func ExecuteNonceAndFinalize(
 	ctx context.Context, chainState *blockchain.ChainState,
 	tx types.Transaction, enableTrace bool, blockTime uint64,
 ) (types.ExecuteSCResult, error) {
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
+	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 	if err != nil {
 		return exRs, err

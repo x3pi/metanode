@@ -15,7 +15,7 @@ import (
 
 func newTestValidator(addr common.Address, authorityKey string, stake *big.Int, jailed bool) state.ValidatorState {
 	vs := state.NewValidatorState(addr)
-	vs.SetAuthorityKey(authorityKey)
+	vs.SetAuthorityKey([]byte(authorityKey))
 	vs.SetName("validator-" + addr.Hex()[:8])
 
 	if jailed {

@@ -103,7 +103,7 @@ else
     # Rust
     echo "  🦀 Building Rust metanode..."
     export PATH="/home/abc/protoc3/bin:$PATH"
-    cd "$METANODE_ROOT" && cargo +nightly build --release --bin metanode
+    cd "$METANODE_ROOT" && cargo build --release --bin metanode
     echo -e "${GREEN}  ✅ Rust binary ready${NC}"
     
     # C++ MVM

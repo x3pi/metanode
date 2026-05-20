@@ -104,8 +104,19 @@ func (bp *BlockProcessor) commitWorker() {
 		// Without this, eth_getBlockByNumber returns null for organically produced blocks.
 		// By adding WithCommitMappings(), we ensure dirtyStorage is flushed to LevelDB immediately
 		// AFTER it is populated, rather than asynchronously via commitToMemoryParallel.
+		lastBlockBeforeCommit := storage.GetLastBlockNumber()
+		logger.Info("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
+			blockNum, txCount, lastBlockBeforeCommit, len(bp.commitChannel), cap(bp.commitChannel))
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
+		} else {
+			// Remove from pending store now that it is fully committed
+			bp.RemovePendingCommitBlock(blockNum)
+			lastBlockAfterCommit := storage.GetLastBlockNumber()
+			if lastBlockAfterCommit != blockNum {
+				logger.Error("🚨 [COMMIT-WORKER] Block #%d CommitBlockState completed but lastBlockNumber=%d (expected %d) — BLOCK MAY HAVE BEEN REJECTED!",
+					blockNum, lastBlockAfterCommit, blockNum)
+			}
 		}
 		saveDuration := time.Since(startSave)
 
@@ -239,18 +250,13 @@ func (bp *BlockProcessor) commitWorker() {
 			case bp.backupDbChannel <- job:
 				// enqueued successfully
 			default:
-				// queue full, drop oldest and try again
-				select {
-				case <-bp.backupDbChannel:
-					bp.backupDbWg.Done() // The dropped job will never be processed
-				default:
-				}
-				// push newest
-				select {
-				case bp.backupDbChannel <- job:
-				default:
-					bp.backupDbWg.Done() // If still full (rare), we drop it
-				}
+				// queue full, DO NOT DROP! Spawn a transient worker to prevent data loss
+				// without blocking the commitWorker pipeline.
+				logger.Warn("⚠️ [BACKUP] backupDbChannel full, spawning transient worker for block #%d to prevent SyncOnly stall", blockNum)
+				go func(j CommitJob) {
+					bp.persistBackupDbAsync(j)
+					bp.backupDbWg.Done()
+				}(job)
 			}
 		}
 

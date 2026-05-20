@@ -189,11 +189,25 @@ pub async fn transition_to_epoch_from_system_tx(
             );
         }
     }
-    // Clear TxRecycler pending map — prevents 100k+ stale entries from accumulating
-    // across epochs. These TXs are tracked separately in epoch_pending_transactions
-    // for recovery purposes, so clearing here is safe and necessary.
+    // STABILITY FIX: Migrate unconfirmed TXs from recycler to pending_transactions_queue
+    // instead of dropping them. This prevents TX loss during epoch transition.
+    //
+    // Previously: recycler.clear_pending() dropped ALL pending TXs including those
+    // that were submitted but not yet committed. Combined with BUG 2 (confirm_committed
+    // never called), this meant ALL in-flight TXs were lost at every epoch boundary.
+    //
+    // Now: drain_all_pending() returns the TX data, which we queue for re-submission
+    // in the new epoch via pending_transactions_queue → submit_queued_transactions().
     if let Some(ref recycler) = node.tx_recycler {
-        recycler.clear_pending().await;
+        let drained_txs = recycler.drain_all_pending().await;
+        if !drained_txs.is_empty() {
+            info!(
+                "♻️ [EPOCH TRANSITION] Migrating {} unconfirmed TXs from recycler to pending queue for new epoch",
+                drained_txs.len()
+            );
+            let mut queue = node.pending_transactions_queue.lock().await;
+            queue.extend(drained_txs);
+        }
     }
     node.update_execution_lock_epoch(new_epoch).await;
 

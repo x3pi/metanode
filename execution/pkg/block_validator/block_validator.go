@@ -3,6 +3,7 @@ package block_validator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -114,7 +115,7 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 
 	// Use the block's stored timestamp for deterministic replay during validation
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
-	processResult, err := tx_processor.ProcessTransactions(ctx, chainState, groupedGroups, true, false, blockTimeSec)
+	processResult, err := tx_processor.ProcessTransactions(ctx, chainState, groupedGroups, true, false, blockTimeSec, blockData.Header().LeaderAddress())
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to process transactions for block %d: %w", blockNumber, err)
 	}

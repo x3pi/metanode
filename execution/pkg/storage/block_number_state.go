@@ -31,6 +31,10 @@ var (
 	// via is_ready in LastBlockNumberResponse to know the returned block
 	// number is the FINAL value, not a transient metadata.json value.
 	blockchainInitDone uint32
+
+	// lastAssignedBlockNumber tracks the highest block number assigned by Rust FFI
+	// before it's necessarily committed to DB. Used to prevent block numbering overlap.
+	lastAssignedBlockNumber uint64
 )
 
 // Update state constants
@@ -100,6 +104,22 @@ func UpdateLastBlockNumber(blockNumber uint64) {
 
 func GetLastBlockNumber() uint64 {
 	return atomic.LoadUint64(&lastBlockNumber)
+}
+
+func UpdateLastAssignedBlockNumber(blockNumber uint64) {
+	for {
+		current := atomic.LoadUint64(&lastAssignedBlockNumber)
+		if blockNumber <= current {
+			return // Don't go backwards
+		}
+		if atomic.CompareAndSwapUint64(&lastAssignedBlockNumber, current, blockNumber) {
+			return
+		}
+	}
+}
+
+func GetLastAssignedBlockNumber() uint64 {
+	return atomic.LoadUint64(&lastAssignedBlockNumber)
 }
 
 // SetBlockchainInitDone marks blockchain initialization as complete.

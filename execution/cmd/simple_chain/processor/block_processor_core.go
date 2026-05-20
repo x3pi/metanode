@@ -122,6 +122,10 @@ type BlockProcessor struct {
 	inputTxCounter  atomic.Int64
 	nextBlockNumber atomic.Uint64
 
+	// In-flight blocks that are in the commit channel but not yet persisted.
+	// This ensures RPC eth_getBlockByNumber doesn't return null during the async gap.
+	pendingCommitBlocks sync.Map
+
 	ProcessedVirtualTxCount atomic.Uint64
 	ProcessedInputTxCount   atomic.Uint64
 	ProcessedIndexTxCount   atomic.Uint64
@@ -447,7 +451,7 @@ func NewBlockProcessor(
 		commitChannel:                    make(chan CommitJob, 8),     // TPS PIPELINE: Small buffer for bounded pipeline depth. EVM runs max 8 blocks ahead of PebbleDB persist. Prevents memory accumulation (each CommitJob ~1-5MB) and GC thrashing.
 		indexingChannel:                  make(chan uint64, 50000),    // Giữ nguyên 50k (chỉ 8 bytes mỗi entry)
 		// Khởi tạo các trường mới cho kiến trúc committer và sub-node buffering
-		createdBlocksChan: make(chan *block.Block, 200),
+		createdBlocksChan: make(chan *block.Block, 2000),
 		CacheManager:      NewCacheManager(),
 		BlockBuffers:      NewBlockBuffers(),
 		ReceiptTracker:    NewReceiptTracker(),
@@ -646,6 +650,9 @@ func (bp *BlockProcessor) UpdateLastBlockAndHeader(blk types.Block) {
 		// Update header atomically
 		headerCopy := blk.Header()
 		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+		// Add to pending commit store so RPC can serve it before async commit finishes
+		bp.AddPendingCommitBlock(blk)
 	}
 }
 
@@ -656,6 +663,26 @@ func (bp *BlockProcessor) SetLastBlock(lastBlock types.Block) {
 		bp.lastBlock.Store(lastBlock)
 		bp.lastBlockMutex.Unlock()
 	}
+}
+
+// AddPendingCommitBlock temporarily stores a block that is in the commit pipeline
+func (bp *BlockProcessor) AddPendingCommitBlock(blk types.Block) {
+	if blk != nil {
+		bp.pendingCommitBlocks.Store(blk.Header().BlockNumber(), blk)
+	}
+}
+
+// RemovePendingCommitBlock removes a block from the temporary commit pipeline store
+func (bp *BlockProcessor) RemovePendingCommitBlock(blockNumber uint64) {
+	bp.pendingCommitBlocks.Delete(blockNumber)
+}
+
+// GetPendingCommitBlock retrieves a block from the temporary commit pipeline store
+func (bp *BlockProcessor) GetPendingCommitBlock(blockNumber uint64) (types.Block, bool) {
+	if val, ok := bp.pendingCommitBlocks.Load(blockNumber); ok {
+		return val.(types.Block), true
+	}
+	return nil, false
 }
 
 // GetState returns the current processor state
