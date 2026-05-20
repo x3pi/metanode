@@ -462,8 +462,14 @@ PROCESS_BLOCK:
 	nextBlockToCreate := *currentBlockNumber + 1
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
 		if len(epochData.Transactions) > 0 {
-			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d). "+
-				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber())
+			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d, GEI=%d). "+
+				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex)
+			// CRITICAL: Must advance GEI even when skipping execution,
+			// otherwise the next commit sees a stale nextExpectedGlobalExecIndex
+			// and creates a permanent gap → BLOCK_GAP error.
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			*currentBlockNumber = nextBlockToCreate
 			return
 		}
 	}

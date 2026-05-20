@@ -163,7 +163,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			return blockNum, err
 		}
 		logger.Info("✅ [COMMIT STATE] Block #%d persisted to DB (hash: %s, parentHash: %s, txCount: %d, lastBlockNum_before: %d)",
-			blockNum, blockHash.Hex()[:18], header.ParentHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
+			blockNum, blockHash.Hex()[:18], header.LastBlockHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
 	}
 
 	// ─── 6. Rebuild state tries from header roots (optional) ─────────────
