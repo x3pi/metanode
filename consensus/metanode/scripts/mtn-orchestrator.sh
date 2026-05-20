@@ -756,6 +756,9 @@ cmd_start_node() {
     cleanup_socket "$(get_master_sock $node_id)"
     cleanup_socket "$(get_tx_sock $node_id)"
 
+    # Xoá log cũ
+    rm -rf "$LOG_BASE/node_${node_id}" 2>/dev/null || true
+
     # NOTE (Apr 2026): executor_state is PRESERVED for fork-safety v5.
     # Only --fresh deletes executor_state. Normal restart preserves it.
 
