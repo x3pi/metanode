@@ -86,10 +86,18 @@ log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 log_phase()   { echo -e "\n${CYAN}${BOLD}═══ $* ═══${NC}"; }
 log_step()    { echo -e "  ${BLUE}►${NC} $*"; }
 
-# Kiểm tra tmux session có tồn tại không
+# Kiểm tra tmux session có tồn tại khớp chính xác không
 session_exists() {
-    tmux has-session -t "$1" 2>/dev/null
+    tmux list-sessions -F '#S' 2>/dev/null | grep -q -x "$1"
 }
+
+# Kiểm tra tmux session có ở trạng thái dead pane không (remain-on-exit)
+is_session_dead() {
+    local session="$1"
+    session_exists "$session" || return 1
+    ! tmux list-panes -t "$session" -F '#{pane_dead}' 2>/dev/null | grep -q "0"
+}
+
 
 # Kiểm tra session có nằm trong danh sách bảo vệ không
 is_protected_session() {
@@ -209,8 +217,13 @@ start_go_master() {
     local pprof=$(get_master_pprof $node_id)
 
     if session_exists "$session"; then
-        log_warn "Session $session đã tồn tại — bỏ qua"
-        return 0
+        if is_session_dead "$session"; then
+            log_warn "Phát hiện session $session đang ở trạng thái dead pane — dọn dẹp..."
+            tmux kill-session -t "$session" 2>/dev/null || true
+        else
+            log_warn "Session $session đã tồn tại — bỏ qua"
+            return 0
+        fi
     fi
 
     mkdir -p "$log_dir"
@@ -509,7 +522,7 @@ cmd_start() {
             log_warn "⚠️  Node ${i} process died during startup! Check logs: $LOG_BASE/node_${i}/go-master-stdout.log"
             # Retry once
             sleep 2
-            if ! session_exists "go-master-${i}"; then
+            if ! session_exists "go-master-${i}" || is_session_dead "go-master-${i}"; then
                 log_warn "  ↻ Retrying node ${i}..."
                 start_go_master "$i"
                 sleep "$NODE_DELAY"
