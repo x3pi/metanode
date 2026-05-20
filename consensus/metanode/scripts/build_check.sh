@@ -6,7 +6,8 @@
 set -e
 
 # ─── Paths ────────────────────────────────────────────────────────
-REPO_ROOT="/home/abc/nhat/consensus-chain/metanode"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 GO_ROOT="$REPO_ROOT/execution"
 RUST_ROOT="$REPO_ROOT/consensus/metanode"
 NOMT_FFI_DIR="$GO_ROOT/pkg/nomt_ffi/rust_lib"
