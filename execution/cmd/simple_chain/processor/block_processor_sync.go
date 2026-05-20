@@ -562,28 +562,19 @@ PROCESS_BLOCK:
 	logger.Debug("📦 [TX FLOW] Processing %d transactions straight from ExecutableBlock payload", len(epochData.Transactions))
 	// fileLogger is passed as parameter from caller (MEMORY FIX: avoid per-call os.File leak)
 
-	// CRITICAL FORK-SAFETY: Commit any pending empty block before processing new block with transactions
-	// This ensures empty block is committed to DB if no replacement arrived
-	// All nodes will commit empty block at the same point (when processing next block) → fork-safe
-	lastBlockPending := bp.GetLastBlock()
-	lastCommittedBlockNumber := storage.GetLastBlockNumber()
-	if lastBlockPending != nil && lastBlockPending.Header().BlockNumber() > lastCommittedBlockNumber && len(lastBlockPending.Transactions()) == 0 {
-		// There's an empty block that hasn't been committed yet - commit it now before processing new block
-		emptyBlockNum := lastBlockPending.Header().BlockNumber()
-		logger.Info("💾 [PENDING-EMPTY-COMMIT] Committing pending empty block #%d SYNCHRONOUSLY before processing new block with txs (lastCommitted=#%d, commitChannelLen=%d/%d, global_exec_index=%d)",
-			emptyBlockNum, lastCommittedBlockNumber, len(bp.commitChannel), cap(bp.commitChannel), globalExecIndex)
-
-		// Centralized commit (fork-safe: all nodes will do this at the same point)
-		if _, err := bp.chainState.CommitBlockState(lastBlockPending,
-			blockchain.WithPersistToDB(),
-			blockchain.WithCommitMappings(), // CRITICAL FIX: Ensure mapping batches from memory are flushed to DB
-		); err != nil {
-			logger.Error("❌ [PENDING-EMPTY-COMMIT] Failed to commit pending empty block #%d: %v", emptyBlockNum, err)
-		} else {
-			logger.Info("✅ [PENDING-EMPTY-COMMIT] Empty block #%d committed to database successfully (lastBlockNumber now=%d)",
-				emptyBlockNum, storage.GetLastBlockNumber())
-		}
-	}
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PENDING-EMPTY-COMMIT: REMOVED (BLOCK_GAP FIX 2026-05-20)
+	//
+	// Previously, this code called CommitBlockState() SYNCHRONOUSLY on the
+	// processing goroutine for pending empty blocks. This was UNSAFE because:
+	//   1. commitWorker may still have older blocks queued in commitChannel
+	//   2. Sync CommitBlockState(N) updates lastBlockNum to N
+	//   3. commitWorker processes older block M (M<N) → STRICT REJECT → BLOCK LOST!
+	//
+	// Empty blocks are already dispatched to commitChannel by createBlockFromResults.
+	// commitWorker processes them in FIFO order — sequential ordering guaranteed.
+	// No synchronous commit needed here.
+	// ═══════════════════════════════════════════════════════════════════════════
 
 	// STEP 2: Process direct transactions from payload
 	// OPTIMIZATION: Pre-allocate slice to prevent GC allocations during deserialization
@@ -665,29 +656,25 @@ PROCESS_BLOCK:
 
 		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 		if emptyBlock != nil {
-			// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
-			bp.SetLastBlock(emptyBlock)
-			bp.AddPendingCommitBlock(emptyBlock)
-
-			// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
-			job := CommitJob{
-				Block:           emptyBlock,
-				ProcessResults:  &emptyResult,
-				MappingWg:       &sync.WaitGroup{},
-				GlobalExecIndex: globalExecIndex,
-				CommitIndex:     commitIndex,
-			}
-			select {
-			case bp.commitChannel <- job:
-			default:
-				logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
-				bp.commitChannel <- job
-			}
-
+			// ═══════════════════════════════════════════════════════════════
+			// BLOCK_GAP FIX (2026-05-20): Removed duplicate CommitJob dispatch.
+			//
+			// createBlockFromResults() already does:
+			//   1. SetLastBlock(bl)          — line 422 in processing.go
+			//   2. commitToMemoryParallel()   — line 438
+			//   3. commitChannel <- job       — line 555
+			//
+			// The previous code here sent a SECOND CommitJob for the same
+			// block, causing commitWorker to process it twice. Combined with
+			// PENDING-EMPTY-COMMIT (also removed), this broke FIFO ordering
+			// and caused STRICT REJECT of valid blocks → BLOCK_GAP.
+			//
+			// Only createdBlocksChan broadcast is needed here (for Sub-node sync).
+			// ═══════════════════════════════════════════════════════════════
 			select {
 			case bp.createdBlocksChan <- emptyBlock:
 			default:
-				logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+				logger.Warn("⚠️ createdBlocksChan full, blocking for empty block #%d", emptyBlock.Header().BlockNumber())
 				bp.createdBlocksChan <- emptyBlock
 			}
 		}
