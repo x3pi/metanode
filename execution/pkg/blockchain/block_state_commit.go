@@ -76,6 +76,9 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		return 0, nil
 	}
 
+	cs.commitMutex.Lock()
+	defer cs.commitMutex.Unlock()
+
 	// Parse options
 	cfg := &commitConfig{}
 	for _, opt := range opts {
@@ -102,8 +105,17 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// already-committed block's header roots — safe to allow through.
 	// ═══════════════════════════════════════════════════════════════════════
 	lastBlockNum := storage.GetLastBlockNumber()
-	if blockNum <= lastBlockNum && blockNum > 0 && !cfg.rebuildTries {
-		logger.Warn("⚠️ [SEQUENTIAL GUARD] Rejecting duplicate block #%d (last committed: #%d, hash: %s)",
+	
+	// STRICT REJECT: Never allow rewriting strictly older blocks, even with bypass.
+	if blockNum < lastBlockNum && blockNum > 0 {
+		logger.Error("🚨 [SEQUENTIAL GUARD] STRICT REJECT: block #%d is strictly older than last committed #%d (hash: %s) — THIS BLOCK WILL NOT BE PERSISTED!",
+			blockNum, lastBlockNum, blockHash.Hex()[:18])
+		return blockNum, nil
+	}
+
+	// EXACT DUPLICATE REJECT: Reject duplicate unless explicitly rebuilding tries
+	if blockNum == lastBlockNum && blockNum > 0 && !cfg.rebuildTries {
+		logger.Warn("⚠️ [SEQUENTIAL GUARD] DUPLICATE REJECT: block #%d == last committed #%d (hash: %s) — skipping",
 			blockNum, lastBlockNum, blockHash.Hex()[:18])
 		return blockNum, nil // Return without error — silently skip
 	}
@@ -150,6 +162,8 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			logger.Error("❌ [COMMIT STATE] Failed to save block #%d to DB: %v", blockNum, err)
 			return blockNum, err
 		}
+		logger.Info("✅ [COMMIT STATE] Block #%d persisted to DB (hash: %s, parentHash: %s, txCount: %d, lastBlockNum_before: %d)",
+			blockNum, blockHash.Hex()[:18], header.LastBlockHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
 	}
 
 	// ─── 6. Rebuild state tries from header roots (optional) ─────────────

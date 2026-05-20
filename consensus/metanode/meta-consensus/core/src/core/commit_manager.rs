@@ -348,26 +348,16 @@ impl Core {
                 }
 
                 // ═══════════════════════════════════════════════════════════════════
-                // ARCHITECTURAL FIX (May 2026): SPARSE DAG EVALUATION PREVENTION
-                // After snapshot recovery, the local DAG is sparse for past rounds.
-                // If the local committer evaluates these sparse regions, it will
-                // calculate divergent leader support and cause a FORK.
-                // We MUST rely purely on CertifiedCommits until the DAG is dense.
+                // ARCHITECTURAL FIX (May 2026): DAG GC GUARD (REMOVED)
+                // Previously, we blocked the local committer here if `next_leader_round <= gc_round`
+                // because the DAG was considered sparse and evaluating it locally would produce
+                // divergent "Skip" decisions.
+                // 
+                // However, DagState has been patched to fetch missing GC-ed blocks directly 
+                // from RocksDB (via `get_uncommitted_blocks_at_round`). This guarantees that the
+                // committer evaluates the EXACT same dense DAG state deterministically, eliminating 
+                // the fork risk without causing cluster deadlocks during cold starts or fast-forwards.
                 // ═══════════════════════════════════════════════════════════════════
-                if let Some(boundary_round) = self.coordination_hub.sparse_dag_boundary() {
-                    let gc_round = self.dag_state.read().gc_round();
-                    if gc_round <= boundary_round {
-                        tracing::info!(
-                            "🛡️ [SPARSE-DAG-GUARD] Blocking local committer: gc_round ({}) <= boundary_round ({}). \
-                             Waiting for network CertifiedCommits to push the DAG search space entirely past the sparse history.",
-                            gc_round, boundary_round
-                        );
-                        break;
-                    } else {
-                        // The DAG search space has caught up to the dense region!
-                        self.coordination_hub.clear_sparse_dag_boundary();
-                    }
-                }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);

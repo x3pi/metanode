@@ -321,15 +321,31 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 		destPath := filepath.Join(nomtDestBase, entry.namespace)
 
 		// ═══════════════════════════════════════════════════════════════
-		// NON-BLOCKING CHECKPOINT IS DISABLED due to hard-link corruption.
-		// Hard-linking memory-mapped files that are modified in-place 
-		// destroys snapshot atomicity. We MUST use CloseForSnapshot 
-		// and reflink/copy.
+		// DEADLOCK FIX (May 2026): Skip CloseForSnapshot entirely.
+		//
+		// PREREQUISITE (enforced by SnapshotManager):
+		//   PauseExecution() + WaitForPersistence() has already:
+		//   1. Closed snapshotGate → blocks ProcessorPool/GenerateBlock
+		//   2. Acquired ExecutionMutex.Lock() → blocks processRustEpochData
+		//   3. Drained commitWorker → all CommitPayload finished
+		//   4. Waited backupDbWg → all FlushAll finished
+		//   5. Gated RPC SyncBlocksRequest EXECUTE mode
+		//
+		// At this point there are ZERO active NOMT sessions and ZERO
+		// pending I/O operations. The database files are stable on disk.
+		// We can safely copy them without Close/Reopen.
+		//
+		// OLD APPROACH: CloseForSnapshot() waited for activeCount==0
+		// then called nomt_close(). This was the primary deadlock vector
+		// because ungated goroutines (RPC handlers, late CommitPayload)
+		// could hold sessions indefinitely.
+		//
+		// SAFETY: reflink/cp -a copies file contents atomically.
+		// Even if mmap'd pages are in kernel cache, the on-disk data
+		// is consistent because all writes were flushed by WaitForPersistence.
 		// ═══════════════════════════════════════════════════════════════
-		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (Close+Copy API): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
+		logger.Info("📸 [TRIE] Snapshotting NOMT namespace %s (DIRECT COPY — no close/reopen): %s -> %s", entry.namespace, entry.handle.GetPath(), destPath)
 		start := time.Now()
-
-		entry.handle.CloseForSnapshot()
 
 		if mkdirErr := os.MkdirAll(destPath, 0755); mkdirErr != nil {
 			return fmt.Errorf("failed to create dest dir for NOMT snapshot: %w", mkdirErr)
@@ -340,10 +356,6 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 			copyErr = copyDirReflink(entry.handle.GetPath(), destPath)
 		} else {
 			copyErr = copyDirFallback(entry.handle.GetPath(), destPath)
-		}
-
-		if reopenErr := entry.handle.ReopenAfterSnapshot(); reopenErr != nil {
-			return fmt.Errorf("CRITICAL: failed to reopen NOMT namespace %s after snapshot: %w", entry.namespace, reopenErr)
 		}
 
 		if copyErr != nil {
@@ -363,7 +375,7 @@ func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 			}
 		}
 
-		logger.Info("✅ [TRIE] NOMT checkpoint %s completed in %v", entry.namespace, time.Since(start))
+		logger.Info("✅ [TRIE] NOMT snapshot %s completed in %v (no close/reopen overhead)", entry.namespace, time.Since(start))
 	}
 
 	return nil

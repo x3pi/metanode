@@ -208,11 +208,11 @@ func NewTransactionProcessor(
 func (tp *TransactionProcessor) startInjectionWorkers(n int) {
 	for i := 0; i < n; i++ {
 		go func(workerID int) {
-			logger.Info("Injection worker %d started", workerID)
+			// logger.Info("Injection worker %d started", workerID)
 			for req := range tp.injectionQueue {
 				tp.executeAndAddTx(req)
 			}
-			logger.Info("Injection worker %d stopped", workerID)
+			// logger.Info("Injection worker %d stopped", workerID)
 		}(i)
 	}
 }

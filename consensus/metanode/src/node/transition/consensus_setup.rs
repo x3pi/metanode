@@ -94,9 +94,33 @@ pub(super) async fn setup_validator_consensus(
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-        .with_storage_path(node.storage_path.clone());
+        .with_storage_path(node.storage_path.clone())
+        .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
 
-    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
+    if let Some(ref tx_recycler) = node.tx_recycler {
+        processor = processor.with_tx_recycler(tx_recycler.clone());
+    }
+
+    let digest_verifier_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_verifier(move |index: u32| {
+        if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
+            verifier(index)
+        } else {
+            None // Monitor not yet initialized
+        }
+    });
+
+    // COLD-START-FIX (May 2026): Wire digest data checker to CommitVoteMonitor.
+    // This callback returns true ONLY when CommitVoteMonitor has received actual
+    // digest votes from P2P blocks, NOT when CommitSyncer has merely set QCI > 0.
+    let digest_checker_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_data_checker(move || {
+        digest_checker_hub.has_digest_data()
+    });
+
+    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_committee_size(committee.size())
+        .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
     if let Some(c) = exec_client_proc {
         processor = processor.with_executor_client(c.clone());
@@ -236,9 +260,31 @@ pub(super) async fn setup_synconly_sync(
         .with_pending_transactions_queue(node.pending_transactions_queue.clone())
         .with_delivery_sender(delivery_tx)
         .with_epoch_transition_callback(epoch_cb)
-        .with_storage_path(node.storage_path.clone());
+        .with_storage_path(node.storage_path.clone())
+        .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
 
-    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
+    if let Some(ref tx_recycler) = node.tx_recycler {
+        processor = processor.with_tx_recycler(tx_recycler.clone());
+    }
+
+    let digest_verifier_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_verifier(move |index: u32| {
+        if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
+            verifier(index)
+        } else {
+            None // Monitor not yet initialized
+        }
+    });
+
+    // COLD-START-FIX (May 2026): Wire digest data checker (same logic as Validator path)
+    let digest_checker_hub = node.coordination_hub.clone();
+    processor = processor.with_digest_data_checker(move || {
+        digest_checker_hub.has_digest_data()
+    });
+
+    processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_committee_size(committee.size())
+        .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
     if let Some(c) = exec_client_proc.clone() {
         processor = processor.with_executor_client(c.clone());

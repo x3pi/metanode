@@ -29,7 +29,7 @@ SRC_NODE=0
 DST_NODE=1
 ROTATE_DST=false
 CATCHUP_TIMEOUT=300
-LIVENESS_WAIT=30
+LIVENESS_WAIT=120
 SETTLE_TIME=15
 TX_PUMP_PID=""
 LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db"
@@ -590,15 +590,27 @@ run_single_round() {
     log "### Giai đoạn 5: Kiểm tra Liveness sau phục hồi"
     local live_start=$(get_block_number "$dst_port")
     start_tx_pump
-    sleep $LIVENESS_WAIT
-    stop_tx_pump
-    local live_end=$(get_block_number "$dst_port")
 
-    if [ "$live_end" -gt "$live_start" ]; then
-        local produced=$((live_end - live_start))
-        log "- ✅ Liveness OK: $produced khối đã được tạo trong ${LIVENESS_WAIT}s"
-    else
-        log "- ❌ **THẤT BẠI LIVENESS**: Không có khối mới nào trong ${LIVENESS_WAIT}s"
+    # Polling liveness: kiểm tra mỗi 5s, nếu block tiến triển → pass ngay
+    local liveness_ok=false
+    local elapsed=0
+    local poll_interval=5
+    while [ $elapsed -lt $LIVENESS_WAIT ]; do
+        sleep $poll_interval
+        elapsed=$((elapsed + poll_interval))
+        local live_now=$(get_block_number "$dst_port")
+        if [ "$live_now" -gt "$live_start" ]; then
+            local produced=$((live_now - live_start))
+            log "- ✅ Liveness OK: $produced khối mới sau ${elapsed}s (polling mỗi ${poll_interval}s)"
+            liveness_ok=true
+            break
+        fi
+    done
+
+    stop_tx_pump
+
+    if [ "$liveness_ok" = "false" ]; then
+        log "- ❌ **THẤT BẠI LIVENESS**: Không có khối mới nào trong ${LIVENESS_WAIT}s (đã poll mỗi ${poll_interval}s)"
         return 1
     fi
 

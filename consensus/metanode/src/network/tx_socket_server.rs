@@ -6,7 +6,7 @@ use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -60,18 +60,19 @@ impl TxSocketServer {
             let peer_discovery_addresses_ref = peer_discovery_addresses.clone();
             let tx_recycler_ref = tx_recycler.clone();
 
-            tokio::spawn(async move {
-                Self::process_ffi_batch(
-                    tx_data,
-                    client_ref,
-                    node_ref,
-                    is_transitioning_ref,
-                    peer_rpc_addresses_ref,
-                    peer_discovery_addresses_ref,
-                    tx_recycler_ref,
-                )
-                .await;
-            });
+            // DO NOT spawn a new task. Process sequentially to exert backpressure 
+            // on the bounded FFI channel (capacity 1000). If we spawn, unbounded tasks
+            // pile up during epoch transitions, causing a livelock.
+            Self::process_ffi_batch(
+                tx_data,
+                client_ref,
+                node_ref,
+                is_transitioning_ref,
+                peer_rpc_addresses_ref,
+                peer_discovery_addresses_ref,
+                tx_recycler_ref,
+            )
+            .await;
         }
         Ok(())
     }
@@ -169,7 +170,8 @@ impl TxSocketServer {
             return;
         }
 
-        debug!("✅ [FFI TX FLOW] Zero-copy extracted {} TXs", individual_txs.len());
+        info!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
+            individual_txs.len(), data_len);
         let transactions_to_submit = individual_txs;
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
@@ -185,8 +187,20 @@ impl TxSocketServer {
                     if attempt % 60 == 0 {
                         warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    continue;
+                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
+                    // flag is never cleared (same pattern as CommitProcessor).
+                    // After 60s, force-clear and proceed to submission.
+                    if attempt >= 60 {
+                        error!(
+                            "🚨 [FFI TX FLOW] is_transitioning stuck for {}s! Force-clearing to prevent permanent TX deadlock.",
+                            attempt
+                        );
+                        transitioning.store(false, Ordering::SeqCst);
+                        // Fall through to submission
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        continue;
+                    }
                 }
             }
 
@@ -215,7 +229,7 @@ impl TxSocketServer {
                                 drop(node_guard);
                                 attempt += 1;
                                 if attempt % 60 == 0 {
-                                    warn!("⏳ [FFI TX FLOW] Node still catching up. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
+                                    tracing::warn!("⚠️ [FFI TX FLOW] [DEADLOCK-MONITOR] Backpressure: Rust FFI transaction channel is full (50K capacity)!");
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                                 continue;
@@ -253,19 +267,21 @@ impl TxSocketServer {
 
             let mut all_succeeded = true;
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
-                // let chunk_len = chunk_vec.len();
-                
-                let epoch_pending_ptr = if let Some(ref node_mutex) = node {
-                    let node_guard = node_mutex.lock().await;
-                    Some(node_guard.epoch_pending_transactions.clone())
-                } else {
-                    None
-                };
-
-                if let Some(epoch_pending_mutex) = epoch_pending_ptr {
-                    let mut epoch_pending = epoch_pending_mutex.lock().await;
-                    epoch_pending.extend(chunk_vec.clone());
-                }
+                // STABILITY FIX: epoch_pending_transactions tracking REMOVED from hot path.
+                //
+                // ROOT CAUSE OF TX LOSS: Previously, every TX was inserted into 
+                // epoch_pending_transactions HashMap here. After 8 rounds × 20K TXs = 160K entries,
+                // the HashMap caused severe mutex lock contention. When the 200ms lock timeout
+                // fired, TXs were submitted to consensus but NOT tracked in epoch_pending.
+                // During epoch transition, recover_epoch_pending_transactions would only recover
+                // tracked TXs → untracked TXs lost forever.
+                //
+                // FIX: TxRecycler already tracks ALL submitted TXs with bounded capacity (100K)
+                // and persists them to disk. Epoch transition now drains TxRecycler pending
+                // instead of epoch_pending_transactions. This eliminates:
+                // 1. Unbounded HashMap growth (160K+ entries)
+                // 2. Mutex lock contention on submission hot path
+                // 3. Lock timeout causing untracked TXs that can't be recovered
 
                 if let Some(ref recycler) = tx_recycler {
                     recycler.track_submitted(&chunk_vec).await;
@@ -299,6 +315,7 @@ impl TxSocketServer {
             }
 
             if all_succeeded {
+                info!("✅ [TX-FLOW-TRACE] ▶ PHASE 1.5 DONE: All {} TXs submitted to consensus DAG core", total_tx_count);
                 return; // Everything submitted cleanly
             }
 

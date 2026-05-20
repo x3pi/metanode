@@ -408,7 +408,7 @@ func (vmP *VmProcessor) updateStateDB(
 		if span != nil { // GUARD
 			span.AddEvent("MarkedTrieDBAsReverted", map[string]interface{}{"mvmId": mvmId.Hex()})
 		}
-		// 🔒 [STATE-LEAK-FIX] Master node's C++ cache (isCache=true) retains state updates 
+		// 🔒 [STATE-LEAK-FIX] Master node's C++ cache (isCache=true) retains state updates
 		// even if the transaction ultimately throws an exception mid-execution.
 		// We MUST ONLY clear the specific mvmId instance to prevent global wipe data races
 		// during parallel group execution.

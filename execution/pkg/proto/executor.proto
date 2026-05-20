@@ -52,6 +52,13 @@ message ExecutableBlock {
     // standard user transactions. These are passed to Go for RPC logging but are NOT
     // part of the Go transaction trie or Execution block payload.
     repeated bytes system_transactions = 11;
+    // LAYER-1 FORK-PROOF: Authority public key as raw bytes (NOT string).
+    // Used for strict boundary validation — prevents String vs Bytes sorting mismatches.
+    // When present, Go MUST validate this is a valid key before processing.
+    bytes authority_key = 12;
+    // LAYER-6 FORK-PROOF: Commit digest from Rust DAG for inline hash verification.
+    // Go stores this digest and exposes it via RPC for peer cross-checking.
+    bytes commit_digest = 13;
 }
 
 // Response from Go after processing an ExecutableBlock.

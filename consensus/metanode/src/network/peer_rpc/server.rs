@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::node::executor_client::ExecutorClient;
 
@@ -268,7 +268,7 @@ impl PeerRpcServer {
             error!("🌐 [PEER RPC] Failed to write response: {}", e);
         }
 
-        info!(
+        debug!(
             "🌐 [PEER RPC] Served /peer_info: epoch={}, last_block={}, global_exec_index={}",
             epoch, last_block, last_global_exec_index
         );
@@ -571,8 +571,8 @@ impl PeerRpcServer {
             return;
         };
 
-        // Limit batch size to prevent DoS or timeouts on huge blocks (200MB+)
-        let max_batch = 500u64;
+        // Limit batch size to prevent DoS or timeouts on huge blocks
+        let max_batch = 1000u64;
         let actual_to = std::cmp::min(to, from + max_batch - 1);
 
         info!(
@@ -584,7 +584,7 @@ impl PeerRpcServer {
         // CRITICAL: Add timeout to prevent peer RPC handler from hanging
         // if Go Master is busy or not responding.
         let fetch_result = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(15),
             executor.get_blocks_range(from, actual_to)
         ).await;
 

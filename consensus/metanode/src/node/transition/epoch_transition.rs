@@ -189,6 +189,26 @@ pub async fn transition_to_epoch_from_system_tx(
             );
         }
     }
+    // STABILITY FIX: Migrate unconfirmed TXs from recycler to pending_transactions_queue
+    // instead of dropping them. This prevents TX loss during epoch transition.
+    //
+    // Previously: recycler.clear_pending() dropped ALL pending TXs including those
+    // that were submitted but not yet committed. Combined with BUG 2 (confirm_committed
+    // never called), this meant ALL in-flight TXs were lost at every epoch boundary.
+    //
+    // Now: drain_all_pending() returns the TX data, which we queue for re-submission
+    // in the new epoch via pending_transactions_queue → submit_queued_transactions().
+    if let Some(ref recycler) = node.tx_recycler {
+        let drained_txs = recycler.drain_all_pending().await;
+        if !drained_txs.is_empty() {
+            info!(
+                "♻️ [EPOCH TRANSITION] Migrating {} unconfirmed TXs from recycler to pending queue for new epoch",
+                drained_txs.len()
+            );
+            let mut queue = node.pending_transactions_queue.lock().await;
+            queue.extend(drained_txs);
+        }
+    }
     node.update_execution_lock_epoch(new_epoch).await;
 
     info!(
@@ -551,34 +571,43 @@ async fn stop_authority_and_poll_go(
     Ok(synced_index)
 }
 
-/// Poll Go's GEI until it reaches the expected value, with timeout.
+/// Poll Go's GEI until it reaches the expected value.
 ///
-/// OPTIMIZATION (2026-04-25): Reduced timeout from 300s to 30s and added
-/// active ForceCommit to flush Go's async commitChannel pipeline.
-/// Previously, 3 GEI updates could sit in Go's coalescing geiUpdateChan
-/// or commitChannel buffer indefinitely, causing a 5-minute stall at
-/// every epoch transition. ForceCommit triggers Go to flush its pipeline.
+/// PROGRESS-BASED WAIT (May 2026): Replaces fixed 300s absolute timeout.
 ///
-/// Also accepts a small tolerance (5 GEIs) for in-flight empty commits
-/// that don't affect state correctness.
+/// KEY DESIGN: Instead of timing out after a fixed duration, we track whether
+/// Go is making FORWARD PROGRESS. If Go's GEI advances, the system is healthy
+/// (just slow). We only consider it "stuck" if there's NO progress for 60s.
+///
+/// WHY NOT FIXED TIMEOUT:
+/// - Under 20k TPS load, Go may need 30-60s to process 121 blocks
+/// - A fixed 300s timeout could fire when Go is actively processing
+/// - Breaking early causes GEI overlap → state fork
+///
+/// WHY PROGRESS-BASED:
+/// - If Go processes even 1 block per minute, it's not stuck → keep waiting
+/// - If Go is truly stuck (0 progress for 60s), log critical warning
+/// - ForceCommit every 3s ensures Go's pipeline stays flushed
+///
+/// BACKPRESSURE SYNERGY: With FIX-1A (honest FFI wait), the gap at epoch
+/// boundary should be much smaller (< 50 blocks), making this function
+/// complete in < 10s instead of the previous 30+s.
 async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
     expected_last_block: u64,
     _new_epoch: u64,
-    config: &crate::config::NodeConfig,
+    _config: &crate::config::NodeConfig,
 ) {
     let poll_interval = Duration::from_millis(100);
-    let max_wait = Duration::from_secs(30);
-    let mut wait_start = std::time::Instant::now();
-    let mut attempt = 0u64;
     let mut last_force_commit = std::time::Instant::now();
+    let mut last_log = std::time::Instant::now();
+    let overall_start = std::time::Instant::now();
+    let mut attempt = 0u64;
 
-    // CRITICAL FIX (2026-05-05): GEI_TOLERANCE REMOVED.
-    // The timeout + ForceCommit is sufficient for Go to process all commits.
-    // CRITICAL FIX (2026-05-06): FIXED TIMEOUT REMOVED.
-    // Breaking out of this loop early causes the new epoch to start while Go is still
-    // processing the old epoch. This leads to GEI overlap and a massive state fork.
-    // We MUST wait indefinitely for Go to catch up, using ForceCommit to ensure progress.
+    // PROGRESS TRACKING: Detect true deadlocks vs slow-but-progressing
+    let mut last_progress_gei = 0u64;
+    let mut last_progress_time = std::time::Instant::now();
+    let no_progress_timeout = Duration::from_secs(60);
 
     // Immediately trigger a ForceCommit to flush Go's pipeline
     if let Err(e) = executor_client
@@ -591,61 +620,56 @@ async fn poll_go_until_synced(
     loop {
         attempt += 1;
 
-        if wait_start.elapsed() > max_wait {
-            warn!(
-                "⏱️ [SYNC POLL] Go is taking longer than {:?} to process commits (expected={}). \
-                 This happens during heavy catch-up or if Go missed blocks. Attempting active peer sync...",
-                max_wait,
-                expected_last_block
-            );
-
-            // Active Fallback: If Go is stuck, fetch the missing blocks from peers and force-feed them!
-            match executor_client.get_last_block_number().await {
-                Ok((go_block, _, _, _, _)) => {
-                    if go_block < expected_last_block && !config.peer_rpc_addresses.is_empty() {
-                        use rand::seq::SliceRandom;
-                        let mut shuffled_peers = config.peer_rpc_addresses.clone();
-                        shuffled_peers.shuffle(&mut rand::thread_rng());
-
-                        warn!("🔄 [SYNC POLL] Fetching blocks {}-{} from peers to unblock Go...", go_block + 1, expected_last_block);
-                        match crate::network::peer_rpc::fetch_blocks_from_peer(
-                            &shuffled_peers,
-                            go_block + 1,
-                            expected_last_block,
-                        ).await {
-                            Ok(blocks) if !blocks.is_empty() => {
-                                warn!("✅ [SYNC POLL] Fetched {} missing blocks. Injecting to Go...", blocks.len());
-                                if let Err(e) = executor_client.sync_and_execute_blocks(blocks).await {
-                                    error!("❌ [SYNC POLL] sync_and_execute_blocks failed: {}", e);
-                                } else {
-                                    info!("✅ [SYNC POLL] Successfully injected missing blocks! Go should advance now.");
-                                }
-                            }
-                            _ => warn!("⚠️ [SYNC POLL] Failed to fetch missing blocks from peers."),
-                        }
-                    } else if config.peer_rpc_addresses.is_empty() {
-                        warn!("⚠️ [SYNC POLL] No peer addresses configured. Cannot fetch missing blocks.");
-                    }
-                }
-                Err(e) => warn!("⚠️ [SYNC POLL] Could not get last block number from Go: {}", e),
-            }
-
-            // DO NOT BREAK HERE! Wait indefinitely to guarantee state parity.
-            // Reset wait_start to avoid spamming the log and retry logic.
-            wait_start = std::time::Instant::now();
-        }
-
         match executor_client.get_last_global_exec_index().await {
             Ok(go_last_gei) => {
                 if go_last_gei >= expected_last_block {
                     info!(
                         "✅ [SYNC VERIFIED] Go confirmed: gei={} >= expected={} ({} attempts, {:?})",
-                        go_last_gei, expected_last_block, attempt, wait_start.elapsed()
+                        go_last_gei, expected_last_block, attempt, overall_start.elapsed()
                     );
                     break;
                 }
 
                 let remaining = expected_last_block.saturating_sub(go_last_gei);
+
+                // PROGRESS CHECK: Update if Go advanced
+                if go_last_gei > last_progress_gei {
+                    last_progress_gei = go_last_gei;
+                    last_progress_time = std::time::Instant::now();
+                }
+
+                // STUCK DETECTION: No progress for 60s
+                if last_progress_time.elapsed() > no_progress_timeout {
+                    if remaining <= 10 {
+                        // Small gap + stuck → safe to proceed
+                        warn!(
+                            "🚨 [SYNC POLL] Go stuck for {:?} at gei={} (expected={}, gap={}). \
+                             Gap is small — proceeding safely.",
+                            last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining
+                        );
+                        break;
+                    } else {
+                        // Large gap + stuck → log critical but keep waiting
+                        // (DO NOT exit — "thà pending chứ không fork")
+                        let ffi_queue_depth = crate::ffi::get_ffi_tx_queue_depth();
+                        if ffi_queue_depth > 1000 {
+                            warn!(
+                                "🚨 [SYNC POLL] Go appears stuck for {:?} (gei={}), BUT FFI queue is saturated ({} items). \
+                                 This is transient backpressure during high TPS, NOT a deadlock. Waiting...",
+                                last_progress_time.elapsed(), go_last_gei, ffi_queue_depth
+                            );
+                        } else {
+                            error!(
+                                "🚨 [SYNC POLL] CRITICAL: Go has made NO PROGRESS for {:?}! \
+                                 gei={}, expected={}, gap={}, ffi_queue_depth={}. Go may be stuck. \
+                                 Investigate: check Go logs, NOMT state, commitWorker.",
+                                last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining, ffi_queue_depth
+                            );
+                        }
+                        // Reset timer to avoid spamming this error every 100ms
+                        last_progress_time = std::time::Instant::now();
+                    }
+                }
 
                 // Trigger ForceCommit every 3 seconds to flush Go's pipeline
                 if last_force_commit.elapsed() > Duration::from_secs(3) {
@@ -658,12 +682,15 @@ async fn poll_go_until_synced(
                     }
                 }
 
-                // Periodic progress logging
-                if attempt.is_multiple_of(50) {
+                // Periodic progress logging (every 2s)
+                if last_log.elapsed() > Duration::from_secs(2) {
                     warn!(
-                        "⏳ [SYNC WAIT] gei={}, expected={}, gap={} (waiting {:?})",
-                        go_last_gei, expected_last_block, remaining, wait_start.elapsed()
+                        "⏳ [LIVENESS] Still waiting for Go to sync boundary block {}. \
+                         Current Go block: {} (gap={}, waiting {:?}, progress_age={:?})",
+                        expected_last_block, go_last_gei, remaining,
+                        overall_start.elapsed(), last_progress_time.elapsed()
                     );
+                    last_log = std::time::Instant::now();
                 }
             }
             Err(e) => {

@@ -63,6 +63,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	const maxConcurrentSends = MaxConcurrentSends
 	semaphore := make(chan struct{}, maxConcurrentSends)
 
+	// TBAB: Throughput-Based Adaptive Batching state
+	emaTPS := 0.0
+	lastBatchTime := time.Now()
+
 	for {
 		<-ticker.C
 
@@ -80,9 +84,18 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// BATCH ACCUMULATION: Wait for pool to fill up before draining.
-		const batchAccumulationTimeout = 50 * time.Millisecond      
-		const batchAccumulationCheckInterval = 5 * time.Millisecond 
+		// BATCH ACCUMULATION: Throughput-Based Adaptive Batching (TBAB)
+		// Dynamically adjust timeout based on real-time TPS
+		var batchAccumulationTimeout time.Duration
+		if emaTPS < 1000 {
+			batchAccumulationTimeout = 5 * time.Millisecond // Low latency for low load
+		} else if emaTPS < 10000 {
+			batchAccumulationTimeout = 20 * time.Millisecond // Balanced
+		} else {
+			batchAccumulationTimeout = 50 * time.Millisecond // Max throughput for extreme load
+		}
+		
+		const batchAccumulationCheckInterval = 1 * time.Millisecond 
 		const minBatchSize = MaxTransactionsPerBatch                
 
 		accumulationStart := time.Now()
@@ -102,7 +115,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			if currentPoolSize == lastPoolSize {
 				stagnantCycles++
-				if stagnantCycles >= 3 { 
+				// ADAPTIVE BATCHING: If no new TXs arrive for 2ms, flush immediately
+				if stagnantCycles >= 2 { 
 					break
 				}
 			} else {
@@ -119,16 +133,27 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		poolSizeAfter := bf.transactionProcessor.transactionPool.CountTransactions()
 		pendingPoolSizeAfter := bf.transactionProcessor.pendingTxManager.Count()
 
+		// TBAB: Update TPS
+		totalTxs := len(txs)
+		now := time.Now()
+		elapsedSecs := now.Sub(lastBatchTime).Seconds()
+		if elapsedSecs > 0 {
+			currentTPS := float64(totalTxs) / elapsedSecs
+			emaTPS = (emaTPS * 0.8) + (currentTPS * 0.2) // EMA smoothing
+		}
+		lastBatchTime = now
+
 		if len(txs) == 0 {
 			if poolSizeBefore > 0 {
-				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions",
+				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions. Sleeping 10ms to prevent spin.",
 					poolSizeBefore, poolSizeAfter, pendingPoolSizeBefore, pendingPoolSizeAfter)
+				// Backoff to prevent 100% CPU spin loop when pool contains only future nonces
+				time.Sleep(10 * time.Millisecond)
 			}
 			continue
 		}
 
 		// Chia nhỏ batch nếu có quá nhiều transaction để tránh quá tải
-		totalTxs := len(txs)
 		if totalTxs > maxTransactionsPerBatch {
 			logger.Info("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions, splitting into batches of %d",
 				totalTxs, maxTransactionsPerBatch)
@@ -139,7 +164,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		// Chia nhỏ thành các batch nhỏ hơn để gửi
 		for batchStart := 0; batchStart < totalTxs; batchStart += maxTransactionsPerBatch {
-			<-rateLimiter.C
+			// OPTIMIZED FOR LATENCY: Only apply rate limiting for TCP connections, NOT zero-copy FFI
+			if bf.serviceType == string(p_common.ServiceTypeReadonly) {
+				<-rateLimiter.C
+			}
 
 			batchEnd := batchStart + maxTransactionsPerBatch
 			if batchEnd > totalTxs {
@@ -177,14 +205,15 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				if !success {
 					logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
 						batchNum, totalBatches, len(batchTxs))
-					// Re-add to transaction pool for retry in the next tick
-					bf.transactionProcessor.transactionPool.AddTransactions(batchTxs)
-					for _, tx := range batchTxs {
+					// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
+					remainingTxs := txs[batchStart:]
+					bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
+					for _, tx := range remainingTxs {
 						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
 					}
 					// Slow down slightly on backpressure
 					time.Sleep(50 * time.Millisecond)
-					continue
+					break // Break out of the batch loop to wait for the next tick
 				} else {
 					if shouldLogSend {
 						logger.Info("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
@@ -224,7 +253,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				time.Sleep(100 * time.Millisecond)
 				masterConnections = bf.connectionsManager.ConnectionsByType(p_common.MapConnectionTypeToIndex(p_common.MASTER_CONNECTION_TYPE))
 				if len(masterConnections) == 0 {
-					logger.Warn("TxsProcessor2: vẫn không tìm thấy master connection sau retry")
+					logger.Warn("TxsProcessor2: vẫn không tìm thấy master connection sau retry. Re-adding %d txs to pool.", len(txs))
+					bf.transactionProcessor.transactionPool.AddTransactions(txs)
+					for _, tx := range txs {
+						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+					}
 					continue
 				}
 			}
@@ -279,13 +312,24 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 						done <- bf.messageSender.SendBytes(c, p_common.TransactionsFromSubTopic, txData)
 					}()
 
+					var sendSuccess bool
 					select {
 					case sendErr := <-done:
 						if sendErr != nil {
 							logger.Error("TxsProcessor2: lỗi khi gửi transaction đến %s: %v", addr.Hex(), sendErr)
+						} else {
+							sendSuccess = true
 						}
 					case <-time.After(5 * time.Second):
 						logger.Error("TxsProcessor2: timeout khi gửi transaction đến %s", addr.Hex())
+					}
+					
+					if !sendSuccess {
+						logger.Warn("⚠️ [TX FLOW] Sub node TCP send failed, re-adding %d txs to pool", len(txs))
+						bf.transactionProcessor.transactionPool.AddTransactions(txs)
+						for _, tx := range txs {
+							bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+						}
 					}
 				}(conn, address, bTransactionCopy)
 			}

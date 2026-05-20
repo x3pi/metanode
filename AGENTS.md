@@ -38,7 +38,7 @@ while strictly avoiding over-engineering.
 
 | Rule | Detail |
 | :--- | :--- |
-| **Impact Analysis** | Before modifying critical write logic, run `npx gitnexus analyze --context` to assess upstream/downstream blast radius. |
+| **Impact Analysis** | Before modifying critical write logic, use `grep_search` on the target symbol across the repo, or ask the user to run `npx gitnexus analyze` from their terminal and paste the output. Always reference `PROJECT_STRUCTURE.md` for module map. |
 | **Single Source of Truth** | Verify the state owner before touching any concurrent write logic. |
 | **Bounded Concurrency** | Every new message queue or worker pool MUST have an explicit buffer limit. |
 | **No Blocking Async** | NEVER use synchronous blocking I/O inside async loops or event engines. |
@@ -63,22 +63,33 @@ while strictly avoiding over-engineering.
 
 ## 🛠 PART 4: TOOL EXECUTION RULES
 
-Execute these via terminal using `npx gitnexus` before modifying core structs:
+### Impact Analysis (before modifying core structs)
 
-```bash
-# View system-wide context and module map
-npx gitnexus analyze --context
-
-# Trace execution flows and call chains
-npx gitnexus analyze --processes
-
-# Query specific symbol impact before modifying
-npx gitnexus query --symbol <SymbolName>
+**Primary method — AI uses built-in tools directly:**
+```
+1. Read PROJECT_STRUCTURE.md to understand module map
+2. Use grep_search to find all callers of the target symbol
+3. Use view_file to trace logic and confirm blast radius
+4. Report all affected files before making changes
 ```
 
-**Fallback if gitnexus is unavailable:** Manually grep the codebase for the
-target symbol and list all direct callers before proceeding. State this
-limitation clearly in your response.
+**Optional — user can run from their own terminal:**
+```bash
+# Index/analyze the repo (run once or after large changes)
+npx gitnexus analyze
+
+# Query a specific symbol's impact
+npx gitnexus query --symbol <SymbolName>
+```
+> ⚠️ Note: Antigravity's sandbox cannot execute `npx`. These commands must be
+> run by the user in their local terminal. Paste the output into the chat
+> for AI analysis.
+
+**Standard grep fallback (always available):**
+```bash
+# Find all usages of a symbol
+grep -rn "<SymbolName>" ./execution ./consensus --include="*.go" --include="*.rs"
+```
 
 ---
 
@@ -91,7 +102,29 @@ Kết thúc MỌI response bằng một khối tóm tắt tiếng Việt theo đ
 ### 📋 Tóm tắt thay đổi
 - **Đã thay đổi:** [liệt kê file/struct/function bị ảnh hưởng]
 - **Blast radius:** [upstream/downstream bị tác động]
-- **Rủi ro tiềm ẩn:** [concurrency, state drift, breaking changes]
+- **🐛 Nguyên nhân lỗi:** [nếu là fix bug — mô tả tóm tắt root cause, ví dụ: race condition, nil pointer, sai thứ tự khởi tạo, thiếu lock, v.v.]
+- **Rủi ro tiềm ẩn:** [concurrency, state drift, breaking changes, cần đảm bảo 100% không fork thà pending chứ không fork, miễn đủ số node hoạt động thì hệ thống luôn tiến triển không deadlock]
 - **Lưu ý hiệu năng:** [memory, latency, throughput nếu liên quan]
 ---
 ```
+
+---
+
+## 🗺️ PART 6: PROJECT STRUCTURE MAINTENANCE (BẮT BUỘC)
+
+File `PROJECT_STRUCTURE.md` ở root của repo là **nguồn sự thật** về kiến trúc dự án.
+AI PHẢI cập nhật file này mỗi khi có thay đổi cấu trúc.
+
+**Khi nào cần cập nhật `PROJECT_STRUCTURE.md`:**
+- ✅ Thêm package/module mới vào `pkg/` hoặc `src/`
+- ✅ Thêm entrypoint hoặc command mới vào `cmd/`
+- ✅ Thay đổi FFI interface giữa Go và Rust
+- ✅ Thay đổi gRPC proto definitions
+- ✅ Thêm/xóa kênh giao tiếp cross-layer
+- ✅ Rename hoặc di chuyển file/package quan trọng
+- ❌ Thay đổi logic nội bộ không ảnh hưởng cấu trúc
+
+**Format cập nhật bắt buộc:** Cập nhật trường `Last updated` và phần tương ứng trong sơ đồ.
+
+**Tham chiếu:** Luôn đọc `PROJECT_STRUCTURE.md` trước khi bắt đầu bất kỳ task nào
+liên quan đến module mới hoặc cross-layer changes.

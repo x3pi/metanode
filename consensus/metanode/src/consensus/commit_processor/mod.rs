@@ -6,5 +6,6 @@ pub mod executor;
 pub mod gei_validator;
 pub mod lag_monitor;
 pub mod processor;
+pub mod wal;
 
 pub use processor::CommitProcessor;

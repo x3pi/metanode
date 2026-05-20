@@ -48,7 +48,7 @@ impl ExecutorClient {
         // FFI INTEGRATION: Send request directly via CGo callback
         let response_buf = self.execute_rpc_request(&request_buf).await?;
 
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, decoding...",
             response_buf.len()
         );
@@ -62,8 +62,8 @@ impl ExecutorClient {
             )
         })?;
 
-        info!("🔍 [EXECUTOR-REQ] Decoded response successfully");
-        info!(
+        trace!("🔍 [EXECUTOR-REQ] Decoded response successfully");
+        trace!(
             "🔍 [EXECUTOR-REQ] Response payload type: {:?}",
             response.payload
         );
@@ -80,14 +80,15 @@ impl ExecutorClient {
                 );
                 // CRITICAL: Log each ValidatorInfo exactly as received from Go
                 for (idx, validator) in v.validators.iter().enumerate() {
-                    let auth_key_preview = if validator.authority_key.len() > 50 {
-                        format!("{}...", &validator.authority_key[..50])
+                    let auth_hex = hex::encode(&validator.authority_key);
+                    let auth_key_preview = if auth_hex.len() > 50 {
+                        format!("{}...", &auth_hex[..50])
                     } else {
-                        validator.authority_key.clone()
+                        auth_hex
                     };
                     info!("📥 [RUST←GO] ValidatorInfo[{}]: address={}, stake={}, name={}, authority_key={}, protocol_key={}, network_key={}",
                             idx, validator.address, validator.stake, validator.name,
-                            auth_key_preview, validator.protocol_key, validator.network_key);
+                            auth_key_preview, hex::encode(&validator.protocol_key), hex::encode(&validator.network_key));
                 }
             }
             Some(proto::response::Payload::Error(e)) => {
@@ -147,14 +148,15 @@ impl ExecutorClient {
 
                     // CRITICAL: Log each ValidatorInfo exactly as received from Go
                     for (idx, validator) in validator_info_list.validators.iter().enumerate() {
-                        let auth_key_preview = if validator.authority_key.len() > 50 {
-                            format!("{}...", &validator.authority_key[..50])
+                        let auth_hex = hex::encode(&validator.authority_key);
+                        let auth_key_preview = if auth_hex.len() > 50 {
+                            format!("{}...", &auth_hex[..50])
                         } else {
-                            validator.authority_key.clone()
+                            auth_hex
                         };
                         info!("📥 [RUST←GO] ValidatorInfo[{}]: address={}, stake={}, name={}, authority_key={}, protocol_key={}, network_key={}",
                             idx, validator.address, validator.stake, validator.name,
-                            auth_key_preview, validator.protocol_key, validator.network_key);
+                            auth_key_preview, hex::encode(&validator.protocol_key), hex::encode(&validator.network_key));
                     }
 
                     Ok((
@@ -264,7 +266,7 @@ impl ExecutorClient {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        info!(
+        trace!(
             "📥 [EXECUTOR-REQ] Received {} bytes from Go FFI, hex={}, decoding...",
             response_buf.len(),
             hex_preview
@@ -279,7 +281,7 @@ impl ExecutorClient {
                 Err(anyhow::anyhow!("Unexpected NotifyEpochChangeResponse"))
             }
             Some(proto::response::Payload::LastBlockNumberResponse(r)) => {
-                info!("✅ [EXECUTOR-REQ] Received LastBlockNumber: {}, GEI: {}, Epoch: {}, IsReady: {}", 
+                trace!("✅ [EXECUTOR-REQ] Received LastBlockNumber: {}, GEI: {}, Epoch: {}, IsReady: {}", 
                     r.last_block_number, r.last_global_exec_index, r.last_epoch, r.is_ready);
                 let mut hash = [0u8; 32];
                 if r.last_executed_commit_hash.len() == 32 {

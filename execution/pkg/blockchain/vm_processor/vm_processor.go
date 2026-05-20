@@ -111,6 +111,13 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	}
 
 	if tx.IsDeployContract() {
+		if !tx.ValidDeployData() {
+			err := fmt.Errorf("deploy data is nil or invalid")
+			if span != nil {
+				span.SetError(err)
+			}
+			return nil, err
+		}
 		if span != nil {
 			span.AddEvent("HandlingDeployContract", map[string]interface{}{
 				"deployDataCodeLength": len(tx.DeployData().Code()),

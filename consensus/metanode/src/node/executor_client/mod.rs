@@ -386,13 +386,34 @@ impl ExecutorClient {
             };
 
             // Initialize next_block_number (Explicit tracking)
+            // MONOTONIC GUARD: Never let next_block_number go BACKWARDS during epoch
+            // transitions. Go's HandleGetLastBlockNumberRequest may return a lower value
+            // due to backward hash scan fallback (line 540-576 in unix_socket_handler_epoch.go).
+            // The old ExecutorClient's next_block_number is the ground truth for what was
+            // already assigned to Go.
             {
                 let mut next_bn_guard = self.next_block_number.lock().await;
-                *next_bn_guard = last_block_number + 1;
-                info!(
-                    "📊 [INIT] Initialized next_block_number to {} (from last_block_number={})",
-                    *next_bn_guard, last_block_number
-                );
+                let go_next = last_block_number + 1;
+                let old_next = *next_bn_guard;
+                if go_next > old_next {
+                    *next_bn_guard = go_next;
+                    info!(
+                        "📊 [INIT] Initialized next_block_number to {} (from Go last_block_number={}, old={})",
+                        *next_bn_guard, last_block_number, old_next
+                    );
+                } else if old_next > go_next {
+                    // MONOTONIC GUARD: Keep higher value to prevent block number gaps
+                    warn!(
+                        "🛡️ [INIT] MONOTONIC GUARD: Keeping next_block_number={} (Go reports last_block={}, go_next={}). \
+                         Old pipeline blocks may still be in Go's pipeline.",
+                        old_next, last_block_number, go_next
+                    );
+                } else {
+                    info!(
+                        "📊 [INIT] next_block_number confirmed at {} (Go last_block_number={})",
+                        *next_bn_guard, last_block_number
+                    );
+                }
             }
 
             // Initialize last_processed_epoch

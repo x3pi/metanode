@@ -276,7 +276,6 @@ go app.blockProcessor.GenerateBlock()           // Tạo block mới
 go app.transactionProcessor.ProcessTransactionsFromSub() // Xử lý txs
 go app.blockProcessor.TxsProcessor()            // Xử lý write queries
 go app.blockProcessor.TxsProcessor2()           // Xử lý read queries
-go app.blockProcessor.ProcessorPool()           // Background jobs
 ```
 
 **Kết nối**:

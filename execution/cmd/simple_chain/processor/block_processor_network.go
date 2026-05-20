@@ -5,7 +5,6 @@ package processor
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -15,10 +14,12 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -73,7 +74,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 	dataDir := bp.config.Databases.RootPath
 	if err := executor.InitFFIBridge(rustConfigPath, dataDir, reqHandler, blockQueue); err != nil {
 		logger.Error("❌ [FFI BRIDGE] Error starting FFI Bridge: %v", err)
-		os.Exit(1)
+		fatal.Exit("Fatal exit from block_processor_network.go")
 	}
 
 	logger.Info("✅ [FFI BRIDGE] MetaNode Consensus initialized via FFI")
@@ -107,7 +108,7 @@ func (bp *BlockProcessor) runSocketExecutor(path string) {
 	// 2. Start listening (non-blocking)
 	if err := listener.Start(); err != nil {
 		logger.Error("Could not start listener: %v", err)
-		os.Exit(1)
+		fatal.Exit("Fatal exit from block_processor_network.go")
 	}
 
 	// Create a goroutine to handle safe program shutdown
@@ -186,8 +187,15 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	// MEMORY FIX: Create FileLogger once (not per-epoch-data) to avoid leaking os.File handles
 	epochFileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("runSocketExecutor_" + ".log"))
 
-	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (batch-drain enabled)...")
+	fmt.Printf("🎧 [PROCESSOR] Starting loop to read from dataChan and authQueue (hybrid: sync+5s timeout)...")
 	authQueue := executor.GetAuthoritativeBlockQueue()
+
+	// STALL DETECTOR (May 2026): Non-blocking heartbeat to log diagnostic state
+	// when no blocks are processed for 15 seconds. This provides visibility
+	// into pipeline stalls without breaking any safety invariants.
+	stallTicker := time.NewTicker(15 * time.Second)
+	defer stallTicker.Stop()
+	lastProcessedTime := time.Now()
 
 PROCESS_LOOP:
 	for {
@@ -208,6 +216,30 @@ PROCESS_LOOP:
 				break PROCESS_LOOP
 			}
 			epochData = data
+		case <-stallTicker.C:
+			// STALL DETECTOR: Log diagnostic state when no blocks are being processed
+			stallDuration := time.Since(lastProcessedTime)
+			if stallDuration > 15*time.Second {
+				// Enhanced diagnostics: full pipeline state
+				pendingTxCount := bp.transactionProcessor.pendingTxManager.Count()
+				poolSize := bp.transactionProcessor.transactionPool.CountTransactions()
+				authQueueDepth := len(authQueue)
+				authQueueCap := cap(authQueue)
+
+				logger.Warn("🔒 [STALL-DETECT] No blocks processed for %v. "+
+					"dataChan=%d/%d, authQueue=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
+					"nextExpectedGEI=%d, currentBlock=%d, "+
+					"pendingTx=%d, poolSize=%d. "+
+					"Investigate: Rust CommitProcessor may be stuck in DIGEST-GATE.",
+					stallDuration,
+					len(dataChan), cap(dataChan),
+					authQueueDepth, authQueueCap,
+					len(bp.commitChannel), cap(bp.commitChannel),
+					bp.snapshotGateOpen.Load(),
+					nextExpectedGlobalExecIndex, currentBlockNumber,
+					pendingTxCount, poolSize)
+			}
+			continue
 		}
 
 		// Self-monitoring queue and processing rate
@@ -263,6 +295,23 @@ PROCESS_LOOP:
 					currentBlockNumber = actualLastBlockDB
 					logger.Info("🔄 [TRANSITION SYNC] Advanced block number from DB: %d → %d",
 						oldBlockNumber, currentBlockNumber)
+
+					// ═══════════════════════════════════════════════════════════
+					// NOMT TRIE RE-ALIGNMENT: Since the DB fast-forwarded via
+					// SyncBlocksRequest, the in-memory NomtStateTrie may still
+					// hold the old state root. We MUST re-align it to the new
+					// block's header before processing the next consensus block.
+					// ═══════════════════════════════════════════════════════════
+					if trie.GetStateBackend() == trie.BackendNOMT {
+						lastBlock := bp.GetLastBlock()
+						if lastBlock != nil {
+							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)", 
+								currentBlockNumber, actualLastGEI)
+							if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
+								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
+							}
+						}
+					}
 				}
 
 				if oldNextExpected != nextExpectedGlobalExecIndex {
@@ -353,7 +402,7 @@ PROCESS_LOOP:
 						// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 						// use the same atomic counter. Previously used Rust's hint GEI
 						// directly, which could diverge from GEIAuthority's counter.
-						bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex)
+						bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
 						nextExpectedGlobalExecIndex = highestGEI + 1
 						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
@@ -366,9 +415,15 @@ PROCESS_LOOP:
 						// Now process the non-empty/non-consecutive commit
 						logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", nextGEI)
 						
+						blockStart := time.Now()
 						bp.ExecutionMutex.RLock()
 						bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 						bp.ExecutionMutex.RUnlock()
+						lastProcessedTime = time.Now()
+						if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+							logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
+								blockDur, nextGEI, len(next.Transactions))
+						}
 						
 						drainTimeout.Stop()
 						goto BATCH_DONE
@@ -383,7 +438,7 @@ PROCESS_LOOP:
 			// Persist only the final GEI and CommitIndex (1 atomic DB write for entire batch)
 			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 			// use the same atomic counter, preventing +1 offset divergence.
-			bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex)
+			bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
 			nextExpectedGlobalExecIndex = highestGEI + 1
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)
@@ -396,18 +451,47 @@ PROCESS_LOOP:
 			// Check pending blocks after batch drain
 			if pendingBlock, exists := pendingBlocks[nextExpectedGlobalExecIndex]; exists {
 				delete(pendingBlocks, nextExpectedGlobalExecIndex)
+				blockStart := time.Now()
 				bp.ExecutionMutex.RLock()
 				bp.processSingleEpochData(pendingBlock, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 				bp.ExecutionMutex.RUnlock()
+				lastProcessedTime = time.Now()
+				if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+					logger.Warn("🐌 [SLOW-BLOCK] Pending block processing took %v", blockDur)
+				}
 			}
 		BATCH_DONE:
 			continue
 		} else {
 			// Non-empty commit, authoritative, or non-sequential — full processing path
 			logger.Info("📥 [PROCESSOR] Read block from channel: global_exec_index=%d, auth=%v", epochData.GetGlobalExecIndex(), authRespCh != nil)
+
+			// ═══════════════════════════════════════════════════════════════
+			// BOUNDED CONCURRENCY GUARD: Prevent unbounded map growth.
+			// If a permanent GEI gap causes pendingBlocks to grow forever,
+			// this cap prevents OOM. The cleared entries will be re-sent
+			// by Rust on the next retry cycle.
+			// ═══════════════════════════════════════════════════════════════
+			if len(pendingBlocks) > 1000 {
+				logger.Error("🚨 [BOUNDED] pendingBlocks overflow (%d entries) — clearing to prevent OOM. "+
+					"Possible permanent GEI gap. Rust will retry.", len(pendingBlocks))
+				pendingBlocks = make(map[uint64]*pb.ExecutableBlock)
+			}
+			if len(skippedCommitsWithTxs) > 500 {
+				logger.Error("🚨 [BOUNDED] skippedCommitsWithTxs overflow (%d entries) — clearing to prevent OOM.",
+					len(skippedCommitsWithTxs))
+				skippedCommitsWithTxs = make(map[uint64]*pb.ExecutableBlock)
+			}
+
+			blockStart := time.Now()
 			bp.ExecutionMutex.RLock()
 			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 			bp.ExecutionMutex.RUnlock()
+			lastProcessedTime = time.Now()
+			if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+				logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
+					blockDur, epochData.GetGlobalExecIndex(), len(epochData.Transactions))
+			}
 
 			// GO-AUTHORITATIVE GEI: Send Response
 			if authRespCh != nil {
@@ -550,7 +634,7 @@ func (bp *BlockProcessor) ProcessBlockData(request network.Request) error {
 				if len(bp.masterBLSPubKey) > 0 && !bp.skipSigVerification {
 					sig := header.AggregateSignature()
 					if len(sig) > 0 {
-						signingHash := header.HashWithoutSignature()
+						signingHash := header.Hash()
 						if !block_signer.VerifyBlockSignature(signingHash, sig, bp.masterBLSPubKey) {
 							logger.Error("🚨 [BLOCK VERIFY] REJECTED block #%d: BLS signature INVALID! hash=%s",
 								header.BlockNumber(), signingHash.Hex()[:16]+"...")
@@ -833,7 +917,7 @@ func (bp *BlockProcessor) StartupCatchUp() {
 			logger.Error("  └─────────────────────────────────────────────────────┘")
 			logger.Error("")
 			logger.Error("  🛑 Sub-node is HALTING to prevent running with corrupted state.")
-			os.Exit(1)
+			fatal.Exit("Fatal exit from block_processor_network.go")
 		}
 
 		logger.Info("╔══════════════════════════════════════════════════════════╗")
