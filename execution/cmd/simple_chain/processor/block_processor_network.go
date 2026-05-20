@@ -422,7 +422,9 @@ PROCESS_LOOP:
 						
 						blockStart := time.Now()
 						bp.ExecutionMutex.RLock()
-						bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
+						if err := bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger); err != nil {
+							logger.Error("❌ [PROCESSOR] processSingleEpochData failed for next block from channel: %v", err)
+						}
 						bp.ExecutionMutex.RUnlock()
 						lastProcessedTime = time.Now()
 						if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
@@ -458,7 +460,9 @@ PROCESS_LOOP:
 				delete(pendingBlocks, nextExpectedGlobalExecIndex)
 				blockStart := time.Now()
 				bp.ExecutionMutex.RLock()
-				bp.processSingleEpochData(pendingBlock, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
+				if err := bp.processSingleEpochData(pendingBlock, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger); err != nil {
+					logger.Error("❌ [PROCESSOR] processSingleEpochData failed for pendingBlock: %v", err)
+				}
 				bp.ExecutionMutex.RUnlock()
 				lastProcessedTime = time.Now()
 				if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
@@ -490,7 +494,7 @@ PROCESS_LOOP:
 
 			blockStart := time.Now()
 			bp.ExecutionMutex.RLock()
-			bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
+			err := bp.processSingleEpochData(epochData, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger)
 			bp.ExecutionMutex.RUnlock()
 			lastProcessedTime = time.Now()
 			if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
@@ -500,13 +504,24 @@ PROCESS_LOOP:
 
 			// GO-AUTHORITATIVE GEI: Send Response
 			if authRespCh != nil {
-				// The GEI authority has already advanced nextExpectedGlobalExecIndex inside processSingleEpochData
-				assignedGei := nextExpectedGlobalExecIndex - 1
-				authRespCh <- &pb.ExecuteBlockResponse{
-					Success:      true,
-					ActualGei:    assignedGei,
-					BlockNumber:  currentBlockNumber,
-					GeisConsumed: 1,
+				if err != nil {
+					logger.Error("❌ [PROCESSOR] Authoritative block execution FAILED: %v", err)
+					authRespCh <- &pb.ExecuteBlockResponse{
+						Success:      false,
+						Error:        err.Error(),
+						ActualGei:    incomingGEI,
+						BlockNumber:  currentBlockNumber,
+						GeisConsumed: 0,
+					}
+				} else {
+					// The GEI authority has already advanced nextExpectedGlobalExecIndex inside processSingleEpochData
+					assignedGei := nextExpectedGlobalExecIndex - 1
+					authRespCh <- &pb.ExecuteBlockResponse{
+						Success:      true,
+						ActualGei:    assignedGei,
+						BlockNumber:  currentBlockNumber,
+						GeisConsumed: 1,
+					}
 				}
 			}
 		}
