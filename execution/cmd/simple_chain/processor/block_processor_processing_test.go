@@ -1,13 +1,10 @@
 package processor
 
 import (
-	"math/big"
 	"testing"
-	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
-	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,28 +60,23 @@ func TestGenerateBlockData_BasicCreation(t *testing.T) {
 // ============================================================================
 // TestGenerateBlockData_ZeroTimestampFallback
 // ============================================================================
-func TestGenerateBlockData_ZeroTimestampFallback(t *testing.T) {
+func TestGenerateBlockData_ZeroTimestampPanic(t *testing.T) {
 	lastHeader := block.NewBlockHeader(
 		e_common.Hash{}, 0,
 		e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
 		e_common.Address{}, 0, e_common.Hash{}, 0,
 	)
 
-	before := uint64(time.Now().Unix())
-	bl, err := GenerateBlockData(
-		lastHeader, e_common.Address{},
-		nil, nil,
-		e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
-		1, 0,
-		0, // zero → should fallback to time.Now()
-		0, // globalExecIndex
-	)
-	after := uint64(time.Now().Unix())
-
-	require.NoError(t, err)
-	ts := bl.Header().TimeStamp()
-	assert.True(t, ts >= before && ts <= after,
-		"zero timestamp should fallback to time.Now(), got %d (expected %d-%d)", ts, before, after)
+	assert.Panics(t, func() {
+		_, _ = GenerateBlockData(
+			lastHeader, e_common.Address{},
+			nil, nil,
+			e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
+			1, 0,
+			0, // zero -> must panic
+			0, // globalExecIndex
+		)
+	}, "zero timestamp must panic to prevent fork-safety issues")
 }
 
 // ============================================================================
@@ -140,22 +132,17 @@ func TestGenerateBlockDataReadOnly(t *testing.T) {
 // ============================================================================
 // TestGenerateBlockDataReadOnly_ZeroTimestamp
 // ============================================================================
-func TestGenerateBlockDataReadOnly_ZeroTimestamp(t *testing.T) {
-	before := uint64(time.Now().Unix())
-	bl, err := GenerateBlockDataReadOnly(
-		e_common.Address{},
-		nil, nil,
-		e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
-		1, 0,
-		0, // zero → fallback
-		0, // globalExecIndex
-	)
-	after := uint64(time.Now().Unix())
-
-	require.NoError(t, err)
-	ts := bl.Header().TimeStamp()
-	assert.True(t, ts >= before && ts <= after,
-		"zero timestamp should fallback to time.Now()")
+func TestGenerateBlockDataReadOnly_ZeroTimestampPanic(t *testing.T) {
+	assert.Panics(t, func() {
+		_, _ = GenerateBlockDataReadOnly(
+			e_common.Address{},
+			nil, nil,
+			e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
+			1, 0,
+			0, // zero -> must panic
+			0, // globalExecIndex
+		)
+	}, "zero timestamp must panic to prevent fork-safety issues")
 }
 
 // ============================================================================
