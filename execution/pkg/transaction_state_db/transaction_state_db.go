@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -226,20 +227,34 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		wg.Wait()
 		close(results)
 
-		// Thu thập kết quả và cập nhật trie
-		batchKeys := make([][]byte, 0, numJobs)
-		batchValues := make([][]byte, 0, numJobs)
+		var resultsList []marshalResult
 
 		for res := range results {
 			if res.err != nil {
 				return common.Hash{}, fmt.Errorf("failed to marshal transaction %s: %w", res.hash.Hex(), res.err)
 			}
-			
-			// FORK-SAFETY & PERF: Loại bỏ db.trie.Get tuần tự.
-			// Mọi hash giao dịch là duy nhất hoặc Update nội dung giống hệt
-			// là idempotent (không đổi Trie Root hash).
-			batchKeys = append(batchKeys, res.hash.Bytes())
-			batchValues = append(batchValues, res.data)
+			resultsList = append(resultsList, res)
+		}
+
+		// FORK-SAFETY: Sort by txHash for deterministic trie insertion order
+		sort.Slice(resultsList, func(i, j int) bool {
+			// Compare hashes directly byte by byte
+			for k := 0; k < len(resultsList[i].hash); k++ {
+				if resultsList[i].hash[k] < resultsList[j].hash[k] {
+					return true
+				}
+				if resultsList[i].hash[k] > resultsList[j].hash[k] {
+					return false
+				}
+			}
+			return false
+		})
+
+		batchKeys := make([][]byte, len(resultsList))
+		batchValues := make([][]byte, len(resultsList))
+		for i, res := range resultsList {
+			batchKeys[i] = res.hash.Bytes()
+			batchValues[i] = res.data
 		}
 
 		if len(batchKeys) > 0 {
@@ -254,8 +269,6 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 				}
 			}
 		}
-		// Sau khi đã cập nhật trie, xóa danh sách dirty
-		db.dirtyTransactions = make(map[common.Hash]types.Transaction)
 		logger.Info("✅ [txDB Phase 1] Marshalling & Trie BatchUpdate completed in %v", time.Since(marshalTimeStart))
 	} else {
 		logger.Debug("Commit: No dirty transactions to process. Proceeding to commit current trie state.")
@@ -324,6 +337,10 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("failed to reset trie to empty state: %w", err)
 	}
 	db.originRootHash = trie.EmptyRootHash
+	
+	// Reset dirtyTransactions AFTER they have been successfully written to the DB
+	db.dirtyTransactions = make(map[common.Hash]types.Transaction)
+	
 	logger.Debug(fmt.Sprintf("✅ [Phase 4] Cleanup and Reset completed in %v", time.Since(cleanupTimeStart)))
 
 	logger.Debug(fmt.Sprintf("🚀 Total Commit execution time: %v", time.Since(totalTimeStart)))
@@ -383,6 +400,11 @@ func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 		}
 		results = append(results, res)
 	}
+
+	// FORK-SAFETY: Sort by txHash for deterministic trie insertion order
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].hash.Cmp(results[j].hash) < 0
+	})
 
 	// PARALLEL TRIE UPDATE: Use BatchUpdate for multi-core scaling
 	batchKeys := make([][]byte, len(results))

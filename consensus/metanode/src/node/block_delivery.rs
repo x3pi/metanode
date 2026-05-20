@@ -46,6 +46,7 @@ impl BlockDeliveryManager {
         info!("🚚 [STATION 4: DELIVERY] Started BlockDeliveryManager loop. Conveyor belt active.");
         while let Some(msg) = self.receiver.recv().await {
             let commit_index = msg.subdag.commit_ref.index;
+
             let result = self
                 .executor_client
                 .send_committed_subdag(
@@ -58,6 +59,11 @@ impl BlockDeliveryManager {
 
             match result {
                 Ok(geis_consumed) => {
+                    info!(
+                        "✅ [TX-FLOW-TRACE] ▶ PHASE 3.3→3.4 DONE: send_committed_subdag completed | \
+                         commit_index={}, gei={}, geis_consumed={}",
+                        commit_index, msg.global_exec_index, geis_consumed
+                    );
                     if let Err(_) = msg.response_tx.send(geis_consumed) {
                         error!("🚨 [STATION 4: DELIVERY] Processor dropped response channel for commit {} before reply could be sent.", commit_index);
                     }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -127,6 +128,22 @@ type nomtDirtyEntry struct {
 
 // Compile-time check: NomtStateTrie must implement StateTrie.
 var _ StateTrie = (*NomtStateTrie)(nil)
+
+// NomtSessionToFlush holds a finished session and its associated handle for deferred flushing.
+type NomtSessionToFlush struct {
+	Session *nomt_ffi.FinishedSession
+	Handle  *nomt_ffi.Handle
+}
+
+// FlushNomtSessions performs disk I/O synchronously for a batch of sessions.
+func FlushNomtSessions(sessions []NomtSessionToFlush) error {
+	for _, s := range sessions {
+		if err := s.Session.CommitPayload(s.Handle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // nomtRegistryKeyPrefix is used to store the keys registry in NOMT.
 // DEPRECATED: Registry is now stored in a separate file, NOT in the NOMT Merkle trie.
@@ -502,29 +519,60 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 }
 
 // Update sets the value for a key. Buffers in dirty map — O(1).
-// Uses writerMu (fast, no FFI under lock). Readers are NEVER blocked.
+// PERFORMANCE FIX (May 2026): Old-value FFI read moved OUTSIDE writerMu.Lock().
+// Previously, handle.Read() (50-200µs FFI call) was called under writer lock,
+// blocking all concurrent Get() calls from 64 server workers. Now pre-fetched
+// using lock-free readView + thread-safe handle.Read(), matching BatchUpdate() pattern.
 func (n *NomtStateTrie) Update(key, value []byte) error {
 	hexKey := hex.EncodeToString(key)
 	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 
-	n.writerMu.Lock()
-	// Load old value for replication tracking (only once per key per block)
-	if !n.wOldLoaded[hexKey] {
-		// Check committing from readView (lock-free read of immutable map)
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 1: PRE-FETCH old value OUTSIDE writerMu (NO lock contention)
+	// handle.Read() is thread-safe. readView is lock-free atomic load (~1ns).
+	// ═══════════════════════════════════════════════════════════════════════
+	var prefetchedOldVal []byte
+	var prefetchedLoaded bool
+
+	// Quick check: if writer already loaded this key, skip prefetch entirely.
+	// writerMu.RLock is cheap (~1ns) and doesn't block other readers.
+	n.writerMu.RLock()
+	alreadyLoaded := n.wOldLoaded[hexKey]
+	// Also check if key is already in wDirty — if so, old value was captured
+	// when the first Update() for this key ran, no need to prefetch again.
+	_, alreadyDirty := n.wDirty[hexKey]
+	n.writerMu.RUnlock()
+
+	if !alreadyLoaded && !alreadyDirty {
+		// Check committing from readView (lock-free, immutable snapshot)
 		view := n.loadReadView()
 		if view.committing != nil {
 			if commEntry, ok := view.committing[hexKey]; ok {
-				n.wOldValues[hexKey] = commEntry.value
-				n.wOldLoaded[hexKey] = true
+				prefetchedOldVal = commEntry.value
+				prefetchedLoaded = true
 			}
 		}
-		if !n.wOldLoaded[hexKey] {
+		if !prefetchedLoaded {
+			// Thread-safe FFI read — NO lock held
 			oldVal, found, err := n.handle.Read(keyPath)
 			if err == nil && found && len(oldVal) > 0 {
-				n.wOldValues[hexKey] = oldVal
+				prefetchedOldVal = oldVal
 			}
-			n.wOldLoaded[hexKey] = true
+			prefetchedLoaded = true
 		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 2: ACQUIRE writerMu and mutate dirty map (fast, no FFI under lock)
+	// ═══════════════════════════════════════════════════════════════════════
+	n.writerMu.Lock()
+
+	// Apply prefetched old value (only if not already loaded by a concurrent Update)
+	if prefetchedLoaded && !n.wOldLoaded[hexKey] {
+		if len(prefetchedOldVal) > 0 {
+			n.wOldValues[hexKey] = prefetchedOldVal
+		}
+		n.wOldLoaded[hexKey] = true
 	}
 
 	keyCopy := make([]byte, len(key))
@@ -600,13 +648,18 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 				keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 				hexKey := hex.EncodeToString(key)
 
-				// Read old value from NOMT (thread-safe concurrent read)
+				// CRITICAL FORK-SAFETY FIX: Use n.Get(key) instead of n.handle.Read(keyPath).
+				// n.handle.Read() only sees data flushed to disk via CommitPayload.
+				// If a previous block modified this key but hasn't flushed yet,
+				// handle.Read() returns STALE data. This stale data becomes the `oldValue`
+				// passed to NOMT C++, resulting in a divergent Merkle hash (CHAIN BROKEN).
+				// n.Get() correctly checks wDirty, view.dirty, and view.committing first.
 				var oldVal []byte
 				var loaded bool
-				val, found, err := n.handle.Read(keyPath)
-				if err == nil {
+				val, getErr := n.Get(keyCopy)
+				if getErr == nil {
 					loaded = true
-					if found && len(val) > 0 {
+					if len(val) > 0 {
 						oldVal = val
 					}
 				}
@@ -793,9 +846,12 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 
 	// Perform slow FFI operations OUTSIDE sessionMu to avoid blocking the fast path
 	if fs != nil {
-		logger.Info("[NomtStateTrie] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
+		startDrain := time.Now()
+		logger.Info("⏳ [NOMT-SYNC-DRAIN] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
 		if err := fs.CommitPayload(n.handle); err != nil {
-			logger.Error("[NomtStateTrie] Failed to drain pendingFinishedSession: %v", err)
+			logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+		} else {
+			logger.Info("✅ [NOMT-SYNC-DRAIN] Successfully drained pendingFinishedSession in %v (namespace=%s)", time.Since(startDrain), string(n.namespace))
 		}
 
 		// Clear committing from readView since data is now on disk
@@ -826,6 +882,31 @@ func (n *NomtStateTrie) PreWarm(keys [][]byte) {
 // LOCK-FREE: reads from atomic readView.
 func (n *NomtStateTrie) Hash() e_common.Hash {
 	return n.loadReadView().rootHash
+}
+
+// RealignRoot updates the in-memory root hash to match the C++ NOMT engine's
+// authoritative state after a DB fast-forward (e.g., P2P block sync via
+// HandleSyncBlocksRequest). This is O(1) — no FFI calls, no file I/O.
+//
+// WHEN TO USE: After NOMT C++ has been updated via ApplyNomtReplicationBatches
+// or direct CommitPayload, and Go's readView.rootHash is stale.
+//
+// WHEN NOT TO USE: During normal consensus execution — Commit() already
+// updates rootHash atomically.
+//
+// FORK-SAFETY: This ONLY updates the in-memory view. It does NOT modify
+// the C++ NOMT state. If the expectedRoot doesn't match the actual C++ handle
+// root, subsequent Commit() calls will compute the correct root from dirty state.
+func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
+	n.writerMu.Lock()
+	view := n.loadReadView()
+	oldRoot := view.rootHash
+	n.publishReadView(view.dirty, view.committing, expectedRoot)
+	n.writerMu.Unlock()
+	if oldRoot != expectedRoot {
+		logger.Info("🔧 [NOMT-REALIGN] namespace=%s, root %s → %s",
+			string(n.namespace), oldRoot.Hex()[:18], expectedRoot.Hex()[:18])
+	}
 }
 
 // Commit finalizes changes: writes all dirty entries to NOMT via batch session.
@@ -1157,9 +1238,11 @@ func (n *NomtStateTrie) GetCommitBatch() [][2][]byte {
 // commit takes 4+ minutes, completely stalling sub-node sync. Instead, we simply strip the
 // 'nomt:' prefix and keep the data in the PebbleDB batch for fast downstream writes.
 // This reduces block apply time from minutes to milliseconds.
-func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error {
+func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]NomtSessionToFlush, error) {
+	var sessionsToFlush []NomtSessionToFlush
+
 	if globalStateBackend != BackendNOMT {
-		return nil
+		return sessionsToFlush, nil
 	}
 
 	// We apply NOMT batches for BOTH Master and Sub nodes.
@@ -1205,7 +1288,7 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 		if len(nomtKeys) > 0 {
 			handle, err := GetOrInitNomtHandle(namespace)
 			if err != nil {
-				return fmt.Errorf("failed to init NOMT handle for sync: %w", err)
+				return sessionsToFlush, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
 			}
 
 			if batchName == "SC Storage" {
@@ -1259,13 +1342,13 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 					t := NewNomtStateTrie(handle, false, keyPrefix)
 					t.SetReplicationSync(true)
 					if err := t.BatchUpdate(group.keys, group.values); err != nil {
-						return fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					if _, _, _, err := t.Commit(true); err != nil {
-						return fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					if err := t.CommitPayload(); err != nil {
-						return fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					totalKeys += len(group.keys)
 				}
@@ -1291,13 +1374,13 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 				}
 				
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
-					return fmt.Errorf("failed to apply nomt sync batch: %w", err)
+					return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}
 				if _, _, _, err := trie.Commit(true); err != nil {
-					return fmt.Errorf("failed to commit nomt sync batch: %w", err)
+					return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
 				if err := trie.CommitPayload(); err != nil {
-					return fmt.Errorf("failed to flush nomt sync batch: %w", err)
+					return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch: %w", err)
 				}
 
 				// FORK-DIAG: Log handle root AFTER sync
@@ -1335,5 +1418,5 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) error
 		}
 	}
 
-	return nil
+	return sessionsToFlush, nil
 }

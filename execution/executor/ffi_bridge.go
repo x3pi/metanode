@@ -110,10 +110,26 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
 	// ═══════════════════════════════════════════════════════════════════
-	// SYNCHRONOUS MODE (Enforced for ALL blocks)
-	// We dispatch via AuthoritativeBlockRequest and WAIT for the response.
-	// This is synchronous (blocking) but safe because CommitProcessor
-	// already serializes commits (one at a time).
+	// BACKPRESSURE FIX (May 2026): Synchronous dispatch via authQueue
+	// with HONEST indefinite wait — provides natural backpressure.
+	//
+	// KEY INSIGHT: Rust calls cgo_execute_block via spawn_blocking(),
+	// which runs on a dedicated thread pool. Blocking here does NOT
+	// block Rust's async runtime (tokio). This means we can safely
+	// wait indefinitely — Rust can still process consensus, RPCs, etc.
+	//
+	// WHY NOT TIMEOUT:
+	// The previous 5s timeout returned true (lied to Rust), causing:
+	// - Rust thought block was processed → sent next block immediately
+	// - Gap accumulated: 121+ blocks between Rust GEI and Go GEI
+	// - At epoch boundary, poll_go_until_synced waited 30+s for Go
+	// - If Go couldn't catch up → crash
+	//
+	// HONEST WAIT gives natural backpressure:
+	// - Rust can only send 1 block per spawn_blocking thread at a time
+	// - Go processing time directly limits Rust's send rate
+	// - Gap stays small (< authQueue buffer size)
+	// - "thà pending chứ không fork" — prefer stall over divergence
 	// ═══════════════════════════════════════════════════════════════════
 	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
@@ -122,34 +138,58 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 			ResponseCh: responseCh,
 		}
 
-		// Send request (blocking if queue is full — natural backpressure)
-		defaultAuthoritativeBlockQueue <- req
-
-		// Wait for response with timeout
+		// Non-blocking send to authQueue (1000 buffer).
+		// If queue is full, Go is severely behind — drop block.
 		select {
-		case resp := <-responseCh:
-			if resp != nil && resp.Success {
-				logger.Debug("[FFI Bridge] Authoritative GEI assigned: actual_gei=%d, geis_consumed=%d",
-					resp.ActualGei, resp.GeisConsumed)
-				return C.bool(true)
-			}
-			if resp != nil {
-				logger.Error("[FFI Bridge] Authoritative block processing failed: %s", resp.Error)
-			}
+		case defaultAuthoritativeBlockQueue <- req:
+			// Block dispatched. Now wait for response INDEFINITELY.
+		default:
+			logger.Error("[FFI Bridge] 🚨 authQueue full (1000)! Block GEI=%d dropped. "+
+				"Go block processing is severely behind.",
+				subDag.GetGlobalExecIndex())
 			return C.bool(false)
-		case <-time.After(300 * time.Second):
-			logger.Error("[FFI Bridge] Authoritative block processing timed out (300s)")
-			return C.bool(false)
+		}
+
+		// Wait for Go to finish processing — INDEFINITELY with progress logging.
+		// Rust uses spawn_blocking() so blocking here is safe.
+		// This provides honest backpressure: Rust send rate = Go processing rate.
+		waitStart := time.Now()
+		logInterval := 5 * time.Second
+		gei := subDag.GetGlobalExecIndex()
+		for {
+			select {
+			case resp := <-responseCh:
+				if resp != nil && resp.Success {
+					elapsed := time.Since(waitStart)
+					if elapsed > 3*time.Second {
+						logger.Info("[FFI Bridge] ✅ Block GEI=%d processed after %v (slow but OK)",
+							gei, elapsed)
+					}
+					return C.bool(true)
+				}
+				if resp != nil {
+					logger.Error("[FFI Bridge] Block processing failed: %s", resp.Error)
+				}
+				return C.bool(false)
+			case <-time.After(logInterval):
+				elapsed := time.Since(waitStart)
+				logger.Warn("[FFI Bridge] ⏳ Block GEI=%d still processing after %v. "+
+					"authQueue depth=%d. Waiting (backpressure active).",
+					gei, elapsed, len(defaultAuthoritativeBlockQueue))
+			}
 		}
 	}
 
-	// ═══════════════════════════════════════════════════════════════════
-	// LEGACY MODE: Fire-and-forget (original behavior)
-	// ═══════════════════════════════════════════════════════════════════
+	// FALLBACK: Use dataChan if authQueue not initialized
 	if defaultListenerBlockQueue != nil {
-		// Blocking send, exactly as listener.go
-		defaultListenerBlockQueue <- &subDag
-		return C.bool(true)
+		select {
+		case defaultListenerBlockQueue <- &subDag:
+			return C.bool(true)
+		case <-time.After(5 * time.Second):
+			logger.Error("[FFI Bridge] dataChan blocked for 5s. GEI=%d",
+				subDag.GetGlobalExecIndex())
+			return C.bool(false)
+		}
 	}
 
 	logger.Error("[FFI Bridge] Block queue is not initialized!")

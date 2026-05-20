@@ -3,7 +3,7 @@
 
 use crate::node::executor_client::ExecutorClient;
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use consensus_config::{
     Authority, AuthorityPublicKey, Committee, NetworkPublicKey, ProtocolPublicKey,
 };
@@ -102,27 +102,12 @@ pub fn build_committee_from_validator_list(
 ) -> Result<Committee> {
     let mut sorted_validators: Vec<_> = validators.into_iter().collect();
     // CRITICAL FIX: Sort by authority_key (BLS public key) for DETERMINISTIC ordering
-    // We MUST decode the Base64 strings to bytes before comparing, because Base64
-    // character values do not monotonically map to the underlying byte values.
+    // The keys are already raw bytes from the updated protobuf.
     // This perfectly aligns with Go's `bytes.Compare` sorting in block_processor_core.go!
     sorted_validators.sort_by(|a, b| {
-        let get_bytes = |k: &String| -> Vec<u8> {
-            if k.starts_with("0x") {
-                hex::decode(&k[2..]).unwrap_or_default()
-            } else {
-                match STANDARD.decode(k) {
-                    Ok(bytes) => bytes,
-                    Err(_) => hex::decode(k).unwrap_or_default(),
-                }
-            }
-        };
-        let bytes_a = get_bytes(&a.authority_key);
-        let bytes_b = get_bytes(&b.authority_key);
-        
-        let cmp = bytes_a.cmp(&bytes_b);
+        let cmp = a.authority_key.cmp(&b.authority_key);
         if cmp == std::cmp::Ordering::Equal {
-            // FORK-SAFETY (May 2026): If get_bytes fails (e.g. unexpected encoding) and returns empty vecs,
-            // or if keys are identical, fallback to sorting by ETH address (and then p2p_address)
+            // FORK-SAFETY (May 2026): If keys are identical, fallback to sorting by ETH address (and then p2p_address)
             // to guarantee a strictly deterministic sort order across all nodes.
             a.address.cmp(&b.address).then_with(|| a.p2p_address.cmp(&b.p2p_address))
         } else {
@@ -138,39 +123,18 @@ pub fn build_committee_from_validator_list(
         let address: Multiaddr = validator.p2p_address.parse()?;
 
         // Auth Key
-        let authority_key_bytes = if validator.authority_key.starts_with("0x") {
-            hex::decode(&validator.authority_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.authority_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.authority_key)?,
-            }
-        };
+        let authority_key_bytes = validator.authority_key.clone();
         let authority_pubkey =
             bls12381::min_sig::BLS12381PublicKey::from_bytes(&authority_key_bytes)?;
         let authority_key = AuthorityPublicKey::new(authority_pubkey);
 
         // Protocol Key
-        let protocol_key_bytes = if validator.protocol_key.starts_with("0x") {
-            hex::decode(&validator.protocol_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.protocol_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.protocol_key)?,
-            }
-        };
+        let protocol_key_bytes = validator.protocol_key.clone();
         let protocol_pubkey = ed25519::Ed25519PublicKey::from_bytes(&protocol_key_bytes)?;
         let protocol_key = ProtocolPublicKey::new(protocol_pubkey);
 
         // Network Key
-        let network_key_bytes = if validator.network_key.starts_with("0x") {
-            hex::decode(&validator.network_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.network_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.network_key)?,
-            }
-        };
+        let network_key_bytes = validator.network_key.clone();
         let network_pubkey = ed25519::Ed25519PublicKey::from_bytes(&network_key_bytes)?;
         let network_key = NetworkPublicKey::new(network_pubkey);
 
@@ -206,27 +170,12 @@ pub fn build_committee_with_eth_addresses(
 ) -> Result<(Committee, Vec<Vec<u8>>)> {
     let mut sorted_validators: Vec<_> = validators.into_iter().collect();
     // CRITICAL FIX: Sort by authority_key (BLS public key) for DETERMINISTIC ordering
-    // We MUST decode the Base64 strings to bytes before comparing, because Base64
-    // character values do not monotonically map to the underlying byte values.
+    // The keys are already raw bytes from the updated protobuf.
     // This perfectly aligns with Go's `bytes.Compare` sorting in block_processor_core.go!
     sorted_validators.sort_by(|a, b| {
-        let get_bytes = |k: &String| -> Vec<u8> {
-            if k.starts_with("0x") {
-                hex::decode(&k[2..]).unwrap_or_default()
-            } else {
-                match STANDARD.decode(k) {
-                    Ok(bytes) => bytes,
-                    Err(_) => hex::decode(k).unwrap_or_default(),
-                }
-            }
-        };
-        let bytes_a = get_bytes(&a.authority_key);
-        let bytes_b = get_bytes(&b.authority_key);
-        
-        let cmp = bytes_a.cmp(&bytes_b);
+        let cmp = a.authority_key.cmp(&b.authority_key);
         if cmp == std::cmp::Ordering::Equal {
-            // FORK-SAFETY (May 2026): If get_bytes fails (e.g. unexpected encoding) and returns empty vecs,
-            // or if keys are identical, fallback to sorting by ETH address (and then p2p_address)
+            // FORK-SAFETY (May 2026): If keys are identical, fallback to sorting by ETH address (and then p2p_address)
             // to guarantee a strictly deterministic sort order across all nodes.
             a.address.cmp(&b.address).then_with(|| a.p2p_address.cmp(&b.p2p_address))
         } else {
@@ -264,39 +213,18 @@ pub fn build_committee_with_eth_addresses(
         eth_addresses.push(eth_addr_bytes);
 
         // Auth Key
-        let authority_key_bytes = if validator.authority_key.starts_with("0x") {
-            hex::decode(&validator.authority_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.authority_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.authority_key)?,
-            }
-        };
+        let authority_key_bytes = validator.authority_key.clone();
         let authority_pubkey =
             bls12381::min_sig::BLS12381PublicKey::from_bytes(&authority_key_bytes)?;
         let authority_key = AuthorityPublicKey::new(authority_pubkey);
 
         // Protocol Key
-        let protocol_key_bytes = if validator.protocol_key.starts_with("0x") {
-            hex::decode(&validator.protocol_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.protocol_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.protocol_key)?,
-            }
-        };
+        let protocol_key_bytes = validator.protocol_key.clone();
         let protocol_pubkey = ed25519::Ed25519PublicKey::from_bytes(&protocol_key_bytes)?;
         let protocol_key = ProtocolPublicKey::new(protocol_pubkey);
 
         // Network Key
-        let network_key_bytes = if validator.network_key.starts_with("0x") {
-            hex::decode(&validator.network_key[2..])?
-        } else {
-            match STANDARD.decode(&validator.network_key) {
-                Ok(b) => b,
-                Err(_) => hex::decode(&validator.network_key)?,
-            }
-        };
+        let network_key_bytes = validator.network_key.clone();
         let network_pubkey = ed25519::Ed25519PublicKey::from_bytes(&network_key_bytes)?;
         let network_key = NetworkPublicKey::new(network_pubkey);
 

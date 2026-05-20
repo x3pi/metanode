@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -46,18 +47,17 @@ type ChainState struct {
 
 	currentBlockHeader atomic.Pointer[types.BlockHeader]
 	storageManager     *storage.StorageManager
-	accountStateDB     *account_state_db.AccountStateDB
-	smartContractDB    *smart_contract_db.SmartContractDB
+	accountStateDB     atomic.Pointer[account_state_db.AccountStateDB]
+	smartContractDB    atomic.Pointer[smart_contract_db.SmartContractDB]
+	stakeStateDB       atomic.Pointer[stake_state_db.StakeStateDB]
 	blockDatabase      *block.BlockDatabase
-	stakeStateDB       *stake_state_db.StakeStateDB
 	freeFeeAddress     map[common.Address]struct{}
 	changelogDB        *state_changelog.StateChangelogDB
 	stakeChangelogDB   *state_changelog.StateChangelogDB
-	// stateMutex protects accountStateDB, smartContractDB, stakeStateDB from
-	// concurrent access during UpdateStateForNewHeader (writer) and Get*DB (readers).
-	// Without this, virtual execution can race with block processing and read a
-	// stale accountStateDB that doesn't contain newly deployed contract state.
-	stateMutex sync.RWMutex
+
+	// commitMutex serializes all block state mutations in CommitBlockState
+	// to prevent concurrent corruption of the NOMT trie and DB batches.
+	commitMutex sync.Mutex
 
 	// Sui-style epoch tracking
 	currentEpoch          uint64
@@ -171,9 +171,6 @@ func NewChainStateWithGenesis(
 
 	cs := &ChainState{
 		storageManager:        sm,
-		accountStateDB:        asDB,
-		stakeStateDB:          stakeStateDB,
-		smartContractDB:       scDB,
 		config:                config,
 		blockDatabase:         blockDatabase,
 		freeFeeAddress:        freeFeeAddress,
@@ -189,6 +186,10 @@ func NewChainStateWithGenesis(
 		backupPath:            backupPath,                       // CRITICAL: Set BEFORE LoadEpochData()
 		attestationInterval:   10,                      // Default: attestation every 10 blocks
 	}
+
+	cs.accountStateDB.Store(asDB)
+	cs.stakeStateDB.Store(stakeStateDB)
+	cs.smartContractDB.Store(scDB)
 
 	// CRITICAL: Log backup path to verify node-specific path is used
 	if backupPath == "" {
@@ -254,6 +255,55 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 	if newHeader == nil {
 		return fmt.Errorf("cannot update state with a nil header")
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT FAST-PATH: Lightweight root re-alignment (~1µs vs ~10ms full rebuild)
+	//
+	// For NOMT backend, the C++ engine already has the authoritative state.
+	// We only need to update Go's in-memory root hash pointers to match.
+	// This avoids:
+	//   - loadRegistryFromFile() disk I/O per namespace
+	//   - handle.Root() FFI calls
+	//   - NewAccountStateDB/NewStakeStateDB constructor overhead
+	//   - Atomic DB pointer swaps + GC pressure from discarded old DBs
+	//
+	// FORK-SAFETY: RealignRoot only updates readView.rootHash. It does NOT
+	// modify the C++ NOMT state. Subsequent Commit() calls will compute
+	// the correct root from dirty entries against the C++ engine.
+	// ═══════════════════════════════════════════════════════════════════════
+	if trie.GetStateBackend() == trie.BackendNOMT {
+		newAccountRoot := newHeader.AccountStatesRoot()
+		newStakeRoot := common.Hash(newHeader.StakeStatesRoot())
+
+		// Realign account state trie
+		if asDB := cs.GetAccountStateDB(); asDB != nil {
+			if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newAccountRoot)
+				asDB.SetOriginRootHash(newAccountRoot)
+			}
+		}
+		// Realign stake state trie
+		if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+			if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+				nomtTrie.RealignRoot(newStakeRoot)
+				stakeDB.SetOriginRootHash(newStakeRoot)
+			}
+		}
+
+		// Update header pointer atomically
+		headerCopy := newHeader
+		cs.currentBlockHeader.Store(&headerCopy)
+
+		logger.Info("🔧 [NOMT-FAST-PATH] UpdateStateForNewHeader lightweight re-alignment for block #%d (accountRoot=%s, stakeRoot=%s)",
+			newHeader.BlockNumber(), newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+		return nil
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FULL REBUILD PATH: For MPT/Flat/Verkle backends
+	// Creates new trie instances from header roots and swaps DB pointers.
+	// ═══════════════════════════════════════════════════════════════════════
+
 	// 1. Khởi tạo lại AccountStateDB với root mới
 	accountStorage := cs.storageManager.GetStorageAccount()
 	newAccountRoot := newHeader.AccountStatesRoot() // Lấy root từ header mới
@@ -292,23 +342,22 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 		newAsDB, // Sử dụng asDB mới tạo
 	)
 
-	// 4. Cập nhật các trường trong ChainState — WRITE LOCK to prevent virtual
-	// execution from reading stale DB references during the swap.
-	cs.stateMutex.Lock()
-	if cs.accountStateDB != nil {
-		if closer, ok := interface{}(cs.accountStateDB).(interface{ Close() }); ok {
-			closer.Close()
-		}
-	}
-	if cs.stakeStateDB != nil {
-		if closer, ok := interface{}(cs.stakeStateDB.Trie()).(interface{ Close() }); ok {
-			closer.Close()
-		}
-	}
-	cs.accountStateDB = newAsDB
-	cs.stakeStateDB = newStakeStateDB
-	cs.smartContractDB = newScDB
-	cs.stateMutex.Unlock()
+	// 4. Atomic Lock-Free DB Swaps (no delayed Close)
+	// Swap the pointers immediately so new EVM transactions use the new state.
+	oldAsDB := cs.accountStateDB.Swap(newAsDB)
+	oldStakeDB := cs.stakeStateDB.Swap(newStakeStateDB)
+	oldScDB := cs.smartContractDB.Swap(newScDB)
+
+	// OLD DB LIFECYCLE: Let Go's GC handle cleanup naturally.
+	// CRITICAL FIX (May 2026 — Fork at Block 4690):
+	// The previous pseudo-RCU goroutine called oldAsDB.Close() after 5 seconds.
+	// NOMT C++ sessions share underlying mmap'd storage between old and new tries.
+	// Closing the old session while the new session is actively reading causes
+	// non-deterministic IntermediateRoot() across nodes → stateRoot divergence → FORK.
+	// The old *AccountStateDB will be GC'd once all goroutine references are dropped.
+	_ = oldAsDB
+	_ = oldStakeDB
+	_ = oldScDB
 
 	// 5. Cập nhật con trỏ header nguyên tử
 	headerCopy := newHeader
@@ -339,10 +388,10 @@ func NewChainStateRemote(
 		asDB)
 
 	cs := &ChainState{
-		accountStateDB:  asDB,
-		smartContractDB: scDB,
 		freeFeeAddress:  freeFeeAddress,
 	}
+	cs.accountStateDB.Store(asDB)
+	cs.smartContractDB.Store(scDB)
 
 	headerCopy := currentBlockHeader
 	cs.currentBlockHeader.Store(&headerCopy)
@@ -402,25 +451,16 @@ func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
 }
 
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
-	cs.stateMutex.RLock()
-	db := cs.accountStateDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.accountStateDB.Load()
 }
 
 // GetSmartContractDB trả về SmartContractDB.
 func (cs *ChainState) GetSmartContractDB() *smart_contract_db.SmartContractDB {
-	cs.stateMutex.RLock()
-	db := cs.smartContractDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.smartContractDB.Load()
 }
 
 func (cs *ChainState) GetStakeStateDB() *stake_state_db.StakeStateDB {
-	cs.stateMutex.RLock()
-	db := cs.stakeStateDB
-	cs.stateMutex.RUnlock()
-	return db
+	return cs.stakeStateDB.Load()
 }
 
 // GetStorageManager trả về StorageManager.
@@ -428,24 +468,21 @@ func (cs *ChainState) GetStorageManager() *storage.StorageManager {
 	return cs.storageManager
 }
 
-// SetAccountStateDB đặt AccountStateDB cho ChainState.
-// Lưu ý: Việc thay đổi trực tiếp DB này có thể ảnh hưởng đến tính nhất quán
-// của trạng thái nếu không được quản lý cẩn thận trong quy trình xử lý block.
 func (cs *ChainState) SetAccountStateDB(asDB *account_state_db.AccountStateDB) {
-	cs.accountStateDB = asDB
+	cs.accountStateDB.Store(asDB)
 }
 
 // InvalidateAllState clears all in-memory caches across all state databases.
 // This ensures that subsequent reads will fetch fresh data from the underlying PebbleDB/NOMT storage.
 func (cs *ChainState) InvalidateAllState() {
-	if cs.accountStateDB != nil {
-		cs.accountStateDB.InvalidateAllCaches()
+	if db := cs.accountStateDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
-	if cs.stakeStateDB != nil {
-		cs.stakeStateDB.InvalidateAllCaches()
+	if db := cs.stakeStateDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
-	if cs.smartContractDB != nil {
-		cs.smartContractDB.InvalidateAllCaches()
+	if db := cs.smartContractDB.Load(); db != nil {
+		db.InvalidateAllCaches()
 	}
 }
 
@@ -529,6 +566,12 @@ func (cs *ChainState) GetEpochBoundaryGei(epoch uint64) uint64 {
 func (cs *ChainState) SetEpochValidators(epoch uint64, serializedValidators json.RawMessage) {
 	cs.epochMutex.Lock()
 	defer cs.epochMutex.Unlock()
+	cs.setEpochValidatorsLocked(epoch, serializedValidators)
+}
+
+// setEpochValidatorsLocked is the unlocked version of SetEpochValidators.
+// Caller MUST hold cs.epochMutex.Lock().
+func (cs *ChainState) setEpochValidatorsLocked(epoch uint64, serializedValidators json.RawMessage) {
 	if cs.epochValidatorsCache == nil {
 		cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
 	}
@@ -561,7 +604,11 @@ func (cs *ChainState) AdvanceEpoch(newEpoch uint64, epochStartTimestampMs uint64
 // SIMPLIFIED: Go just stores what Rust tells it. Rust is the single source of truth.
 // No validation, no block checks - Rust controls epoch transitions.
 func (cs *ChainState) AdvanceEpochWithBoundary(newEpoch uint64, epochStartTimestampMs uint64, boundaryBlock uint64, boundaryGei uint64) error {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in AdvanceEpochWithBoundary took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	logger.Info("🔄 [ADVANCE EPOCH] Rust says advance to epoch %d (timestamp=%d, boundary=%d, gei=%d)",
@@ -613,7 +660,11 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 //   1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
 //   2. BlockDatabase parent-chain traversal (always available)
 func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
+	lockStart := time.Now()
 	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in ForceAlignEpochFromBlockHeader took %v", d)
+	}
 	defer cs.epochMutex.Unlock()
 
 	if blockEpoch != cs.currentEpoch {
@@ -750,118 +801,137 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 // MULTI-EPOCH SUPPORT: For jumps > 1 epoch, directly advance to target epoch using current storage state.
 // This handles restart catch-up scenarios where Go Sub receives blocks from a much later epoch.
 func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimestamp uint64) bool {
-	cs.epochMutex.Lock()
-	defer cs.epochMutex.Unlock()
-	if blockEpoch > cs.currentEpoch {
-		epochDiff := blockEpoch - cs.currentEpoch
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FAST PATH (RLock): Check if epoch update is needed before doing any heavy I/O
+	// ═══════════════════════════════════════════════════════════════════════════
+	cs.epochMutex.RLock()
+	currentEpoch := cs.currentEpoch
+	needsUpdate := blockEpoch > currentEpoch
+	cs.epochMutex.RUnlock()
 
-		if epochDiff > 1 {
-			logger.Info("🔄 [AUTO-EPOCH SYNC] Multi-epoch jump: current=%d → target=%d (diff=%d). "+
-				"Advancing directly using current storage state.",
-				cs.currentEpoch, blockEpoch, epochDiff)
-		} else {
-			logger.Info("🔄 [AUTO-EPOCH SYNC] Detected higher epoch from incoming block",
-				"block_epoch", blockEpoch,
-				"current_epoch", cs.currentEpoch,
-				"block_timestamp", blockTimestamp)
-		}
+	if !needsUpdate {
+		return false // No update needed
+	}
 
-		// STEP 1: Calculate boundary block
-		// ══════════════════════════════════════════════════════════════════
-		// CRITICAL FIX (April 2026): Find the exact boundary block deterministically.
-		// Depending on where this function is called (before or after block is saved),
-		// lastBlockNum could be the newly written block, or the previous one.
-		// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
-		// ══════════════════════════════════════════════════════════════════
-		searchBlock := storage.GetLastBlockNumber()
-		var boundaryBlock uint64 = 0
-		
-		for searchBlock > 0 {
-			hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
-			if !ok {
-				searchBlock--
-				continue
-			}
-			blockData, err := cs.GetBlockDatabase().GetBlockByHash(hash)
-			if err != nil {
-				searchBlock--
-				continue
-			}
-			if blockData.Header().Epoch() < blockEpoch {
-				boundaryBlock = searchBlock
-				break
-			}
+	epochDiff := blockEpoch - currentEpoch
+	if epochDiff > 1 {
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Multi-epoch jump: current=%d → target=%d (diff=%d). "+
+			"Advancing directly using current storage state.",
+			currentEpoch, blockEpoch, epochDiff)
+	} else {
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Detected higher epoch from incoming block",
+			"block_epoch", blockEpoch,
+			"current_epoch", currentEpoch,
+			"block_timestamp", blockTimestamp)
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// I/O PHASE (Lockless): Do heavy LevelDB backwards search WITHOUT epochMutex
+	// ═══════════════════════════════════════════════════════════════════════════
+	// STEP 1: Calculate boundary block
+	// CRITICAL FIX (April 2026): Find the exact boundary block deterministically.
+	// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
+	searchBlock := storage.GetLastBlockNumber()
+	var boundaryBlock uint64 = 0
+	
+	for searchBlock > 0 {
+		hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
+		if !ok {
 			searchBlock--
+			continue
+		}
+		blockData, err := cs.GetBlockDatabase().GetBlockByHash(hash)
+		if err != nil {
+			searchBlock--
+			continue
+		}
+		if blockData.Header().Epoch() < blockEpoch {
+			boundaryBlock = searchBlock
+			break
+		}
+		searchBlock--
+	}
+
+	// STEP 2: MUST read boundary block - NO FALLBACK ALLOWED
+	// If boundary block is not available, DEFER the epoch update
+	// ═══════════════════════════════════════════════════════════════════════════
+	// WRITE PHASE (Locked): Apply updates and cache safely
+	// ═══════════════════════════════════════════════════════════════════════════
+	lockStart := time.Now()
+	cs.epochMutex.Lock()
+	if d := time.Since(lockStart); d > 50*time.Millisecond {
+		logger.Warn("🚨 [LOCK CONTENTION] epochMutex Lock in CheckAndUpdateEpochFromBlock took %v", d)
+	}
+	defer cs.epochMutex.Unlock()
+
+	// DOUBLE-CHECK: Ensure no other goroutine advanced the epoch while we were doing I/O
+	if blockEpoch <= cs.currentEpoch {
+		return false 
+	}
+
+	var epochTimestampMs uint64
+	var boundaryGei uint64
+	if boundaryBlock > 0 {
+		// Get boundary block's timestamp - REQUIRED, no fallback
+		blockHash, ok := GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		if !ok {
+			// CRITICAL: Boundary block not in chain yet - DEFER epoch update
+			// This can happen if blocks arrive out-of-order
+			logger.Error("❌ [AUTO-EPOCH SYNC] Boundary block %d hash not found in chain. "+
+				"Block sync may be out-of-order. DEFERRING epoch update until boundary is available.",
+				boundaryBlock)
+			return false // ← DEFER epoch update
 		}
 
-		// STEP 2: MUST read boundary block - NO FALLBACK ALLOWED
-		// If boundary block is not available, DEFER the epoch update
-		var epochTimestampMs uint64
-		var boundaryGei uint64
-		if boundaryBlock > 0 {
-			// Get boundary block's timestamp - REQUIRED, no fallback
-			blockHash, ok := GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
-			if !ok {
-				// CRITICAL: Boundary block not in chain yet - DEFER epoch update
-				// This can happen if blocks arrive out-of-order
-				logger.Error("❌ [AUTO-EPOCH SYNC] Boundary block %d hash not found in chain. "+
-					"Block sync may be out-of-order. DEFERRING epoch update until boundary is available.",
-					boundaryBlock)
-				return false // ← DEFER epoch update
-			}
-
-			boundaryBlockData, err := cs.GetBlockDatabase().GetBlockByHash(blockHash)
-			if err != nil {
-				// CRITICAL: Cannot read boundary block data - DEFER epoch update
-				logger.Error("❌ [AUTO-EPOCH SYNC] Cannot read boundary block %d data: %v. "+
-					"DEFERRING epoch update.", boundaryBlock, err)
-				return false // ← DEFER epoch update
-			}
-
-			epochTimestampMs = boundaryBlockData.Header().TimeStamp() * 1000
-			boundaryGei = boundaryBlockData.Header().GlobalExecIndex()
-			logger.Info("✅ [AUTO-EPOCH SYNC] Using BOUNDARY BLOCK timestamp and GEI (deterministic, no fallback)",
-				"boundary_block", boundaryBlock,
-				"epoch_timestamp_ms", epochTimestampMs,
-				"boundary_gei", boundaryGei)
-		} else {
-			// Genesis case (epoch 1 from epoch 0): boundary = 0
-			// Use genesis timestamp (should be set from genesis config)
-			// For safety, use 0 and let Rust provide authoritative timestamp via AdvanceEpoch
-			epochTimestampMs = 0
-			boundaryGei = 0
-			logger.Info("📝 [AUTO-EPOCH SYNC] Genesis epoch boundary (block=0), using placeholder timestamp=0. " +
-				"Rust will provide authoritative timestamp via AdvanceEpoch RPC.")
+		boundaryBlockData, err := cs.GetBlockDatabase().GetBlockByHash(blockHash)
+		if err != nil {
+			// CRITICAL: Cannot read boundary block data - DEFER epoch update
+			logger.Error("❌ [AUTO-EPOCH SYNC] Cannot read boundary block %d data: %v. "+
+				"DEFERRING epoch update.", boundaryBlock, err)
+			return false // ← DEFER epoch update
 		}
 
-		// === SINGLE WRITE PATH: advanceEpochLocked ===
-		cs.advanceEpochLocked(blockEpoch, epochTimestampMs, boundaryBlock, boundaryGei)
+		epochTimestampMs = boundaryBlockData.Header().TimeStamp() * 1000
+		boundaryGei = boundaryBlockData.Header().GlobalExecIndex()
+		logger.Info("✅ [AUTO-EPOCH SYNC] Using BOUNDARY BLOCK timestamp and GEI (deterministic, no fallback)",
+			"boundary_block", boundaryBlock,
+			"epoch_timestamp_ms", epochTimestampMs,
+			"boundary_gei", boundaryGei)
+	} else {
+		// Genesis case (epoch 1 from epoch 0): boundary = 0
+		// Use genesis timestamp (should be set from genesis config)
+		// For safety, use 0 and let Rust provide authoritative timestamp via AdvanceEpoch
+		epochTimestampMs = 0
+		boundaryGei = 0
+		logger.Info("📝 [AUTO-EPOCH SYNC] Genesis epoch boundary (block=0), using placeholder timestamp=0. " +
+			"Rust will provide authoritative timestamp via AdvanceEpoch RPC.")
+	}
 
-		// EVENT-DRIVEN NOTIFICATION: Notify Rust about the detected epoch change
-		if cs.epochNotificationCallback != nil {
-			logger.Info("📣 [AUTO-EPOCH SYNC] Triggering epoch notification callback for epoch %d", cs.currentEpoch)
-			go cs.epochNotificationCallback(cs.currentEpoch, cs.epochStartTimestampMs, boundaryBlock)
-		}
+	// === SINGLE WRITE PATH: advanceEpochLocked ===
+	cs.advanceEpochLocked(blockEpoch, epochTimestampMs, boundaryBlock, boundaryGei)
 
-		// AGGRESSIVE CACHING: Proactively cache validators for the new epoch
-		// Run in a goroutine to avoid deadlocking on epochMutex and not block execution
-		if boundaryBlock > 0 {
-			targetEpoch := blockEpoch
-			go func(e uint64, bBlock uint64, tsMs uint64, bGei uint64) {
-				logger.Info("🔄 [AUTO-EPOCH SYNC] Proactively caching validators for epoch %d at boundary block %d", e, bBlock)
-				stakeDB := cs.GetStakeStateDB()
-				if stakeDB == nil {
-					return
-				}
-				validators, err := stakeDB.GetAllValidators()
-				if err != nil || len(validators) == 0 {
-					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to actively cache validators: %v (len=%d) - NOMT knownKeys amnesia likely.", err, len(validators))
-					return
-				}
+	// EVENT-DRIVEN NOTIFICATION: Notify Rust about the detected epoch change
+	if cs.epochNotificationCallback != nil {
+		logger.Info("📣 [AUTO-EPOCH SYNC] Triggering epoch notification callback for epoch %d", cs.currentEpoch)
+		go cs.epochNotificationCallback(cs.currentEpoch, cs.epochStartTimestampMs, boundaryBlock)
+	}
 
+	// AGGRESSIVE CACHING: Proactively cache validators for the new epoch
+	// RUN SYNCHRONOUSLY: We must NOT run this in a goroutine because it calls
+	// stakeDB.GetAllValidators() -> Nomt.GetAll() -> handle.Read() which would
+	// RACE with the background PersistAsync() -> CommitPayload() of the boundary block!
+	if boundaryBlock > 0 {
+		targetEpoch := blockEpoch
+		logger.Info("🔄 [AUTO-EPOCH SYNC] Proactively caching validators for epoch %d at boundary block %d", targetEpoch, boundaryBlock)
+		stakeDB := cs.GetStakeStateDB()
+		if stakeDB != nil {
+			validators, err := stakeDB.GetAllValidators()
+			if err != nil || len(validators) == 0 {
+				logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to actively cache validators: %v (len=%d) - NOMT knownKeys amnesia likely.", err, len(validators))
+			} else {
 				validatorInfoList := &pb.ValidatorInfoList{
-					EpochTimestampMs:    tsMs,
-					LastGlobalExecIndex: bGei,
+					EpochTimestampMs:    epochTimestampMs,
+					LastGlobalExecIndex: boundaryGei,
 				}
 
 				for _, v := range validators {
@@ -892,17 +962,17 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 				}
 
 				if serializedData, err := json.Marshal(validatorInfoList); err == nil {
-					cs.SetEpochValidators(e, serializedData)
-					logger.Info("✅ [AUTO-EPOCH SYNC] Successfully cached %d validators for epoch %d", len(validatorInfoList.Validators), e)
+					// CRITICAL FIX: Use unlocked version to prevent deadlock (we already hold epochMutex.Lock())
+					cs.setEpochValidatorsLocked(targetEpoch, serializedData)
+					logger.Info("✅ [AUTO-EPOCH SYNC] Successfully cached %d validators for epoch %d", len(validatorInfoList.Validators), targetEpoch)
 				} else {
 					logger.Warn("⚠️ [AUTO-EPOCH SYNC] Failed to serialize validators for cache: %v", err)
 				}
-			}(targetEpoch, boundaryBlock, epochTimestampMs, boundaryGei)
+			}
 		}
-
-		return true // Epoch was updated
 	}
-	return false // No update needed
+
+	return true // Epoch was updated
 }
 
 // SetBackupPath sets the node-specific backup path for epoch data persistence
@@ -912,12 +982,24 @@ func (cs *ChainState) SetBackupPath(path string) {
 	cs.backupPath = path
 	logger.Info("📁 [EPOCH PERSISTENCE] Set node-specific backup path: %s", path)
 
+	// CRITICAL FIX: Reset the epoch state BEFORE reloading to prevent pollution
+	// from the shared /tmp/epoch_data_backup.json loaded during NewChainState().
+	// If the node-specific file doesn't exist, we must start from a clean state (epoch 0).
+	cs.epochMutex.Lock()
+	cs.currentEpoch = 0
+	cs.epochStartTimestampMs = 0
+	cs.epochStartTimestamps = make(map[uint64]uint64)
+	cs.epochBoundaryBlocks = make(map[uint64]uint64)
+	cs.epochBoundaryGeis = make(map[uint64]uint64)
+	cs.epochValidatorsCache = make(map[uint64]json.RawMessage)
+	cs.epochMutex.Unlock()
+
 	// CRITICAL: Reload epoch data from the correct node-specific path
 	// This is necessary because NewChainState() calls LoadEpochData() before SetBackupPath()
 	// which may load stale data from /tmp/epoch_data_backup.json (shared fallback)
 	logger.Info("🔄 [EPOCH PERSISTENCE] Reloading epoch data from node-specific backup path...")
 	if err := cs.LoadEpochData(); err != nil {
-		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping current values", "error", err)
+		logger.Warn("⚠️ [EPOCH PERSISTENCE] Failed to reload epoch data from node-specific path, keeping clean state", "error", err)
 	} else {
 		logger.Info("✅ [EPOCH PERSISTENCE] Successfully reloaded epoch data from node-specific path - current_epoch=%d, epoch_timestamp_ms=%d",
 			cs.currentEpoch, cs.epochStartTimestampMs)

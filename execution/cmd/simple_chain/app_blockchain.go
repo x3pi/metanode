@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -13,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -59,7 +61,6 @@ func (app *App) initBlockchain() error {
 		// ═══════════════════════════════════════════════════════════════════
 		dataDir := app.config.Databases.RootPath
 		blocksPath := dataDir + "/blocks"
-		nomtPath := dataDir + "/nomt_db/account_state"
 		metadataPath := dataDir + "/metadata.json"
 		hasExistingData := false
 
@@ -83,12 +84,6 @@ func (app *App) initBlockchain() error {
 				}
 			}
 		}
-		
-		// Also check NOMT HT file presence
-		if _, err := os.Stat(nomtPath + "/ht"); err == nil {
-			hasExistingData = true
-		}
-
 		if hasExistingData {
 			if _, err := os.Stat(metadataPath); err == nil {
 				logger.Warn("⚠️ GetLastBlock() failed, but metadata.json exists! Bypassing panic to recover from snapshot.")
@@ -333,6 +328,26 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed to create account state trie: %v", err)
 		}
 
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+				headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
+				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s",
+					nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+
+				if nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						headerAccountRoot.Hex()[:18]+"...")
+				}
+
+				if nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] AccountStatesRoot MISMATCH: nomt=%s header=%s → patching header to use NOMT authoritative root",
+						nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+					app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+				}
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════
 		// CRITICAL FIX (May 2026): Pre-init stake_db NOMT handle and verify root
 		// BEFORE NewChainStateWithGenesis. NOMT backend ignores the root parameter
@@ -476,7 +491,7 @@ SKIP_GENESIS:
 				if nomtRootHex != metadata.StateRoot && nomtRoot.Hex() != metadata.StateRoot {
 					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! NOMT root=%s, but metadata.json claims StateRoot=%s",
 						nomtRoot.Hex(), metadata.StateRoot)
-					panic("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
+					fatal.Exit("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
 				}
 
 				// Enforce GEI and BlockNumber globally from metadata to prevent any inflation
@@ -678,15 +693,15 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			name = val.GetName()
 		}
 		pubkeyBls := val.GetAuthorityKey()
-		if pubkeyBls == "" {
-			pubkeyBls = val.GetPubkeyBls()
+		if len(pubkeyBls) == 0 {
+			pubkeyBls = []byte(val.GetPubkeyBls())
 		}
 		pubkeySecp := val.GetProtocolKey()
-		if pubkeySecp == "" {
-			pubkeySecp = val.GetPubkeySecp()
+		if len(pubkeySecp) == 0 {
+			pubkeySecp = []byte(val.GetPubkeySecp())
 		}
 		networkKey := val.GetNetworkKey()
-		if networkKey == "" {
+		if len(networkKey) == 0 {
 			networkKey = pubkeySecp // Fallback to protocol_key if network_key not set
 		}
 		validatorAddress := e_common.HexToAddress(val.GetAddress())
@@ -704,11 +719,11 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			val.GetPrimaryAddress(),
 			val.GetWorkerAddress(),
 			val.GetP2PAddress(),
-			pubkeyBls,
-			pubkeySecp, // protocol_key (Ed25519)
-			networkKey, // network_key (Ed25519)
-			name,       // hostname (use validator name)
-			pubkeyBls,  // authority_key (BLS public key)
+			hex.EncodeToString(pubkeyBls), // Encode raw bytes to hex string for valid UTF-8
+			pubkeySecp,        // protocol_key []byte
+			networkKey,        // network_key []byte
+			name,              // hostname
+			pubkeyBls,         // authority_key []byte
 		)
 
 		// CRITICAL: Set initial stake from delegator_stakes in genesis.json
@@ -818,7 +833,19 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 	}
 	logger.Info("Stake state committed successfully, hash=%s", commitHash.Hex())
 
-	app.startLastBlock.Header().SetStakeStatesRoot(hashStake)
+	// GENESIS-FIX (May 2026): Use commitHash (post-Commit authoritative root)
+	// instead of hashStake (pre-Commit IntermediateRoot).
+	// ROOT CAUSE: On NOMT backend, IntermediateRoot() returns 0x0 BEFORE the
+	// commit runs because NOMT only computes the real root during Commit().
+	// Using hashStake=0x0 causes a false STARTUP error on every fresh boot:
+	//   "NOMT stake_db handle root (0x7f2b...) differs from header StakeStatesRoot (0x0...)"
+	// The self-healing code patches it, but the error log is misleading.
+	stakeRoot := commitHash
+	if stakeRoot == (e_common.Hash{}) && hashStake != (e_common.Hash{}) {
+		// Fallback for non-NOMT backends where Commit returns empty but IntermediateRoot is valid
+		stakeRoot = hashStake
+	}
+	app.startLastBlock.Header().SetStakeStatesRoot(stakeRoot)
 	saveErr := blockDatabase.SaveLastBlock(app.startLastBlock)
 	if saveErr != nil {
 		logger.Error("❌ [GENESIS] Failed to SaveLastBlock: %v", saveErr)
@@ -871,12 +898,10 @@ func (app *App) loadFreeFeeAddresses() {
 				}
 				key := e_common.HexToAddress(addr)
 				FreeFeeAddresses[key] = struct{}{}
-				logger.Info("FreeFeeAddresses: ", key)
+				// logger.Info("FreeFeeAddresses: ", key)
 			}
 		}
 	} else {
-		logger.Error("[FATAL] FreeFeeAddresses in config.json is not an array")
-		logger.SyncFileLog()
-		os.Exit(1)
+		fatal.Exit("FreeFeeAddresses in config.json is not an array")
 	}
 }

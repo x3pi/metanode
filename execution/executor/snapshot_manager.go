@@ -189,6 +189,15 @@ func (sm *SnapshotManager) SetPauseCallback(cb func()) {
 	sm.pauseCallback = cb
 }
 
+// IsSnapshotInProgress returns true if a snapshot is currently being created.
+// Used by RPC handlers to refuse NOMT-heavy operations (e.g. SyncBlocksRequest EXECUTE mode)
+// during snapshot to prevent CloseForSnapshot deadlock from ungated NOMT sessions.
+func (sm *SnapshotManager) IsSnapshotInProgress() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.isCreating
+}
+
 // SetStateRootCallback registers a callback to fetch the current NOMT state root.
 func (sm *SnapshotManager) SetStateRootCallback(cb func() string) {
 	sm.mu.Lock()
@@ -229,6 +238,18 @@ func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.waitPersistenceCallback = cb
+}
+
+// WaitForPersistence manually triggers the waitPersistenceCallback to wait for the commit pipeline to flush.
+// This is used to prevent concurrent NOMT mutations between STARTUP-SYNC and commitWorker.
+func (sm *SnapshotManager) WaitForPersistence() {
+	sm.mu.Lock()
+	cb := sm.waitPersistenceCallback
+	sm.mu.Unlock()
+	if cb != nil {
+		logger.Info("⏳ [SNAPSHOT-MANAGER] Manually triggering wait persistence callback to flush pipeline...")
+		cb()
+	}
 }
 
 // SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
@@ -319,29 +340,6 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 		logger.Info("📸 [SNAPSHOT] ⏰ Trigger! Creating snapshot at block %d (epoch=%d, boundary=%d, method=%s)",
 			blockNumber, epoch, boundaryBlock, sm.snapshotMethod)
 
-		// Đợi toàn bộ các Goroutine Commit ghi vào MVM, PebbleDB và NOMT hoàn tất
-		sm.mu.Lock()
-		waitCb := sm.waitPersistenceCallback
-		sm.mu.Unlock()
-		if waitCb != nil {
-			logger.Info("⏳ [SNAPSHOT] Waiting for BlockProcessor async persistence pipeline to finish...")
-			waitCb()
-		}
-
-		// Trigger storage flush immediately before snapshot
-		sm.mu.Lock()
-		flushCb := sm.forceFlushCallback
-		sm.mu.Unlock()
-		if flushCb != nil {
-			logger.Info("💾 [SNAPSHOT] Force flushing all memory tables to disk before snapshotting...")
-			if err := flushCb(); err != nil {
-				logger.Error("❌ [SNAPSHOT] Memory table flush failed: %v", err)
-				// Continue with snapshot anyway to have _something_, though it may be incomplete
-			} else {
-				logger.Info("✅ [SNAPSHOT] Successfully flushed all memory tables to disk")
-			}
-		}
-
 		var createErr, rotateErr error
 		switch sm.snapshotMethod {
 		case "rsync":
@@ -413,31 +411,52 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	rustResumeCb := sm.rustResumeCallback
 	stateRootCb := sm.stateRootCallback
 	stakeRootCb := sm.stakeRootCallback
+	flushCb := sm.forceFlushCallback
 	sm.mu.Unlock()
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// PHASE 0: FREEZE TOÀN BỘ EXECUTION
 	// ═══════════════════════════════════════════════════════════════════════════
 	pausedGo := false
-	if rustPauseCb != nil {
-		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Rust consensus writing for atomic snapshot...")
-		rustPauseCb()
-	}
+	
+	// 1. Dừng Go Master (acquires ExecutionMutex, calls WaitForPersistence)
+	// Việc này đảm bảo không có block mới nào được đẩy vào commitChannel nữa.
+	// Nó cũng drain toàn bộ commit queue cũ, đưa memory state về sync hoàn toàn.
 	if pauseCb != nil {
 		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Go Master execution for atomic database snapshot...")
 		pauseCb()
 		pausedGo = true
 	}
 
-	// CRITICAL: Đảm bảo resume luôn được gọi kể cả khi panic/error xảy ra
-	defer func() {
-		if resumeCb != nil && pausedGo {
-			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Go Master execution after DB snapshots")
-			resumeCb()
+	// 2. Flush memory tables
+	// An toàn để flush vì Go execution đã dừng, không có data mới ghi vào memory db.
+	if flushCb != nil {
+		logger.Info("💾 [SNAPSHOT] Force flushing all memory tables to disk before snapshotting...")
+		if err := flushCb(); err != nil {
+			logger.Error("❌ [SNAPSHOT] Memory table flush failed: %v", err)
+		} else {
+			logger.Info("✅ [SNAPSHOT] Successfully flushed all memory tables to disk")
 		}
+	}
+
+	// 3. Dừng Rust Consensus (bắt đầu 30s timer)
+	// Vì Go đã flush và commitChannel đã rỗng, phần snapshot phía sau sẽ hoàn thành
+	// cực kỳ nhanh, tránh hoàn toàn rủi ro PAUSE TIMEOUT (vượt quá 30s watchdog).
+	if rustPauseCb != nil {
+		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Rust consensus writing for atomic snapshot...")
+		rustPauseCb()
+	}
+
+	// CRITICAL: Đảm bảo resume luôn được gọi kể cả khi panic/error xảy ra
+	// Thứ tự resume phải ngược lại: Resume Rust trước, sau đó Resume Go.
+	defer func() {
 		if rustResumeCb != nil {
 			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Rust consensus writing after DB snapshots")
 			rustResumeCb()
+		}
+		if resumeCb != nil && pausedGo {
+			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Go Master execution after DB snapshots")
+			resumeCb()
 		}
 	}()
 
@@ -879,16 +898,7 @@ func (sm *SnapshotManager) ForceSnapshotNow(blockNumber uint64, epoch uint64) {
 			sm.mu.Unlock()
 		}()
 
-		// CRITICAL FIX: Wait for ALL async persistence jobs BEFORE flushing
-		sm.mu.Lock()
-		waitCb := sm.waitPersistenceCallback
-		sm.mu.Unlock()
-		if waitCb != nil {
-			logger.Info("⏳ [SNAPSHOT] ForceSnapshotNow: Waiting for persistence pipeline...")
-			waitCb()
-		}
-
-		// Use createAtomicSnapshot which PAUSES Rust+Go → captures state → resumes
+		// Use createAtomicSnapshot which PAUSES Go+Rust → captures state → resumes
 		var createErr error
 		createErr = sm.createAtomicSnapshot(epoch, blockNumber, blockNumber, sm.snapshotMethod)
 		

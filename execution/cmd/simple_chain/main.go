@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/devicekey"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
@@ -54,7 +55,7 @@ func main() {
 			logger.Error("[FATAL] Stack trace:\n%s", runtime_debug.Stack())
 			logger.Error("[FATAL] ===== END PANIC =====")
 			logger.SyncFileLog() // Force flush ra disk trước khi exit
-			os.Exit(1)
+			fatal.Exit("Fatal exit from main.go")
 		}
 
 	// PERFORMANCE OPTIMIZATION: Cleanup TrieDB connection pool on shutdown
@@ -148,7 +149,7 @@ signal.Ignore(syscall.SIGPIPE)
 	if err := initializeDeviceKey(*sshKeyPath); err != nil {
 		logger.Error("[FATAL] Device key initialization failed: %v", err)
 		logger.SyncFileLog()
-		os.Exit(1)
+		fatal.Exit("Fatal exit from main.go")
 	}
 
 	if *debug {
@@ -161,7 +162,7 @@ signal.Ignore(syscall.SIGPIPE)
 	if err != nil {
 		logger.Error("[FATAL] Failed to create app: %v", err)
 		logger.SyncFileLog()
-		os.Exit(1)
+		fatal.Exit("Fatal exit from main.go")
 	}
 
 	// Thêm panic recovery cho goroutine app.Run
@@ -173,7 +174,7 @@ signal.Ignore(syscall.SIGPIPE)
 				logger.Error("[FATAL] Stack trace:\n%s", runtime_debug.Stack())
 				logger.Error("[FATAL] ===== END PANIC =====")
 				logger.SyncFileLog()
-				os.Exit(1)
+				fatal.Exit("Fatal exit from main.go")
 			}
 		}()
 		if err := app.Run(); err != nil {
@@ -184,7 +185,7 @@ signal.Ignore(syscall.SIGPIPE)
 			}
 			logger.Error("[FATAL] app.Run() error: %v", err)
 			logger.SyncFileLog()
-			os.Exit(1)
+			fatal.Exit("Fatal exit from main.go")
 		}
 	}()
 
@@ -194,7 +195,7 @@ signal.Ignore(syscall.SIGPIPE)
 	initializeLogCleaner(logDir, app.config.EpochsToKeep)
 	if _, err := logger.EnableFileLog("App.log"); err != nil {
 		logger.Error("enable file log failed: %v", err)
-		os.Exit(1)
+		fatal.Exit("Fatal exit from main.go")
 	}
 	// Tắt console — chỉ ghi vào epoch file log (tránh trùng lặp với shell redirect)
 	logger.SetConsoleOutputEnabled(false)
@@ -369,13 +370,13 @@ func startRPCServer(app *App) {
 			if err := server.ListenAndServeTLS(app.config.TlsCert, app.config.TlsKey); err != nil && err != http.ErrServerClosed {
 				logger.Error("[FATAL] Không thể khởi động HTTPS server: %v", err)
 				logger.SyncFileLog()
-				os.Exit(1)
+				fatal.Exit("Fatal exit from main.go")
 			}
 		} else {
 			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				logger.Error("[FATAL] Không thể khởi động HTTP server: %v", err)
 				logger.SyncFileLog()
-				os.Exit(1)
+				fatal.Exit("Fatal exit from main.go")
 			}
 		}
 	}()

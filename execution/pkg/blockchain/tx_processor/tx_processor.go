@@ -37,6 +37,32 @@ var (
 	// Increased to 500,000 to prevent L0 compaction stalls during 50k+ TPS burst tests.
 	// The 157GB server RAM easily sustains this cache size before asynchronous background flush.
 	FlushThresholdTxs uint64 = 500000
+
+	// Memory Pools for zero-allocation parallel processing
+	txSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.Transaction, 0, 128)
+			return &s
+		},
+	}
+	receiptSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.Receipt, 0, 128)
+			return &s
+		},
+	}
+	scResultSlicePool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.ExecuteSCResult, 0, 128)
+			return &s
+		},
+	}
+	mvmIdMapPool = sync.Pool{
+		New: func() interface{} {
+			m := make(map[common.Hash]common.Address, 128)
+			return &m
+		},
+	}
 )
 
 type ProcessResult struct {
@@ -49,6 +75,15 @@ type ProcessResult struct {
 	EventLogs        map[common.Address][]types.EventLog
 	MvmIdMap         map[common.Hash]common.Address
 	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
+}
+
+type groupResultExt struct {
+	txPtr         *[]types.Transaction
+	rcpPtr        *[]types.Receipt
+	exPtr         *[]types.ExecuteSCResult
+	mvmPtr        *map[common.Hash]common.Address
+	Error         error
+	DirtyAccounts []types.AccountState
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -322,7 +357,7 @@ func processGroupsConcurrently(
 	// Goroutines write to results[i] (by group index), ensuring deterministic merge order
 	// regardless of which goroutine finishes first. This prevents receipt ordering differences
 	// between nodes that cause receiptsRoot divergence → fork.
-	results := make([]grouptxns.GroupResult, len(groupedGroups))
+	results := make([]groupResultExt, len(groupedGroups))
 
 	// ═══════════════════════════════════════════════════════════════
 	// WORKER POOL: Use bounded goroutines instead of 1-per-group.
@@ -442,8 +477,8 @@ func processGroupsConcurrently(
 	var totalTxs int
 	var totalSCResults int
 	for _, gRs := range results {
-		totalTxs += len(gRs.Transactions)
-		totalSCResults += len(gRs.ExecuteSCResults)
+		totalTxs += len(*gRs.txPtr)
+		totalSCResults += len(*gRs.exPtr)
 	}
 
 	allTransactions := make([]types.Transaction, 0, totalTxs)
@@ -452,12 +487,18 @@ func processGroupsConcurrently(
 	allMvmIdMap := make(map[common.Hash]common.Address, totalTxs)
 
 	for _, gRs := range results {
-		allTransactions = append(allTransactions, gRs.Transactions...)
-		allReceipts = append(allReceipts, gRs.Receipts...)
-		allExecuteSCResults = append(allExecuteSCResults, gRs.ExecuteSCResults...)
-		for h, addr := range gRs.MvmIdMap {
+		allTransactions = append(allTransactions, *gRs.txPtr...)
+		allReceipts = append(allReceipts, *gRs.rcpPtr...)
+		allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
+		for h, addr := range *gRs.mvmPtr {
 			allMvmIdMap[h] = addr
 		}
+		
+		// Return slices and maps to pools to prevent GC overhead
+		txSlicePool.Put(gRs.txPtr)
+		receiptSlicePool.Put(gRs.rcpPtr)
+		scResultSlicePool.Put(gRs.exPtr)
+		mvmIdMapPool.Put(gRs.mvmPtr)
 	}
 	mergeDuration := time.Since(startMerge)
 
@@ -491,14 +532,27 @@ func processSingleGroup(
 	enableTrace bool,
 	isCache bool,
 	blockTime uint64,
-) grouptxns.GroupResult {
-	// PRE-ALLOCATE: Prevent internal slice re-allocation during block execution.
+) groupResultExt {
+	// Acquire slices from memory pools to eliminate GC pressure
+	txPtr := txSlicePool.Get().(*[]types.Transaction)
+	txs := (*txPtr)[:0]
+	
+	rcpPtr := receiptSlicePool.Get().(*[]types.Receipt)
+	rcps := (*rcpPtr)[:0]
+	
+	exPtr := scResultSlicePool.Get().(*[]types.ExecuteSCResult)
+	exs := (*exPtr)[:0]
+	
+	mvmMapPtr := mvmIdMapPool.Get().(*map[common.Hash]common.Address)
+	mvmMap := *mvmMapPtr
+	clear(mvmMap) // Go 1.21+ fast clear
+
 	gRs := grouptxns.GroupResult{
-		Transactions:     make([]types.Transaction, 0, len(groupItems)),
-		Receipts:         make([]types.Receipt, 0, len(groupItems)),
-		ExecuteSCResults: make([]types.ExecuteSCResult, 0, len(groupItems)),
+		Transactions:     txs,
+		Receipts:         rcps,
+		ExecuteSCResults: exs,
 		Error:            nil,
-		MvmIdMap:         make(map[common.Hash]common.Address, len(groupItems)),
+		MvmIdMap:         mvmMap,
 	}
 	startGroup := time.Now()
 
@@ -527,11 +581,10 @@ func processSingleGroup(
 		if tx.IsDeployContract() {
 			toAddress = common.Address{}
 		}
-		// ❗ Nếu sender đã có lỗi trước đó, tạo receipt lỗi cho tx này và bài bỏ
+		// ❗ Nếu sender đã có lỗi trước đó, bài bỏ tx này mà không đưa vào block.
+		// FORK-SAFETY & DATA INTEGRITY: Do NOT include skipped TXs in the block.
+		// Including them without incrementing their nonce violates blockchain invariants.
 		if failedSenders[tx.FromAddress()] {
-			rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("skipped due to previous transaction failure"))
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -556,13 +609,16 @@ func processSingleGroup(
 		}
 		if tx.GetNonce() != as.Nonce() {
 			err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
-			// CRITICAL FIX: Downgrade from Error to Debug to prevent massive lock contention
-			// when a client (e.g. tps_blast) resends duplicated batches under heavy load.
-			logger.Debug("❌ [NONCE-REJECT] %v for tx %s", err, tx.Hash().Hex())
-			rcp := createErrorReceipt(tx, toAddress, err)
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
+			// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
+			logger.Warn("❌ [NONCE-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", err, tx.Hash().Hex(), tx.FromAddress().Hex())
+
+			// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
+			// Including them causes duplicate TX hashes across multiple blocks when a client
+			// resends a batch, inflating the block's TX count and bloating the ledger.
 			failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+			if enableTrace && txSpan != nil {
+				txSpan.End()
+			}
 			continue
 		}
 		var rcp types.Receipt
@@ -572,7 +628,13 @@ func processSingleGroup(
 				logger.Error("Lỗi khi tạo ValidatorHandler: %v", err)
 				rcp = createErrorReceipt(tx, toAddress, err)
 				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
+	
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 			rcp, exRs, txFailed := validatorHandler.HandleTransaction(txCtx, chainState, tx, enableTrace, blockTime)
@@ -583,6 +645,11 @@ func processSingleGroup(
 			}
 			if txFailed {
 				failedSenders[tx.FromAddress()] = true
+
+			}
+
+			if enableTrace && txSpan != nil {
+				txSpan.End()
 			}
 			continue // Chuyển sang transaction tiếp theo
 		}
@@ -615,6 +682,7 @@ func processSingleGroup(
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
 					failedSenders[tx.FromAddress()] = true
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -642,7 +710,9 @@ func processSingleGroup(
 				logger.Error("Lỗi khi tạo CrossChainHandler: %v", err)
 				rcp = createErrorReceipt(tx, toAddress, err)
 				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}
@@ -657,6 +727,7 @@ func processSingleGroup(
 			}
 			if txFailed {
 				failedSenders[tx.FromAddress()] = true
+
 			}
 			if enableTrace && txSpan != nil {
 				txSpan.End()
@@ -672,6 +743,10 @@ func processSingleGroup(
 				gRs.Receipts = append(gRs.Receipts, rcp)
 				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 
@@ -717,6 +792,7 @@ func processSingleGroup(
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
 					logger.Error("SetPublicKeyBls failed for tx %s: %v", tx.Hash().Hex(), setErr)
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -764,6 +840,7 @@ func processSingleGroup(
 					rcp := createErrorReceipt(tx, toAddress, err)
 					gRs.Receipts = append(gRs.Receipts, rcp)
 					gRs.Transactions = append(gRs.Transactions, tx)
+
 					if enableTrace && txSpan != nil {
 						txSpan.End()
 					}
@@ -798,6 +875,10 @@ func processSingleGroup(
 				gRs.Transactions = append(gRs.Transactions, tx)
 				logger.Error("Transaction failed for tx %s: %v", tx.Hash().Hex(), err)
 				failedSenders[tx.FromAddress()] = true
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 
@@ -822,6 +903,10 @@ func processSingleGroup(
 				gRs.Transactions = append(gRs.Transactions, tx)
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
 				continue
 			}
 			rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
@@ -864,6 +949,11 @@ func processSingleGroup(
 			gRs.Transactions = append(gRs.Transactions, tx)
 			logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 			failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+
+	
+			if enableTrace && txSpan != nil {
+				txSpan.End()
+			}
 			continue
 		}
 		logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
@@ -892,7 +982,21 @@ func processSingleGroup(
 	}
 	logger.Debug("⏱️ [PERF-GROUP] txCount=%d | groupTime=%v | avg=%v/tx",
 		txCount, elapsed, avgPerTx)
-	return gRs
+
+	// Update slice headers in pools before returning
+	*txPtr = gRs.Transactions
+	*rcpPtr = gRs.Receipts
+	*exPtr = gRs.ExecuteSCResults
+	*mvmMapPtr = gRs.MvmIdMap
+
+	return groupResultExt{
+		txPtr:         txPtr,
+		rcpPtr:        rcpPtr,
+		exPtr:         exPtr,
+		mvmPtr:        mvmMapPtr,
+		Error:         gRs.Error,
+		DirtyAccounts: gRs.DirtyAccounts,
+	}
 }
 
 func createErrorReceipt(tx types.Transaction, toAddress common.Address, err error) types.Receipt {

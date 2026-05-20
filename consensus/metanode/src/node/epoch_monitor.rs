@@ -136,117 +136,111 @@ pub fn start_unified_epoch_monitor(
             // by sync_loop.rs with turbo mode for fast catch-up.
             // ═══════════════════════════════════════════════════════════════
 
-            // 4. Check if transition needed (NETWORK epoch ahead of Rust)
-            // Use network_epoch instead of local_go_epoch!
-            if network_epoch <= rust_epoch {
-                // ═══════════════════════════════════════════════════════════
-                // SAME-EPOCH: No epoch transition needed.
-                //
-                // DESIGN: No mid-epoch validator promotion/demotion.
-                // Validator role changes ONLY happen during epoch transitions.
-                //
                 // HOWEVER: If this Validator's Go blocks are stalled (not
                 // advancing), we need to intervene by fetching blocks from
                 // peers via P2P. This un-stalls CommitSyncer which needs
                 // Go's highest_handled_index to advance for DAG catch-up.
                 // ═══════════════════════════════════════════════════════════
-                if matches!(current_mode, crate::node::NodeMode::Validator)
-                    && !config_clone.peer_rpc_addresses.is_empty()
-                {
-                    // Get current Go block number
-                    let go_block = match client_arc.get_last_block_number().await {
-                        Ok((b, _, _, _, _)) => b,
-                        Err(_) => {
-                            continue;
-                        }
-                    };
-
-                    // Check if Go blocks are stalled: not advancing AND peers are ahead
-                    if peer_best_block > go_block + STALL_MIN_GAP {
-                        if go_block == stall_last_go_block && go_block > 0 {
-                            stall_count += 1;
-                        } else if go_block == 0 && stall_last_go_block == 0 {
-                            // Fresh node at block 0 — also counts as stalled
-                            stall_count += 1;
-                        } else {
-                            // Block advanced — reset stall counter
-                            stall_count = 0;
-                        }
-                        stall_last_go_block = go_block;
-
-                        if stall_count >= STALL_THRESHOLD {
-                            let fetch_to = std::cmp::min(
-                                go_block + STALL_FETCH_BATCH,
-                                peer_best_block,
-                            );
-                            warn!(
-                                "🚨 [STALL RECOVERY] Validator blocks stalled! go_block={}, peer_block={}, stall_count={}. Fetching blocks {}→{} from peers...",
-                                go_block, peer_best_block, stall_count, go_block + 1, fetch_to
-                            );
-
-                            match crate::network::peer_rpc::fetch_blocks_from_peer(
-                                &config_clone.peer_rpc_addresses,
-                                go_block + 1,
-                                fetch_to,
-                            )
-                            .await
-                            {
-                                Ok(blocks) if !blocks.is_empty() => {
-                                    let count = blocks.len();
-                                    match client_arc.sync_and_execute_blocks(blocks).await {
-                                        Ok((synced, last, _gei)) => {
-                                            info!(
-                                                "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",
-                                                synced, last
-                                            );
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "⚠️ [STALL RECOVERY] sync_and_execute_blocks failed: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                    let _ = count;
-
-                                    // Switch to fast polling to detect rapid recovery
-                                    fast_cycles_remaining = fast_cycles_max;
-                                }
-                                Ok(_) => {
-                                    info!(
-                                        "ℹ️ [STALL RECOVERY] No blocks available from peers (go_block={}, peer_block={})",
-                                        go_block, peer_best_block
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "⚠️ [STALL RECOVERY] Block fetch failed: {}",
-                                        e
-                                    );
-                                }
-                            }
-
-                            // Reset stall counter after recovery attempt (will re-trigger if still stalled)
-                            stall_count = 0;
-                        } else {
-                            debug!(
-                                "⏳ [STALL DETECT] go_block={}, peer_block={}, stall_count={}/{}",
-                                go_block, peer_best_block, stall_count, STALL_THRESHOLD
-                            );
-                        }
-                    } else {
-                        // No stall condition — blocks are advancing or no gap
-                        if stall_count > 0 {
-                            info!(
-                                "✅ [STALL CLEARED] go_block={}, peer_block={} (gap < {}). Resuming normal monitoring.",
-                                go_block, peer_best_block, STALL_MIN_GAP
-                            );
-                        }
-                        stall_count = 0;
-                        stall_last_go_block = go_block;
+            if matches!(current_mode, crate::node::NodeMode::Validator)
+                && !config_clone.peer_rpc_addresses.is_empty()
+            {
+                // Get current Go block number
+                let go_block = match client_arc.get_last_block_number().await {
+                    Ok((b, _, _, _, _)) => b,
+                    Err(_) => {
+                        continue;
                     }
-                }
+                };
 
+                // Check if Go blocks are stalled: not advancing AND peers are ahead
+                if peer_best_block > go_block + STALL_MIN_GAP {
+                    if go_block == stall_last_go_block && go_block > 0 {
+                        stall_count += 1;
+                    } else if go_block == 0 && stall_last_go_block == 0 {
+                        // Fresh node at block 0 — also counts as stalled
+                        stall_count += 1;
+                    } else {
+                        // Block advanced — reset stall counter
+                        stall_count = 0;
+                    }
+                    stall_last_go_block = go_block;
+
+                    if stall_count >= STALL_THRESHOLD {
+                        let fetch_to = std::cmp::min(
+                            go_block + STALL_FETCH_BATCH,
+                            peer_best_block,
+                        );
+                        warn!(
+                            "🚨 [STALL RECOVERY] Validator blocks stalled! go_block={}, peer_block={}, stall_count={}. Fetching blocks {}→{} from peers...",
+                            go_block, peer_best_block, stall_count, go_block + 1, fetch_to
+                        );
+
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &config_clone.peer_rpc_addresses,
+                            go_block + 1,
+                            fetch_to,
+                        )
+                        .await
+                        {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                let count = blocks.len();
+                                match client_arc.sync_and_execute_blocks(blocks).await {
+                                    Ok((synced, last, _gei)) => {
+                                        info!(
+                                            "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",
+                                            synced, last
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "⚠️ [STALL RECOVERY] sync_and_execute_blocks failed: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                let _ = count;
+
+                                // Switch to fast polling to detect rapid recovery
+                                fast_cycles_remaining = fast_cycles_max;
+                            }
+                            Ok(_) => {
+                                info!(
+                                    "ℹ️ [STALL RECOVERY] No blocks available from peers (go_block={}, peer_block={})",
+                                    go_block, peer_best_block
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "⚠️ [STALL RECOVERY] Block fetch failed: {}",
+                                    e
+                                );
+                            }
+                        }
+
+                        // Reset stall counter after recovery attempt (will re-trigger if still stalled)
+                        stall_count = 0;
+                    } else {
+                        debug!(
+                            "⏳ [STALL DETECT] go_block={}, peer_block={}, stall_count={}/{}",
+                            go_block, peer_best_block, stall_count, STALL_THRESHOLD
+                        );
+                    }
+                } else {
+                    // No stall condition — blocks are advancing or no gap
+                    if stall_count > 0 {
+                        info!(
+                            "✅ [STALL CLEARED] go_block={}, peer_block={} (gap < {}). Resuming normal monitoring.",
+                            go_block, peer_best_block, STALL_MIN_GAP
+                        );
+                    }
+                    stall_count = 0;
+                    stall_last_go_block = go_block;
+                }
+            }
+
+            // 4. Check if transition needed (NETWORK epoch ahead of Rust)
+            // Use network_epoch instead of local_go_epoch!
+            if network_epoch <= rust_epoch {
                 continue;
             }
 
@@ -293,35 +287,14 @@ pub fn start_unified_epoch_monitor(
                                     target_epoch, data.boundary_block, data.timestamp_ms, peer_addr
                                 );
 
-                                // Fetch blocks up to boundary from peers
+                                // Wait for sync_loop to fetch blocks up to boundary
                                 let (go_block, _, _go_ready, _, _) = client_arc
                                     .get_last_block_number()
                                     .await
                                     .unwrap_or((0, 0, false, [0; 32], 0));
                                 if go_block < data.boundary_block {
-                                    // Fetch missing blocks
-                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                                        &peer_rpc,
-                                        go_block + 1,
-                                        data.boundary_block,
-                                    )
-                                    .await
-                                    {
-                                        Ok(blocks) if !blocks.is_empty() => {
-                                            match client_arc.sync_blocks(blocks).await {
-                                                Ok((synced, last)) => {
-                                                    info!(
-                                                        "✅ [EPOCH MONITOR] SyncOnly: synced {} blocks to Go (last: {})",
-                                                        synced, last
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    warn!("⚠️ [EPOCH MONITOR] SyncOnly: sync_blocks failed: {}", e);
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                                    info!("⏳ [EPOCH MONITOR] SyncOnly: Go block {} < boundary {}. Waiting for sync_loop to catch up.", go_block, data.boundary_block);
+                                    break;
                                 }
 
                                 // Advance Go epoch
@@ -487,32 +460,10 @@ pub fn start_unified_epoch_monitor(
                     .get_last_block_number()
                     .await
                     .unwrap_or((0, 0, false, [0; 32], 0));
-                if go_block < boundary_block && !peer_rpc.is_empty() {
-                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                        &peer_rpc,
-                        go_block + 1,
-                        boundary_block,
-                    )
-                    .await
-                    {
-                        Ok(blocks) if !blocks.is_empty() => {
-                            let count = blocks.len();
-                            // Phase 1 fix: Use sync_and_execute_blocks instead of sync_blocks.
-                            // This executes blocks through NOMT, preventing GEI inflation.
-                            // GEI now always reflects actually-executed state → no fork.
-                            match client_arc.sync_and_execute_blocks(blocks).await {
-                                Ok((synced, last, _gei)) => {
-                                    info!("✅ [EPOCH MONITOR] Executed {} blocks to Go for epoch {} boundary (last: {})", synced, target_epoch, last);
-                                }
-                                Err(e) => {
-                                    tracing::error!("🚨 [EPOCH MONITOR] sync_and_execute_blocks failed: {}. Will retry next epoch monitor cycle. NO store-only fallback.", e);
-                                    break; // Stop multi-epoch loop — retry in next monitor cycle
-                                }
-                            }
-                            let _ = count;
-                        }
-                        _ => {}
-                    }
+                
+                if go_block < boundary_block {
+                    info!("⏳ [EPOCH MONITOR] Go is at block {}, waiting to reach boundary block {} for epoch {}. CoreThread or Stall Recovery will catch up.", go_block, boundary_block, target_epoch);
+                    break; // Stop multi-epoch loop — retry in next monitor cycle
                 }
 
                 // Advance Go epoch if needed

@@ -180,11 +180,11 @@ func (h *ValidatorHandler) handleRegisterValidator(
 		primaryAddress,
 		workerAddress,
 		p2pAddress,
-		authorityKey, // Use authorityKey (Base64) for pubKeyBls to ensure consistent format
-		protocolKey,  // protocol_key (Ed25519) from input
-		networkKey,   // network_key (Ed25519) from input
-		hostname,     // hostname from input
-		authorityKey, // authority_key (BLS) from input
+		authorityKey,   // Use authorityKey (Base64) for pubKeyBls to ensure consistent format
+		[]byte(protocolKey),  // protocol_key (Ed25519) from input
+		[]byte(networkKey),   // network_key (Ed25519) from input
+		hostname,       // hostname from input
+		[]byte(authorityKey), // authority_key (BLS) from input
 	)
 	// ---- Tạo Event Log ----
 	event, ok := h.abi.Events["ValidatorRegistered"]

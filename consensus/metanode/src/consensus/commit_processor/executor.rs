@@ -4,7 +4,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
-use tokio::time::Duration;
+
 use tracing::{error, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
@@ -14,6 +14,9 @@ use tracing::{error, info, trace, warn};
 static DEFERRED_TASK_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(64)));
 
+static LAST_FORCE_COMMIT: std::sync::LazyLock<std::sync::atomic::AtomicU64> =
+    std::sync::LazyLock::new(|| std::sync::atomic::AtomicU64::new(0));
+
 use crate::node::executor_client::ExecutorClient;
 
 pub async fn dispatch_commit(
@@ -22,6 +25,9 @@ pub async fn dispatch_commit(
     epoch: u64,
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
+    tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
+    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    storage_path: Option<std::path::PathBuf>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -66,18 +72,6 @@ pub async fn dispatch_commit(
     // Same immutability pattern as global_exec_index — set once, never recalculated.
     let leader_address = subdag.leader_address.clone();
 
-    if total_transactions > 0 || has_system_tx {
-        trace!(
-                "🔷 [batch_id={}] [Global Index: {}] Executing commit #{} (epoch={}): {} blocks, {} txs, has_system_tx={}",
-                batch_id, global_exec_index, commit_index, epoch, subdag.blocks.len(), total_transactions, has_system_tx
-            );
-    } else {
-        // Still log empty commits but as trace/debug to avoid spam
-        tracing::trace!(
-                "⏭️ [batch_id={}] [TX FLOW] Forwarding empty commit to Go Master (for sequence sync): global_exec_index={}, commit_index={}",
-                batch_id, global_exec_index, commit_index
-            );
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // GEI GUARD: Skip commits that Go has already executed.
@@ -143,17 +137,26 @@ pub async fn dispatch_commit(
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
 
-                    // Fix 4 Revert: Use direct indefinite wait (no 90s timeout) to enforce backpressure
-                    let geis_consumed = match response_rx.await {
-                        Ok(c) => c,
-                        Err(_) => {
-                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
-                            anyhow::bail!("DeliveryManager response channel closed.");
-                        }
-                    };
+                    // PIPELINE FIX: We return expected_fragments immediately to unblock CommitProcessor.
+                    // This eliminates the IPC serialization bottleneck. Backpressure is now handled
+                    // natively by the bounded capacity of `delivery_sender` (100 commits).
+                    // With FIX-1A (honest FFI wait), BlockDeliveryManager blocks per block,
+                    // so this buffer fills when Go is ~100 blocks behind → natural throttle.
+                    let geis_consumed = expected_fragments;
 
-                    trace!("✅ [batch_id={}] [TX FLOW] Successfully sent committed subdag: global_exec_index={}, commit_index={}, geis_consumed={}",
-                                batch_id, global_exec_index, commit_index, geis_consumed);
+                    tokio::spawn(async move {
+                        if let Err(_) = response_rx.await {
+                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                        }
+                    });
+
+                    info!(
+                        "📤 [TX-FLOW-TRACE] ▶ PHASE 3.2→3.3: Commit sent to BlockDeliveryManager | \
+                         batch_id={}, commit_index={}, gei={}, txs={}, fragments={}, \
+                         leader_addr_len={}, has_system_tx={}",
+                        batch_id, commit_index, global_exec_index, total_transactions,
+                        geis_consumed, leader_address.len(), has_system_tx
+                    );
 
                     // CommitProcessor handles updating shared_last_global_exec_index using the returned geis_consumed.
 
@@ -175,67 +178,16 @@ pub async fn dispatch_commit(
                     // Track committed transaction hashes to prevent duplicates during epoch transitions
                     // CRITICAL: Only track when commit is actually processed, not just submitted
                     //
-                    // FIX C1: When try_lock() fails (transition handler holds node lock),
-                    // spawn a deferred task to retry tracking after a short backoff.
-                    // Previously, we simply skipped tracking, which could cause tx_recycler
-                    // to resubmit already-committed TXs in the new epoch.
-                    if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                        // Use try_lock() instead of lock().await to avoid blocking
-                        let node_guard = match node_arc.try_lock() {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                // Lock held by transition handler — defer tracking to a background task
-                                trace!("⏭️ [TX TRACKING] Deferring tracking for commit {} — node lock held by transition handler", commit_index);
-                                let node_arc_clone = node_arc.clone();
-                                let subdag_blocks: Vec<Vec<Vec<u8>>> = subdag
-                                    .blocks
-                                    .iter()
-                                    .map(|b| {
-                                        b.transactions()
-                                            .iter()
-                                            .map(|tx| tx.data().to_vec())
-                                            .collect()
-                                    })
-                                    .collect();
-                                let deferred_commit_index = commit_index;
-                                // T2-5: Bounded deferred task — acquire semaphore permit before spawning
-                                let sem = DEFERRED_TASK_SEMAPHORE.clone();
-                                match sem.try_acquire_owned() {
-                                    Ok(permit) => {
-                                        tokio::spawn(async move {
-                                            let _permit = permit; // held until task completes
-                                                                  // Wait for transition handler to release lock
-                                            tokio::time::sleep(Duration::from_millis(500)).await;
-                                            if let Ok(guard) = node_arc_clone.try_lock() {
-                                                let mut hashes_guard =
-                                                    guard.committed_transaction_hashes.lock().await;
-                                                let mut count = 0;
-                                                for block_txs in &subdag_blocks {
-                                                    for tx_data in block_txs {
-                                                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
-                                                        hashes_guard.insert(tx_hash);
-                                                        count += 1;
-                                                    }
-                                                }
-                                                if count > 0 {
-                                                    info!("💾 [TX TRACKING DEFERRED] Successfully tracked {} hashes for commit #{} after backoff", count, deferred_commit_index);
-                                                }
-                                            } else {
-                                                warn!("⚠️ [TX TRACKING DEFERRED] Still cannot acquire lock for commit #{}. TX tracking skipped.", deferred_commit_index);
-                                            }
-                                        });
-                                    }
-                                    Err(_) => {
-                                        warn!("⚠️ [TX TRACKING DEFERRED] Semaphore full (64 tasks in-flight). Dropping deferred tracking for commit #{}.", deferred_commit_index);
-                                    }
-                                }
-                                return Ok(geis_consumed);
-                            }
-                        };
-                        let mut hashes_guard = node_guard.committed_transaction_hashes.lock().await;
+                    // We now pass committed_transaction_hashes and tx_recycler directly to avoid acquiring
+                    // the Node lock, which under high TPS is heavily contended (e.g. by UdsServer), causing
+                    // tracking to fail and dropping transactions into a re-submission loop.
+                    if let Some(hashes_arc) = &committed_transaction_hashes {
+                        let mut hashes_guard = hashes_arc.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
+                        // Collect committed TX data for TxRecycler confirmation
+                        let mut committed_tx_data: Vec<Vec<u8>> = Vec::new();
                         for block in &subdag.blocks {
                             for tx in block.transactions() {
                                 let tx_hash =
@@ -243,15 +195,28 @@ pub async fn dispatch_commit(
                                         tx.data(),
                                     );
                                 hashes_guard.insert(tx_hash.clone());
+                                
+                                committed_tx_data.push(tx.data().to_vec());
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
+                            }
+                        }
+
+                        // STABILITY FIX: Confirm committed TXs in TxRecycler.
+                        // Previously, TxRecycler.confirm_committed() was NEVER called from the
+                        // commit path. This caused pending TXs to accumulate indefinitely (up to
+                        // MAX_PENDING_TXS=100K), triggering stale TX re-submission every 15s
+                        // via collect_stale() → nonce conflicts → chain stall.
+                        if !committed_tx_data.is_empty() {
+                            if let Some(ref recycler) = tx_recycler {
+                                recycler.confirm_committed(&committed_tx_data).await;
                             }
                         }
 
                         // TPS OPT: Defer disk persist to background — TX hashes are only used for
                         // epoch transition recovery, not state computation. Async persist is fork-safe.
                         if !batch_hashes.is_empty() {
-                            let storage_path = node_guard.storage_path.clone();
+                            let storage_path_clone = storage_path.clone();
                             let hashes_count = batch_hashes.len();
                             let persist_epoch = epoch;
                             // T2-5: Bounded persistence task — acquire semaphore permit
@@ -260,13 +225,15 @@ pub async fn dispatch_commit(
                                 Ok(permit) => {
                                     tokio::spawn(async move {
                                         let _permit = permit; // held until task completes
-                                        if let Err(e) = crate::node::transition::save_committed_transaction_hashes_batch(
-                                                    &storage_path, persist_epoch, &batch_hashes
-                                                ).await {
-                                                warn!("⚠️ [TX TRACKING] Failed to persist committed hashes after commit: {}", e);
-                                            } else {
-                                                trace!("💾 [TX TRACKING] Persisted {} committed hashes for epoch {}", hashes_count, persist_epoch);
-                                            }
+                                        if let Some(ref p) = storage_path_clone {
+                                            if let Err(e) = crate::node::transition::save_committed_transaction_hashes_batch(
+                                                        p, persist_epoch, &batch_hashes
+                                                    ).await {
+                                                    warn!("⚠️ [TX TRACKING] Failed to persist committed hashes after commit: {}", e);
+                                                } else {
+                                                    trace!("💾 [TX TRACKING] Persisted {} committed hashes for epoch {}", hashes_count, persist_epoch);
+                                                }
+                                        }
                                     });
                                 }
                                 Err(_) => {
@@ -283,21 +250,32 @@ pub async fn dispatch_commit(
 
                     // NEW: Send ForceCommit request to Go via isolated deferred task
                     // This triggers Event-Driven Block Generation in the Go execution engine
-                    let client_clone = client.clone();
-                    let reason = format!("commit_g{}_e{}", global_exec_index, epoch);
-                    let sem = DEFERRED_TASK_SEMAPHORE.clone();
-                    match sem.try_acquire_owned() {
-                        Ok(permit) => {
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                if let Err(e) = client_clone.send_force_commit(reason).await {
-                                    trace!("📝 [FORCE COMMIT] Failed to send ForceCommit (non-critical): {}", e);
-                                }
-                            });
+                    // RATE-LIMIT: Only trigger ForceCommit on EndOfEpoch OR once every 500ms
+                    // This prevents TCP socket saturation under high TPS.
+                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let last_ms = LAST_FORCE_COMMIT.load(std::sync::atomic::Ordering::Relaxed);
+                    let should_force_commit = has_system_tx || (now_ms.saturating_sub(last_ms) >= 500);
+
+                    if should_force_commit {
+                        LAST_FORCE_COMMIT.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        let client_clone = client.clone();
+                        let reason = format!("commit_g{}_e{}", global_exec_index, epoch);
+                        let sem = DEFERRED_TASK_SEMAPHORE.clone();
+                        match sem.try_acquire_owned() {
+                            Ok(permit) => {
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    if let Err(e) = client_clone.send_force_commit(reason).await {
+                                        trace!("📝 [FORCE COMMIT] Failed to send ForceCommit (non-critical): {}", e);
+                                    }
+                                });
+                            }
+                            Err(_) => {
+                                trace!("📝 [FORCE COMMIT] Semaphore full (64 tasks), skipping force commit trigger");
+                            }
                         }
-                        Err(_) => {
-                            trace!("📝 [FORCE COMMIT] Semaphore full (64 tasks), skipping force commit trigger");
-                        }
+                    } else {
+                        trace!("📝 [FORCE COMMIT] Rate-limited force commit trigger for commit_g{}_e{}", global_exec_index, epoch);
                     }
 
                     return Ok(geis_consumed);

@@ -6,7 +6,7 @@ use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::{Mutex, Condvar, OnceLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // The global callbacks registry configured from Go
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
@@ -16,10 +16,20 @@ pub static FFI_TX_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = Mu
 // Condvar to block Go's FFI caller until the channel is initialized
 pub static FFI_TX_CONDVAR: Condvar = Condvar::new();
 
+// DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+static FFI_TX_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_SUBMIT_BYTES: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_FULL_COUNT: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
 pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
 
 /// Tracks whether pause is active (for auto-resume timeout thread)
 static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tracks the unique session ID of the pause to prevent stale watchdogs from dropping locks
+static PAUSE_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Maximum time (in seconds) to hold the pause lock before auto-resuming.
 /// This prevents permanent deadlock if Go never calls metanode_resume_consensus.
@@ -63,16 +73,17 @@ pub extern "C" fn metanode_pause_consensus() {
         PAUSE_GUARD = Some(std::mem::transmute(guard));
     }
     PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED.");
+    let session_id = PAUSE_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED. Session={}", session_id);
 
     // Spawn watchdog thread: auto-resume after PAUSE_TIMEOUT_SECS if Go never calls resume
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(PAUSE_TIMEOUT_SECS));
-        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) && PAUSE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst) == session_id {
             error!(
-                "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s. \
+                "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s for Session={}. \
                  Auto-resuming to prevent permanent deadlock!",
-                PAUSE_TIMEOUT_SECS
+                PAUSE_TIMEOUT_SECS, session_id
             );
             // Force-resume by dropping the guard
             PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -112,6 +123,16 @@ pub fn get_go_state_root() -> String {
     String::new()
 }
 
+/// Returns the current number of items in the FFI TX queue.
+pub fn get_ffi_tx_queue_depth() -> usize {
+    if let Ok(guard) = FFI_TX_SENDER.lock() {
+        if let Some(sender) = guard.as_ref() {
+            return sender.max_capacity() - sender.capacity();
+        }
+    }
+    0
+}
+
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
 #[no_mangle]
 pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {
@@ -138,11 +159,49 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
         guard.clone().unwrap()
     };
 
+    // Instrumentation: Queue Saturation metrics
+    let remaining_capacity = sender.capacity();
+    if remaining_capacity < 1000 {
+        tracing::warn!("⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000", remaining_capacity);
+    }
+
     // try_send is non-blocking and synchronous
+    let batch_size = tx_data.len();
     match sender.try_send(tx_data) {
-        Ok(_) => true,
+        Ok(_) => {
+            FFI_TX_SUBMIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
+            
+            // DIAGNOSTIC: Periodic summary every 5s
+            let should_log = {
+                let mut last_log = FFI_TX_LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
+                match *last_log {
+                    Some(ts) if ts.elapsed().as_secs() < 5 => false,
+                    _ => {
+                        *last_log = Some(std::time::Instant::now());
+                        true
+                    }
+                }
+            };
+            if should_log {
+                let total_batches = FFI_TX_SUBMIT_COUNT.load(AtomicOrdering::Relaxed);
+                let total_bytes = FFI_TX_SUBMIT_BYTES.load(AtomicOrdering::Relaxed);
+                let full_count = FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed);
+                info!(
+                    "📊 [FFI TX METRICS] total_batches={}, total_bytes={}, channel_full_events={}, \
+                     capacity_remaining={}/10000",
+                    total_batches, total_bytes, full_count, remaining_capacity
+                );
+            }
+            
+            info!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
+            true
+        }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Channel is full. Go side will see `false` and automatically sleep/retry.
+            FFI_TX_FULL_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            warn!("⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}", 
+                FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed));
             false
         }
         Err(_) => {

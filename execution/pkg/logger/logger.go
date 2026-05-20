@@ -441,52 +441,16 @@ func EnableFileLog(fileName string) (*loggerfile.FileLogger, error) {
 	return fileLoggerInstance, nil
 }
 
+// RotateToEpoch xoay log sang epoch mới
+// Unified node logging: RotateToEpoch is now a no-op.
+// We no longer split logs by epoch directories, logs are rotated by size instead.
+func RotateToEpoch(newEpoch uint64) {
+	// No-op
+}
+
 // EnableDailyFileLog giữ backward compatibility — gọi EnableFileLog
 func EnableDailyFileLog(fileName string) (*loggerfile.FileLogger, error) {
 	return EnableFileLog(fileName)
-}
-
-// RotateToEpoch xoay log sang epoch mới
-// Gọi khi epoch transition xảy ra
-// Tự động tạo thư mục epoch mới và đóng file cũ
-func RotateToEpoch(newEpoch uint64) {
-	fileLoggerMu.Lock()
-	defer fileLoggerMu.Unlock()
-
-	if fileLoggerInstance == nil {
-		return
-	}
-
-	// Cập nhật epoch trong loggerfile
-	loggerfile.SetGlobalEpoch(newEpoch)
-
-	if newEpoch == fileLoggerCurrentEpoch {
-		return // Epoch chưa thay đổi
-	}
-
-	// Tạo logger mới cho epoch mới
-	newLogger, err := loggerfile.NewFileLogger(fileLoggerFileName)
-	if err != nil {
-		fmt.Printf("failed to rotate log to epoch %d: %v\n", newEpoch, err)
-		return
-	}
-
-	oldLogger := fileLoggerInstance
-	var oldFile *os.File
-	if oldLogger != nil {
-		oldFile = oldLogger.File()
-	}
-
-	fileLoggerInstance = newLogger
-	fileLoggerCurrentEpoch = newEpoch
-	attachFileLoggerOutputLocked()
-
-	if oldLogger != nil {
-		removeOutputLocked(oldFile)
-		oldLogger.Close()
-	}
-
-	fmt.Printf("📝 [LOG] Rotated to epoch_%d (file %s)\n", newEpoch, fileLoggerFileName)
 }
 
 // CloseFileLog đóng file logger (nếu đang bật) và loại khỏi outputs.

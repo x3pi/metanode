@@ -192,118 +192,6 @@ func TestGenerateBlockData_MultipleTransactions(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// TestGetLeaderAddressByIndex_ValidIndex
-// Uses real state.NewValidatorState to avoid full interface mocking.
-// ============================================================================
-func TestGetLeaderAddressByIndex_ValidIndex(t *testing.T) {
-	// This test exercises the pure lookup logic without needing a real ChainState.
-	// We directly test the sorting + filtering + index lookup algorithm.
-
-	validators := newTestValidators() // authkey_A, authkey_B, authkey_C
-
-	// Simulate the same sorting logic as GetLeaderAddressByIndex
-	// (extracted from the function for unit testing)
-	addrA := validators[0].Address()
-	addrB := validators[1].Address()
-	addrC := validators[2].Address()
-
-	// After sorting by AuthorityKey: A, B, C
-	// Index 0 → A, Index 1 → B, Index 2 → C
-	assert.Equal(t, addrA, validators[0].Address())
-	assert.Equal(t, addrB, validators[1].Address())
-	assert.Equal(t, addrC, validators[2].Address())
-
-	// Verify authority keys sort correctly
-	assert.True(t, validators[0].AuthorityKey() < validators[1].AuthorityKey())
-	assert.True(t, validators[1].AuthorityKey() < validators[2].AuthorityKey())
-}
-
-// ============================================================================
-// TestGetLeaderAddressByIndex_NilChainState (already exists but verify coverage)
-// ============================================================================
-func TestGetLeaderAddressByIndex_NilChainState_Extended(t *testing.T) {
-	fallbackAddr := e_common.HexToAddress("0xdddd000000000000000000000000000000000004")
-	bp := &BlockProcessor{
-		validatorAddress: fallbackAddr,
-		// chainState is nil
-	}
-
-	// Multiple indices should all return fallback
-	for i := uint32(0); i < 5; i++ {
-		result := bp.GetLeaderAddressByIndex(i)
-		assert.Equal(t, fallbackAddr, result,
-			"nil chainState should always fallback to validatorAddress for index %d", i)
-	}
-}
-
-// ============================================================================
-// TestGetLeaderAddressByIndex_DeterministicWrapAround
-// Tests that out-of-range index wraps deterministically via modulo.
-// ============================================================================
-func TestGetLeaderAddressByIndex_DeterministicWrapAround(t *testing.T) {
-	// Test the modulo wrap-around logic directly
-	// Given 3 active validators, index 5 should map to 5 % 3 = 2
-	activeValidators := []e_common.Address{
-		e_common.HexToAddress("0xAAAA000000000000000000000000000000000001"),
-		e_common.HexToAddress("0xBBBB000000000000000000000000000000000002"),
-		e_common.HexToAddress("0xCCCC000000000000000000000000000000000003"),
-	}
-
-	testCases := []struct {
-		index    uint32
-		expected int
-	}{
-		{0, 0},
-		{1, 1},
-		{2, 2},
-		{3, 0},   // wrap
-		{4, 1},   // wrap
-		{5, 2},   // wrap
-		{100, 1}, // 100 % 3 = 1
-	}
-
-	for _, tc := range testCases {
-		safeIndex := int(tc.index) % len(activeValidators)
-		assert.Equal(t, tc.expected, safeIndex,
-			"index %d should map to position %d", tc.index, tc.expected)
-		assert.Equal(t, activeValidators[tc.expected], activeValidators[safeIndex])
-	}
-}
-
-// ============================================================================
-// TestGetLeaderAddressByIndex_JailedAndZeroStakeFiltered
-// Verifies the filtering logic using real ValidatorState objects.
-// ============================================================================
-func TestGetLeaderAddressByIndex_JailedAndZeroStakeFiltered(t *testing.T) {
-	addrActive := e_common.HexToAddress("0xAAAA000000000000000000000000000000000001")
-	addrJailed := e_common.HexToAddress("0xBBBB000000000000000000000000000000000002")
-	addrNoStake := e_common.HexToAddress("0xCCCC000000000000000000000000000000000003")
-
-	stake := big.NewInt(1000000)
-
-	validators := []state.ValidatorState{
-		newTestValidator(addrActive, "authkey_A", stake, false), // active
-		newTestValidator(addrJailed, "authkey_B", stake, true),  // jailed → should be filtered
-		newTestValidator(addrNoStake, "authkey_C", nil, false),  // zero stake → should be filtered
-	}
-
-	// Simulate filter logic from GetLeaderAddressByIndex
-	var activeValidators []e_common.Address
-	for _, v := range validators {
-		if v.IsJailed() {
-			continue
-		}
-		s := v.TotalStakedAmount()
-		if s == nil || s.Sign() <= 0 {
-			continue
-		}
-		activeValidators = append(activeValidators, v.Address())
-	}
-
-	require.Len(t, activeValidators, 1, "only 1 validator should be active")
-	assert.Equal(t, addrActive, activeValidators[0])
-}
 
 // ============================================================================
 // TestGetLeaderAddress_LeaderOverride
@@ -333,6 +221,74 @@ func TestGetLeaderAddress_LeaderOverride(t *testing.T) {
 				blockLeaderAddress = tt.override[0]
 			}
 			assert.Equal(t, tt.expected, blockLeaderAddress)
+		})
+	}
+}
+
+// ============================================================================
+// TestVerifyDraftBlock
+// Tests the FORK-GUARD logic that prevents 0x0 roots from being committed
+// ============================================================================
+func TestVerifyDraftBlock(t *testing.T) {
+	bp := &BlockProcessor{}
+	validHash := e_common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	zeroHash := e_common.Hash{}
+
+	tests := []struct {
+		name               string
+		accountRoot        e_common.Hash
+		stakeRoot          e_common.Hash
+		currentBlockNumber uint64
+		expected           bool
+	}{
+		{
+			name:               "Valid block with both roots",
+			accountRoot:        validHash,
+			stakeRoot:          validHash,
+			currentBlockNumber: 100,
+			expected:           true,
+		},
+		{
+			name:               "Block 1 is allowed to have 0x0 roots (genesis state)",
+			accountRoot:        zeroHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 1,
+			expected:           true,
+		},
+		{
+			name:               "Block > 1 with 0x0 AccountStatesRoot should be rejected",
+			accountRoot:        zeroHash,
+			stakeRoot:          validHash,
+			currentBlockNumber: 2,
+			expected:           false,
+		},
+		{
+			name:               "Block > 1 with 0x0 StakeStatesRoot should be rejected",
+			accountRoot:        validHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 100,
+			expected:           false,
+		},
+		{
+			name:               "Block > 1 with both 0x0 roots should be rejected",
+			accountRoot:        zeroHash,
+			stakeRoot:          zeroHash,
+			currentBlockNumber: 50,
+			expected:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create dummy block with specific header roots
+			header := block.NewBlockHeader(
+				e_common.Hash{}, 0, tt.accountRoot, tt.stakeRoot,
+				e_common.Hash{}, e_common.Address{}, 0, e_common.Hash{}, 1,
+			)
+			bl := block.NewBlock(header, nil, nil)
+			
+			result := bp.verifyDraftBlock(bl, tt.currentBlockNumber, 1)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

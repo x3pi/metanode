@@ -935,7 +935,7 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                 };
 
                 let peer_info = PeerInfo { authority_index };
-                info!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?} for remote_addr={:?}",
+                trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?} for remote_addr={:?}",
                       authority_index, remote_addr);
                 request.extensions_mut().insert(peer_info);
                 request

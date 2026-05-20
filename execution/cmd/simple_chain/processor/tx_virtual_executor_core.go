@@ -140,11 +140,11 @@ func (v *TxVirtualExecutor) ProcessEstimateGas(
 func (v *TxVirtualExecutor) startReadTxWorkers(n int) {
 	for i := 0; i < n; i++ {
 		go func(workerID int) {
-			logger.Info("Read TX worker %d started", workerID)
+			// logger.Info("Read TX worker %d started", workerID)
 			for req := range v.readTxRequestChan {
 				v.executeAndRespondReadTx(req)
 			}
-			logger.Info("Read TX worker %d stopped", workerID)
+			// logger.Info("Read TX worker %d stopped", workerID)
 		}(i)
 	}
 }

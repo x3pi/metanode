@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -24,6 +25,20 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+)
+
+var (
+	txHashDataPool = sync.Pool{
+		New: func() interface{} {
+			return &pb.TransactionHashData{}
+		},
+	}
+	hashBufferPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, 1024)
+			return &b
+		},
+	}
 )
 
 type Transaction struct {
@@ -94,7 +109,9 @@ func (t *Transaction) ToEthTransaction() *e_types.Transaction { // SỬA: Kiểu
 		data = t.CallData().Input()
 	}
 	if t.IsDeployContract() {
-		data = t.DeployData().Code()
+		if t.ValidDeployData() {
+			data = t.DeployData().Code()
+		}
 	}
 	// logger.Debug("tx.Type 2: ", tx.Type)
 	switch tx.Type {
@@ -557,28 +574,39 @@ func (t *Transaction) Hash() common.Hash {
 		return *cached // Trả về giá trị đã cache nếu có
 	}
 
-	hashPb := &pb.TransactionHashData{
-		FromAddress:   t.proto.FromAddress,
-		ToAddress:     t.proto.ToAddress,
-		Amount:        t.proto.Amount,
-		MaxGas:        t.proto.MaxGas,
-		MaxGasPrice:   t.proto.MaxGasPrice,
-		MaxTimeUse:    t.proto.MaxTimeUse,
-		Data:          t.proto.Data,
-		Type:          t.proto.Type,
-		LastDeviceKey: t.proto.LastDeviceKey,
-		NewDeviceKey:  t.proto.NewDeviceKey,
-		Nonce:         t.proto.Nonce,
-		ChainID:       t.proto.ChainID,
-		R:             t.proto.R,
-		S:             t.proto.S,
-		V:             t.proto.V,
-		GasTipCap:     t.proto.GasTipCap,
-		GasFeeCap:     t.proto.GasFeeCap,
-		AccessList:    t.proto.AccessList,
-	}
+	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
+	defer func() {
+		// Clear to avoid memory leaks of referenced slices safely
+		proto.Reset(hashPb)
+		txHashDataPool.Put(hashPb)
+	}()
 
-	bHashPb, err := proto.MarshalOptions{Deterministic: true}.Marshal(hashPb)
+	hashPb.FromAddress = t.proto.FromAddress
+	hashPb.ToAddress = t.proto.ToAddress
+	hashPb.Amount = t.proto.Amount
+	hashPb.MaxGas = t.proto.MaxGas
+	hashPb.MaxGasPrice = t.proto.MaxGasPrice
+	hashPb.MaxTimeUse = t.proto.MaxTimeUse
+	hashPb.Data = t.proto.Data
+	hashPb.Type = t.proto.Type
+	hashPb.LastDeviceKey = t.proto.LastDeviceKey
+	hashPb.NewDeviceKey = t.proto.NewDeviceKey
+	hashPb.Nonce = t.proto.Nonce
+	hashPb.ChainID = t.proto.ChainID
+	hashPb.R = t.proto.R
+	hashPb.S = t.proto.S
+	hashPb.V = t.proto.V
+	hashPb.GasTipCap = t.proto.GasTipCap
+	hashPb.GasFeeCap = t.proto.GasFeeCap
+	hashPb.AccessList = t.proto.AccessList
+
+	bufPtr := hashBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	defer func() {
+		hashBufferPool.Put(bufPtr)
+	}()
+
+	bHashPb, err := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, hashPb)
 	if err != nil {
 		logger.Error("Transaction.Hash: proto.Marshal failed: %v", err)
 		return common.Hash{}
@@ -599,27 +627,38 @@ func (t *Transaction) RHash() common.Hash {
 		return *cached // Trả về giá trị đã cache nếu có
 	}
 
-	hashPb := &pb.TransactionHashData{
-		FromAddress:   t.proto.FromAddress,
-		ToAddress:     t.proto.ToAddress,
-		Amount:        t.proto.Amount,
-		MaxGas:        t.proto.MaxGas,
-		MaxGasPrice:   t.proto.MaxGasPrice,
-		MaxTimeUse:    t.proto.MaxTimeUse,
-		Data:          t.proto.Data,
-		Type:          t.proto.Type,
-		LastDeviceKey: t.proto.LastDeviceKey,
-		NewDeviceKey:  t.proto.NewDeviceKey,
-		ChainID:       t.proto.ChainID,
-		R:             t.proto.R,
-		S:             t.proto.S,
-		V:             t.proto.V,
-		GasTipCap:     t.proto.GasTipCap,
-		GasFeeCap:     t.proto.GasFeeCap,
-		AccessList:    t.proto.AccessList,
-	}
+	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
+	defer func() {
+		// Clear to avoid memory leaks safely
+		proto.Reset(hashPb)
+		txHashDataPool.Put(hashPb)
+	}()
 
-	bHashPb, err := proto.MarshalOptions{Deterministic: true}.Marshal(hashPb)
+	hashPb.FromAddress = t.proto.FromAddress
+	hashPb.ToAddress = t.proto.ToAddress
+	hashPb.Amount = t.proto.Amount
+	hashPb.MaxGas = t.proto.MaxGas
+	hashPb.MaxGasPrice = t.proto.MaxGasPrice
+	hashPb.MaxTimeUse = t.proto.MaxTimeUse
+	hashPb.Data = t.proto.Data
+	hashPb.Type = t.proto.Type
+	hashPb.LastDeviceKey = t.proto.LastDeviceKey
+	hashPb.NewDeviceKey = t.proto.NewDeviceKey
+	hashPb.ChainID = t.proto.ChainID
+	hashPb.R = t.proto.R
+	hashPb.S = t.proto.S
+	hashPb.V = t.proto.V
+	hashPb.GasTipCap = t.proto.GasTipCap
+	hashPb.GasFeeCap = t.proto.GasFeeCap
+	hashPb.AccessList = t.proto.AccessList
+
+	bufPtr := hashBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	defer func() {
+		hashBufferPool.Put(bufPtr)
+	}()
+
+	bHashPb, err := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, hashPb)
 	if err != nil {
 		logger.Error("Transaction.RHash: proto.Marshal failed: %v", err)
 		return common.Hash{}
@@ -805,7 +844,10 @@ func (t *Transaction) GetData() []byte {
 		return t.CallData().Input()
 	}
 	if t.IsDeployContract() {
-		return t.DeployData().Code()
+		if t.ValidDeployData() {
+			return t.DeployData().Code()
+		}
+		return nil
 	}
 	return t.Data()
 }

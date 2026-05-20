@@ -131,8 +131,8 @@ impl PostRecoveryHealthCheck {
             Ok(local_epoch) if local_epoch > 0 => {
                 match self.executor_client.get_epoch_boundary_data(local_epoch).await {
                     Ok((_, _, _, local_validators, _, _)) if !local_validators.is_empty() => {
-                        let mut local_keys: Vec<&str> = local_validators.iter()
-                            .map(|v| v.authority_key.as_str())
+                        let mut local_keys: Vec<&[u8]> = local_validators.iter()
+                            .map(|v| v.authority_key.as_slice())
                             .collect();
                         local_keys.sort();
                         
@@ -142,8 +142,8 @@ impl PostRecoveryHealthCheck {
                                 peer_addr, local_epoch
                             ).await {
                                 if !peer_boundary.validators.is_empty() {
-                                    let mut peer_keys: Vec<&str> = peer_boundary.validators.iter()
-                                        .map(|v| v.authority_key.as_str())
+                                    let mut peer_keys: Vec<&[u8]> = peer_boundary.validators.iter()
+                                        .map(|v| v.authority_key.as_slice())
                                         .collect();
                                     peer_keys.sort();
                                     

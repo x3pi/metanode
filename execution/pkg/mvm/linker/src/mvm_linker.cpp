@@ -334,9 +334,11 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
                 << std::endl;
     }
 
+    bool apply_to_cache = (result.er == mvm::ExitReason::returned || result.er == mvm::ExitReason::halted);
+
     // Add balance
     std::vector<std::vector<uint8_t>> add_balance_change =
-        gs.get_add_balance_change();
+        gs.get_add_balance_change(apply_to_cache);
     length_add_balance_change = add_balance_change.size();
     if (length_add_balance_change > 0) {
       b_add_balance_change = new uint8_t
@@ -353,7 +355,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
 
     // Sub balance
     std::vector<std::vector<uint8_t>> sub_balance_change =
-        gs.get_sub_balance_change();
+        gs.get_sub_balance_change(apply_to_cache);
     length_sub_balance_change = sub_balance_change.size();
     if (length_sub_balance_change > 0) {
       b_sub_balance_change = new uint8_t *[length_sub_balance_change]();
@@ -368,7 +370,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     }
 
     // Nonce changes
-    std::vector<std::vector<uint8_t>> nonce_change = gs.get_nonce_change();
+    std::vector<std::vector<uint8_t>> nonce_change = gs.get_nonce_change(apply_to_cache);
     length_nonce_change = nonce_change.size();
     if (length_nonce_change > 0) {
       b_nonce_change = new uint8_t *[length_nonce_change]();
@@ -382,7 +384,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     }
 
     // Code changes
-    std::vector<std::vector<uint8_t>> code_change = gs.get_newly_deploy();
+    std::vector<std::vector<uint8_t>> code_change = gs.get_newly_deploy(apply_to_cache);
     length_code_change = code_change.size();
     if (length_code_change > 0) {
       length_codes = new int[length_code_change];
@@ -399,7 +401,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     }
 
     // Storage changes
-    std::vector<std::vector<uint8_t>> storage_change = gs.get_storage_change();
+    std::vector<std::vector<uint8_t>> storage_change = gs.get_storage_change(apply_to_cache);
     length_storage_change = storage_change.size();
     if (length_storage_change > 0) {
       length_storages = new int[length_storage_change];

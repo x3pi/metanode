@@ -16,48 +16,17 @@ pub(super) async fn recover_epoch_pending_transactions(node: &mut ConsensusNode)
         return Ok(0);
     }
 
+    let transactions_to_recover: Vec<Vec<u8>> = epoch_pending.values().cloned().collect();
+    
     info!(
-        "🔄 [EPOCH RECOVERY] Checking {} transactions from previous epoch for recovery",
-        epoch_pending.len()
-    );
-
-    // Load committed transaction hashes from previous epoch to avoid duplicates
-    let committed_hashes =
-        load_committed_transaction_hashes(&node.storage_path, node.current_epoch - 1).await;
-    info!(
-        "📋 [EPOCH RECOVERY] Loaded {} committed transaction hashes from epoch {}",
-        committed_hashes.len(),
-        node.current_epoch - 1
-    );
-
-    let mut transactions_to_recover = Vec::new();
-    let mut skipped_duplicates = 0;
-
-    // Filter out transactions that were already committed in the previous epoch
-    for tx_data in epoch_pending.iter() {
-        // tx_data từ pending queue là single Transaction bytes (không phải array)
-        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
-        let hash_hex = hex::encode(&tx_hash);
-
-        if committed_hashes.contains(&tx_hash) {
-            info!("⏭️ [EPOCH RECOVERY] Skipping already committed transaction: {} (found in epoch {} registry)",
-                  hash_hex, node.current_epoch - 1);
-            skipped_duplicates += 1;
-        } else {
-            info!("🔄 [EPOCH RECOVERY] Will recover transaction: {} (not found in committed registry)",
-                  hash_hex);
-            transactions_to_recover.push(tx_data.clone());
-        }
-    }
-
-    // Clear the pending list - we'll resubmit what needs recovery
-    epoch_pending.clear();
-
-    info!(
-        "🔄 [EPOCH RECOVERY] Filtered duplicates: {} skipped, {} to recover",
-        skipped_duplicates,
+        "🔄 [EPOCH RECOVERY] Extracting {} uncommitted transactions from previous epoch for recovery",
         transactions_to_recover.len()
     );
+
+    // Clear the pending map - we'll resubmit what needs recovery
+    epoch_pending.clear();
+    
+    let skipped_duplicates = 0; // Not applicable anymore since garbage collection is real-time
 
     if transactions_to_recover.is_empty() {
         info!("✅ [EPOCH RECOVERY] No transactions need recovery (all were already committed)");

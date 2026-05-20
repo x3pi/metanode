@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -31,9 +31,14 @@ import (
 // 4. Collects attestations from peers
 // 5. Quorum check: if local state differs from ≥2/3 of peers → FORK DETECTED → HALT
 //
-// FORK BEHAVIOR: When fork is detected, the node logs 🚨 FORK DETECTED and
-// halts block processing (os.Exit with error). This prevents the forked node
-// from diverging further and alerts the operator.
+// FORK BEHAVIOR: When fork is detected, the node enters PENDING mode:
+// 1. Waits 10s for pipeline backpressure to drain
+// 2. Re-computes attestation hash for the same block
+// 3. If state NOW matches → was transient lag, resumes normally
+// 4. If state STILL mismatches → CONFIRMED FORK → fatal.Exit()
+//    → Operator restarts → STARTUP-SYNC resync from peers
+// This prevents both false-positive kills (pipeline lag) AND
+// silent divergence (genuine fork running unchecked).
 // ══════════════════════════════════════════════════════════════════════════════
 
 // StateAttestation represents a node's attestation of state at a given block.
@@ -373,28 +378,84 @@ func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error
 
 		if isFork {
 			// ═══════════════════════════════════════════════════════════════
-			// 🚨 FORK DETECTED — NODE HALT
-			// This node's state differs from ≥2/3 of peers.
-			// HALT to prevent further divergence.
+			// 🚨 FORK DETECTED — PENDING → RE-VERIFY → RESYNC
+			//
+			// "Thà pending chứ không fork": Do NOT continue running with
+			// diverged state, but also do NOT exit without re-verification.
+			//
+			// Strategy:
+			// 1. LOG the initial fork detection
+			// 2. WAIT 10s for pipeline to drain (transient lag clears)
+			// 3. RE-VERIFY: Re-compute attestation hash for the same block
+			// 4. If NOW matches → was transient pipeline lag, resume
+			// 5. If STILL mismatches → CONFIRMED FORK:
+			//    → fatal.Exit() to write crash.log and halt cleanly
+			//    → Operator restarts node → STARTUP-SYNC resync from peers
 			// ═══════════════════════════════════════════════════════════════
 			logger.Error("═══════════════════════════════════════════════════")
 			logger.Error(msg)
-			logger.Error("🚨 [FORK HALT] This node's state is INCONSISTENT with the network majority!")
-			logger.Error("🚨 [FORK HALT] Block #%d: local_state=%s",
-				peerAtt.BlockNumber, localHash.Hex())
-			logger.Error("🚨 [FORK HALT] local_account_root=%s", localAccountRoot.Hex())
-			logger.Error("🚨 [FORK HALT] local_stake_root=%s", localStakeRoot.Hex())
-			logger.Error("🚨 [FORK HALT] ACTION REQUIRED: Investigate state divergence and resync from a healthy node.")
-			logger.Error("🚨 [FORK HALT] Halting node in 3 seconds...")
+			logger.Error("🚨 [FORK ALERT] State divergence detected at block #%d!", peerAtt.BlockNumber)
+			logger.Error("🚨 [FORK ALERT] ENTERING PENDING MODE — waiting 10s for pipeline to drain before re-verification...")
 			logger.Error("═══════════════════════════════════════════════════")
+			logger.SyncFileLog()
 
-			// Give time for logs to flush
-			go func() {
-				time.Sleep(3 * time.Second)
-				logger.Error("🛑 [FORK HALT] Node halting NOW due to state fork at block #%d", peerAtt.BlockNumber)
+			// Async: wait → re-verify → act
+			go func(blockNum uint64, peerHash common.Hash) {
+				// STEP 1: Wait for pipeline to drain
+				time.Sleep(10 * time.Second)
+
+				// STEP 2: Re-compute local attestation hash
+				reCheckHeader := bp.chainState.GetcurrentBlockHeader()
+				if reCheckHeader == nil {
+					logger.Error("🚨 [FORK RE-VERIFY] Cannot re-verify: no current block header")
+					return
+				}
+				header := *reCheckHeader
+
+				var reLocalAccountRoot, reLocalStakeRoot common.Hash
+				if header.BlockNumber() >= blockNum {
+					// Try to get historical block state
+					blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNum)
+					if !ok {
+						logger.Error("🚨 [FORK RE-VERIFY] Cannot find block hash for #%d — skipping re-verify", blockNum)
+						return
+					}
+					pastBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
+					if err != nil || pastBlock == nil {
+						logger.Error("🚨 [FORK RE-VERIFY] Cannot fetch block #%d data — skipping re-verify", blockNum)
+						return
+					}
+					reLocalAccountRoot = pastBlock.Header().AccountStatesRoot()
+					reLocalStakeRoot = pastBlock.Header().StakeStatesRoot()
+				} else {
+					// Node still hasn't reached that block — this was pipeline lag
+					logger.Info("✅ [FORK RE-VERIFY] Block #%d: local block is still at #%d — confirmed pipeline lag, NOT a fork. Resuming.",
+						blockNum, header.BlockNumber())
+					return
+				}
+
+				reLocalHash := ComputeAttestationHash(blockNum, reLocalAccountRoot, reLocalStakeRoot)
+
+				if reLocalHash == peerHash {
+					// State now matches peer — was transient pipeline lag
+					logger.Info("✅ [FORK RE-VERIFY] Block #%d: state NOW MATCHES peer after pipeline drain. Was transient lag, NOT a fork. Resuming.",
+						blockNum)
+					return
+				}
+
+				// CONFIRMED FORK: state still divergent after pipeline drain
+				logger.Error("═══════════════════════════════════════════════════")
+				logger.Error("🚨🚨🚨 [CONFIRMED FORK] Block #%d: state STILL MISMATCHES after 10s drain!", blockNum)
+				logger.Error("🚨 [CONFIRMED FORK] local_hash=%s, peer_hash=%s", reLocalHash.Hex(), peerHash.Hex())
+				logger.Error("🚨 [CONFIRMED FORK] local_account_root=%s", reLocalAccountRoot.Hex())
+				logger.Error("🚨 [CONFIRMED FORK] local_stake_root=%s", reLocalStakeRoot.Hex())
+				logger.Error("🚨 [CONFIRMED FORK] Halting node. Restart will trigger STARTUP-SYNC resync from peers.")
+				logger.Error("═══════════════════════════════════════════════════")
 				logger.SyncFileLog()
-				os.Exit(1)
-			}()
+
+				// Use fatal.Exit for forensic crash dump before clean halt
+				fatal.Exit("CONFIRMED FORK at block #%d: local attestation diverged from network majority after pipeline drain", blockNum)
+			}(peerAtt.BlockNumber, peerAtt.AttestationHash)
 		}
 	}
 

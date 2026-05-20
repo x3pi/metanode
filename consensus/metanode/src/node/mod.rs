@@ -149,7 +149,7 @@ pub struct ConsensusNode {
     pub(crate) notification_server_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     pub(crate) executor_client: Option<Arc<ExecutorClient>>,
     /// Transactions submitted in current epoch that may need recovery during epoch transition
-    pub(crate) epoch_pending_transactions: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
+    pub(crate) epoch_pending_transactions: Arc<tokio::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>>,
     /// Transaction hashes that have been committed in current epoch (for duplicate prevention)
     pub(crate) committed_transaction_hashes:
         Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,

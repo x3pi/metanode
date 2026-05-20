@@ -10,8 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -57,8 +55,6 @@ type BlockChain struct {
 	dirtyStorage *sync.Map
 	dirtyLock    sync.RWMutex // Lock nhẹ để bảo vệ việc tráo đổi con trỏ dirtyStorage
 
-	mappingBatch []byte
-
 	// Worker control
 	stopCleanup chan struct{}
 	wg          sync.WaitGroup
@@ -85,14 +81,28 @@ type cachedUint64 struct {
 	addedAt time.Time
 }
 
-func (bc *BlockChain) SetMappingBatch(batch []byte) {
-	bc.mappingBatch = batch
-}
+func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block) ([]byte, error) {
+	var mappingBatchKVs [][2][]byte
 
-func (bc *BlockChain) GetMappingBatch() []byte {
-	batch := bc.mappingBatch
-	bc.mappingBatch = nil
-	return batch
+	// 1. Block number -> hash
+	blockNum := bl.Header().BlockNumber()
+	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNum)
+	mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(key), bl.Header().Hash().Bytes()})
+
+	// 2. Tx hash -> block number
+	blockNumberBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockNumberBytes, blockNum)
+	for _, txHash := range bl.Transactions() {
+		txKey := fmt.Sprintf("%s%s", txHashPrefix, txHash.Hex())
+		mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(txKey), blockNumberBytes})
+	}
+
+	serializedMappingBatch, err := storage.SerializeBatch(mappingBatchKVs)
+	if err != nil {
+		logger.Error("GenerateMappingBatchForBlock: failed to serialize mapping batch: %v", err)
+		return nil, err
+	}
+	return serializedMappingBatch, nil
 }
 
 // InitBlockChain khởi tạo singleton.
@@ -514,22 +524,28 @@ func (bc *BlockChain) Commit() error {
 			logger.Error("Storage BatchPut failed: %v", err)
 			return err
 		}
-		if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
-			data, err := storage.SerializeBatch(batch)
-			if err != nil {
-				logger.Error("SerializeBatch: %v", err)
-			}
-			bc.SetMappingBatch(data)
-		}
 	}
 
 	// mapToProcess sẽ được GC dọn dẹp sau khi hàm này kết thúc
 	return nil
 }
 
-// Discard hủy bỏ thay đổi
+// Discard hủy bỏ thay đổi toàn bộ (CẢNH BÁO: Không dùng trong pipeline xử lý block vì sẽ xóa block đang chờ commit)
 func (bc *BlockChain) Discard() {
 	bc.dirtyLock.Lock()
 	defer bc.dirtyLock.Unlock()
 	bc.dirtyStorage = new(sync.Map)
+}
+
+func (bc *BlockChain) removeFromDirty(key string) {
+	bc.dirtyLock.RLock()
+	defer bc.dirtyLock.RUnlock()
+	bc.dirtyStorage.Delete(key)
+}
+
+// DiscardBlockMappings safely removes only the mappings associated with a specific block number
+func (bc *BlockChain) DiscardBlockMappings(blockNumber uint64) {
+	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber)
+	bc.removeFromDirty(key)
+	bc.blockNumberToHashCache.Delete(blockNumber)
 }

@@ -321,21 +321,54 @@ impl BaseCommitter {
 
         // Use those potential certificates to determine which (if any) of the target leader
         // blocks can be committed.
+        // Fix for Mysticeti Bug: We aggregate votes across ALL potential certificates (which are the anchor's causal past).
+        // If the aggregated votes reach the ValidityThreshold (f+1), we commit.
+        // This prevents the fork where one node directly commits (sees 2f+1 votes), but another indirectly skips
+        // because the anchor doesn't contain a specific certificate block, even though it causally contains f+1 votes.
         let mut certified_leader_blocks: Vec<_> = leader_blocks
             .into_iter()
             .filter(|leader_block| {
+                let mut votes_stake_aggregator = crate::stake_aggregator::StakeAggregator::<crate::stake_aggregator::ValidityThreshold>::new();
                 let mut all_votes = HashMap::new();
-                potential_certificates.iter().any(|potential_certificate| {
-                    self.is_certificate(potential_certificate, leader_block, &mut all_votes)
-                })
+                
+                for potential_certificate in &potential_certificates {
+                    for reference in potential_certificate.ancestors() {
+                        let is_vote = if let Some(is_vote) = all_votes.get(reference) {
+                            *is_vote
+                        } else {
+                            let potential_vote = self.dag_state.read().get_block(reference);
+                            let is_vote = {
+                                if let Some(potential_vote) = potential_vote {
+                                    self.is_vote(&potential_vote, leader_block)
+                                } else {
+                                    false
+                                }
+                            };
+                            all_votes.insert(*reference, is_vote);
+                            is_vote
+                        };
+
+                        if is_vote {
+                            if votes_stake_aggregator.add(reference.author, &self.context.committee) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
             })
             .collect();
 
         // There can be at most one certified leader, otherwise it means the BFT assumption is broken.
+        // Wait, with ValidityThreshold (f+1), a Byzantine leader COULD equivocate and get f+1 votes for two different blocks.
+        // If this happens, NEITHER block could have gotten 2f+1 votes (since 2f+1 + f+1 > 3f+1).
+        // Since neither could have gotten 2f+1 votes, no node could have directly committed either of them.
+        // Thus, we can safely skip the leader if we see multiple blocks with f+1 votes.
         if certified_leader_blocks.len() > 1 {
-            panic!(
-                "More than one certified leader at wave {wave} in {leader_slot}: {certified_leader_blocks:?}"
+            tracing::warn!(
+                "More than one certified leader at wave {wave} in {leader_slot}: {certified_leader_blocks:?}. Skipping."
             );
+            return LeaderStatus::Skip(leader_slot);
         }
 
         // We commit the target leader if it has a certificate that is an ancestor of the anchor.

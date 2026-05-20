@@ -277,7 +277,7 @@ impl DagStateActor {
 
                 DagWriteCommand::TakeBaselineScores { reply } => {
                     let scores = dag_state.write().take_baseline_reputation_scores();
-                    tracing::info!(
+                    tracing::trace!(
                         "🔄 [DAG-STATE-ACTOR] TakeBaselineScores: {}",
                         if scores.is_some() { "found" } else { "none" }
                     );

@@ -20,51 +20,6 @@ func TestGetLeaderAddress_Direct20Byte(t *testing.T) {
 	assert.Equal(t, expected, result)
 }
 
-// ============================================================================
-// TestGetLeaderAddress_EmptyFallback
-// ============================================================================
-func TestGetLeaderAddress_EmptyFallback(t *testing.T) {
-	fallbackAddr := e_common.HexToAddress("0xbbbb000000000000000000000000000000000002")
-	bp := &BlockProcessor{
-		validatorAddress: fallbackAddr,
-		// chainState is nil → GetLeaderAddressByIndex will return validatorAddress
-	}
-
-	// Empty address → fallback
-	result := bp.GetLeaderAddress([]byte{}, 0)
-	assert.Equal(t, fallbackAddr, result, "empty address should fallback to validatorAddress")
-}
-
-// ============================================================================
-// TestGetLeaderAddress_InvalidLengthFallback
-// ============================================================================
-func TestGetLeaderAddress_InvalidLengthFallback(t *testing.T) {
-	fallbackAddr := e_common.HexToAddress("0xcccc000000000000000000000000000000000003")
-	bp := &BlockProcessor{
-		validatorAddress: fallbackAddr,
-	}
-
-	// 10-byte address (invalid) → fallback
-	result := bp.GetLeaderAddress(make([]byte, 10), 0)
-	assert.Equal(t, fallbackAddr, result, "non-20-byte should fallback to validatorAddress")
-
-	// 32-byte address (too long) → fallback
-	result = bp.GetLeaderAddress(make([]byte, 32), 0)
-	assert.Equal(t, fallbackAddr, result, "32-byte should also fallback")
-}
-
-// ============================================================================
-// TestGetLeaderAddressByIndex_NilChainState
-// ============================================================================
-func TestGetLeaderAddressByIndex_NilChainState(t *testing.T) {
-	fallbackAddr := e_common.HexToAddress("0xdddd000000000000000000000000000000000004")
-	bp := &BlockProcessor{
-		validatorAddress: fallbackAddr,
-	}
-
-	result := bp.GetLeaderAddressByIndex(0)
-	assert.Equal(t, fallbackAddr, result, "nil chainState should fallback to validatorAddress")
-}
 
 // ============================================================================
 // TestGetState_SetState

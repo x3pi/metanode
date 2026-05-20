@@ -51,7 +51,7 @@ sleep 2
 echo -e "${BLUE}📋 Step 1.5: Build Rust and Go binaries...${NC}"
 echo "  🔄 Building Rust metanode..."
 export PATH="/home/abc/protoc3/bin:$PATH"
-cd "$METANODE_ROOT" && cargo +nightly build --release --bin metanode
+cd "$METANODE_ROOT" && cargo build --release --bin metanode
 echo "  🔄 Building Go simple_chain..."
 cd "$GO_SIMPLE_ROOT" && go build -o simple_chain .
 echo -e "${GREEN}  ✅ Binaries ready${NC}"
@@ -84,7 +84,7 @@ cd "$GO_SIMPLE_ROOT"
 XAPIAN="sample/$DATA/data/data/xapian_node"
 PPROF_ARG="--pprof-addr=localhost:6060"
 tmux new-session -d -s "$GO_MASTER_SESSION" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=$GO_MASTER_CONFIG $PPROF_ARG >> \"$LOG_DIR/node_0/go-master-stdout.log\" 2>&1"
+    "ulimit -n 100000; ulimit -c unlimited; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export GOTRACEBACK=crash && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=$GO_MASTER_CONFIG $PPROF_ARG >> \"$LOG_DIR/node_0/go-master-stdout.log\" 2>&1"
 
 
 # Step 5: Start Go Sub 0

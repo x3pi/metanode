@@ -246,8 +246,8 @@ func main() {
 	flag.StringVar(&configPath, "config", "./config.json", "Client config")
 	flag.StringVar(&keysFile, "keys", "../gen_spam_keys/generated_keys.json", "Generated keys JSON")
 	flag.IntVar(&count, "count", 10000, "Number of lockAndBridge TXs")
-	flag.IntVar(&batchSize, "batch", 500, "Batch size")
-	flag.IntVar(&sleepMs, "sleep", 10, "Sleep between batches (ms)")
+	flag.IntVar(&batchSize, "batch", 1000, "Batch size")
+	flag.IntVar(&sleepMs, "sleep", 5, "Sleep between batches (ms)")
 	flag.StringVar(&nodeAddr, "node", "", "Override node TCP address")
 	flag.StringVar(&rpcAddr, "rpc", "", "RPC URL for verification")
 	flag.IntVar(&waitSecs, "wait", 120, "Max seconds to wait for chain processing")
@@ -256,7 +256,7 @@ func main() {
 	flag.StringVar(&amountWei, "amount", "1000000000000000000", "Amount in wei (default: 1 ETH)")
 	flag.IntVar(&numRounds, "rounds", 1, "Number of benchmark rounds")
 	flag.BoolVar(&parallelNative, "parallel_native", false, "Use native self-transfers for parallel execution benchmarking")
-	flag.BoolVar(&loadBalance, "load_balance", false, "Round-robin transactions across all connection_node_* in config")
+	flag.BoolVar(&loadBalance, "load_balance", true, "Round-robin transactions across all connection_node_* in config")
 	flag.BoolVar(&verify, "verify", false, "After each round, check recipient balance to confirm TXs landed")
 	flag.Parse()
 
@@ -360,6 +360,25 @@ func main() {
 
 	// Round-robin counter cho nonce fetching
 	var rpcPoolIdx int64
+
+	// Wait for all RPC nodes to be ready before starting concurrent requests
+	fmt.Printf("\n⏳ Waiting for all RPC nodes to be ready...\n")
+	for _, rc := range rpcPool {
+		for i := 0; i < 120; i++ {
+			_, err := rc.GetAccountState(toSend[0].Address)
+			if err == nil {
+				fmt.Printf("  ✅ Node %s is ready\n", rc.Endpoint)
+				break
+			}
+			if i%10 == 0 {
+				fmt.Printf("    Still waiting for %s... (err: %v)\n", rc.Endpoint, err)
+			}
+			time.Sleep(1 * time.Second)
+			if i == 119 {
+				log.Fatalf("❌ Node %s failed to become ready after 120s: %v", rc.Endpoint, err)
+			}
+		}
+	}
 
 	// fetchNonce: luôn dùng rcPool[0] (tức là node master/local) để lấy nonce
 	// Việc dùng round-robin rpcPool (poolSize > 1) sẽ gây ra lỗi "invalid nonce" vì

@@ -89,10 +89,10 @@ pub async fn query_peer_info(peer_address: &str) -> Result<PeerInfoResponse> {
 pub async fn query_peer_epochs_network(
     peer_addresses: &[String],
 ) -> Result<(u64, u64, String, u64)> {
-    info!(
-        "🌐 [PEER RPC] Querying {} peer(s) over network for epoch discovery...",
-        peer_addresses.len()
-    );
+    // info!(
+    //     "🌐 [PEER RPC] Querying {} peer(s) over network for epoch discovery...",
+    //     peer_addresses.len()
+    // );
 
     let mut best_epoch = 0u64;
     let mut best_block = 0u64;
@@ -256,7 +256,7 @@ pub async fn fetch_blocks_from_peer(
     );
 
     let mut all_blocks = Vec::new();
-    let batch_size = 500u64; // Optimize: 500 blocks ≈ 35KB, reduces TCP connection churn
+    let batch_size = 1000u64; // Optimize: 1000 blocks reduces TCP connection churn and speeds up sync
     let mut current_from = from_block;
 
     while current_from <= to_block {

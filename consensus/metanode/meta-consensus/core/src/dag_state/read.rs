@@ -82,6 +82,22 @@ impl DagState {
         )) {
             blocks.push(block_info.block.clone())
         }
+
+        // HOTFIX: If the slot's round has been evicted by GC, we MUST fetch from the store
+        // to maintain deterministic consensus logic during fast-forward/catch-up phases.
+        let eviction_round = self.evicted_rounds[slot.authority];
+        if slot.round <= eviction_round && blocks.is_empty() {
+            if let Ok(store_blocks) = self.store.scan_blocks_by_author(slot.authority, slot.round) {
+                for block in store_blocks {
+                    if block.round() == slot.round {
+                        blocks.push(block);
+                    } else if block.round() > slot.round {
+                        break;
+                    }
+                }
+            }
+        }
+
         blocks
     }
 
@@ -104,6 +120,27 @@ impl DagState {
         )) {
             blocks.push(block_info.block.clone())
         }
+
+        // HOTFIX: For authorities whose eviction round is >= requested round, we MUST check 
+        // the store. This ensures deterministic leader support evaluation even if blocks are GC'd.
+        for (authority_index, _) in self.context.committee.authorities() {
+            let eviction_round = self.evicted_rounds[authority_index];
+            if round <= eviction_round {
+                if let Ok(store_blocks) = self.store.scan_blocks_by_author(authority_index, round) {
+                    for block in store_blocks {
+                        if block.round() == round {
+                            // avoid duplicates if it was already in recent_blocks (unlikely but safe)
+                            if !blocks.iter().any(|b| b.reference() == block.reference()) {
+                                blocks.push(block);
+                            }
+                        } else if block.round() > round {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         blocks
     }
 

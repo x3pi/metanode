@@ -155,6 +155,9 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	}
 
 	if executeTransaction.IsDeployContract() {
+		if !executeTransaction.ValidDeployData() {
+			return nil, fmt.Errorf("deploy data is nil or invalid")
+		}
 		mvmResult = mvmOffChain.Deploy(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.DeployData().Code(),
@@ -295,6 +298,9 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		)
 	}
 	if executeTransaction.IsDeployContract() {
+		if !executeTransaction.ValidDeployData() {
+			return nil, fmt.Errorf("deploy data is nil or invalid")
+		}
 		mvmResult = mvmOffChain.Deploy(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.DeployData().Code(),

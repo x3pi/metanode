@@ -226,8 +226,14 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches START (batch_count=%d)", len(aggregatedBatches))
 	nomtStart := time.Now()
 
-	if err := p_trie.ApplyNomtReplicationBatches(aggregatedBatches); err != nil {
+	sessions, err := p_trie.ApplyNomtReplicationBatches(aggregatedBatches)
+	if err != nil {
 		return fmt.Errorf("error replicating NOMT batches: %w", err)
+	}
+	if len(sessions) > 0 {
+		if err := p_trie.FlushNomtSessions(sessions); err != nil {
+			return fmt.Errorf("error flushing NOMT sessions: %w", err)
+		}
 	}
 	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches DONE in %v", time.Since(nomtStart))
 

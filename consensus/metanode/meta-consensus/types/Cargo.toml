@@ -7,7 +7,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
-serde = { version = "1.0.144", features = ["derive", "rc"] }
-base64 = "0.21.2"
+fastcrypto = { workspace = true }
+serde = { workspace = true }
+base64 = { workspace = true }
 consensus-config = { path = "../config" }

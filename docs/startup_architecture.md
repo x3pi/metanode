@@ -393,6 +393,7 @@ Bước 8: Authority starts
 | Update GEI và CommitIndex rời rạc | Sequence shifting, duplicate blocks sau khi restart | Dùng `BatchPut` lưu atomic (Atomic Consensus Persistence) |
 | Local DAG rỗng nhưng `local_commit` pre-seeded > 0 | Node bị lọt qua SCHEDULE-RECOVERY-GUARD, tạo block với leader schedule rỗng → Fork | Dùng `dag_state.last_commit.is_none()` (DAG Sparseness Detection) thay vì kiểm tra số học |
 | Local committer chạy trên DAG thiếu ancestor blocks | `median_timestamp_by_stake()` tính từ tập con → timestamp lệch 1-5 giây → txRoot/receiptsRoot lệch → Fork (Block 1000 bug) | COLD-START-GUARD v2: kiểm tra full committee coverage + deep ancestor verification trước khi cho phép local commit |
+| Thuật toán sắp xếp danh sách Validators bất đồng bộ (String vs Byte comparison) | Sai lệch Index LeaderSchedule giữa Go và Rust → node tự bầu leader sai và nhúng leader_address lỗi vào SubDag → Hard Fork | Sử dụng hàm giải mã `decode_key` đồng nhất thành Raw Bytes trước khi so sánh (`bytes.Compare` / `cmp`) ở tất cả các lớp (`committee.rs`, `epoch_recovery.rs`, `block_processor_core.go`). |
 
 ---
 

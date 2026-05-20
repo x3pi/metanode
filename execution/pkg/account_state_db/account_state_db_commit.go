@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	// Assume these paths are correct for your project structure
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -72,7 +73,11 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	// }
 
 	if !db.lockedFlag.Load() {
-		return common.Hash{}, errors.New("Commit: db.lockedFlag is not already locked")
+		// SELF-HEALING: Same as CommitPipeline — force-acquire instead of crash.
+		// See CommitPipeline comment for full rationale.
+		logger.Warn("⚠️ [SELF-HEAL] Commit: lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash.")
+		db.lockedFlag.Store(true)
 	}
 	// Lock the entire commit process to ensure atomicity
 	db.muCommit.Lock()
@@ -294,7 +299,29 @@ type PipelineCommitResult struct {
 // persist nodes to LevelDB and swap the trie reference.
 func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	if !db.lockedFlag.Load() {
-		return nil, errors.New("CommitPipeline: db.lockedFlag is not already locked")
+		// ═══════════════════════════════════════════════════════════════
+		// SELF-HEALING: lockedFlag should be true (set by IntermediateRoot(true)
+		// in ProcessTransactions). If it's false, a NOMT trie re-alignment
+		// or deferred cleanup race from the previous block has cleared it.
+		//
+		// Instead of returning error → logger.Fatal → os.Exit (killing the
+		// entire node), we force-acquire the lock and proceed. This is safe
+		// because:
+		//   1. CommitPipeline immediately calls IntermediateRoot(false) which
+		//      only returns the cached trie hash — no iteration.
+		//   2. The trie state is still valid (mutations were applied during
+		//      the original IntermediateRoot(true) call in ProcessTransactions).
+		//   3. muCommit.Lock below serializes any concurrent Commit attempts.
+		//
+		// ROOT CAUSE: NOMT trie re-alignment (FORK-PREVENTION path) can
+		// trigger deferred lockedFlag.Store(false) from block N-1's
+		// IntermediateRoot(false) while block N's CommitPipeline is starting.
+		// ═══════════════════════════════════════════════════════════════
+		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline: lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a NOMT re-alignment race or ghost-block boundary where ProcessTransactions was skipped.")
+		db.lockedFlag.Store(true)
+		db.muTrie.Lock()
 	}
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
@@ -330,7 +357,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 		logger.Debug("[PERF-COMMIT] trie.Commit(true) took: %v", trieCommitDuration)
 	}
 
-	// Sanity check
+	// Sanity check: intermediateHash (from IntermediateRoot) must match committedHash (from Commit).
+	// With NOMT inline commit fix (May 2026), IntermediateRoot calls Commit() for NOMT,
+	// so CommitPipeline's Commit() sees empty wDirty and returns the same hash.
 	if intermediateHash != committedHash {
 		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); !isNomt {
 			db.muTrie.Unlock()
@@ -341,6 +370,9 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 				intermediateHash, committedHash,
 			)
 		}
+		// NOMT: should not happen with inline commit, but log for diagnostics
+		logger.Warn("⚠️ [NOMT] CommitPipeline: intermediateHash=%s != committedHash=%s (unexpected after inline commit)",
+			intermediateHash.Hex()[:18], committedHash.Hex()[:18])
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -551,6 +583,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		}
 		db.lockedFlag.Store(true) // CHANGED: Use atomic Store
 
+		// FORK-SAFETY FIX: Use cacheEpoch as a SeqLock to prevent concurrent mempool
+		// validators (AccountStateReadOnly) from poisoning the lruCache with stale
+		// trie data while IntermediateRoot is actively mutating the trie.
+		db.cacheEpoch.Add(1)
+		defer db.cacheEpoch.Add(1)
+
 		// ═══════════════════════════════════════════════════════════════
 		// PIPELINE OVERLAP: persistReady wait has been MOVED to AFTER the
 		// CPU-bound marshal phase (below), just before BatchUpdate which
@@ -687,6 +725,18 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	if totalDirty > 0 {
 		hasChanges = true
+		if lockProcess {
+			// FORENSIC LOGGING: Print DirtyContentHash for deterministic diffing
+			hasher := crypto.NewKeccakState()
+			for _, entry := range keysToProcess {
+				hasher.Write(entry.addr.Bytes())
+				b, _ := entry.state.Marshal()
+				hasher.Write(b)
+			}
+			var h common.Hash
+			hasher.Read(h[:])
+			logger.Info("🔍 [FORENSIC] AccountStateDB DirtyContentHash: %s (totalDirty=%d)", h.Hex(), totalDirty)
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -858,14 +908,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// Moving the gate here ensures all trie reads see the swapped trie.
 		//
 		// PERF NOTE: PersistAsync closes persistReady BEFORE CommitPayload,
-		// so this wait is nearly instantaneous (trie swap << disk flush).
-		// The marshal phase (10-50ms) still overlaps with disk I/O.
-		// ═══════════════════════════════════════════════════════════════
-		persistWaitStart := time.Now()
+		// so waiting on persistReady was sufficient.
+		waitStart := time.Now()
 		<-db.persistReady
-		persistWaitDuration := time.Since(persistWaitStart)
-		if persistWaitDuration > 5*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", persistWaitDuration)
+		if d := time.Since(waitStart); d > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB: IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
+		} else {
+			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", d)
 		}
 
 		if updateErr == nil && len(batchKeys) > 0 {
@@ -937,11 +986,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 		// DEFERRED PERSIST GATE (MPT path): same as FlatTrie path above.
 		// CRITICAL FORK FIX: ALL trie types must wait (see comment above).
-		persistWaitStart := time.Now()
+		waitStart := time.Now()
 		<-db.persistReady
-		persistWaitDuration := time.Since(persistWaitStart)
-		if persistWaitDuration > 5*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", persistWaitDuration)
+		if d := time.Since(waitStart); d > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB (MPT): IntermediateRoot DEFERRED persistReady wait took %v (Pipeline stalled)!", d)
+		} else {
+			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", d)
 		}
 
 		db.muTrie.Lock()
@@ -1026,7 +1076,39 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// CRITICAL FIX: Must compute the actual trie hash NOW so that
 		// ProcessTransactions returns the correct post-state root for the block header.
 		startHash := time.Now()
-		newHash = db.trie.Hash()
+
+		// ═══════════════════════════════════════════════════════════════
+		// NOMT STATEROOT FIX (May 2026):
+		//
+		// For NOMT trie, Hash() returns readView.rootHash — a cached value
+		// that is ONLY updated by Commit(). Calling Hash() here returns the
+		// PREVIOUS block's root, causing STATEROOT_FREEZE: the block header
+		// shows stale stateRoot despite 170+ successful TXs.
+		//
+		// Fix: Call Commit() for NOMT during IntermediateRoot(true).
+		// This runs the NOMT session (RecordRead + BatchWrite + Finish),
+		// computes the actual Merkle root, and updates readView.rootHash.
+		//
+		// CommitPipeline's subsequent trie.Commit() call will see empty
+		// wDirty and return immediately (no-op) with the correct hash.
+		//
+		// For MPT/Flat tries, Hash() correctly computes from in-memory
+		// trie state — no change needed.
+		// ═══════════════════════════════════════════════════════════════
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			committedHash, _, _, commitErr := db.trie.Commit(true)
+			if commitErr != nil {
+				logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during IntermediateRoot failed: %v", commitErr)
+				newHash = db.trie.Hash() // fallback to stale hash
+			} else {
+				newHash = committedHash
+				logger.Debug("[NOMT-INLINE-COMMIT] IntermediateRoot got real root: %s (was: %s)",
+					newHash.Hex()[:18]+"...", db.originRootHash.Hex()[:18]+"...")
+			}
+		} else {
+			newHash = db.trie.Hash()
+		}
+
 		hashDuration := time.Since(startHash)
 		if hashDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] IntermediateRoot Hash: %v (%d dirty)", hashDuration, totalDirty)

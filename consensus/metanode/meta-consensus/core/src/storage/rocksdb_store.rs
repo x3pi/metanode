@@ -341,7 +341,7 @@ impl Store for RocksDBStore {
         let start_key = (range.start(), CommitDigest::MIN);
         let end_key = (range.end(), CommitDigest::MAX);
         
-        tracing::info!(
+        tracing::trace!(
             "🔍 [SCAN_COMMITS] Searching range: {:?} -> start_key: {:?}, end_key: {:?}",
             range, start_key.0, end_key.0
         );
@@ -355,7 +355,7 @@ impl Store for RocksDBStore {
             let ((index, digest), serialized) = result?;
             
             if count == 1 {
-                tracing::info!("🔍 [SCAN_COMMITS] First commit found: index={}, digest={:?}", index, digest);
+                tracing::trace!("🔍 [SCAN_COMMITS] First commit found: index={}, digest={:?}", index, digest);
             }
             
             let commit = TrustedCommit::new_trusted(
@@ -366,7 +366,7 @@ impl Store for RocksDBStore {
             commits.push(commit);
         }
         
-        tracing::info!(
+        tracing::trace!(
             "🔍 [SCAN_COMMITS] Found {} commits for range {:?}",
             commits.len(), range
         );

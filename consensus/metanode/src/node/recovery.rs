@@ -26,9 +26,6 @@ pub async fn perform_block_recovery_check(
     );
 
     // The recovery store is now passed in as an argument to avoid RocksDB lock conflicts.
-    // Calculate start commit index
-    // global_exec_index = epoch_base + commit_index + cumulative_fragment_offset
-    // For recovery, we must reconstruct the fragment offset by counting TXs in each commit
     let start_global = go_last_block + 1;
     if start_global <= epoch_base_exec_index {
         info!(
@@ -39,13 +36,6 @@ pub async fn perform_block_recovery_check(
         return Ok(());
     }
 
-    let start_commit_index = (start_global - epoch_base_exec_index) as u32;
-
-    info!(
-        "🔍 [RECOVERY] Scanning for commits starting from commit_index={} (global={})",
-        start_commit_index, start_global
-    );
-
     // Ensure db exists before attempting to read it
     if !db_path.exists() {
         info!("✅ [RECOVERY] Local DB path does not exist. No commits to recover.");
@@ -54,8 +44,9 @@ pub async fn perform_block_recovery_check(
 
     let recovery_store = RocksDBStore::new(db_path.to_str().unwrap());
     
-    // Scan commits from start_commit_index
-    let range = consensus_core::CommitRange::new(start_commit_index..=u32::MAX);
+    // We MUST scan from the beginning of the epoch to reconstruct the fragment offset.
+    // Assuming commit_index starts at 1 for the first commit after genesis/epoch base.
+    let range = consensus_core::CommitRange::new(1..=u32::MAX);
     let commits = recovery_store.scan_commits(range)?;
 
     if commits.is_empty() {
@@ -63,50 +54,32 @@ pub async fn perform_block_recovery_check(
         return Ok(());
     }
 
+    let mut next_required_global = go_last_block + 1;
+    let mut cumulative_fragment_offset: u64 = 0;
+    let mut missing_commits_found = false;
+
     info!(
-        "🔄 [RECOVERY] Found {} missing commits to replay!",
+        "🔍 [RECOVERY] Scanning {} commits to reconstruct GEI fragmentation offset...",
         commits.len()
     );
-
-    let mut next_required_global = go_last_block + 1;
 
     // ═══════════════════════════════════════════════════════════════════
     // FORK-SAFETY FIX (C2): Track cumulative fragment offset during recovery.
     //
     // When a commit has >MAX_TXS_PER_GO_BLOCK TXs, send_committed_subdag
     // fragments it into N blocks, each consuming 1 GEI. So a fragmented
-    // commit consumes N GEIs instead of 1. We must advance next_required_global
-    // by N, not 1, to match what other nodes did during live processing.
-    //
-    // DETERMINISM: All nodes use the same MAX_TXS_PER_GO_BLOCK constant
-    // and process the same commits → identical fragment offsets.
+    // commit consumes N GEIs instead of 1.
+    // We must accumulate `cumulative_fragment_offset` from commit 1 to ensure
+    // that `commit_start_gei` is correctly aligned with the original GEI stream.
     // ═══════════════════════════════════════════════════════════════════
 
     for commit in commits {
         let commit_index = commit.index();
-        let global_exec_index = epoch_base_exec_index + commit_index as u64;
-
-        if global_exec_index < next_required_global {
-            continue; // Already processed or duplicate
+        if commit_index == 0 {
+            continue; // Genesis/Epoch start is handled locally
         }
 
-        // NOTE: With fragmentation, the GEI formula is:
-        //   global_exec_index = epoch_base + commit_index + cumulative_fragment_offset
-        // We don't track cumulative_fragment_offset here because send_committed_subdag
-        // handles the actual GEI assignment internally. We pass `next_required_global`
-        // as the starting GEI and let send_committed_subdag fragment as needed.
-        // The key fix is advancing next_required_global by geis_consumed (not always 1).
-
-        if global_exec_index > next_required_global {
-            // GAP DETECTED!
-            // This is critical: if we skip a block, Go Master will buffer forever waiting for it.
-            let error_msg = format!(
-                "🚨 [RECOVERY CRITICAL] Gap detected in block sequence! Expected global_exec_index={}, but found {}. Missing {} blocks. Recovery cannot proceed sequentially.",
-                next_required_global, global_exec_index, global_exec_index - next_required_global
-             );
-            error!("{}", error_msg);
-            return Err(anyhow::anyhow!(error_msg));
-        }
+        let commit_start_gei = epoch_base_exec_index + commit_index as u64 + cumulative_fragment_offset;
 
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
@@ -131,32 +104,61 @@ pub async fn perform_block_recovery_check(
             1
         };
 
+        let commit_end_gei = commit_start_gei + geis_consumed;
+
+        // Update the offset for the NEXT commit
+        if geis_consumed > 1 {
+            cumulative_fragment_offset += geis_consumed - 1;
+        }
+
+        // If this commit is completely older than what we need, skip it
+        if commit_end_gei <= next_required_global {
+            continue;
+        }
+
+        // GAP DETECTED!
+        // This is critical: if we skip a block, Go Master will buffer forever waiting for it.
+        if commit_start_gei > next_required_global {
+            let error_msg = format!(
+                "🚨 [RECOVERY CRITICAL] Gap detected in block sequence! Expected global_exec_index={}, but commit {} starts at {}. Missing {} blocks. Recovery cannot proceed sequentially.",
+                next_required_global, commit_index, commit_start_gei, commit_start_gei - next_required_global
+             );
+            error!("{}", error_msg);
+            return Err(anyhow::anyhow!(error_msg));
+        }
+
+        missing_commits_found = true;
+
         if geis_consumed > 1 {
             info!(
-                "🔪 [RECOVERY-FRAGMENT] Commit #{} has {} TXs → will consume {} GEIs (global_exec_index={})",
-                commit_index, total_txs, geis_consumed, global_exec_index
+                "🔪 [RECOVERY-FRAGMENT] Commit #{} has {} TXs → will consume {} GEIs ({} to {})",
+                commit_index, total_txs, geis_consumed, commit_start_gei, commit_end_gei - 1
             );
         } else {
             info!(
                 "🔄 [RECOVERY] Replaying commit #{} (global_exec_index={}, txs={})",
-                commit_index, global_exec_index, total_txs
+                commit_index, commit_start_gei, total_txs
             );
         }
 
         // Send to executor — send_committed_subdag handles fragmentation internally
-        // and returns the actual number of GEIs consumed
+        // We MUST pass commit_start_gei, and it will skip fragments < next_expected_index.
         let actual_geis = executor_client
-            .send_committed_subdag(&subdag, current_epoch, next_required_global, subdag.leader_address.clone())
+            .send_committed_subdag(&subdag, current_epoch, commit_start_gei, subdag.leader_address.clone())
             .await?;
 
-        // Advance expected index by the number of GEIs consumed (not always 1!)
-        next_required_global += actual_geis;
+        // Advance expected index to the end of this commit
+        next_required_global = std::cmp::max(next_required_global, commit_start_gei + actual_geis);
 
         // Small delay to prevent overwhelming the socket/executor
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    info!("✅ [RECOVERY] Replay completed successfully.");
+    if !missing_commits_found {
+        info!("✅ [RECOVERY] No missing commits found in local DB that need replaying.");
+    } else {
+        info!("✅ [RECOVERY] Replay completed successfully.");
+    }
     Ok(())
 }
 

@@ -314,8 +314,10 @@ where
             "consensus db_path must be valid UTF-8 — check Parameters::db_path configuration",
         );
         let store = Arc::new(RocksDBStore::new(store_path));
-        let mut dag_state = DagState::new(context.clone(), store.clone());
-        dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
+        let dag_state = DagState::new(context.clone(), store.clone());
+        // REMOVED: dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
+        // This was overwriting the accurate ms-precision timestamp from Rust's DagState 
+        // with Go's second-precision timestamp, causing fork divergence.
 
         // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
         // On snapshot restart: DAG might be at 1005, but Go has processed up to replay_after (e.g. 1000).
@@ -456,6 +458,29 @@ where
             LeaderTimeoutTask::start(core_dispatcher.clone(), &signals_receivers, context.clone());
 
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+
+        // DIGEST-GATE: Wire CommitVoteMonitor.quorum_commit_digest() into CoordinationHub
+        // so CommitProcessor can verify local commit digests against network quorum.
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            coordination_hub.set_digest_verifier(move |index: u32| {
+                monitor_ref
+                    .quorum_commit_digest(index)
+                    .map(|d| d.into_inner())
+            });
+        }
+
+        // COLD-START-FIX (May 2026): Wire CommitVoteMonitor.has_any_digest_data() into
+        // CoordinationHub so CommitProcessor can detect true cold-start conditions.
+        // This is the definitive fix for the epoch transition deadlock where CommitSyncer
+        // sets quorum_commit_index > 0 from peer queries BEFORE CommitVoteMonitor has
+        // received any actual digest votes, permanently disabling COLD-START-BYPASS.
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            coordination_hub.set_digest_data_checker(move || {
+                monitor_ref.has_any_digest_data()
+            });
+        }
 
         let synchronizer = Synchronizer::start(
             network_client.clone(),
