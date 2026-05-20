@@ -914,7 +914,37 @@ impl ConsensusNode {
             "✅ [STARTUP] Using epoch_base={} from Go boundary_gei (epoch={}, boundary_block={})",
             epoch_base_exec_index, current_epoch, boundary_block
         );
-
+        // FORK-SAFETY FIX: Initialize executor_client state (block numbers, epoch) before recovery.
+        // If we don't do this, executor_client has last_processed_epoch=0 and next_block_number=0.
+        // When it replays a commit from the current epoch, it incorrectly thinks it's an Epoch Boundary,
+        // assigns block_number=0, and causes "CHAIN BROKEN" state divergence on Go.
+        executor_client.initialize_from_go().await;
+        
+        // --- NEW CODE: FETCH PEER GEI FOR RECOVERY CLAMPING ---
+        // We query the network to find the highest GEI known to peers.
+        // This acts as a strict ceiling for local recovery, preventing the node from replaying
+        // 'ghost commits' from a dirty database (e.g., from a previous test run) that the cluster
+        // has not actually certified in the current run.
+        let mut max_allowed_gei = u64::MAX;
+        if config.executor_read_enabled && !config.peer_rpc_addresses.is_empty() {
+            let mut highest_peer_gei = 0;
+            let mut reached = 0;
+            for peer_addr in &config.peer_rpc_addresses {
+                if let Ok(info) = crate::network::peer_rpc::query_peer_info(peer_addr).await {
+                    reached += 1;
+                    if info.last_global_exec_index > highest_peer_gei {
+                        highest_peer_gei = info.last_global_exec_index;
+                    }
+                }
+            }
+            if reached > 0 {
+                max_allowed_gei = std::cmp::max(highest_peer_gei, last_global_exec_index);
+                tracing::info!("🔍 [STARTUP] Strict Height Enforcement: Clamping recovery to max_allowed_gei={}", max_allowed_gei);
+            } else {
+                tracing::warn!("⚠️ [STARTUP] Failed to fetch peer GEI for clamping. Allowing unlimited recovery.");
+            }
+        }
+        
         // Recovery check
         if config.executor_read_enabled && last_global_exec_index > 0 {
             if let Err(e) = recovery::perform_block_recovery_check(
@@ -924,6 +954,7 @@ impl ConsensusNode {
                 current_epoch,
                 &epoch_db_path,
                 config.node_id as u32,
+                max_allowed_gei,
             )
             .await {
                 warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
@@ -1013,10 +1044,12 @@ impl ConsensusNode {
             }
         };
 
+        let mut actual_go_gei = local_go_gei;
         let (last_handled_commit_index, last_block_timestamp_ms) = match executor_client.get_last_handled_commit_index().await {
-            Ok((commit_index, _, _, _, _, ts, state_root)) => {
+            Ok((commit_index, auth_gei, _, _, _, ts, state_root)) => {
                 let state_root_hex = hex::encode(&state_root);
-                tracing::info!("🔑 [GO-AUTH GEI] Post-init query: state_root=0x{}", state_root_hex);
+                tracing::info!("🔑 [GO-AUTH GEI] Post-init query: state_root=0x{}, auth_gei={}", state_root_hex, auth_gei);
+                actual_go_gei = auth_gei;
                 (Some(commit_index), ts)
             },
             Err(e) => {
@@ -1049,7 +1082,7 @@ impl ConsensusNode {
                 warn!("⚠️ [STARTUP] INDEX DISCREPANCY DETECTED:");
                 warn!(
                     "   LocalGoBlock={}, PeerBlock={}, PersistedGEI={}, LocalGEI={}",
-                    local_go_block, peer_last_block, persisted_index, local_go_gei
+                    local_go_block, peer_last_block, persisted_index, actual_go_gei
                 );
                 warn!("   This may indicate network partition or stale data.");
             }
@@ -1058,7 +1091,7 @@ impl ConsensusNode {
                 warn!("🚨 [STARTUP] STALE CHAIN DETECTED: Local ({}) is ahead of Peer ({})! Forcing resync from Peer.", 
                        local_go_block, peer_last_block);
                 // In recovery we just use the local GEI anyway because Go Master blocks handles actual rollback if needed
-                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, actual_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else if local_go_block < peer_last_block.saturating_sub(5) {
                 let lag = peer_last_block - local_go_block;
                 info!(
@@ -1066,24 +1099,24 @@ impl ConsensusNode {
                     local_go_block, peer_last_block, lag, local_go_block
                 );
                 // Flag as lagging if behind by more than 50 blocks
-                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, actual_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             } else {
                 info!(
                     "✅ [STARTUP] Local and Peer are in sync (LocalBlock={}, PeerBlock={}). Using Local Go GEI: {} as authoritative.",
-                    local_go_block, peer_last_block, local_go_gei
+                    local_go_block, peer_last_block, actual_go_gei
                 );
-                (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+                (local_go_block, actual_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
             }
         } else {
-            if persisted_index > local_go_gei {
+            if persisted_index > actual_go_gei {
                 warn!("⚠️ [STARTUP] Persisted Index (GEI) {} > Local Go GEI {}. Go is behind (possible rollback/crash). Using Local Go GEI {} to force resync/replay.", 
-                    persisted_index, local_go_gei, local_go_gei);
+                    persisted_index, actual_go_gei, actual_go_gei);
             }
             info!(
                 "📊 [STARTUP] No peer reference, using Local Go Last GEI: {} (Block: {})",
-                local_go_gei, local_go_block
+                actual_go_gei, local_go_block
             );
-            (local_go_block, local_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
+            (local_go_block, actual_go_gei, last_executed_commit_hash, last_handled_commit_index, last_block_timestamp_ms)
         }
     }
 
@@ -1840,106 +1873,95 @@ impl ConsensusNode {
                         total_synced_blocks += total_synced_this_round;
                         local_block = round_last_block; // Update for next iteration
                                 
-                                // Re-query Go GEI after syncing to update shared state
-                                if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
-                                    coordination_hub.set_initial_global_exec_index(new_gei).await;
-                                    
-                                    // CRITICAL FIX: Also update the shared GEI tracker used by CommitProcessor.
-                                    // Without this, CommitProcessor starts incrementing GEI from its stale pre-sync value,
-                                    // passing incorrect GEIs to Go, which Go blindly accepts → hashes diverge across nodes.
-                                    {
-                                        let mut gei_guard = shared_last_global_exec_index.lock().await;
-                                        *gei_guard = new_gei;
-                                        tracing::info!("🔄 [STARTUP-SYNC] Updated shared_last_global_exec_index to {}", new_gei);
-                                    }
-                                    
-                                    // CRITICAL FIX: Query Go DIRECTLY for the updated lastHandledCommitIndex
-                                    // instead of reading stale Rust persistence files.
-                                    //
-                                    // ROOT CAUSE of fork: After STARTUP-SYNC syncs blocks to Go, Go's
-                                    // lastHandledCommitIndex is updated (from the synced block headers).
-                                    // But the OLD code read from Rust persistence files, which still had
-                                    // the pre-sync stale value. This caused CommitSyncer to replay commits
-                                    // that Go already processed → duplicate blocks → fork.
-                                    let mut post_sync_epoch = storage.current_epoch;
-                                    let new_handled = match barrier_client.get_last_handled_commit_index().await {
-                                        Ok((commit_idx, _, _, go_epoch, _, last_ts, _state_root)) => {
-                                            post_sync_epoch = go_epoch;
-                                            if commit_idx > 0 {
-                                                tracing::info!(
-                                                    "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync), ts={}, go_epoch={}",
-                                                    commit_idx, last_ts, go_epoch
-                                                );
-                                                commit_consumer.update_last_block_timestamp_ms(last_ts);
-                                                commit_idx
-                                            } else {
-                                                tracing::warn!(
-                                                    "⚠️ [STARTUP-SYNC] Go returned lastHandledCommitIndex=0 after sync (go_epoch={}). Using go_replay_after={}",
-                                                    go_epoch, go_replay_after
-                                                );
-                                                go_replay_after
-                                            }
+                                // CRITICAL FIX: Query Go DIRECTLY for BOTH the authoritative GEI and updated lastHandledCommitIndex.
+                                // get_last_block_number() counts ALL blocks (including empty skipped ones), which inflates GEI.
+                                // get_last_handled_commit_index() returns the authoritative GEI from the last executed commit.
+                                let mut post_sync_epoch = storage.current_epoch;
+                                let mut new_gei = 0;
+                                let new_handled = match barrier_client.get_last_handled_commit_index().await {
+                                    Ok((commit_idx, auth_gei, _, go_epoch, _, last_ts, _state_root)) => {
+                                        coordination_hub.set_initial_global_exec_index(auth_gei).await;
+                                        {
+                                            let mut gei_guard = shared_last_global_exec_index.lock().await;
+                                            *gei_guard = auth_gei;
+                                            tracing::info!("🔄 [STARTUP-SYNC] Updated shared_last_global_exec_index to authoritative GEI {}", auth_gei);
                                         }
-                                        Err(e) => {
+                                        new_gei = auth_gei;
+                                        post_sync_epoch = go_epoch;
+                                        if commit_idx > 0 {
+                                            tracing::info!(
+                                                "🔑 [STARTUP-SYNC] Got fresh lastHandledCommitIndex={} from Go RPC (post-sync), ts={}, go_epoch={}",
+                                                commit_idx, last_ts, go_epoch
+                                            );
+                                            commit_consumer.update_last_block_timestamp_ms(last_ts);
+                                            commit_idx
+                                        } else {
                                             tracing::warn!(
-                                                "⚠️ [STARTUP-SYNC] Failed to query Go for lastHandledCommitIndex: {}. Falling back to go_replay_after={}",
-                                                e, go_replay_after
+                                                "⚠️ [STARTUP-SYNC] Go returned lastHandledCommitIndex=0 after sync (go_epoch={}). Using go_replay_after={}",
+                                                go_epoch, go_replay_after
                                             );
                                             go_replay_after
                                         }
-                                    };
-                                    commit_consumer.monitor().set_highest_handled_commit(new_handled);
-                                    // CRITICAL: Also update commit_consumer's replay_after_commit_index
-                                    // so that authority_node.rs uses the post-sync value when computing
-                                    // max(go_handled, dag_handled). Without this, authority_node.rs
-                                    // would use the stale pre-sync go_replay_after value and the
-                                    // surviving RocksDB DAG's commit count could override our fix.
-                                    commit_consumer.update_replay_after_commit_index(new_handled);
-                                    tracing::info!(
-                                        "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}, replay_after_updated={}",
-                                        sync_round, new_gei, new_handled, new_handled
-                                    );
-                                    
-                                    // CRITICAL FIX: Also update the CommitProcessor's internal tracking indices.
-                                    // If these are not updated, the CommitProcessor will use its stale pre-sync
-                                    // values (e.g. from the snapshot block 5000) and will REPLAY all the commits
-                                    // that Go just downloaded via P2P Block Sync. This replay causes Go to execute
-                                    // the historical commits AGAIN as new blocks (e.g. 5436, 5437) -> Hard Fork.
-                                    // MUST be done unconditionally, even if epoch hasn't changed.
-                                    commit_processor.update_go_last_commit_index(new_handled);
-                                    commit_processor.update_next_expected_index(new_handled + 1);
-                                    tracing::info!(
-                                        "🔄 [STARTUP-SYNC] Updated CommitProcessor: go_last_commit_index={}, next_expected_index={}",
-                                        new_handled, new_handled + 1
-                                    );
-
-                                    if post_sync_epoch > storage.current_epoch {
-                                        tracing::info!(
-                                            "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
-                                            storage.current_epoch, post_sync_epoch
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "⚠️ [STARTUP-SYNC] Failed to query Go for lastHandledCommitIndex: {}. Falling back to go_replay_after={}",
+                                            e, go_replay_after
                                         );
-                                        storage.current_epoch = post_sync_epoch;
-                                        commit_processor.update_epoch(post_sync_epoch);
+                                        go_replay_after
+                                    }
+                                };
+                                commit_consumer.monitor().set_highest_handled_commit(new_handled);
+                                // CRITICAL: Also update commit_consumer's replay_after_commit_index
+                                // so that authority_node.rs uses the post-sync value when computing
+                                // max(go_handled, dag_handled). Without this, authority_node.rs
+                                // would use the stale pre-sync go_replay_after value and the
+                                // surviving RocksDB DAG's commit count could override our fix.
+                                commit_consumer.update_replay_after_commit_index(new_handled);
+                                tracing::info!(
+                                    "🔄 [STARTUP-SYNC] Round {}: Re-queried Go: gei={}, highest_handled_commit={}, replay_after_updated={}",
+                                    sync_round, new_gei, new_handled, new_handled
+                                );
+                                
+                                // CRITICAL FIX: Also update the CommitProcessor's internal tracking indices.
+                                // If these are not updated, the CommitProcessor will use its stale pre-sync
+                                // values (e.g. from the snapshot block 5000) and will REPLAY all the commits
+                                // that Go just downloaded via P2P Block Sync. This replay causes Go to execute
+                                // the historical commits AGAIN as new blocks (e.g. 5436, 5437) -> Hard Fork.
+                                // MUST be done unconditionally, even if epoch hasn't changed.
+                                commit_processor.update_go_last_commit_index(new_handled);
+                                commit_processor.update_next_expected_index(new_handled + 1);
+                                tracing::info!(
+                                    "🔄 [STARTUP-SYNC] Updated CommitProcessor: go_last_commit_index={}, next_expected_index={}",
+                                    new_handled, new_handled + 1
+                                );
 
-                                        // CRITICAL FIX: Fetch and populate the committee for the new epoch!
-                                        // Without this, CommitProcessor's `epoch_eth_addresses` map is missing
-                                        // the committee for the new epoch, causing `resolve_leader_address`
-                                        // to return an empty leader address for subsequent blocks, which
-                                        // alters the ExtraData and causes a block hash fork.
-                                        if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(post_sync_epoch).await {
-                                            if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, post_sync_epoch) {
-                                                let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
-                                                let mut map = epoch_eth_addresses_arc.write().await;
-                                                map.insert(post_sync_epoch, new_eth_addrs);
-                                                tracing::info!("🔄 [STARTUP-SYNC] Populated epoch_eth_addresses for epoch {}", post_sync_epoch);
-                                            } else {
-                                                tracing::error!("🚨 [STARTUP-SYNC] Failed to build committee ETH addresses for epoch {}", post_sync_epoch);
-                                            }
+                                if post_sync_epoch > storage.current_epoch {
+                                    tracing::info!(
+                                        "🔄 [STARTUP-SYNC] Updating Rust current_epoch from {} to {} based on synced Go DB",
+                                        storage.current_epoch, post_sync_epoch
+                                    );
+                                    storage.current_epoch = post_sync_epoch;
+                                    commit_processor.update_epoch(post_sync_epoch);
+
+                                    // CRITICAL FIX: Fetch and populate the committee for the new epoch!
+                                    // Without this, CommitProcessor's `epoch_eth_addresses` map is missing
+                                    // the committee for the new epoch, causing `resolve_leader_address`
+                                    // to return an empty leader address for subsequent blocks, which
+                                    // alters the ExtraData and causes a block hash fork.
+                                    if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(post_sync_epoch).await {
+                                        if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, post_sync_epoch) {
+                                            let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                            let mut map = epoch_eth_addresses_arc.write().await;
+                                            map.insert(post_sync_epoch, new_eth_addrs);
+                                            tracing::info!("🔄 [STARTUP-SYNC] Populated epoch_eth_addresses for epoch {}", post_sync_epoch);
                                         } else {
-                                            tracing::error!("🚨 [STARTUP-SYNC] Failed to fetch epoch boundary data for epoch {}", post_sync_epoch);
+                                            tracing::error!("🚨 [STARTUP-SYNC] Failed to build committee ETH addresses for epoch {}", post_sync_epoch);
                                         }
+                                    } else {
+                                        tracing::error!("🚨 [STARTUP-SYNC] Failed to fetch epoch boundary data for epoch {}", post_sync_epoch);
                                     }
-                                    }
+                                }
                                 }
                     Ok(_) => {
                         tracing::warn!("⚠️ [STARTUP-SYNC] Round {}: Fetched 0 blocks from peers. Retrying...", sync_round);
@@ -1963,48 +1985,93 @@ impl ConsensusNode {
             }
 
             // ═══════════════════════════════════════════════════════════════
-            // CRITICAL FIX: Update CommitProcessor to skip commits whose blocks
-            // were already imported by STARTUP-SYNC.
+            // CRITICAL FIX (May 2026): ALWAYS query Go for authoritative commit
+            // index after STARTUP-SYNC loop exits, regardless of total_synced_blocks.
             //
-            // ROOT CAUSE: STARTUP-SYNC imports N blocks from peers to Go via
-            // HandleSyncBlocksRequest, which advances Go's LastGlobalExecIndex.
-            // Then CommitProcessor dispatches the SAME commits from the DAG,
-            // causing Go to create DUPLICATE blocks with new GEI values.
-            // The synced blocks occupy GEI slots 313-329, and CommitProcessor's
-            // blocks start from 330 — but the cluster's blocks at the same
-            // positions have GEI 313-326. Delta = N (synced blocks).
+            // ROOT CAUSE: When Go advances via P2P Block Sync during setup_storage()
+            // (e.g., from block 428 to block 504), STARTUP-SYNC sees local_block=504
+            // == peer_block=504 and breaks out immediately with total_synced_blocks=0.
+            // CommitProcessor retains the stale go_last_commit_index from go_replay_after
+            // (e.g., =3), causing it to replay ALL commits 4→78 as new blocks.
+            // Go creates ghost blocks 429→504 (all epoch=2) → GEI inflates to 504 →
+            // hash divergence → permanent fork.
             //
-            // FIX: Advance go_last_commit_index by the number of synced blocks.
-            // Since DAG baseline was injected at go_replay_after, the local DAG's
-            // first N commits (go_replay_after+1 through go_replay_after+N)
-            // correspond to the N synced blocks. CommitProcessor will fast-forward
-            // these and only dispatch commits for NEW blocks.
+            // FIX: UNCONDITIONALLY query get_last_handled_commit_index() and update
+            // CommitProcessor's go_last_commit_index + next_expected_index.
+            // This guarantees CommitProcessor fast-forwards past ALL already-executed
+            // commits, whether they were synced by Rust STARTUP-SYNC or Go P2P.
             // ═══════════════════════════════════════════════════════════════
             let mut final_handled_commit = commit_processor.go_last_commit_index;
-            if total_synced_blocks > 0 {
-                // We must query Go one last time to get the exact commit_index
-                // that corresponds to the synced blocks. Adding total_synced_blocks
-                // is mathematically incorrect because there are empty consensus commits.
-                match executor_client_for_proc.get_last_handled_commit_index().await {
-                    Ok(final_go_state) => {
-                        final_handled_commit = final_go_state.0;
+            match executor_client_for_proc.get_last_handled_commit_index().await {
+                Ok((commit_idx, auth_gei, _, go_epoch, _, last_ts, _state_root)) => {
+                    final_handled_commit = commit_idx;
+                    tracing::info!(
+                        "🔑 [POST-SYNC] Go authoritative state: commit_index={}, gei={}, epoch={}, ts={}",
+                        commit_idx, auth_gei, go_epoch, last_ts
+                    );
+
+                    // ALWAYS update shared_last_global_exec_index to authoritative GEI
+                    coordination_hub.set_initial_global_exec_index(auth_gei).await;
+                    {
+                        let mut gei_guard = shared_last_global_exec_index.lock().await;
+                        if auth_gei > *gei_guard {
+                            tracing::info!(
+                                "🔄 [POST-SYNC] Advancing shared_last_global_exec_index: {} → {}",
+                                *gei_guard, auth_gei
+                            );
+                            *gei_guard = auth_gei;
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("❌ [STARTUP-SYNC] Failed to get final handled commit index from Go: {}", e);
+
+                    // ALWAYS update epoch if Go has advanced
+                    if go_epoch > storage.current_epoch {
+                        tracing::info!(
+                            "🔄 [POST-SYNC] Updating Rust current_epoch from {} to {} based on Go DB",
+                            storage.current_epoch, go_epoch
+                        );
+                        storage.current_epoch = go_epoch;
+                        commit_processor.update_epoch(go_epoch);
+
+                        // Fetch and populate the committee for the new epoch
+                        if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(go_epoch).await {
+                            if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, go_epoch) {
+                                let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
+                                let mut map = epoch_eth_addresses_arc.write().await;
+                                map.insert(go_epoch, new_eth_addrs);
+                                tracing::info!("🔄 [POST-SYNC] Populated epoch_eth_addresses for epoch {}", go_epoch);
+                            }
+                        }
+                    }
+
+                    // Update commit_consumer replay_after to prevent authority_node from overriding
+                    commit_consumer.update_replay_after_commit_index(commit_idx);
+                    if last_ts > 0 {
+                        commit_consumer.update_last_block_timestamp_ms(last_ts);
                     }
                 }
+                Err(e) => {
+                    tracing::error!("❌ [POST-SYNC] Failed to get final handled commit index from Go: {}", e);
+                }
+            }
 
+            // ALWAYS advance CommitProcessor's tracking indices to match Go
+            if final_handled_commit > commit_processor.go_last_commit_index {
                 let new_go_last = final_handled_commit;
                 let new_next_expected = new_go_last + 1;
                 tracing::warn!(
-                    "🔧 [STARTUP-SYNC] Advancing CommitProcessor: go_last_commit_index {} → {}, \
-                     next_expected {} → {} (synced {} blocks during STARTUP-SYNC)",
+                    "🔧 [POST-SYNC] Advancing CommitProcessor: go_last_commit_index {} → {}, \
+                     next_expected {} → {} (Go advanced via P2P sync or STARTUP-SYNC, synced_blocks={})",
                     commit_processor.go_last_commit_index, new_go_last,
                     commit_processor.next_expected_index, new_next_expected,
                     total_synced_blocks
                 );
                 commit_processor.go_last_commit_index = new_go_last;
                 commit_processor.next_expected_index = new_next_expected;
+            } else {
+                tracing::info!(
+                    "✅ [POST-SYNC] CommitProcessor already aligned: go_last_commit_index={}, final_handled_commit={}",
+                    commit_processor.go_last_commit_index, final_handled_commit
+                );
             }
 
             // ═══════════════════════════════════════════════════════════════

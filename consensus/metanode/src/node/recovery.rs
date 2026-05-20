@@ -15,6 +15,7 @@ pub async fn perform_block_recovery_check(
     current_epoch: u64,
     db_path: &std::path::PathBuf,
     node_id: u32,
+    max_allowed_gei: u64,
 ) -> Result<()> {
     if node_id != 0 {
         // info!("ℹ️ [RECOVERY] Node ID is {}, enabling recovery for all validators.", node_id);
@@ -114,6 +115,16 @@ pub async fn perform_block_recovery_check(
         // If this commit is completely older than what we need, skip it
         if commit_end_gei <= next_required_global {
             continue;
+        }
+        
+        // Strict Height Enforcement: Do not replay ghost commits beyond the authoritative network state
+        if commit_start_gei > max_allowed_gei {
+            warn!(
+                "🛑 [RECOVERY] Strict Height Enforcement: Commit starts at GEI {} which exceeds network max_allowed_gei {}. \
+                 Stopping recovery to prevent phantom GEI increments / fork.",
+                commit_start_gei, max_allowed_gei
+            );
+            break;
         }
 
         // GAP DETECTED!
