@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -115,6 +116,8 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	blockNumber := request.GetBlockNumber()
 	logger.Info("🔍 [SNAPSHOT] Handling GetValidatorsAtBlockRequest for block %d (Rust checking if Go executor has processed this block)", blockNumber)
 
+	validatorCacheKey := crypto.Keccak256([]byte(fmt.Sprintf("epoch_validators_at_block_%d", blockNumber)))
+
 	// CRITICAL FOR SNAPSHOT: Verify block has been committed to DB
 	// Ensures block is committed before returning validators (snapshot consistency)
 	lastCommittedBlockNumber := storage.GetLastBlockNumber()
@@ -136,13 +139,12 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		blockHash, ok = blockchainInstance.GetBlockHashByNumber(blockNumber)
 	}
 	logger.Debug("🔍 [SNAPSHOT] GetBlockHashByNumber(%d): ok=%v, hash=%s", blockNumber, ok, blockHash)
+	var validators []state.ValidatorState
+	var err error
+	var blockData types.Block
+
 	if !ok {
 		if blockNumber == 0 {
-			// CRITICAL FORK-SAFETY FIX: NEVER use current state for epoch 0 boundary!
-			// If a node restarts midway through the chain, its "current state" might have
-			// NEW validators or changed stakes, causing its epoch 0 committee to diverge
-			// from nodes that ran continuously from genesis.
-			// We MUST use the genesis validators directly from genesis.json.
 			logger.Warn("Block 0 not found, getting validators from genesis.json to ensure fork-safe deterministic committee")
 
 			validatorInfoList := &pb.ValidatorInfoList{}
@@ -213,7 +215,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 					logger.Error("🚨 [FORK-SAFETY] ChainState or StakeStateDB is nil, cannot fallback to current state for genesis validators!")
 					return nil, fmt.Errorf("cannot get validators from current state: ChainState or StakeStateDB is nil")
 				}
-				validators, err := rh.chainState.GetStakeStateDB().GetAllValidators()
+				validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
 				if err != nil {
 					logger.Error("🔍 [EPOCH] ERROR getting validators from stake state DB: %v", err)
 					return nil, fmt.Errorf("cannot get validators from current state (genesis not initialized): %w", err)
@@ -305,80 +307,86 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 			return validatorInfoList, nil
 		}
-		return nil, fmt.Errorf("cannot find block hash for block number %d", blockNumber)
-	}
 
-	blockData, err := rh.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("could not get block data by hash %s: %w", blockHash, err)
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════
-	// NOMT FIX: NOMT doesn't support historical state lookups.
-	// Creating a temporary ChainState at a historical block creates a new
-	// NomtStateTrie that reads from the SAME global state but may not have
-	// the knownKeys registry populated correctly.
-	// For NOMT, use the live StakeStateDB directly — it always has the
-	// correct knownKeys and reads current state (which is the only state
-	// available in NOMT anyway).
-	// ═══════════════════════════════════════════════════════════════════════
-	// ═══════════════════════════════════════════════════════════════════════
-	// NOMT CACHE FIX: Check if we have cached validators for this block!
-	// ═══════════════════════════════════════════════════════════════════════
-	validatorCacheKey := crypto.Keccak256([]byte(fmt.Sprintf("epoch_validators_at_block_%d", blockNumber)))
-	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
-		if cachedData, err := blockStorage.Get(validatorCacheKey); err == nil && len(cachedData) > 0 {
-			cachedList := &pb.ValidatorInfoList{}
-			if err := json.Unmarshal(cachedData, cachedList); err == nil {
-				logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache (Crucial for NOMT)", blockNumber)
-				return cachedList, nil
-			}
-		}
-	}
-
-	var validators []state.ValidatorState
-
-	if trie.GetStateBackend() == trie.BackendNOMT {
-		logger.Info("🔍 [EPOCH] Using LIVE StakeStateDB for NOMT backend (block=%d, NOMT has no historical roots)", blockNumber)
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// CRITICAL FIX: Rebuild NOMT knownKeys from the authoritative epoch cache
-		// before calling GetAllValidators(). This guarantees that even if the node
-		// restarted and NOMT knownKeys was cleared, we recover all validators from
-		// the epoch boundary backup, preventing consensus forks.
-		// ═══════════════════════════════════════════════════════════════════════════
-		if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
-			cachedList := &pb.ValidatorInfoList{}
-			if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
-				addrs := make([]string, 0, len(cachedList.Validators))
-				for _, v := range cachedList.Validators {
-					addrs = append(addrs, v.Address)
+		// FORK-SAFETY & CATCH-UP GAP FIX:
+		// For NOMT backend, historical state is not stored, and we only query the live state.
+		// If the requested blockNumber has been passed (lastCommittedBlockNumber >= blockNumber)
+		// but the block itself was skipped/never-committed in Go due to fast-skip/catch-up,
+		// we can safely query the live NOMT state instead of failing.
+		if trie.GetStateBackend() == trie.BackendNOMT && lastCommittedBlockNumber >= blockNumber {
+			logger.Info("ℹ️ [SNAPSHOT] Block %d not found in DB but height has been passed (lastCommitted=%d) with NOMT backend. Bypassing block existence check to query live state.", blockNumber, lastCommittedBlockNumber)
+			
+			if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
+				cachedList := &pb.ValidatorInfoList{}
+				if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					addrs := make([]string, 0, len(cachedList.Validators))
+					for _, v := range cachedList.Validators {
+						addrs = append(addrs, v.Address)
+					}
+					rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
 				}
-				rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+			}
+
+			validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
+			if err != nil {
+				return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
+			}
+		} else {
+			return nil, fmt.Errorf("cannot find block hash for block number %d", blockNumber)
+		}
+	} else {
+		blockData, err = rh.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("could not get block data by hash %s: %w", blockHash, err)
+		}
+
+		// NOMT CACHE FIX: Check if we have cached validators for this block!
+		if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
+			if cachedData, err := blockStorage.Get(validatorCacheKey); err == nil && len(cachedData) > 0 {
+				cachedList := &pb.ValidatorInfoList{}
+				if err := json.Unmarshal(cachedData, cachedList); err == nil {
+					logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache (Crucial for NOMT)", blockNumber)
+					return cachedList, nil
+				}
 			}
 		}
 
-		validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
-	} else {
-		// MPT/Flat/Verkle: Create historical ChainState at specific block root
-		blockDatabase := block.NewBlockDatabase(rh.storageManager.GetStorageBlock())
-		chainStateAtBlock, csErr := blockchain.NewChainState(
-			rh.storageManager,
-			blockDatabase,
-			blockData.Header(),
-			rh.chainState.GetConfig(),
-			rh.chainState.GetFreeFeeAddress(),
-			"", // Empty backupPath for temporary chain state
-		)
-		if csErr != nil {
-			return nil, fmt.Errorf("could not create chain state at block %d: %w", blockNumber, csErr)
-		}
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			logger.Info("🔍 [EPOCH] Using LIVE StakeStateDB for NOMT backend (block=%d, NOMT has no historical roots)", blockNumber)
 
-		// Get all validators from state at this block
-		validators, err = chainStateAtBlock.GetStakeStateDB().GetAllValidators()
-	}
-	if err != nil {
-		return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
+			if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
+				cachedList := &pb.ValidatorInfoList{}
+				if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					addrs := make([]string, 0, len(cachedList.Validators))
+					for _, v := range cachedList.Validators {
+						addrs = append(addrs, v.Address)
+					}
+					rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+				}
+			}
+
+			validators, err = rh.chainState.GetStakeStateDB().GetAllValidators()
+		} else {
+			// MPT/Flat/Verkle: Create historical ChainState at specific block root
+			blockDatabase := block.NewBlockDatabase(rh.storageManager.GetStorageBlock())
+			chainStateAtBlock, csErr := blockchain.NewChainState(
+				rh.storageManager,
+				blockDatabase,
+				blockData.Header(),
+				rh.chainState.GetConfig(),
+				rh.chainState.GetFreeFeeAddress(),
+				"", // Empty backupPath for temporary chain state
+			)
+			if csErr != nil {
+				return nil, fmt.Errorf("could not create chain state at block %d: %w", blockNumber, csErr)
+			}
+
+			// Get all validators from state at this block
+			validators, err = chainStateAtBlock.GetStakeStateDB().GetAllValidators()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("could not get all validators from stake DB at block %d: %w", blockNumber, err)
+		}
 	}
 
 	// CRITICAL: Sort validators by AuthorityKey (BLS public key) by bytes
@@ -474,16 +482,18 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 	epochTimestampMs := rh.chainState.GetCurrentEpochStartTimestampMs()
 	if epochTimestampMs == 0 {
 		// Fallback: always derive from boundary block header (deterministic across nodes)
-		blockHeader := blockData.Header()
-		epochTimestampMs = blockHeader.TimeStamp() * 1000 // Convert seconds to milliseconds
+		if blockData != nil {
+			blockHeader := blockData.Header()
+			epochTimestampMs = blockHeader.TimeStamp() * 1000 // Convert seconds to milliseconds
+		}
 		if epochTimestampMs == 0 {
-			// FORK-SAFETY FIX: Block header has timestamp=0 (genesis or broken state)
+			// FORK-SAFETY FIX: Block header has timestamp=0 (genesis or broken state or block skipped)
 			// Using deterministic fallback based on blockNumber instead of time.Now()
 			epochTimestampMs = blockNumber * 1000 // Deterministic: same across all nodes
 			if epochTimestampMs == 0 {
 				epochTimestampMs = 1 // Avoid zero for genesis block
 			}
-			logger.Error("🚨 [EPOCH TIMESTAMP] Block header timestamp is 0! Using deterministic fallback: %d ms (block=%d)", epochTimestampMs, blockNumber)
+			logger.Error("🚨 [EPOCH TIMESTAMP] Block header timestamp is 0 or block is skipped! Using deterministic fallback: %d ms (block=%d)", epochTimestampMs, blockNumber)
 		} else {
 			logger.Info("✅ [EPOCH TIMESTAMP] Derived from boundary block %d header: %d ms", blockNumber, epochTimestampMs)
 		}
@@ -709,7 +719,11 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	lastCommittedBlock := storage.GetLastBlockNumber()
 	lastGEI := storage.GetLastGlobalExecIndex()
 
-	if request.NewEpoch <= currentEpoch && request.NewEpoch > 0 {
+	if request.NewEpoch < currentEpoch && request.NewEpoch > 0 {
+		return nil, fmt.Errorf("cannot go backwards: Target Epoch %d, but Go is already at Epoch %d", request.NewEpoch, currentEpoch)
+	}
+
+	if request.NewEpoch == currentEpoch && request.NewEpoch > 0 {
 		// Rust loop/monitor fired a duplicate advance.
 		// We silently accept but DO NOT modify Go state, to let Rust proceed.
 		logger.Warn("🛡️ [EPOCH GUARD] Duplicate AdvanceEpoch rejected! Target Epoch %d, but Go is already at Epoch %d.", request.NewEpoch, currentEpoch)
@@ -923,10 +937,17 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		}
 
 		// Check if boundary block is fully synced to correctly handle NOMT queries below
+		lastBlock := storage.GetLastBlockNumber()
 		_, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
 		if !ok {
-			syncComplete = false
-			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. (sync pending)", epoch, boundaryBlock)
+			if lastBlock >= boundaryBlock {
+				// The block was skipped due to fast-skip/catch-up, but we are past its height
+				syncComplete = true
+				logger.Info("ℹ️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not in DB but height passed (lastBlock=%d). Marking syncComplete = true.", epoch, boundaryBlock, lastBlock)
+			} else {
+				syncComplete = false
+				logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. (sync pending, lastBlock=%d)", epoch, boundaryBlock, lastBlock)
+			}
 		}
 	}
 

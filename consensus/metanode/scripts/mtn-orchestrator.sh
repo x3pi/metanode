@@ -486,6 +486,8 @@ cmd_start() {
         for i in $(seq 0 $((NUM_NODES - 1))); do
             rm -rf "$GO_DIR/sample/node${i}/data"
             rm -rf "$GO_DIR/sample/node${i}/back_up"
+            rm -rf "$GO_DIR/sample/node${i}/changelog_db_account"
+            rm -rf "$GO_DIR/sample/node${i}/changelog_db_stake"
             rm -rf "$GO_DIR/snapshot_data_node${i}"
             rm -rf "$GO_DIR"/snapshot_*node${i}* 2>/dev/null || true
         done
