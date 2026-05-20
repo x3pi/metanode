@@ -155,7 +155,7 @@ func (vmP *VmProcessor) callDebug(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
@@ -347,7 +347,7 @@ func (vmP *VmProcessor) onlyCall(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
