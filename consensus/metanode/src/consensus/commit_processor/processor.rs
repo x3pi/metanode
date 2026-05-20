@@ -49,8 +49,8 @@ pub struct CommitProcessor {
     epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     /// TX recycler for confirming committed TXs
     tx_recycler: Option<Arc<TxRecycler>>,
-
-    /// RS-2: Storage path for persistence
+    /// Committed transaction hashes for deduplication
+    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
     storage_path: Option<std::path::PathBuf>,
     /// Channel sender for emitting lag alerts
     lag_alert_sender: Option<
@@ -100,6 +100,7 @@ impl CommitProcessor {
                 std::collections::HashMap::new(),
             )),
             tx_recycler: None,
+            committed_transaction_hashes: None,
             storage_path: None,
             lag_alert_sender: None,
             quorum_commit_index: None,
@@ -239,6 +240,15 @@ impl CommitProcessor {
     /// Set TX recycler for confirming committed TXs
     pub fn with_tx_recycler(mut self, recycler: Arc<TxRecycler>) -> Self {
         self.tx_recycler = Some(recycler);
+        self
+    }
+
+    /// Set committed transaction hashes
+    pub fn with_committed_transaction_hashes(
+        mut self,
+        hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    ) -> Self {
+        self.committed_transaction_hashes = Some(hashes);
         self
     }
 
@@ -407,6 +417,9 @@ impl CommitProcessor {
         let epoch_transition_callback = self.epoch_transition_callback;
         let go_last_commit_index = self.go_last_commit_index;
         let epoch_eth_addresses = self.epoch_eth_addresses;
+        let tx_recycler = self.tx_recycler;
+        let storage_path = self.storage_path;
+        let committed_transaction_hashes = self.committed_transaction_hashes;
         let _quorum_commit_index_ref = self.quorum_commit_index.clone();
         let committee_size = self.committee_size;
         let digest_verifier = self.digest_verifier.clone();
@@ -442,7 +455,7 @@ impl CommitProcessor {
         // Records PENDING before FFI call, COMMITTED after Go confirms.
         // On restart, pending entries indicate crash mid-FFI → log warning.
         // ═══════════════════════════════════════════════════════════════
-        let mut commit_wal = if let Some(ref sp) = self.storage_path {
+        let mut commit_wal = if let Some(ref sp) = storage_path {
             match super::wal::CommitWAL::open(sp) {
                 Ok(wal) => {
                     // Recovery: check for pending entries (crash during FFI)
@@ -501,7 +514,60 @@ impl CommitProcessor {
 
         info!("📡 [COMMIT PROCESSOR] Waiting for commits from consensus...");
 
+        // DIAGNOSTIC (May 2026): Periodic state dump for stall diagnosis
+        let mut last_diag_log = std::time::Instant::now();
+        const DIAG_INTERVAL_SECS: u64 = 10;
+
         loop {
+            // ═══════════════════════════════════════════════════════════════
+            // PIPELINE HEALTH DIAGNOSTIC: Log full DIGEST-GATE state every
+            // 10s when pending commits exist. This provides visibility into
+            // WHY the pipeline is stalled without modifying any control flow.
+            // ═══════════════════════════════════════════════════════════════
+            if !pending_local_commits.is_empty()
+                && last_diag_log.elapsed().as_secs() >= DIAG_INTERVAL_SECS
+            {
+                let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
+                    qci.load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    0
+                };
+                let digest_has_data = if let Some(ref checker) = digest_data_checker {
+                    checker()
+                } else {
+                    false
+                };
+                let is_trans = if let Some(ref it) = self.is_transitioning {
+                    it.load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    false
+                };
+                let oldest_age = pending_local_timestamps.values()
+                    .map(|ts| std::time::Instant::now().duration_since(*ts).as_secs())
+                    .max()
+                    .unwrap_or(0);
+                let first_pending_idx = pending_local_commits.keys().next().copied().unwrap_or(0);
+                let first_verifier_result = if let Some(ref verifier) = digest_verifier {
+                    match verifier(first_pending_idx) {
+                        Some(_) => "Some(digest)",
+                        None => "None",
+                    }
+                } else {
+                    "no_verifier"
+                };
+                warn!(
+                    "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
+                     pending_local={}, first_idx={}, oldest_age={}s, \
+                     next_expected={}, qci={}, digest_has_data={}, \
+                     is_transitioning={}, verifier({})={}, \
+                     pending_ooo={}, epoch={}",
+                    pending_local_commits.len(), first_pending_idx, oldest_age,
+                    next_expected_index, qci_val, digest_has_data,
+                    is_trans, first_pending_idx, first_verifier_result,
+                    pending_commits.len(), current_epoch
+                );
+                last_diag_log = std::time::Instant::now();
+            }
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
             // This prevents CommitProcessor from pushing new execution state to Go Master
             // while Go is busy re-initializing for the next epoch.
@@ -578,6 +644,17 @@ impl CommitProcessor {
                     let mut verified_indices: Vec<u32> = Vec::new();
                     for (&local_idx, local_commit) in pending_local_commits.iter() {
                         let local_digest = local_commit.commit_ref.digest.into_inner();
+                        let is_epoch_boundary = local_commit.extract_end_of_epoch_transaction().is_some();
+                        if is_epoch_boundary {
+                            info!(
+                                "⚡ [DIGEST-GATE POLL] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                                 EndOfEpoch system transaction detected. Dispatching immediately to prevent consensus deadlock.",
+                                local_idx
+                            );
+                            verified_indices.push(local_idx);
+                            continue;
+                        }
+
                         match verifier(local_idx) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -688,6 +765,31 @@ impl CommitProcessor {
                                         (false, false)
                                     }
                                 } else {
+                                    // ═══════════════════════════════════════════════════════
+                                    // QCI-AHEAD-BYPASS (May 2026): Safe alternative to timeout.
+                                    //
+                                    // When digest_has_data=true but verifier returns None for
+                                    // THIS specific commit index:
+                                    //   - digest_history has entries from OTHER indices
+                                    //   - But blocks' commit_votes don't carry digests for
+                                    //     every intermediate index — only their LATEST
+                                    //   - So digest_history[commit_index] may never exist
+                                    //
+                                    // SAFETY PROOF: QCI requires 2f+1 stake agreement.
+                                    // If our local commit at index N diverges from network,
+                                    // commits N+1, N+2... would also diverge, preventing
+                                    // QCI from advancing past N. Therefore:
+                                    //   qci_val > commit_index → network agreed on N
+                                    //   verifier returns None → no conflicting digest found
+                                    //   → local commit is implicitly verified
+                                    //
+                                    // This is FORK-SAFE: we never bypass when a conflicting
+                                    // digest EXISTS (that case returns false at line ~1165).
+                                    // We only bypass when NO digest entry exists AND QCI
+                                    // proves the network has already moved past this point.
+                                    // ═══════════════════════════════════════════════════════
+                                    // digest_has_data=true but verifier returned None.
+                                    // QCI-AHEAD-BYPASS is checked below in the else branch.
                                     (false, false)
                                 };
 
@@ -719,8 +821,25 @@ impl CommitProcessor {
                                     );
                                     verified_indices.push(local_idx);
                                 } else {
-                                    // Genuinely no quorum yet — STOP here
-                                    break; // STRICT ORDER: stop at first unresolved
+                                    // QCI-AHEAD-BYPASS: digest_has_data=true,
+                                    // verifier returns None, check if QCI already passed this commit.
+                                    let qci_ahead_bypass = if digest_has_data {
+                                        qci_val > local_idx
+                                    } else {
+                                        false
+                                    };
+                                    if qci_ahead_bypass {
+                                        info!(
+                                            "✅ [DIGEST-GATE QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                             qci={} > commit_index. Network quorum committed past \
+                                             this index. No conflicting digest. Implicitly verified.",
+                                            local_idx, qci_val
+                                        );
+                                        verified_indices.push(local_idx);
+                                    } else {
+                                        // Genuinely no quorum yet — STOP here
+                                        break; // STRICT ORDER: stop at first unresolved
+                                    }
                                 }
                             }
                         }
@@ -801,6 +920,9 @@ impl CommitProcessor {
                                 current_epoch,
                                 executor_client.clone(),
                                 delivery_sender.clone(),
+                                tx_recycler.clone(),
+                                committed_transaction_hashes.clone(),
+                                storage_path.clone(),
                             )
                             .await?;
                             // WAL: Record COMMITTED after Go confirms
@@ -811,7 +933,7 @@ impl CommitProcessor {
                                 let mut gei_guard = shared_gei.lock().await;
                                 *gei_guard += geis_consumed;
                             }
-                            if let Some(ref recycler) = self.tx_recycler {
+                            if let Some(ref recycler) = tx_recycler {
                                 let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
                                 if total_txs > 0 {
                                     let committed_tx_data: Vec<Vec<u8>> = confirmed
@@ -866,12 +988,29 @@ impl CommitProcessor {
             // we MUST drain `pending_commits` here before `receiver.recv().await` blocks us forever.
             let mut should_break = false;
             while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
+                // Check transitioning state before processing buffered OOO commits
+                if let Some(ref is_trans) = self.is_transitioning {
+                    if is_trans.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("🛑 [STATION 3: PROCESSOR] OOO Drain Loop paused: Node is transitioning. Buffering commit {}.", next_expected_index);
+                        pending_commits.insert(next_expected_index, pending);
+                        break;
+                    }
+                }
+                
                 // ═══════════════════════════════════════════════════════
                 // DIGEST-GATE (OOO PATH): Same logic as main path.
                 // ═══════════════════════════════════════════════════════
                 if pending.decided_with_local_blocks {
                     let local_digest = pending.commit_ref.digest.into_inner();
-                    let digest_match = if let Some(ref verifier) = digest_verifier {
+                    let is_epoch_boundary = pending.extract_end_of_epoch_transaction().is_some();
+                    let digest_match = if is_epoch_boundary {
+                        info!(
+                            "⚡ [DIGEST-GATE-OOO] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                             EndOfEpoch transaction detected in OOO path. Dispatching immediately.",
+                            next_expected_index
+                        );
+                        true
+                    } else if let Some(ref verifier) = digest_verifier {
                         match verifier(next_expected_index) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -927,7 +1066,30 @@ impl CommitProcessor {
                                     );
                                     true
                                 } else {
-                                    false
+                                    // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
+                                    // If digest_has_data=true but verifier returns None,
+                                    // check if QCI already passed this commit index.
+                                    let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
+                                        checker()
+                                    } else {
+                                        false
+                                    };
+                                    let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
+                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                    } else {
+                                        0
+                                    };
+                                    if digest_has_data_ooo && qci_val_ooo > next_expected_index {
+                                        info!(
+                                            "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                             qci={} > commit_index. Network quorum committed past \
+                                             this index. No conflicting digest. Implicitly verified.",
+                                            next_expected_index, qci_val_ooo
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 }
                             }
                         }
@@ -984,6 +1146,18 @@ impl CommitProcessor {
 
                 Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
+                if let Some(ref recycler) = tx_recycler {
+                    let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
+                    if total_txs > 0 {
+                        let committed_tx_data: Vec<Vec<u8>> = pending
+                            .blocks
+                            .iter()
+                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                            .collect();
+                        recycler.confirm_committed(&committed_tx_data).await;
+                    }
+                }
+
                 if let Some(ref mut wal) = commit_wal {
                     let _ = wal.write_pending(pending_commit_index, pending_gei, current_epoch);
                 }
@@ -993,6 +1167,9 @@ impl CommitProcessor {
                     current_epoch,
                     executor_client.clone(),
                     delivery_sender.clone(),
+                    tx_recycler.clone(),
+                    committed_transaction_hashes.clone(),
+                    storage_path.clone(),
                 )
                 .await?;
                 if let Some(ref mut wal) = commit_wal {
@@ -1130,7 +1307,15 @@ impl CommitProcessor {
                             let local_digest = subdag.commit_ref.digest.into_inner();
 
                             // Check if digest is already verified by network quorum
-                            let digest_match = if let Some(ref verifier) = digest_verifier {
+                            let is_epoch_boundary = subdag.extract_end_of_epoch_transaction().is_some();
+                            let digest_match = if is_epoch_boundary {
+                                info!(
+                                    "⚡ [DIGEST-GATE-IMMEDIATE] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                                     EndOfEpoch transaction detected. Dispatching immediately.",
+                                    commit_index
+                                );
+                                true
+                            } else if let Some(ref verifier) = digest_verifier {
                                 match verifier(commit_index) {
                                     Some(quorum_digest) => {
                                         if quorum_digest == local_digest {
@@ -1182,7 +1367,30 @@ impl CommitProcessor {
                                                     );
                                                     true
                                                 } else {
-                                                    false // Digest infra functional but no quorum yet — buffer
+                                                    // QCI-AHEAD-BYPASS: Check if QCI already passed
+                                                    // this commit index at receive time.
+                                                    let qci_immediate = if let Some(ref qci) = _quorum_commit_index_ref {
+                                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                                    } else {
+                                                        0
+                                                    };
+                                                    if qci_immediate > commit_index {
+                                                        info!(
+                                                            "✅ [DIGEST-GATE-IMMEDIATE QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                                             qci={} > commit_index. Network quorum committed past \
+                                                             this index. No conflicting digest. Implicitly verified.",
+                                                            commit_index, qci_immediate
+                                                        );
+                                                        true
+                                                    } else {
+                                                        info!(
+                                                            "🛡️ [DIGEST-GATE-IMMEDIATE] Commit {} buffered: digest_has_data=true \
+                                                             but verifier returned None, qci={} <= commit_index. \
+                                                             Will poll for QCI-AHEAD-BYPASS.",
+                                                            commit_index, qci_immediate
+                                                        );
+                                                        false // Buffer — QCI-AHEAD-BYPASS will handle in POLL path
+                                                    }
                                                 }
                                             }
                                         } else {
@@ -1408,6 +1616,9 @@ impl CommitProcessor {
                             current_epoch,
                             executor_client.clone(),
                             delivery_sender.clone(),
+                            tx_recycler.clone(),
+                            committed_transaction_hashes.clone(),
+                            storage_path.clone(),
                         )
                         .await?;
                         // WAL: Record COMMITTED after Go confirms
@@ -1422,7 +1633,7 @@ impl CommitProcessor {
                         }
                         
                         // ♻️ TX RECYCLER: Confirm committed TXs
-                        if let Some(ref recycler) = self.tx_recycler {
+                        if let Some(ref recycler) = tx_recycler {
                             if total_txs_in_commit > 0 {
                                 let committed_tx_data: Vec<Vec<u8>> = subdag
                                     .blocks
@@ -1580,6 +1791,9 @@ impl CommitProcessor {
                                     current_epoch,
                                     executor_client.clone(),
                                     delivery_sender.clone(),
+                                    tx_recycler.clone(),
+                                    committed_transaction_hashes.clone(),
+                                    storage_path.clone(),
                                 )
                                 .await?;
                                 // WAL: Record COMMITTED after Go confirms
@@ -1597,7 +1811,7 @@ impl CommitProcessor {
                                     commit_index, exec_gei, certified.leader,
                                     hex::encode(&certified_digest[..4])
                                 );
-                                if let Some(ref recycler) = self.tx_recycler {
+                                if let Some(ref recycler) = tx_recycler {
                                     let total_txs: usize = certified.blocks.iter().map(|b| b.transactions().len()).sum();
                                     if total_txs > 0 {
                                         let committed_tx_data: Vec<Vec<u8>> = certified

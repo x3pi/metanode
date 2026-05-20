@@ -278,7 +278,12 @@ pub async fn transition_mode_only(
     // Share epoch_eth_addresses HashMap reference for leader address lookup
     processor = processor
         .with_storage_path(node.storage_path.clone())
-        .with_epoch_eth_addresses(node.epoch_eth_addresses.clone());
+        .with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
+
+    if let Some(ref tx_recycler) = node.tx_recycler {
+        processor = processor.with_tx_recycler(tx_recycler.clone());
+    }
 
     if let Some(c) = exec_client_proc.clone() {
         processor = processor.with_executor_client(c.clone());

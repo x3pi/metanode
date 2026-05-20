@@ -372,7 +372,7 @@ func (vp *TxValidatorPool) StartPreloadAccounts(txs []types.Transaction) <-chan 
 
 // ProcessTransactions processes a batch of transactions through grouping and execution.
 // blockTime is the deterministic timestamp (in seconds) from Rust consensus for EVM block.timestamp.
-func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTime uint64, externalPreload <-chan struct{}) (
+func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTime uint64, leaderAddr common.Address, externalPreload <-chan struct{}) (
 	tx_processor.ProcessResult,
 	error,
 ) {
@@ -511,7 +511,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startExecution := time.Now()
-	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime)
+	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr)
 	execDuration := time.Since(startExecution)
 
 	if execDuration.Milliseconds() > 100 {
@@ -522,7 +522,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 }
 
 // ProcessTransactionsInPool retrieves transactions from the pool and processes them
-func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTime uint64) (
+func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTime uint64, leaderAddr common.Address) (
 	tx_processor.ProcessResult,
 	error,
 ) {
@@ -587,7 +587,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		baseCtx = ctx
 		rootSpan = nil
 	}
-	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime)
+	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr)
 }
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding

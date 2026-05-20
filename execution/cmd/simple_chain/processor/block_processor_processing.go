@@ -30,64 +30,64 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// GenerateBlock generates blocks
-// func (bp *BlockProcessor) GenerateBlock() {
-// 	currentBlockNumber := storage.GetLastBlockNumber() + 1
-// 	var accumulatedResults *tx_processor.ProcessResult = nil
-// 	// Use centralized constants from constants.go
-// 	const minTxsForImmediateBlock = MinTxsForImmediateBlock
-// 	const maxTxsInAccumulatedResults = MaxTxsInAccumulatedResults
+// // GenerateBlock generates blocks
+// // func (bp *BlockProcessor) GenerateBlock() {
+// // 	currentBlockNumber := storage.GetLastBlockNumber() + 1
+// // 	var accumulatedResults *tx_processor.ProcessResult = nil
+// // 	// Use centralized constants from constants.go
+// // 	const minTxsForImmediateBlock = MinTxsForImmediateBlock
+// // 	const maxTxsInAccumulatedResults = MaxTxsInAccumulatedResults
 
-// 	for {
-// 		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
-// 		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
-// 		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
-// 		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
-// 		bp.waitSnapshotGate()
+// // 	for {
+// // 		// SNAPSHOT GATE: Block processing while NOMT snapshot is in progress.
+// // 		// Without this, ProcessorPool continues calling ProcessTransactionsInPool()
+// // 		// which writes to NOMT, causing CloseForSnapshot() to deadlock.
+// // 		// Optimized: atomic.Bool check on fast path (zero contention when gate is open).
+// // 		bp.waitSnapshotGate()
 
-// 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
-// 		// Go's native select has uniform random selection when multiple cases are ready.
-// 		// Under high load, timeoutChan may fire while ProcessResultChan also has data,
-// 		// causing premature flush with fewer TXs. This pattern drains all available
-// 		// results first, then checks if we should flush.
+// // 		// T1-4: Priority-select pattern — always drain ProcessResultChan before checking timeout.
+// // 		// Go's native select has uniform random selection when multiple cases are ready.
+// // 		// Under high load, timeoutChan may fire while ProcessResultChan also has data,
+// // 		// causing premature flush with fewer TXs. This pattern drains all available
+// // 		// results first, then checks if we should flush.
 
-// 		// Phase 1: Non-blocking drain of all available results
-// 		drained := false
-// 		for {
-// 			select {
-// 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
-// 				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-// 				if accumulatedResults == nil {
-// 					accumulatedResults = &processResults
-// 				} else {
-// 					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
-// 					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
-// 					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
-// 				}
-// 				drained = true
+// // 		// Phase 1: Non-blocking drain of all available results
+// // 		drained := false
+// // 		for {
+// // 			select {
+// // 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
+// // 				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+// // 				if accumulatedResults == nil {
+// // 					accumulatedResults = &processResults
+// // 				} else {
+// // 					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
+// // 					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
+// // 					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
+// // 				}
+// // 				drained = true
 
-// 				// Check max size limit to avoid memory leak
-// 				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
-// 					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
-// 					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-// 					accumulatedResults = nil
-// 					currentBlockNumber++
-// 				}
-// 			default:
-// 				goto FLUSH_CHECK
-// 			}
-// 		}
+// // 				// Check max size limit to avoid memory leak
+// // 				if len(accumulatedResults.Transactions) >= maxTxsInAccumulatedResults {
+// // 					logger.Warn("GenerateBlock: accumulatedResults reached max size (%d), force flush", maxTxsInAccumulatedResults)
+// // 					bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// // 					accumulatedResults = nil
+// // 					currentBlockNumber++
+// // 				}
+// // 			default:
+// // 				goto FLUSH_CHECK
+// // 			}
+// // 		}
 
-// 	FLUSH_CHECK:
-// 		// Phase 2: Check if we should flush or wait
-// 		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
-// 			// Enough TXs accumulated — flush immediately
-// 			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
-// 			accumulatedResults = nil
-// 			currentBlockNumber++
-// 			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
-// 			continue
-// 		}
+// // 	FLUSH_CHECK:
+// // 		// Phase 2: Check if we should flush or wait
+// // 		if accumulatedResults != nil && len(accumulatedResults.Transactions) >= minTxsForImmediateBlock {
+// // 			// Enough TXs accumulated — flush immediately
+// // 			newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// // 			accumulatedResults = nil
+// // 			currentBlockNumber++
+// // 			logger.Info("Created block #%d with %d txs", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+// // 			continue
+// // 		}
 
 // 		if !drained && accumulatedResults != nil && len(accumulatedResults.Transactions) > 0 {
 // 			// No new results arrived and we have pending data — use timer to flush
@@ -112,9 +112,25 @@ import (
 // 			}
 // 		} else if !drained {
 // 			// No pending results and no new data — blocking wait for first result
-// 			processResults := <-bp.transactionProcessor.ProcessResultChan
-// 			bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
-// 			accumulatedResults = &processResults
+// 			select {
+// 			case processResults := <-bp.transactionProcessor.ProcessResultChan:
+// 				bp.inputTxCounter.Add(int64(len(processResults.Transactions)))
+// 				if accumulatedResults == nil {
+// 					accumulatedResults = &processResults
+// 				} else {
+// 					accumulatedResults.Transactions = append(accumulatedResults.Transactions, processResults.Transactions...)
+// 					accumulatedResults.Receipts = append(accumulatedResults.Receipts, processResults.Receipts...)
+// 					accumulatedResults.ExecuteSCResults = append(accumulatedResults.ExecuteSCResults, processResults.ExecuteSCResults...)
+// 				}
+// 			case <-bp.forceCommitChan:
+// 				if accumulatedResults == nil {
+// 					accumulatedResults = &tx_processor.ProcessResult{}
+// 				}
+// 				newBlock := bp.createBlockFromResults(*accumulatedResults, currentBlockNumber, 0, true, "single_block", 0, 0, 0)
+// 				accumulatedResults = nil
+// 				currentBlockNumber++
+// 				logger.Info("Created block #%d with %d txs (event-driven flush - empty block)", newBlock.Header().BlockNumber(), len(newBlock.Transactions()))
+// 			}
 // 		}
 // 	}
 // }
@@ -159,7 +175,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 				}
 			}
 
-			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec)
+			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec, bp.validatorAddress)
 			if err == nil {
 				bp.inputTxCounter.Add(int64(len(processResult.Transactions)))
 				bp.ProcessedInputTxCount.Add(uint64(len(processResult.Transactions)))
@@ -278,9 +294,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// CRITICAL FORK-SAFETY: Convert commitTimestampMs (from Rust) to seconds for BlockHeader
 	timestampSec := commitTimestampMs / 1000 // 0 if commitTimestampMs is 0 (fallback to time.Now())
 
-	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, else fallback to local validator
+	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, even if it's the zero address.
+	// The zero address is used intentionally as a deterministic fallback for system transactions (EndOfEpoch)
+	// which do not have a Rust leader. Falling back to bp.validatorAddress would cause a fork!
 	blockLeaderAddress := bp.validatorAddress
-	if len(leaderAddressOverride) > 0 && leaderAddressOverride[0] != (common.Address{}) {
+	if len(leaderAddressOverride) > 0 {
 		blockLeaderAddress = leaderAddressOverride[0]
 	}
 
@@ -410,11 +428,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	phase3Start := time.Now()
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
-	// Synchronous mapping population for Master Node cache so RPC queries don't return null
-	blockchain.GetBlockChainInstance().SetBlockNumberToHash(currentBlockNumber, bl.Header().Hash())
-	for _, txHash := range bl.Transactions() {
-		blockchain.GetBlockChainInstance().SetTxHashMapBlockNumber(txHash, currentBlockNumber)
-	}
 	var mappingWg sync.WaitGroup // Keep this as dummy to satisfy Job signature if needed
 
 	phase31Elapsed := time.Since(phase3Start)
@@ -666,7 +679,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(lastBlockNumber)
 	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
 	bp.SetLastBlock(lastBl)
 	bp.chainState.GetBlockDatabase().SaveLastBlock(lastBl)
@@ -717,7 +730,8 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
-	blockchain.GetBlockChainInstance().Discard()
+	bp.chainState.GetStakeStateDB().Discard() // CRITICAL FIX: Prevent stake state divergence
+	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
 
 	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
 	parentBlockNumber := failedBlockNumber - 1

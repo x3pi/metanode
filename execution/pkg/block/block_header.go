@@ -2,12 +2,27 @@ package block
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+)
+
+var (
+	blockHeaderPbPool = sync.Pool{
+		New: func() interface{} {
+			return &pb.BlockHeader{}
+		},
+	}
+	blockHashBufferPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, 512)
+			return &b
+		},
+	}
 )
 
 type BlockHeader struct {
@@ -130,19 +145,32 @@ func (b *BlockHeader) Hash() common.Hash {
 	// NOTE: GlobalExecIndex IS included — it acts as a fork-detection canary.
 	// If GEI diverges between nodes, hash mismatch alerts to a problem
 	// that MUST be fixed at the source (Rust commit ordering), not hidden.
-	pbHeader := &pb.BlockHeader{
-		LastBlockHash:     b.lastBlockHash.Bytes(),
-		BlockNumber:       b.blockNumber,
-		AccountStatesRoot: b.accountStatesRoot.Bytes(),
-		StakeStatesRoot:   b.stakeStatesRoot.Bytes(),
-		ReceiptRoot:       b.receiptRoot.Bytes(),
-		LeaderAddress:     b.leaderAddress.Bytes(),
-		TimeStamp:         b.timeStamp,
-		TransactionsRoot:  b.transactionsRoot.Bytes(),
-		Epoch:             b.epoch,
-		GlobalExecIndex:   b.globalExecIndex,
-	}
-	bData, _ := proto.MarshalOptions{Deterministic: true}.Marshal(pbHeader)
+	
+	pbHeader := blockHeaderPbPool.Get().(*pb.BlockHeader)
+	defer func() {
+		// Clear fields to avoid memory leaks of byte slices safely
+		proto.Reset(pbHeader)
+		blockHeaderPbPool.Put(pbHeader)
+	}()
+
+	pbHeader.LastBlockHash = b.lastBlockHash.Bytes()
+	pbHeader.BlockNumber = b.blockNumber
+	pbHeader.AccountStatesRoot = b.accountStatesRoot.Bytes()
+	pbHeader.StakeStatesRoot = b.stakeStatesRoot.Bytes()
+	pbHeader.ReceiptRoot = b.receiptRoot.Bytes()
+	pbHeader.LeaderAddress = b.leaderAddress.Bytes()
+	pbHeader.TimeStamp = b.timeStamp
+	pbHeader.TransactionsRoot = b.transactionsRoot.Bytes()
+	pbHeader.Epoch = b.epoch
+	pbHeader.GlobalExecIndex = b.globalExecIndex
+
+	bufPtr := blockHashBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	defer func() {
+		blockHashBufferPool.Put(bufPtr)
+	}()
+
+	bData, _ := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, pbHeader)
 	return crypto.Keccak256Hash(bData)
 }
 

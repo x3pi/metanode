@@ -35,7 +35,7 @@ func (h *CrossChainHandler) executeMintForInbound(
 		return nil, fmt.Errorf("executeMintForInbound: nil packet data")
 	}
 
-	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 	mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
 	var allLogs []types.EventLog
@@ -218,7 +218,7 @@ func (h *CrossChainHandler) executeConfirmation(
 	if !conf.IsSuccess {
 		// Giao dịch thất bại bên kia → MINT lại (hoàn tiền) cho người gửi (Sender) bên này
 		if refundAmount.Sign() > 0 {
-			vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+			vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 			mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
 			fakeRefundTx := proxy_tx.New(tx, tx.FromAddress(), conf.Sender, refundAmount, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)

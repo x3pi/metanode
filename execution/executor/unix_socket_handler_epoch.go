@@ -477,18 +477,17 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	logger.Debug("🔍 [INIT] Handling GetLastBlockNumberRequest (Rust executor_client initializing next_expected_index)")
 
 	// Get last block number from counter
-	counterBlockNumber := storage.GetLastBlockNumber()
-	logger.Debug("🔍 [INIT] Block counter from storage: %d", counterBlockNumber)
+	committedBlockNumber := storage.GetLastBlockNumber()
+	assignedBlockNumber := storage.GetLastAssignedBlockNumber()
+	logger.Debug("🔍 [INIT] Block counter from storage: committed=%d, assigned=%d", committedBlockNumber, assignedBlockNumber)
 
 	// CRITICAL FIX: With blockchainInitDone, the counter is AUTHORITATIVE.
-	// initBlockchain() loads the actual last block from DB, then updates the counter,
-	// then sets blockchainInitDone. The backwards-validation loop below was causing
-	// false negatives because BlockChain.Commit() only runs for state-changing blocks;
-	// empty commits set SetBlockNumberToHash in dirty cache but never Commit() to DB.
-	// After restart, GetBlockHashByNumber can't find those mappings and decrements
-	// to the last state-changing block — a STALE value that causes Rust to re-execute
-	// existing blocks → permanent fork.
-	validatedBlockNumber := counterBlockNumber
+	// We return the maximum of committed and assigned to prevent block numbering overlap
+	// during epoch transitions where the pipeline is not fully flushed.
+	validatedBlockNumber := committedBlockNumber
+	if assignedBlockNumber > committedBlockNumber {
+		validatedBlockNumber = assignedBlockNumber
+	}
 
 	// Guard against nil blockchain instance (during early startup or tests)
 	blockchainInstance := blockchain.GetBlockChainInstance()
@@ -531,41 +530,51 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			if err == nil && block != nil {
 				lastEpoch = block.Header().Epoch()
 			}
+		} else if returnBlockNumber > committedBlockNumber {
+			// PIPELINE FIX: This block was assigned by Rust but hasn't been committed to DB yet.
+			// It is safely buffered in Go's memory. Do NOT scan backwards, as that would return 
+			// a stale block number and cause duplicate numbering in the next epoch.
+			// We return the assigned block number with an empty hash.
+			logger.Info("✅ [INIT] Block %d is in pipeline (assigned > committed). Bypassing backward scan.", returnBlockNumber)
+			lastEpoch = rh.chainState.GetCurrentEpoch()
 		} else {
 			// EPOCH-BOUNDARY FIX: Counter reports block N but hash not persisted yet.
 			// This happens when snapshot metadata records the epoch boundary block number,
 			// but the block itself hasn't been committed to the chain DB.
-			// Scan backward to find the most recent block with a valid persisted hash.
-			// Max scan depth of 10 prevents pathological scanning.
+			// 
+			// CRITICAL FIX (May 2026): The backward scan MUST NOT modify returnBlockNumber!
+			// Previously, returnBlockNumber was overwritten with the fallback block number,
+			// causing Rust to set next_block_number too low → block number overlap/gap.
+			// The scan is only used to find hash/epoch metadata for Rust's POST-GATE-VERIFY.
 			logger.Warn("⚠️ [INIT] Block %d exists in counter but hash not found in DB. "+
-				"Scanning backward for nearest persisted block (epoch boundary race condition).",
+				"Using counter value (hash will be empty). Rust must use block NUMBER as authoritative.",
 				returnBlockNumber)
+			// Keep returnBlockNumber unchanged — it's the correct max(committed, assigned)
+			// Only scan backwards for epoch metadata (not for block number)
 			const maxFallbackScan = 10
-			found := false
 			for delta := uint64(1); delta <= maxFallbackScan && delta <= returnBlockNumber; delta++ {
 				fallbackBlock := returnBlockNumber - delta
 				if fallbackBlock == 0 {
-					break // Don't fall back to genesis
+					break
 				}
 				fallbackHash, fallbackOk := blockchainInstance.GetBlockHashByNumber(fallbackBlock)
 				if fallbackOk && fallbackHash != (common.Hash{}) {
-					blockHashBytes = fallbackHash.Bytes()
-					returnBlockNumber = fallbackBlock
+					// Found a persisted block — use its epoch for metadata
 					block, err := rh.chainState.GetBlockDatabase().GetBlockByHash(fallbackHash)
 					if err == nil && block != nil {
 						lastEpoch = block.Header().Epoch()
 					}
-					logger.Info("✅ [INIT] Using fallback block %d (delta=-%d) with hash %s",
-						returnBlockNumber, delta, fallbackHash.Hex())
-					found = true
+					logger.Info("✅ [INIT] Block %d hash not found, but found epoch=%d from nearby block %d (delta=-%d). "+
+						"Returning block=%d (unchanged) with empty hash.",
+						returnBlockNumber, lastEpoch, fallbackBlock, delta, returnBlockNumber)
 					break
 				}
 			}
-			if !found {
-				logger.Error("🚨 [INIT] CRITICAL: Could not find ANY persisted block hash within %d blocks of counter=%d. "+
-					"Returning block=0 to force STARTUP-SYNC from scratch.",
-					maxFallbackScan, counterBlockNumber)
-				returnBlockNumber = 0
+			// If no nearby block found for epoch, use current epoch
+			if lastEpoch == 0 {
+				lastEpoch = rh.chainState.GetCurrentEpoch()
+				logger.Info("✅ [INIT] No nearby block found for epoch lookup. Using current epoch=%d. block=%d",
+					lastEpoch, returnBlockNumber)
 			}
 		}
 	}
@@ -582,7 +591,7 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 	}
 
 	logger.Debug("✅ [INIT] Returning last block number for Rust: block=%d, gei=%d, epoch=%d (counter=%d, validated=%d, is_ready=%v)",
-		returnBlockNumber, lastGEI, lastEpoch, counterBlockNumber, validatedBlockNumber, isReady)
+		returnBlockNumber, lastGEI, lastEpoch, committedBlockNumber, validatedBlockNumber, isReady)
 	return response, nil
 }
 
@@ -1731,6 +1740,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// Save as lastBlock in LevelDB (lastBlockHashKey)
 		if err := blockDatabase.SaveLastBlock(blk); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to SaveLastBlock for #%d: %v", blockNum, err)
+		}
+
+		// CRITICAL FIX: Save mappings so RPC can resolve these synced blocks
+		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("❌ [SNAPSHOT-RESUME] Failed to set block->hash mapping for block #%d: %v", blockNum, err)
+		}
+		for _, txHash := range blk.Transactions() {
+			bc.SetTxHashMapBlockNumber(txHash, blockNum)
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════

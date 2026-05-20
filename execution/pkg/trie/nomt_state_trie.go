@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -845,9 +846,12 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 
 	// Perform slow FFI operations OUTSIDE sessionMu to avoid blocking the fast path
 	if fs != nil {
-		logger.Info("[NomtStateTrie] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
+		startDrain := time.Now()
+		logger.Info("⏳ [NOMT-SYNC-DRAIN] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
 		if err := fs.CommitPayload(n.handle); err != nil {
-			logger.Error("[NomtStateTrie] Failed to drain pendingFinishedSession: %v", err)
+			logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+		} else {
+			logger.Info("✅ [NOMT-SYNC-DRAIN] Successfully drained pendingFinishedSession in %v (namespace=%s)", time.Since(startDrain), string(n.namespace))
 		}
 
 		// Clear committing from readView since data is now on disk

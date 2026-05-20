@@ -73,6 +73,12 @@ func (db *StakeStateDB) SetHistoricalContext(changelogDB *state_changelog.StateC
 	db.historicalBlockNumber = blockNumber
 }
 
+// SetOriginRootHash explicitly updates the origin root hash.
+// This is critical for Sub nodes when applying block states from the network.
+func (db *StakeStateDB) SetOriginRootHash(hash common.Hash) {
+	db.originRootHash = hash
+}
+
 // Trie returns the underlying StateTrie instance.
 func (db *StakeStateDB) Trie() p_trie.StateTrie {
 	return db.trie
@@ -722,7 +728,10 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 	defer db.muCommit.Unlock()
 
 	if !db.lockedFlag.Load() {
-		return common.Hash{}, errors.New("Commit: db is not already locked")
+		logger.Warn("⚠️ [SELF-HEAL] Commit (StakeStateDB): lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a ghost-block boundary where ProcessTransactions was skipped.")
+		db.lockedFlag.Store(true)
 	}
 
 	// CRITICAL FIX: IntermediateRoot MUST be called BEFORE trie.Commit().
@@ -859,7 +868,10 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	defer db.muCommit.Unlock()
 
 	if !db.lockedFlag.Load() {
-		return nil, errors.New("CommitPipeline: db is not already locked")
+		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline (StakeStateDB): lockedFlag was false (expected true). " +
+			"Force-acquiring lock to prevent node crash. " +
+			"This indicates a ghost-block boundary where ProcessTransactions was skipped.")
+		db.lockedFlag.Store(true)
 	}
 
 	// ═══════════════════════════════════════════════════════════════

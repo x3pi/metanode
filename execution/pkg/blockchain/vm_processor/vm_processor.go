@@ -26,16 +26,25 @@ type VmProcessor struct {
 	mvmId          common.Address // Consider if this is still needed here or managed by the caller.
 	tracingEnabled bool
 	blockTime      uint64
+	leaderAddr     common.Address
 }
 
 // NewVmProcessor tạo một thực thể VmProcessor mới và thiết lập trạng thái trace.
-func NewVmProcessor(cs *blockchain.ChainState, mvmId common.Address, enableTrace bool, blockTime uint64) *VmProcessor {
+func NewVmProcessor(cs *blockchain.ChainState, mvmId common.Address, enableTrace bool, blockTime uint64, leaderAddr common.Address) *VmProcessor {
 	return &VmProcessor{
 		chainState:     cs,
 		mvmId:          mvmId,
 		tracingEnabled: enableTrace,
 		blockTime:      blockTime,
+		leaderAddr:     leaderAddr,
 	}
+}
+
+func (vmP *VmProcessor) getLeaderAddress(lastBlockHeader types.BlockHeader) common.Address {
+	if vmP.leaderAddr != (common.Address{}) {
+		return vmP.leaderAddr
+	}
+	return lastBlockHeader.LeaderAddress()
 }
 
 // ExecuteTransactionWithMvmId thực thi giao dịch, sử dụng cờ tracingEnabled nội bộ.
@@ -192,7 +201,7 @@ func (vmP *VmProcessor) deploySmartContract(
 		span.AddEvent("CallingMvmDeploy", map[string]interface{}{
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 			"isDebug":     tx.GetIsDebug(),
 			"commit":      true,
 		})
@@ -205,7 +214,7 @@ func (vmP *VmProcessor) deploySmartContract(
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
 	)
 	if span != nil { // GUARD
 		span.AddEvent("MvmDeployFinished", map[string]interface{}{
@@ -277,7 +286,7 @@ func (vmP *VmProcessor) readOnlyCall(
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -302,7 +311,7 @@ func (vmP *VmProcessor) readOnlyCall(
 	mvmResult := mvmE.Call( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
 
 	if span != nil { // GUARD
@@ -358,7 +367,7 @@ func (vmP *VmProcessor) executeSmartContract(
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -385,14 +394,14 @@ func (vmP *VmProcessor) executeSmartContract(
 		mvmResult = mvmE.Execute( // Luôn gọi MVM
 			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
+			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
 		)
 
 	} else {
 		mvmResult = mvmE.Call( // Luôn gọi MVM
 			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
+			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
 		)
 
 	}
@@ -477,7 +486,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 			"operationType": operationType, // 0: mint, 1: burn
 			"blockNumber":   lastBlockHeader.BlockNumber() + 1,
 			"blockTs":       vmP.blockTime,
-			"leader":        lastBlockHeader.LeaderAddress().Hex(),
+			"leader":        vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -514,7 +523,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 	mvmResult := mvmE.ProcessNativeMintBurn( // Call MVM ProcessNativeMintBurn
 		bFrom, bTo, tx.Amount(), operationType, tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(),
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
 	)
 
 	if span != nil { // GUARD
@@ -588,7 +597,7 @@ func (vmP *VmProcessor) sendNative(
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
 			"blockTs":     vmP.blockTime,
-			"leader":      lastBlockHeader.LeaderAddress().Hex(),
+			"leader":      vmP.getLeaderAddress(lastBlockHeader).Hex(),
 		})
 		span = actualSpan
 		defer func() {
@@ -611,7 +620,7 @@ func (vmP *VmProcessor) sendNative(
 	mvmResult := mvmE.SendNative( // Luôn gọi MVM
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, lastBlockHeader.LeaderAddress(), mvmE.GetKey(),
+		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
 	)
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{

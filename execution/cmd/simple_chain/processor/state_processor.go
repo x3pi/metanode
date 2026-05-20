@@ -340,7 +340,7 @@ func (sp *StateProcessor) GetExecuteSCResultsHashCore(ctx context.Context, block
 
 	// Use the block's stored timestamp for deterministic replay
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
-	processResult, err := tx_processor.ProcessTransactionsRemote(ctx, chainState, groupedGroups, true, false, blockTimeSec)
+	processResult, err := tx_processor.ProcessTransactionsRemote(ctx, chainState, groupedGroups, true, false, blockTimeSec, blockData.Header().LeaderAddress())
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to process transactions for block %d: %w", blockNumber, err)
 	}

@@ -6,7 +6,7 @@ use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::{Mutex, Condvar, OnceLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // The global callbacks registry configured from Go
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
@@ -15,6 +15,13 @@ pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
 pub static FFI_TX_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
 // Condvar to block Go's FFI caller until the channel is initialized
 pub static FFI_TX_CONDVAR: Condvar = Condvar::new();
+
+// DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+static FFI_TX_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_SUBMIT_BYTES: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_FULL_COUNT: AtomicU64 = AtomicU64::new(0);
+static FFI_TX_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
 
@@ -162,11 +169,39 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
     let batch_size = tx_data.len();
     match sender.try_send(tx_data) {
         Ok(_) => {
+            FFI_TX_SUBMIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
+            
+            // DIAGNOSTIC: Periodic summary every 5s
+            let should_log = {
+                let mut last_log = FFI_TX_LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
+                match *last_log {
+                    Some(ts) if ts.elapsed().as_secs() < 5 => false,
+                    _ => {
+                        *last_log = Some(std::time::Instant::now());
+                        true
+                    }
+                }
+            };
+            if should_log {
+                let total_batches = FFI_TX_SUBMIT_COUNT.load(AtomicOrdering::Relaxed);
+                let total_bytes = FFI_TX_SUBMIT_BYTES.load(AtomicOrdering::Relaxed);
+                let full_count = FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed);
+                info!(
+                    "📊 [FFI TX METRICS] total_batches={}, total_bytes={}, channel_full_events={}, \
+                     capacity_remaining={}/10000",
+                    total_batches, total_bytes, full_count, remaining_capacity
+                );
+            }
+            
             info!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
             true
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Channel is full. Go side will see `false` and automatically sleep/retry.
+            FFI_TX_FULL_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            warn!("⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}", 
+                FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed));
             false
         }
         Err(_) => {

@@ -105,7 +105,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 			blHeader = v.env.GetLastBlock().Header()
 		}
 
-		vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, blockTime)
+		vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, blockTime, common.Address{})
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
 			/*toAccountState, getAccErr := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress())
@@ -400,7 +400,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			itemHash := sha256.Sum256([]byte(fmt.Sprintf("batchsubmit-virtual-%x-%s-%d",
 				updatedTx.Hash(), item.Target.Hex(), i)))
 			itemMvmId := common.BytesToAddress(itemHash[12:])
-			vmP := vm_processor.NewVmProcessor(v.chainState, itemMvmId, false, blockTime)
+			vmP := vm_processor.NewVmProcessor(v.chainState, itemMvmId, false, blockTime, common.Address{})
 
 			// Validate: target phải là contract hợp lệ
 			toAccountState, err := v.chainState.GetAccountStateDB().AccountState(item.Target)
