@@ -387,11 +387,14 @@ where
             commit_consumer.block_sender.clone(),
         );
 
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+
         let mut proposed_block_handler = ProposedBlockHandler::new(
             context.clone(),
             signals_receivers.block_broadcast_receiver(),
             transaction_certifier.clone(),
             coordination_hub.clone(),
+            commit_vote_monitor.clone(),
         );
 
         info!(
@@ -456,8 +459,6 @@ where
         let core_dispatcher = Arc::new(core_dispatcher);
         let leader_timeout_handle =
             LeaderTimeoutTask::start(core_dispatcher.clone(), &signals_receivers, context.clone());
-
-        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
 
         // DIGEST-GATE: Wire CommitVoteMonitor.quorum_commit_digest() into CoordinationHub
         // so CommitProcessor can verify local commit digests against network quorum.
