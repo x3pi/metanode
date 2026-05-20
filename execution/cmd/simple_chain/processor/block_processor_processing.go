@@ -420,14 +420,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
 	bp.SetLastBlock(bl)
-	// CRITICAL FIX: Store block in pendingCommitBlocks so RPC eth_getBlockByNumber
-	// can serve it during the async commit gap. Without this, the block exists in
-	// memory (lastBlock) but is not queryable by number because:
-	//   1. blockNumberToHash mapping hasn't been committed to DB yet
-	//   2. pendingCommitBlocks is empty (never populated)
-	// → RPC returns null for valid block numbers.
-	// commitWorker.RemovePendingCommitBlock() cleans this up after DB persist.
-	bp.AddPendingCommitBlock(bl)
 	// currentBlockHeader and BlockNumberToHash mappings are safely updated 
 	// synchronously inside CommitBlockState (via commitWorker) under commitMutex
 	// to guarantee no race condition with P2P sync blocks.
