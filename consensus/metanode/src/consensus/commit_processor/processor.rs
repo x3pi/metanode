@@ -644,6 +644,17 @@ impl CommitProcessor {
                     let mut verified_indices: Vec<u32> = Vec::new();
                     for (&local_idx, local_commit) in pending_local_commits.iter() {
                         let local_digest = local_commit.commit_ref.digest.into_inner();
+                        let is_epoch_boundary = local_commit.extract_end_of_epoch_transaction().is_some();
+                        if is_epoch_boundary {
+                            info!(
+                                "⚡ [DIGEST-GATE POLL] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                                 EndOfEpoch system transaction detected. Dispatching immediately to prevent consensus deadlock.",
+                                local_idx
+                            );
+                            verified_indices.push(local_idx);
+                            continue;
+                        }
+
                         match verifier(local_idx) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -991,7 +1002,15 @@ impl CommitProcessor {
                 // ═══════════════════════════════════════════════════════
                 if pending.decided_with_local_blocks {
                     let local_digest = pending.commit_ref.digest.into_inner();
-                    let digest_match = if let Some(ref verifier) = digest_verifier {
+                    let is_epoch_boundary = pending.extract_end_of_epoch_transaction().is_some();
+                    let digest_match = if is_epoch_boundary {
+                        info!(
+                            "⚡ [DIGEST-GATE-OOO] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                             EndOfEpoch transaction detected in OOO path. Dispatching immediately.",
+                            next_expected_index
+                        );
+                        true
+                    } else if let Some(ref verifier) = digest_verifier {
                         match verifier(next_expected_index) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -1288,7 +1307,15 @@ impl CommitProcessor {
                             let local_digest = subdag.commit_ref.digest.into_inner();
 
                             // Check if digest is already verified by network quorum
-                            let digest_match = if let Some(ref verifier) = digest_verifier {
+                            let is_epoch_boundary = subdag.extract_end_of_epoch_transaction().is_some();
+                            let digest_match = if is_epoch_boundary {
+                                info!(
+                                    "⚡ [DIGEST-GATE-IMMEDIATE] Commit {} EPOCH-BOUNDARY-BYPASS: \
+                                     EndOfEpoch transaction detected. Dispatching immediately.",
+                                    commit_index
+                                );
+                                true
+                            } else if let Some(ref verifier) = digest_verifier {
                                 match verifier(commit_index) {
                                     Some(quorum_digest) => {
                                         if quorum_digest == local_digest {
