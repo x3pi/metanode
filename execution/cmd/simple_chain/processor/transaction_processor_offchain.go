@@ -268,9 +268,22 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
 	mvmId := common.BytesToAddress(ethAddressBytes)
 	lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
+	stateRoot := lastBlockHeader.AccountStatesRoot()
 
-	vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
-	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, v.chainState.GetSmartContractDB(), v.chainState.GetAccountStateDB(), true)
+	accountStateTrie, err := trie.NewStateTrie(stateRoot, v.storageManager.GetStorageAccount(), true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create account state trie: %v", err)
+	}
+	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, v.storageManager.GetStorageAccount())
+
+	blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+	if err != nil {
+		return nil, err
+	}
+
+	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
+	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
