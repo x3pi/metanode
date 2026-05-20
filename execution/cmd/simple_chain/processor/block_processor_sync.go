@@ -97,15 +97,15 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// ═════════════════════════════════════════════════════════════════════
 	if epochNum > currentEpoch && lastBlock != nil {
 		epochJump := epochNum - currentEpoch
-		if epochJump > 4 {
-			logger.Error("🚨 [EPOCH-INFLATION-GUARD] Suspicious epoch jump %d→%d (delta=%d, GEI=%d). "+
+		if epochJump > 4 && globalExecIndex <= lastPersistedGEI {
+			logger.Error("🚨 [EPOCH-INFLATION-GUARD] Suspicious epoch jump %d→%d (delta=%d, GEI=%d <= lastPersistedGEI=%d). "+
 				"This indicates replayed/corrupt commit data. BLOCKING epoch reset to prevent inflation.",
-				currentEpoch, epochNum, epochJump, globalExecIndex)
+				currentEpoch, epochNum, epochJump, globalExecIndex, lastPersistedGEI)
 			// DO NOT reset commitIndex — this would cause GEI inflation on forked nodes.
 			// The node should continue with its current epoch until a legitimate
 			// EndOfEpoch system transaction arrives via live consensus.
 		} else {
-			logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected (jump=%d). Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum, epochJump)
+			logger.Info("🔄 [GEI-AUTHORITY] Epoch %d→%d detected (jump=%d, GEI=%d, lastPersistedGEI=%d). Resetting lastHandledCommitIndex and persisting new epoch.", currentEpoch, epochNum, epochJump, globalExecIndex, lastPersistedGEI)
 			geiAuth := GetGEIAuthority()
 			geiAuth.ResetCommitIndexForEpoch(epochNum)
 			storage.ForceSetLastHandledCommitIndex(0)

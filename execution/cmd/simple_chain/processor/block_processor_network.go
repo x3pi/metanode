@@ -58,6 +58,11 @@ func (bp *BlockProcessor) runUnixSocket() {
 	// Inject PushAsyncGEIUpdate callback to prevent empty commit stalls
 	reqHandler.SetPushAsyncGEIUpdateCallback(bp.PushAsyncGEIUpdate)
 
+	// Inject ResetCommitIndex callback to prevent epoch-transition execution skips
+	reqHandler.SetResetCommitIndexCallback(func(newEpoch uint64) {
+		GetGEIAuthority().ResetCommitIndexForEpoch(newEpoch)
+	})
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
