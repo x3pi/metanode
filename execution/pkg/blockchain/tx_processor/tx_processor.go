@@ -89,7 +89,7 @@ type groupResultExt struct {
 // ProcessTransactions processes a batch of transactions.
 // blockTime is the deterministic block timestamp (in seconds) from Rust consensus.
 // This ensures all nodes use the same EVM block.timestamp for deterministic execution.
-func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64) (
+func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address) (
 	ProcessResult,
 	error,
 ) {
@@ -111,7 +111,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// *** Call the new function for concurrent processing ***
 	startExec := time.Now()
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 	execDuration := time.Since(startExec)
 	logger.Debug("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
@@ -195,7 +195,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 }
 
 // ProcessTransactionsRemote processes a batch of transactions for remote execution.
-func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64) (
+func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address) (
 	ProcessResult,
 	error,
 ) {
@@ -216,7 +216,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// *** Call the new function for concurrent processing ***
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -292,6 +292,7 @@ func processGroupsConcurrently(
 	enableTrace bool,
 	isCache bool,
 	blockTime uint64,
+	leaderAddr common.Address,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -438,7 +439,7 @@ func processGroupsConcurrently(
 				}
 				for idx := startIdx; idx < endIdx; idx++ {
 					meta := groupMetas[idx]
-					result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime)
+					result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 					results[idx] = result // Write to indexed position — deterministic order
 					if enableTrace && meta.span != nil {
 						meta.span.End()
@@ -532,6 +533,7 @@ func processSingleGroup(
 	enableTrace bool,
 	isCache bool,
 	blockTime uint64,
+	leaderAddr common.Address,
 ) groupResultExt {
 	// Acquire slices from memory pools to eliminate GC pressure
 	txPtr := txSlicePool.Get().(*[]types.Transaction)
@@ -664,7 +666,7 @@ func processSingleGroup(
 			// ReadOnly=false (mặc định) → gọi HandleTransaction để execute đầy đủ.
 			if tx.GetReadOnly() {
 				logger.Info("[CC SIG_ACK] TX %s readOnly=true → nonce-only", tx.Hash().Hex())
-				vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+				vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
@@ -890,7 +892,7 @@ func processSingleGroup(
 			)
 
 			var exRs types.ExecuteSCResult
-			vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
+			vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
 
 			exRs, err = vmP.ExecuteNonceOnly(txCtx, tx, true)
 			if err != nil {
@@ -930,10 +932,10 @@ func processSingleGroup(
 		)
 
 		var exRs types.ExecuteSCResult
-		vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
+		vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
 		usedMvmId := tx.ToAddress()
 		if tx.IsDeployContract() || tx.IsRegularTransaction() || !isCache {
-			vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime)
+			vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
 			usedMvmId = mvmId
 		}
 		gRs.MvmIdMap[tx.Hash()] = usedMvmId

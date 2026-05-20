@@ -30,7 +30,7 @@ func HandleRevertedTransaction(
 	)
 	// 3. Tăng nonce và cập nhật các thông tin tài khoản khác
 	// Đây là phần code được tái sử dụng
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
+	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 	if err != nil {
 		errorReceipt := createErrorReceipt(tx, toAddress, fmt.Errorf("ExecuteNonceOnly failed during revert: %w", err))
@@ -61,7 +61,7 @@ func HandleSuccessTransaction(
 		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime)
+	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 
 	if err != nil {

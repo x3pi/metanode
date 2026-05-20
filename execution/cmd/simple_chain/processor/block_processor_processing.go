@@ -175,7 +175,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 				}
 			}
 
-			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec)
+			processResult, err := bp.transactionProcessor.ProcessTransactionsInPool(setEmptyBlock, blockTimeSec, bp.validatorAddress)
 			if err == nil {
 				bp.inputTxCounter.Add(int64(len(processResult.Transactions)))
 				bp.ProcessedInputTxCount.Add(uint64(len(processResult.Transactions)))
