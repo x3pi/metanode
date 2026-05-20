@@ -26,7 +26,7 @@ echo ""
 # ─── Rust ─────────────────────────────────────────────────────
 echo -e "${BLUE}📋 Step 1: Build Rust metanode...${NC}"
 export PATH="/home/abc/protoc3/bin:$PATH"
-cd "$METANODE_ROOT" && cargo +nightly build --release --bin metanode
+cd "$METANODE_ROOT" && cargo build --release --bin metanode
 echo -e "${GREEN}  ✅ Rust binary: $METANODE_ROOT/target/release/metanode${NC}"
 
 # ─── C++ EVM ──────────────────────────────────────────────────
