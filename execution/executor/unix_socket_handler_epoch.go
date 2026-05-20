@@ -1573,6 +1573,28 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			currentGEI = blockGEI
 		}
 
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PARENT-HASH CONSISTENCY CHECK: Reject synced block if it breaks continuity
+		// ═══════════════════════════════════════════════════════════════════════════
+		if blockNum > 1 {
+			prevBlockNum := blockNum - 1
+			if prevHash, ok := bc.GetBlockHashByNumber(prevBlockNum); ok && prevHash != (common.Hash{}) {
+				expectedParentHash := prevHash
+				actualParentHash := header.LastBlockHash()
+				if actualParentHash != expectedParentHash {
+					logger.Error("🚨 [SYNC-FORK-GUARD] parent-hash mismatch at block #%d! "+
+						"Synced block has parentHash=%s, but local block #%d hash is %s. "+
+						"Rejecting block to prevent chain corruption.",
+						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex())
+					return &pb.SyncBlocksResponse{
+						SyncedCount:     executedCount,
+						LastSyncedBlock: lastExecutedBlock,
+						Error:           fmt.Sprintf("parent-hash mismatch at block %d: parentHash=%s but local block %d hash=%s", blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex()),
+					}, nil
+				}
+			}
+		}
+
 		// CRITICAL FIX: Restore lastHandledCommitIndex from the synced block!
 		// This prevents Go from double-executing these commits when Rust resumes consensus.
 		if header.CommitIndex() > 0 {
