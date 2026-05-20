@@ -157,12 +157,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// During sync, ~95%+ of commits are empty consensus rounds (0 transactions).
 	// The full processing path does LAZY REFRESH (DB queries), epoch detection,
 	// Case 1/2/3 ordering, block creation — all unnecessary for empty commits.
-	//
-	// CRITICAL FIX (May 2026): Check epoch boundary and ghost-block-guard BEFORE
-	// advancing GEI. Previously, GEI was advanced first (PushAsyncGEIUpdate),
-	// then undone if ghost-block-guard fired. This fragile undo pattern caused
-	// block gaps when the undo was missed or the GEI was already persisted.
-	// New order: validate ordering → check if block creation needed → advance GEI → return.
+	// This fast-path: validates ordering → updates GEI → checks epoch → returns.
 	// ═══════════════════════════════════════════════════════════════════════════
 	totalTxsQuick := len(epochData.Transactions)
 	if totalTxsQuick == 0 && len(epochData.GetSystemTransactions()) == 0 {
@@ -187,10 +182,43 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 				oldExpected, globalExecIndex, gapSize)
 		}
 
+		// Sequential empty commit — update GEI and advance
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+		*nextExpectedGlobalExecIndex = globalExecIndex + 1
+
 		// ═══════════════════════════════════════════════════════════════
-		// BLOCK-CREATION CHECKS: Must be done BEFORE GEI advance.
-		// If any of these fire, we fall through to the full processing
-		// path which creates a block. GEI will be advanced there.
+		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
+		// when there are 0 user transactions. Without this, EndOfEpoch
+		// system txs attached to empty commits are silently dropped,
+		// making them invisible to eth_getSystemTransactionsByBlockNumber.
+		// ═══════════════════════════════════════════════════════════════
+		fastPathSysTxs := epochData.GetSystemTransactions()
+		if len(fastPathSysTxs) > 0 {
+			// Use the current block number from the last persisted block
+			sysTxBlockNum := *currentBlockNumber
+			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
+				sysTxBlockNum = lastBlock.Header().BlockNumber()
+			}
+			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
+			if err != nil {
+				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
+			} else {
+				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
+			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// LAZY REFRESH: DISABLED (FORK-SAFETY FIX 2026-04-29)
+		//
+		// This block imported P2P-synced blocks from LevelDB into the
+		// in-memory state (bp.lastBlock, currentBlockNumber, chainState).
+		// processSingleEpochData only runs on Master nodes, which MUST NOT
+		// adopt P2P blocks — their state is managed by consensus execution.
+		// Importing P2P blocks here corrupts the trie state and causes
+		// hash mismatches in subsequent blocks.
+		//
+		// Original purpose (SyncOnly nodes) is now handled by
+		// syncLastBlockFromDB goroutine in block_processor_db_sync.go.
 		// ═══════════════════════════════════════════════════════════════
 
 		// EPOCH AUTO-ADVANCE: Check epoch from block data (cheap — only field access)
@@ -217,7 +245,8 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 					lastBlockEpoch, epochNum, globalExecIndex)
 				// Don't return — fall through to full processing path below
 				// The full path will create a block with 0 transactions.
-				// NOTE: GEI has NOT been advanced yet — full path handles it.
+				// CRITICAL FIX: Undo the GEI advance from line 85 so the full path doesn't reject it as a duplicate.
+				*nextExpectedGlobalExecIndex = globalExecIndex
 				goto EPOCH_BOUNDARY_FALLTHROUGH
 			}
 		}
@@ -226,45 +255,12 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// GHOST-BLOCK-GUARD: If Rust explicitly assigned a block number
 		// for this 0-tx commit, we MUST create an empty block to prevent
 		// sequence gaps in the Go chain.
-		//
-		// CRITICAL FIX (May 2026): This check is now BEFORE GEI advance.
-		// Previously it was after PushAsyncGEIUpdate, requiring a fragile
-		// undo of nextExpectedGEI. Now we simply fall through without
-		// having advanced anything — the full path handles GEI correctly.
 		// ═══════════════════════════════════════════════════════════════
 		if epochData.GetBlockNumber() > 0 {
 			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Rust assigned block_number=%d for 0-tx commit (GEI=%d). Creating empty block to prevent sequence gap.",
 				epochData.GetBlockNumber(), globalExecIndex)
-			// NOTE: GEI has NOT been advanced yet — full path handles it.
+			*nextExpectedGlobalExecIndex = globalExecIndex
 			goto EPOCH_BOUNDARY_FALLTHROUGH
-		}
-
-		// ═══════════════════════════════════════════════════════════════
-		// SAFE TO SKIP: No epoch boundary, no block number assigned.
-		// This is a pure empty consensus round — advance GEI and return.
-		// ═══════════════════════════════════════════════════════════════
-		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-		*nextExpectedGlobalExecIndex = globalExecIndex + 1
-
-		// ═══════════════════════════════════════════════════════════════
-		// FAST-PATH SYSTEM-TX PERSISTENCE: Save SystemTransactions even
-		// when there are 0 user transactions. Without this, EndOfEpoch
-		// system txs attached to empty commits are silently dropped,
-		// making them invisible to eth_getSystemTransactionsByBlockNumber.
-		// ═══════════════════════════════════════════════════════════════
-		fastPathSysTxs := epochData.GetSystemTransactions()
-		if len(fastPathSysTxs) > 0 {
-			// Use the current block number from the last persisted block
-			sysTxBlockNum := *currentBlockNumber
-			if lastBlock := bp.GetLastBlock(); lastBlock != nil {
-				sysTxBlockNum = lastBlock.Header().BlockNumber()
-			}
-			err := bp.chainState.GetBlockDatabase().SaveSystemTransactions(sysTxBlockNum, fastPathSysTxs)
-			if err != nil {
-				logger.Error("❌ [FAST-PATH-SYSTEM-TX] Failed to save %d SystemTransactions at block #%d: %v", len(fastPathSysTxs), sysTxBlockNum, err)
-			} else {
-				logger.Info("📡 [TELEMETRY] [FAST-PATH-SYSTEM-TX] Saved %d SystemTransactions at block #%d (GEI=%d)", len(fastPathSysTxs), sysTxBlockNum, globalExecIndex)
-			}
 		}
 
 		// Drain pending blocks
@@ -466,22 +462,8 @@ PROCESS_BLOCK:
 	nextBlockToCreate := *currentBlockNumber + 1
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
 		if len(epochData.Transactions) > 0 {
-			logger.Warn("🛡️ [NOMT-GUARD] Block #%d already in DB (#%d). Skipping EVM but advancing GEI=%d. "+
-				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex)
-			// CRITICAL FIX (May 2026): Must advance GEI even when skipping execution,
-			// otherwise the block number gap causes CHAIN BROKEN on all nodes.
-			// Previously this was a bare `return` which silently dropped the block
-			// without advancing any counters → permanent gap at this block number.
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
-			*currentBlockNumber = nextBlockToCreate
-
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
-			}
+			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d). "+
+				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber())
 			return
 		}
 	}
@@ -582,17 +564,18 @@ PROCESS_BLOCK:
 	if lastBlockPending != nil && lastBlockPending.Header().BlockNumber() > lastCommittedBlockNumber && len(lastBlockPending.Transactions()) == 0 {
 		// There's an empty block that hasn't been committed yet - commit it now before processing new block
 		emptyBlockNum := lastBlockPending.Header().BlockNumber()
-		logger.Info("💾 [FORK-SAFETY] Committing pending empty block #%d before processing new block (global_exec_index=%d)",
-			emptyBlockNum, globalExecIndex)
+		logger.Info("💾 [PENDING-EMPTY-COMMIT] Committing pending empty block #%d SYNCHRONOUSLY before processing new block with txs (lastCommitted=#%d, commitChannelLen=%d/%d, global_exec_index=%d)",
+			emptyBlockNum, lastCommittedBlockNumber, len(bp.commitChannel), cap(bp.commitChannel), globalExecIndex)
 
 		// Centralized commit (fork-safe: all nodes will do this at the same point)
 		if _, err := bp.chainState.CommitBlockState(lastBlockPending,
 			blockchain.WithPersistToDB(),
 			blockchain.WithCommitMappings(), // CRITICAL FIX: Ensure mapping batches from memory are flushed to DB
 		); err != nil {
-			logger.Error("❌ [FORK-SAFETY] Failed to commit pending empty block #%d: %v", emptyBlockNum, err)
+			logger.Error("❌ [PENDING-EMPTY-COMMIT] Failed to commit pending empty block #%d: %v", emptyBlockNum, err)
 		} else {
-			logger.Debug("✅ [FORK-SAFETY] Empty block #%d committed to database successfully", emptyBlockNum)
+			logger.Info("✅ [PENDING-EMPTY-COMMIT] Empty block #%d committed to database successfully (lastBlockNumber now=%d)",
+				emptyBlockNum, storage.GetLastBlockNumber())
 		}
 	}
 
@@ -1010,25 +993,6 @@ PROCESS_BLOCK:
 					*currentBlockNumber = epochData.GetBlockNumber()
 					emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 					if emptyBlock != nil {
-						// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
-						bp.SetLastBlock(emptyBlock)
-						bp.AddPendingCommitBlock(emptyBlock)
-
-						// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
-						tsrJob := CommitJob{
-							Block:           emptyBlock,
-							ProcessResults:  &emptyResult,
-							MappingWg:       &sync.WaitGroup{},
-							GlobalExecIndex: globalExecIndex,
-							CommitIndex:     commitIndex,
-						}
-						select {
-						case bp.commitChannel <- tsrJob:
-						default:
-							logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
-							bp.commitChannel <- tsrJob
-						}
-
 						select {
 						case bp.createdBlocksChan <- emptyBlock:
 						default:
@@ -1075,31 +1039,13 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		if epochData.GetBlockNumber() > 0 {
-			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all rejected by nonce/dedup), "+
-				"but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d",
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", 
 				len(allTransactions), epochData.GetBlockNumber(), globalExecIndex)
-			// CRITICAL FIX (May 2026): Use the ACTUAL stateRoot from ProcessTransactions()
-			// (which called IntermediateRoot internally) instead of blindly copying from
-			// lastBlock. If ProcessTransactions caused any side-effect (even cleanup),
-			// the root from IntermediateRoot reflects the true state.
-			// When all TXs are rejected (no mutation), accumulatedResults.Root will be
-			// identical to lastBlock.Root — but this is self-consistent, not a blind copy.
-			emptyResult := tx_processor.ProcessResult{
-				Transactions:    nil,
-				Receipts:        nil,
-				Root:            accumulatedResults.Root,
-				StakeStatesRoot: accumulatedResults.StakeStatesRoot,
-				TrieDBSnapshots: accumulatedResults.TrieDBSnapshots,
-			}
-			// DIAGNOSTIC: Log the stateRoot comparison so block_hash_checker can verify
+			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 			lastB := bp.GetLastBlock()
 			if lastB != nil {
-				parentRoot := lastB.Header().AccountStatesRoot()
-				if accumulatedResults.Root != parentRoot {
-					logger.Warn("⚠️ [GHOST-BLOCK-GUARD] stateRoot CHANGED despite 0 valid txs! "+
-						"actualRoot=%s parentRoot=%s — ProcessTransactions had side-effects",
-						accumulatedResults.Root.Hex()[:18]+"...", parentRoot.Hex()[:18]+"...")
-				}
+				emptyResult.Root = lastB.Header().AccountStatesRoot()
+				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
 			}
 			leaderBytes := epochData.GetLeaderAddress()
 			var leader common.Address
@@ -1110,25 +1056,6 @@ PROCESS_BLOCK:
 			*currentBlockNumber = epochData.GetBlockNumber()
 			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
 			if emptyBlock != nil {
-				// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
-				bp.SetLastBlock(emptyBlock)
-				bp.AddPendingCommitBlock(emptyBlock)
-
-				// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
-				job := CommitJob{
-					Block:           emptyBlock,
-					ProcessResults:  &emptyResult,
-					MappingWg:       &sync.WaitGroup{},
-					GlobalExecIndex: globalExecIndex,
-					CommitIndex:     commitIndex,
-				}
-				select {
-				case bp.commitChannel <- job:
-				default:
-					logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
-					bp.commitChannel <- job
-				}
-
 				select {
 				case bp.createdBlocksChan <- emptyBlock:
 				default:
