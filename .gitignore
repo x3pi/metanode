@@ -428,3 +428,4 @@ venv/
 **/*.zip
 .gitnexus
 execution/cmd/simple_chain/metanode_btrfs.img
+consensus/metanode/src/node/metanode.code-workspace
