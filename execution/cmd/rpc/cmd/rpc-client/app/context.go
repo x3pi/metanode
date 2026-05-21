@@ -64,7 +64,7 @@ type Context struct {
 // New tạo Application Context với tất cả dependencies
 func New(cfg *config.Config, tcpCfg *tcp_config.ClientConfig) (*Context, error) {
 	// 1. Initialize Private Key Store
-	pkStore, err := store.NewPrivateKeyStore(cfg.MasterPassword, cfg.AppPepper)
+	pkStore, err := store.NewPrivateKeyStore(cfg.LdbPrivateKeyPath, cfg.MasterPassword, cfg.AppPepper)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize PrivateKeyStore: %w", err)
 	}

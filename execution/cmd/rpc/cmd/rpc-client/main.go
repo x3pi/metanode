@@ -29,17 +29,34 @@ func main() {
 	log.SetOutput(os.Stdout)
 	var configPath string
 	var tcpConfigPath string
-	flag.StringVar(&defaultLogsDir, "logs-root", "./logs", "Root directory to store rpc-client logs (YYYY/MM/DD)")
-	flag.StringVar(&configPath, "config", "config-rpc.json", "Path to the RPC configuration file")
-	flag.StringVar(&tcpConfigPath, "tcp-config", "config-client-tcp.json", "Path to the TCP client configuration file")
+	flag.StringVar(&defaultLogsDir, "logs-root", "", "Root directory to store rpc-client logs (YYYY/MM/DD)")
+	flag.StringVar(&configPath, "config", "config-rpc-node0.json", "Path to the RPC configuration file")
+	flag.StringVar(&tcpConfigPath, "tcp-config", "config-client-tcp-node0.json", "Path to the TCP client configuration file")
 	flag.Parse()
 
-	if err := setup.SetupLogging(defaultLogsDir); err != nil {
-		log.Fatalf("FATAL: Failed to setup logging: %v", err)
-	}
 	cfg, tcpCfg, err := config.Load(configPath, tcpConfigPath)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to load configuration: %v", err)
+	}
+
+	if defaultLogsDir == "" {
+		if cfg.LogsDir != "" {
+			defaultLogsDir = cfg.LogsDir
+		} else {
+			// Automatically split logs per node based on config file name
+			baseName := filepath.Base(configPath)
+			if strings.HasPrefix(baseName, "config-rpc-node") {
+				suffix := strings.TrimPrefix(baseName, "config-rpc-node")
+				suffix = strings.TrimSuffix(suffix, ".json")
+				defaultLogsDir = "./logs" + suffix
+			} else {
+				defaultLogsDir = "./logs"
+			}
+		}
+	}
+
+	if err := setup.SetupLogging(defaultLogsDir); err != nil {
+		log.Fatalf("FATAL: Failed to setup logging: %v", err)
 	}
 	go func() {
 		logger.Info("Starting pprof server on localhost:6060")

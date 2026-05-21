@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -89,13 +88,15 @@ type PrivateKeyStore struct {
 	appPepper      string
 }
 
-func NewPrivateKeyStore(masterPassword, appPepper string) (*PrivateKeyStore, error) {
+func NewPrivateKeyStore(dbPath, masterPassword, appPepper string) (*PrivateKeyStore, error) {
 	if masterPassword == "" || appPepper == "" {
 		return nil, fmt.Errorf("masterPassword và appPepper không được rỗng")
 	}
-	fullPath := filepath.Join(".", privateKeyDBPathEncrypted)
-	logger.Info("Khởi tạo CSDL private key đã mã hóa tại: %s", fullPath)
-	db, err := leveldb.OpenFile(fullPath, nil)
+	if dbPath == "" {
+		return nil, fmt.Errorf("dbPath không được rỗng")
+	}
+	logger.Info("Khởi tạo CSDL private key đã mã hóa tại: %s", dbPath)
+	db, err := leveldb.OpenFile(dbPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("lỗi mở CSDL: %w", err)
 	}
