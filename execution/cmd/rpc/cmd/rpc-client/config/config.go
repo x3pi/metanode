@@ -28,6 +28,8 @@ type Config struct {
 	LdbContractFreeGasPath  string   `json:"ldb_contract_free_gas"`
 	LdbArtifactRegistryPath string   `json:"ldb_artifact_registry"`
 	LdbRobotTransactionPath string   `json:"ldb_robot_transaction"` // Path cho transaction storage
+	LdbPrivateKeyPath       string   `json:"ldb_private_key_path"`
+	LogsDir                 string   `json:"logs_dir"`
 	OwnerRpcAddress         string   `json:"owner_rpc_address"`
 	ContractsInterceptor    []string `json:"contracts_interceptor"` // Địa chỉ contract dùng để intercept
 	RewardAmount            *big.Int `json:"reward_amount"`         // Số lượng reward cho mỗi giao dịch được intercept
