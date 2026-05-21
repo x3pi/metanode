@@ -26,6 +26,8 @@ type RequestHandler struct {
 	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
 	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte, commitIndex uint32, epoch uint64)                                   // Callback to advance GEI asynchronously
 	resetCommitIndexCallback func(newEpoch uint64)                                                  // Callback to reset commit index on epoch advancement
+	lockExecutionCallback   func()                                                                 // Callback to acquire BlockProcessor's ExecutionMutex lock
+	unlockExecutionCallback func()                                                                 // Callback to release BlockProcessor's ExecutionMutex lock
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -71,6 +73,13 @@ func (rh *RequestHandler) SetPushAsyncGEIUpdateCallback(cb func(gei uint64, hash
 func (rh *RequestHandler) SetResetCommitIndexCallback(cb func(newEpoch uint64)) {
 	rh.resetCommitIndexCallback = cb
 }
+
+// SetExecutionLockCallbacks sets the execution lock/unlock callbacks for sync gating
+func (rh *RequestHandler) SetExecutionLockCallbacks(lock, unlock func()) {
+	rh.lockExecutionCallback = lock
+	rh.unlockExecutionCallback = unlock
+}
+
 
 
 // NOTE (Sync Architecture Redesign, Apr 2026):

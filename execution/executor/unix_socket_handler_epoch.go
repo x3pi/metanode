@@ -1414,19 +1414,33 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// DEADLOCK PREVENTION (May 2026): Reject EXECUTE mode requests during snapshot.
+	// DEADLOCK PREVENTION (May 2026): Reject all sync requests during snapshot.
 	// HandleSyncBlocksRequest opens NOMT sessions that are NOT gated by snapshotGate
-	// or ExecutionMutex. If a snapshot triggers while these sessions are active,
+	// or ExecutionMutex natively. If a snapshot triggers while these sessions are active,
 	// CloseForSnapshot waits forever → DEADLOCK.
 	// Rust will retry this RPC after the snapshot completes.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if request.GetExecuteMode() && rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
-		logger.Warn("⏸️ [SYNC] SyncBlocksRequest EXECUTE mode rejected: snapshot in progress. Rust should retry.")
+	if rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
+		logger.Warn("⏸️ [SYNC] SyncBlocksRequest rejected: snapshot in progress. Rust should retry.")
 		return &pb.SyncBlocksResponse{
 			SyncedCount:     0,
 			LastSyncedBlock: 0,
 			Error:           "snapshot in progress, retry later",
 		}, nil
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// CONCURRENCY & FORK-SAFETY GATE (May 2026): Acquire ExecutionMutex lock.
+	// This serializes block sync writes with consensus block execution, preventing
+	// NOMT trie root invalidations (Changeset no longer valid FFI errors).
+	// ═══════════════════════════════════════════════════════════════════════════
+	if rh.lockExecutionCallback != nil {
+		logger.Info("🔒 [SYNC-GATE] Acquiring ExecutionMutex lock for block synchronization")
+		rh.lockExecutionCallback()
+		defer func() {
+			logger.Info("🔓 [SYNC-GATE] Releasing ExecutionMutex lock after block synchronization")
+			rh.unlockExecutionCallback()
+		}()
 	}
 
 	if blockCount == 0 {
