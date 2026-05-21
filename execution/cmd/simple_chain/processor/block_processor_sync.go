@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -65,9 +67,16 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// ═══════════════════════════════════════════════════════════════════════════
 	geiAuthLayer4 := GetGEIAuthority()
 	if geiAuthLayer4.ShouldSkipCommit(commitIndex, epochNum) {
-		logger.Info("🛡️ [LAYER-4] Idempotent guard triggered: returning early for commit=%d epoch=%d GEI=%d",
-			commitIndex, epochNum, globalExecIndex)
-		return nil
+		// If the block number we want to process is greater than our actual database/in-memory tip,
+		// we must not skip it, even if the commit index was recorded in BackupDb before crash/restart.
+		if incomingBlockNum > 0 && incomingBlockNum > localTipBlockNum {
+			logger.Warn("🛡️ [LAYER-4] Idempotent guard would skip commit=%d epoch=%d GEI=%d, but incoming block #%d > local tip block #%d. Bypassing skip to recover missing block!",
+				commitIndex, epochNum, globalExecIndex, incomingBlockNum, localTipBlockNum)
+		} else {
+			logger.Info("🛡️ [LAYER-4] Idempotent guard triggered: returning early for commit=%d epoch=%d GEI=%d",
+				commitIndex, epochNum, globalExecIndex)
+			return nil
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -302,6 +311,14 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// processed an empty block with the same index (from epoch transition race), save it
 	// for potential replacement when processing next sequential block.
 	if globalExecIndex < *nextExpectedGlobalExecIndex {
+		// If the block we receive is the exact next block we must create according to the local database tip,
+		// bypass this old/duplicate skip, because the local database is the single source of truth.
+		if incomingBlockNum > 0 && incomingBlockNum == localTipBlockNum+1 {
+			logger.Warn("🛡️ [FORK-SAFETY] Bypass Case 1 duplicate check because incoming block #%d == localTipBlockNum + 1 (localTip=%d, expectedGEI=%d, GEI=%d)",
+				incomingBlockNum, localTipBlockNum, *nextExpectedGlobalExecIndex, globalExecIndex)
+			goto PROCESS_BLOCK
+		}
+
 		// Count transactions in this duplicate block
 		duplicateTxCount := len(epochData.Transactions)
 
@@ -681,7 +698,12 @@ PROCESS_BLOCK:
 			lastBlockGEI = lastBlock.Header().GlobalExecIndex()
 		}
 
-		if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
+		if incomingBlockNum > 0 && incomingBlockNum == localTipBlockNum+1 && lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI {
+			logger.Warn("🛡️ [GEI-REGRESSION] Bypass regression check because incoming block #%d == localTipBlockNum + 1 (localTip=%d, lastBlockGEI=%d, GEI=%d)",
+				incomingBlockNum, localTipBlockNum, lastBlockGEI, globalExecIndex)
+		}
+
+		if lastBlockGEI > 0 && globalExecIndex <= lastBlockGEI && !(incomingBlockNum > 0 && incomingBlockNum == localTipBlockNum+1) {
 			logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
 				"This commit was already executed — not creating duplicate block.",
 				globalExecIndex, lastBlockGEI, *currentBlockNumber)
@@ -918,6 +940,115 @@ PROCESS_BLOCK:
 				return nil
 			}
 		}
+	}
+
+	if incomingBlockNum > localTipBlockNum && incomingBlockNum <= bp.startupLastHandledBlockNum {
+		logger.Warn("🛡️ [NOMT-RECOVERY-GUARD] Bypassing EVM execution for block #%d (already in NOMT state up to #%d). Re-applying backup batches to sync databases.",
+			incomingBlockNum, bp.startupLastHandledBlockNum)
+
+		// 1. Fetch backup bytes from BackupDB
+		key := []byte(fmt.Sprintf("block_data_topic-%d", incomingBlockNum))
+		backupBytes, err := bp.storageManager.GetStorageBackupDb().Get(key)
+		if err != nil {
+			logger.Error("❌ [NOMT-RECOVERY-GUARD] Failed to get backup data for block #%d: %v", incomingBlockNum, err)
+			return err
+		}
+
+		// 2. Deserialize backup data
+		backupDb, err := storage.DeserializeBackupDb(backupBytes)
+		if err != nil {
+			logger.Error("❌ [NOMT-RECOVERY-GUARD] Failed to deserialize backup data for block #%d: %v", incomingBlockNum, err)
+			return err
+		}
+
+		// 3. Reconstruct Block
+		blockBatch, err := storage.DeserializeBatch(backupDb.BockBatch)
+		if err != nil || len(blockBatch) == 0 {
+			logger.Error("❌ [NOMT-RECOVERY-GUARD] Failed to deserialize BlockBatch for block #%d: %v", incomingBlockNum, err)
+			return fmt.Errorf("failed to deserialize block batch: %v", err)
+		}
+		rawBlockBytes := blockBatch[0][1]
+		restoredBlock := &block.Block{}
+		if err := restoredBlock.Unmarshal(rawBlockBytes); err != nil {
+			logger.Error("❌ [NOMT-RECOVERY-GUARD] Failed to unmarshal Block for block #%d: %v", incomingBlockNum, err)
+			return fmt.Errorf("failed to unmarshal block: %v", err)
+		}
+
+		// 4. Persist historical batches to PebbleDB (Block, Receipts, Tx Mappings)
+		if len(backupDb.BockBatch) > 0 {
+			bp.storageManager.GetStorageBlock().BatchPut(blockBatch)
+		}
+		if len(backupDb.ReceiptBatchPut) > 0 {
+			receiptBatch, _ := storage.DeserializeBatch(backupDb.ReceiptBatchPut)
+			bp.storageManager.GetStorageReceipt().BatchPut(receiptBatch)
+		}
+		if len(backupDb.TxBatchPut) > 0 {
+			txBatch, _ := storage.DeserializeBatch(backupDb.TxBatchPut)
+			bp.storageManager.GetStorageTransaction().BatchPut(txBatch)
+		}
+		if len(backupDb.MapppingBatch) > 0 {
+			mappingBatch, _ := storage.DeserializeBatch(backupDb.MapppingBatch)
+			bp.storageManager.GetStorageMapping().BatchPut(mappingBatch)
+		}
+
+		// 5. Update memory tracking variables synchronously
+		bp.SetLastBlock(restoredBlock)
+		bp.nextBlockNumber.Store(restoredBlock.Header().BlockNumber() + 1)
+		*currentBlockNumber = restoredBlock.Header().BlockNumber()
+
+		// 6. Reconstruct Receipts container
+		receipts, err := receipt.NewReceipts(bp.storageManager.GetStorageReceipt())
+		if err != nil {
+			logger.Error("❌ [NOMT-RECOVERY-GUARD] Failed to initialize receipts: %v", err)
+			return err
+		}
+		if len(backupDb.ReceiptBatchPut) > 0 {
+			receiptBatch, err := storage.DeserializeBatch(backupDb.ReceiptBatchPut)
+			if err == nil {
+				for _, kv := range receiptBatch {
+					rcp := &receipt.Receipt{}
+					if err := rcp.Unmarshal(kv[1]); err == nil {
+						receipts.AddReceipt(rcp)
+					}
+				}
+			}
+		}
+
+		// Update in-memory state tracking before advancing
+		if globalExecIndex > 0 {
+			storage.UpdateLastGlobalExecIndex(globalExecIndex)
+		}
+		if commitIndex > 0 {
+			storage.UpdateLastHandledCommitIndex(commitIndex)
+		}
+		storage.UpdateLastBlockNumber(restoredBlock.Header().BlockNumber())
+		storage.UpdateLastAssignedBlockNumber(restoredBlock.Header().BlockNumber())
+
+		// Update progress in BackupDB
+		bp.updateAndPersistConsensusState(globalExecIndex, commitIndex, epochNum)
+
+		// Broadcast block to createdBlocksChan (Sub-node sync)
+		select {
+		case bp.createdBlocksChan <- restoredBlock:
+		default:
+			bp.createdBlocksChan <- restoredBlock
+		}
+		logger.Info("🛡️ [NOMT-RECOVERY-GUARD] Restored block #%d successfully and sent to pipeline.", restoredBlock.Header().BlockNumber())
+
+		// 7. Update GEI tracking and check for pending buffers
+		if globalExecIndex > 0 {
+			*nextExpectedGlobalExecIndex = globalExecIndex + 1
+			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+				epochData = pendingBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
+			} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+				delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+				epochData = skippedBlock
+				goto PROCESS_SINGLE_EPOCH_DATA_START
+			}
+		}
+		return nil
 	}
 
 	processTxStart := time.Now()

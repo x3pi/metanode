@@ -208,6 +208,11 @@ type BlockProcessor struct {
 	// Key: "leader_addr:<gei>" → 20-byte address
 	// ═══════════════════════════════════════════════════════════════
 	leaderAddrCache sync.Map // GEI → common.Address (in-memory LRU)
+
+	// ═══════════════════════════════════════════════════════════════
+	// NOMT-RECOVERY-GUARD: Track the highest block processed before crash
+	// ═══════════════════════════════════════════════════════════════
+	startupLastHandledBlockNum uint64
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
@@ -510,6 +515,26 @@ func NewBlockProcessor(
 		bp.nextBlockNumber.Store(lastBlock.Header().BlockNumber() + 1)
 	} else {
 		bp.nextBlockNumber.Store(1)
+	}
+
+	startupLastHandledBlockNum := uint64(0)
+	if lastBlock != nil {
+		startupLastHandledBlockNum = lastBlock.Header().BlockNumber()
+	}
+	if storageManager != nil && storageManager.GetStorageBackupDb() != nil {
+		localTip := startupLastHandledBlockNum
+		for b := localTip + 1; ; b++ {
+			key := []byte(fmt.Sprintf("block_data_topic-%d", b))
+			if _, err := storageManager.GetStorageBackupDb().Get(key); err == nil {
+				startupLastHandledBlockNum = b
+			} else {
+				break
+			}
+		}
+	}
+	bp.startupLastHandledBlockNum = startupLastHandledBlockNum
+	if bp.startupLastHandledBlockNum > 0 {
+		logger.Info("🛡️ [NOMT-RECOVERY-GUARD] Startup check: highest block in BackupDb is #%d", bp.startupLastHandledBlockNum)
 	}
 
 	// Khởi chạy goroutine committer để cập nhật state tuần tự
