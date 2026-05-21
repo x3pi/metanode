@@ -55,7 +55,7 @@ pub async fn perform_block_recovery_check(
     }
 
     let mut next_required_global = go_last_block + 1;
-    let mut cumulative_fragment_offset: u64 = 0;
+    let mut cumulative_fragment_offset: i64 = 0;
     let mut missing_commits_found = false;
 
     info!(
@@ -79,7 +79,7 @@ pub async fn perform_block_recovery_check(
             continue; // Genesis/Epoch start is handled locally
         }
 
-        let commit_start_gei = epoch_base_exec_index + commit_index as u64 + cumulative_fragment_offset;
+        let commit_start_gei = (epoch_base_exec_index as i64 + commit_index as i64 + cumulative_fragment_offset) as u64;
 
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
@@ -96,8 +96,22 @@ pub async fn perform_block_recovery_check(
         };
 
         // Count total TXs to determine how many GEIs this commit will consume
-        let total_txs: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
-        let geis_consumed: u64 = if total_txs > MAX_TXS_PER_GO_BLOCK {
+        let mut total_txs = 0;
+        for block in subdag.blocks.iter() {
+            for tx in block.transactions().iter() {
+                let tx_data = tx.data();
+                // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                    continue;
+                }
+                total_txs += 1;
+            }
+        }
+        let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
+
+        let geis_consumed: u64 = if total_txs == 0 && !has_system_tx {
+            0
+        } else if total_txs > MAX_TXS_PER_GO_BLOCK {
             let fragments = total_txs.div_ceil(MAX_TXS_PER_GO_BLOCK);
             fragments as u64
         } else {
@@ -107,9 +121,7 @@ pub async fn perform_block_recovery_check(
         let commit_end_gei = commit_start_gei + geis_consumed;
 
         // Update the offset for the NEXT commit
-        if geis_consumed > 1 {
-            cumulative_fragment_offset += geis_consumed - 1;
-        }
+        cumulative_fragment_offset += geis_consumed as i64 - 1;
 
         // If this commit is completely older than what we need, skip it
         if commit_end_gei <= next_required_global {
@@ -125,6 +137,15 @@ pub async fn perform_block_recovery_check(
              );
             error!("{}", error_msg);
             return Err(anyhow::anyhow!(error_msg));
+        }
+
+        // Skip empty commits completely during recovery check
+        if geis_consumed == 0 {
+            tracing::trace!(
+                "⏭️ [RECOVERY-SKIP] Skipping empty commit #{} (GEI={})",
+                commit_index, commit_start_gei
+            );
+            continue;
         }
 
         missing_commits_found = true;

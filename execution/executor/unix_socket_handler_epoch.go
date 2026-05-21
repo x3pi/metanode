@@ -1565,6 +1565,15 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				lastExecutedGEI = blockGEI
 			}
 
+			// Ensure block number to hash mapping exists in mapping DB
+			if _, ok := bc.GetBlockHashByNumber(blockNum); !ok {
+				if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+					logger.Error("❌ [SNAPSHOT-RESUME] Failed to restore block mapping for skip block #%d: %v", blockNum, err)
+				} else {
+					logger.Info("🔄 [SNAPSHOT-RESUME] Restored block mapping for skip block #%d -> %s", blockNum, blockHash.Hex())
+				}
+			}
+
 			// CRITICAL FIX: Even if the block was fully executed previously (from LevelDB),
 			// we MUST update the in-memory pointers so that Rust's initialize_from_go()
 			// query reads the correct last_block_number. Otherwise, Rust will use a stale
@@ -1946,6 +1955,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// Commit block number→hash mappings
 	if err := bc.Commit(); err != nil {
 		logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to commit block number mappings: %v", err)
+	} else if rh.storageManager != nil {
+		if flushErr := rh.storageManager.GetStorageMapping().Flush(); flushErr != nil {
+			logger.Error("❌ [SNAPSHOT-RESUME] Failed to flush mapping DB: %v", flushErr)
+		} else {
+			logger.Info("💾 [SNAPSHOT-RESUME] Successfully flushed mapping DB to disk after batch sync")
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -2053,6 +2068,9 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 	}
 	legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
 	backupStorage.Put(legacyKey, backupBytes)
+	if err := backupStorage.Flush(); err != nil {
+		logger.Error("❌ [EXECUTE SYNC] Failed to flush backup for block #%d: %v", blockNum, err)
+	}
 }
 
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.

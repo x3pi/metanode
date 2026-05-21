@@ -1178,6 +1178,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                                     if status.epoch == inner.context.committee.epoch() {
                                                         max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
                                                         peers_reached += 1;
+                                                    } else if status.epoch > inner.context.committee.epoch() {
+                                                        max_peer_commit = std::cmp::max(max_peer_commit, std::cmp::max(status.last_commit_index, my_commit + 1));
+                                                        peers_reached += 1;
                                                     }
                                                 }
                                             }
@@ -1308,6 +1311,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     if let Ok(status) = inner.network_client.get_epoch_status(authority, timeout).await {
                                         if status.epoch == inner.context.committee.epoch() {
                                             max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
+                                            polled_stake += inner.context.committee.stake(authority);
+                                        } else if status.epoch > inner.context.committee.epoch() {
+                                            max_peer_commit = std::cmp::max(max_peer_commit, std::cmp::max(status.last_commit_index, my_commit + 1));
                                             polled_stake += inner.context.committee.stake(authority);
                                         }
                                     }

@@ -82,6 +82,9 @@ type ChainState struct {
 
 	// State attestation interval (in blocks) - from genesis config
 	attestationInterval uint64
+
+	// Unaligned future NOMT root detected on startup (NOMT ahead of LevelDB)
+	futureNomtRoot common.Hash
 }
 
 // NewChainState tạo một đối tượng ChainState mới.
@@ -484,6 +487,21 @@ func (cs *ChainState) InvalidateAllState() {
 	if db := cs.smartContractDB.Load(); db != nil {
 		db.InvalidateAllCaches()
 	}
+}
+
+// SetFutureNomtRoot sets the unaligned future NOMT root detected on startup.
+func (cs *ChainState) SetFutureNomtRoot(root common.Hash) {
+	cs.futureNomtRoot = root
+}
+
+// GetFutureNomtRoot returns the unaligned future NOMT root detected on startup.
+func (cs *ChainState) GetFutureNomtRoot() common.Hash {
+	return cs.futureNomtRoot
+}
+
+// ClearFutureNomtRoot clears the unaligned future NOMT root.
+func (cs *ChainState) ClearFutureNomtRoot() {
+	cs.futureNomtRoot = common.Hash{}
 }
 
 // GetBlockDatabase trả về BlockDatabase.

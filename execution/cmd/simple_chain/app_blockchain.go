@@ -28,6 +28,8 @@ import (
 func (app *App) initBlockchain() error {
 	logger.Info("initBlockchain started")
 
+	var futureNomtRoot e_common.Hash
+
 	blockDatabase := block.NewBlockDatabase(app.storageManager.GetStorageBlock())
 
 	// Configure backup directory for lastBlock crash recovery file
@@ -340,10 +342,70 @@ func (app *App) initBlockchain() error {
 						headerAccountRoot.Hex()[:18]+"...")
 				}
 
-				if nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] AccountStatesRoot MISMATCH: nomt=%s header=%s → patching header to use NOMT authoritative root",
+				EmptyNomtRoot := e_common.HexToHash("0x59244d688eccda45a938566777f742597e2a84ea7bb048c209a52ac89b3fcf0e")
+				isEmptyNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == EmptyNomtRoot)
+
+				if isEmptyNomt && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=%s) but header expects %s. "+
+						"Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.",
+						nomtAccountRoot.Hex(), headerAccountRoot.Hex()[:18]+"...")
+					
+					// Load block 0 (genesis) from block database
+					key := []byte("blockNumber_0")
+					data, err := app.storageManager.GetStorageMapping().Get(key)
+					if err == nil && data != nil && len(data) == 32 {
+						blockHash := e_common.BytesToHash(data)
+						blk0, err := blockDatabase.GetBlockByHash(blockHash)
+						if err == nil && blk0 != nil {
+							logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
+							app.startLastBlock = blk0
+							storage.ForceSetLastBlockNumber(0)
+							storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
+							storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
+							storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
+							
+							// Also reset the last block number in backup db or storage if needed
+							storage.UpdateLastBlockNumber(0)
+						} else {
+							logger.Error("❌ [STARTUP] Failed to load genesis block by hash %s: %v", blockHash.Hex(), err)
+						}
+					} else {
+						logger.Error("❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: %v", err)
+					}
+				} else if nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{}) {
+					logger.Warn("🛡️ [STARTUP] AccountStatesRoot MISMATCH: nomt=%s header=%s. Searching for correct matching block in LevelDB...",
 						nomtAccountRoot.Hex(), headerAccountRoot.Hex())
-					app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+					found := false
+					for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
+						key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+						data, err := app.storageManager.GetStorageMapping().Get(key)
+						if err != nil || data == nil || len(data) != 32 {
+							continue
+						}
+						blockHash := e_common.BytesToHash(data)
+						blk, err := blockDatabase.GetBlockByHash(blockHash)
+						if err != nil || blk == nil {
+							continue
+						}
+						if blk.Header().AccountStatesRoot() == nomtAccountRoot {
+							correctedGEI := blk.Header().GlobalExecIndex()
+							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (stateRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
+								bn, nomtAccountRoot.Hex()[:18]+"...", correctedGEI)
+							app.startLastBlock = blk
+							storage.ForceSetLastBlockNumber(bn)
+							storage.ForceSetLastGlobalExecIndex(correctedGEI)
+							storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+							storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
+							found = true
+							break
+						}
+					}
+					if !found {
+						logger.Warn("⚠️ [STARTUP] NOMT root %s does not match any block in LevelDB. Falling back to patching header.",
+							nomtAccountRoot.Hex()[:18]+"...")
+						app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+						futureNomtRoot = nomtAccountRoot
+					}
 				}
 			}
 		}
@@ -385,6 +447,11 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed NewChainState: %v", err)
 		}
 
+		if futureNomtRoot != (e_common.Hash{}) {
+			app.chainState.SetFutureNomtRoot(futureNomtRoot)
+			logger.Info("🛡️ [STARTUP] Registered future unaligned NOMT root %s in ChainState for catch-up bypass.", futureNomtRoot.Hex()[:18])
+		}
+
 		// FORK-SAFETY ROOT FIX: After ChainState loads (including LoadEpochData),
 		// verify that the epoch matches the last block header. This prevents fork
 		// after snapshot restore where LoadEpochData() returns stale epoch data.
@@ -407,6 +474,8 @@ func (app *App) initBlockchain() error {
 
 		// Initialize blockchain
 		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
+		blockchain.GetBlockChainInstance().Commit()
 	}
 
 SKIP_GENESIS:
@@ -579,6 +648,33 @@ SKIP_GENESIS:
 			}
 			logger.Info("✅ [STARTUP-DIAG] Final state: GEI=%d, CommitIndex=%d, Block=%d, Epoch=%d",
 				storageGEI, storageCommit, app.startLastBlock.Header().BlockNumber(), app.startLastBlock.Header().Epoch())
+
+			// ═══════════════════════════════════════════════════════════════
+			// STARTUP MAPPING ALIGNMENT:
+			// Re-register and durably flush mapping for startLastBlock tip.
+			// This guards against sudden SIGTERM shut downs where the block itself
+			// was stored in LevelDB but Pebble's mapping DB memtable was not flushed to disk.
+			// ═══════════════════════════════════════════════════════════════
+			bc := blockchain.GetBlockChainInstance()
+			if bc != nil {
+				blockNum := uint64(app.startLastBlock.Header().BlockNumber())
+				blockHash := app.startLastBlock.Header().Hash()
+				existingHash, ok := bc.GetBlockHashByNumber(blockNum)
+				if !ok || existingHash != blockHash {
+					logger.Info("🔄 [STARTUP-MAPPING] Restoring/correcting mapping for last startup block #%d: existing=%s -> expected=%s", blockNum, existingHash.Hex(), blockHash.Hex())
+					_ = bc.SetBlockNumberToHash(blockNum, blockHash)
+					_ = bc.Commit()
+					if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
+						if err := app.storageManager.GetStorageMapping().Flush(); err != nil {
+							logger.Error("❌ [STARTUP-MAPPING] Failed to durably flush mapping for block #%d: %v", blockNum, err)
+						} else {
+							logger.Info("✅ [STARTUP-MAPPING] Durable flush completed for corrected block #%d mapping.", blockNum)
+						}
+					}
+				} else {
+					logger.Info("✅ [STARTUP-MAPPING] Block #%d mapping already present and correct: %s", blockNum, existingHash.Hex())
+				}
+			}
 		}
 	}
 
