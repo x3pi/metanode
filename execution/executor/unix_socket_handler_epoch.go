@@ -2105,7 +2105,12 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 	// becomes completely unaware of the state updates, leading to stale
 	// 'nomt_read' queries later (fixing persistent nonce mismatches on restart!!).
 	// ═══════════════════════════════════════════════════════════════════════════
-	sessions, err := trie.ApplyNomtReplicationBatches(aggregatedBatches)
+	sessions, err := trie.ApplyNomtReplicationBatches(
+		aggregatedBatches,
+		rh.chainState.GetChangelogDB(),
+		rh.chainState.GetStakeChangelogDB(),
+		backupDb.BockNumber,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
 	}

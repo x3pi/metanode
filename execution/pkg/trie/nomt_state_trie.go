@@ -1238,7 +1238,12 @@ func (n *NomtStateTrie) GetCommitBatch() [][2][]byte {
 // commit takes 4+ minutes, completely stalling sub-node sync. Instead, we simply strip the
 // 'nomt:' prefix and keep the data in the PebbleDB batch for fast downstream writes.
 // This reduces block apply time from minutes to milliseconds.
-func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]NomtSessionToFlush, error) {
+func ApplyNomtReplicationBatches(
+	aggregatedBatches map[string][][2][]byte,
+	changelogDB *state_changelog.StateChangelogDB,
+	stakeChangelogDB *state_changelog.StateChangelogDB,
+	blockNumber uint64,
+) ([]NomtSessionToFlush, error) {
 	var sessionsToFlush []NomtSessionToFlush
 
 	if globalStateBackend != BackendNOMT {
@@ -1367,6 +1372,17 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]No
 
 				trie := NewNomtStateTrie(handle, false, namespace)
 				
+				// Set changelogDB based on namespace
+				if namespace == "account_state" {
+					trie.SetChangelogDB(changelogDB)
+				} else if namespace == "stake_db" {
+					trie.SetChangelogDB(stakeChangelogDB)
+				}
+
+				if blockNumber > 0 {
+					trie.SetCurrentCommitBlock(blockNumber)
+				}
+
 				// CRITICAL FIX: For stake_db, we MUST NOT set isReplicationSync to true.
 				// If we do, the knownKeys registry is bypassed, and subsequent calls
 				// to GetAllValidators() will return 0 validators, causing consensus forks
