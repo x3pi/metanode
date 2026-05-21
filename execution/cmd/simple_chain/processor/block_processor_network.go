@@ -66,6 +66,11 @@ func (bp *BlockProcessor) runUnixSocket() {
 	// Inject ExecutionMutex Lock and Unlock callbacks to serialize sync operations with consensus execution
 	reqHandler.SetExecutionLockCallbacks(bp.ExecutionMutex.Lock, bp.ExecutionMutex.Unlock)
 
+	// Inject SetBroadcastEventsAndReceiptsCallback for SyncOnly transaction receipt delivery
+	reqHandler.SetBroadcastEventsAndReceiptsCallback(func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) {
+		bp.broadcastEventsAndReceipts(blk, receipts, eventLogs)
+	})
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
