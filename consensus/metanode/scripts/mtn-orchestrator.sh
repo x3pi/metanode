@@ -98,6 +98,23 @@ is_session_dead() {
     ! tmux list-panes -t "$session" -F '#{pane_dead}' 2>/dev/null | grep -q "0"
 }
 
+# Hủy tmux session và chờ đến khi nó thực sự biến mất (tránh race condition)
+kill_and_wait_session() {
+    local session="$1"
+    if session_exists "$session"; then
+        tmux kill-session -t "$session" 2>/dev/null || true
+        # Chờ tối đa 3 giây (30 * 0.1s)
+        local elapsed=0
+        while session_exists "$session" && [ $elapsed -lt 30 ]; do
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+        if session_exists "$session"; then
+            log_warn "  ⚠️  Không thể xóa session $session sau 3s!"
+        fi
+    fi
+}
+
 
 # Kiểm tra session có nằm trong danh sách bảo vệ không
 is_protected_session() {
@@ -219,7 +236,7 @@ start_go_master() {
     if session_exists "$session"; then
         if is_session_dead "$session"; then
             log_warn "Phát hiện session $session đang ở trạng thái dead pane — dọn dẹp..."
-            tmux kill-session -t "$session" 2>/dev/null || true
+            kill_and_wait_session "$session"
         else
             log_warn "Session $session đã tồn tại — bỏ qua"
             return 0
@@ -365,7 +382,7 @@ stop_session() {
     fi
 
     # Kill tmux session (cleanup shell wrapper)
-    tmux kill-session -t "$session" 2>/dev/null || true
+    kill_and_wait_session "$session"
     log_info "  ✅ $label đã dừng"
 }
 

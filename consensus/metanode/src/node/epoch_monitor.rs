@@ -567,10 +567,10 @@ pub fn start_unified_epoch_monitor(
 }
 
 /// Stop the epoch monitor task
-#[allow(dead_code)]
 pub async fn stop_epoch_monitor(handle: Option<JoinHandle<()>>) {
     if let Some(h) = handle {
         h.abort();
+        let _ = h.await;
         info!("🛑 [EPOCH MONITOR] Stopped unified epoch monitor");
     }
 }
