@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -54,7 +55,17 @@ func (bp *BlockProcessor) runUnixSocket() {
 		bp.UpdateLastBlockAndHeader(blk)
 		logger.Info("🔄 [RUST CONTROL] Rust explicitly advanced Go Master memory to block #%d", blk.Header().BlockNumber())
 	})
-
+	// Inject BroadCast callback to broadcast receipts in SyncOnly mode
+	reqHandler.SetBroadcastCallback(func(receipts []types.Receipt, blk *block.Block) {
+		var allEventLogs []types.EventLog
+		for _, r := range receipts {
+			for _, e := range r.EventLogs() {
+				allEventLogs = append(allEventLogs, smart_contract.NewEventLogFromProto(e))
+			}
+		}
+		// Use broadcastEventsAndReceipts to ensure websocket / event listeners get triggered
+		go bp.broadcastEventsAndReceipts(blk, receipts, allEventLogs)
+	})
 	// Inject PushAsyncGEIUpdate callback to prevent empty commit stalls
 	reqHandler.SetPushAsyncGEIUpdateCallback(bp.PushAsyncGEIUpdate)
 
@@ -92,13 +103,13 @@ func (bp *BlockProcessor) runUnixSocket() {
 	fmt.Printf("✅ [READY] Go Master executor initialized via FFI: block=%d\n", lastBlock)
 
 	logger.Info("Main program waiting for data from FFI Module...")
-	
+
 	// 5. Start block processing loop asynchronously using the channel
 	go bp.processRustEpochData(blockQueue)
-	
+
 	// The runUnixSocket caller expects this function to block/run in background
 	// We can simply return here, or keep it alive like it did. It's normally run as a goroutine.
-	// Since the previous function had a block wait, we can mimic it or just let it exit. 
+	// Since the previous function had a block wait, we can mimic it or just let it exit.
 	// The processRustEpochData is backgrounded now.
 	for {
 		time.Sleep(30 * time.Second)
@@ -257,7 +268,7 @@ PROCESS_LOOP:
 			if elapsed > 10*time.Second {
 				rate := float64(bp.processedBlockCount-bp.lastRateCheckCount) / elapsed.Seconds()
 				queueLen := len(dataChan)
-				
+
 				if queueLen > 40000 { // 80% of 50K dataChan
 					logger.Error("🚨 [SELF-MONITOR] Processing rate=%.1f blk/s, queue=%d/50000 (%.0f%% full). Go is falling behind!",
 						rate, queueLen, float64(queueLen)/50000*100)
@@ -265,7 +276,7 @@ PROCESS_LOOP:
 					logger.Warn("⚠️ [SELF-MONITOR] Processing rate=%.1f blk/s, queue=%d/50000 (%.0f%% full). Monitor closely.",
 						rate, queueLen, float64(queueLen)/50000*100)
 				}
-				
+
 				bp.lastRateCheckTime = time.Now()
 				bp.lastRateCheckCount = bp.processedBlockCount
 			}
@@ -295,7 +306,7 @@ PROCESS_LOOP:
 			if actualLastGEI > 0 && actualLastGEI >= nextExpectedGlobalExecIndex {
 				oldNextExpected := nextExpectedGlobalExecIndex
 				nextExpectedGlobalExecIndex = actualLastGEI + 1
-				
+
 				// WE MUST ALSO ADVANCE currentBlockNumber !!!
 				actualLastBlockDB := storage.GetLastBlockNumber()
 				if actualLastBlockDB > 0 && actualLastBlockDB > currentBlockNumber {
@@ -313,7 +324,7 @@ PROCESS_LOOP:
 					if trie.GetStateBackend() == trie.BackendNOMT {
 						lastBlock := bp.GetLastBlock()
 						if lastBlock != nil {
-							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)", 
+							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)",
 								currentBlockNumber, actualLastGEI)
 							if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
 								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
@@ -344,7 +355,6 @@ PROCESS_LOOP:
 					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, incomingTxCount)
 			}
 		}
-
 
 		// ═══════════════════════════════════════════════════════════════════
 		// BATCH-DRAIN OPTIMIZATION: Process consecutive empty commits in bulk
@@ -422,7 +432,7 @@ PROCESS_LOOP:
 						}
 						// Now process the non-empty/non-consecutive commit
 						logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", nextGEI)
-						
+
 						blockStart := time.Now()
 						bp.ExecutionMutex.RLock()
 						if err := bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger); err != nil {
@@ -434,7 +444,7 @@ PROCESS_LOOP:
 							logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
 								blockDur, nextGEI, len(next.Transactions))
 						}
-						
+
 						drainTimeout.Stop()
 						goto BATCH_DONE
 					}
@@ -607,7 +617,6 @@ func (bp *BlockProcessor) ProcessBlockData(request network.Request) error {
 			request.Connection().Type(), request.Connection().RemoteAddr())
 		return nil
 	}
-
 
 	// Decompress zstd before deserializing
 	var decoder, _ = zstd.NewReader(nil)

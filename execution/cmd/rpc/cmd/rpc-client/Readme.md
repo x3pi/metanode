@@ -5,8 +5,8 @@
 go run main.go --config config-rpc-node0.json --tcp-config config-client-tcp-node0.json
 go run main.go --config config-rpc-node1.json --tcp-config config-client-tcp-node1.json
 go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node2.json
-go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node3.json
-go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node4.json
+go run main.go --config config-rpc-node3.json --tcp-config config-client-tcp-node3.json
+go run main.go --config config-rpc-node4.json --tcp-config config-client-tcp-node4.json
 
 
 
