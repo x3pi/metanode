@@ -233,15 +233,9 @@ start_go_master() {
     local xapian_path=$(get_master_xapian $node_id)
     local pprof=$(get_master_pprof $node_id)
 
-    if session_exists "$session"; then
-        if is_session_dead "$session"; then
-            log_warn "Phát hiện session $session đang ở trạng thái dead pane — dọn dẹp..."
-            kill_and_wait_session "$session"
-        else
-            log_warn "Session $session đã tồn tại — bỏ qua"
-            return 0
-        fi
-    fi
+    log_step "Đảm bảo dọn dẹp hoàn toàn session và tiến trình cũ của Node ${node_id}..."
+    kill_and_wait_session "$session"
+    pkill -9 -f "simple_chain.*config-master-node${node_id}" 2>/dev/null || true
 
     mkdir -p "$log_dir"
 
@@ -284,7 +278,22 @@ start_go_master() {
     echo "$cmd" >> "$script_file"
     chmod +x "$script_file"
 
-    tmux new-session -d -s "$session" "$script_file"
+    # Thử tạo session tmux với chế độ thử lại (retry) để tránh lỗi race condition "duplicate session" từ tmux
+    local success=false
+    for attempt in {1..5}; do
+        if tmux new-session -d -s "$session" "$script_file" 2>/dev/null; then
+            success=true
+            break
+        fi
+        log_warn "  ⚠️  Không thể tạo session $session (thử lại sau 0.2s, lần thử $attempt)..."
+        sleep 0.2
+        tmux kill-session -t "$session" 2>/dev/null || true
+    done
+    if [ "$success" = false ]; then
+        log_error "  ❌ Thất bại hoàn toàn khi tạo session $session!"
+        exit 1
+    fi
+
     # Enable remain-on-exit: keep tmux pane alive after process exits
     # This allows attaching to see crash output, exit code, and signal info
     tmux set-option -t "$session" remain-on-exit on
