@@ -33,7 +33,14 @@ pub async fn dispatch_commit(
     let mut total_transactions = 0;
 
     for block in subdag.blocks.iter() {
-        total_transactions += block.transactions().len();
+        for tx in block.transactions().iter() {
+            let tx_data = tx.data();
+            // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+            if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                continue;
+            }
+            total_transactions += 1;
+        }
     }
 
     let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
@@ -190,13 +197,18 @@ pub async fn dispatch_commit(
                         let mut committed_tx_data: Vec<Vec<u8>> = Vec::new();
                         for block in &subdag.blocks {
                             for tx in block.transactions() {
+                                let tx_data = tx.data();
+                                // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                                if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                                    continue;
+                                }
                                 let tx_hash =
                                     crate::types::tx_hash::calculate_transaction_hash_single(
-                                        tx.data(),
+                                        tx_data,
                                     );
                                 hashes_guard.insert(tx_hash.clone());
                                 
-                                committed_tx_data.push(tx.data().to_vec());
+                                committed_tx_data.push(tx_data.to_vec());
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
                             }
