@@ -387,17 +387,15 @@ PROCESS_BLOCK:
 	// Compare that against the DB — if the DB already has it, this is a re-execution.
 	nextBlockToCreate := *currentBlockNumber + 1
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
-		if len(epochData.Transactions) > 0 {
-			logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution for block #%d (already in DB: #%d, GEI=%d). "+
-				"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex)
-			// CRITICAL: Must advance GEI even when skipping execution,
-			// otherwise the next commit sees a stale nextExpectedGlobalExecIndex
-			// and creates a permanent gap → BLOCK_GAP error.
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
-			*currentBlockNumber = nextBlockToCreate
-			return nil
-		}
+		logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution and block creation for historic block #%d (already in DB: #%d, GEI=%d, txs=%d). "+
+			"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex, len(epochData.Transactions))
+		// CRITICAL: Must advance GEI even when skipping execution,
+		// otherwise the next commit sees a stale nextExpectedGlobalExecIndex
+		// and creates a permanent gap → BLOCK_GAP error.
+		bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+		*nextExpectedGlobalExecIndex = globalExecIndex + 1
+		*currentBlockNumber = nextBlockToCreate
+		return nil
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -449,47 +447,9 @@ PROCESS_BLOCK:
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
 		if bNum > 0 {
-			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for empty commit to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d", epochData.GetBlockNumber(), bNum, globalExecIndex)
-			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
-			lastB := bp.GetLastBlock()
-			if lastB != nil {
-				emptyResult.Root = lastB.Header().AccountStatesRoot()
-				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
-			}
-			leaderBytes := epochData.GetLeaderAddress()
-			var leader common.Address
-			if len(leaderBytes) == 20 {
-				leader = common.BytesToAddress(leaderBytes)
-			}
-			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
-			*currentBlockNumber = bNum
-			storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
-
-			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
-			if emptyBlock != nil {
-				select {
-				case bp.createdBlocksChan <- emptyBlock:
-				default:
-					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
-					bp.createdBlocksChan <- emptyBlock
-				}
-			}
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-			if globalExecIndex > 0 {
-				*nextExpectedGlobalExecIndex = globalExecIndex + 1
-				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-					logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
-					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-					epochData = pendingBlock
-					goto PROCESS_SINGLE_EPOCH_DATA_START
-				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
-					logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
-					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
-					epochData = skippedBlock
-					goto PROCESS_SINGLE_EPOCH_DATA_START
-				}
-			}
-			return nil
+			// Live block with assigned block number cannot be empty.
+			// Return safety violation to stall/sync instead of forging a divergent empty block.
+			return fmt.Errorf("safety violation (Guard 1): 0 transactions for assigned live block number %d at GEI %d", bNum, globalExecIndex)
 		} else {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
@@ -1020,14 +980,18 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum == 0 {
-			// FALLBACK: Auto-increment local block number if Rust doesn't provide one
-			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
-			if lastCommittedBlockNumber == 0 {
-				lastCommittedBlockNumber = storage.GetLastBlockNumber()
-			}
-			bNum = lastCommittedBlockNumber + 1
+		if bNum > 0 {
+			// Live block with assigned block number cannot be empty due to duplicate drop in catch-up/sync.
+			// Return safety violation to stall/sync instead of forging a divergent empty block.
+			return fmt.Errorf("safety violation (Guard 3): 0 transactions after execution for assigned live block number %d at GEI %d", bNum, globalExecIndex)
 		}
+		
+		// Fallback for bNum == 0
+		lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
+		if lastCommittedBlockNumber == 0 {
+			lastCommittedBlockNumber = storage.GetLastBlockNumber()
+		}
+		bNum = lastCommittedBlockNumber + 1
 
 		logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates). Creating empty block #%d to prevent gap. GEI=%d", 
 			len(allTransactions), bNum, globalExecIndex)
