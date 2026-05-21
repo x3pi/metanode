@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -15,6 +16,12 @@ type StateChangelogDB struct {
 	db        *pebble.DB
 	namespace string
 	mu        sync.RWMutex
+
+	// startBlock is the first block that was committed with changelog enabled.
+	// Used for exact accuracy: if targetBlock < startBlock, we CANNOT serve
+	// historical data because we don't know what happened before tracking started.
+	// Persisted as a PebbleDB key: "__meta__:start_block" → 8-byte big-endian.
+	startBlock atomic.Uint64 // 0 = not yet initialized
 }
 
 // StateChange represents a single state mutation
@@ -35,12 +42,24 @@ func NewStateChangelogDB(path string, namespace string) (*StateChangelogDB, erro
 		return nil, fmt.Errorf("failed to open changelog pebble db at %s: %w", path, err)
 	}
 
-	logger.Info("📜 [CHANGELOG] Initialized StateChangelogDB at %s for namespace %s", path, namespace)
-
-	return &StateChangelogDB{
+	c := &StateChangelogDB{
 		db:        db,
 		namespace: namespace,
-	}, nil
+	}
+
+	// Load persisted startBlock from DB (if exists)
+	metaKey := []byte("__meta__:" + namespace + ":start_block")
+	val, closer, getErr := db.Get(metaKey)
+	if getErr == nil && len(val) == 8 {
+		block := binary.BigEndian.Uint64(val)
+		c.startBlock.Store(block)
+		closer.Close()
+		logger.Info("📜 [CHANGELOG] Loaded startBlock=%d for namespace %s", block, namespace)
+	}
+
+	logger.Info("📜 [CHANGELOG] Initialized StateChangelogDB at %s for namespace %s (startBlock=%d)", path, namespace, c.startBlock.Load())
+
+	return c, nil
 }
 
 // Close gracefully shuts down the database
@@ -64,6 +83,18 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 
 	batch := c.db.NewBatch()
 	defer batch.Close()
+
+	// Persist startBlock on first write (CAS: only if still 0)
+	if c.startBlock.CompareAndSwap(0, blockNumber) {
+		metaKey := []byte("__meta__:" + c.namespace + ":start_block")
+		blockBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(blockBytes, blockNumber)
+		if err := batch.Set(metaKey, blockBytes, pebble.Sync); err != nil {
+			c.startBlock.Store(0) // Reset on failure
+			return fmt.Errorf("failed to persist startBlock: %w", err)
+		}
+		logger.Info("📜 [CHANGELOG] startBlock set to %d for namespace %s (first write)", blockNumber, c.namespace)
+	}
 
 	for _, change := range changes {
 		// Key format: namespace:address:blockNumber
@@ -95,6 +126,12 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 
 	logger.Debug("📜 [CHANGELOG] Recorded %d state changes for block %d in namespace %s", len(changes), blockNumber, c.namespace)
 	return nil
+}
+
+// GetStartBlock returns the first block that was committed with changelog enabled.
+// Returns 0 if not yet initialized (no blocks committed yet).
+func (c *StateChangelogDB) GetStartBlock() uint64 {
+	return c.startBlock.Load()
 }
 
 // GetStateAt returns the value of an address AT a specific block.
@@ -144,6 +181,35 @@ func (c *StateChangelogDB) GetStateAt(address []byte, targetBlock uint64) ([]byt
 	// If this node has a complete changelog from genesis, it means the address didn't exist.
 	// If the node started syncing at block N, and targetBlock < N, we don't have the state.
 	return nil, fmt.Errorf("historical state not found in changelog for block %d", targetBlock)
+}
+
+// HasAnyEntry checks if the given address has ANY changelog entry (at any block).
+// This is used for progressive accuracy: if an address has zero entries, it means
+// the account was never modified since changelog tracking started, so the current
+// NOMT state IS the correct historical state for all blocks within the tracking range.
+//
+// Performance: single Pebble SeekGE (~1µs) — negligible overhead.
+func (c *StateChangelogDB) HasAnyEntry(address []byte) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	prefix := c.encodeKeyPrefix(address)
+
+	opts := &pebble.IterOptions{
+		LowerBound: prefix,
+	}
+	iter, err := c.db.NewIter(opts)
+	if err != nil {
+		return false
+	}
+	defer iter.Close()
+
+	// SeekGE finds the first key >= prefix. If it starts with prefix,
+	// it means there is at least one entry for this address.
+	if iter.SeekGE(prefix) {
+		return bytes.HasPrefix(iter.Key(), prefix)
+	}
+	return false
 }
 
 // encodeKeyPrefix returns: namespace:address:
