@@ -8,7 +8,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
 
 // syncLastBlockFromDB periodically checks if storage.GetLastBlockNumber() is ahead
@@ -73,6 +75,17 @@ func (bp *BlockProcessor) syncLastBlockFromDB() {
 		bp.nextBlockNumber.Store(storageBlockNum + 1)
 		headerCopy := freshBlock.Header()
 		bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+		// CRITICAL C++ EVM CACHE INVALIDATION:
+		// Since sync directly updated the LevelDB/NOMT database, the C++ EVM's
+		// internal memory cache (State::instances and MVMApi maps) contains
+		// stale values (nonce/balance/contract storage) that do not match reality.
+		// We must clean/reset them to force subsequent calls to read fresh state.
+		bp.chainState.InvalidateAllState()
+		mvm.ClearAllMVMApi()
+		mvm.ClearAllProtectedMVMApi()
+		mvm.CallClearAllStateInstances()
+		trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 
 		logger.Info("🔄 [DB-SYNC-REFRESH] Updated bp.lastBlock from DB: block #%d → #%d (RPC will now report correct block number)",
 			currentBlockNum, storageBlockNum)
