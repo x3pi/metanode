@@ -63,6 +63,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 		GetGEIAuthority().ResetCommitIndexForEpoch(newEpoch)
 	})
 
+	// Inject ExecutionMutex Lock and Unlock callbacks to serialize sync operations with consensus execution
+	reqHandler.SetExecutionLockCallbacks(bp.ExecutionMutex.Lock, bp.ExecutionMutex.Unlock)
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
