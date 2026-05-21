@@ -106,6 +106,10 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		}
 
 		vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, blockTime, common.Address{})
+		// PROTECT: Prevent ClearAllMVMApi() (triggered by concurrent SyncBlocksRequest)
+		// from deleting this instance before we can read GetCurrentRelatedAddresses().
+		// relatedAddresses collected here are CRITICAL for master node sequential execution.
+		mvm.ProtectMVMApi(mvmId)
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
 			/*toAccountState, getAccErr := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress())
@@ -171,6 +175,8 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		}
 
 		// Cập nhật RelatedAddresses
+		// Instance is guaranteed non-nil here because ProtectMVMApi(mvmId) was called
+		// before Execute, preventing concurrent ClearAllMVMApi() from deleting it.
 		listRelatedAddress := mvm.GetMVMApi(mvmId).GetCurrentRelatedAddresses()
 		bRelatedAddresses := make([][]byte, len(listRelatedAddress))
 		for j, addr := range listRelatedAddress {
@@ -183,6 +189,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		updatedTx.AddRelatedAddress(tx.ToAddress())
 		updatedTx.SetReadOnly(!statusUpdate)
 
+		mvm.UnprotectMVMApi(mvmId)
 		mvm.ClearMVMApi(mvmId)
 		return updatedTx, nil, exRs.Return()
 	}
