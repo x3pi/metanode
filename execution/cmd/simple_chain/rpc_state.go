@@ -180,8 +180,12 @@ func (api *MetaAPI) GetStorageAt(ctx context.Context, address common.Address, he
 
 func (api *MetaAPI) GetTransactionCount(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (*hexutil.Uint64, error) {
 	as, err := api.resolveAccountState(ctx, address, blockNrOrHash)
-	if err != nil || as == nil {
+	if err != nil {
 		return nil, err
+	}
+	if as == nil {
+		zero := hexutil.Uint64(0)
+		return &zero, nil
 	}
 	count := hexutil.Uint64(as.Nonce())
 	return &count, nil

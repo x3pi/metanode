@@ -69,7 +69,7 @@ pub fn start_unified_epoch_monitor(
         let mut stall_last_go_block: u64 = 0;
         let mut stall_count: u32 = 0;
         const STALL_THRESHOLD: u32 = 3;       // 3 consecutive stalls → trigger recovery (30s at 10s poll)
-        const STALL_MIN_GAP: u64 = 10;        // Minimum block gap to consider "stalled"
+        const STALL_MIN_GAP: u64 = 2;        // Minimum block gap to consider "stalled"
         const STALL_FETCH_BATCH: u64 = 500;   // Max blocks to fetch per recovery cycle
 
         loop {

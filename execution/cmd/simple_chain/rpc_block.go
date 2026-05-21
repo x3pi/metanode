@@ -147,12 +147,19 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 	}
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
 	if fullTx {
-		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
-		if err != nil {
-			return nil
-		}
-		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-			return txDB.GetTransaction(hash)
+		if len(blockData.Transactions()) == 0 {
+			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+				return nil, fmt.Errorf("no transactions in block")
+			}
+		} else {
+			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+			if err != nil {
+				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
+				return nil
+			}
+			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+				return txDB.GetTransaction(hash)
+			}
 		}
 	}
 
@@ -277,12 +284,19 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
 	if fullTx {
-		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
-		if err != nil {
-			return nil
-		}
-		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-			return txDB.GetTransaction(hash)
+		if len(blockData.Transactions()) == 0 {
+			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+				return nil, fmt.Errorf("no transactions in block")
+			}
+		} else {
+			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+			if err != nil {
+				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
+				return nil
+			}
+			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+				return txDB.GetTransaction(hash)
+			}
 		}
 	}
 
@@ -333,9 +347,15 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 		return nil
 	}
 	txHash := blockData.Transactions()[index]
-	txDB, _ := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	if err != nil {
+		return nil
+	}
 
-	tx, _ := txDB.GetTransaction(txHash)
+	tx, err := txDB.GetTransaction(txHash)
+	if err != nil || tx == nil {
+		return nil
+	}
 	v, r, s := tx.RawSignatureValues()
 
 	return &RPCTransaction{
@@ -378,9 +398,15 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 		return nil
 	}
 	txHash := blockData.Transactions()[index]
-	txDB, _ := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	if err != nil {
+		return nil
+	}
 
-	tx, _ := txDB.GetTransaction(txHash)
+	tx, err := txDB.GetTransaction(txHash)
+	if err != nil || tx == nil {
+		return nil
+	}
 	v, r, s := tx.RawSignatureValues()
 
 	return &RPCTransaction{

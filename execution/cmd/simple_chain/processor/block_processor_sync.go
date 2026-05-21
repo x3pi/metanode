@@ -14,11 +14,13 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -389,6 +391,31 @@ PROCESS_BLOCK:
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
 		logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution and block creation for historic block #%d (already in DB: #%d, GEI=%d, txs=%d). "+
 			"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex, len(epochData.Transactions))
+
+		// Safely load the historic block from storage to update lastBlock tip
+		bc := blockchain.GetBlockChainInstance()
+		if bc != nil {
+			if blockHash, ok := bc.GetBlockHashByNumber(nextBlockToCreate); ok {
+				if freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash); err == nil && freshBlock != nil {
+					bp.SetLastBlock(freshBlock)
+					bp.nextBlockNumber.Store(nextBlockToCreate + 1)
+					headerCopy := freshBlock.Header()
+					bp.chainState.SetcurrentBlockHeader(&headerCopy)
+
+					// Invalidate caches to ensure state freshness on sync resume
+					bp.chainState.InvalidateAllState()
+					mvm.ClearAllMVMApi()
+					mvm.ClearAllProtectedMVMApi()
+					mvm.CallClearAllStateInstances()
+					trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+				} else {
+					logger.Error("❌ [NOMT-GUARD] Failed to load historic block #%d from DB by hash %s: %v", nextBlockToCreate, blockHash.Hex(), err)
+				}
+			} else {
+				logger.Error("❌ [NOMT-GUARD] Failed to get block hash for historic block #%d from DB", nextBlockToCreate)
+			}
+		}
+
 		// CRITICAL: Must advance GEI even when skipping execution,
 		// otherwise the next commit sees a stale nextExpectedGlobalExecIndex
 		// and creates a permanent gap → BLOCK_GAP error.

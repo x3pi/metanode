@@ -613,7 +613,12 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		if errPut != nil {
 			logger.Error("❌ [BACKUP] Failed to persist BackupDb for block #%d: %v", blockNum, errPut)
 		} else {
-			logger.Info("✅ [BACKUP] Persisted BackUpDb for block #%d, key=%s, len=%d bytes (took %v)", blockNum, string(primaryKey), len(backupBytes), time.Since(startBackup))
+			if bp.storageManager != nil {
+				if errFlush := bp.storageManager.GetStorageBackupDb().Flush(); errFlush != nil {
+					logger.Error("❌ [BACKUP] Failed to flush BackupDb for block #%d: %v", blockNum, errFlush)
+				}
+			}
+			logger.Info("✅ [BACKUP] Persisted and flushed BackUpDb for block #%d, key=%s, len=%d bytes (took %v)", blockNum, string(primaryKey), len(backupBytes), time.Since(startBackup))
 		}
 	} else {
 		logger.Error("❌ [BACKUP] Failed to serialize BackupDb for block #%d: %v", blockNum, err)
