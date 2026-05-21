@@ -1,11 +1,22 @@
 # RPC Reverse Proxy
 
+``` bash
+
+go run main.go --config config-rpc-node0.json --tcp-config config-client-tcp-node0.json
+go run main.go --config config-rpc-node1.json --tcp-config config-client-tcp-node1.json
+go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node2.json
+go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node3.json
+go run main.go --config config-rpc-node2.json --tcp-config config-client-tcp-node4.json
+
+
+
   "rpc_server_url": "<http://139.59.243.85:8757>",
   "wss_server_url": "ws://139.59.243.85:8757/ws",
 
   "rpc_server_url": "<http://localhost:8757>",
   "wss_server_url": "ws://localhost:8757/ws",
-<http://192.168.1.234:8545/register-bls-key>
+  "http://192.168.1.234:8545/register-bls-key"
+```
 
     "parent_connection_address": "139.59.243.85:4200",
 Dự án này là một reverse proxy được viết bằng Go, đóng vai trò trung gian cho các lệnh gọi RPC và WebSocket tới một máy chủ RPC Ethereum (hoặc tương thích). Nó cũng cung cấp các điểm cuối tùy chỉnh để quản lý khóa BLS và phục vụ một giao diện người dùng tĩnh để đăng ký khóa BLS.
