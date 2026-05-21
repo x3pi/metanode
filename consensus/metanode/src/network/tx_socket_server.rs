@@ -82,7 +82,7 @@ impl TxSocketServer {
         client: Arc<dyn TransactionSubmitter>,
         node: Option<Arc<Mutex<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
-        _peer_rpc_addresses: Vec<String>,
+        peer_rpc_addresses: Vec<String>,
         _peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
     ) {
@@ -223,9 +223,24 @@ impl TxSocketServer {
                         }
 
                         if !should_accept {
-                            let is_sync_only = reason.contains("Node is still initializing");
+                            let is_sync_only = reason.contains("SyncOnly mode");
+                            let is_initializing = reason.contains("Node is still initializing");
+
                             if is_sync_only {
-                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
+                                warn!("🔄 [FFI TX FLOW] Node is SyncOnly. Forwarding {} TXs to validators.", transactions_to_submit.len());
+                                
+                                let addrs = peer_rpc_addresses.clone();
+                                let txs = transactions_to_submit.clone();
+                                
+                                tokio::spawn(async move {
+                                    let _ = crate::network::peer_rpc::forward_transaction_to_validators(&addrs, txs).await;
+                                });
+                                
+                                return; // Forwarded, don't block the channel
+                            }
+
+                            if is_initializing {
+                                warn!("⏳ [FFI TX FLOW] Validator is initializing. Delaying {} TXs internally.", transactions_to_submit.len());
                                 drop(node_guard);
                                 attempt += 1;
                                 if attempt % 60 == 0 {

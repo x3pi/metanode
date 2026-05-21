@@ -17,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -315,7 +316,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		// we can safely query the live NOMT state instead of failing.
 		if trie.GetStateBackend() == trie.BackendNOMT && lastCommittedBlockNumber >= blockNumber {
 			logger.Info("ℹ️ [SNAPSHOT] Block %d not found in DB but height has been passed (lastCommitted=%d) with NOMT backend. Bypassing block existence check to query live state.", blockNumber, lastCommittedBlockNumber)
-			
+
 			if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
 				cachedList := &pb.ValidatorInfoList{}
 				if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
@@ -590,7 +591,7 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			}
 		} else if returnBlockNumber > committedBlockNumber {
 			// PIPELINE FIX: This block was assigned by Rust but hasn't been committed to DB yet.
-			// It is safely buffered in Go's memory. Do NOT scan backwards, as that would return 
+			// It is safely buffered in Go's memory. Do NOT scan backwards, as that would return
 			// a stale block number and cause duplicate numbering in the next epoch.
 			// We return the assigned block number with an empty hash.
 			logger.Info("✅ [INIT] Block %d is in pipeline (assigned > committed). Bypassing backward scan.", returnBlockNumber)
@@ -599,7 +600,7 @@ func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlo
 			// EPOCH-BOUNDARY FIX: Counter reports block N but hash not persisted yet.
 			// This happens when snapshot metadata records the epoch boundary block number,
 			// but the block itself hasn't been committed to the chain DB.
-			// 
+			//
 			// CRITICAL FIX (May 2026): The backward scan MUST NOT modify returnBlockNumber!
 			// Previously, returnBlockNumber was overwritten with the fallback block number,
 			// causing Rust to set next_block_number too low → block number overlap/gap.
@@ -1881,12 +1882,30 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
+			if rh.broadcastCallback != nil {
+				backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
+				if deserErr != nil {
+					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
+				}
 
-			// if rh.broadcastCallback != nil {
-			// 	rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
-			// }
+				if len(backupDb.ReceiptBatchPut) > 0 {
+					if deserializedReceipts, err := storage.DeserializeBatch(backupDb.ReceiptBatchPut); err == nil {
+						receipts := make([]types.Receipt, 0, len(deserializedReceipts))
+						for _, kv := range deserializedReceipts {
+							if len(kv) == 2 {
+								rcp := &receipt.Receipt{}
+								if err := rcp.Unmarshal(kv[1]); err == nil {
+									receipts = append(receipts, rcp)
+								}
+							}
+						}
+						if len(receipts) > 0 {
+							rh.broadcastCallback(receipts, blk)
+						}
+					}
+				}
+			}
 		}
-
 		logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
 			blockNum, blockHash.Hex()[:18]+"...", header.Epoch(), blockGEI, len(blk.Transactions()))
 

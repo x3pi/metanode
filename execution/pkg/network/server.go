@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
+	"github.com/meta-node-blockchain/meta-node/cmd/observer/client-tcp/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -121,6 +123,20 @@ func (s *SocketServer) startWorkerPool() {
 								request.Message().Command(),
 								err,
 							)
+							msgID := request.Message().ID()
+							errProto := &pb.TransactionHashWithError{
+								Code:        -1,
+								Description: fmt.Sprintf("Server error: %v", err),
+							}
+							errBytes, _ := proto.Marshal(errProto)
+							errorMsg := NewMessage(&pb.Message{
+								Header: &pb.Header{
+									Command: command.TransactionError,
+									ID:      msgID,
+								},
+								Body: errBytes,
+							})
+							_ = request.Connection().SendMessage(errorMsg)
 						}
 					}()
 				}

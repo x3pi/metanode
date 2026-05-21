@@ -103,6 +103,41 @@ Nó đứng đợi mẻ dữ liệu và **giữ đúng thứ tự commit**. Đâ
 
 - **FORK-FORENSIC logging:** Khi local leader ≠ certified leader → log đầy đủ fingerprint (author_idx, ETH address, digest, tx count) để forensic phân tích sau.
 
+> **🔍 GIẢI PHẪU 2 LOẠI BUFFER TRONG COMMIT PROCESSOR:**
+>
+> **1. `pending_local_commits` (Bộ đệm chờ kiểm duyệt Digest)**
+> - **Là gì:** Chứa các commit do chính node hiện tại tự sinh ra (Local Commit / `decided_with_local_blocks == true`).
+> - **Khi nào được lưu:** Ngay khi nhận được từ lõi đồng thuận, nhưng mạng lưới (Quorum) **chưa** xác nhận chữ ký Digest. Nó phải nằm đây chờ `DIGEST-GATE`.
+> - **Khi nào bị xóa (Remove):**
+>   - *Hợp lệ (Dispatch):* Khi `digest_verifier` báo có 2f+1 node mạng xác nhận cùng hash digest → Gỡ khỏi buffer để gửi sang Go xử lý.
+>   - *Hết hạn (Stale Evict):* Nếu bị lệch hash với mạng lưới quá 30 giây → Bị xóa bỏ hoàn toàn (chờ mạng gửi bản Certified chuẩn về thay thế).
+>   - *Bị đè (Replace):* Nếu nhận được một `CertifiedCommit` (mạng đã verify) có cùng `commit_index` → Xóa bản local trong buffer, dùng bản certified.
+>   - *Đầy bộ nhớ:* Khi vượt quá `MAX_PENDING_LOCAL_COMMITS` (500) → Drop cái cũ nhất để chống OOM.
+>
+> **2. `pending_commits` (Bộ đệm chờ tới lượt - Out-of-Order)**
+> - **Là gì:** Chứa các commit (có thể là local hoặc certified) bay về **sai thứ tự** (nhảy cóc).
+> - **Khi nào được lưu:** Khi `commit_index > next_expected_index`. Ví dụ hệ thống đang đợi commit 10, nhưng nhảy bụp một phát nhận được commit 12. Commit 12 sẽ bị nhét vào đây chờ.
+> - **Khi nào bị xóa (Remove):**
+>   - *Tới lượt (Drain):* Khi hệ thống đã xử lý xong commit 10, 11 (do `CommitSyncer` kéo về lấp chỗ trống), `next_expected_index` chạy tới 12 → Nó sẽ gỡ commit 12 ra để xử lý tiếp (kiểm duyệt digest hoặc dispatch).
+>   - *Quá tải (Capacity Evict):* Nếu mảng này phình to > 50,000 commits (`MAX_PENDING_COMMITS`) → Dùng `pop_last()` để xóa commit có index **lớn nhất (xa nhất trong tương lai)**. Lõi đồng thuận sẽ tự `sync` lại commit này sau.
+>
+> **⚙️ CƠ CHẾ HOẠT ĐỘNG 3 PHA CỦA COMMIT PROCESSOR:**
+>
+> CommitProcessor chạy một vòng lặp liên tục xử lý block theo cơ chế 3 pha khép kín. Mục đích tối thượng là đảm bảo tính **Tuyệt đối Tuần tự (Strict Sequential Order)** theo `next_expected_index`:
+> 
+> - **Pha 1: Duyệt `pending_local_commits` (DIGEST-GATE POLL)**
+>   Kiểm tra các commit do máy tự đào (Local) đang bị nhốt. Nếu `digest_verifier` báo có đủ 2f+1 chữ ký mạng (hoặc thỏa điều kiện Bypass), hệ thống sẽ tháo nó ra và gửi sang Go (dispatch). Sau khi dispatch thành công, tăng `next_expected_index` lên 1.
+>
+> - **Pha 2: Rút rỗng `pending_commits` (OOO DRAIN)**
+>   Vì Pha 1 vừa tăng `next_expected_index`, hệ thống sẽ quét xem index mới đó có đang nằm sẵn trong "Phòng chờ Tương lai" không. Nếu có, tháo ra xử lý (nếu là local thì lại kiểm duyệt, nếu là certified thì đi tiếp), dispatch, tăng index lên 1, và lặp lại vét đáy rổ cho đến khi đứt chuỗi.
+>
+> - **Pha 3: Nhận khối mới từ `receiver` (RECEIVE NEW)**
+>   Sau khi dọn dẹp sạch sẽ 2 phòng chờ, nó mới mở ống nước nhận khối mới từ lõi DAG.
+>   - *Cơ chế Chống Kẹt (Polling & Timeout):* NẾU phòng chờ Local đang có khối bị nhốt, nó dùng `tokio::select!` đợi khối mới tối đa 200ms. Hết 200ms mà không có ai đến, nó `continue` quay lại đầu vòng lặp (Pha 1) để rà soát xem khối đang nhốt đã được mạng đóng mộc chưa.
+>   - *Cơ chế Ép ngược (Backpressure):* NẾU phòng chờ trống trơn, nó dùng `receiver.recv().await` đợi vô thời hạn để tiết kiệm 100% CPU và điều tiết tốc độ sinh block của mạng.
+>
+> **Bảo vệ Tuần Tự (Strict Order):** Không một nhánh logic nào được phép gửi khối sang Go nếu `commit_index != next_expected_index`. Việc tăng sai biến số này sẽ lập tức gây chia nhánh (Fork) vì Go (Execution Layer) sẽ tính toán sai Global Execution Index (GEI).
+
 **File liên quan:** `consensus/commit_processor/processor.rs`
 
 #### Trạm 2: `dispatch_commit` — Hải quan & Màng lọc (`executor.rs`)

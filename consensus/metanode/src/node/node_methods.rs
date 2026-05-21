@@ -26,6 +26,9 @@ impl ConsensusNode {
     }
 
     pub async fn check_transaction_acceptance(&self) -> (bool, bool, String) {
+        if self.node_mode == NodeMode::SyncOnly {
+            return (false, false, "Node is in SyncOnly mode".to_string());
+        }
         if self.authority.is_none() {
             return (false, false, "Node is still initializing".to_string());
         }
