@@ -1765,6 +1765,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
 			// Continue anyway — partial state is better than no state
 		} else {
+			executedCount++
+			if blockNum > lastExecutedBlock {
+				lastExecutedBlock = blockNum
+			}
+			if blockGEI > lastExecutedGEI {
+				lastExecutedGEI = blockGEI
+			}
+
 			if shouldCommitState {
 				// ═══════════════════════════════════════════════════════════════
 				// STATE ROOT VERIFICATION (May 2026):
