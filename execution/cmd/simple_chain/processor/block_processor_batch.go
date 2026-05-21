@@ -186,7 +186,10 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 		"StakeState":    func(db *storage.BackUpDb) []byte { return db.StakeState },
 	}
 
+	nomtStart := time.Now()
 	for _, backupDB := range blockBatch {
+		// Deserialize batches specifically for this block
+		blockBatches := make(map[string][][2][]byte)
 		for name, getData := range batchDataFields {
 			data := getData(backupDB)
 			if len(data) > 0 {
@@ -194,7 +197,30 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 				if err != nil {
 					return fmt.Errorf("error deserializing batch '%s' for block %d: %w", name, backupDB.BockNumber, err)
 				}
-				aggregatedBatches[name] = append(aggregatedBatches[name], deserialized...)
+				blockBatches[name] = deserialized
+			}
+		}
+
+		// Apply the NOMT replication batches block-by-block to record historical state changes under the correct block number
+		sessions, err := p_trie.ApplyNomtReplicationBatches(
+			blockBatches,
+			bp.chainState.GetChangelogDB(),
+			bp.chainState.GetStakeChangelogDB(),
+			backupDB.BockNumber,
+		)
+		if err != nil {
+			return fmt.Errorf("error replicating NOMT batches for block %d: %w", backupDB.BockNumber, err)
+		}
+		if len(sessions) > 0 {
+			if err := p_trie.FlushNomtSessions(sessions); err != nil {
+				return fmt.Errorf("error flushing NOMT sessions for block %d: %w", backupDB.BockNumber, err)
+			}
+		}
+
+		// Append the remaining non-NOMT batch elements to the aggregatedBatches map for parallel writing
+		for name, batch := range blockBatches {
+			if len(batch) > 0 {
+				aggregatedBatches[name] = append(aggregatedBatches[name], batch...)
 			}
 		}
 
@@ -210,6 +236,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 			}
 		}
 	}
+	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches block-by-block completed for %d blocks in %v", len(blockBatch), time.Since(nomtStart))
 
 	storages := map[string]storage.Storage{
 		"Block":         bp.storageManager.GetStorageBlock(),
@@ -221,21 +248,6 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 		"Transaction":   bp.storageManager.GetStorageTransaction(),
 		"StakeState":    bp.storageManager.GetStorageStake(),
 	}
-
-	// PERFORMANCE OPTIMIZATION: Intercept NOMT batches before they hit PebbleDB
-	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches START (batch_count=%d)", len(aggregatedBatches))
-	nomtStart := time.Now()
-
-	sessions, err := p_trie.ApplyNomtReplicationBatches(aggregatedBatches)
-	if err != nil {
-		return fmt.Errorf("error replicating NOMT batches: %w", err)
-	}
-	if len(sessions) > 0 {
-		if err := p_trie.FlushNomtSessions(sessions); err != nil {
-			return fmt.Errorf("error flushing NOMT sessions: %w", err)
-		}
-	}
-	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches DONE in %v", time.Since(nomtStart))
 
 	// PERFORMANCE OPTIMIZATION: Parallel storage operations
 	// Process storage writes in parallel to reduce I/O bottleneck
