@@ -447,8 +447,49 @@ PROCESS_BLOCK:
 	}
 
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
-		if epochData.GetBlockNumber() > 0 {
-			return fmt.Errorf("safety violation: empty payload for assigned block number %d at GEI %d", epochData.GetBlockNumber(), globalExecIndex)
+		bNum := epochData.GetBlockNumber()
+		if bNum > 0 {
+			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for empty commit to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d", epochData.GetBlockNumber(), bNum, globalExecIndex)
+			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
+			lastB := bp.GetLastBlock()
+			if lastB != nil {
+				emptyResult.Root = lastB.Header().AccountStatesRoot()
+				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
+			}
+			leaderBytes := epochData.GetLeaderAddress()
+			var leader common.Address
+			if len(leaderBytes) == 20 {
+				leader = common.BytesToAddress(leaderBytes)
+			}
+			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
+			*currentBlockNumber = bNum
+			storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
+
+			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+			if emptyBlock != nil {
+				select {
+				case bp.createdBlocksChan <- emptyBlock:
+				default:
+					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
+					bp.createdBlocksChan <- emptyBlock
+				}
+			}
+			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
+			if globalExecIndex > 0 {
+				*nextExpectedGlobalExecIndex = globalExecIndex + 1
+				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [FORK-SAFETY] Found next pending block in buffer: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
+					epochData = pendingBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				} else if skippedBlock, exists := skippedCommitsWithTxs[*nextExpectedGlobalExecIndex]; exists {
+					logger.Info("✅ [LAG-HANDLING] Processing skipped commit: global_exec_index=%d", *nextExpectedGlobalExecIndex)
+					delete(skippedCommitsWithTxs, *nextExpectedGlobalExecIndex)
+					epochData = skippedBlock
+					goto PROCESS_SINGLE_EPOCH_DATA_START
+				}
+			}
+			return nil
 		} else {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
@@ -553,7 +594,7 @@ PROCESS_BLOCK:
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
 		if bNum > 0 {
-			return fmt.Errorf("safety violation: 0 valid transactions after unmarshal for assigned block number %d at GEI %d", bNum, globalExecIndex)
+			return fmt.Errorf("safety violation: 0 valid transactions after unmarshal for assigned block number %d at GEI %d (Rust sent %d txs but unmarshal failed)", bNum, globalExecIndex, len(epochData.Transactions))
 		}
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one (e.g., during SyncOnly)
@@ -979,9 +1020,6 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			return fmt.Errorf("safety violation: late drop resulting in 0 valid transactions for assigned block number %d at GEI %d", bNum, globalExecIndex)
-		}
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one
 			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
