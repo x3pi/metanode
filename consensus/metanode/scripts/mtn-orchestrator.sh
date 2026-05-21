@@ -448,8 +448,11 @@ cmd_start() {
         
         # CRITICAL FIX: Clean the Go build cache so it relinks the new libmetanode.a.
         # This replaces the need to 'touch' source files manually.
+        # Note: We run go clean -cache with '|| true' to prevent crashes due to directory locks.
+        # Bằng cách touch ffi_bridge.go, ta ép Go build biên dịch lại wrapper và link trực tiếp với libmetanode.a mới.
         log_info "🧹  Đang ép Go xóa cache cho FFI bridge..."
-        (cd "$GO_DIR" && go clean -cache)
+        (cd "$GO_DIR" && go clean -cache || true)
+        touch "$BASE_DIR/execution/executor/ffi_bridge.go"
     fi
     if $build_go; then
         log_info "🛠  Đang build Protobuf cho Go (simple_chain)..."
