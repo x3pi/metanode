@@ -245,7 +245,11 @@ if $DO_BUILD; then
         export GOTOOLCHAIN=${GO_TOOLCHAIN}
         export CGO_ENABLED=1
         rm -f simple_chain
-        go build -p $(nproc) -o simple_chain . 2>&1
+        NUM_PROCS=$(nproc)
+        if [ "$NUM_PROCS" -gt 4 ]; then
+            NUM_PROCS=4
+        fi
+        go build -p $NUM_PROCS -o simple_chain . 2>&1
     )
     log_ok "Go binary: ${LOCAL_GO_SIMPLE}/simple_chain"
 else
