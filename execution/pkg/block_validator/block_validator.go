@@ -115,7 +115,7 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 
 	// Use the block's stored timestamp for deterministic replay during validation
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
-	processResult, err := tx_processor.ProcessTransactions(ctx, chainState, groupedGroups, true, false, blockTimeSec, blockData.Header().LeaderAddress())
+	processResult, err := tx_processor.ProcessTransactions(ctx, chainState, groupedGroups, true, false, blockTimeSec, blockData.Header().LeaderAddress(), blockNumber)
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to process transactions for block %d: %w", blockNumber, err)
 	}

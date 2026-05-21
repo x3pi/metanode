@@ -159,7 +159,7 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 	}
 
 	// 7. Process transactions using ProcessTransactionsRemote
-	processResult, err := tx_processor.ProcessTransactionsRemote(ctx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress())
+	processResult, err := tx_processor.ProcessTransactionsRemote(ctx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress(), uint64(blockNumber))
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to process transactions for block %d: %w", blockNumber, err)
 	}
