@@ -90,7 +90,7 @@ if [ "$BUILD_GO" = true ]; then
 
     # Go simple_chain binary
     run_step "Go simple_chain (go build)" \
-        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && go build -p \$(nproc) -o simple_chain ."
+        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && NUM_PROCS=\$(nproc); if [ \$NUM_PROCS -gt 4 ]; then NUM_PROCS=4; fi && go build -p \$NUM_PROCS -o simple_chain ."
 fi
 
 # ═══════════════════════════════════════════════════════════════════
