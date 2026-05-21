@@ -212,10 +212,7 @@ impl ConsensusNode {
                     // The epoch monitor is designed to run continuously for ALL node modes.
                     // Previously, we only take() the handle without restarting, which left
                     // Validators without epoch monitoring backup when they miss EndOfEpoch txs.
-                    if let Some(old_handle) = self.epoch_monitor_handle.take() {
-                        old_handle.abort();
-                        info!("🛑 [EPOCH MONITOR] Aborted old epoch monitor task to prevent leak");
-                    }
+                    epoch_monitor::stop_epoch_monitor(self.epoch_monitor_handle.take()).await;
                     // Start new epoch monitor for Validator mode
                     if let Ok(Some(handle)) =
                         epoch_monitor::start_unified_epoch_monitor(&self.executor_client, config)
@@ -285,10 +282,7 @@ impl ConsensusNode {
                     let _ = self.start_sync_task(config).await;
                     
                     // Abort old monitor to prevent tokio task leak
-                    if let Some(old_handle) = self.epoch_monitor_handle.take() {
-                        old_handle.abort();
-                        info!("🛑 [EPOCH MONITOR] Aborted old epoch monitor task to prevent leak");
-                    }
+                    epoch_monitor::stop_epoch_monitor(self.epoch_monitor_handle.take()).await;
                     
                     // Start unified epoch monitor for demotion recovery
                     if let Ok(Some(handle)) =
