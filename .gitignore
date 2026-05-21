@@ -211,6 +211,7 @@ hybrid-storage-demo/
 **/*.iso
 **/k8s/
 **/*.key
+**/*.pem
 # **/*_key.json
 **/known_hosts
 # Kubernetes

@@ -43,11 +43,17 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	// top of a much older block, leading to parent hash mismatch.
 	// ═══════════════════════════════════════════════════════════════════════════
 	incomingBlockNum := epochData.GetBlockNumber()
-	storageLastBlockNum := storage.GetLastBlockNumber()
-	if incomingBlockNum > 0 && incomingBlockNum > storageLastBlockNum + 1 {
+	lastBlockForGuard := bp.GetLastBlock()
+	var localTipBlockNum uint64
+	if lastBlockForGuard != nil {
+		localTipBlockNum = lastBlockForGuard.Header().BlockNumber()
+	} else {
+		localTipBlockNum = storage.GetLastBlockNumber()
+	}
+	if incomingBlockNum > 0 && incomingBlockNum > localTipBlockNum + 1 {
 		logger.Error("🚨 [BLOCK-GAP-GUARD] REJECT: Consensus block height gap detected! Incoming block #%d, but Go local tip is #%d. Rejecting block execution to let P2P sync complete.",
-			incomingBlockNum, storageLastBlockNum)
-		return fmt.Errorf("consensus block height gap detected: incoming %d, local tip %d", incomingBlockNum, storageLastBlockNum)
+			incomingBlockNum, localTipBlockNum)
+		return fmt.Errorf("consensus block height gap detected: incoming %d, local tip %d", incomingBlockNum, localTipBlockNum)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
