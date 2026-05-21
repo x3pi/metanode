@@ -89,7 +89,7 @@ type groupResultExt struct {
 // ProcessTransactions processes a batch of transactions.
 // blockTime is the deterministic block timestamp (in seconds) from Rust consensus.
 // This ensures all nodes use the same EVM block.timestamp for deterministic execution.
-func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address) (
+func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64) (
 	ProcessResult,
 	error,
 ) {
@@ -129,6 +129,11 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	trie_database.GetTrieDatabaseManager().IntermediateRoot()
 	trieDBIRDuration := time.Since(startTrieDBIR)
 
+	// Set blockNumber for StateChangelog BEFORE IntermediateRoot(true).
+	// This ensures NOMT writes changes to the correct block in StateChangelogDB.
+	chainState.GetAccountStateDB().SetTrieCommitBlock(blockNum)
+	chainState.GetStakeStateDB().SetTrieCommitBlock(blockNum)
+
 	var irWg sync.WaitGroup
 	irWg.Add(2)
 
@@ -166,7 +171,6 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	}
 
 	// --- PERF SUMMARY for blocks with TXs ---
-	blockNum := (*lastBlockHeader).BlockNumber() + 1
 	if len(allTransactions) > 0 {
 		logger.Debug("[PERF] Block #%d Phase Breakdown (txCount=%d):", blockNum, len(allTransactions))
 		logger.Debug("  [PERF]   TX Execution (Parallel): %v", execDuration)
@@ -195,7 +199,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 }
 
 // ProcessTransactionsRemote processes a batch of transactions for remote execution.
-func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address) (
+func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64) (
 	ProcessResult,
 	error,
 ) {
@@ -235,6 +239,11 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	var root common.Hash
 	var stakeRoot common.Hash
 	var accountErr, stakeErr error
+	// Set blockNumber for StateChangelog BEFORE IntermediateRoot(true).
+	// This ensures NOMT writes changes to the correct block in StateChangelogDB.
+	chainState.GetAccountStateDB().SetTrieCommitBlock(blockNum)
+	chainState.GetStakeStateDB().SetTrieCommitBlock(blockNum)
+
 	var rootWg sync.WaitGroup
 	rootWg.Add(2)
 

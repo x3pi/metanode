@@ -923,7 +923,7 @@ PROCESS_BLOCK:
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
 	leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
-	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, leaderAddr, preloadChan)
+	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, leaderAddr, preloadChan, *currentBlockNumber)
 	processTxDuration := time.Since(processTxStart)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to process transactions for block #%d: %v", *currentBlockNumber, err)
