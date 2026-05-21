@@ -82,8 +82,8 @@ impl TxSocketServer {
         client: Arc<dyn TransactionSubmitter>,
         node: Option<Arc<Mutex<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
-        _peer_rpc_addresses: Vec<String>,
-        _peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
+        peer_rpc_addresses: Vec<String>,
+        peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
     ) {
         use prost::bytes::Buf;
@@ -225,6 +225,56 @@ impl TxSocketServer {
                         if !should_accept {
                             let is_sync_only = reason.contains("Node is still initializing");
                             if is_sync_only {
+                                // Fallback to discovery addresses if peer_rpc_addresses is empty
+                                let mut targets = peer_rpc_addresses.clone();
+                                if targets.is_empty() {
+                                    if let Some(ref discovery_lock) = peer_discovery_addresses {
+                                        targets = discovery_lock.read().await.clone();
+                                    }
+                                }
+
+                                if !targets.is_empty() {
+                                    info!(
+                                        "📡 [FFI TX FLOW] Node is running in SyncOnly. Attempting to forward {} TXs to active validators...",
+                                        transactions_to_submit.len()
+                                    );
+                                    let mut forwarded = false;
+                                    for peer_addr in &targets {
+                                        match crate::network::peer_rpc::forward_transactions_to_peer(
+                                            peer_addr,
+                                            transactions_to_submit.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(resp) => {
+                                                if resp.success {
+                                                    info!(
+                                                        "📡 [FFI TX FLOW] Successfully forwarded {} TXs to validator {}",
+                                                        transactions_to_submit.len(),
+                                                        peer_addr
+                                                    );
+                                                    forwarded = true;
+                                                    break;
+                                                } else {
+                                                    warn!(
+                                                        "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
+                                                        peer_addr, resp.error
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "📡 [FFI TX FLOW] Failed to forward transactions to validator {}: {}",
+                                                    peer_addr, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if forwarded {
+                                        return; // Successfully forwarded, exit thread.
+                                    }
+                                }
+
                                 warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
                                 drop(node_guard);
                                 attempt += 1;

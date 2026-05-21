@@ -28,6 +28,7 @@ type RequestHandler struct {
 	resetCommitIndexCallback func(newEpoch uint64)                                                  // Callback to reset commit index on epoch advancement
 	lockExecutionCallback   func()                                                                 // Callback to acquire BlockProcessor's ExecutionMutex lock
 	unlockExecutionCallback func()                                                                 // Callback to release BlockProcessor's ExecutionMutex lock
+	broadcastEventsAndReceiptsCallback func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) // Callback to broadcast transaction receipts on synced blocks
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -78,6 +79,11 @@ func (rh *RequestHandler) SetResetCommitIndexCallback(cb func(newEpoch uint64)) 
 func (rh *RequestHandler) SetExecutionLockCallbacks(lock, unlock func()) {
 	rh.lockExecutionCallback = lock
 	rh.unlockExecutionCallback = unlock
+}
+
+// SetBroadcastEventsAndReceiptsCallback sets the callback for broadcasting transaction receipts on synced blocks
+func (rh *RequestHandler) SetBroadcastEventsAndReceiptsCallback(cb func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog)) {
+	rh.broadcastEventsAndReceiptsCallback = cb
 }
 
 

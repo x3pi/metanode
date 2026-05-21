@@ -20,8 +20,11 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // HandleGetActiveValidatorsRequest processes a GetActiveValidatorsRequest and returns a ValidatorInfoList.
@@ -1785,6 +1788,43 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 			if blockGEI > lastExecutedGEI {
 				lastExecutedGEI = blockGEI
+			}
+
+			// Broadcast transaction receipts for SyncOnly nodes if callback is configured and backupBytes/receipts are present
+			if rh.broadcastEventsAndReceiptsCallback != nil && len(backupBytes) > 0 {
+				backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
+				if deserErr == nil && len(backupDb.ReceiptBatchPut) > 0 {
+					deserializedBatch, err := storage.DeserializeBatch(backupDb.ReceiptBatchPut)
+					if err == nil && len(deserializedBatch) > 0 {
+						var syncReceipts []types.Receipt
+						var syncEventLogs []types.EventLog
+
+						for _, kv := range deserializedBatch {
+							// Each entry is a flat key-value pair of [txHash, serializedReceipt]
+							serializedReceipt := kv[1]
+							if len(serializedReceipt) > 0 {
+								pbReceipt := &pb.Receipt{}
+								if err := proto.Unmarshal(serializedReceipt, pbReceipt); err == nil {
+									typesReceipt := receipt.ReceiptFromProto(pbReceipt)
+									syncReceipts = append(syncReceipts, typesReceipt)
+
+									// Extract event logs
+									for _, pbLog := range pbReceipt.EventLogs {
+										typesLog := smart_contract.NewEventLogFromProto(pbLog)
+										syncEventLogs = append(syncEventLogs, typesLog)
+									}
+								}
+							}
+						}
+
+						if len(syncReceipts) > 0 {
+							logger.Info("📤 [SYNC BROADCAST] Calling broadcastEventsAndReceiptsCallback for synced block #%d with %d receipts and %d event logs",
+								blockNum, len(syncReceipts), len(syncEventLogs))
+							// Call the callback safely
+							rh.broadcastEventsAndReceiptsCallback(blk, syncReceipts, syncEventLogs)
+						}
+					}
+				}
 			}
 
 			if shouldCommitState {

@@ -1250,9 +1250,11 @@ func ApplyNomtReplicationBatches(aggregatedBatches map[string][][2][]byte) ([]No
 	// they do NOT get written to PebbleDB again.
 
 	namespaces := map[string]string{
-		"Account":    "account_state",
-		"SC Storage": "smart_contract_storage",
-		"StakeState": "stake_db",
+		"Account":     "account_state",
+		"SC Storage":  "smart_contract_storage",
+		"StakeState":  "stake_db",
+		"Receipt":     "receipts",
+		"Transaction": "transaction_state",
 	}
 
 	for batchName, namespace := range namespaces {

@@ -121,3 +121,9 @@ func (ps *PrefixStorage) Flush() error {
 func (ps *PrefixStorage) GetBackupPath() string {
 	return ""
 }
+
+// GetPrefix returns the database sharding prefix.
+func (ps *PrefixStorage) GetPrefix() []byte {
+	return ps.prefix
+}
+
