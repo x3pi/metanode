@@ -5,7 +5,6 @@ package processor
 // Go build cache invalidation comment: Force relink of Rust FFI library
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -449,7 +448,7 @@ PROCESS_BLOCK:
 
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		if epochData.GetBlockNumber() > 0 {
-			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Empty payload (deduplicated), but Rust assigned block_number=%d. Creating empty block to prevent gap. GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
+			return fmt.Errorf("safety violation: empty payload for assigned block number %d at GEI %d", epochData.GetBlockNumber(), globalExecIndex)
 		} else {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
@@ -553,6 +552,9 @@ PROCESS_BLOCK:
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
+		if bNum > 0 {
+			return fmt.Errorf("safety violation: 0 valid transactions after unmarshal for assigned block number %d at GEI %d", bNum, globalExecIndex)
+		}
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one (e.g., during SyncOnly)
 			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
@@ -707,71 +709,6 @@ PROCESS_BLOCK:
 			logger.Info("🛡️ [GEI-REGRESSION] Skipping stale commit: incoming GEI=%d ≤ last block GEI=%d (block #%d). "+
 				"This commit was already executed — not creating duplicate block.",
 				globalExecIndex, lastBlockGEI, *currentBlockNumber)
-
-			bNum := epochData.GetBlockNumber()
-			if bNum == 0 {
-				lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
-				if lastCommittedBlockNumber == 0 {
-					lastCommittedBlockNumber = storage.GetLastBlockNumber()
-				}
-				bNum = lastCommittedBlockNumber + 1
-			}
-
-			logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for GEI-REGRESSION to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d", epochData.GetBlockNumber(), bNum, globalExecIndex)
-			emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
-			lastB := bp.GetLastBlock()
-			if lastB != nil {
-				emptyResult.Root = lastB.Header().AccountStatesRoot()
-				emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
-			}
-			leaderBytes := epochData.GetLeaderAddress()
-			var leader common.Address
-			if len(leaderBytes) == 20 {
-				leader = common.BytesToAddress(leaderBytes)
-			}
-			batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
-			*currentBlockNumber = bNum
-			storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
-
-			emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
-			if emptyBlock != nil {
-				// CRITICAL FIX: Must set last block so the NEXT block's ParentHash is correct
-				bp.SetLastBlock(emptyBlock)
-				bp.AddPendingCommitBlock(emptyBlock)
-
-				// CRITICAL FIX: Must also dispatch to commitWorker to save to DB!
-				job := CommitJob{
-					Block:           emptyBlock,
-					ProcessResults:  &emptyResult,
-					MappingWg:       &sync.WaitGroup{},
-					GlobalExecIndex: globalExecIndex,
-					CommitIndex:     commitIndex,
-				}
-				select {
-				case bp.commitChannel <- job:
-				default:
-					logger.Warn("WARNING: commitChannel full! Block commit goroutine will block.")
-					bp.commitChannel <- job
-				}
-
-				select {
-				case bp.createdBlocksChan <- emptyBlock:
-				default:
-					logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
-					bp.createdBlocksChan <- emptyBlock
-				}
-			}
-
-			// Still update GEI counter so the processor advances past this commit
-			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-			*nextExpectedGlobalExecIndex = globalExecIndex + 1
-
-			// Check pending blocks
-			if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-				delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-				epochData = pendingBlock
-				goto PROCESS_SINGLE_EPOCH_DATA_START
-			}
 			return nil
 		}
 	}
@@ -894,32 +831,6 @@ PROCESS_BLOCK:
 					*currentBlockNumber, blockTimeSec, regression,
 					lastBlock.Header().BlockNumber(), parentTs,
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
-
-				if epochData.GetBlockNumber() > 0 {
-					logger.Info("🛡️ [GHOST-BLOCK-GUARD] Creating empty block for TIMESTAMP-REGRESSION to prevent gap. block_number=%d, GEI=%d", epochData.GetBlockNumber(), globalExecIndex)
-					emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
-					lastB := bp.GetLastBlock()
-					if lastB != nil {
-						emptyResult.Root = lastB.Header().AccountStatesRoot()
-						emptyResult.StakeStatesRoot = lastB.Header().StakeStatesRoot()
-					}
-					leaderBytes := epochData.GetLeaderAddress()
-					var leader common.Address
-					if len(leaderBytes) == 20 {
-						leader = common.BytesToAddress(leaderBytes)
-					}
-					batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
-					*currentBlockNumber = epochData.GetBlockNumber()
-					emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
-					if emptyBlock != nil {
-						select {
-						case bp.createdBlocksChan <- emptyBlock:
-						default:
-							logger.Warn("WARNING: createdBlocksChan full! Block creation goroutine will block.")
-							bp.createdBlocksChan <- emptyBlock
-						}
-					}
-				}
 
 				// Update GEI so processor advances past this commit
 				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
@@ -1068,6 +979,9 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
+		if bNum > 0 {
+			return fmt.Errorf("safety violation: late drop resulting in 0 valid transactions for assigned block number %d at GEI %d", bNum, globalExecIndex)
+		}
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one
 			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
