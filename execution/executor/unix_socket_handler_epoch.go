@@ -900,6 +900,7 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 	// =============================================================================
 	var epochTimestamp uint64
 	var syncComplete bool = true
+	queryBlock := boundaryBlock
 
 	if epoch == 0 {
 		// EPOCH 0: Genesis epoch - use genesis config timestamp
@@ -942,11 +943,19 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		// Check if boundary block is fully synced to correctly handle NOMT queries below
 		lastBlock := storage.GetLastBlockNumber()
 		_, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		queryBlock = boundaryBlock
 		if !ok {
 			if lastBlock >= boundaryBlock {
 				// The block was skipped due to fast-skip/catch-up, but we are past its height
 				syncComplete = true
 				logger.Info("ℹ️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not in DB but height passed (lastBlock=%d). Marking syncComplete = true.", epoch, boundaryBlock, lastBlock)
+			} else if lastBlock >= boundaryBlock-1 && boundaryBlock > 0 {
+				// The block before the boundary block is committed.
+				// Since validator set changes are finalized at the end of the previous epoch (lastBlock),
+				// we can safely query the committee from lastBlock to allow the boundary block to be processed and synced!
+				syncComplete = true
+				queryBlock = lastBlock // Redirect the query to lastBlock
+				logger.Info("ℹ️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced, but parent %d is committed. Querying parent state to resolve chicken-and-egg deadlock.", epoch, boundaryBlock, lastBlock)
 			} else {
 				syncComplete = false
 				logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch %d: boundary block %d not yet synced. (sync pending, lastBlock=%d)", epoch, boundaryBlock, lastBlock)
@@ -989,12 +998,12 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 
 	// PRIORITY 2: Query NOMT live state at boundary block
 	if syncComplete || epoch == 0 {
-		validators, err = rh.GetValidatorsAtBlockInternal(boundaryBlock)
+		validators, err = rh.GetValidatorsAtBlockInternal(queryBlock)
 		if err != nil {
-			logger.Error("❌ [EPOCH BOUNDARY] PRIORITY 2: NOMT query failed at boundary block %d: %v", boundaryBlock, err)
+			logger.Error("❌ [EPOCH BOUNDARY] PRIORITY 2: NOMT query failed at query block %d: %v", queryBlock, err)
 		} else if len(validators.Validators) == 0 && epoch > 0 {
 			logger.Warn("⚠️ [EPOCH BOUNDARY] PRIORITY 2: NOMT returned 0 validators for epoch %d (knownKeys likely empty after snapshot restore)", epoch)
-			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at boundary block %d (knownKeys likely empty). Rust MUST fallback to peers.", epoch, boundaryBlock)
+			err = fmt.Errorf("NOMT returned 0 validators for epoch %d at query block %d (knownKeys likely empty). Rust MUST fallback to peers.", epoch, queryBlock)
 		}
 	} else {
 		// Sync incomplete — boundary block not available
@@ -1571,6 +1580,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					logger.Error("❌ [SNAPSHOT-RESUME] Failed to restore block mapping for skip block #%d: %v", blockNum, err)
 				} else {
 					logger.Info("🔄 [SNAPSHOT-RESUME] Restored block mapping for skip block #%d -> %s", blockNum, blockHash.Hex())
+				}
+			}
+
+			// Ensure raw block bytes exist in PebbleDB block storage
+			if _, err := blockDatabase.GetBlockByHash(blockHash); err != nil {
+				logger.Warn("⚠️ [SYNC-INTEGRITY] Block #%d (hash=%s) has mapping but raw bytes are missing from DB. Force-restoring block data.", blockNum, blockHash.Hex())
+				if saveErr := blockDatabase.SaveBlockByHash(blk); saveErr != nil {
+					logger.Error("❌ [SYNC-INTEGRITY] Failed to save missing block #%d: %v", blockNum, saveErr)
+				} else if flushErr := blockDatabase.GetDB().Flush(); flushErr != nil {
+					logger.Error("❌ [SYNC-INTEGRITY] Failed to flush missing block #%d: %v", blockNum, flushErr)
+				} else {
+					logger.Info("🔄 [SYNC-INTEGRITY] Successfully restored and flushed missing block #%d bytes", blockNum)
 				}
 			}
 
