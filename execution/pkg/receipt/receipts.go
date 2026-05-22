@@ -482,20 +482,8 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 		batchValues[i] = entry.data
 	}
 
-	if nomtTrie, ok := r.trie.(*trie.NomtStateTrie); ok {
-		oldValues := make([][]byte, len(batchKeys))
-		if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, oldValues); err != nil {
-			return common.Hash{}, err
-		}
-	} else if flatTrie, ok := r.trie.(*trie.FlatStateTrie); ok {
-		oldValues := make([][]byte, len(batchKeys))
-		if err := flatTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, oldValues); err != nil {
-			return common.Hash{}, err
-		}
-	} else {
-		if err := r.trie.BatchUpdate(batchKeys, batchValues); err != nil {
-			return common.Hash{}, err
-		}
+	if err := r.trie.BatchUpdate(batchKeys, batchValues); err != nil {
+		return common.Hash{}, err
 	}
 
 	r.dirtyReceipts = make(map[common.Hash]types.Receipt)
