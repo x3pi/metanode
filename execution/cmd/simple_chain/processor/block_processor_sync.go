@@ -473,11 +473,7 @@ PROCESS_BLOCK:
 
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			// Live block with assigned block number cannot be empty.
-			// Return safety violation to stall/sync instead of forging a divergent empty block.
-			return fmt.Errorf("safety violation (Guard 1): 0 transactions for assigned live block number %d at GEI %d", bNum, globalExecIndex)
-		} else {
+		if bNum == 0 {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 			// Update GlobalExecIndex tracking (persistent)
@@ -580,9 +576,7 @@ PROCESS_BLOCK:
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			return fmt.Errorf("safety violation: 0 valid transactions after unmarshal for assigned block number %d at GEI %d (Rust sent %d txs but unmarshal failed)", bNum, globalExecIndex, len(epochData.Transactions))
-		}
+
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one (e.g., during SyncOnly)
 			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()

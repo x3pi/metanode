@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-21
+> **Last updated:** 2026-05-22
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -165,6 +165,18 @@ metanode/
 | `transaction_virtual_processor.go` | Virtual tx processing |
 | `state_processor.go` | State transition processor |
 | `vote_recovery.go` | Vote/quorum recovery |
+
+### `execution/pkg/blockchain/tx_processor/` — Transaction Executor Layer
+| File | Role |
+|------|------|
+| `tx_processor.go` | **Concurrent Executor Engine** using Actor Model (Channel-based routing) by Smart Contract address to eliminate data races. |
+| `validation.go` | Core transaction verification and sanity checks. |
+
+### `execution/cmd/rpc/` — RPC API Gateway
+| Module | Role |
+|--------|------|
+| `cmd/rpc-client/internal/proxy/` | HTTP/WS Proxy. Intercepts specific RPCs (like `eth_getTransactionCount`) and directly queries Go `AccountStateDB` via TCP to bypass stale C++ caches. |
+| `tcp-rpc/client-tcp/` | Go implementation of RPC TCP Client for high-performance direct queries. |
 
 ### `pkg/` — Shared Packages (Critical Ones)
 | Package | Role | Concurrency Risk |
