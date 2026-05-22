@@ -618,6 +618,18 @@ func processSingleGroup(
 		if as == nil {
 			as = state.NewAccountState(tx.FromAddress())
 		}
+		
+		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...) 
+		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
+		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
+			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
+			failedSenders[tx.FromAddress()] = true
+			if enableTrace && txSpan != nil {
+				txSpan.End()
+			}
+			continue
+		}
+
 		if tx.GetNonce() != as.Nonce() {
 			err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
 			// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
