@@ -170,7 +170,7 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		addressStr := address.String()
 		
 		// Decode address to bytes
-		addrBytes := ethCommon.FromHex(addressStr).Bytes()
+		addrBytes := ethCommon.FromHex(addressStr)
 		
 		if p.AppCtx != nil && p.AppCtx.ChainPool != nil {
 			chainClient, err := p.AppCtx.ChainPool.Get()
