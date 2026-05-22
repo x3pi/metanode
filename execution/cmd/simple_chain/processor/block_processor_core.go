@@ -619,7 +619,11 @@ func NewBlockProcessor(
 				if err := storageMgr.CheckpointAll(destPath); err != nil {
 					return err
 				}
-
+				if bp.chainState != nil {
+					if err := bp.chainState.CheckpointChangelogs(destPath); err != nil {
+						return err
+					}
+				}
 				return nil
 			})
 		}
