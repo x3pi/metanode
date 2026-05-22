@@ -17,6 +17,8 @@ import (
 	"github.com/tidwall/gjson"
 
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -173,6 +175,9 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Decode address to bytes
 		addrBytes := ethCommon.FromHex(addressStr)
 		
+		var nonceVal uint64
+		var gotNonce bool
+
 		if p.AppCtx != nil && p.AppCtx.ChainPool != nil {
 			chainClient, err := p.AppCtx.ChainPool.Get()
 			if err == nil {
@@ -180,18 +185,11 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					var as pb.AccountState
 					if err := proto.Unmarshal(asBytes, &as); err == nil {
-						var nonceVal uint64
 						if len(as.Nonce) >= 8 {
 							nonceVal = binary.BigEndian.Uint64(as.Nonce)
 						}
-						resp := rpc_client.JSONRPCResponse{
-							Jsonrpc: "2.0",
-							Result:  fmt.Sprintf("0x%x", nonceVal),
-							Id:      id,
-						}
-						utils.WriteJSON(w, resp)
+						gotNonce = true
 						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonceVal)
-						return
 					} else {
 						logger.Warn("⚠️ [http_handler] eth_getTransactionCount unmarshal error: %v", err)
 					}
@@ -201,8 +199,28 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if gotNonce {
+			resp := rpc_client.JSONRPCResponse{
+				Jsonrpc: "2.0",
+				Result:  fmt.Sprintf("0x%x", nonceVal),
+				Id:      id,
+			}
+			utils.WriteJSON(w, resp)
+			return
+		}
+
 		// Fallback to upstream RPC if TCP fails or AppCtx isn't ready
 		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s", addressStr)
+		if p.AppCtx != nil && p.AppCtx.Cfg != nil && p.AppCtx.Cfg.RPCServerURL != "" {
+			respBytes, err := p.forwardAndSanitizeGetTransactionCount(p.AppCtx.Cfg.RPCServerURL, body)
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(respBytes)
+				return
+			}
+			logger.Warn("⚠️ [http_handler] Sanitized fallback failed: %v, falling back to raw reverse proxy", err)
+		}
+
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		p.ReverseProxy.ServeHTTP(w, r)
 		return
@@ -222,4 +240,39 @@ func (p *RpcReverseProxy) errorHandler(w http.ResponseWriter, r *http.Request, e
 func (p *RpcReverseProxy) readonlyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	logger.Error("Readonly ReverseProxy error for %s %s: %v", r.Method, r.URL, err)
 	http.Error(w, "Readonly upstream server error", http.StatusBadGateway)
+}
+
+func (p *RpcReverseProxy) forwardAndSanitizeGetTransactionCount(rpcURL string, reqBody []byte) ([]byte, error) {
+	resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	resultVal := gjson.GetBytes(bodyBytes, "result")
+	if resultVal.Exists() && resultVal.Type == gjson.String {
+		rawHex := resultVal.String()
+		cleanHex := strings.TrimPrefix(rawHex, "0x")
+		nonceVal, err := strconv.ParseUint(cleanHex, 16, 64)
+		if err == nil {
+			idVal := gjson.GetBytes(bodyBytes, "id")
+			var id interface{} = nil
+			if idVal.Exists() {
+				id = idVal.Value()
+			}
+			sanitizedResp := rpc_client.JSONRPCResponse{
+				Jsonrpc: "2.0",
+				Result:  fmt.Sprintf("0x%x", nonceVal),
+				Id:      id,
+			}
+			return json.Marshal(sanitizedResp)
+		}
+	}
+
+	return bodyBytes, nil
 }
