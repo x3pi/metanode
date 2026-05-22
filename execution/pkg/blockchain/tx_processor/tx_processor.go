@@ -93,6 +93,11 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	ProcessResult,
 	error,
 ) {
+	defer func() {
+		mvm.ClearAllMVMApi()
+		mvm.CallClearAllStateInstances()
+	}()
+
 	lastBlockHeader := chainState.GetcurrentBlockHeader()
 
 	var funcCtx context.Context
@@ -203,6 +208,11 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	ProcessResult,
 	error,
 ) {
+	defer func() {
+		mvm.ClearAllMVMApi()
+		mvm.CallClearAllStateInstances()
+	}()
+
 	lastBlockHeader := chainState.GetcurrentBlockHeader()
 
 	var funcCtx context.Context
