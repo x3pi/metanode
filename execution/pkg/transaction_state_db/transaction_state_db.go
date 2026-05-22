@@ -152,8 +152,13 @@ func (db *TransactionStateDB) GetTransaction(hash common.Hash) (types.Transactio
 	// if not exist in dirty then get from trie
 	bData, _ := db.trie.Get(hash.Bytes())
 	if len(bData) == 0 {
-		logger.Error("TransactionStateDB GetTransaction transaction not found", hash)
-		return nil, errors.New("TransactionStateDB GetTransaction transaction not found") // Trả về nil hợp lệ cho con trỏ
+		// Sync nodes write transactions directly to db.db (PebbleDB) but bypass FFI NOMT trie.
+		// Fall back to reading transaction bytes directly from PebbleDB.
+		bData, _ = db.db.Get(hash.Bytes())
+		if len(bData) == 0 {
+			logger.Error("TransactionStateDB GetTransaction transaction not found", hash)
+			return nil, errors.New("TransactionStateDB GetTransaction transaction not found") // Trả về nil hợp lệ cho con trỏ
+		}
 	}
 
 	// exist in trie, unmarshal

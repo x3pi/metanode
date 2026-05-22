@@ -554,7 +554,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	blockNumberBigInt := tx.BlockNumber.ToInt()
 	blockNumberInt64 := blockNumberBigInt.Int64()
 
-	bl := api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNumberInt64), true)
+	bl := api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNumberInt64), false)
 
 	events := receipt.EventLogs()
 	logs := make([]interface{}, len(events))
