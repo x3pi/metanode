@@ -14,6 +14,12 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/rpc_client"
 	"github.com/tidwall/gjson"
+
+	"fmt"
+	"time"
+	ethCommon "github.com/ethereum/go-ethereum/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -153,57 +159,49 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 	logger.Info("🔵 [http_handler] Forwarded eth_getTransactionReceipt response: id=%v, txHash=%s", id, txHashStr)
 	// 	return
 
-	// case "eth_getTransactionCount":
-	// 	address := gjson.GetBytes(body, "params.0")
-	// 	blockTag := gjson.GetBytes(body, "params.1")
-	// 	if !address.Exists() {
-	// 		logger.Warn("⚠️ [http_handler] eth_getTransactionCount missing params: id=%v", id)
-	// 		resp := utils.MakeInvalidParamError(id, "Invalid params for eth_getTransactionCount")
-	// 		utils.WriteJSON(w, resp)
-	// 		return
-	// 	}
-	// 	addressStr := address.String()
-	// 	blockTagStr := "latest"
-	// 	if blockTag.Exists() {
-	// 		blockTagStr = blockTag.String()
-	// 	}
-	// 	logger.Info("🔵 [http_handler] Received eth_getTransactionCount request: id=%v, address=%s, blockTag=%s", id, addressStr, blockTagStr)
+	case "eth_getTransactionCount":
+		address := gjson.GetBytes(body, "params.0")
+		if !address.Exists() {
+			logger.Warn("⚠️ [http_handler] eth_getTransactionCount missing params: id=%v", id)
+			resp := utils.MakeInvalidParamError(id, "Invalid params for eth_getTransactionCount")
+			utils.WriteJSON(w, resp)
+			return
+		}
+		addressStr := address.String()
+		
+		// Decode address to bytes
+		addrBytes := ethCommon.FromHex(addressStr).Bytes()
+		
+		if p.AppCtx != nil && p.AppCtx.ChainPool != nil {
+			chainClient, err := p.AppCtx.ChainPool.Get()
+			if err == nil {
+				asBytes, err := chainClient.GetAccountState(addrBytes, 10*time.Second)
+				if err == nil {
+					var as pb.AccountState
+					if err := proto.Unmarshal(asBytes, &as); err == nil {
+						nonce := as.Nonce
+						resp := rpc_client.JSONRPCResponse{
+							Jsonrpc: "2.0",
+							Result:  fmt.Sprintf("0x%x", nonce),
+							Id:      id,
+						}
+						utils.WriteJSON(w, resp)
+						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonce)
+						return
+					} else {
+						logger.Warn("⚠️ [http_handler] eth_getTransactionCount unmarshal error: %v", err)
+					}
+				} else {
+					logger.Warn("⚠️ [http_handler] eth_getTransactionCount TCP error: %v", err)
+				}
+			}
+		}
 
-	// 	// Gọi upstream RPC trực tiếp để có thể kiểm tra và sửa response
-	// 	params := []interface{}{addressStr}
-	// 	if blockTag.Exists() {
-	// 		params = append(params, blockTagStr)
-	// 	}
-	// 	request := &rpc_client.JSONRPCRequest{
-	// 		Jsonrpc: "2.0",
-	// 		Method:  "eth_getTransactionCount",
-	// 		Params:  params,
-	// 		Id:      id,
-	// 	}
-
-	// 	response := p.AppCtx.ClientRpc.SendHTTPRequest(request)
-
-	// 	// Kiểm tra và sửa response nếu có null
-	// 	if response.Error != nil {
-	// 		logger.Warn("⚠️ [http_handler] eth_getTransactionCount error: id=%v, error=%v", id, response.Error)
-	// 	} else if response.Result != nil {
-	// 		// Đảm bảo Result là hex string hợp lệ (không null)
-	// 		resultStr, ok := response.Result.(string)
-	// 		if !ok || resultStr == "" || resultStr == "null" {
-	// 			logger.Warn("⚠️ [http_handler] eth_getTransactionCount result is null or invalid: id=%v, result=%v (type=%T), setting to 0x0", id, response.Result, response.Result)
-	// 			response.Result = "0x0"
-	// 		} else {
-	// 			logger.Info("🔵 [http_handler] eth_getTransactionCount response: id=%v, result=%s", id, resultStr)
-	// 		}
-	// 	} else {
-	// 		// Nếu không có result và không có error, set default
-	// 		logger.Warn("⚠️ [http_handler] eth_getTransactionCount no result and no error: id=%v, setting to 0x0", id)
-	// 		// response.Result = "0x0"
-	// 	}
-
-	// 	utils.WriteJSON(w, *response)
-	// 	logger.Info("🔵 [http_handler] Sent eth_getTransactionCount response: id=%v, address=%s", id, addressStr)
-	// 	return
+		// Fallback to upstream RPC if TCP fails or AppCtx isn't ready
+		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s", addressStr)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		p.ReverseProxy.ServeHTTP(w, r)
+		return
 
 	default:
 		r.Body = io.NopCloser(bytes.NewReader(body))

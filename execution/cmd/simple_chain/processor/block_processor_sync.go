@@ -997,10 +997,6 @@ PROCESS_BLOCK:
 	processTxDuration := time.Since(processTxStart)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to process transactions for block #%d: %v", *currentBlockNumber, err)
-		// LOCK LEAK FIX: If ProcessTransactions partially succeeded (IntermediateRoot(true)
-		// locked muTrie), we must release the lock before returning. If it failed before
-		// IntermediateRoot, AbortLockedState is a safe no-op (checks lockedFlag first).
-		bp.chainState.GetAccountStateDB().AbortLockedState()
 		return err // Skip this commit, wait for next one
 	}
 
@@ -1014,13 +1010,9 @@ PROCESS_BLOCK:
 		if bNum > 0 {
 			// Live block with assigned block number cannot be empty due to duplicate drop in catch-up/sync.
 			// Return safety violation to stall/sync instead of forging a divergent empty block.
-			// LOCK LEAK FIX: Release muTrie before returning — IntermediateRoot(true) locked it.
-			bp.chainState.GetAccountStateDB().AbortLockedState()
 			return fmt.Errorf("safety violation (Guard 3): 0 transactions after execution for assigned live block number %d at GEI %d", bNum, globalExecIndex)
 		}
 		
-		// LOCK LEAK FIX: Release muTrie before ghost-block path — IntermediateRoot(true) locked it.
-		bp.chainState.GetAccountStateDB().AbortLockedState()
 
 		// Fallback for bNum == 0
 		lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
