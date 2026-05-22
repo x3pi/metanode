@@ -220,6 +220,19 @@ func (db *AccountStateDB) SetTrieCommitBlock(blockNumber uint64) {
 	}
 }
 
+// AbortLockedState releases the muTrie writer lock and resets lockedFlag
+// when the caller decides to skip Commit/CommitPipeline after a successful
+// IntermediateRoot(true) call. This MUST be called on any early-exit path
+// between IntermediateRoot(true) returning successfully and Commit/CommitPipeline.
+// Without this, muTrie stays permanently locked → all readers deadlock.
+func (db *AccountStateDB) AbortLockedState() {
+	if db.lockedFlag.Load() {
+		db.lockedFlag.Store(false)
+		db.muTrie.Unlock()
+		logger.Warn("⚠️ [ABORT] AbortLockedState: Released muTrie and lockedFlag (commit was skipped)")
+	}
+}
+
 // DirtyAccountCount returns the number of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountCount() int {
 	count := 0
