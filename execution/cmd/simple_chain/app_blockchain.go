@@ -476,6 +476,24 @@ func (app *App) initBlockchain() error {
 		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
 		blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
 		blockchain.GetBlockChainInstance().Commit()
+
+		// ═══════════════════════════════════════════════════════════════════
+		// STARTUP MAPPING REBUILD (May 2026): Walk backwards from startLastBlock
+		// through parentHash chain to rebuild any missing blockNumber→hash mappings.
+		// These mappings can be lost if the node was SIGTERM'd/crashed before
+		// dirtyStorage was flushed to PebbleDB. Without this, historical RPC
+		// queries (eth_getTransactionCount, eth_getBalance at specific block)
+		// fail with "block not found" after recovery.
+		//
+		// Depth is conditional on previous shutdown type:
+		//   - Clean shutdown: verify last 50 blocks (fast sanity check, ~1ms)
+		//   - Crash/SIGKILL:  full walk to genesis (recover all lost mappings)
+		// ═══════════════════════════════════════════════════════════════════
+		rebuildMaxBlocks := 0 // unlimited — full recovery walk
+		if app.WasCleanShutdown() {
+			rebuildMaxBlocks = 50 // fast sanity check only
+		}
+		blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
 	}
 
 SKIP_GENESIS:

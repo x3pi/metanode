@@ -70,7 +70,7 @@ get_master_pprof() {
 # ─── Timeout settings ────────────────────────────────────────────
 SOCKET_TIMEOUT=90      # Chờ socket tối đa 90 giây
 PROCESS_TIMEOUT=15     # Chờ process start tối đa 15 giây
-SHUTDOWN_TIMEOUT=30    # Chờ process dừng tối đa 30s (Go StopWait=12s + FlushAll + CloseAll)
+SHUTDOWN_TIMEOUT=45    # Chờ process dừng tối đa 45s (Go StopWait=12s + FlushAll + CloseAll + margin)
 PHASE_DELAY=3          # Delay giữa các phase (giây)
 NODE_DELAY=4           # Delay giữa các node (4s cho FFI startup overhead)
 RUST_DRAIN_WAIT=10     # Chờ sau khi Rust dừng để Go xử lý hết block trong pipeline

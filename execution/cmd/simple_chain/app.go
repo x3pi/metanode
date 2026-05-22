@@ -6,6 +6,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -463,15 +464,25 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 func (app *App) Stop() {
 	logger.Info("Stopping app...")
 
-	// Signal all background processes to stop
-	app.cancel()
+	// ═══════════════════════════════════════════════════════════════════════════
+	// SHUTDOWN ORDERING FIX (May 2026):
+	// Previously app.cancel() fired FIRST, which killed periodicStorageFlusher
+	// before the commit pipeline could drain. If StopWait() took >30s
+	// (SHUTDOWN_TIMEOUT), SIGKILL would fire and FlushAll never executed → data loss.
+	//
+	// New order:
+	// 1. Stop non-critical services (txQueue, pruning, network)
+	// 2. Drain commit pipeline (StopWait)
+	// 3. Force-sync lastBlock + commit mappings + FlushAll
+	// 4. THEN cancel context (stops periodicFlusher — no longer needed)
+	// 5. Close databases
+	// ═══════════════════════════════════════════════════════════════════════════
 
-	// Stop async transaction queue (drain pending txs)
+	// Phase 1: Stop non-critical services that don't need the context
 	if app.txAsyncQueue != nil {
 		app.txAsyncQueue.Stop()
 	}
 
-	// Stop pruning manager
 	if app.pruningManager != nil {
 		app.pruningManager.Stop()
 	}
@@ -481,11 +492,12 @@ func (app *App) Stop() {
 		go app.socketServer.Stop()
 	}
 
-	// ── CRASH SAFETY: Flush all data to disk before closing ──────────
-	// Wait for background persistence queues to drain so trie states are written to DB
+	// Phase 2: Drain commit pipeline — blocks until all pending commits are flushed
 	if app.blockProcessor != nil {
 		app.blockProcessor.StopWait()
 	}
+
+	// Phase 3: Force-sync all data to disk
 
 	// CRITICAL (Mar 2026): Force-sync lastBlock to disk BEFORE FlushAll.
 	// This ensures the lastBlockHashKey survives even if the process is killed
@@ -533,10 +545,16 @@ func (app *App) Stop() {
 		}
 	}
 
-	// Close NOMT database (must be before closing other databases)
+	// Phase 4: NOW cancel context — periodicFlusher no longer needed since we just flushed
+	app.cancel()
+
+	// Write clean shutdown sentinel file — startup uses this to skip expensive
+	// integrity checks after clean shutdown (only run full check after crash/SIGKILL)
+	app.writeCleanShutdownSentinel()
+
+	// Phase 5: Close databases
 	mt_trie.CloseNomtDB()
 
-	// Close databases
 	if trie_database.GetTrieDatabaseManager() != nil {
 		trie_database.GetTrieDatabaseManager().CloseAllTrieDatabases()
 	}
@@ -598,6 +616,14 @@ func (app *App) periodicStorageFlusher() {
 			return
 		case <-ticker.C:
 			if app.storageManager != nil {
+				// CRITICAL (May 2026): Commit dirty blockchain mappings (blockNumber→hash)
+				// to PebbleDB memtable BEFORE FlushAll. Without this, dirty mappings
+				// accumulate in memory and are lost if the node crashes between flushes.
+				if bc := blockchain.GetBlockChainInstance(); bc != nil {
+					if err := bc.Commit(); err != nil {
+						logger.Error("❌ [CRASH SAFETY] Periodic blockchain mapping commit error: %v", err)
+					}
+				}
 				if err := app.storageManager.FlushAll(); err != nil {
 					logger.Error("❌ [CRASH SAFETY] Periodic FlushAll error: %v", err)
 				}
@@ -621,3 +647,44 @@ func (app *App) periodicStorageFlusher() {
 }
 
 // REMOVED: initExecutor() - Không còn cần thiết, đã có runSocketExecutor() trong blockProcessor
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLEAN SHUTDOWN SENTINEL (May 2026)
+// Writes a marker file on clean shutdown. On startup, if this file is missing,
+// it means the node crashed or was SIGKILL'd — run full integrity checks.
+// If present, skip expensive checks (clean shutdown = all data flushed).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const cleanShutdownFile = ".clean_shutdown"
+
+func (app *App) writeCleanShutdownSentinel() {
+	if app.config == nil || app.config.Databases.RootPath == "" {
+		return
+	}
+	sentinelPath := filepath.Join(app.config.Databases.RootPath, cleanShutdownFile)
+	data := []byte(fmt.Sprintf("%d", time.Now().Unix()))
+	if err := os.WriteFile(sentinelPath, data, 0644); err != nil {
+		logger.Warn("⚠️ [SHUTDOWN] Failed to write clean shutdown sentinel: %v", err)
+	} else {
+		logger.Info("✅ [SHUTDOWN] Clean shutdown sentinel written to %s", sentinelPath)
+	}
+}
+
+// WasCleanShutdown checks if the previous shutdown was clean.
+// Returns true if the sentinel file exists (clean shutdown).
+// Always removes the sentinel file so the next crash/SIGKILL is detected.
+func (app *App) WasCleanShutdown() bool {
+	if app.config == nil || app.config.Databases.RootPath == "" {
+		return false
+	}
+	sentinelPath := filepath.Join(app.config.Databases.RootPath, cleanShutdownFile)
+	_, err := os.Stat(sentinelPath)
+	if err != nil {
+		logger.Warn("⚠️ [STARTUP] No clean shutdown indicator found — previous shutdown was unclean (crash/SIGKILL)")
+		return false
+	}
+	// Remove sentinel so the NEXT crash is detected
+	os.Remove(sentinelPath)
+	logger.Info("✅ [STARTUP] Clean shutdown detected — skipping expensive integrity checks")
+	return true
+}
