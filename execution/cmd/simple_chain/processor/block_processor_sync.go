@@ -33,7 +33,17 @@ func (bp *BlockProcessor) processSingleEpochData(
 	pendingBlocks map[uint64]*pb.ExecutableBlock,
 	skippedCommitsWithTxs map[uint64]*pb.ExecutableBlock,
 	fileLogger *loggerfile.FileLogger,
-) error {
+) (err error) {
+	defer func() {
+		if err != nil {
+			logger.Error("⚠️ [PROCESSOR] processSingleEpochData failed with error: %v. Discarding all dirty states to prevent lock leaks.", err)
+			bp.chainState.GetAccountStateDB().Discard()
+			bp.chainState.GetSmartContractDB().Discard()
+			bp.chainState.GetStakeStateDB().Discard()
+			trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
+		}
+	}()
+
 PROCESS_SINGLE_EPOCH_DATA_START:
 	logger.Debug("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d", epochData.GetGlobalExecIndex())
 	globalExecIndex := epochData.GetGlobalExecIndex()
