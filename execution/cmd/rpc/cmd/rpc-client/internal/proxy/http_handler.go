@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -185,9 +184,7 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					var as pb.AccountState
 					if err := proto.Unmarshal(asBytes, &as); err == nil {
-						if len(as.Nonce) >= 8 {
-							nonceVal = binary.BigEndian.Uint64(as.Nonce)
-						}
+						nonceVal = bytesToUint64(as.Nonce)
 						gotNonce = true
 						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonceVal)
 					} else {
@@ -209,20 +206,61 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Fallback to upstream RPC if TCP fails or AppCtx isn't ready
-		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s", addressStr)
-		if p.AppCtx != nil && p.AppCtx.Cfg != nil && p.AppCtx.Cfg.RPCServerURL != "" {
-			respBytes, err := p.forwardAndSanitizeGetTransactionCount(p.AppCtx.Cfg.RPCServerURL, body)
+		// Fallback to upstream RPC and intercept the response to ensure proper Ethereum hex encoding
+		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s with intercepted capture", addressStr)
+		
+		rec := &responseCaptureWriter{
+			ResponseWriter: w,
+			body:           new(bytes.Buffer),
+			headers:        make(http.Header),
+			statusCode:     http.StatusOK,
+		}
+		
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		p.ReverseProxy.ServeHTTP(rec, r)
+		
+		respBytes := rec.body.Bytes()
+		
+		// Copy captured headers to actual ResponseWriter, excluding Content-Length (which will be re-calculated)
+		for k, vv := range rec.headers {
+			if strings.ToLower(k) != "content-length" {
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+		}
+		
+		resultVal := gjson.GetBytes(respBytes, "result")
+		if resultVal.Exists() && resultVal.Type == gjson.String {
+			rawHex := resultVal.String()
+			sanitizedHex := sanitizeHex(rawHex)
+			
+			idVal := gjson.GetBytes(respBytes, "id")
+			var id interface{} = nil
+			if idVal.Exists() {
+				id = idVal.Value()
+			}
+			
+			sanitizedResp := rpc_client.JSONRPCResponse{
+				Jsonrpc: "2.0",
+				Result:  sanitizedHex,
+				Id:      id,
+			}
+			
+			finalBytes, err := json.Marshal(sanitizedResp)
 			if err == nil {
 				w.Header().Set("Content-Type", "application/json")
-				w.Write(respBytes)
+				w.Header().Set("Content-Length", strconv.Itoa(len(finalBytes)))
+				w.WriteHeader(rec.statusCode)
+				w.Write(finalBytes)
 				return
 			}
-			logger.Warn("⚠️ [http_handler] Sanitized fallback failed: %v, falling back to raw reverse proxy", err)
 		}
-
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		p.ReverseProxy.ServeHTTP(w, r)
+		
+		// Fallback if parsing or marshal fails, write raw response with recalculated Content-Length
+		w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
+		w.WriteHeader(rec.statusCode)
+		w.Write(respBytes)
 		return
 
 	default:
@@ -242,6 +280,44 @@ func (p *RpcReverseProxy) readonlyErrorHandler(w http.ResponseWriter, r *http.Re
 	http.Error(w, "Readonly upstream server error", http.StatusBadGateway)
 }
 
+type responseCaptureWriter struct {
+	http.ResponseWriter
+	body       *bytes.Buffer
+	headers    http.Header
+	statusCode int
+}
+
+func (w *responseCaptureWriter) Header() http.Header {
+	return w.headers
+}
+
+func (w *responseCaptureWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
+}
+
+func (w *responseCaptureWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func sanitizeHex(rawHex string) string {
+	rawHex = strings.ToLower(strings.TrimSpace(rawHex))
+	rawHex = strings.TrimPrefix(rawHex, "0x")
+	rawHex = strings.TrimPrefix(rawHex, "0x")
+	sanitized := strings.TrimLeft(rawHex, "0")
+	if sanitized == "" {
+		return "0x0"
+	}
+	return "0x" + sanitized
+}
+
+func bytesToUint64(b []byte) uint64 {
+	var val uint64
+	for _, x := range b {
+		val = (val << 8) | uint64(x)
+	}
+	return val
+}
+
 func (p *RpcReverseProxy) forwardAndSanitizeGetTransactionCount(rpcURL string, reqBody []byte) ([]byte, error) {
 	resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -257,21 +333,18 @@ func (p *RpcReverseProxy) forwardAndSanitizeGetTransactionCount(rpcURL string, r
 	resultVal := gjson.GetBytes(bodyBytes, "result")
 	if resultVal.Exists() && resultVal.Type == gjson.String {
 		rawHex := resultVal.String()
-		cleanHex := strings.TrimPrefix(rawHex, "0x")
-		nonceVal, err := strconv.ParseUint(cleanHex, 16, 64)
-		if err == nil {
-			idVal := gjson.GetBytes(bodyBytes, "id")
-			var id interface{} = nil
-			if idVal.Exists() {
-				id = idVal.Value()
-			}
-			sanitizedResp := rpc_client.JSONRPCResponse{
-				Jsonrpc: "2.0",
-				Result:  fmt.Sprintf("0x%x", nonceVal),
-				Id:      id,
-			}
-			return json.Marshal(sanitizedResp)
+		sanitizedHex := sanitizeHex(rawHex)
+		idVal := gjson.GetBytes(bodyBytes, "id")
+		var id interface{} = nil
+		if idVal.Exists() {
+			id = idVal.Value()
 		}
+		sanitizedResp := rpc_client.JSONRPCResponse{
+			Jsonrpc: "2.0",
+			Result:  sanitizedHex,
+			Id:      id,
+		}
+		return json.Marshal(sanitizedResp)
 	}
 
 	return bodyBytes, nil
