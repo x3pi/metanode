@@ -47,8 +47,8 @@ const (
 
 )
 
-var StateChangeChan = make(chan uint32)
-var ConnectChangeChan = make(chan uint32)
+var StateChangeChan = make(chan uint32, 128)
+var ConnectChangeChan = make(chan uint32, 128)
 
 // TPS OPTIMIZATION: CommitLock removed — was causing 71% idle time by blocking
 // ProcessorPool while blocks committed. AccountStateDB.lockedFlag already provides
@@ -252,7 +252,11 @@ func GetLastBlockNumberFromMaster() uint64 {
 // Cập nhật trạng thái và gửi thông báo qua channel nếu thay đổi
 func UpdateState(state uint32) {
 	atomic.StoreUint32(&updateState, state)
-	StateChangeChan <- state
+	select {
+	case StateChangeChan <- state:
+	default:
+		// Non-blocking send: drop event if channel buffer is full or no receiver is active
+	}
 }
 
 // Lấy trạng thái cập nhật
@@ -263,7 +267,11 @@ func GetUpdateState() uint32 {
 // Cập nhật trạng thái kết nối và gửi thông báo qua channel nếu thay đổi
 func UpdateConnectState(state uint32) {
 	atomic.StoreUint32(&connectState, state)
-	ConnectChangeChan <- state
+	select {
+	case ConnectChangeChan <- state:
+	default:
+		// Non-blocking send: drop event if channel buffer is full or no receiver is active
+	}
 }
 
 // Lấy trạng thái kết nối
