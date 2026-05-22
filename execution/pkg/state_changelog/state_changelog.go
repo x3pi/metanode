@@ -130,7 +130,9 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	// Use pebble.Sync instead of NoSync to ensure durability of historical changelogs,
+	// protecting against historical state loss during sudden node shutdowns/kills.
+	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("failed to commit changelog batch: %w", err)
 	}
 
