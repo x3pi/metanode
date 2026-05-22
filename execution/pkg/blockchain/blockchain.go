@@ -392,16 +392,131 @@ func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, boo
 
 	key := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber))
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
-	if err != nil || data == nil || len(data) != common.HashLength {
+	if err == nil && data != nil && len(data) == common.HashLength {
+		blockHash := common.BytesToHash(data)
+		bc.blockNumberToHashCache.Store(blockNumber, cachedHash{
+			hash:    blockHash,
+			addedAt: time.Now(),
+		})
+		return blockHash, true
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAZY FALLBACK (May 2026): Mapping missing from both cache and DB.
+	// This happens when dirtyStorage was not flushed before a crash/SIGTERM.
+	// Walk backwards from lastBlock via parentHash chain to find and rebuild
+	// the missing mapping. This is O(N) worst-case but only triggers on
+	// actual cache/DB misses, and rebuilds all intermediate mappings too.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if bc.blockDatabase != nil {
+		hash, ok := bc.rebuildMappingByWalkback(blockNumber)
+		if ok {
+			return hash, true
+		}
+	}
+
+	return common.Hash{}, false
+}
+
+// rebuildMappingByWalkback walks backwards from lastBlock through parentHash
+// chain to find the block at blockNumber and rebuild all missing mappings.
+// Returns the hash of the target block if found.
+func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common.Hash, bool) {
+	lastBlock, err := bc.blockDatabase.GetLastBlock()
+	if err != nil || lastBlock == nil {
 		return common.Hash{}, false
 	}
-	blockHash := common.BytesToHash(data)
 
-	bc.blockNumberToHashCache.Store(blockNumber, cachedHash{
-		hash:    blockHash,
-		addedAt: time.Now(),
-	})
-	return blockHash, true
+	lastBlockNum := lastBlock.Header().BlockNumber()
+	if targetBlockNumber > lastBlockNum {
+		return common.Hash{}, false
+	}
+
+	// Walk backwards from lastBlock
+	blk := lastBlock
+	var rebuiltCount int
+	var targetHash common.Hash
+	found := false
+
+	for blk != nil {
+		bNum := blk.Header().BlockNumber()
+
+		// Check if mapping already exists for this block
+		if _, exists := bc.blockNumberToHashCache.Load(bNum); !exists {
+			// Also check DB
+			dbKey := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, bNum))
+			dbData, dbErr := bc.storageManager.GetStorageMapping().Get(dbKey)
+			if dbErr != nil || dbData == nil || len(dbData) != common.HashLength {
+				// Missing mapping — rebuild it
+				bHash := blk.Header().Hash()
+				bc.storeToDirty(fmt.Sprintf("%s%d", blockNumberPrefix, bNum), bHash.Bytes())
+				bc.blockNumberToHashCache.Store(bNum, cachedHash{
+					hash:    bHash,
+					addedAt: time.Now(),
+				})
+				rebuiltCount++
+
+				if bNum == targetBlockNumber {
+					targetHash = bHash
+					found = true
+				}
+			} else {
+				// Mapping exists in DB — cache it and stop if we're past our target
+				existingHash := common.BytesToHash(dbData)
+				bc.blockNumberToHashCache.Store(bNum, cachedHash{
+					hash:    existingHash,
+					addedAt: time.Now(),
+				})
+				if bNum == targetBlockNumber {
+					targetHash = existingHash
+					found = true
+				}
+				if bNum <= targetBlockNumber {
+					break // All mappings at or below target exist, stop walking
+				}
+			}
+		} else if bNum <= targetBlockNumber {
+			// Cache hit at or below target — we've already rebuilt everything needed
+			if bNum == targetBlockNumber {
+				if cached, ok := bc.blockNumberToHashCache.Load(bNum); ok {
+					if ch, ok := cached.(cachedHash); ok {
+						targetHash = ch.hash
+						found = true
+					}
+				}
+			}
+			break
+		}
+
+		if bNum == 0 {
+			break
+		}
+
+		// Walk to parent
+		parentHash := blk.Header().LastBlockHash()
+		if parentHash == (common.Hash{}) {
+			break
+		}
+		parentBlk, pErr := bc.blockDatabase.GetBlockByHash(parentHash)
+		if pErr != nil || parentBlk == nil {
+			break
+		}
+		blk = parentBlk
+	}
+
+	// Commit rebuilt mappings to DB so they survive restart
+	if rebuiltCount > 0 {
+		logger.Info("🔄 [LAZY-REBUILD] Rebuilt %d missing block→hash mappings (target=#%d, found=%v)", rebuiltCount, targetBlockNumber, found)
+		if commitErr := bc.Commit(); commitErr != nil {
+			logger.Error("❌ [LAZY-REBUILD] Failed to commit rebuilt mappings: %v", commitErr)
+		} else if bc.storageManager != nil {
+			if flushErr := bc.storageManager.GetStorageMapping().Flush(); flushErr != nil {
+				logger.Error("❌ [LAZY-REBUILD] Failed to flush mapping DB: %v", flushErr)
+			}
+		}
+	}
+
+	return targetHash, found
 }
 
 func (bc *BlockChain) SetTxHashMapBlockNumber(txHash common.Hash, blockNumber uint64) error {
