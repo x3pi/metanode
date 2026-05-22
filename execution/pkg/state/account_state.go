@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -27,6 +28,7 @@ var (
 )
 
 type AccountState struct {
+	mu                 sync.RWMutex
 	address            common.Address
 	lastHash           common.Hash
 	balance            *big.Int
@@ -51,6 +53,8 @@ func NewAccountState(address common.Address) types.AccountState {
 
 // general
 func (as *AccountState) Proto() *pb.AccountState {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
 	pbAs := &pb.AccountState{
@@ -70,6 +74,8 @@ func (as *AccountState) Proto() *pb.AccountState {
 }
 
 func (as *AccountState) FromProto(pbData *pb.AccountState) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.address = common.BytesToAddress(pbData.Address)
 	as.lastHash = common.BytesToHash(pbData.LastHash)
 	as.balance = big.NewInt(0).SetBytes(pbData.Balance)
@@ -103,17 +109,30 @@ func (as *AccountState) Unmarshal(b []byte) error {
 }
 
 func (as *AccountState) Copy() types.AccountState {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	copyAs := &AccountState{}
 	copy(copyAs.address[:], as.address[:])
 	copy(copyAs.lastHash[:], as.lastHash[:])
-	copyAs.balance = big.NewInt(0).Set(as.balance)
-	copyAs.pendingBalance = big.NewInt(0).Set(as.pendingBalance)
+	if as.balance != nil {
+		copyAs.balance = big.NewInt(0).Set(as.balance)
+	} else {
+		copyAs.balance = big.NewInt(0)
+	}
+	if as.pendingBalance != nil {
+		copyAs.pendingBalance = big.NewInt(0).Set(as.pendingBalance)
+	} else {
+		copyAs.pendingBalance = big.NewInt(0)
+	}
 	copy(copyAs.deviceKey[:], as.deviceKey[:])
 	if as.smartContractState != nil {
 		copyAs.smartContractState = as.smartContractState.Copy()
 	}
 	copyAs.nonce = as.nonce
-	copy(copyAs.publicKeyBls[:], as.publicKeyBls[:])
+	if as.publicKeyBls != nil {
+		copyAs.publicKeyBls = make([]byte, len(as.publicKeyBls))
+		copy(copyAs.publicKeyBls, as.publicKeyBls)
+	}
 	copyAs.accountType = as.accountType
 	copyAs.isDirty = as.isDirty
 	return copyAs
@@ -128,148 +147,217 @@ func (as *AccountState) String() string {
 
 // getter
 func (as *AccountState) Address() common.Address {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.address
 }
 
 func (as *AccountState) PublicKeyBls() []byte {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.publicKeyBls
 }
 
 func (as *AccountState) AccountType() pb.ACCOUNT_TYPE {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.accountType
 }
 
 func (as *AccountState) Balance() *big.Int {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.balance
 }
 
 func (as *AccountState) PendingBalance() *big.Int {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.pendingBalance
 }
 
 func (as *AccountState) TotalBalance() *big.Int {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return big.NewInt(0).Add(
-		as.Balance(),
-		as.PendingBalance(),
+		as.balance,
+		as.pendingBalance,
 	)
 }
 
 func (as *AccountState) LastHash() common.Hash {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.lastHash
 }
 
 func (as *AccountState) SmartContractState() types.SmartContractState {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.smartContractState
 }
 
 func (as *AccountState) DeviceKey() common.Hash {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.deviceKey
 }
 
 // setter
 func (as *AccountState) SetBalance(newBalance *big.Int) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.balance = newBalance
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetNewDeviceKey(newDeviceKey common.Hash) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.deviceKey = newDeviceKey
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetLastHash(newLastHash common.Hash) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.lastHash = newLastHash
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetSmartContractState(smState types.SmartContractState) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.smartContractState = smState
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) AddPendingBalance(amount *big.Int) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.pendingBalance = big.NewInt(0).Add(as.pendingBalance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SubPendingBalance(amount *big.Int) error {
-	pendingBalance := as.PendingBalance()
-	if amount.Cmp(pendingBalance) > 0 {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if amount.Cmp(as.pendingBalance) > 0 {
 		return ErrorInvalidSubPendingAmount
 	}
-	as.pendingBalance = big.NewInt(0).Sub(pendingBalance, amount)
-	as.MarkDirty()
+	as.pendingBalance = big.NewInt(0).Sub(as.pendingBalance, amount)
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) SubBalance(amount *big.Int) error {
-	balance := as.Balance()
-	if amount.Cmp(balance) > 0 {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if amount.Cmp(as.balance) > 0 {
 		return ErrorInvalidSubBalanceAmount
 	}
-	as.balance = big.NewInt(0).Sub(balance, amount)
-	as.MarkDirty()
+	as.balance = big.NewInt(0).Sub(as.balance, amount)
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) SubTotalBalance(amount *big.Int) error {
-	totalBalance := big.NewInt(0).Add(as.PendingBalance(), as.Balance())
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	totalBalance := big.NewInt(0).Add(as.pendingBalance, as.balance)
 	if amount.Cmp(totalBalance) > 0 {
 		return ErrorInvalidSubBalanceAmount
 	}
 	as.pendingBalance = big.NewInt(0)
 	as.balance = big.NewInt(0).Sub(totalBalance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) AddBalance(amount *big.Int) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.balance = big.NewInt(0).Add(as.balance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) GetOrCreateSmartContractState() types.SmartContractState {
-	scState := as.SmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
 	if scState == nil {
 		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+		as.isDirty = true
 	}
-	as.SetSmartContractState(scState)
 	return scState
 }
 
 func (as *AccountState) SetCodeHash(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetCodeHash(hash)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetStorageAddress(storageAddress common.Address) {
-	scState := as.GetOrCreateSmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetStorageAddress(storageAddress)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetStorageRoot(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetStorageRoot(hash)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetCreatorPublicKey(creatorPublicKey p_common.PublicKey) {
-	scState := as.GetOrCreateSmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetCreatorPublicKey(creatorPublicKey)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) AddLogHash(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetLogsHash(crypto.Keccak256Hash(append(scState.LogsHash().Bytes(), hash.Bytes()...)))
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetPendingBalance(newBalance *big.Int) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.pendingBalance = newBalance
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 type JsonAccountState struct {
@@ -303,6 +391,8 @@ func (j *JsonAccountState) ToAccountState() *AccountState {
 }
 
 func (j *JsonAccountState) FromAccountState(as *AccountState) {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	j.Address = as.address.Hex()
 	j.Balance = as.balance.String()
 	j.PendingBalance = as.pendingBalance.String()
@@ -312,7 +402,7 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 		j.SmartContractState = &JsonSmartContractState{}
 		j.SmartContractState.FromSmartContractState(as.smartContractState)
 	}
-	j.Nonce = as.Nonce()
+	j.Nonce = as.nonce
 	j.PublicKeyBls = hex.EncodeToString(as.publicKeyBls)
 	j.AccountType = int32(as.accountType)
 }
@@ -407,28 +497,36 @@ func UnmarshalAccountStateWithIdRequest(
 }
 
 func (as *AccountState) Nonce() uint64 {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.nonce
 }
 
 func (as *AccountState) SetNonce(newNonce uint64) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.nonce = newNonce
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 // plus one nonce
 func (as *AccountState) PlusOneNonce() {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.nonce++
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetPublicKeyBls(publicKeyBls []byte) error {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	if len(publicKeyBls) != 48 {
 		logger.Error("Invalid publicKeyBls length. Expected 48 bytes, got", len(publicKeyBls))
 		return errors.New("invalid publicKeyBls length")
 	}
 	if len(as.publicKeyBls) == 0 {
 		as.publicKeyBls = publicKeyBls
-		as.MarkDirty()
+		as.isDirty = true
 	} else {
 		return errors.New("publicKeyBls is already set")
 	}
@@ -436,6 +534,8 @@ func (as *AccountState) SetPublicKeyBls(publicKeyBls []byte) error {
 }
 
 func (as *AccountState) SetAccountType(accountTypeNew pb.ACCOUNT_TYPE) error {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	isValid := false
 	for _, accountType := range []pb.ACCOUNT_TYPE{pb.ACCOUNT_TYPE_READ_WRITE_STRICT, pb.ACCOUNT_TYPE_REGULAR_ACCOUNT} {
 		if accountType == accountTypeNew {
@@ -446,7 +546,7 @@ func (as *AccountState) SetAccountType(accountTypeNew pb.ACCOUNT_TYPE) error {
 
 	if isValid {
 		as.accountType = accountTypeNew
-		as.MarkDirty()
+		as.isDirty = true
 		return nil // Thêm return nil khi hợp lệ
 	} else {
 		logger.Error("Invalid account type:", accountTypeNew)
@@ -455,9 +555,13 @@ func (as *AccountState) SetAccountType(accountTypeNew pb.ACCOUNT_TYPE) error {
 }
 
 func (as *AccountState) IsDirty() bool {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
 	return as.isDirty
 }
 
 func (as *AccountState) MarkDirty() {
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	as.isDirty = true
 }
