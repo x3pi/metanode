@@ -116,7 +116,7 @@ func VerifyTransaction(
 		}
 	}
 	if tx.GetNonce() < as.Nonce() {
-		logger.Error("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
+		logger.Warn("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
 		return transaction.InvalidNonce
 	}
 
