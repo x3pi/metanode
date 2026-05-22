@@ -361,8 +361,11 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 // Gọi sau Error/Fatal để đảm bảo log không mất khi crash
 func syncFileOutputs() {
 	writeMu.Lock()
-	defer writeMu.Unlock()
-	for _, out := range config.Outputs {
+	// Copy the outputs slice so we can release the lock before expensive I/O
+	outputsCopy := append([]*os.File(nil), config.Outputs...)
+	writeMu.Unlock()
+
+	for _, out := range outputsCopy {
 		if out == nil || out == os.Stdout || out == os.Stderr {
 			continue
 		}
