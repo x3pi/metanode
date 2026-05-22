@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"runtime"
 	"slices"
 	"sync"
@@ -55,54 +54,28 @@ var (
 
 // Commit persists all dirty account states to the trie and the underlying database.
 // It calculates the new root hash and updates the state database instance.
+//
+// DEADLOCK-FREE DESIGN: Commit() self-acquires muTrie — it does NOT assume
+// muTrie is pre-held by IntermediateRoot. This eliminates the cross-function
+// deferred lock pattern that previously caused permanent deadlocks.
 func (db *AccountStateDB) Commit() (common.Hash, error) {
 
-	// 1. Apply dirty changes to the in-memory trie representation
-	// IntermediateRoot handles locking muStruct for iterating and clearing dirtyAccounts.
-	// intermediateHash, err := db.IntermediateRoot(false) // isLog = false
-	// defer func() {
-	// 	db.lockedFlag.Store(false) // CHANGED: Use atomic Store
-	// }()
-	// if err != nil {
-	// 	logger.Error("Commit: Error applying changes during IntermediateRoot", "error", err)
-	// 	// Attempt to discard changes to revert to the last known good state?
-	// 	// Discard() acquires muStruct, which is fine as IntermediateRoot released it.
-	// 	// However, discard might fail too.
-	// 	// For now, return the error directly.
-	// 	return common.Hash{}, fmt.Errorf("commit failed during IntermediateRoot: %w", err)
-	// }
-
-	if !db.lockedFlag.Load() {
-		// SELF-HEALING: Same as CommitPipeline — force-acquire instead of crash.
-		// See CommitPipeline comment for full rationale.
-		logger.Warn("⚠️ [SELF-HEAL] Commit: lockedFlag was false (expected true). " +
-			"Force-acquiring lock to prevent node crash.")
-		db.lockedFlag.Store(true)
-		db.muTrie.Lock()
-	}
 	// Lock the entire commit process to ensure atomicity
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
 
 	// ═══════════════════════════════════════════════════════════════
-	// muTrie is already held by the preceding IntermediateRoot(true) call.
-	// IntermediateRoot(false) below also skips locking. We hold muTrie
-	// continuously through this entire Commit cycle.
+	// Self-acquire muTrie for the duration of commit.
+	// IntermediateRoot(true) has already released muTrie after computing
+	// the hash, so we re-acquire here for trie.Commit + swap.
 	// ═══════════════════════════════════════════════════════════════
+	db.muTrie.Lock()
 
-	// 1. Apply dirty changes to the in-memory trie representation
-	// IntermediateRoot(false) skips its own muTrie lock since we hold it.
-	intermediateHash, err := db.IntermediateRoot(false) // isLog = false
-	defer func() {
-		db.lockedFlag.Store(false) // CHANGED: Use atomic Store
-	}()
+	// IntermediateRoot(false) returns cached hash — caller holds muTrie.
+	intermediateHash, err := db.IntermediateRoot(false)
 	if err != nil {
-		db.muTrie.Unlock() // Lock leak fix: release structural lock on error exit path
+		db.muTrie.Unlock()
 		logger.Error("Commit: Error applying changes during IntermediateRoot", "error", err)
-		// Attempt to discard changes to revert to the last known good state?
-		// Discard() acquires muStruct, which is fine as IntermediateRoot released it.
-		// However, discard might fail too.
-		// For now, return the error directly.
 		return common.Hash{}, fmt.Errorf("commit failed during IntermediateRoot: %w", err)
 	}
 
@@ -110,8 +83,9 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	// and db.dirtyAccounts has been cleared.
 
 	// ═══════════════════════════════════════════════════════════════
-	// muTrie still held — protect trie.Commit + swap
+	// muTrie held — protect trie.Commit + swap
 	// ═══════════════════════════════════════════════════════════════
+
 
 	// 2. Commit the in-memory trie to generate database nodes
 	committedHash, nodeSet, oldKeys, err := db.trie.Commit(true)
@@ -287,7 +261,7 @@ type PipelineCommitResult struct {
 }
 
 // CommitPipeline performs the fast, synchronous phase of commit:
-//  1. IntermediateRoot(false) → return cached hash, release lockedFlag
+//  1. IntermediateRoot(false) → return cached hash
 //  2. trie.Commit(true) → generate nodeSet (creates internal copy, fast)
 //  3. Verify intermediate == committed hash
 //  4. Serialize batch for network transfer
@@ -300,43 +274,22 @@ type PipelineCommitResult struct {
 // The caller MUST call PersistAsync() with the returned result to eventually
 // persist nodes to LevelDB and swap the trie reference.
 func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
-	if !db.lockedFlag.Load() {
-		// ═══════════════════════════════════════════════════════════════
-		// SELF-HEALING: lockedFlag should be true (set by IntermediateRoot(true)
-		// in ProcessTransactions). If it's false, a NOMT trie re-alignment
-		// or deferred cleanup race from the previous block has cleared it.
-		//
-		// Instead of returning error → logger.Fatal → os.Exit (killing the
-		// entire node), we force-acquire the lock and proceed. This is safe
-		// because:
-		//   1. CommitPipeline immediately calls IntermediateRoot(false) which
-		//      only returns the cached trie hash — no iteration.
-		//   2. The trie state is still valid (mutations were applied during
-		//      the original IntermediateRoot(true) call in ProcessTransactions).
-		//   3. muCommit.Lock below serializes any concurrent Commit attempts.
-		//
-		// ROOT CAUSE: NOMT trie re-alignment (FORK-PREVENTION path) can
-		// trigger deferred lockedFlag.Store(false) from block N-1's
-		// IntermediateRoot(false) while block N's CommitPipeline is starting.
-		// ═══════════════════════════════════════════════════════════════
-		logger.Warn("⚠️ [SELF-HEAL] CommitPipeline: lockedFlag was false (expected true). " +
-			"Force-acquiring lock to prevent node crash. " +
-			"This indicates a NOMT re-alignment race or ghost-block boundary where ProcessTransactions was skipped.")
-		db.lockedFlag.Store(true)
-		db.muTrie.Lock()
-	}
+	// ═══════════════════════════════════════════════════════════════
+	// DEADLOCK-FREE DESIGN: Self-acquire muTrie instead of assuming
+	// it's pre-held by IntermediateRoot. This eliminates the cross-function
+	// deferred lock pattern that previously caused permanent deadlocks.
+	// ═══════════════════════════════════════════════════════════════
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
+
+	db.muTrie.Lock()
 
 	// ═══════════════════════════════════════════════════════════════
 	// Phase 1: Get the already-computed hash (fast — no trie iteration)
 	// ═══════════════════════════════════════════════════════════════
 	intermediateHash, err := db.IntermediateRoot(false)
-	defer func() {
-		db.lockedFlag.Store(false)
-	}()
 	if err != nil {
-		db.muTrie.Unlock() // Lock leak fix: release structural lock on error exit path
+		db.muTrie.Unlock()
 		logger.Error("CommitPipeline: Error during IntermediateRoot(false)", "error", err)
 		return nil, fmt.Errorf("commit pipeline failed during IntermediateRoot: %w", err)
 	}
@@ -568,78 +521,73 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	return nil
 }
 
-// --- Hàm với logging chi tiết ---
+// IntermediateRoot computes the state root hash by applying all dirty account
+// changes to the underlying trie.
+//
+// DEADLOCK-FREE DESIGN (May 2026 Redesign):
+// This function is fully self-contained — it acquires muTrie internally and
+// ALWAYS releases it before returning. The previous design left muTrie locked
+// intentionally for Commit/CommitPipeline to release, but any early-exit path
+// between IntermediateRoot and Commit caused a permanent deadlock.
+//
+// Parameters:
+//   - isLockProcess=true (default): Full processing mode. Applies dirty accounts
+//     to trie, computes hash, acquires+releases muTrie.
+//   - isLockProcess=false: Fast hash-return mode for Commit/CommitPipeline.
+//     Returns the cached trie hash. Caller MUST hold muTrie.
 func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, error) {
 	var lockProcess bool
 	if len(isLockProcess) > 0 {
 		lockProcess = isLockProcess[0]
 	} else {
-		lockProcess = true // Gán mặc định là true
+		lockProcess = true
 	}
-	// Nếu isLockProcess là true và mutex đang bị lock, báo lỗi
-	if lockProcess {
-		// Thử lock mutex, nếu mutex đã bị lock thì sẽ báo lỗi
-		if db.lockedFlag.Load() {
-			errMsg := "IntermediateRoot (lockProcess=true): db.lockedFlag is already locked"
-			log.Println("error:", errMsg)
-			return common.Hash{}, errors.New(errMsg)
-		}
-		db.lockedFlag.Store(true) // CHANGED: Use atomic Store
 
-		// FORK-SAFETY FIX: Use cacheEpoch as a SeqLock to prevent concurrent mempool
-		// validators (AccountStateReadOnly) from poisoning the lruCache with stale
-		// trie data while IntermediateRoot is actively mutating the trie.
-		db.cacheEpoch.Add(1)
-		defer db.cacheEpoch.Add(1)
-
+	if !lockProcess {
 		// ═══════════════════════════════════════════════════════════════
-		// PIPELINE OVERLAP: persistReady wait has been MOVED to AFTER the
-		// CPU-bound marshal phase (below), just before BatchUpdate which
-		// actually reads/writes the trie. This allows marshal (10-50ms)
-		// to overlap with the previous block's PersistAsync disk I/O
-		// (200-1000ms), dramatically reducing block creation time under
-		// large state. See "DEFERRED PERSIST GATE" comment below.
-		//
-		// FORK-SAFETY: Still guaranteed because we wait on persistReady
-		// before ANY trie access (BatchUpdate/Hash). The marshal phase
-		// only reads from dirtyAccounts (sync.Map) and lruCache, neither
-		// of which is affected by PersistAsync's trie swap.
+		// FAST PATH: Called from Commit/CommitPipeline which already holds muTrie.
+		// IntermediateRoot(true) already applied all dirty accounts and computed
+		// the hash. Just return the cached trie hash.
+		// FORK-SAFETY: dirtyAccounts was cleared by IntermediateRoot(true),
+		// so no risk of picking up next block's state.
 		// ═══════════════════════════════════════════════════════════════
-
-		// Lock mutex thành công
-		logger.Debug("Structure lock acquired, processing locked")
-	} else {
-		// ═══════════════════════════════════════════════════════════════
-		// CRITICAL FORK-SAFETY: When called from Commit (lockProcess=false),
-		// DO NOT iterate or process dirtyAccounts at all.
-		//
-		// IntermediateRoot(true) already:
-		// 1. Applied ALL dirty accounts to the in-memory trie
-		// 2. Cleared dirtyAccounts immediately after
-		// 3. Computed and cached the correct hash
-		//
-		// If we iterate dirtyAccounts here, we risk picking up entries
-		// from the NEXT block's PreloadAccounts (which may have already
-		// started) and applying them to THIS block's trie → corrupted
-		// state → different results on different nodes → FORK.
-		//
-		// So we just return the already-computed hash and release the lock.
-		// ═══════════════════════════════════════════════════════════════
-		if !db.lockedFlag.Load() {
-			errMsg := "error: db.lockedFlag is not locked"
-			log.Println(errMsg)
-			return common.Hash{}, errors.New(errMsg)
-		}
-		defer func() {
-			db.lockedFlag.Store(false)
-			logger.Debug("Structure lock released, processing unlocked")
-		}()
-
-		// Just return the current trie hash — all updates were already applied
 		currentHash := db.trie.Hash()
 		logger.Debug("IntermediateRoot(false): returning cached hash (no dirty processing)", "hash", currentHash)
 		return currentHash, nil
 	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// FULL PROCESSING PATH: IntermediateRoot(true)
+	// ═══════════════════════════════════════════════════════════════
+
+	// FORK-SAFETY FIX: Use cacheEpoch as a SeqLock to prevent concurrent mempool
+	// validators (AccountStateReadOnly) from poisoning the lruCache with stale
+	// trie data while IntermediateRoot is actively mutating the trie.
+	db.cacheEpoch.Add(1)
+	defer db.cacheEpoch.Add(1)
+
+	// ═══════════════════════════════════════════════════════════════
+	// PIPELINE OVERLAP: persistReady wait has been MOVED to AFTER the
+	// CPU-bound marshal phase (below), just before BatchUpdate which
+	// actually reads/writes the trie. This allows marshal (10-50ms)
+	// to overlap with the previous block's PersistAsync disk I/O
+	// (200-1000ms), dramatically reducing block creation time under
+	// large state. See "DEFERRED PERSIST GATE" comment below.
+	//
+	// FORK-SAFETY: Still guaranteed because we wait on persistReady
+	// before ANY trie access (BatchUpdate/Hash). The marshal phase
+	// only reads from dirtyAccounts (sync.Map) and lruCache, neither
+	// of which is affected by PersistAsync's trie swap.
+	// ═══════════════════════════════════════════════════════════════
+
+	logger.Debug("IntermediateRoot(true): starting full processing")
+
+	// DIAGNOSTIC GUARD: Set lockedFlag for the duration of IntermediateRoot(true).
+	// Mutation functions (AddBalance, SetNonce, etc.) check this flag and refuse
+	// to modify accounts while the trie is being mutated. This is a self-contained
+	// guard — lockedFlag is cleared before this function returns.
+	db.lockedFlag.Store(true)
+	defer db.lockedFlag.Store(false)
 
 	if db.trie == nil {
 		logger.Error("Trie is nil, cannot proceed")
@@ -978,7 +926,8 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		}
 
 		if updateErr != nil {
-			logger.Error("Failed during dirtyAccounts update loop", "error", updateErr, "processedBeforeError", processedKeys)
+			db.muTrie.Unlock()
+			logger.Error("Failed during dirtyAccounts update loop (FlatTrie)", "error", updateErr, "processedBeforeError", processedKeys)
 			return common.Hash{}, updateErr
 		}
 
@@ -1019,7 +968,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 		if updateErr != nil {
 			db.muTrie.Unlock()
-			logger.Error("Failed during dirtyAccounts update loop, clearing dirty map", "error", updateErr, "processedBeforeError", processedKeys)
+			logger.Error("Failed during dirtyAccounts update loop (MPT)", "error", updateErr, "processedBeforeError", processedKeys)
 			return common.Hash{}, updateErr
 		}
 	}
@@ -1123,8 +1072,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		logger.Debug("No changes detected in dirtyAccounts, intermediate hash remains origin hash", "hash", newHash)
 	}
 
-	// NOTE: muTrie stays LOCKED here intentionally.
-	// Commit() will release muTrie after trie swap is complete.
+	// ═══════════════════════════════════════════════════════════════
+	// DEADLOCK-FREE: Unlock muTrie before returning.
+	// Commit/CommitPipeline will re-acquire muTrie when they need it.
+	// This eliminates the cross-function deferred lock pattern that
+	// caused permanent deadlocks when callers skipped commit.
+	// ═══════════════════════════════════════════════════════════════
+	db.muTrie.Unlock()
 
 	return newHash, nil
 }
