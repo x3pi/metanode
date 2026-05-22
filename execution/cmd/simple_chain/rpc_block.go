@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -116,6 +117,9 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 			blockData = api.App.blockProcessor.GetLastBlock() // Correctly assign lastBlock fallback
 		}
 	} else {
+		if number.Int64() >= 0 && uint64(number.Int64()) > storage.GetLastBlockNumber() {
+			return nil
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(number.Int64()))
 		if !ok {
 			return nil
@@ -236,6 +240,9 @@ func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, numb
 			return nil
 		}
 	} else {
+		if number.Int64() >= 0 && uint64(number.Int64()) > storage.GetLastBlockNumber() {
+			return []map[string]interface{}{}
+		}
 		blockNum = uint64(number.Int64())
 	}
 
@@ -306,6 +313,9 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 			blockData = api.App.blockProcessor.GetLastBlock() // Correctly assign lastBlock fallback
 		}
 	} else {
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
+			return nil
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
 			return nil
@@ -421,6 +431,9 @@ func (api *MetaAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockN
 			blockData = api.App.blockProcessor.GetLastBlock() // Correctly assign lastBlock fallback
 		}
 	} else {
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
+			return nil
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
 			return nil
@@ -461,6 +474,9 @@ func (api *MetaAPI) GetRawTransactionByBlockNumberAndIndex(ctx context.Context, 
 			blockData = api.App.blockProcessor.GetLastBlock() // Correctly assign lastBlock fallback
 		}
 	} else {
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
+			return nil
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
 			return nil
