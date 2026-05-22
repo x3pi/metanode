@@ -21,6 +21,8 @@ struct VoteState {
     digest_history: BTreeMap<CommitIndex, HashMap<CommitDigest, u64>>,
     // Tracks which authority has already voted for which commit index.
     authority_voted_indices: Vec<std::collections::HashSet<CommitIndex>>,
+    // Highest seen epoch in future blocks or network packets (for catching up)
+    highest_seen_epoch: u64,
 }
 
 /// Monitors the progress of consensus commits across the network.
@@ -43,10 +45,12 @@ const DIGEST_HISTORY_RETAIN: u32 = 50_000;
 impl CommitVoteMonitor {
     pub(crate) fn new(context: Arc<Context>) -> Self {
         let size = context.committee.size();
+        let current_epoch = context.committee.epoch();
         let state = VoteState {
             highest_voted_commits: vec![0; size],
             digest_history: BTreeMap::new(),
             authority_voted_indices: (0..size).map(|_| std::collections::HashSet::new()).collect(),
+            highest_seen_epoch: current_epoch,
         };
         Self {
             context,
@@ -205,6 +209,21 @@ impl CommitVoteMonitor {
             self.quorum_advanced_notify.notify_waiters();
         }
         updated
+    }
+
+    /// Observes a seen epoch from block verification or other network messages.
+    /// If it is higher than the current highest seen epoch, we update it.
+    pub fn observe_highest_seen_epoch(&self, epoch: u64) {
+        let mut state = self.state.lock();
+        if epoch > state.highest_seen_epoch {
+            state.highest_seen_epoch = epoch;
+        }
+    }
+
+    /// Returns the highest seen epoch across blocks, verification failures, etc.
+    pub fn highest_seen_epoch(&self) -> u64 {
+        let state = self.state.lock();
+        state.highest_seen_epoch
     }
 }
 
