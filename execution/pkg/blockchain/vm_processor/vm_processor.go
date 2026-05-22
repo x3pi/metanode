@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -81,7 +80,10 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if span != nil {
 			span.AddEvent("HandlingReadOnlyTransaction", nil)
 		}
-		combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", tx.Hash(), rand.Int63(), time.Now().UnixNano())))
+		// DETERMINISTIC: Use txHash-only hash for readOnly mvmId.
+		// No state changes occur, so no fork risk, but deterministic IDs
+		// make execution reproducible for debugging.
+		combinedHash := sha256.Sum256(append([]byte("readonly-"), tx.Hash().Bytes()...))
 		ethAddressBytes := combinedHash[12:]
 		mvmIdReadOnly := common.BytesToAddress(ethAddressBytes)
 		if span != nil {

@@ -69,6 +69,11 @@ func (bp *BlockProcessor) commitWorker() {
 		// because `UpdateLastBlockNumber` can trigger an asynchronous node snapshot.
 		// ══════════════════════════════════════════════════════════════════
 		if bp.serviceType == p_common.ServiceTypeMaster && job.ProcessResults != nil {
+			// OPTIMIZATION: Dedup mvmIds — multiple TXs to the same contract share
+			// one MVMApi instance. CommitFullDb/RevertFullDb only needs to be called
+			// once per contract, not once per TX.
+			committedMvmIds := make(map[common.Address]struct{}, 64)
+
 			for _, tx := range job.ProcessResults.Transactions {
 				isCall := tx.IsCallContract()
 				isDeploy := tx.IsDeployContract()
@@ -80,6 +85,10 @@ func (bp *BlockProcessor) commitWorker() {
 							mvmId = tx.ToAddress()
 						}
 					}
+					// Skip if this mvmId was already committed/reverted
+					if _, done := committedMvmIds[mvmId]; done {
+						continue
+					}
 					mvmAPI := mvm.GetMVMApi(mvmId)
 					if mvmAPI != nil {
 						mvmRs := mvmAPI.GetExecuteResult()
@@ -90,10 +99,17 @@ func (bp *BlockProcessor) commitWorker() {
 								mvmAPI.CommitFullDb()
 							}
 						}
-						// Unprotect the MVM API
 						mvm.UnprotectMVMApi(mvmId)
+						committedMvmIds[mvmId] = struct{}{}
 					}
 				}
+			}
+
+			// MEMORY OPTIMIZATION: Eagerly clear all committed MVMApi instances
+			// instead of relying solely on RemoveOldApiInstances() GC (50K threshold).
+			// Safe because no consumer reads MVMApi after commit/revert phase.
+			for mvmId := range committedMvmIds {
+				mvm.ClearMVMApi(mvmId)
 			}
 			mvm.RemoveOldApiInstances()
 		}
