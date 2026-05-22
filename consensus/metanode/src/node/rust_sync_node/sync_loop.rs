@@ -83,7 +83,7 @@ impl RustSyncNode {
 
             let sleep_duration = if is_turbo_mode {
                 // When catching up: minimal sleep to maximize throughput
-                Duration::from_millis(50)
+                Duration::from_millis(10)
             } else {
                 normal_interval
             };

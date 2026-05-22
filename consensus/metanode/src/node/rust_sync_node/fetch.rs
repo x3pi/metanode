@@ -137,7 +137,7 @@ impl RustSyncNode {
         let fetch_timer = self.metrics.peer_fetch_duration_seconds.start_timer();
 
         info!(
-            "🎯 [SMART-SHARDING] Assigned primary peer {} for range {:?} (Hedging in 500ms)",
+            "🎯 [SMART-SHARDING] Assigned primary peer {} for range {:?} (Hedging in 100ms)",
             primary_peer, commit_range
         );
 
@@ -170,7 +170,7 @@ impl RustSyncNode {
             timeout,
         ));
 
-        let mut hedging_timer = Box::pin(tokio::time::sleep(Duration::from_millis(500)));
+        let mut hedging_timer = Box::pin(tokio::time::sleep(Duration::from_millis(100)));
         let mut hedged = false;
 
         let mut serialized_commits: Vec<Bytes> = Vec::new();
@@ -182,7 +182,7 @@ impl RustSyncNode {
                 _ = &mut hedging_timer, if !hedged => {
                     hedged = true;
                     if active_authorities.len() > 1 {
-                        info!("🚀 [HEDGING] Primary {} slow (500ms). Racing against others...", primary_peer);
+                        info!("🚀 [HEDGING] Primary {} slow (100ms). Racing against others...", primary_peer);
                         for &peer_idx in active_authorities {
                             if peer_idx != primary_peer {
                                 fetch_futures.push(spawn_req(peer_idx, network_client.clone(), commit_range.clone(), timeout));
