@@ -78,6 +78,7 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 		logger.Warn("⚠️ [SELF-HEAL] Commit: lockedFlag was false (expected true). " +
 			"Force-acquiring lock to prevent node crash.")
 		db.lockedFlag.Store(true)
+		db.muTrie.Lock()
 	}
 	// Lock the entire commit process to ensure atomicity
 	db.muCommit.Lock()
@@ -96,6 +97,7 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 		db.lockedFlag.Store(false) // CHANGED: Use atomic Store
 	}()
 	if err != nil {
+		db.muTrie.Unlock() // Lock leak fix: release structural lock on error exit path
 		logger.Error("Commit: Error applying changes during IntermediateRoot", "error", err)
 		// Attempt to discard changes to revert to the last known good state?
 		// Discard() acquires muStruct, which is fine as IntermediateRoot released it.
@@ -334,6 +336,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 		db.lockedFlag.Store(false)
 	}()
 	if err != nil {
+		db.muTrie.Unlock() // Lock leak fix: release structural lock on error exit path
 		logger.Error("CommitPipeline: Error during IntermediateRoot(false)", "error", err)
 		return nil, fmt.Errorf("commit pipeline failed during IntermediateRoot: %w", err)
 	}
