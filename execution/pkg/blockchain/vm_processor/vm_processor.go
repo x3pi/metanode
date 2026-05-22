@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
