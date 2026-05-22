@@ -124,7 +124,10 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 
 			// Register PebbleDB checkpoint callback for atomic snapshots
 			sm.SetCheckpointCallback(func(destPath string) error {
-				return storageMgr.CheckpointAll(destPath)
+				if err := storageMgr.CheckpointAll(destPath); err != nil {
+					return err
+				}
+				return chainState.CheckpointChangelogs(destPath)
 			})
 			logger.Info("📸 [SNAPSHOT] Registered PebbleDB checkpoint callback")
 			

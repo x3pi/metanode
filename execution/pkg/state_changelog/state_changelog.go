@@ -72,6 +72,16 @@ func (c *StateChangelogDB) Close() error {
 	return nil
 }
 
+// Checkpoint creates an atomic PebbleDB checkpoint of the changelog DB to destDir.
+func (c *StateChangelogDB) Checkpoint(destDir string) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.db == nil {
+		return fmt.Errorf("changelog db is closed")
+	}
+	return c.db.Checkpoint(destDir)
+}
+
 // WriteBlockChanges records state diffs for a given block
 func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []StateChange) error {
 	if len(changes) == 0 {
@@ -120,7 +130,9 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	// Use pebble.Sync instead of NoSync to ensure durability of historical changelogs,
+	// protecting against historical state loss during sudden node shutdowns/kills.
+	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("failed to commit changelog batch: %w", err)
 	}
 

@@ -241,8 +241,10 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	// Phase 2.4: Try to get historical state from StateChangelogDB
 	changelogDB := api.App.chainState.GetChangelogDB()
 	if changelogDB != nil && foundBlockNumber {
+		logger.Info("🔍 [DEBUG-RPC] Resolving historical state for %x at block %d using StateChangelogDB", address.Bytes(), targetBlockNumber)
 		stateBytes, err := changelogDB.GetStateAt(address.Bytes(), targetBlockNumber)
 		if err == nil {
+			logger.Info("🔍 [DEBUG-RPC] StateChangelogDB found entry for %x at block %d, len(bytes)=%d", address.Bytes(), targetBlockNumber, len(stateBytes))
 			if len(stateBytes) == 0 {
 				// Address explicitly deleted or does not exist
 				return nil, nil
@@ -250,33 +252,17 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 			// Unmarshal the protobuf bytes
 			as := &state.AccountState{}
 			if errUnmarshal := as.Unmarshal(stateBytes); errUnmarshal == nil {
+				logger.Info("🔍 [DEBUG-RPC] Successfully unmarshaled AccountState for %x at block %d: Balance=%s, Nonce=%d", address.Bytes(), targetBlockNumber, as.Balance().String(), as.Nonce())
 				return as, nil
 			} else {
 				logger.Warn("⚠️ [RPC] Failed to unmarshal historical state for %x at block %d: %v", address, targetBlockNumber, errUnmarshal)
 			}
 		} else {
-			// ErrNotFound: changelog has no entry for this address at or before targetBlock.
-			//
-			// CRITICAL FIX: NOMT is a flat key-value store — it does NOT support point-in-time
-			// queries. NomtStateTrie.Get() always returns the LATEST flushed state.
-			//
-			// EXACT ACCURACY via startBlock tracking:
-			// The changelog records its startBlock (the first block ever written).
-			// This enables three cases with ZERO approximation:
-			//
-			//   Case 1: targetBlock < startBlock
-			//     → Block predates changelog tracking → we have NO data → error
-			//
-			//   Case 2: targetBlock >= startBlock AND no entries for this address
-			//     → Account was NEVER modified in [startBlock, now]
-			//     → Current NOMT state IS EXACTLY the historical state (proven: no changes)
-			//     → Fall through to NOMT trie read ✅
-			//
-			//   Case 3: targetBlock >= startBlock AND entries exist but only after targetBlock
-			//     → Account was modified AFTER targetBlock
-			//     → We don't know the pre-modification state → error
+			logger.Info("🔍 [DEBUG-RPC] StateChangelogDB GetStateAt returned error for %x at block %d: %v", address.Bytes(), targetBlockNumber, err)
 			if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
 				startBlock := changelogDB.GetStartBlock()
+				hasAny := changelogDB.HasAnyEntry(address.Bytes())
+				logger.Info("🔍 [DEBUG-RPC] StateChangelogDB startBlock=%d, HasAnyEntry=%v for %x", startBlock, hasAny, address.Bytes())
 
 				// Case 1: targetBlock predates changelog tracking
 				if startBlock > 0 && targetBlockNumber < startBlock {
@@ -284,7 +270,7 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 					return nil, fmt.Errorf("historical state unavailable: block %d predates changelog tracking (started at block %d)", targetBlockNumber, startBlock)
 				}
 
-				if changelogDB.HasAnyEntry(address.Bytes()) {
+				if hasAny {
 					// Case 3: Entries exist but only for blocks AFTER targetBlock
 					logger.Warn("⚠️ [RPC] StateChangelogDB has entries for %x but not at/before block %d. Account was modified after target block — cannot determine pre-modification state.", address, targetBlockNumber)
 					return nil, fmt.Errorf("historical state unavailable: account was modified after block %d but pre-modification state not recorded", targetBlockNumber)

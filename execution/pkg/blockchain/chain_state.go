@@ -126,7 +126,13 @@ func NewChainStateWithGenesis(
 		if config == nil || !config.EnableHistoricalState || backupPath == "" {
 			return nil
 		}
-		cPath := filepath.Join(filepath.Dir(backupPath), dirName)
+		var baseDir string
+		if config.Databases.RootPath != "" {
+			baseDir = config.Databases.RootPath
+		} else {
+			baseDir = filepath.Dir(backupPath)
+		}
+		cPath := filepath.Join(baseDir, dirName)
 		cdb, cErr := state_changelog.NewStateChangelogDB(cPath, namespace)
 		if cErr != nil {
 			logger.Error("Failed to init StateChangelogDB for %s at %s: %v", namespace, cPath, cErr)
@@ -1216,4 +1222,23 @@ func (cs *ChainState) LoadEpochData() error {
 // SetEpochNotificationCallback sets the callback function to be called when epoch changes
 func (cs *ChainState) SetEpochNotificationCallback(cb func(uint64, uint64, uint64)) {
 	cs.epochNotificationCallback = cb
+}
+
+// CheckpointChangelogs creates atomic PebbleDB checkpoints for changelog databases if enabled
+func (cs *ChainState) CheckpointChangelogs(destBaseDir string) error {
+	if cs.changelogDB != nil {
+		cPath := filepath.Join(destBaseDir, "changelog_db_account")
+		if err := cs.changelogDB.Checkpoint(cPath); err != nil {
+			return fmt.Errorf("failed to checkpoint changelog_db_account: %w", err)
+		}
+		logger.Info("✅ [STATE CHANGELOG] Checkpointed changelog_db_account to %s", cPath)
+	}
+	if cs.stakeChangelogDB != nil {
+		cPath := filepath.Join(destBaseDir, "changelog_db_stake")
+		if err := cs.stakeChangelogDB.Checkpoint(cPath); err != nil {
+			return fmt.Errorf("failed to checkpoint changelog_db_stake: %w", err)
+		}
+		logger.Info("✅ [STATE CHANGELOG] Checkpointed changelog_db_stake to %s", cPath)
+	}
+	return nil
 }
