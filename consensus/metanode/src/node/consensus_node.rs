@@ -1741,7 +1741,7 @@ impl ConsensusNode {
                     break;
                 }
 
-                if local_block + ACCEPTABLE_GAP >= max_peer_block {
+                if local_block > 0 && local_block + ACCEPTABLE_GAP >= max_peer_block {
                     tracing::info!(
                         "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}, round={}). Starting consensus...",
                         local_block, max_peer_block, sync_round
