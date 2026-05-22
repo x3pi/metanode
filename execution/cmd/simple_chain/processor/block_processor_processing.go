@@ -679,6 +679,7 @@ func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
 	bp.chainState.GetAccountStateDB().Discard()
 	bp.chainState.GetSmartContractDB().Discard()
+	bp.chainState.GetStakeStateDB().Discard()
 	blockchain.GetBlockChainInstance().DiscardBlockMappings(lastBlockNumber)
 	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
 	bp.SetLastBlock(lastBl)
