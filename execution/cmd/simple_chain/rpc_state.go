@@ -123,9 +123,12 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, input hexutil.Bytes,
 
 func (api *MetaAPI) GetBalance(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (*hexutil.Big, error) {
 	as, err := api.resolveAccountState(ctx, address, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
 	zero := new(big.Int)
 	vl := hexutil.Big(*zero)
-	if err != nil || as == nil {
+	if as == nil {
 		return &vl, nil
 	}
 
