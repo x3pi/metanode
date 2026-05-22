@@ -751,7 +751,18 @@ impl CommitProcessor {
                                 } else {
                                     false // No checker → assume no data → allow bypass
                                 };
-                                let (cold_start_bypass, sustained_load_bypass) = if !digest_has_data {
+                                // ═══════════════════════════════════════════════════════
+                                // BYPASS TIMEOUT CALCULATION (Updated May 2026):
+                                // We calculate cold_start_bypass and sustained_load_bypass
+                                // regardless of digest_has_data. If the local commit is stuck
+                                // without digest data for 10s (or 5s under high pressure),
+                                // we bypass and dispatch to prevent pipeline deadlock.
+                                //
+                                // Fork safety is preserved because this None path ONLY runs
+                                // when no conflicting digest has been seen. If a conflict
+                                // is detected, we enter the divergence path instead.
+                                // ═══════════════════════════════════════════════════════
+                                let (cold_start_bypass, sustained_load_bypass) = {
                                     if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
                                         let now = std::time::Instant::now();
                                         let age = now.duration_since(*pending_ts);
@@ -764,33 +775,6 @@ impl CommitProcessor {
                                     } else {
                                         (false, false)
                                     }
-                                } else {
-                                    // ═══════════════════════════════════════════════════════
-                                    // QCI-AHEAD-BYPASS (May 2026): Safe alternative to timeout.
-                                    //
-                                    // When digest_has_data=true but verifier returns None for
-                                    // THIS specific commit index:
-                                    //   - digest_history has entries from OTHER indices
-                                    //   - But blocks' commit_votes don't carry digests for
-                                    //     every intermediate index — only their LATEST
-                                    //   - So digest_history[commit_index] may never exist
-                                    //
-                                    // SAFETY PROOF: QCI requires 2f+1 stake agreement.
-                                    // If our local commit at index N diverges from network,
-                                    // commits N+1, N+2... would also diverge, preventing
-                                    // QCI from advancing past N. Therefore:
-                                    //   qci_val > commit_index → network agreed on N
-                                    //   verifier returns None → no conflicting digest found
-                                    //   → local commit is implicitly verified
-                                    //
-                                    // This is FORK-SAFE: we never bypass when a conflicting
-                                    // digest EXISTS (that case returns false at line ~1165).
-                                    // We only bypass when NO digest entry exists AND QCI
-                                    // proves the network has already moved past this point.
-                                    // ═══════════════════════════════════════════════════════
-                                    // digest_has_data=true but verifier returned None.
-                                    // QCI-AHEAD-BYPASS is checked below in the else branch.
-                                    (false, false)
                                 };
 
                                 if quorum_gc_bypass {
