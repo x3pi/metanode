@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -179,14 +180,17 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					var as pb.AccountState
 					if err := proto.Unmarshal(asBytes, &as); err == nil {
-						nonce := as.Nonce
+						var nonceVal uint64
+						if len(as.Nonce) >= 8 {
+							nonceVal = binary.BigEndian.Uint64(as.Nonce)
+						}
 						resp := rpc_client.JSONRPCResponse{
 							Jsonrpc: "2.0",
-							Result:  fmt.Sprintf("0x%x", nonce),
+							Result:  fmt.Sprintf("0x%x", nonceVal),
 							Id:      id,
 						}
 						utils.WriteJSON(w, resp)
-						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonce)
+						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonceVal)
 						return
 					} else {
 						logger.Warn("⚠️ [http_handler] eth_getTransactionCount unmarshal error: %v", err)
