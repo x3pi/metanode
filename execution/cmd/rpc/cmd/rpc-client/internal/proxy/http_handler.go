@@ -177,7 +177,16 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var nonceVal uint64
 		var gotNonce bool
 
-		if p.AppCtx != nil && p.AppCtx.ChainPool != nil {
+		blockParam := gjson.GetBytes(body, "params.1")
+		isLatestOrPending := true
+		if blockParam.Exists() {
+			blockStr := strings.ToLower(strings.TrimSpace(blockParam.String()))
+			if blockStr != "latest" && blockStr != "pending" && blockStr != "" {
+				isLatestOrPending = false
+			}
+		}
+
+		if isLatestOrPending && p.AppCtx != nil && p.AppCtx.ChainPool != nil {
 			chainClient, err := p.AppCtx.ChainPool.Get()
 			if err == nil {
 				asBytes, err := chainClient.GetAccountState(addrBytes, 10*time.Second)
@@ -206,8 +215,8 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Fallback to upstream RPC and intercept the response to ensure proper Ethereum hex encoding
-		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s with intercepted capture", addressStr)
+		// Fallback to upstream simple_chain Go DB/trie and intercept the response to ensure proper Ethereum hex encoding
+		logger.Info("🔵 [http_handler] eth_getTransactionCount falling back to upstream Go simple_chain DB for address=%s with intercepted capture", addressStr)
 		
 		rec := &responseCaptureWriter{
 			ResponseWriter: w,
