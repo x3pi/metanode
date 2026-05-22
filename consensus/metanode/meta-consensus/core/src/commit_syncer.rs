@@ -1593,11 +1593,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
-        let quorum_commit_index = std::cmp::max(
+        let local_epoch = self.inner.context.committee.epoch();
+        let mut quorum_commit_index = std::cmp::max(
             self.inner.commit_vote_monitor.quorum_commit_index(),
             self.coordination_hub.get_quorum_commit_index(),
         );
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
+
+        // If the highest seen epoch from peers is greater than our local epoch,
+        // we are lagging on epoch boundaries. Force quorum_commit_index forward
+        // to trigger CatchingUp phase and schedule commit sync downloads across epoch boundaries.
+        if self.inner.commit_vote_monitor.highest_seen_epoch() > local_epoch {
+            let batch_size = self.inner.context.parameters.commit_sync_batch_size;
+            quorum_commit_index = std::cmp::max(quorum_commit_index, local_commit_index + batch_size);
+        }
 
         // ═══════════════════════════════════════════════════════════════════════
         // ACTIVE SYNC RECOVERY: Removed. We no longer forcibly lower synced_commit_index

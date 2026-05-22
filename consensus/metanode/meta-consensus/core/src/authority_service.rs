@@ -206,6 +206,11 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                     .with_label_values(&[peer_hostname, "handle_send_block", e.name()])
                     .inc();
                 info!("Invalid block from {}: {}", peer, e);
+                if let ConsensusError::WrongEpoch { expected, actual } = e {
+                    if *actual > *expected {
+                        self.commit_vote_monitor.observe_highest_seen_epoch(*actual);
+                    }
+                }
             })?;
         let block_ref = verified_block.reference();
         debug!("Received block {} via send block.", block_ref);
