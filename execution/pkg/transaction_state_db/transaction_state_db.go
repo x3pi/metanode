@@ -263,15 +263,8 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		}
 
 		if len(batchKeys) > 0 {
-			if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
-				oldValues := make([][]byte, len(batchKeys))
-				if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, oldValues); err != nil {
-					return common.Hash{}, fmt.Errorf("failed to batch update nomt trie: %w", err)
-				}
-			} else {
-				if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
-					return common.Hash{}, fmt.Errorf("failed to batch update trie: %w", err)
-				}
+			if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
+				return common.Hash{}, fmt.Errorf("failed to batch update trie: %w", err)
 			}
 		}
 		logger.Info("✅ [txDB Phase 1] Marshalling & Trie BatchUpdate completed in %v", time.Since(marshalTimeStart))
@@ -420,20 +413,8 @@ func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 	}
 
 	if len(batchKeys) > 0 {
-		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
-			oldValues := make([][]byte, len(batchKeys))
-			if err := nomtTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, oldValues); err != nil {
-				return common.Hash{}, err
-			}
-		} else if flatTrie, ok := db.trie.(*p_trie.FlatStateTrie); ok {
-			oldValues := make([][]byte, len(batchKeys))
-			if err := flatTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, oldValues); err != nil {
-				return common.Hash{}, err
-			}
-		} else {
-			if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
-				return common.Hash{}, err
-			}
+		if err := db.trie.BatchUpdate(batchKeys, batchValues); err != nil {
+			return common.Hash{}, err
 		}
 	}
 
