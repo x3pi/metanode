@@ -118,31 +118,11 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 	} else {
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(number.Int64()))
 		if !ok {
-			// FALLBACK: The block mapping hasn't been committed to DB yet (async pipeline).
-			// Check if it's currently in the pending commit queue.
-			if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(number.Int64())); ok {
-				blockData = pendingBlock
-			} else {
-				// SECONDARY FALLBACK: Check if it's the absolute last block processed in memory
-				if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil && lastBlock.Header().BlockNumber() == uint64(number.Int64()) {
-					blockData = lastBlock
-				} else {
-					return nil
-				}
-			}
-		} else {
-			blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
-			if blockData == nil {
-				// DEFENSE IN DEPTH: If mapping exists but block loading from PebbleDB/cache returned nil,
-				// fall back to the active blockProcessor memory block to prevent race condition returns.
-				if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil && lastBlock.Header().BlockNumber() == uint64(number.Int64()) {
-					blockData = lastBlock
-				} else if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(number.Int64())); ok {
-					blockData = pendingBlock
-				} else {
-					return nil
-				}
-			}
+			return nil
+		}
+		blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
+		if blockData == nil {
+			return nil
 		}
 	}
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
@@ -328,17 +308,11 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 	} else {
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
-			if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(blockNr.Int64())); ok {
-				blockData = pendingBlock
-			} else {
-				return nil
-			}
-		} else {
-			// Load block from cache or file
-			blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
-			if blockData == nil {
-				return nil
-			}
+			return nil
+		}
+		blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
+		if blockData == nil {
+			return nil
 		}
 	}
 
@@ -449,18 +423,12 @@ func (api *MetaAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockN
 	} else {
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
-			if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(blockNr.Int64())); ok {
-				blockData = pendingBlock
-			} else {
-				return nil
-			}
-		} else {
-			// Load block from cache or file
-			blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
-			if blockData == nil {
-				logger.Warn("Error loading block from cache/file: not found for hash", hash)
-				return nil
-			}
+			return nil
+		}
+		blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
+		if blockData == nil {
+			logger.Warn("Error loading block from cache/file: not found for hash", hash)
+			return nil
 		}
 	}
 
@@ -495,18 +463,12 @@ func (api *MetaAPI) GetRawTransactionByBlockNumberAndIndex(ctx context.Context, 
 	} else {
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
-			if pendingBlock, ok := api.App.blockProcessor.GetPendingCommitBlock(uint64(blockNr.Int64())); ok {
-				blockData = pendingBlock
-			} else {
-				return nil
-			}
-		} else {
-			// Load block from file or cache
-			blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
-			if blockData == nil {
-				logger.Warn("Error loading block from cache/file: not found for hash", hash)
-				return nil
-			}
+			return nil
+		}
+		blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
+		if blockData == nil {
+			logger.Warn("Error loading block from cache/file: not found for hash", hash)
+			return nil
 		}
 	}
 
