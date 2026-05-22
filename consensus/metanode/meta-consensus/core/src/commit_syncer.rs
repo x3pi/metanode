@@ -402,7 +402,8 @@ impl CommitSyncerSupervisor {
                                     tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
                                 }
                             } else {
-                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected? Restarting in {:?}...", restart_delay);
+                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected terminal halt (e.g. epoch mismatch). Stopping supervisor.");
+                                break;
                             }
                             
                             tokio::time::sleep(restart_delay).await;
