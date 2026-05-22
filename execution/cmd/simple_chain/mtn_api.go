@@ -18,7 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -29,7 +28,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
-	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -213,52 +211,21 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 			isLatest = true
 		}
 	}
-	var as types.AccountState
 
-	if isLatest {
-		// CRITICAL FIX: Bypass LevelDB trie lookup for LatestBlock because the newest
-		// hashing runs in the background. Get from live memory singleton instead.
-		var err error
-		as, err = api.App.chainState.GetAccountStateDB().AccountStateReadOnly(address)
-		if err != nil {
-			return nil, err
-		}
-	} else {
+	if !isLatest {
 		stateRoot, err := api.resolveStateRoot(ctx, blockNrOrHash)
-		if err != nil {
-			return nil, err
-		}
-
-		cacheKey := stateRoot.Hex() + ":" + strings.ToLower(address.Hex())
-		if cached, ok := api.accountStateCache.Get(cacheKey); ok {
-			return cloneAccountStateMap(cached), nil
-		}
-
-		var accountStateTrie mt_trie.StateTrie
-		trieCacheKey := stateRoot.Hex()
-		if cachedTrie, ok := api.App.blockProcessor.GetTrieCache(trieCacheKey); ok {
-			accountStateTrie = cachedTrie
-		} else {
-			accountStateTrie, err = mt_trie.NewStateTrie(
-				stateRoot,
-				api.App.storageManager.GetStorageAccount(),
-				true,
-			)
-			if err != nil {
-				return nil, err
+		if err == nil {
+			cacheKey := stateRoot.Hex() + ":" + strings.ToLower(address.Hex())
+			if cached, ok := api.accountStateCache.Get(cacheKey); ok {
+				return cloneAccountStateMap(cached), nil
 			}
-			api.App.blockProcessor.SetTrieCache(trieCacheKey, accountStateTrie)
 		}
+	}
 
-		accountStateDB := account_state_db.NewAccountStateDB(
-			accountStateTrie,
-			api.App.storageManager.GetStorageAccount(),
-		)
-
-		as, err = accountStateDB.AccountState(address)
-		if err != nil {
-			return nil, err
-		}
+	// Use unified historical state resolution from ethApi which correctly supports NOMT's StateChangelogDB
+	as, err := api.ethApi.resolveAccountState(ctx, address, blockNrOrHash)
+	if err != nil {
+		return nil, err
 	}
 
 	if as == nil {
