@@ -29,6 +29,7 @@ func (app *App) initBlockchain() error {
 	logger.Info("initBlockchain started")
 
 	var futureNomtRoot e_common.Hash
+	wasCleanShutdown := app.WasCleanShutdown()
 
 	blockDatabase := block.NewBlockDatabase(app.storageManager.GetStorageBlock())
 
@@ -490,13 +491,27 @@ func (app *App) initBlockchain() error {
 		//   - Crash/SIGKILL:  full walk to genesis (recover all lost mappings)
 		// ═══════════════════════════════════════════════════════════════════
 		rebuildMaxBlocks := 0 // unlimited — full recovery walk
-		if app.WasCleanShutdown() {
+		if wasCleanShutdown {
 			rebuildMaxBlocks = 50 // fast sanity check only
 		}
 		blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
 	}
 
 SKIP_GENESIS:
+
+	// ═══════════════════════════════════════════════════════════════════
+	// STARTUP INTEGRITY CHECK (May 2026)
+	// Verify critical data consistency BEFORE starting consensus/sync.
+	// If data is corrupted beyond self-repair → warn ops team → exit.
+	// Clean shutdown: light check (10 blocks)
+	// Crash/SIGKILL: deep check (100 blocks)
+	// ═══════════════════════════════════════════════════════════════════
+	integrityDepth := 100 // deep check for crash recovery
+	if wasCleanShutdown {
+		integrityDepth = 10 // light check for clean shutdown
+	}
+	integrityResult := app.runStartupIntegrityCheck(integrityDepth)
+	app.handleIntegrityResult(integrityResult) // exits if critical errors found
 
 	// ═══════════════════════════════════════════════════════════════════
 	// ATOMIC SNAPSHOT VERIFICATION (OPTION C)
