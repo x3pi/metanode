@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -429,43 +428,74 @@ func processGroupsConcurrently(
 		numWorkers = 1
 	}
 
-	var nextIdx atomic.Int64
+	// ═══════════════════════════════════════════════════════════════
+	// WORKER POOL: Channel-based routing to prevent data races.
+	// We map Smart Contract transactions to specific workers based on their
+	// mvmId hash. This guarantees sequential execution for a specific contract,
+	// eliminating the updateStateDB data race and ensuring deterministic stateRoot.
+	// ═══════════════════════════════════════════════════════════════
+
+	type workerJob struct {
+		idx  int
+		meta groupMeta
+	}
+	workerChans := make([]chan workerJob, numWorkers)
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
+
+	for w := 0; w < numWorkers; w++ {
+		workerChans[w] = make(chan workerJob, len(groupedGroups)) // buffered
+		go func(wIdx int) {
+			defer wg.Done()
+			for job := range workerChans[wIdx] {
+				meta := job.meta
+				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[job.idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+				results[job.idx] = result // Write to indexed position — deterministic order
+				if enableTrace && meta.span != nil {
+					meta.span.End()
+				}
+			}
+		}(w)
+	}
 
 	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
 	startEVM := time.Now()
 
-	chunkSize := len(groupedGroups) / (numWorkers * 4)
-	if chunkSize < 1 {
-		chunkSize = 1
-	} else if chunkSize > 64 {
-		chunkSize = 64
+	nativeRoundRobin := 0
+	for i, group := range groupedGroups {
+		// Identify if this group contains smart contract execution
+		var contractAddr *common.Address
+		for _, item := range group.Items {
+			if !item.Tx.IsRegularTransaction() && !item.Tx.IsDeployContract() {
+				addr := item.Tx.ToAddress()
+				contractAddr = &addr
+				break
+			}
+		}
+
+		var workerIdx int
+		if contractAddr != nil {
+			// Hash contract address to route to a specific worker
+			h := 0
+			for _, b := range contractAddr.Bytes() {
+				h += int(b)
+			}
+			workerIdx = h % numWorkers
+		} else {
+			// SendNative or Deploy: load balance across workers
+			workerIdx = nativeRoundRobin % numWorkers
+			nativeRoundRobin++
+		}
+
+		workerChans[workerIdx] <- workerJob{
+			idx:  i,
+			meta: groupMetas[i],
+		}
 	}
 
+	// Close channels to signal workers to stop
 	for w := 0; w < numWorkers; w++ {
-		go func() {
-			defer wg.Done()
-			for {
-				endIdxVal := int(nextIdx.Add(int64(chunkSize)))
-				startIdx := endIdxVal - chunkSize
-				if startIdx >= len(groupedGroups) {
-					return
-				}
-				endIdx := endIdxVal
-				if endIdx > len(groupedGroups) {
-					endIdx = len(groupedGroups)
-				}
-				for idx := startIdx; idx < endIdx; idx++ {
-					meta := groupMetas[idx]
-					result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
-					results[idx] = result // Write to indexed position — deterministic order
-					if enableTrace && meta.span != nil {
-						meta.span.End()
-					}
-				}
-			}
-		}()
+		close(workerChans[w])
 	}
 
 	if enableTrace {

@@ -116,7 +116,7 @@ func VerifyTransaction(
 		}
 	}
 	if tx.GetNonce() < as.Nonce() {
-		logger.Error("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
+		logger.Warn("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
 		return transaction.InvalidNonce
 	}
 
@@ -282,6 +282,37 @@ func VerifyTransaction(
 	if !isFree && !isSubNodeLagging && !tx.ValidMaxFee(as) {
 		return transaction.InvalidMaxFee
 	}
+
+	// kiểm tra số dư có đủ cho max price
+	// maxFee := tx.MaxFee()
+	// if !isFree && maxFee.Cmp(big.NewInt(common.MINIMUM_BASE_FEE)) < 0 {
+	// 	logger.Error("maxFee", maxFee)
+	// 	return transaction.InvalidAmount
+	// }
+
+	// if !isFree && !tx.ValidAmountSpend(as, maxFee) {
+	// 	logger.Error("Error when execute transaction code 120003: maxFee")
+	// 	logger.Error("Error when execute transaction code 120003: detail as", as.Balance(), as.PendingBalance())
+	// 	logger.Error("Error when execute transaction code 120003: detail mf", maxFee, tx.Amount())
+	// 	return transaction.InvalidMaxGasPrice
+	// }
+
+	// if (!isFree && tx.ValidMaxGas() ) {
+	// 	return transaction.InvalidMaxGas
+	// }
+
+	// verify last hash
+
+	// Debug
+	// neu newDeviceKey ma bang voi as.DeviceKey() thi bao loi
+	// if tx.NewDeviceKey() == as.DeviceKey() && as.Nonce() != 0 {
+	// 	return transaction.InvalidNewDeviceKey
+	// }
+
+	// // // verify device key
+	// if !tx.ValidDeviceKey(as) {
+	// 	return transaction.InvalidLastDeviceKey
+	// }
 
 	return nil
 }
