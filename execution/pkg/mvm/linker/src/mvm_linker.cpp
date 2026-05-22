@@ -1001,6 +1001,10 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
     auto fromAc = gs.get(from, nullptr);
     auto toAc = gs.get(to, nullptr);
 
+    if (fromAc.acc.get_balance() < amount) {
+      throw std::runtime_error("insufficient balance for sendNative");
+    }
+
     fromAc.acc.set_balance(fromAc.acc.get_balance() - amount);
     toAc.acc.set_balance(toAc.acc.get_balance() + amount);
     gs.add_addresses_sub_balance_change(from, amount);
