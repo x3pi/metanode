@@ -974,6 +974,78 @@ func (db *AccountStateDB) LoadedAccountCount() int {
 	return count
 }
 
+// DeterministicDirtyHash returns a keccak256 hash of all dirty accounts in deterministic order.
+// This is used for fork debugging: if two nodes have the same dirtyHash before IntermediateRoot,
+// the fork is in trie computation. If different, the fork is in TX processing.
+func (db *AccountStateDB) DeterministicDirtyHash() common.Hash {
+	// 1. Collect all dirty accounts
+	var addrs []common.Address
+	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
+		addrs = append(addrs, key.(common.Address))
+		return true
+	})
+	if len(addrs) == 0 {
+		return common.Hash{}
+	}
+
+	// 2. Sort by address for deterministic order
+	slices.SortFunc(addrs, func(a, b common.Address) int {
+		return bytes.Compare(a[:], b[:])
+	})
+
+	// 3. Serialize each account and hash the concatenation
+	var allBytes []byte
+	for _, addr := range addrs {
+		val, ok := db.dirtyAccounts.Load(addr)
+		if !ok {
+			continue
+		}
+		as, valid := val.(types.AccountState)
+		if !valid || as == nil {
+			continue
+		}
+		data, err := as.Marshal()
+		if err != nil {
+			logger.Error("[FORK-DEBUG] DeterministicDirtyHash: marshal error for %s: %v", addr.Hex(), err)
+			continue
+		}
+		allBytes = append(allBytes, addr.Bytes()...)
+		allBytes = append(allBytes, data...)
+	}
+
+	return crypto.Keccak256Hash(allBytes)
+}
+
+// DirtyAccountsSummary returns a summary of all dirty accounts for fork debugging.
+// Returns sorted list of (address, balance, pendingBalance, nonce) tuples.
+func (db *AccountStateDB) DirtyAccountsSummary() string {
+	var addrs []common.Address
+	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
+		addrs = append(addrs, key.(common.Address))
+		return true
+	})
+	if len(addrs) == 0 {
+		return "no dirty accounts"
+	}
+	slices.SortFunc(addrs, func(a, b common.Address) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	result := fmt.Sprintf("%d dirty accounts:\n", len(addrs))
+	for _, addr := range addrs {
+		val, ok := db.dirtyAccounts.Load(addr)
+		if !ok {
+			continue
+		}
+		as, valid := val.(types.AccountState)
+		if !valid || as == nil {
+			continue
+		}
+		result += fmt.Sprintf("  %s: bal=%s pend=%s nonce=%d\n",
+			addr.Hex()[:10], as.Balance().String(), as.PendingBalance().String(), as.Nonce())
+	}
+	return result
+}
+
 // CommitPayload explicitly commits the NOMT payload to disk.
 // This is used for Genesis blocks and standalone operations where PersistAsync is not called.
 func (db *AccountStateDB) CommitPayload() error {
