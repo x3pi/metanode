@@ -55,9 +55,6 @@ mod setup_storage;
 mod setup_consensus;
 
 // Re-export from epoch_store for use in consensus_node
-use epoch_store::detect_local_epoch;
-
-
 
 #[cfg(test)]
 mod epoch_transition_tests;
