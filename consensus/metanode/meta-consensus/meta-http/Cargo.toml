@@ -1,5 +1,5 @@
 [package]
-name = "meta-http"
+name = "meta-http-consensus"
 version = "0.0.1"
 authors = ["Brandon Williams <brandon@mystenlabs.com>"]
 license = "Apache-2.0"

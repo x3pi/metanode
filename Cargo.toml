@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "consensus/metanode",
+    "consensus/client",
+    "execution/pkg/nomt_ffi/rust_lib",
+    "consensus/metanode/meta-consensus/core",
+    "consensus/metanode/meta-consensus/types",
+    "consensus/metanode/meta-consensus/config",
+    "consensus/metanode/meta-consensus/meta-http",
+    "consensus/metanode/meta-consensus/meta-tls",
+]
+resolver = "2"
+
+[workspace.dependencies]
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
+serde = { version = "1.0.144", features = ["derive", "rc"] }
+tokio = "=1.47.1"
+tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+bcs = "0.1.4"
+anyhow = "1.0.71"
+thiserror = "1.0.40"
+tracing = "0.1.37"
+parking_lot = { version = "0.12.3", features = ["arc_lock"] }
+itertools = "0.13.0"
+prometheus = "0.13.3"
+rand = "0.8.5"
+async-trait = "0.1.80"
+prost = "0.14.1"
+tonic = { version = "0.14.2", features = ["tls-webpki-roots", "transport", "zstd"] }
+tonic-prost = "0.14.2"
+tonic-build = "0.14.2"
+base64 = "0.21.2"
+tempfile = "3.8"
