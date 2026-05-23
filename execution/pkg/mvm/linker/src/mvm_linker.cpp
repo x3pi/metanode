@@ -334,7 +334,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
                 << std::endl;
     }
 
-    bool apply_to_cache = (result.er == mvm::ExitReason::returned || result.er == mvm::ExitReason::halted);
+    bool apply_to_cache = !isOffChain && (result.er == mvm::ExitReason::returned || result.er == mvm::ExitReason::halted);
 
     // Add balance
     std::vector<std::vector<uint8_t>> add_balance_change =
