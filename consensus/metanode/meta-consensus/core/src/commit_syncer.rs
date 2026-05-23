@@ -3077,7 +3077,11 @@ impl<C: NetworkClient> Inner<C> {
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);
             }
             for vote in block.commit_votes() {
-                if *vote == end_commit_ref {
+                // CROSS-EPOCH STAKE ALIGNMENT: Compare only index and digest.
+                // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0
+                // while validators vote with the actual active epoch (e.g., 2, 3, 4), causing
+                // accumulated_stake to incorrectly resolve to 0 and stall synchronization.
+                if vote.index == end_commit_ref.index && vote.digest == end_commit_ref.digest {
                     stake_aggregator.add(block.author(), &self.context.committee);
                 }
             }
