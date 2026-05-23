@@ -115,6 +115,9 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	}
 	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses())
+	if isCache {
+		defer mvm.UnprotectMVMApi(vmP.mvmId)
+	}
 	if tx.IsRegularTransaction() || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		rs, err := vmP.sendNative(execCtx, tx, mvmE)
 		if err != nil && span != nil {
