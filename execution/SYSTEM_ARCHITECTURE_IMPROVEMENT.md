@@ -6,6 +6,7 @@
 > 
 > Author: System Architecture Review  
 > Date: 2026-04-04  
+> **Status Review: 2026-05-23**  
 > Scope: `mtn-consensus` (Rust) + `mtn-simple-2025` (Go)  
 > Current Baseline: ~25,000 TPS (warm chain, 5 validators)
 
@@ -46,9 +47,9 @@ The MetaNode system is a sophisticated two-process blockchain architecture: Rust
 
 ### Top 5 Blockers for 40k+ TPS
 
-1. **Request socket serialization during epoch transitions** — RPC queries from Rust contend on sequential Go handler
+1. **Request socket serialization during epoch transitions** — RPC queries from Rust contend on sequential Go handler *(partially mitigated: connection_pool size=4)*
 2. **Serialization overhead in BackupDb** — ~2-5s per block for Sub-node replication serialization
-3. **`CommitProcessor` lock contention** — `tokio::sync::Mutex` on `epoch_eth_addresses` acquired per commit
+3. ~~**`CommitProcessor` lock contention** — `tokio::sync::Mutex` on `epoch_eth_addresses` acquired per commit~~ ✅ **RESOLVED (May 2026)** — Changed to `tokio::sync::RwLock`
 4. **`processGroupsConcurrently` goroutine sprawl** — Unbounded goroutine creation per TX group
 5. **Trie commit pipeline backlog** — `persistChannel` capacity (1) causes head-of-line blocking
 
@@ -407,27 +408,22 @@ A 30ms ticker for sequential block processing on Sub nodes limits theoretical th
 
 ### 3.3 Rust Consensus Engine
 
-#### RS-1: `CommitProcessor` Lock Contention on `epoch_eth_addresses` (🔴 Critical)
+#### ~~RS-1: `CommitProcessor` Lock Contention on `epoch_eth_addresses`~~ (✅ RESOLVED May 2026)
 
-**File**: `commit_processor.rs:596-767`
+**File**: `commit_processor.rs:50`
 
-Every commit acquires `validator_eth_addresses.lock().await` to resolve the leader address. This is a `tokio::sync::Mutex`, which means:
-1. If the epoch transition callback holds this lock (it inserts new epoch data), all commits block
-2. The retry loop (10 retries × 200ms) can hold the lock for up to 2 seconds
+**Status**: ✅ **RESOLVED** — `epoch_eth_addresses` now uses `tokio::sync::RwLock` instead of `tokio::sync::Mutex`. Reads (leader lookup, every commit) don't block each other; only writes (epoch transition) take exclusive lock.
 
 ```rust
-let resolved_address = loop {
-    let epoch_addresses = validator_eth_addresses.lock().await;  // ← CONTENTION
-    // ... validation logic ...
-    break Some(addr);
-};
+// Current implementation (May 2026):
+epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
 ```
 
-**Impact**: During epoch transitions, this can stall 5-10 commits (100ms each), causing a 500ms-1s gap in block production.
+~~**Impact**: During epoch transitions, this can stall 5-10 commits (100ms each), causing a 500ms-1s gap in block production.~~
 
-**Recommendation**: 
-1. Use `tokio::sync::RwLock` — reads (leader lookup) can be concurrent, only writes (epoch update) need exclusivity
-2. Cache the current epoch's committee in a `Arc<ArcSwap<Vec<Vec<u8>>>>` for lock-free reads
+~~**Recommendation**:~~
+~~1. Use `tokio::sync::RwLock` — reads (leader lookup) can be concurrent, only writes (epoch update) need exclusivity~~
+~~2. Cache the current epoch's committee in a `Arc<ArcSwap<Vec<Vec<u8>>>>` for lock-free reads~~
 
 ---
 
@@ -565,10 +561,10 @@ This confirms **40k+ TPS is achievable** with the optimizations in this document
 - **Risk**: Low (additive change to checkpoint logic)
 - **Files**: `commit_processor.rs`, `epoch_checkpoint.rs`
 
-#### T1-2: Replace `epoch_eth_addresses` Mutex with RwLock (RS-1)
-- **Effort**: 1 hour  
-- **Risk**: Low (read paths don't change, only lock type)
-- **File**: `commit_processor.rs`
+#### ~~T1-2: Replace `epoch_eth_addresses` Mutex with RwLock (RS-1)~~ ✅ DONE
+- **Status**: ✅ Completed May 2026
+- ~~**Effort**: 1 hour~~
+- **File**: `commit_processor.rs` — now uses `tokio::sync::RwLock`
 
 #### T1-3: Add connection health monitoring to IPC sockets (IPC-5)
 - **Effort**: 4 hours
@@ -644,7 +640,7 @@ This confirms **40k+ TPS is achievable** with the optimizations in this document
 ### Phase 1: Quick Wins (1 week)
 | Task | ID | Effort | Priority |
 |------|----|--------|----------|
-| RwLock for `epoch_eth_addresses` | T1-2 | 1h | P0 |
+| ~~RwLock for `epoch_eth_addresses`~~ | ~~T1-2~~ | ~~1h~~ | ✅ DONE |
 | Persist `cumulative_fragment_offset` | T1-1 | 2h | P0 |
 | Merge duplicate TX iteration | T2-4 | 2h | P1 |
 | Eliminate `ProcessorPool` busy-wait | T2-3 | 4h | P1 |
