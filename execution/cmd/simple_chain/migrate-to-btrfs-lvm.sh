@@ -76,6 +76,16 @@ fi
 echo "🔑 Cấp quyền sở hữu thư mục cho user hiện tại..."
 sudo chown -R $USER:$USER ./sample
 
+# 7. Thêm vào /etc/fstab để tự động mount sau khi restart (Chỉ chạy 1 lần)
+FSTAB_ENTRY="$(pwd)/metanode_btrfs.img $(pwd)/sample btrfs loop,defaults,nofail 0 0"
+if ! grep -q "$(pwd)/metanode_btrfs.img" /etc/fstab; then
+    echo "⚙️ Đang thêm cấu hình tự động mount vào /etc/fstab..."
+    echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab > /dev/null
+    echo "✅ Đã thêm vào fstab thành công!"
+else
+    echo "⚠️ Cấu hình tự động mount đã có trong /etc/fstab."
+fi
+
 echo ""
 echo "==========================================================="
 echo "🎉 HOÀN TẤT!"
