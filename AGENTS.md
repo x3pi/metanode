@@ -44,7 +44,7 @@ while strictly avoiding over-engineering.
 | **No Blocking Async** | NEVER use synchronous blocking I/O inside async loops or event engines. |
 | **Deterministic Merging** | NEVER trust local unverified state over network consensus hashes. |
 | **Output Language** | Code comments in English. Post-process summary in Vietnamese (see Part 5). |
-| **Build Verification** | ALWAYS run or ask the user to run `build_check.sh` inside `consensus/metanode/scripts/` after editing code to verify that both Go, Rust, and FFI build correctly. Never assume code is correct without compiling. |
+| **Build Verification** | ALWAYS run or ask the user to run `build_check.sh` inside `consensus/metanode/scripts/` after editing code to verify that both Go, Rust, and FFI build correctly. The agent's responsibility is solely to guarantee a clean build check; complex runtime testing and pipeline validation are left for the user to perform themselves. |
 
 ---
 
@@ -157,6 +157,7 @@ grep -rn "<SymbolName>" ./execution ./consensus --include="*.go" --include="*.rs
 ### Build Verification (after modifying code)
 
 **Primary verification method:**
+The agent is only responsible for verifying successful compilation (build checks). The complex testing and validation processes are handled manually/independently by the user.
 ALWAYS run or ask the user to run the build check script to verify both Go, Rust, and FFI components compile successfully:
 ```bash
 cd ./consensus/metanode/scripts
