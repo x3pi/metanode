@@ -33,6 +33,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -210,22 +211,32 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	}
 
 	// Prepare items for grouping
-	items := make([]grouptxns.Item, 0, len(txs)) // Use current tp.excludedItems
+	items := make([]grouptxns.Item, 0, len(txs))
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	nativeParallelAddrs := map[common.Address]struct{}{
+		accountSettingAddr:                   {},
+		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+	}
 	for i, tx := range txs {
+		// Build grouping addresses: filter out native dispatch addresses
+		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
+		for _, addr := range tx.RelatedAddresses() {
+			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+				groupAddrs = append(groupAddrs, addr)
+			}
+		}
+		// Safety: always have at least FromAddress
+		if len(groupAddrs) == 0 {
+			groupAddrs = append(groupAddrs, tx.FromAddress())
+		}
 		items = append(items, grouptxns.Item{
-			ID:        i, // Adjust ID based on current excludedItems length
-			Array:     tx.RelatedAddresses(),
-			GroupID:   0,
-			Tx:        tx,
-			TimeStart: time.Now(),
+			ID:      i,
+			Array:   groupAddrs,
+			GroupID: 0,
+			Tx:      tx,
 		})
 	}
-
-	// Group transactions
-	groupedGroups, _, err := grouptxns.GroupAndLimitTransactionsOptimized(items, mt_common.MAX_GROUP_GAS, mt_common.MAX_TOTAL_GAS, mt_common.MAX_GROUP_TIME, mt_common.MAX_TOTAL_TIME)
-	if err != nil {
-		return nil, fmt.Errorf("TraceBlock: failed to create grouptxns for block %d: %w", blockNumber, err)
-	}
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
 	blockDatabase := block.NewBlockDatabase(api.App.storageManager.GetStorageBlock())
 	myCollector := trace.NewSpanCollector()
 

@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -91,20 +92,31 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 	}
 
 	items := make([]grouptxns.Item, 0, len(txs))
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	nativeParallelAddrs := map[common.Address]struct{}{
+		accountSettingAddr:                   {},
+		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+	}
 	for i, tx := range txs {
+		// Build grouping addresses: filter out native dispatch addresses
+		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
+		for _, addr := range tx.RelatedAddresses() {
+			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+				groupAddrs = append(groupAddrs, addr)
+			}
+		}
+		// Safety: always have at least FromAddress
+		if len(groupAddrs) == 0 {
+			groupAddrs = append(groupAddrs, tx.FromAddress())
+		}
 		items = append(items, grouptxns.Item{
-			ID:        i,
-			Array:     tx.RelatedAddresses(),
-			GroupID:   0,
-			Tx:        tx,
-			TimeStart: time.Now(),
+			ID:      i,
+			Array:   groupAddrs,
+			GroupID: 0,
+			Tx:      tx,
 		})
 	}
-
-	groupedGroups, _, err := grouptxns.GroupAndLimitTransactionsOptimized(items, mt_common.MAX_GROUP_GAS, mt_common.MAX_TOTAL_GAS, mt_common.MAX_GROUP_TIME, mt_common.MAX_TOTAL_TIME)
-	if err != nil {
-		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create grouptxns for block %d: %w", blockNumber, err)
-	}
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
 
 	blockDatabase := block.NewBlockDatabase(bv.storageManager.GetStorageBlock())
 
