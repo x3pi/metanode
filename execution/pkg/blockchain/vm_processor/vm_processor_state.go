@@ -443,19 +443,16 @@ func (vmP *VmProcessor) updateStateDB(
 					details[address] = fmt.Sprintf("ConversionError: %s", newNonceBig.String())
 					continue
 				}
-				// 🔒 NONCE-FIX: For sender address, enforce nonce = oldNonce + 1
+				// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
+				// when transactions from the same sender are routed to different workers.
 				if fmtAddress == transaction.FromAddress() {
-					senderAs, asErr := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
-					if asErr == nil && senderAs != nil {
-						expectedNonce := senderAs.Nonce() + 1
-						if newNonce != expectedNonce {
-							logger.Warn("🚨 [NONCE-FIX] REVERT: EVM returned nonce=%d but expected=%d for sender=%s, txHash=%s. Clamping to expected.", newNonce, expectedNonce, fmtAddress.Hex(), transaction.Hash().Hex())
-							newNonce = expectedNonce
-						}
-					}
+					err = vmP.chainState.GetAccountStateDB().PlusOneNonce(fmtAddress)
+					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+					newNonce = 0 // Just for logging details below
+				} else {
+					err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
+					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 				}
-				err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
-				logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 				if err != nil {
 					finalErr = fmt.Errorf("failed to set nonce %d for %s: %w", newNonce, address, err)
 					if span != nil { // GUARD
@@ -575,19 +572,16 @@ func (vmP *VmProcessor) updateStateDB(
 				details[address] = fmt.Sprintf("ConversionError: %s", newNonceBig.String())
 				continue
 			}
-			// 🔒 NONCE-FIX: For sender address, enforce nonce = oldNonce + 1
+			// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
+			// when transactions from the same sender are routed to different workers.
 			if fmtAddress == transaction.FromAddress() {
-				senderAs, asErr := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
-				if asErr == nil && senderAs != nil {
-					expectedNonce := senderAs.Nonce() + 1
-					if newNonce != expectedNonce {
-						logger.Warn("🚨 [NONCE-FIX] SUCCESS: EVM returned nonce=%d but expected=%d for sender=%s, txHash=%s. Clamping to expected.", newNonce, expectedNonce, fmtAddress.Hex(), transaction.Hash().Hex())
-						newNonce = expectedNonce
-					}
-				}
+				err = vmP.chainState.GetAccountStateDB().PlusOneNonce(fmtAddress)
+				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+				newNonce = 0 // Just for logging details below
+			} else {
+				err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
+				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 			}
-			err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
-			logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 			if err != nil {
 				finalErr = fmt.Errorf("failed to set nonce %d for %s: %w", newNonce, address, err)
 				if span != nil { // GUARD

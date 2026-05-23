@@ -511,7 +511,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startExecution := time.Now()
-	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
+	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
 	execDuration := time.Since(startExecution)
 
 	if execDuration.Milliseconds() > 100 {
@@ -587,7 +587,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		baseCtx = ctx
 		rootSpan = nil
 	}
-	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
+	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
 }
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding

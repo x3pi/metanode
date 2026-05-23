@@ -83,9 +83,16 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		// DETERMINISTIC: Use txHash-only hash for readOnly mvmId.
 		// No state changes occur, so no fork risk, but deterministic IDs
 		// make execution reproducible for debugging.
-		combinedHash := sha256.Sum256(append([]byte("readonly-"), tx.Hash().Bytes()...))
-		ethAddressBytes := combinedHash[12:]
-		mvmIdReadOnly := common.BytesToAddress(ethAddressBytes)
+		var mvmIdReadOnly common.Address
+		for {
+			combinedHash := sha256.Sum256(append([]byte(fmt.Sprintf("readonly-%d-", time.Now().UnixNano())), tx.Hash().Bytes()...))
+			ethAddressBytes := combinedHash[12:]
+			ethAddressBytes[0] = 0xFC // Prefix cho readonly
+			mvmIdReadOnly = common.BytesToAddress(ethAddressBytes)
+			if mvm.GetMVMApi(mvmIdReadOnly) == nil {
+				break
+			}
+		}
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
@@ -108,8 +115,11 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	}
 	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses())
+	if isCache {
+		defer mvm.UnprotectMVMApi(vmP.mvmId)
+	}
 	if tx.IsRegularTransaction() || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		rs, err := vmP.sendNative(execCtx, tx, mvmE)
+		rs, err := vmP.sendNative(execCtx, tx, mvmE, isCache)
 		if err != nil && span != nil {
 			span.SetError(err)
 		} else if span != nil {
@@ -397,6 +407,7 @@ func (vmP *VmProcessor) executeSmartContract(
 			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
+			isCache,
 		)
 
 	} else {
@@ -526,6 +537,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 		bFrom, bTo, tx.Amount(), operationType, tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
+		false,
 	)
 
 	if span != nil { // GUARD
@@ -580,6 +592,7 @@ func (vmP *VmProcessor) sendNative(
 	ctx context.Context,
 	tx types.Transaction,
 	mvmE *mvm.MVMApi,
+	isCache bool,
 ) (types.ExecuteSCResult, error) {
 	var span *trace.Span = nil        // Khởi tạo nil
 	var execCtx context.Context = ctx // Mặc định dùng context vào
@@ -623,6 +636,7 @@ func (vmP *VmProcessor) sendNative(
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
+		isCache,
 	)
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{

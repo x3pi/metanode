@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/websocket"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -28,7 +29,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pkg_network "github.com/meta-node-blockchain/meta-node/pkg/network"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -687,4 +691,133 @@ func (api *DebugApi) ListManagedConnections(ctx context.Context, params *Connect
 	})
 
 	return summaries, nil
+}
+
+// ModifiedAccountInfo represents differences/details of a modified account state.
+type ModifiedAccountInfo struct {
+	Address         string `json:"address"`
+	PreBalance      string `json:"preBalance"`
+	PostBalance     string `json:"postBalance"`
+	PreNonce        uint64 `json:"preNonce"`
+	PostNonce       uint64 `json:"postNonce"`
+	PreCodeHash     string `json:"preCodeHash"`
+	PostCodeHash    string `json:"postCodeHash"`
+	PreStorageRoot  string `json:"preStorageRoot"`
+	PostStorageRoot string `json:"postStorageRoot"`
+	PreDataHash     string `json:"preDataHash"`
+	PostDataHash    string `json:"postDataHash"`
+	IsNew           bool   `json:"isNew"`
+}
+
+// BlockStateDiffResult represents the results of evaluating the block execution state changes.
+type BlockStateDiffResult struct {
+	BlockNumber      uint64                         `json:"blockNumber"`
+	CalculatedRoot   string                         `json:"calculatedRoot"`
+	ModifiedAccounts map[string]ModifiedAccountInfo `json:"modifiedAccounts"`
+}
+
+// GetBlockStateDiff returns all accounts that changed in a block, using historical StateChangelogDB data.
+func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) (*BlockStateDiffResult, error) {
+	if blockNumber == 0 {
+		return nil, fmt.Errorf("GetBlockStateDiff: cannot get state diff for genesis block 0")
+	}
+
+	var changelogDB *state_changelog.StateChangelogDB
+	if api.App != nil && api.App.chainState != nil && api.App.chainState.GetAccountStateDB() != nil {
+		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+	}
+
+	if changelogDB == nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: StateChangelogDB is not available (only supported with NomtStateTrie)")
+	}
+
+	changes, err := changelogDB.GetBlockChanges(blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to query block changes: %w", err)
+	}
+
+	modifiedMap := make(map[string]ModifiedAccountInfo)
+	for _, change := range changes {
+		addr := common.BytesToAddress(change.Key)
+		hexAddr := addr.Hex()
+		
+		var postBal, postCodeHash, postStorageRoot, postDataHash string
+		var postNonce uint64
+		if len(change.NewValue) > 0 {
+			postAS := state.NewAccountState(addr)
+			if err := postAS.Unmarshal(change.NewValue); err == nil {
+				postBal = postAS.TotalBalance().String()
+				postNonce = postAS.Nonce()
+				if postAS.SmartContractState() != nil {
+					postCodeHash = postAS.SmartContractState().CodeHash().Hex()
+					postStorageRoot = postAS.SmartContractState().StorageRoot().Hex()
+				} else {
+					postCodeHash = "0x"
+					postStorageRoot = "0x"
+				}
+				postDataHash = common.BytesToHash(crypto.Keccak256(change.NewValue)).Hex()
+			}
+		}
+
+		var isNew bool
+		var preNonce uint64
+		var preBal, preCodeHash, preStorageRoot, preDataHash string
+		oldVal, err := changelogDB.GetStateAt(change.Key, blockNumber-1)
+		if err != nil || len(oldVal) == 0 {
+			isNew = true
+			preBal = "0"
+			preNonce = 0
+			preCodeHash = "0x"
+			preStorageRoot = "0x"
+			preDataHash = "0x"
+		} else {
+			isNew = false
+			preAS := state.NewAccountState(addr)
+			if err := preAS.Unmarshal(oldVal); err == nil {
+				preBal = preAS.TotalBalance().String()
+				preNonce = preAS.Nonce()
+				if preAS.SmartContractState() != nil {
+					preCodeHash = preAS.SmartContractState().CodeHash().Hex()
+					preStorageRoot = preAS.SmartContractState().StorageRoot().Hex()
+				} else {
+					preCodeHash = "0x"
+					preStorageRoot = "0x"
+				}
+				preDataHash = common.BytesToHash(crypto.Keccak256(oldVal)).Hex()
+			}
+		}
+
+		modifiedMap[hexAddr] = ModifiedAccountInfo{
+			Address:         hexAddr,
+			PreBalance:      preBal,
+			PostBalance:     postBal,
+			PreNonce:        preNonce,
+			PostNonce:       postNonce,
+			PreCodeHash:     preCodeHash,
+			PostCodeHash:    postCodeHash,
+			PreStorageRoot:  preStorageRoot,
+			PostStorageRoot: postStorageRoot,
+			PreDataHash:     preDataHash,
+			PostDataHash:    postDataHash,
+			IsNew:           isNew,
+		}
+	}
+
+	var calcRoot string
+	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	if ok {
+		if blockData, err := api.App.chainState.GetBlockDatabase().GetBlockByHash(hash); err == nil {
+			calcRoot = blockData.Header().AccountStatesRoot().Hex()
+		}
+	}
+
+	result := &BlockStateDiffResult{
+		BlockNumber:      blockNumber,
+		CalculatedRoot:   calcRoot,
+		ModifiedAccounts: modifiedMap,
+	}
+
+	return result, nil
 }
