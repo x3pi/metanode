@@ -693,9 +693,38 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		return common.Hash{}, updateErr
 	}
 
+	var newHash common.Hash
 	if hasChanges {
+		// ═══════════════════════════════════════════════════════════════
+		// NOMT STATEROOT FIX (May 2026):
+		//
+		// For NOMT trie, Hash() returns readView.rootHash — a cached value
+		// that is ONLY updated by Commit(). Calling Hash() here returns the
+		// PREVIOUS block's root, causing STATEROOT_FREEZE/DIVERGENCE.
+		//
+		// Fix: Call Commit() for NOMT during IntermediateRoot(true).
+		// This runs the NOMT session (RecordRead + BatchWrite + Finish),
+		// computes the actual Merkle root, and updates readView.rootHash.
+		//
+		// Commit's subsequent trie.Commit() call will see empty
+		// wDirty and return immediately (no-op) with the correct hash.
+		//
+		// For MPT/Flat tries, Hash() correctly computes from in-memory
+		// trie state — no change needed.
+		// ═══════════════════════════════════════════════════════════════
+		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			committedHash, _, _, commitErr := db.trie.Commit(true)
+			if commitErr != nil {
+				logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during IntermediateRoot failed: %v", commitErr)
+				newHash = db.trie.Hash() // fallback to stale hash
+			} else {
+				newHash = committedHash
+				logger.Debug("[NOMT-INLINE-COMMIT] IntermediateRoot got real root: %s", newHash.Hex()[:18]+"...")
+			}
+		} else {
+			newHash = db.trie.Hash()
+		}
 
-		newHash := db.trie.Hash()
 		logger.Debug("Calculated new intermediate hash for stake state", "newHash", newHash)
 		fileLogger.Info("IntermediateRoot: hasChanges", newHash)
 
