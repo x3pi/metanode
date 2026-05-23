@@ -54,9 +54,11 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	// diagnosing fork issues where standard fields match but hash differs.
 	// ═══════════════════════════════════════════════════════════════════════
 	blockMap["globalExecIndex"] = hexutil.EncodeUint64(block.Header().GlobalExecIndex()) // Maps Go block → Rust consensus commit index
+	blockMap["commitIndex"] = hexutil.EncodeUint64(block.Header().CommitIndex())         // Rust consensus commit index
 	blockMap["stakeStatesRoot"] = block.Header().StakeStatesRoot()                       // Root của Merkle trie chứa trạng thái stake
 	blockMap["epoch"] = hexutil.EncodeUint64(block.Header().Epoch())                     // Epoch của khối
 	blockMap["leaderAddress"] = block.Header().LeaderAddress().Hex()                     // Địa chỉ validator tạo khối
+	blockMap["aggregateSignature"] = hexutil.Encode(block.Header().AggregateSignature()) // Chữ ký gộp của block
 
 	// Add transactions to the map.
 	txHashes := block.Transactions()
