@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
+use consensus_core::coordination_hub::PeerAttestResult;
 use mysten_metrics::monitored_mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -76,6 +77,10 @@ pub struct CommitProcessor {
     /// peer queries), this reflects actual digest observation capability.
     /// When this returns false, COLD-START-BYPASS is eligible regardless of QCI value.
     digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// ZERO-TIMEOUT PEER ATTESTATION (May 2026): Replaces COLD-START-BYPASS (10s)
+    /// and SUSTAINED-LOAD-BYPASS (5s). When DIGEST-GATE has no quorum digest, this
+    /// callback polls peers to verify the local commit instead of using timeouts.
+    peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
 }
 
 impl CommitProcessor {
@@ -107,6 +112,7 @@ impl CommitProcessor {
             committee_size: 0,
             digest_verifier: None,
             digest_data_checker: None,
+            peer_commit_attestation: None,
         }
     }
 
@@ -304,6 +310,18 @@ impl CommitProcessor {
         self
     }
 
+    /// ZERO-TIMEOUT (May 2026): Set the peer commit attestation callback.
+    /// Replaces timeout-based COLD-START-BYPASS (10s) and SUSTAINED-LOAD-BYPASS (5s).
+    /// When DIGEST-GATE verifier returns None (no quorum digest), this callback polls
+    /// peers to verify the local commit digest instead of waiting for a timeout.
+    pub fn with_peer_commit_attestation<F>(mut self, attestor: F) -> Self
+    where
+        F: Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync + 'static,
+    {
+        self.peer_commit_attestation = Some(Arc::new(attestor));
+        self
+    }
+
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
@@ -424,6 +442,7 @@ impl CommitProcessor {
         let committee_size = self.committee_size;
         let digest_verifier = self.digest_verifier.clone();
         let digest_data_checker = self.digest_data_checker.clone();
+        let peer_commit_attestation = self.peer_commit_attestation.clone();
         // BFT quorum threshold: 2f+1 where n=3f+1, so quorum = ceil(2n/3)
         // For n=5: quorum=4, n=4: quorum=3, n=7: quorum=5
         let _quorum_threshold = if committee_size > 0 {
@@ -752,29 +771,29 @@ impl CommitProcessor {
                                     false // No checker → assume no data → allow bypass
                                 };
                                 // ═══════════════════════════════════════════════════════
-                                // BYPASS TIMEOUT CALCULATION (Updated May 2026):
-                                // We calculate cold_start_bypass and sustained_load_bypass
-                                // regardless of digest_has_data. If the local commit is stuck
-                                // without digest data for 10s (or 5s under high pressure),
-                                // we bypass and dispatch to prevent pipeline deadlock.
+                                // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
+                                // Replaces COLD-START-BYPASS (10s) and SUSTAINED-LOAD-
+                                // BYPASS (5s) with a DATA-DRIVEN peer polling check.
                                 //
-                                // Fork safety is preserved because this None path ONLY runs
-                                // when no conflicting digest has been seen. If a conflict
-                                // is detected, we enter the divergence path instead.
+                                // Instead of waiting N seconds and dispatching blind,
+                                // we ask peers if they produced the same commit digest.
+                                // This is DETERMINISTIC: all nodes get the same answer
+                                // from the same set of peers.
+                                //
+                                // Fork safety: Peer attestation returns Ok only when
+                                // 2f+1 peers agree on the digest. Conflict means our
+                                // local commit is wrong. Insufficient means we can't
+                                // verify yet — stay pending (thà pending chứ không fork).
                                 // ═══════════════════════════════════════════════════════
-                                let (cold_start_bypass, sustained_load_bypass) = {
-                                    if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
-                                        let now = std::time::Instant::now();
-                                        let age = now.duration_since(*pending_ts);
-                                        let cold = age.as_secs() >= 10;
-                                        // SUSTAINED-LOAD-BYPASS: 5s timeout when buffer pressure is high
-                                        let sustained = !cold
-                                            && age.as_secs() >= 5
-                                            && pending_local_commits.len() >= MAX_PENDING_LOCAL_COMMITS / 2;
-                                        (cold, sustained)
+                                let peer_attest_result = if !digest_has_data {
+                                    if let Some(ref attestor) = peer_commit_attestation {
+                                        let local_digest = local_commit.commit_ref.digest.into_inner();
+                                        Some(attestor(local_idx, local_digest))
                                     } else {
-                                        (false, false)
+                                        None // No attestor available
                                     }
+                                } else {
+                                    None // Digest data exists — use QCI-AHEAD path instead
                                 };
 
                                 if quorum_gc_bypass {
@@ -785,25 +804,25 @@ impl CommitProcessor {
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
-                                } else if cold_start_bypass {
-                                    warn!(
-                                        "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 10s wait. \
-                                         CommitVoteMonitor has no digest data (epoch cold-start). \
-                                         Normal DIGEST-GATE verification will resume once digest votes arrive.",
+                                } else if peer_attest_result == Some(PeerAttestResult::Ok) {
+                                    info!(
+                                        "✅ [DIGEST-GATE PEER-ATTEST] Commit {} dispatching: \
+                                         peer attestation confirmed. 2f+1 peers agree on digest. \
+                                         Data-driven verification (zero timeout).",
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
-                                } else if sustained_load_bypass {
+                                } else if peer_attest_result == Some(PeerAttestResult::Conflict) {
                                     warn!(
-                                        "⚡ [DIGEST-GATE SUSTAINED-LOAD-BYPASS] Commit {} dispatching after 5s \
-                                         (buffer at {}/{} = {}%). No digest data yet, dispatching early to prevent \
-                                         cascade buffer saturation.",
-                                        local_idx,
-                                        pending_local_commits.len(),
-                                        MAX_PENDING_LOCAL_COMMITS,
-                                        (pending_local_commits.len() * 100) / MAX_PENDING_LOCAL_COMMITS
+                                        "🚨 [DIGEST-GATE PEER-ATTEST] Commit {} CONFLICT: \
+                                         peers produced DIFFERENT digest! Local commit is divergent. \
+                                         DISCARDING from pending buffer. CertifiedCommit will replace.",
+                                        local_idx
                                     );
-                                    verified_indices.push(local_idx);
+                                    // Mark for eviction — don't push to verified
+                                    pending_local_commits.remove(&local_idx);
+                                    pending_local_timestamps.remove(&local_idx);
+                                    break; // STRICT ORDER: re-evaluate remaining
                                 } else {
                                     // QCI-AHEAD-BYPASS: digest_has_data=true,
                                     // verifier returns None, check if QCI already passed this commit.
@@ -1016,7 +1035,7 @@ impl CommitProcessor {
                                 }
                             }
                             None => {
-                                // QUORUM-GC-BYPASS + COLD-START-BYPASS: Same logic as DIGEST-GATE POLL path.
+                                // QUORUM-GC-BYPASS + PEER-ATTEST: Same logic as DIGEST-GATE POLL path.
                                 let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
                                     qci.load(std::sync::atomic::Ordering::Relaxed)
                                 } else {
@@ -1029,50 +1048,65 @@ impl CommitProcessor {
                                         next_expected_index, qci_val
                                     );
                                     true
-                                } else if !{
-                                    // COLD-START-FIX: Check actual digest data availability
-                                    // instead of qci==0 (which CommitSyncer corrupts early)
-                                    if let Some(ref checker) = digest_data_checker {
-                                        checker()
-                                    } else {
-                                        false
-                                    }
-                                } {
-                                    // COLD-START-BYPASS: Same rationale as DIGEST-GATE POLL.
-                                    // In OOO path, commit was already waiting in pending_commits
-                                    // (arrived out of order). If qci==0, verification infra is
-                                    // non-functional — safe to dispatch.
-                                    warn!(
-                                        "⚡ [DIGEST-GATE-OOO COLD-START-BYPASS] Commit {} dispatching. \
-                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
-                                         Normal verification will resume once digest votes arrive.",
-                                        next_expected_index
-                                    );
-                                    true
                                 } else {
-                                    // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
-                                    // If digest_has_data=true but verifier returns None,
-                                    // check if QCI already passed this commit index.
+                                    // Check digest data availability
                                     let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
                                         checker()
                                     } else {
                                         false
                                     };
-                                    let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
-                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                    if !digest_has_data_ooo {
+                                        // ZERO-TIMEOUT PEER ATTESTATION (OOO PATH):
+                                        // No digest data = cold-start. Instead of blind dispatch,
+                                        // use peer attestation to verify deterministically.
+                                        if let Some(ref attestor) = peer_commit_attestation {
+                                            let local_digest = pending.commit_ref.digest.into_inner();
+                                            match attestor(next_expected_index, local_digest) {
+                                                PeerAttestResult::Ok => {
+                                                    info!(
+                                                        "✅ [DIGEST-GATE-OOO PEER-ATTEST] Commit {} dispatching: \
+                                                         peer attestation confirmed. Data-driven (zero timeout).",
+                                                        next_expected_index
+                                                    );
+                                                    true
+                                                }
+                                                PeerAttestResult::Conflict => {
+                                                    warn!(
+                                                        "🚨 [DIGEST-GATE-OOO PEER-ATTEST] Commit {} CONFLICT: \
+                                                         peers disagree on digest. Blocking OOO drain.",
+                                                        next_expected_index
+                                                    );
+                                                    false
+                                                }
+                                                PeerAttestResult::Insufficient => {
+                                                    // Not enough peers — stay pending
+                                                    false
+                                                }
+                                            }
+                                        } else {
+                                            // No attestor — stay pending (safe default)
+                                            false
+                                        }
                                     } else {
-                                        0
-                                    };
-                                    if digest_has_data_ooo && qci_val_ooo > next_expected_index {
-                                        info!(
-                                            "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
-                                             qci={} > commit_index. Network quorum committed past \
-                                             this index. No conflicting digest. Implicitly verified.",
-                                            next_expected_index, qci_val_ooo
-                                        );
-                                        true
-                                    } else {
-                                        false
+                                        // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
+                                        // If digest_has_data=true but verifier returns None,
+                                        // check if QCI already passed this commit index.
+                                        let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
+                                            qci.load(std::sync::atomic::Ordering::Relaxed)
+                                        } else {
+                                            0
+                                        };
+                                        if qci_val_ooo > next_expected_index {
+                                            info!(
+                                                "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                                 qci={} > commit_index. Network quorum committed past \
+                                                 this index. No conflicting digest. Implicitly verified.",
+                                                next_expected_index, qci_val_ooo
+                                            );
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     }
                                 }
                             }
@@ -1334,22 +1368,41 @@ impl CommitProcessor {
                                                 );
                                                 true
                                             } else {
-                                                // COLD-START-FIX (May 2026): Check if digest data is available.
-                                                // If CommitVoteMonitor has no data yet (epoch cold-start),
-                                                // allow immediate dispatch instead of buffering.
+                                                // ZERO-TIMEOUT PEER ATTESTATION (IMMEDIATE PATH):
+                                                // Check digest data availability first.
                                                 let digest_has_data = if let Some(ref checker) = digest_data_checker {
                                                     checker()
                                                 } else {
                                                     false
                                                 };
                                                 if !digest_has_data {
-                                                    warn!(
-                                                        "⚡ [DIGEST-GATE-IMMEDIATE COLD-START-BYPASS] Commit {} dispatching. \
-                                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
-                                                         Normal verification will resume once digest votes arrive.",
-                                                        commit_index
-                                                    );
-                                                    true
+                                                    // No digest data = cold-start. Use peer attestation.
+                                                    if let Some(ref attestor) = peer_commit_attestation {
+                                                        let local_digest = subdag.commit_ref.digest.into_inner();
+                                                        let result = attestor(commit_index, local_digest);
+                                                        match result {
+                                                            PeerAttestResult::Ok => {
+                                                                info!(
+                                                                    "✅ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} dispatching: \
+                                                                     peer attestation confirmed. Data-driven (zero timeout).",
+                                                                    commit_index
+                                                                );
+                                                                true
+                                                            }
+                                                            other => {
+                                                                // Conflict or Insufficient — buffer for POLL path
+                                                                info!(
+                                                                    "🛡️ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} buffered: \
+                                                                     peer attestation returned {:?}. Will retry in POLL path.",
+                                                                    commit_index, other
+                                                                );
+                                                                false
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // No attestor — buffer (safe default)
+                                                        false
+                                                    }
                                                 } else {
                                                     // QCI-AHEAD-BYPASS: Check if QCI already passed
                                                     // this commit index at receive time.
