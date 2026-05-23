@@ -84,12 +84,12 @@ pub struct PendingEpochTransition {
 
 // Global registry for transition handler to access node
 static TRANSITION_HANDLER_REGISTRY: tokio::sync::OnceCell<
-    Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::Mutex<ConsensusNode>>>>>,
+    tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<ConsensusNode>>>>,
 > = tokio::sync::OnceCell::const_new();
 
 pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<ConsensusNode>>> {
     if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
-        let registry_guard = registry.lock().await;
+        let registry_guard = registry.read().await;
         registry_guard.clone()
     } else {
         None
@@ -98,11 +98,11 @@ pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<Cons
 
 pub async fn set_transition_handler_node(node: Arc<tokio::sync::Mutex<ConsensusNode>>) {
     if TRANSITION_HANDLER_REGISTRY.get().is_none() {
-        let _ = TRANSITION_HANDLER_REGISTRY.set(Arc::new(tokio::sync::Mutex::new(None)));
+        let _ = TRANSITION_HANDLER_REGISTRY.set(tokio::sync::RwLock::new(None));
     }
 
     if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
-        let mut registry_guard = registry.lock().await;
+        let mut registry_guard = registry.write().await;
         *registry_guard = Some(node);
         drop(registry_guard);
         info!("✅ Registered node in global transition handler registry");

@@ -14,96 +14,40 @@ use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
 
-/// Commit processor that ensures commits are executed in order
-pub struct CommitProcessor {
-    receiver: UnboundedReceiver<CommittedSubDag>,
-    pub next_expected_index: u32, // CommitIndex is u32
-    pending_commits: BTreeMap<u32, CommittedSubDag>,
-    /// The last commit index that Go has already processed. Used to fast-forward replay.
-    pub go_last_commit_index: u32,
-    /// Optional callback to notify commit index updates (for epoch transition)
-    commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-    /// Optional callback to update global execution index after successful commit
-    global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
-    /// Current epoch (for deterministic global_exec_index calculation)
-    current_epoch: u64,
-
-    /// Shared last global exec index for direct updates
-    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
-    /// Optional executor client to send blocks to Go executor
-    executor_client: Option<Arc<ExecutorClient>>,
-    /// Flag indicating if epoch transition is in progress
-    /// When true, we're transitioning to a new epoch
-    is_transitioning: Option<Arc<AtomicBool>>,
-    /// Channel to send validated commits to the BlockDeliveryManager
-    delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
-    /// Queue for transactions that must be retried in the next epoch
-    pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    /// Optional callback to handle EndOfEpoch system transactions
-    /// Called immediately when an EndOfEpoch system transaction is detected in a committed sub-dag
-    /// Uses commit finalization approach (like Sui) - no buffer needed as commits are processed sequentially
-    epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
-    /// Multi-epoch committee cache: ETH addresses keyed by epoch
-    /// Supports looking up leaders from previous epochs during transitions
-    /// RS-1: Uses RwLock instead of Mutex — reads (every commit) don't block each other,
-    /// only writes (epoch transition) take exclusive lock.
-    epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
-    /// TX recycler for confirming committed TXs
-    tx_recycler: Option<Arc<TxRecycler>>,
-    /// Committed transaction hashes for deduplication
-    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
-    storage_path: Option<std::path::PathBuf>,
-    /// Channel sender for emitting lag alerts
-    lag_alert_sender: Option<
-        tokio::sync::mpsc::UnboundedSender<
-            crate::consensus::commit_processor::lag_monitor::LagAlert,
-        >,
-    >,
-    /// QUORUM-GATE (May 2026): Shared reference to the network's quorum commit index.
-    /// When set, local commits (decided_with_local_blocks=true) are held until
-    /// quorum_commit_index >= commit_index. This prevents Go from executing
-    /// divergent blocks produced by a sparse DAG local committer.
-    quorum_commit_index: Option<Arc<AtomicU32>>,
-    /// Committee size (number of validators) for DAG density verification.
-    /// Used to compute quorum threshold: 2f+1 where f = (n-1)/3.
-    committee_size: usize,
-    /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
-    /// Takes commit_index, returns Some(digest_bytes) if 2f+1 authorities agree on digest,
-    /// None if not enough votes yet. Used to verify local commit content matches network.
-    digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
-    /// COLD-START-FIX (May 2026): Callback to check if CommitVoteMonitor has received
-    /// any actual digest vote data from P2P blocks. Returns true when digest verification
-    /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer's
-    /// peer queries), this reflects actual digest observation capability.
-    /// When this returns false, COLD-START-BYPASS is eligible regardless of QCI value.
-    digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    /// ZERO-TIMEOUT PEER ATTESTATION (May 2026): Replaces COLD-START-BYPASS (10s)
-    /// and SUSTAINED-LOAD-BYPASS (5s). When DIGEST-GATE has no quorum digest, this
-    /// callback polls peers to verify the local commit instead of using timeouts.
-    peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
+/// Configuration for the CommitProcessor
+pub struct CommitProcessorConfig {
+    pub commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    pub global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    pub shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    pub executor_client: Option<Arc<ExecutorClient>>,
+    pub is_transitioning: Option<Arc<AtomicBool>>,
+    pub delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
+    pub pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
+    pub epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
+    pub epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    pub tx_recycler: Option<Arc<TxRecycler>>,
+    pub committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    pub storage_path: Option<std::path::PathBuf>,
+    pub lag_alert_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::commit_processor::lag_monitor::LagAlert>>,
+    pub quorum_commit_index: Option<Arc<AtomicU32>>,
+    pub committee_size: usize,
+    pub digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
+    pub digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
 }
 
-impl CommitProcessor {
-    pub fn new(receiver: UnboundedReceiver<CommittedSubDag>) -> Self {
+impl Default for CommitProcessorConfig {
+    fn default() -> Self {
         Self {
-            receiver,
-            next_expected_index: 1, // First commit has index 1 (consensus doesn't create commit with index 0)
-            pending_commits: BTreeMap::new(),
-            go_last_commit_index: 0,
-            // PHASE-B: No GEI tracking in Rust. Go assigns via GEIAuthority.
             commit_index_callback: None,
             global_exec_index_callback: None,
             shared_last_global_exec_index: None,
-            current_epoch: 0,
-
             executor_client: None,
             is_transitioning: None,
             delivery_sender: None,
             pending_transactions_queue: None,
             epoch_transition_callback: None,
-            epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
+            epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             tx_recycler: None,
             committed_transaction_hashes: None,
             storage_path: None,
@@ -115,13 +59,39 @@ impl CommitProcessor {
             peer_commit_attestation: None,
         }
     }
+}
+
+/// Commit processor that ensures commits are executed in order
+pub struct CommitProcessor {
+    receiver: UnboundedReceiver<CommittedSubDag>,
+    pub next_expected_index: u32, // CommitIndex is u32
+    pending_commits: BTreeMap<u32, CommittedSubDag>,
+    /// The last commit index that Go has already processed. Used to fast-forward replay.
+    pub go_last_commit_index: u32,
+    /// Current epoch (for deterministic global_exec_index calculation)
+    current_epoch: u64,
+    /// Configuration bundle
+    pub config: CommitProcessorConfig,
+}
+
+impl CommitProcessor {
+    pub fn new(receiver: UnboundedReceiver<CommittedSubDag>) -> Self {
+        Self {
+            receiver,
+            next_expected_index: 1, // First commit has index 1 (consensus doesn't create commit with index 0)
+            pending_commits: BTreeMap::new(),
+            go_last_commit_index: 0,
+            current_epoch: 0,
+            config: CommitProcessorConfig::default(),
+        }
+    }
 
     /// Set callback to notify commit index updates
     pub fn with_commit_index_callback<F>(mut self, callback: F) -> Self
     where
         F: Fn(u32) + Send + Sync + 'static,
     {
-        self.commit_index_callback = Some(Arc::new(callback));
+        self.config.commit_index_callback = Some(Arc::new(callback));
         self
     }
 
@@ -130,7 +100,7 @@ impl CommitProcessor {
     where
         F: Fn(u64) + Send + Sync + 'static,
     {
-        self.global_exec_index_callback = Some(Arc::new(callback));
+        self.config.global_exec_index_callback = Some(Arc::new(callback));
         self
     }
 
@@ -139,7 +109,7 @@ impl CommitProcessor {
         mut self,
         shared_index: Arc<tokio::sync::Mutex<u64>>,
     ) -> Self {
-        self.shared_last_global_exec_index = Some(shared_index);
+        self.config.shared_last_global_exec_index = Some(shared_index);
         self
     }
 
@@ -171,7 +141,7 @@ impl CommitProcessor {
 
     /// Set executor client to send blocks to Go executor
     pub fn with_executor_client(mut self, executor_client: Arc<ExecutorClient>) -> Self {
-        self.executor_client = Some(executor_client);
+        self.config.executor_client = Some(executor_client);
         self
     }
 
@@ -188,13 +158,13 @@ impl CommitProcessor {
 
     /// Set is_transitioning flag to track epoch transition state
     pub fn with_is_transitioning(mut self, is_transitioning: Arc<AtomicBool>) -> Self {
-        self.is_transitioning = Some(is_transitioning);
+        self.config.is_transitioning = Some(is_transitioning);
         self
     }
 
     /// Set BlockDeliveryManager sender
     pub fn with_delivery_sender(mut self, sender: tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>) -> Self {
-        self.delivery_sender = Some(sender);
+        self.config.delivery_sender = Some(sender);
         self
     }
 
@@ -203,7 +173,7 @@ impl CommitProcessor {
         mut self,
         pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     ) -> Self {
-        self.pending_transactions_queue = Some(pending_transactions_queue);
+        self.config.pending_transactions_queue = Some(pending_transactions_queue);
         self
     }
 
@@ -212,7 +182,7 @@ impl CommitProcessor {
     where
         F: Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync + 'static,
     {
-        self.epoch_transition_callback = Some(Arc::new(callback));
+        self.config.epoch_transition_callback = Some(Arc::new(callback));
         self
     }
 
@@ -222,7 +192,7 @@ impl CommitProcessor {
         mut self,
         epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     ) -> Self {
-        self.epoch_eth_addresses = epoch_eth_addresses;
+        self.config.epoch_eth_addresses = epoch_eth_addresses;
         self
     }
 
@@ -231,7 +201,7 @@ impl CommitProcessor {
     pub fn with_validator_eth_addresses(mut self, eth_addresses: Vec<Vec<u8>>) -> Self {
         let mut map = std::collections::HashMap::new();
         map.insert(self.current_epoch, eth_addresses);
-        self.epoch_eth_addresses = Arc::new(tokio::sync::RwLock::new(map));
+        self.config.epoch_eth_addresses = Arc::new(tokio::sync::RwLock::new(map));
         self
     }
 
@@ -240,12 +210,12 @@ impl CommitProcessor {
     pub fn get_epoch_eth_addresses_arc(
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>> {
-        self.epoch_eth_addresses.clone()
+        self.config.epoch_eth_addresses.clone()
     }
 
     /// Set TX recycler for confirming committed TXs
     pub fn with_tx_recycler(mut self, recycler: Arc<TxRecycler>) -> Self {
-        self.tx_recycler = Some(recycler);
+        self.config.tx_recycler = Some(recycler);
         self
     }
 
@@ -254,13 +224,13 @@ impl CommitProcessor {
         mut self,
         hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
     ) -> Self {
-        self.committed_transaction_hashes = Some(hashes);
+        self.config.committed_transaction_hashes = Some(hashes);
         self
     }
 
     /// RS-2: Set storage path for persisting cumulative_fragment_offset
     pub fn with_storage_path(mut self, path: std::path::PathBuf) -> Self {
-        self.storage_path = Some(path);
+        self.config.storage_path = Some(path);
         self
     }
 
@@ -271,7 +241,7 @@ impl CommitProcessor {
             crate::consensus::commit_processor::lag_monitor::LagAlert,
         >,
     ) -> Self {
-        self.lag_alert_sender = Some(sender);
+        self.config.lag_alert_sender = Some(sender);
         self
     }
 
@@ -281,12 +251,12 @@ impl CommitProcessor {
     /// This eliminates the root cause of consensus-layer forks from sparse DAG
     /// local committer decisions.
     pub fn with_quorum_commit_index(mut self, quorum_index: Arc<AtomicU32>) -> Self {
-        self.quorum_commit_index = Some(quorum_index);
+        self.config.quorum_commit_index = Some(quorum_index);
         self
     }
 
     pub fn with_committee_size(mut self, size: usize) -> Self {
-        self.committee_size = size;
+        self.config.committee_size = size;
         self
     }
 
@@ -294,7 +264,7 @@ impl CommitProcessor {
     where
         F: Fn(u32) -> Option<[u8; 32]> + Send + Sync + 'static,
     {
-        self.digest_verifier = Some(Arc::new(verifier));
+        self.config.digest_verifier = Some(Arc::new(verifier));
         self
     }
 
@@ -306,7 +276,7 @@ impl CommitProcessor {
     where
         F: Fn() -> bool + Send + Sync + 'static,
     {
-        self.digest_data_checker = Some(Arc::new(checker));
+        self.config.digest_data_checker = Some(Arc::new(checker));
         self
     }
 
@@ -318,7 +288,7 @@ impl CommitProcessor {
     where
         F: Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync + 'static,
     {
-        self.peer_commit_attestation = Some(Arc::new(attestor));
+        self.config.peer_commit_attestation = Some(Arc::new(attestor));
         self
     }
 
@@ -420,29 +390,58 @@ impl CommitProcessor {
 
     /// Process commits in order
     pub async fn run(self) -> Result<()> {
+        let CommitProcessor {
+            receiver,
+            next_expected_index,
+            pending_commits,
+            go_last_commit_index,
+            current_epoch,
+            config,
+        } = self;
+
+        let CommitProcessorConfig {
+            commit_index_callback,
+            global_exec_index_callback,
+            shared_last_global_exec_index,
+            executor_client,
+            is_transitioning,
+            delivery_sender,
+            pending_transactions_queue: _,
+            epoch_transition_callback,
+            epoch_eth_addresses,
+            tx_recycler,
+            committed_transaction_hashes,
+            storage_path,
+            lag_alert_sender,
+            quorum_commit_index,
+            committee_size,
+            digest_verifier,
+            digest_data_checker,
+            peer_commit_attestation,
+        } = config;
+
         // Validate required dependencies upfront to avoid bare .unwrap() in hot loop
-        let shared_gei = self.shared_last_global_exec_index.clone()
+        let shared_gei = shared_last_global_exec_index.clone()
             .ok_or_else(|| anyhow::anyhow!("BUG: shared_last_global_exec_index must be set before CommitProcessor::run()"))?;
 
-        let mut receiver = self.receiver;
-        let mut next_expected_index = self.next_expected_index;
-        let mut pending_commits = self.pending_commits;
-        let commit_index_callback = self.commit_index_callback;
-        let current_epoch = self.current_epoch;
-        let executor_client = self.executor_client;
-        let delivery_sender = self.delivery_sender;
-        let _pending_transactions_queue = self.pending_transactions_queue;
-        let epoch_transition_callback = self.epoch_transition_callback;
-        let go_last_commit_index = self.go_last_commit_index;
-        let epoch_eth_addresses = self.epoch_eth_addresses;
-        let tx_recycler = self.tx_recycler;
-        let storage_path = self.storage_path;
-        let committed_transaction_hashes = self.committed_transaction_hashes;
-        let _quorum_commit_index_ref = self.quorum_commit_index.clone();
-        let committee_size = self.committee_size;
-        let digest_verifier = self.digest_verifier.clone();
-        let digest_data_checker = self.digest_data_checker.clone();
-        let peer_commit_attestation = self.peer_commit_attestation.clone();
+        let mut receiver = receiver;
+        let mut next_expected_index = next_expected_index;
+        let mut pending_commits = pending_commits;
+        let commit_index_callback = commit_index_callback;
+        let current_epoch = current_epoch;
+        let executor_client = executor_client;
+        let delivery_sender = delivery_sender;
+        let epoch_transition_callback = epoch_transition_callback;
+        let mut go_last_commit_index = go_last_commit_index;
+        let epoch_eth_addresses = epoch_eth_addresses;
+        let tx_recycler = tx_recycler;
+        let storage_path = storage_path;
+        let committed_transaction_hashes = committed_transaction_hashes;
+        let _quorum_commit_index_ref = quorum_commit_index.clone();
+        let committee_size = committee_size;
+        let digest_verifier = digest_verifier.clone();
+        let digest_data_checker = digest_data_checker.clone();
+        let peer_commit_attestation = peer_commit_attestation.clone();
         // BFT quorum threshold: 2f+1 where n=3f+1, so quorum = ceil(2n/3)
         // For n=5: quorum=4, n=4: quorum=3, n=7: quorum=5
         let _quorum_threshold = if committee_size > 0 {
@@ -517,8 +516,8 @@ impl CommitProcessor {
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
             &executor_client,
-            &self.shared_last_global_exec_index,
-            self.lag_alert_sender,
+            &shared_last_global_exec_index,
+            lag_alert_sender,
         ) {
             let lag_monitor = crate::consensus::commit_processor::lag_monitor::LagMonitor::new(
                 client.clone(),
@@ -556,7 +555,7 @@ impl CommitProcessor {
                 } else {
                     false
                 };
-                let is_trans = if let Some(ref it) = self.is_transitioning {
+                let is_trans = if let Some(ref it) = is_transitioning {
                     it.load(std::sync::atomic::Ordering::Relaxed)
                 } else {
                     false
@@ -590,7 +589,7 @@ impl CommitProcessor {
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
             // This prevents CommitProcessor from pushing new execution state to Go Master
             // while Go is busy re-initializing for the next epoch.
-            if let Some(ref is_transitioning) = self.is_transitioning {
+            if let Some(ref is_transitioning) = is_transitioning {
                 let mut logged = false;
                 let transition_wait_start = tokio::time::Instant::now();
                 while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
@@ -992,7 +991,7 @@ impl CommitProcessor {
             let mut should_break = false;
             while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
                 // Check transitioning state before processing buffered OOO commits
-                if let Some(ref is_trans) = self.is_transitioning {
+                if let Some(ref is_trans) = is_transitioning {
                     if is_trans.load(std::sync::atomic::Ordering::Relaxed) {
                         info!("🛑 [STATION 3: PROCESSOR] OOO Drain Loop paused: Node is transitioning. Buffering commit {}.", next_expected_index);
                         pending_commits.insert(next_expected_index, pending);
