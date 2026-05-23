@@ -1380,22 +1380,34 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 // We NEVER unlock based on timeout here. The system MUST wait 
                                 // until it successfully receives the commits to reconstruct the DAG.
                                 if is_schedule_pending {
-                                    // After 3 retries (~15s) with all peers at the same commit,
-                                    // it means the ENTIRE cluster is at this level and no one
-                                    // has historical commits to share. The schedule is already
-                                    // consistent across the cluster — safe to clear pending
-                                    // and fall through to Case C (deadlock breaker).
-                                    if retry_count >= 3 {
+                                    // ZERO-TIMEOUT (May 2026): Replace retry-count-based escalation
+                                    // with data-driven block hash verification.
+                                    // 
+                                    // OLD: After 3 retries (~15s), force-clear schedule_recovery_pending
+                                    // NEW: Require block_hash_verified=true before clearing.
+                                    // This ensures the node's state is bit-perfect against the network.
+                                    //
+                                    // If block hash is NOT verified, keep trying to fetch commits
+                                    // to rebuild the schedule — NEVER force-unlock.
+                                    let hash_verified = hub.is_block_hash_verified();
+                                    if retry_count >= 3 && hash_verified {
                                         tracing::warn!(
                                             "⚡ [ACTIVE-SYNC-RECOVERY] Case B→C ESCALATION (retry {}): \
-                                             Peers at same commit ({}) for {} retries. \
-                                             No historical commits available from ANY peer. \
-                                             Force-clearing schedule_recovery_pending — schedule is \
-                                             already consistent across the quorum-verified cluster.",
+                                             Peers at same commit ({}) for {} retries AND block hash VERIFIED. \
+                                             Schedule is consistent across the quorum-verified cluster. \
+                                             Clearing schedule_recovery_pending.",
                                             retry_count + 1, my_commit, retry_count
                                         );
                                         hub.set_schedule_recovery_pending(false);
                                         // Fall through to Case C below (deadlock breaker)
+                                    } else if retry_count >= 3 && !hash_verified {
+                                        tracing::warn!(
+                                            "🛡️ [ACTIVE-SYNC-RECOVERY] Case B→C BLOCKED (retry {}): \
+                                             Peers at same commit ({}) but block hash NOT YET VERIFIED. \
+                                             Cannot unlock — would risk fork. Waiting for POST-GATE-VERIFY.",
+                                            retry_count + 1, my_commit
+                                        );
+                                        return;
                                     } else {
                                         let num_commits: u32 = 300;
                                         let last_boundary = (my_commit / num_commits) * num_commits;

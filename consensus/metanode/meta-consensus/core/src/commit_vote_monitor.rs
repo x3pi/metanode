@@ -173,6 +173,26 @@ impl CommitVoteMonitor {
         !state.digest_history.is_empty()
     }
 
+    /// Returns (total_voted_stake, Option<(best_digest, best_stake)>) for a specific commit index.
+    /// Used by peer attestation to distinguish:
+    ///   - (0, None) → No peer has voted for this index yet (true cold-start)
+    ///   - (>0, Some) → Some peers voted but haven't reached quorum yet
+    ///
+    /// ZERO-TIMEOUT (May 2026): This enables data-driven dispatch without timeouts.
+    pub fn vote_count_for_index(&self, target_index: CommitIndex) -> (u64, Option<(CommitDigest, u64)>) {
+        let state = self.state.lock();
+        match state.digest_history.get(&target_index) {
+            None => (0, None),
+            Some(digest_stakes) => {
+                let total_stake: u64 = digest_stakes.values().sum();
+                let best = digest_stakes.iter()
+                    .max_by_key(|&(_, s)| *s)
+                    .map(|(d, s)| (*d, *s));
+                (total_stake, best)
+            }
+        }
+    }
+
     /// Seeds the quorum from Go execution state to break the chicken-and-egg
     /// deadlock where blocks need quorum to be produced, but quorum needs blocks
     /// to be computed via observe_block().

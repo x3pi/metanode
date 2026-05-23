@@ -118,6 +118,17 @@ pub(super) async fn setup_validator_consensus(
         digest_checker_hub.has_digest_data()
     });
 
+    // ZERO-TIMEOUT (May 2026): Wire peer commit attestation callback.
+    // Replaces COLD-START-BYPASS (10s) and SUSTAINED-LOAD-BYPASS (5s).
+    let peer_attest_hub = node.coordination_hub.clone();
+    processor = processor.with_peer_commit_attestation(move |index: u32, digest: [u8; 32]| {
+        if let Some(attestor) = peer_attest_hub.get_peer_commit_attestation() {
+            attestor(index, digest)
+        } else {
+            consensus_core::coordination_hub::PeerAttestResult::Insufficient // Not yet initialized
+        }
+    });
+
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
         .with_committee_size(committee.size())
         .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
@@ -280,6 +291,16 @@ pub(super) async fn setup_synconly_sync(
     let digest_checker_hub = node.coordination_hub.clone();
     processor = processor.with_digest_data_checker(move || {
         digest_checker_hub.has_digest_data()
+    });
+
+    // ZERO-TIMEOUT (May 2026): Wire peer commit attestation callback (same as Validator path).
+    let peer_attest_hub = node.coordination_hub.clone();
+    processor = processor.with_peer_commit_attestation(move |index: u32, digest: [u8; 32]| {
+        if let Some(attestor) = peer_attest_hub.get_peer_commit_attestation() {
+            attestor(index, digest)
+        } else {
+            consensus_core::coordination_hub::PeerAttestResult::Insufficient
+        }
     });
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
