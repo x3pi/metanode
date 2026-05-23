@@ -51,9 +51,12 @@ pub mod tx_submitter;
 mod consensus_node;
 mod epoch_store;
 mod node_methods;
+mod setup_storage;
+mod setup_consensus;
 
 // Re-export from epoch_store for use in consensus_node
 use epoch_store::detect_local_epoch;
+
 
 
 #[cfg(test)]
@@ -81,12 +84,12 @@ pub struct PendingEpochTransition {
 
 // Global registry for transition handler to access node
 static TRANSITION_HANDLER_REGISTRY: tokio::sync::OnceCell<
-    Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::Mutex<ConsensusNode>>>>>,
+    tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<ConsensusNode>>>>,
 > = tokio::sync::OnceCell::const_new();
 
 pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<ConsensusNode>>> {
     if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
-        let registry_guard = registry.lock().await;
+        let registry_guard = registry.read().await;
         registry_guard.clone()
     } else {
         None
@@ -95,11 +98,11 @@ pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<Cons
 
 pub async fn set_transition_handler_node(node: Arc<tokio::sync::Mutex<ConsensusNode>>) {
     if TRANSITION_HANDLER_REGISTRY.get().is_none() {
-        let _ = TRANSITION_HANDLER_REGISTRY.set(Arc::new(tokio::sync::Mutex::new(None)));
+        let _ = TRANSITION_HANDLER_REGISTRY.set(tokio::sync::RwLock::new(None));
     }
 
     if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
-        let mut registry_guard = registry.lock().await;
+        let mut registry_guard = registry.write().await;
         *registry_guard = Some(node);
         drop(registry_guard);
         info!("✅ Registered node in global transition handler registry");
@@ -185,3 +188,56 @@ pub struct ConsensusNode {
 // ConsensusNode constructors are in consensus_node.rs
 // ConsensusNode methods are in node_methods.rs
 // Free functions (detect_local_epoch, load_legacy_epoch_stores) are in epoch_store.rs
+
+/// Results from storage/epoch initialization phase.
+pub(crate) struct StorageSetup {
+    pub(crate) current_epoch: u64,
+    pub(crate) epoch_timestamp_ms: u64,
+    pub(crate) committee: consensus_config::Committee,
+    pub(crate) validator_eth_addresses: Vec<Vec<u8>>,
+    pub(crate) own_index: AuthorityIndex,
+    pub(crate) is_in_committee: bool,
+    pub(crate) last_global_exec_index: u64,
+    pub(crate) epoch_base_exec_index: u64,
+    pub(crate) storage_path: std::path::PathBuf,
+    pub(crate) protocol_keypair: consensus_config::ProtocolKeyPair,
+    pub(crate) network_keypair: consensus_config::NetworkKeyPair,
+    /// Epoch duration in seconds, loaded from Go via protobuf (from genesis.json)
+    pub(crate) epoch_duration_from_go: u64,
+    pub(crate) last_executed_commit_hash: [u8; 32],
+    /// Last block number from Go at startup, verified with is_ready=true retry loop.
+    /// Passed to setup_consensus to avoid re-query race where Go returns stale value.
+    pub(crate) latest_block_number: u64,
+    /// Last handled commit index from Go Authoritative DB (persisted across DAG wipes)
+    pub(crate) last_handled_commit_index: Option<u32>,
+    /// Last block timestamp from Go Authoritative DB (used to recover DAG timestamp after wipe)
+    pub(crate) last_block_timestamp_ms: u64,
+}
+
+/// Results from consensus setup phase.
+pub(crate) struct ConsensusSetup {
+    pub(crate) authority: Option<ConsensusAuthority>,
+    /// Whether DAG storage has prior history. False after snapshot restore (DAG deleted).
+    #[allow(dead_code)]
+    pub(crate) dag_has_history: bool,
+    /// Critical health flag. Set to true if any background Station crashes.
+    pub(crate) is_terminally_failed: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) commit_consumer_holder: Option<CommitConsumerArgs>,
+    pub(crate) transaction_client_proxy: Option<Arc<TransactionClientProxy>>,
+    pub(crate) executor_client_for_proc: Arc<ExecutorClient>,
+    pub(crate) current_commit_index: Arc<AtomicU32>,
+    pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
+    pub(crate) committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    pub(crate) epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
+    pub(crate) epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64, u64)>,
+    pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
+    pub(crate) protocol_config: ProtocolConfig,
+    pub(crate) parameters: consensus_config::Parameters,
+    pub(crate) clock: Arc<Clock>,
+    pub(crate) transaction_verifier: Arc<NoopTransactionVerifier>,
+    /// TX recycler for tracking and re-submitting uncommitted TXs
+    pub(crate) tx_recycler: Arc<crate::consensus::tx_recycler::TxRecycler>,
+    /// Shared epoch_eth_addresses cache between CommitProcessor and ConsensusNode
+    pub(crate) epoch_eth_addresses_arc: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+}
+

@@ -429,4 +429,11 @@ venv/
 .gitnexus
 execution/cmd/simple_chain/metanode_btrfs.img
 consensus/metanode/src/node/metanode.code-workspace
+
+# ===== Phase 2: Code Hygiene =====
+sed*
+**/sed*
+test_sort.rs
+patch_http_handler.sh
+
 consensus/metanode/docs/block_flow_go_rust/metanode.code-workspace

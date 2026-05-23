@@ -1,26 +1,43 @@
 // Copyright (c) MetaNode Team
 // SPDX-License-Identifier: Apache-2.0
 
-//! ConsensusCoordinationHub State Machine
-//!
-//! Provides a unified state machine for tracking and orchestrating the operational phase
-//! of the consensus node. This replaces fragmented phase-tracking variables across
-//! CommitSyncer, DagState, and the main Node modes.
-//!
-//! ## Phase Lifecycle (Maps to CONSENSUS_ARCHITECTURE_VN.md)
-//!
-//! ```text
-//! Initializing → Bootstrapping → CatchingUp → Aligning → Healthy
-//!                                    ↓
-//!                               StateSyncing → (restart) → Initializing
-//! ```
-//!
-//! - **Initializing**: Phase 1+2 — Waiting for Go handshake + loading local DAG from RocksDB.
-//! - **Bootstrapping**: Phase 3 pre-baseline — DAG loaded, establishing network baseline.
-//! - **CatchingUp**: Phase 3A — Actively fetching missing commits from peers.
-//! - **StateSyncing**: Phase 3B — Deep lag detected, waiting for state snapshot from Go engine.
-//! - **Aligning**: Phase 5 — Aligning Go ↔ Rust state (filtering already-executed blocks).
-//! - **Healthy**: Phase 6 — Active consensus participation (proposing, voting).
+/// Result of peer attestation for a local commit's digest.
+/// Used by CommitProcessor to decide whether to dispatch, discard, or wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAttestResult {
+    /// 2f+1 peers produced the same digest at this commit index.
+    /// Safe to dispatch — deterministic agreement confirmed.
+    Ok,
+    /// Peers produced a DIFFERENT digest at this commit index.
+    /// Local commit is divergent — must be discarded.
+    /// CommitSyncer will deliver the correct CertifiedCommit.
+    Conflict,
+    /// Not enough peers were reachable to form quorum.
+    /// Stay pending — do NOT dispatch without verification.
+    /// Liveness: when peers come online, next poll will succeed.
+    Insufficient,
+}
+
+// ConsensusCoordinationHub State Machine
+//
+// Provides a unified state machine for tracking and orchestrating the operational phase
+// of the consensus node. This replaces fragmented phase-tracking variables across
+// CommitSyncer, DagState, and the main Node modes.
+//
+// ## Phase Lifecycle (Maps to CONSENSUS_ARCHITECTURE_VN.md)
+//
+// ```text
+// Initializing → Bootstrapping → CatchingUp → Aligning → Healthy
+//                                    ↓
+//                               StateSyncing → (restart) → Initializing
+// ```
+//
+// - **Initializing**: Phase 1+2 — Waiting for Go handshake + loading local DAG from RocksDB.
+// - **Bootstrapping**: Phase 3 pre-baseline — DAG loaded, establishing network baseline.
+// - **CatchingUp**: Phase 3A — Actively fetching missing commits from peers.
+// - **StateSyncing**: Phase 3B — Deep lag detected, waiting for state snapshot from Go engine.
+// - **Aligning**: Phase 5 — Aligning Go ↔ Rust state (filtering already-executed blocks).
+// - **Healthy**: Phase 6 — Active consensus participation (proposing, voting).
 
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -139,6 +156,23 @@ pub struct ConsensusCoordinationHub {
     /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer),
     /// this reflects actual P2P block observation.
     digest_data_checker: Arc<RwLock<Option<Arc<dyn Fn() -> bool + Send + Sync>>>>,
+
+    /// ═══════════════════════════════════════════════════════════════════
+    /// ZERO-TIMEOUT PEER ATTESTATION (May 2026 — Anti-Fork Architecture)
+    ///
+    /// Replaces ALL timeout-based bypass mechanisms (COLD-START-BYPASS 10s,
+    /// SUSTAINED-LOAD-BYPASS 5s) with a data-driven peer polling check.
+    ///
+    /// Set by CommitSyncer (which has network access). Called by CommitProcessor
+    /// when DIGEST-GATE has no quorum digest for a local commit. Instead of
+    /// waiting N seconds and dispatching blind, the processor asks peers:
+    ///   - PeerAttestOk: 2f+1 peers agree on same digest → SAFE to dispatch
+    ///   - PeerAttestConflict: peers have different digest → DISCARD local
+    ///   - PeerAttestInsufficient: not enough peers reachable → stay PENDING
+    ///
+    /// Takes (commit_index: u32, local_digest: [u8; 32]) → PeerAttestResult
+    /// ═══════════════════════════════════════════════════════════════════
+    peer_commit_attestation: Arc<RwLock<Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -158,6 +192,7 @@ impl ConsensusCoordinationHub {
 
             digest_verifier: Arc::new(RwLock::new(None)),
             digest_data_checker: Arc::new(RwLock::new(None)),
+            peer_commit_attestation: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -249,6 +284,25 @@ impl ConsensusCoordinationHub {
             Some(checker) => checker(),
             None => false,
         }
+    }
+
+    /// ZERO-TIMEOUT (May 2026): Set the peer commit attestation callback.
+    /// Called from authority_node/commit_syncer when network access is available.
+    /// This callback enables CommitProcessor to verify local commits by polling
+    /// peers instead of using time-based bypasses.
+    pub fn set_peer_commit_attestation<F>(&self, attestor: F)
+    where
+        F: Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync + 'static,
+    {
+        let mut guard = self.peer_commit_attestation.write();
+        *guard = Some(Arc::new(attestor));
+    }
+
+    /// ZERO-TIMEOUT (May 2026): Get a clone of the peer attestation callback.
+    /// CommitProcessor uses this to verify unattested local commits.
+    pub fn get_peer_commit_attestation(&self) -> Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>> {
+        let guard = self.peer_commit_attestation.read();
+        guard.clone()
     }
 
     /// Retrieve the current consensus phase.
@@ -524,9 +578,11 @@ impl ConsensusCoordinationHub {
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
             block_hash_verified: Arc::new(AtomicBool::new(true)),
             recovery_was_activated: Arc::new(AtomicBool::new(false)),
+            override_dag_gc_guard: Arc::new(AtomicBool::new(false)),
 
             digest_verifier: Arc::new(RwLock::new(None)),
             digest_data_checker: Arc::new(RwLock::new(None)),
+            peer_commit_attestation: Arc::new(RwLock::new(None)),
         }
     }
 

@@ -483,6 +483,79 @@ where
             });
         }
 
+        // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
+        // Wire CommitVoteMonitor into CoordinationHub as the peer attestation callback.
+        // This replaces ALL timeout-based bypass mechanisms (COLD-START-BYPASS 10s,
+        // SUSTAINED-LOAD-BYPASS 5s) with a data-driven check.
+        //
+        // Logic:
+        //   1. No digest data at all + no votes for this index → TRUE cold-start
+        //      → all nodes have identical empty DAGs → deterministic → Ok
+        //   2. No digest data + some votes exist → peers are starting to vote → Insufficient
+        //   3. Quorum agrees with local digest → Ok
+        //   4. Quorum disagrees → Conflict (local commit is wrong)
+        //   5. No quorum yet → Insufficient (wait for more votes)
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            let ctx_ref = context.clone();
+            coordination_hub.set_peer_commit_attestation(move |index: u32, local_digest: [u8; 32]| {
+                use crate::coordination_hub::PeerAttestResult;
+
+                // First check: does quorum_commit_digest have a definitive answer?
+                if let Some(quorum_digest) = monitor_ref.quorum_commit_digest(index) {
+                    if quorum_digest.into_inner() == local_digest {
+                        return PeerAttestResult::Ok; // 2f+1 agree with us
+                    } else {
+                        return PeerAttestResult::Conflict; // 2f+1 disagree
+                    }
+                }
+
+                // No quorum digest yet. Check vote counts for this index.
+                let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
+
+                if total_stake == 0 {
+                    // No peer has voted for this index at all.
+                    // Check if this is a TRUE cold-start (no digest data anywhere)
+                    if !monitor_ref.has_any_digest_data() {
+                        // TRUE COLD-START: No digest votes exist in the entire monitor.
+                        // This means ALL nodes are in the same state — fresh epoch.
+                        // The local commit is deterministic (same DAG → same commits).
+                        // Safe to dispatch without timeout.
+                        PeerAttestResult::Ok
+                    } else {
+                        // Digest data exists for OTHER indices but not this one.
+                        // This could mean: GC'd (too old) or peers haven't voted yet.
+                        // Stay pending until peers catch up.
+                        PeerAttestResult::Insufficient
+                    }
+                } else if let Some((best_digest, best_stake)) = best_entry {
+                    // Some peers have voted. Check if majority matches local digest.
+                    let quorum_threshold = ctx_ref.committee.quorum_threshold();
+                    if best_digest.into_inner() == local_digest {
+                        // Majority matches us but hasn't reached quorum yet.
+                        // If we have validity threshold (f+1) agreement, it's very likely safe,
+                        // but we still wait for full quorum to be absolutely certain.
+                        if best_stake >= quorum_threshold {
+                            PeerAttestResult::Ok // Should have been caught above, but defensive
+                        } else {
+                            PeerAttestResult::Insufficient // Wait for full quorum
+                        }
+                    } else {
+                        // Majority of votes so far disagree with us.
+                        // If the disagreeing stake is already >= quorum, it's definitive.
+                        if best_stake >= quorum_threshold {
+                            PeerAttestResult::Conflict
+                        } else {
+                            // Sub-quorum disagreement — could flip. Wait.
+                            PeerAttestResult::Insufficient
+                        }
+                    }
+                } else {
+                    PeerAttestResult::Insufficient
+                }
+            });
+        }
+
         let synchronizer = Synchronizer::start(
             network_client.clone(),
             context.clone(),

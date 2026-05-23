@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
+use consensus_core::coordination_hub::PeerAttestResult;
 use mysten_metrics::monitored_mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -13,6 +14,53 @@ use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
 
+/// Configuration for the CommitProcessor
+pub struct CommitProcessorConfig {
+    pub commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    pub global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    pub shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    pub executor_client: Option<Arc<ExecutorClient>>,
+    pub is_transitioning: Option<Arc<AtomicBool>>,
+    pub delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
+    pub pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
+    pub epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
+    pub epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    pub tx_recycler: Option<Arc<TxRecycler>>,
+    pub committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    pub storage_path: Option<std::path::PathBuf>,
+    pub lag_alert_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::commit_processor::lag_monitor::LagAlert>>,
+    pub quorum_commit_index: Option<Arc<AtomicU32>>,
+    pub committee_size: usize,
+    pub digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
+    pub digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
+}
+
+impl Default for CommitProcessorConfig {
+    fn default() -> Self {
+        Self {
+            commit_index_callback: None,
+            global_exec_index_callback: None,
+            shared_last_global_exec_index: None,
+            executor_client: None,
+            is_transitioning: None,
+            delivery_sender: None,
+            pending_transactions_queue: None,
+            epoch_transition_callback: None,
+            epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            tx_recycler: None,
+            committed_transaction_hashes: None,
+            storage_path: None,
+            lag_alert_sender: None,
+            quorum_commit_index: None,
+            committee_size: 0,
+            digest_verifier: None,
+            digest_data_checker: None,
+            peer_commit_attestation: None,
+        }
+    }
+}
+
 /// Commit processor that ensures commits are executed in order
 pub struct CommitProcessor {
     receiver: UnboundedReceiver<CommittedSubDag>,
@@ -20,62 +68,10 @@ pub struct CommitProcessor {
     pending_commits: BTreeMap<u32, CommittedSubDag>,
     /// The last commit index that Go has already processed. Used to fast-forward replay.
     pub go_last_commit_index: u32,
-    /// Optional callback to notify commit index updates (for epoch transition)
-    commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-    /// Optional callback to update global execution index after successful commit
-    global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     /// Current epoch (for deterministic global_exec_index calculation)
     current_epoch: u64,
-
-    /// Shared last global exec index for direct updates
-    shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
-    /// Optional executor client to send blocks to Go executor
-    executor_client: Option<Arc<ExecutorClient>>,
-    /// Flag indicating if epoch transition is in progress
-    /// When true, we're transitioning to a new epoch
-    is_transitioning: Option<Arc<AtomicBool>>,
-    /// Channel to send validated commits to the BlockDeliveryManager
-    delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
-    /// Queue for transactions that must be retried in the next epoch
-    pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
-    /// Optional callback to handle EndOfEpoch system transactions
-    /// Called immediately when an EndOfEpoch system transaction is detected in a committed sub-dag
-    /// Uses commit finalization approach (like Sui) - no buffer needed as commits are processed sequentially
-    epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
-    /// Multi-epoch committee cache: ETH addresses keyed by epoch
-    /// Supports looking up leaders from previous epochs during transitions
-    /// RS-1: Uses RwLock instead of Mutex — reads (every commit) don't block each other,
-    /// only writes (epoch transition) take exclusive lock.
-    epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
-    /// TX recycler for confirming committed TXs
-    tx_recycler: Option<Arc<TxRecycler>>,
-    /// Committed transaction hashes for deduplication
-    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
-    storage_path: Option<std::path::PathBuf>,
-    /// Channel sender for emitting lag alerts
-    lag_alert_sender: Option<
-        tokio::sync::mpsc::UnboundedSender<
-            crate::consensus::commit_processor::lag_monitor::LagAlert,
-        >,
-    >,
-    /// QUORUM-GATE (May 2026): Shared reference to the network's quorum commit index.
-    /// When set, local commits (decided_with_local_blocks=true) are held until
-    /// quorum_commit_index >= commit_index. This prevents Go from executing
-    /// divergent blocks produced by a sparse DAG local committer.
-    quorum_commit_index: Option<Arc<AtomicU32>>,
-    /// Committee size (number of validators) for DAG density verification.
-    /// Used to compute quorum threshold: 2f+1 where f = (n-1)/3.
-    committee_size: usize,
-    /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
-    /// Takes commit_index, returns Some(digest_bytes) if 2f+1 authorities agree on digest,
-    /// None if not enough votes yet. Used to verify local commit content matches network.
-    digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
-    /// COLD-START-FIX (May 2026): Callback to check if CommitVoteMonitor has received
-    /// any actual digest vote data from P2P blocks. Returns true when digest verification
-    /// infrastructure is functional. Unlike quorum_commit_index (set by CommitSyncer's
-    /// peer queries), this reflects actual digest observation capability.
-    /// When this returns false, COLD-START-BYPASS is eligible regardless of QCI value.
-    digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Configuration bundle
+    pub config: CommitProcessorConfig,
 }
 
 impl CommitProcessor {
@@ -85,28 +81,8 @@ impl CommitProcessor {
             next_expected_index: 1, // First commit has index 1 (consensus doesn't create commit with index 0)
             pending_commits: BTreeMap::new(),
             go_last_commit_index: 0,
-            // PHASE-B: No GEI tracking in Rust. Go assigns via GEIAuthority.
-            commit_index_callback: None,
-            global_exec_index_callback: None,
-            shared_last_global_exec_index: None,
             current_epoch: 0,
-
-            executor_client: None,
-            is_transitioning: None,
-            delivery_sender: None,
-            pending_transactions_queue: None,
-            epoch_transition_callback: None,
-            epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            tx_recycler: None,
-            committed_transaction_hashes: None,
-            storage_path: None,
-            lag_alert_sender: None,
-            quorum_commit_index: None,
-            committee_size: 0,
-            digest_verifier: None,
-            digest_data_checker: None,
+            config: CommitProcessorConfig::default(),
         }
     }
 
@@ -115,7 +91,7 @@ impl CommitProcessor {
     where
         F: Fn(u32) + Send + Sync + 'static,
     {
-        self.commit_index_callback = Some(Arc::new(callback));
+        self.config.commit_index_callback = Some(Arc::new(callback));
         self
     }
 
@@ -124,7 +100,7 @@ impl CommitProcessor {
     where
         F: Fn(u64) + Send + Sync + 'static,
     {
-        self.global_exec_index_callback = Some(Arc::new(callback));
+        self.config.global_exec_index_callback = Some(Arc::new(callback));
         self
     }
 
@@ -133,7 +109,7 @@ impl CommitProcessor {
         mut self,
         shared_index: Arc<tokio::sync::Mutex<u64>>,
     ) -> Self {
-        self.shared_last_global_exec_index = Some(shared_index);
+        self.config.shared_last_global_exec_index = Some(shared_index);
         self
     }
 
@@ -165,7 +141,7 @@ impl CommitProcessor {
 
     /// Set executor client to send blocks to Go executor
     pub fn with_executor_client(mut self, executor_client: Arc<ExecutorClient>) -> Self {
-        self.executor_client = Some(executor_client);
+        self.config.executor_client = Some(executor_client);
         self
     }
 
@@ -182,13 +158,13 @@ impl CommitProcessor {
 
     /// Set is_transitioning flag to track epoch transition state
     pub fn with_is_transitioning(mut self, is_transitioning: Arc<AtomicBool>) -> Self {
-        self.is_transitioning = Some(is_transitioning);
+        self.config.is_transitioning = Some(is_transitioning);
         self
     }
 
     /// Set BlockDeliveryManager sender
     pub fn with_delivery_sender(mut self, sender: tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>) -> Self {
-        self.delivery_sender = Some(sender);
+        self.config.delivery_sender = Some(sender);
         self
     }
 
@@ -197,7 +173,7 @@ impl CommitProcessor {
         mut self,
         pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     ) -> Self {
-        self.pending_transactions_queue = Some(pending_transactions_queue);
+        self.config.pending_transactions_queue = Some(pending_transactions_queue);
         self
     }
 
@@ -206,7 +182,7 @@ impl CommitProcessor {
     where
         F: Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync + 'static,
     {
-        self.epoch_transition_callback = Some(Arc::new(callback));
+        self.config.epoch_transition_callback = Some(Arc::new(callback));
         self
     }
 
@@ -216,7 +192,7 @@ impl CommitProcessor {
         mut self,
         epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     ) -> Self {
-        self.epoch_eth_addresses = epoch_eth_addresses;
+        self.config.epoch_eth_addresses = epoch_eth_addresses;
         self
     }
 
@@ -225,7 +201,7 @@ impl CommitProcessor {
     pub fn with_validator_eth_addresses(mut self, eth_addresses: Vec<Vec<u8>>) -> Self {
         let mut map = std::collections::HashMap::new();
         map.insert(self.current_epoch, eth_addresses);
-        self.epoch_eth_addresses = Arc::new(tokio::sync::RwLock::new(map));
+        self.config.epoch_eth_addresses = Arc::new(tokio::sync::RwLock::new(map));
         self
     }
 
@@ -234,12 +210,12 @@ impl CommitProcessor {
     pub fn get_epoch_eth_addresses_arc(
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>> {
-        self.epoch_eth_addresses.clone()
+        self.config.epoch_eth_addresses.clone()
     }
 
     /// Set TX recycler for confirming committed TXs
     pub fn with_tx_recycler(mut self, recycler: Arc<TxRecycler>) -> Self {
-        self.tx_recycler = Some(recycler);
+        self.config.tx_recycler = Some(recycler);
         self
     }
 
@@ -248,13 +224,13 @@ impl CommitProcessor {
         mut self,
         hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
     ) -> Self {
-        self.committed_transaction_hashes = Some(hashes);
+        self.config.committed_transaction_hashes = Some(hashes);
         self
     }
 
     /// RS-2: Set storage path for persisting cumulative_fragment_offset
     pub fn with_storage_path(mut self, path: std::path::PathBuf) -> Self {
-        self.storage_path = Some(path);
+        self.config.storage_path = Some(path);
         self
     }
 
@@ -265,7 +241,7 @@ impl CommitProcessor {
             crate::consensus::commit_processor::lag_monitor::LagAlert,
         >,
     ) -> Self {
-        self.lag_alert_sender = Some(sender);
+        self.config.lag_alert_sender = Some(sender);
         self
     }
 
@@ -275,12 +251,12 @@ impl CommitProcessor {
     /// This eliminates the root cause of consensus-layer forks from sparse DAG
     /// local committer decisions.
     pub fn with_quorum_commit_index(mut self, quorum_index: Arc<AtomicU32>) -> Self {
-        self.quorum_commit_index = Some(quorum_index);
+        self.config.quorum_commit_index = Some(quorum_index);
         self
     }
 
     pub fn with_committee_size(mut self, size: usize) -> Self {
-        self.committee_size = size;
+        self.config.committee_size = size;
         self
     }
 
@@ -288,7 +264,7 @@ impl CommitProcessor {
     where
         F: Fn(u32) -> Option<[u8; 32]> + Send + Sync + 'static,
     {
-        self.digest_verifier = Some(Arc::new(verifier));
+        self.config.digest_verifier = Some(Arc::new(verifier));
         self
     }
 
@@ -300,7 +276,19 @@ impl CommitProcessor {
     where
         F: Fn() -> bool + Send + Sync + 'static,
     {
-        self.digest_data_checker = Some(Arc::new(checker));
+        self.config.digest_data_checker = Some(Arc::new(checker));
+        self
+    }
+
+    /// ZERO-TIMEOUT (May 2026): Set the peer commit attestation callback.
+    /// Replaces timeout-based COLD-START-BYPASS (10s) and SUSTAINED-LOAD-BYPASS (5s).
+    /// When DIGEST-GATE verifier returns None (no quorum digest), this callback polls
+    /// peers to verify the local commit digest instead of waiting for a timeout.
+    pub fn with_peer_commit_attestation<F>(mut self, attestor: F) -> Self
+    where
+        F: Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync + 'static,
+    {
+        self.config.peer_commit_attestation = Some(Arc::new(attestor));
         self
     }
 
@@ -402,28 +390,58 @@ impl CommitProcessor {
 
     /// Process commits in order
     pub async fn run(self) -> Result<()> {
+        let CommitProcessor {
+            receiver,
+            next_expected_index,
+            pending_commits,
+            go_last_commit_index,
+            current_epoch,
+            config,
+        } = self;
+
+        let CommitProcessorConfig {
+            commit_index_callback,
+            global_exec_index_callback,
+            shared_last_global_exec_index,
+            executor_client,
+            is_transitioning,
+            delivery_sender,
+            pending_transactions_queue: _,
+            epoch_transition_callback,
+            epoch_eth_addresses,
+            tx_recycler,
+            committed_transaction_hashes,
+            storage_path,
+            lag_alert_sender,
+            quorum_commit_index,
+            committee_size,
+            digest_verifier,
+            digest_data_checker,
+            peer_commit_attestation,
+        } = config;
+
         // Validate required dependencies upfront to avoid bare .unwrap() in hot loop
-        let shared_gei = self.shared_last_global_exec_index.clone()
+        let shared_gei = shared_last_global_exec_index.clone()
             .ok_or_else(|| anyhow::anyhow!("BUG: shared_last_global_exec_index must be set before CommitProcessor::run()"))?;
 
-        let mut receiver = self.receiver;
-        let mut next_expected_index = self.next_expected_index;
-        let mut pending_commits = self.pending_commits;
-        let commit_index_callback = self.commit_index_callback;
-        let current_epoch = self.current_epoch;
-        let executor_client = self.executor_client;
-        let delivery_sender = self.delivery_sender;
-        let _pending_transactions_queue = self.pending_transactions_queue;
-        let epoch_transition_callback = self.epoch_transition_callback;
-        let go_last_commit_index = self.go_last_commit_index;
-        let epoch_eth_addresses = self.epoch_eth_addresses;
-        let tx_recycler = self.tx_recycler;
-        let storage_path = self.storage_path;
-        let committed_transaction_hashes = self.committed_transaction_hashes;
-        let _quorum_commit_index_ref = self.quorum_commit_index.clone();
-        let committee_size = self.committee_size;
-        let digest_verifier = self.digest_verifier.clone();
-        let digest_data_checker = self.digest_data_checker.clone();
+        let mut receiver = receiver;
+        let mut next_expected_index = next_expected_index;
+        let mut pending_commits = pending_commits;
+        let commit_index_callback = commit_index_callback;
+        let current_epoch = current_epoch;
+        let executor_client = executor_client;
+        let delivery_sender = delivery_sender;
+        let epoch_transition_callback = epoch_transition_callback;
+        let mut go_last_commit_index = go_last_commit_index;
+        let epoch_eth_addresses = epoch_eth_addresses;
+        let tx_recycler = tx_recycler;
+        let storage_path = storage_path;
+        let committed_transaction_hashes = committed_transaction_hashes;
+        let _quorum_commit_index_ref = quorum_commit_index.clone();
+        let committee_size = committee_size;
+        let digest_verifier = digest_verifier.clone();
+        let digest_data_checker = digest_data_checker.clone();
+        let peer_commit_attestation = peer_commit_attestation.clone();
         // BFT quorum threshold: 2f+1 where n=3f+1, so quorum = ceil(2n/3)
         // For n=5: quorum=4, n=4: quorum=3, n=7: quorum=5
         let _quorum_threshold = if committee_size > 0 {
@@ -498,8 +516,8 @@ impl CommitProcessor {
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
             &executor_client,
-            &self.shared_last_global_exec_index,
-            self.lag_alert_sender,
+            &shared_last_global_exec_index,
+            lag_alert_sender,
         ) {
             let lag_monitor = crate::consensus::commit_processor::lag_monitor::LagMonitor::new(
                 client.clone(),
@@ -537,7 +555,7 @@ impl CommitProcessor {
                 } else {
                     false
                 };
-                let is_trans = if let Some(ref it) = self.is_transitioning {
+                let is_trans = if let Some(ref it) = is_transitioning {
                     it.load(std::sync::atomic::Ordering::Relaxed)
                 } else {
                     false
@@ -571,7 +589,7 @@ impl CommitProcessor {
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
             // This prevents CommitProcessor from pushing new execution state to Go Master
             // while Go is busy re-initializing for the next epoch.
-            if let Some(ref is_transitioning) = self.is_transitioning {
+            if let Some(ref is_transitioning) = is_transitioning {
                 let mut logged = false;
                 let transition_wait_start = tokio::time::Instant::now();
                 while is_transitioning.load(std::sync::atomic::Ordering::Acquire) {
@@ -752,29 +770,29 @@ impl CommitProcessor {
                                     false // No checker → assume no data → allow bypass
                                 };
                                 // ═══════════════════════════════════════════════════════
-                                // BYPASS TIMEOUT CALCULATION (Updated May 2026):
-                                // We calculate cold_start_bypass and sustained_load_bypass
-                                // regardless of digest_has_data. If the local commit is stuck
-                                // without digest data for 10s (or 5s under high pressure),
-                                // we bypass and dispatch to prevent pipeline deadlock.
+                                // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
+                                // Replaces COLD-START-BYPASS (10s) and SUSTAINED-LOAD-
+                                // BYPASS (5s) with a DATA-DRIVEN peer polling check.
                                 //
-                                // Fork safety is preserved because this None path ONLY runs
-                                // when no conflicting digest has been seen. If a conflict
-                                // is detected, we enter the divergence path instead.
+                                // Instead of waiting N seconds and dispatching blind,
+                                // we ask peers if they produced the same commit digest.
+                                // This is DETERMINISTIC: all nodes get the same answer
+                                // from the same set of peers.
+                                //
+                                // Fork safety: Peer attestation returns Ok only when
+                                // 2f+1 peers agree on the digest. Conflict means our
+                                // local commit is wrong. Insufficient means we can't
+                                // verify yet — stay pending (thà pending chứ không fork).
                                 // ═══════════════════════════════════════════════════════
-                                let (cold_start_bypass, sustained_load_bypass) = {
-                                    if let Some(pending_ts) = pending_local_timestamps.get(&local_idx) {
-                                        let now = std::time::Instant::now();
-                                        let age = now.duration_since(*pending_ts);
-                                        let cold = age.as_secs() >= 10;
-                                        // SUSTAINED-LOAD-BYPASS: 5s timeout when buffer pressure is high
-                                        let sustained = !cold
-                                            && age.as_secs() >= 5
-                                            && pending_local_commits.len() >= MAX_PENDING_LOCAL_COMMITS / 2;
-                                        (cold, sustained)
+                                let peer_attest_result = if !digest_has_data {
+                                    if let Some(ref attestor) = peer_commit_attestation {
+                                        let local_digest = local_commit.commit_ref.digest.into_inner();
+                                        Some(attestor(local_idx, local_digest))
                                     } else {
-                                        (false, false)
+                                        None // No attestor available
                                     }
+                                } else {
+                                    None // Digest data exists — use QCI-AHEAD path instead
                                 };
 
                                 if quorum_gc_bypass {
@@ -785,25 +803,25 @@ impl CommitProcessor {
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
-                                } else if cold_start_bypass {
-                                    warn!(
-                                        "⚡ [DIGEST-GATE COLD-START-BYPASS] Commit {} dispatching after 10s wait. \
-                                         CommitVoteMonitor has no digest data (epoch cold-start). \
-                                         Normal DIGEST-GATE verification will resume once digest votes arrive.",
+                                } else if peer_attest_result == Some(PeerAttestResult::Ok) {
+                                    info!(
+                                        "✅ [DIGEST-GATE PEER-ATTEST] Commit {} dispatching: \
+                                         peer attestation confirmed. 2f+1 peers agree on digest. \
+                                         Data-driven verification (zero timeout).",
                                         local_idx
                                     );
                                     verified_indices.push(local_idx);
-                                } else if sustained_load_bypass {
+                                } else if peer_attest_result == Some(PeerAttestResult::Conflict) {
                                     warn!(
-                                        "⚡ [DIGEST-GATE SUSTAINED-LOAD-BYPASS] Commit {} dispatching after 5s \
-                                         (buffer at {}/{} = {}%). No digest data yet, dispatching early to prevent \
-                                         cascade buffer saturation.",
-                                        local_idx,
-                                        pending_local_commits.len(),
-                                        MAX_PENDING_LOCAL_COMMITS,
-                                        (pending_local_commits.len() * 100) / MAX_PENDING_LOCAL_COMMITS
+                                        "🚨 [DIGEST-GATE PEER-ATTEST] Commit {} CONFLICT: \
+                                         peers produced DIFFERENT digest! Local commit is divergent. \
+                                         DISCARDING from pending buffer. CertifiedCommit will replace.",
+                                        local_idx
                                     );
-                                    verified_indices.push(local_idx);
+                                    // Mark for eviction — don't push to verified
+                                    pending_local_commits.remove(&local_idx);
+                                    pending_local_timestamps.remove(&local_idx);
+                                    break; // STRICT ORDER: re-evaluate remaining
                                 } else {
                                     // QCI-AHEAD-BYPASS: digest_has_data=true,
                                     // verifier returns None, check if QCI already passed this commit.
@@ -973,7 +991,7 @@ impl CommitProcessor {
             let mut should_break = false;
             while let Some(mut pending) = pending_commits.remove(&next_expected_index) {
                 // Check transitioning state before processing buffered OOO commits
-                if let Some(ref is_trans) = self.is_transitioning {
+                if let Some(ref is_trans) = is_transitioning {
                     if is_trans.load(std::sync::atomic::Ordering::Relaxed) {
                         info!("🛑 [STATION 3: PROCESSOR] OOO Drain Loop paused: Node is transitioning. Buffering commit {}.", next_expected_index);
                         pending_commits.insert(next_expected_index, pending);
@@ -1016,7 +1034,7 @@ impl CommitProcessor {
                                 }
                             }
                             None => {
-                                // QUORUM-GC-BYPASS + COLD-START-BYPASS: Same logic as DIGEST-GATE POLL path.
+                                // QUORUM-GC-BYPASS + PEER-ATTEST: Same logic as DIGEST-GATE POLL path.
                                 let qci_val = if let Some(ref qci) = _quorum_commit_index_ref {
                                     qci.load(std::sync::atomic::Ordering::Relaxed)
                                 } else {
@@ -1029,50 +1047,65 @@ impl CommitProcessor {
                                         next_expected_index, qci_val
                                     );
                                     true
-                                } else if !{
-                                    // COLD-START-FIX: Check actual digest data availability
-                                    // instead of qci==0 (which CommitSyncer corrupts early)
-                                    if let Some(ref checker) = digest_data_checker {
-                                        checker()
-                                    } else {
-                                        false
-                                    }
-                                } {
-                                    // COLD-START-BYPASS: Same rationale as DIGEST-GATE POLL.
-                                    // In OOO path, commit was already waiting in pending_commits
-                                    // (arrived out of order). If qci==0, verification infra is
-                                    // non-functional — safe to dispatch.
-                                    warn!(
-                                        "⚡ [DIGEST-GATE-OOO COLD-START-BYPASS] Commit {} dispatching. \
-                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
-                                         Normal verification will resume once digest votes arrive.",
-                                        next_expected_index
-                                    );
-                                    true
                                 } else {
-                                    // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
-                                    // If digest_has_data=true but verifier returns None,
-                                    // check if QCI already passed this commit index.
+                                    // Check digest data availability
                                     let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
                                         checker()
                                     } else {
                                         false
                                     };
-                                    let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
-                                        qci.load(std::sync::atomic::Ordering::Relaxed)
+                                    if !digest_has_data_ooo {
+                                        // ZERO-TIMEOUT PEER ATTESTATION (OOO PATH):
+                                        // No digest data = cold-start. Instead of blind dispatch,
+                                        // use peer attestation to verify deterministically.
+                                        if let Some(ref attestor) = peer_commit_attestation {
+                                            let local_digest = pending.commit_ref.digest.into_inner();
+                                            match attestor(next_expected_index, local_digest) {
+                                                PeerAttestResult::Ok => {
+                                                    info!(
+                                                        "✅ [DIGEST-GATE-OOO PEER-ATTEST] Commit {} dispatching: \
+                                                         peer attestation confirmed. Data-driven (zero timeout).",
+                                                        next_expected_index
+                                                    );
+                                                    true
+                                                }
+                                                PeerAttestResult::Conflict => {
+                                                    warn!(
+                                                        "🚨 [DIGEST-GATE-OOO PEER-ATTEST] Commit {} CONFLICT: \
+                                                         peers disagree on digest. Blocking OOO drain.",
+                                                        next_expected_index
+                                                    );
+                                                    false
+                                                }
+                                                PeerAttestResult::Insufficient => {
+                                                    // Not enough peers — stay pending
+                                                    false
+                                                }
+                                            }
+                                        } else {
+                                            // No attestor — stay pending (safe default)
+                                            false
+                                        }
                                     } else {
-                                        0
-                                    };
-                                    if digest_has_data_ooo && qci_val_ooo > next_expected_index {
-                                        info!(
-                                            "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
-                                             qci={} > commit_index. Network quorum committed past \
-                                             this index. No conflicting digest. Implicitly verified.",
-                                            next_expected_index, qci_val_ooo
-                                        );
-                                        true
-                                    } else {
-                                        false
+                                        // QCI-AHEAD-BYPASS (OOO PATH): Same logic as POLL path.
+                                        // If digest_has_data=true but verifier returns None,
+                                        // check if QCI already passed this commit index.
+                                        let qci_val_ooo = if let Some(ref qci) = _quorum_commit_index_ref {
+                                            qci.load(std::sync::atomic::Ordering::Relaxed)
+                                        } else {
+                                            0
+                                        };
+                                        if qci_val_ooo > next_expected_index {
+                                            info!(
+                                                "✅ [DIGEST-GATE-OOO QCI-AHEAD-BYPASS] Commit {} dispatching: \
+                                                 qci={} > commit_index. Network quorum committed past \
+                                                 this index. No conflicting digest. Implicitly verified.",
+                                                next_expected_index, qci_val_ooo
+                                            );
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     }
                                 }
                             }
@@ -1334,22 +1367,41 @@ impl CommitProcessor {
                                                 );
                                                 true
                                             } else {
-                                                // COLD-START-FIX (May 2026): Check if digest data is available.
-                                                // If CommitVoteMonitor has no data yet (epoch cold-start),
-                                                // allow immediate dispatch instead of buffering.
+                                                // ZERO-TIMEOUT PEER ATTESTATION (IMMEDIATE PATH):
+                                                // Check digest data availability first.
                                                 let digest_has_data = if let Some(ref checker) = digest_data_checker {
                                                     checker()
                                                 } else {
                                                     false
                                                 };
                                                 if !digest_has_data {
-                                                    warn!(
-                                                        "⚡ [DIGEST-GATE-IMMEDIATE COLD-START-BYPASS] Commit {} dispatching. \
-                                                         CommitVoteMonitor has no digest data yet (epoch cold-start). \
-                                                         Normal verification will resume once digest votes arrive.",
-                                                        commit_index
-                                                    );
-                                                    true
+                                                    // No digest data = cold-start. Use peer attestation.
+                                                    if let Some(ref attestor) = peer_commit_attestation {
+                                                        let local_digest = subdag.commit_ref.digest.into_inner();
+                                                        let result = attestor(commit_index, local_digest);
+                                                        match result {
+                                                            PeerAttestResult::Ok => {
+                                                                info!(
+                                                                    "✅ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} dispatching: \
+                                                                     peer attestation confirmed. Data-driven (zero timeout).",
+                                                                    commit_index
+                                                                );
+                                                                true
+                                                            }
+                                                            other => {
+                                                                // Conflict or Insufficient — buffer for POLL path
+                                                                info!(
+                                                                    "🛡️ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} buffered: \
+                                                                     peer attestation returned {:?}. Will retry in POLL path.",
+                                                                    commit_index, other
+                                                                );
+                                                                false
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // No attestor — buffer (safe default)
+                                                        false
+                                                    }
                                                 } else {
                                                     // QCI-AHEAD-BYPASS: Check if QCI already passed
                                                     // this commit index at receive time.

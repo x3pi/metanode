@@ -798,7 +798,7 @@ func (t *Transaction) RelatedAddresses() []common.Address {
 	accountSettingSelector := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	stakeSelector := utils.GetAddressSelector(p_common.IDENTIFIER_STAKE)
 
-	relatedAddresses := make([]common.Address, 0, len(t.proto.RelatedAddresses)+1)
+	relatedAddresses := make([]common.Address, 0, len(t.proto.RelatedAddresses)+2)
 	for _, v := range t.proto.RelatedAddresses {
 		addr := common.BytesToAddress(v)
 		//
@@ -813,6 +813,20 @@ func (t *Transaction) RelatedAddresses() []common.Address {
 	if toAddr != accountSettingSelector && toAddr != stakeSelector && toAddr != p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
 		relatedAddresses = append(relatedAddresses, toAddr)
 	}
+
+	// Append FromAddress (sender) to prevent concurrent state mutation of the same account
+	fromAddr := t.FromAddress()
+	hasFrom := false
+	for _, addr := range relatedAddresses {
+		if addr == fromAddr {
+			hasFrom = true
+			break
+		}
+	}
+	if !hasFrom {
+		relatedAddresses = append(relatedAddresses, fromAddr)
+	}
+
 	return relatedAddresses
 }
 

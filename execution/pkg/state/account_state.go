@@ -106,14 +106,25 @@ func (as *AccountState) Copy() types.AccountState {
 	copyAs := &AccountState{}
 	copy(copyAs.address[:], as.address[:])
 	copy(copyAs.lastHash[:], as.lastHash[:])
-	copyAs.balance = big.NewInt(0).Set(as.balance)
-	copyAs.pendingBalance = big.NewInt(0).Set(as.pendingBalance)
+	if as.balance != nil {
+		copyAs.balance = big.NewInt(0).Set(as.balance)
+	} else {
+		copyAs.balance = big.NewInt(0)
+	}
+	if as.pendingBalance != nil {
+		copyAs.pendingBalance = big.NewInt(0).Set(as.pendingBalance)
+	} else {
+		copyAs.pendingBalance = big.NewInt(0)
+	}
 	copy(copyAs.deviceKey[:], as.deviceKey[:])
 	if as.smartContractState != nil {
 		copyAs.smartContractState = as.smartContractState.Copy()
 	}
 	copyAs.nonce = as.nonce
-	copy(copyAs.publicKeyBls[:], as.publicKeyBls[:])
+	if as.publicKeyBls != nil {
+		copyAs.publicKeyBls = make([]byte, len(as.publicKeyBls))
+		copy(copyAs.publicKeyBls, as.publicKeyBls)
+	}
 	copyAs.accountType = as.accountType
 	copyAs.isDirty = as.isDirty
 	return copyAs
@@ -149,8 +160,8 @@ func (as *AccountState) PendingBalance() *big.Int {
 
 func (as *AccountState) TotalBalance() *big.Int {
 	return big.NewInt(0).Add(
-		as.Balance(),
-		as.PendingBalance(),
+		as.balance,
+		as.pendingBalance,
 	)
 }
 
@@ -169,107 +180,126 @@ func (as *AccountState) DeviceKey() common.Hash {
 // setter
 func (as *AccountState) SetBalance(newBalance *big.Int) {
 	as.balance = newBalance
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetNewDeviceKey(newDeviceKey common.Hash) {
 	as.deviceKey = newDeviceKey
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetLastHash(newLastHash common.Hash) {
 	as.lastHash = newLastHash
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetSmartContractState(smState types.SmartContractState) {
 	as.smartContractState = smState
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) AddPendingBalance(amount *big.Int) {
 	as.pendingBalance = big.NewInt(0).Add(as.pendingBalance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SubPendingBalance(amount *big.Int) error {
-	pendingBalance := as.PendingBalance()
-	if amount.Cmp(pendingBalance) > 0 {
+	if amount.Cmp(as.pendingBalance) > 0 {
 		return ErrorInvalidSubPendingAmount
 	}
-	as.pendingBalance = big.NewInt(0).Sub(pendingBalance, amount)
-	as.MarkDirty()
+	as.pendingBalance = big.NewInt(0).Sub(as.pendingBalance, amount)
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) SubBalance(amount *big.Int) error {
-	balance := as.Balance()
-	if amount.Cmp(balance) > 0 {
+	if amount.Cmp(as.balance) > 0 {
 		return ErrorInvalidSubBalanceAmount
 	}
-	as.balance = big.NewInt(0).Sub(balance, amount)
-	as.MarkDirty()
+	as.balance = big.NewInt(0).Sub(as.balance, amount)
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) SubTotalBalance(amount *big.Int) error {
-	totalBalance := big.NewInt(0).Add(as.PendingBalance(), as.Balance())
+	totalBalance := big.NewInt(0).Add(as.pendingBalance, as.balance)
 	if amount.Cmp(totalBalance) > 0 {
 		return ErrorInvalidSubBalanceAmount
 	}
 	as.pendingBalance = big.NewInt(0)
 	as.balance = big.NewInt(0).Sub(totalBalance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 	return nil
 }
 
 func (as *AccountState) AddBalance(amount *big.Int) {
 	as.balance = big.NewInt(0).Add(as.balance, amount)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) GetOrCreateSmartContractState() types.SmartContractState {
-	scState := as.SmartContractState()
+	scState := as.smartContractState
 	if scState == nil {
 		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+		as.isDirty = true
 	}
-	as.SetSmartContractState(scState)
 	return scState
 }
 
 func (as *AccountState) SetCodeHash(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetCodeHash(hash)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetStorageAddress(storageAddress common.Address) {
-	scState := as.GetOrCreateSmartContractState()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetStorageAddress(storageAddress)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetStorageRoot(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetStorageRoot(hash)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetCreatorPublicKey(creatorPublicKey p_common.PublicKey) {
-	scState := as.GetOrCreateSmartContractState()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetCreatorPublicKey(creatorPublicKey)
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) AddLogHash(hash common.Hash) {
-	scState := as.GetOrCreateSmartContractState()
+	scState := as.smartContractState
+	if scState == nil {
+		scState = NewEmptySmartContractState()
+		as.smartContractState = scState
+	}
 	scState.SetLogsHash(crypto.Keccak256Hash(append(scState.LogsHash().Bytes(), hash.Bytes()...)))
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetPendingBalance(newBalance *big.Int) {
 	as.pendingBalance = newBalance
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 type JsonAccountState struct {
@@ -312,7 +342,7 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 		j.SmartContractState = &JsonSmartContractState{}
 		j.SmartContractState.FromSmartContractState(as.smartContractState)
 	}
-	j.Nonce = as.Nonce()
+	j.Nonce = as.nonce
 	j.PublicKeyBls = hex.EncodeToString(as.publicKeyBls)
 	j.AccountType = int32(as.accountType)
 }
@@ -412,13 +442,13 @@ func (as *AccountState) Nonce() uint64 {
 
 func (as *AccountState) SetNonce(newNonce uint64) {
 	as.nonce = newNonce
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 // plus one nonce
 func (as *AccountState) PlusOneNonce() {
 	as.nonce++
-	as.MarkDirty()
+	as.isDirty = true
 }
 
 func (as *AccountState) SetPublicKeyBls(publicKeyBls []byte) error {
@@ -428,7 +458,7 @@ func (as *AccountState) SetPublicKeyBls(publicKeyBls []byte) error {
 	}
 	if len(as.publicKeyBls) == 0 {
 		as.publicKeyBls = publicKeyBls
-		as.MarkDirty()
+		as.isDirty = true
 	} else {
 		return errors.New("publicKeyBls is already set")
 	}
@@ -446,7 +476,7 @@ func (as *AccountState) SetAccountType(accountTypeNew pb.ACCOUNT_TYPE) error {
 
 	if isValid {
 		as.accountType = accountTypeNew
-		as.MarkDirty()
+		as.isDirty = true
 		return nil // Thêm return nil khi hợp lệ
 	} else {
 		logger.Error("Invalid account type:", accountTypeNew)

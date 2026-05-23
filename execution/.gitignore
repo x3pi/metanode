@@ -244,3 +244,10 @@ test_simple_chain*
 /check_*.go
 cmd/tests/nomt_empty/
 test_nomt/
+
+# ===== Phase 2: Code Hygiene =====
+sed*
+**/sed*
+test_sort.rs
+patch_http_handler.sh
+

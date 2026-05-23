@@ -434,13 +434,16 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	n := len(keys)
 
 	// ═══════════════════════════════════════════════════════════════
-	// Phase 1: PARALLEL — Pre-compute hex keys + bucket indices ONLY.
-	// NO DB READS — old values come from caller's cache.
+	// Phase 1: PARALLEL — Pre-compute hex keys + bucket indices.
+	// DB Fallback: If old values are missing from cache (nil or empty),
+	// read them in parallel from DB to ensure fork determinism.
 	// ═══════════════════════════════════════════════════════════════
 	type batchEntry struct {
-		hexKey  string
-		keyCopy []byte
-		bucket  byte
+		hexKey   string
+		keyCopy  []byte
+		bucket   byte
+		oldValue []byte
+		loaded   bool
 	}
 	entries := make([]batchEntry, n)
 
@@ -473,10 +476,31 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 					bucket = keyCopy[0]
 				}
 
+				hexKey := hex.EncodeToString(key)
+				var oldValue []byte
+				var loaded bool
+
+				// If the caller provided the cached old value, use it.
+				// Otherwise, fall back to direct parallel DB lookup.
+				if oldValues != nil && i < len(oldValues) && len(oldValues[i]) > 0 {
+					oldValue = oldValues[i]
+					loaded = true
+				} else {
+					dbVal, err := f.db.Get(makeFlatKey(keyCopy))
+					if err == nil {
+						loaded = true
+						if len(dbVal) > 0 {
+							oldValue = dbVal
+						}
+					}
+				}
+
 				entries[i] = batchEntry{
-					hexKey:  hex.EncodeToString(key),
-					keyCopy: keyCopy,
-					bucket:  bucket,
+					hexKey:   hexKey,
+					keyCopy:  keyCopy,
+					bucket:   bucket,
+					oldValue: oldValue,
+					loaded:   loaded,
 				}
 			}
 		}(start, end)
@@ -484,7 +508,7 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	wg.Wait()
 
 	// ═══════════════════════════════════════════════════════════════
-	// Phase 2: SEQUENTIAL — Update dirty map + inject cached old values.
+	// Phase 2: SEQUENTIAL — Update dirty map + inject old values.
 	// ═══════════════════════════════════════════════════════════════
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -492,12 +516,14 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	for i := 0; i < n; i++ {
 		e := &entries[i]
 
-		// Inject caller-provided old value (only once per key per block)
+		// Inject old value only once per key per block
 		if !f.oldLoaded[e.hexKey] {
-			if oldValues != nil && len(oldValues[i]) > 0 {
-				f.oldValues[e.hexKey] = oldValues[i]
+			if e.loaded {
+				if e.oldValue != nil {
+					f.oldValues[e.hexKey] = e.oldValue
+				}
+				f.oldLoaded[e.hexKey] = true
 			}
-			f.oldLoaded[e.hexKey] = true
 		}
 
 		f.dirty[e.hexKey] = &dirtyEntry{

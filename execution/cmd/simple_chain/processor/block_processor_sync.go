@@ -33,7 +33,17 @@ func (bp *BlockProcessor) processSingleEpochData(
 	pendingBlocks map[uint64]*pb.ExecutableBlock,
 	skippedCommitsWithTxs map[uint64]*pb.ExecutableBlock,
 	fileLogger *loggerfile.FileLogger,
-) error {
+) (err error) {
+	defer func() {
+		if err != nil {
+			logger.Error("⚠️ [PROCESSOR] processSingleEpochData failed with error: %v. Discarding all dirty states to prevent lock leaks.", err)
+			bp.chainState.GetAccountStateDB().Discard()
+			bp.chainState.GetSmartContractDB().Discard()
+			bp.chainState.GetStakeStateDB().Discard()
+			trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
+		}
+	}()
+
 PROCESS_SINGLE_EPOCH_DATA_START:
 	logger.Debug("⚙️ [PROCESSOR] Called processSingleEpochData for GEI=%d", epochData.GetGlobalExecIndex())
 	globalExecIndex := epochData.GetGlobalExecIndex()
@@ -473,11 +483,7 @@ PROCESS_BLOCK:
 
 	if len(epochData.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			// Live block with assigned block number cannot be empty.
-			// Return safety violation to stall/sync instead of forging a divergent empty block.
-			return fmt.Errorf("safety violation (Guard 1): 0 transactions for assigned live block number %d at GEI %d", bNum, globalExecIndex)
-		} else {
+		if bNum == 0 {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
 
 			// Update GlobalExecIndex tracking (persistent)
@@ -580,9 +586,7 @@ PROCESS_BLOCK:
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			return fmt.Errorf("safety violation: 0 valid transactions after unmarshal for assigned block number %d at GEI %d (Rust sent %d txs but unmarshal failed)", bNum, globalExecIndex, len(epochData.Transactions))
-		}
+
 		if bNum == 0 {
 			// FALLBACK: Auto-increment local block number if Rust doesn't provide one (e.g., during SyncOnly)
 			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
