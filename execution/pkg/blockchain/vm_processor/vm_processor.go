@@ -83,9 +83,16 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		// DETERMINISTIC: Use txHash-only hash for readOnly mvmId.
 		// No state changes occur, so no fork risk, but deterministic IDs
 		// make execution reproducible for debugging.
-		combinedHash := sha256.Sum256(append([]byte("readonly-"), tx.Hash().Bytes()...))
-		ethAddressBytes := combinedHash[12:]
-		mvmIdReadOnly := common.BytesToAddress(ethAddressBytes)
+		var mvmIdReadOnly common.Address
+		for {
+			combinedHash := sha256.Sum256(append([]byte(fmt.Sprintf("readonly-%d-", time.Now().UnixNano())), tx.Hash().Bytes()...))
+			ethAddressBytes := combinedHash[12:]
+			ethAddressBytes[0] = 0xFC // Prefix cho readonly
+			mvmIdReadOnly = common.BytesToAddress(ethAddressBytes)
+			if mvm.GetMVMApi(mvmIdReadOnly) == nil {
+				break
+			}
+		}
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
