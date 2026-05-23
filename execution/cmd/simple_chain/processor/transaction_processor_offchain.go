@@ -390,11 +390,16 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	return exRsE, nil
 }
 
-func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, block types.Block) (types.ExecuteSCResult, error) {
+func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, blockVal types.Block) (types.ExecuteSCResult, error) {
 	ctx := context.Background()
 
 	if tx.IsCallContract() || tx.IsDeployContract() {
-		vmP := vm_processor.NewVmProcessor(v.chainState, tx.ToAddress(), false, block.Header().TimeStamp(), common.Address{})
+		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blockVal.Header(), v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temporary chain state for debug execution: %w", err)
+		}
+		vmP := vm_processor.NewVmProcessor(chainStateNew, tx.ToAddress(), false, blockVal.Header().TimeStamp(), common.Address{})
 		exRs, err := vmP.ExecuteTransactionWithMvmIdDebug(ctx, tx, false)
 		if err != nil {
 			logger.Error("Error executing transaction in debug mode: %v", err)

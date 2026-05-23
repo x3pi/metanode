@@ -13,6 +13,8 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/types"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -94,18 +96,19 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		tx.Hash().Hex(), tx.IsCallContract(), tx.IsDeployContract(), isAccountSetting, needsEVM)
 
 	if needsEVM {
-		// Use the block processor's live chainState directly for EVM execution.
-		// v.chainState is properly synchronized:
-		//   1. applyBlockBatch() writes AccountBatch to PebbleDB
-		//   2. UpdateStateForNewHeader() creates new trie at correct root from PebbleDB
-		//   3. Receipt broadcast (async) happens AFTER state update
-		// So by the time a client receives a receipt and sends the next TX,
-		var blHeader types.BlockHeader
-		if v.env != nil && v.env.GetLastBlock() != nil {
-			blHeader = v.env.GetLastBlock().Header()
+		headerPtr := v.chainState.GetcurrentBlockHeader()
+		if headerPtr == nil {
+			return nil, fmt.Errorf("current block header is nil"), nil
+		}
+		blHeader := *headerPtr
+
+		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temporary chain state for virtual execution: %w", err), nil
 		}
 
-		vmP := vm_processor.NewVmProcessor(v.chainState, mvmId, false, blockTime, common.Address{})
+		vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, blockTime, common.Address{})
 		mvm.ProtectMVMApi(mvmId)
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
@@ -379,6 +382,19 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 	targets := ccHandler.ExtractInboundTargets(inputData)
 	if len(targets) > 0 {
 		blockTime := uint64(time.Now().Unix())
+		headerPtr := v.chainState.GetcurrentBlockHeader()
+		if headerPtr == nil {
+			logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ GetcurrentBlockHeader is nil, cannot simulate inbound targets")
+			return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
+		}
+		blHeader := *headerPtr
+		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		if err != nil {
+			logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ failed to create temporary chain state: %v, cannot simulate inbound targets", err)
+			return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
+		}
+
 		for i, item := range targets {
 			if item.Target == (common.Address{}) {
 				// ── lockAndBridge path: không chạy EVM dry-run ──────────────────
@@ -401,10 +417,10 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			itemHash := sha256.Sum256([]byte(fmt.Sprintf("batchsubmit-virtual-%x-%s-%d",
 				updatedTx.Hash(), item.Target.Hex(), i)))
 			itemMvmId := common.BytesToAddress(itemHash[12:])
-			vmP := vm_processor.NewVmProcessor(v.chainState, itemMvmId, false, blockTime, common.Address{})
+			vmP := vm_processor.NewVmProcessor(chainStateNew, itemMvmId, false, blockTime, common.Address{})
 
 			// Validate: target phải là contract hợp lệ
-			toAccountState, err := v.chainState.GetAccountStateDB().AccountState(item.Target)
+			toAccountState, err := chainStateNew.GetAccountStateDB().AccountState(item.Target)
 			if err != nil || !vmP.IsValidSmartContractCall(toAccountState, updatedTx) {
 				logger.Warn("[VIRTUAL CC batchSubmit] target=%s is not a valid contract, skip dry-run", item.Target.Hex())
 				updatedTx.AddRelatedAddress(item.Target) // vẫn thêm địa chỉ để đảm bảo sequential
