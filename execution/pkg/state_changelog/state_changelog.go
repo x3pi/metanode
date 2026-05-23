@@ -146,6 +146,67 @@ func (c *StateChangelogDB) GetStartBlock() uint64 {
 	return c.startBlock.Load()
 }
 
+// GetBlockChanges scans the changelog to find all state changes that occurred AT a specific block.
+// Note: This performs a full namespace scan. It is intended for debugging APIs only.
+func (c *StateChangelogDB) GetBlockChanges(targetBlock uint64) ([]StateChange, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var changes []StateChange
+	prefix := []byte(fmt.Sprintf("%s:", c.namespace))
+	
+	opts := &pebble.IterOptions{
+		LowerBound: prefix,
+	}
+	iter, err := c.db.NewIter(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	blockBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockBytes, targetBlock)
+
+	for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if !bytes.HasPrefix(key, prefix) {
+			break
+		}
+		
+		// Key format: namespace:address:blockNumber
+		// blockNumber is the last 8 bytes.
+		if len(key) < len(prefix)+9 {
+			continue
+		}
+		
+		keyBlockBytes := key[len(key)-8:]
+		if bytes.Equal(keyBlockBytes, blockBytes) {
+			addr := key[len(prefix) : len(key)-9]
+			
+			val := iter.Value()
+			var newValue []byte
+			if !bytes.Equal(val, []byte("DEL")) {
+				newValue = make([]byte, len(val))
+				copy(newValue, val)
+			}
+			
+			addrCopy := make([]byte, len(addr))
+			copy(addrCopy, addr)
+			
+			changes = append(changes, StateChange{
+				Key:      addrCopy,
+				NewValue: newValue,
+			})
+		}
+	}
+	
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	
+	return changes, nil
+}
+
 // GetStateAt returns the value of an address AT a specific block.
 // It finds the most recent change for this address that happened AT OR BEFORE targetBlock.
 func (c *StateChangelogDB) GetStateAt(address []byte, targetBlock uint64) ([]byte, error) {

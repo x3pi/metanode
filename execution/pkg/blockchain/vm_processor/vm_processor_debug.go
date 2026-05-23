@@ -84,9 +84,17 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 		}() // Defer có điều kiện
 	}
 
-	combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", tx.Hash(), rand.Int63(), time.Now().UnixNano())))
-	ethAddressBytes := combinedHash[12:]
-	mvmIdDebug := common.BytesToAddress(ethAddressBytes)
+	var mvmIdDebug common.Address
+	for {
+		combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", tx.Hash(), rand.Int63(), time.Now().UnixNano())))
+		ethAddressBytes := combinedHash[12:]
+		ethAddressBytes[0] = 0xFD // Prevent overlap with real addresses
+		mvmIdDebug = common.BytesToAddress(ethAddressBytes)
+		if mvm.GetMVMApi(mvmIdDebug) == nil {
+			break
+		}
+	}
+	
 	if span != nil { // GUARD
 		span.SetAttribute("debugMvmId", mvmIdDebug.Hex())
 	}
@@ -614,9 +622,15 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
 
+	if isCache {
+		mvm.ProtectMVMApi(vmP.mvmId)
+	}
 	// Lấy hoặc tạo MVM API instance
 	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), false)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses()) // Đặt các địa chỉ liên quan cho tính nhất quán
+	if isCache {
+		defer mvm.UnprotectMVMApi(vmP.mvmId)
+	}
 
 	if span != nil {
 		span.AddEvent("CallingMvmNoncePlusOne", map[string]interface{}{
@@ -641,6 +655,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		lastBlockHeader.BlockNumber()+1,
 		vmP.getLeaderAddress(lastBlockHeader),
 		vmP.mvmId,
+		isCache,
 	)
 
 	if span != nil {
@@ -680,7 +695,12 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		// Vẫn trả về rs đã chuyển đổi, ngay cả khi có lỗi chuyển đổi
 	}
 
-	// Xóa MVM API instance nếu không ở chế độ cache, vì đây là một hoạt động thay đổi trạng thái
+	// Xóa MVM API instance nếu không ở chế độ cache (tuần tự), để giải phóng bộ nhớ.
+	// Chế độ cache = true (song song) sẽ được clear bởi block_processor_commit.
+	if span != nil {
+		span.AddEvent("ClearingMVMApiAfterNonceOnly", map[string]interface{}{"mvmIdToClear": vmP.mvmId.Hex()})
+	}
+	
 	if !isCache {
 		mvm.ClearMVMApi(vmP.mvmId)
 	}

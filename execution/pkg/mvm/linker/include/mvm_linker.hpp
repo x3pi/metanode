@@ -98,7 +98,8 @@ struct ExecuteResult *execute(
     unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
     unsigned char
         *b_related_addresses,   // Flatten array: addr1(20) + addr2(20) + ...
-    int related_addresses_count // Số lượng addresses
+    int related_addresses_count, // Số lượng addresses
+    bool is_cache                // Thêm is_cache
 );
 
 typedef struct {
@@ -134,21 +135,24 @@ struct ExecuteResult *processNativeMintBurn(
     unsigned long long block_prevrandao, unsigned long long block_gas_limit,
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
-    unsigned char *mvmId);
+    unsigned char *mvmId,
+    bool is_cache);
 struct ExecuteResult *
 sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
            unsigned long long gas_price, unsigned long long gas_limit,
            unsigned long long block_prevrandao,
            unsigned long long block_gas_limit, unsigned long long block_time,
            unsigned long long block_base_fee, unsigned char *b_block_number,
-           unsigned char *b_block_coinbase, unsigned char *mvmId);
+           unsigned char *b_block_coinbase, unsigned char *mvmId,
+           bool is_cache);
 
 struct ExecuteResult *
 noncePlusOne(unsigned char *b_from, unsigned long long gas_price,
              unsigned long long gas_limit, unsigned long long block_prevrandao,
              unsigned long long block_gas_limit, unsigned long long block_time,
              unsigned long long block_base_fee, unsigned char *b_block_number,
-             unsigned char *b_block_coinbase, unsigned char *mvmId);
+             unsigned char *b_block_coinbase, unsigned char *mvmId,
+             bool is_cache);
 
 extern int commit_full_db(unsigned char *mvmId);
 extern int revert_full_db(unsigned char *mvmId);

@@ -261,12 +261,17 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	ctx := context.Background()
 
 	transactionHash := executeTransaction.Hash()
-	currentTime := time.Now().Unix()
-	combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", transactionHash, currentTime, rand.Intn(1000))))
-
-	ethAddressBytes := combinedHash[12:]
-	ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
-	mvmId := common.BytesToAddress(ethAddressBytes)
+	var mvmId common.Address
+	for {
+		currentTime := time.Now().UnixNano()
+		combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", transactionHash, currentTime, rand.Int63())))
+		ethAddressBytes := combinedHash[12:]
+		ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
+		mvmId = common.BytesToAddress(ethAddressBytes)
+		if mvm.GetMVMApi(mvmId) == nil {
+			break
+		}
+	}
 	lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
 	stateRoot := lastBlockHeader.AccountStatesRoot()
 

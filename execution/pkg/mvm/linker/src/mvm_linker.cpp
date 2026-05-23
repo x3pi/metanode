@@ -764,7 +764,8 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
         unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
         unsigned char
             *b_related_addresses, // Flatten array: addr1(20) + addr2(20) + ...
-        int related_addresses_count // Số lượng addresses
+        int related_addresses_count, // Số lượng addresses
+        bool is_cache
 ) {
 
   uint256_t caller_address =
@@ -793,7 +794,7 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
       CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
                          block_base_fee, block_number, block_coinbase, tx_hash);
 
-  mvm::MyGlobalState gs(blockContext, true, relatedAddresses);
+  mvm::MyGlobalState gs(blockContext, is_cache, relatedAddresses);
   mvm::VectorLogHandler log_handler;
 
   auto result =
@@ -912,7 +913,8 @@ ExecuteResult *processNativeMintBurn(
     unsigned long long block_prevrandao, unsigned long long block_gas_limit,
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
-    unsigned char *mvmId) {
+    unsigned char *mvmId,
+    bool is_cache) {
   uint256_t from = mvm::from_big_endian((uint8_t *)b_from, 20u);
   uint256_t to = mvm::from_big_endian((uint8_t *)b_to, 20u);
   uint256_t amount = mvm::from_big_endian((uint8_t *)b_amount, 32u);
@@ -924,7 +926,7 @@ ExecuteResult *processNativeMintBurn(
       CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
                          block_base_fee, block_number, block_coinbase);
 
-  mvm::MyGlobalState gs(blockContext, true);
+  mvm::MyGlobalState gs(blockContext, is_cache);
   mvm::VectorLogHandler log_handler;
   try {
     if (operation_type == 0) { // MINT
@@ -981,7 +983,8 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
            unsigned long long block_prevrandao,
            unsigned long long block_gas_limit, unsigned long long block_time,
            unsigned long long block_base_fee, unsigned char *b_block_number,
-           unsigned char *b_block_coinbase, unsigned char *mvmId) {
+           unsigned char *b_block_coinbase, unsigned char *mvmId,
+           bool is_cache) {
 
   uint256_t from = mvm::from_big_endian((uint8_t *)b_from, 20u);
   uint256_t to = mvm::from_big_endian((uint8_t *)b_to, 20u);
@@ -994,7 +997,7 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
       CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
                          block_base_fee, block_number, block_coinbase);
 
-  mvm::MyGlobalState gs(blockContext, true);
+  mvm::MyGlobalState gs(blockContext, is_cache);
   mvm::VectorLogHandler log_handler;
 
   try {
@@ -1044,7 +1047,8 @@ noncePlusOne(unsigned char *b_from, unsigned long long gas_price,
              unsigned long long gas_limit, unsigned long long block_prevrandao,
              unsigned long long block_gas_limit, unsigned long long block_time,
              unsigned long long block_base_fee, unsigned char *b_block_number,
-             unsigned char *b_block_coinbase, unsigned char *mvmId) {
+             unsigned char *b_block_coinbase, unsigned char *mvmId,
+             bool is_cache) {
 
   uint256_t from = mvm::from_big_endian((uint8_t *)b_from, 20u);
   uint256_t block_number = mvm::from_big_endian((uint8_t *)b_block_number, 32u);
@@ -1055,7 +1059,7 @@ noncePlusOne(unsigned char *b_from, unsigned long long gas_price,
       CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
                          block_base_fee, block_number, block_coinbase);
 
-  mvm::MyGlobalState gs(blockContext, true);
+  mvm::MyGlobalState gs(blockContext, is_cache);
   mvm::VectorLogHandler log_handler;
 
   try {
