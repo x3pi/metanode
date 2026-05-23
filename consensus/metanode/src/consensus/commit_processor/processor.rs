@@ -401,7 +401,7 @@ impl CommitProcessor {
 
         let CommitProcessorConfig {
             commit_index_callback,
-            global_exec_index_callback,
+            global_exec_index_callback: _,
             shared_last_global_exec_index,
             executor_client,
             is_transitioning,
@@ -432,7 +432,7 @@ impl CommitProcessor {
         let executor_client = executor_client;
         let delivery_sender = delivery_sender;
         let epoch_transition_callback = epoch_transition_callback;
-        let mut go_last_commit_index = go_last_commit_index;
+        let go_last_commit_index = go_last_commit_index;
         let epoch_eth_addresses = epoch_eth_addresses;
         let tx_recycler = tx_recycler;
         let storage_path = storage_path;

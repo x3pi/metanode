@@ -235,7 +235,7 @@ start_go_master() {
 
     log_step "Đảm bảo dọn dẹp hoàn toàn session và tiến trình cũ của Node ${node_id}..."
     kill_and_wait_session "$session"
-    pkill -9 -f "simple_chain.*config-master-node${node_id}" 2>/dev/null || true
+    pkill -9 -f "[s]imple_chain.*config-master-node${node_id}" 2>/dev/null || true
 
     mkdir -p "$log_dir"
 
@@ -296,7 +296,7 @@ start_go_master() {
 
     # Enable remain-on-exit: keep tmux pane alive after process exits
     # This allows attaching to see crash output, exit code, and signal info
-    tmux set-option -t "$session" remain-on-exit on
+    tmux set-option -t "$session" remain-on-exit on 2>/dev/null || true
     log_step "Go Master node${node_id} → process started via tmux (remain-on-exit ON)"
 }
 
@@ -321,10 +321,10 @@ stop_session() {
     local real_pids=""
     if [[ "$session" == go-master-* ]]; then
         local node_id=${session#go-master-}
-        real_pids=$(pgrep -f "simple_chain.*config-master-node${node_id}" 2>/dev/null || true)
+        real_pids=$(pgrep -f "[s]imple_chain.*config-master-node${node_id}" 2>/dev/null || true)
     elif [[ "$session" == metanode-* ]]; then
         local node_id=${session#metanode-}
-        real_pids=$(pgrep -f "metanode start.*node_${node_id}.toml" 2>/dev/null || true)
+        real_pids=$(pgrep -f "[m]etanode start.*node_${node_id}.toml" 2>/dev/null || true)
     fi
 
     # Lấy thêm các child processes nếu có
@@ -496,7 +496,7 @@ cmd_start() {
         cmd_stop
         # Chỉ kill các process simple_chain có config cụ thể (không kill rộng)
         for i in $(seq 0 $((NUM_NODES - 1))); do
-            pkill -9 -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+            pkill -9 -f "[s]imple_chain.*config-master-node${i}" 2>/dev/null || true
         done
         echo ""
     fi
@@ -548,7 +548,7 @@ cmd_start() {
             sleep "$NODE_DELAY"
         fi
         # Health check: verify process is alive after startup
-        local hc_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
+        local hc_pid=$(pgrep -f "[s]imple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         if [ -z "$hc_pid" ]; then
             log_warn "⚠️  Node ${i} process died during startup! Check logs: $LOG_BASE/node_${i}/go-master-stdout.log"
             # Retry once
@@ -630,19 +630,19 @@ cmd_stop() {
     echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
     # Tự động kill orphan process (chỉ kill các node config cụ thể, không kill rộng)
-    local orphans=$(pgrep -f "simple_chain.*config-master-node" 2>/dev/null | wc -l || true)
+    local orphans=$(pgrep -f "[s]imple_chain.*config-master-node" 2>/dev/null | wc -l || true)
     if [ $orphans -gt 0 ]; then
         log_warn "⚠️  Phát hiện ${orphans} Go orphan process — đang kill..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
-            pkill -TERM -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+            pkill -TERM -f "[s]imple_chain.*config-master-node${i}" 2>/dev/null || true
         done
         sleep 3
         # Force kill nếu vẫn còn
-        local remaining=$(pgrep -f "simple_chain.*config-master-node" 2>/dev/null | wc -l || true)
+        local remaining=$(pgrep -f "[s]imple_chain.*config-master-node" 2>/dev/null | wc -l || true)
         if [ $remaining -gt 0 ]; then
             log_warn "⚠️  Vẫn còn ${remaining} orphan → SIGKILL"
             for i in $(seq 0 $((NUM_NODES - 1))); do
-                pkill -9 -f "simple_chain.*config-master-node${i}" 2>/dev/null || true
+                pkill -9 -f "[s]imple_chain.*config-master-node${i}" 2>/dev/null || true
             done
             sleep 1
         fi
@@ -693,7 +693,7 @@ cmd_status() {
 
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local master_status="${RED}❌ DOWN${NC}"
-        local real_pid=$(pgrep -f "simple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
+        local real_pid=$(pgrep -f "[s]imple_chain.*config-master-node${i}" 2>/dev/null | head -1 || true)
         
         if [ -n "$real_pid" ]; then
             alive_nodes=$((alive_nodes + 1))

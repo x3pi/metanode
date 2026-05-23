@@ -11,17 +11,16 @@ use crate::node::ConsensusNode;
 use crate::node::StorageSetup;
 use crate::node::ConsensusSetup;
 use anyhow::Result;
-use consensus_config::AuthorityIndex;
 use consensus_core::{
     Clock, CommitConsumerArgs, ConsensusAuthority, DefaultSystemTransactionProvider, NetworkType,
-    ReconfigState, SystemTransactionProvider,
+    SystemTransactionProvider,
 };
 use meta_protocol_config::ProtocolConfig;
 use prometheus::Registry;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 impl ConsensusNode {
     /// Builds the commit processor, consensus parameters, starts authority (or SyncOnly holder),
@@ -224,7 +223,7 @@ impl ConsensusNode {
             next_expected_commit_index, go_replay_after
         );
 
-        let mut commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
+        let commit_processor = crate::consensus::commit_processor::CommitProcessor::new(
             commit_receiver,
         )
         .with_delivery_sender(delivery_tx)
