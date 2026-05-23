@@ -232,6 +232,18 @@ func (db *AccountStateDB) DirtyAccountCount() int {
 	return count
 }
 
+// DirtyAccountAddresses returns the list of all dirty account addresses (for debugging).
+func (db *AccountStateDB) DirtyAccountAddresses() []common.Address {
+	var addresses []common.Address
+	db.dirtyAccounts.Range(func(key, value interface{}) bool {
+		if addr, ok := key.(common.Address); ok {
+			addresses = append(addresses, addr)
+		}
+		return true
+	})
+	return addresses
+}
+
 // DirtyAccountDetails returns addresses and serialized data hashes/details of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountDetails() []string {
 	var details []string
