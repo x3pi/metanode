@@ -322,48 +322,23 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 	var err error
 	var pooledSlice *[]byte
 
-	db.lruMu.RLock()
-	cachedData, ok := db.lruCache[address]
-	if !ok {
-		cachedData, ok = db.lruCacheOld[address]
-	}
-	db.lruMu.RUnlock()
-
-	if ok {
-		// TPS OPT: Use sync.Pool to avoid allocating new byte slices
-		pooledSlice = byteSlicePool.Get().(*[]byte)
-		size := len(cachedData)
-		if cap(*pooledSlice) < size {
-			*pooledSlice = make([]byte, size)
-		} else {
-			*pooledSlice = (*pooledSlice)[:size]
-		}
-		copy(*pooledSlice, cachedData)
-		bData = *pooledSlice
+	// TPS OPT: FlatStateTrie.Get() is fully thread-safe (internal RWMutex).
+	// Skip muTrie.Lock to eliminate serialization bottleneck on cache miss.
+	if db.isFlatTrie {
+		bData, err = db.trie.Get(address.Bytes())
 	} else {
-		// TPS OPT: FlatStateTrie.Get() is fully thread-safe (internal RWMutex).
-		// Skip muTrie.Lock to eliminate serialization bottleneck on cache miss.
-		readEpoch := db.cacheEpoch.Load()
-		if db.isFlatTrie {
-			bData, err = db.trie.Get(address.Bytes())
-		} else {
-			// MPT trie: requires exclusive lock because Get() mutates internal cache
-			db.muTrie.Lock()
-			trieToUse := db.trie
-			if trieToUse == nil {
-				db.muTrie.Unlock()
-				return nil, errors.New("account state DB has a nil trie")
-			}
-			bData, err = trieToUse.Get(address.Bytes())
+		// MPT trie: requires exclusive lock because Get() mutates internal cache
+		db.muTrie.Lock()
+		trieToUse := db.trie
+		if trieToUse == nil {
 			db.muTrie.Unlock()
+			return nil, errors.New("account state DB has a nil trie")
 		}
-		if err != nil {
-			return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
-		}
-
-		// FORK-SAFETY: Only insert into lruCache if InvalidateAllCaches wasn't called
-		// during our trie read. Otherwise, we poison the new cache with old data.
-		db.setLruCacheSafe(address, bData, readEpoch)
+		bData, err = trieToUse.Get(address.Bytes())
+		db.muTrie.Unlock()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 	}
 
 	if len(bData) == 0 {
@@ -550,22 +525,8 @@ func (db *AccountStateDB) Close() {
 	}
 }
 
-// setLruCacheSafe safely inserts into the LRU cache, preventing stale data poisoning.
-// It checks if InvalidateAllCaches was called during the read operation.
+// setLruCacheSafe is a no-op because LRU cache has been disabled to guarantee 100% fork-free and race-free executions.
 func (db *AccountStateDB) setLruCacheSafe(address common.Address, bData []byte, readEpoch uint64) {
-	db.lruMu.Lock()
-	defer db.lruMu.Unlock()
-	
-	// SeqLock FORK-SAFETY FIX: If readEpoch is odd, a commit pipeline (IntermediateRoot)
-	// is actively mutating the trie and cache. Do NOT insert stale data.
-	if readEpoch%2 != 0 {
-		return
-	}
-
-	// If InvalidateAllCaches was called during our read, cacheEpoch would have increased
-	if db.cacheEpoch.Load() == readEpoch {
-		db.lruCache[address] = bData
-	}
 }
 
 // --- Internal Helper Methods ---
@@ -637,59 +598,26 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	}
 
 	// --- Cache miss hoặc mục cache không hợp lệ (dirty cache miss) ---
-	// 1.5. Check LRU cache first (does not require trie lock)
 	var bData []byte
-	var pooledSlice *[]byte
-	var cachedData []byte
-	var found bool
-
-	db.lruMu.RLock()
-	if cachedData, found = db.lruCache[address]; !found {
-		cachedData, found = db.lruCacheOld[address]
-	}
-	db.lruMu.RUnlock()
-
-	if found {
-		// TPS OPT: Use sync.Pool to avoid allocating new byte slices for every cache hit
-		pooledSlice = byteSlicePool.Get().(*[]byte)
-		size := len(cachedData)
-		if cap(*pooledSlice) < size {
-			*pooledSlice = make([]byte, size)
-		} else {
-			*pooledSlice = (*pooledSlice)[:size]
-		}
-		copy(*pooledSlice, cachedData)
-		bData = *pooledSlice
+	var err error
+	if db.isFlatTrie {
+		// FlatStateTrie: direct read without external lock
+		bData, err = db.trie.Get(address.Bytes())
 	} else {
-		// ═══════════════════════════════════════════════════════════════
-		// TPS OPT: FlatStateTrie.Get() is fully thread-safe (internal RWMutex).
-		// Skip muTrie.Lock entirely to eliminate the #1 serialization bottleneck.
-		// MPT trie.Get() is NOT thread-safe (mutates internal resolution cache),
-		// so it still requires the exclusive write lock.
-		// ═══════════════════════════════════════════════════════════════
-		var err error
-		readEpoch := db.cacheEpoch.Load()
-		if db.isFlatTrie {
-			// FlatStateTrie: direct read without external lock
-			bData, err = db.trie.Get(address.Bytes())
-		} else {
-			// MPT: exclusive lock required to prevent trie corruption
-			db.muTrie.Lock()
-			trieToUse := db.trie
-			if trieToUse == nil {
-				db.muTrie.Unlock()
-				logger.Error("getOrCreateAccountState: Trie is nil during cache miss lookup", "address", address.Hex())
-				return nil, errors.New("account state DB has a nil trie")
-			}
-			bData, err = trieToUse.Get(address.Bytes())
+		// MPT: exclusive lock required to prevent trie corruption
+		db.muTrie.Lock()
+		trieToUse := db.trie
+		if trieToUse == nil {
 			db.muTrie.Unlock()
+			logger.Error("getOrCreateAccountState: Trie is nil during cache miss lookup", "address", address.Hex())
+			return nil, errors.New("account state DB has a nil trie")
 		}
-		if err != nil {
-			logger.Debug("getOrCreateAccountState: Error getting data from Trie: address=%s, err=%v", address.Hex(), err)
-			return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
-		}
-
-		db.setLruCacheSafe(address, bData, readEpoch)
+		bData, err = trieToUse.Get(address.Bytes())
+		db.muTrie.Unlock()
+	}
+	if err != nil {
+		logger.Debug("getOrCreateAccountState: Error getting data from Trie: address=%s, err=%v", address.Hex(), err)
+		return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 	}
 
 	// Biến tạm để giữ state sẽ được cung cấp cho LoadOrStore
@@ -718,10 +646,7 @@ func (db *AccountStateDB) getOrCreateAccountState(
 		logger.Debug("getOrCreateAccountState: Loaded AccountState from Trie", "address", address.Hex())
 	}
 
-	// Return the pooled slice back to the pool if we used one
-	if pooledSlice != nil {
-		byteSlicePool.Put(pooledSlice)
-	}
+
 
 	// Store into loadedAccounts (not dirtyAccounts) — this account is merely loaded/read.
 	// Only setDirtyAccountState() should put accounts into dirtyAccounts (when actually modified).
@@ -779,37 +704,10 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 		err         error
 	}
 	results := make([]trieResult, 0, len(toLoad))
-	var addressesToReadFromTrie []common.Address
-
-	// Phase 1.5: Filter — check LRU Cache for the remaining addresses
-	for _, addr := range toLoad {
-		db.lruMu.RLock()
-		cachedData, ok := db.lruCache[addr]
-		if !ok {
-			cachedData, ok = db.lruCacheOld[addr]
-		}
-		db.lruMu.RUnlock()
-
-		if ok {
-			// Found in LRU cache! Use sync.Pool to avoid allocation
-			pooledSlice := byteSlicePool.Get().(*[]byte)
-			size := len(cachedData)
-			if cap(*pooledSlice) < size {
-				*pooledSlice = make([]byte, size)
-			} else {
-				*pooledSlice = (*pooledSlice)[:size]
-			}
-			copy(*pooledSlice, cachedData)
-			results = append(results, trieResult{addr: addr, bData: *pooledSlice, pooledSlice: pooledSlice, err: nil})
-		} else {
-			// Cache miss, must read from LevelDB
-			addressesToReadFromTrie = append(addressesToReadFromTrie, addr)
-		}
-	}
+	addressesToReadFromTrie := toLoad
 
 	// Phase 2: Batch trie read for misses (Parallelized using safe Trie copies avoiding lock starvation)
 	if len(addressesToReadFromTrie) > 0 {
-		readEpoch := db.cacheEpoch.Load()
 		db.muTrie.RLock()
 		if db.trie == nil {
 			db.muTrie.RUnlock()
@@ -888,12 +786,9 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 		wg.Wait()
 		close(resultsChan)
 
-		// Accumulate results and feed the LRU Cache safely in the main thread
+		// Accumulate results
 		for res := range resultsChan {
 			results = append(results, res)
-			if res.err == nil {
-				db.setLruCacheSafe(res.addr, res.bData, readEpoch)
-			}
 		}
 	}
 
