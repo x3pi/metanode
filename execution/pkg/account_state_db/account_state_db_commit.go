@@ -777,14 +777,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 		batchKeys = append(batchKeys, res.address.Bytes())
 		batchValues = append(batchValues, res.bytes)
-
-		// OPTIMIZATION: Update LRU cache HERE (before lock) instead of after BatchUpdate.
-		// This reduces critical section time under muTrie.Lock.
-		if db.lruCache != nil {
-			db.lruMu.Lock()
-			db.lruCache[res.address] = res.bytes
-			db.lruMu.Unlock()
-		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
