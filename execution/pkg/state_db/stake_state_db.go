@@ -1034,9 +1034,7 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 }
 
 func (db *StakeStateDB) Discard() error {
-	if db.lockedFlag.Load() {
-		return errors.New("Discard: db is locked")
-	}
+	db.lockedFlag.Store(false)
 	db.dirtyValidators.Clear()
 	newTrie, err := p_trie.NewStateTrie(db.originRootHash, db.db, true)
 	if err != nil {

@@ -16,6 +16,8 @@ import (
 	"github.com/tidwall/gjson"
 
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -170,24 +172,30 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		addressStr := address.String()
 		
 		// Decode address to bytes
-		addrBytes := ethCommon.FromHex(addressStr).Bytes()
+		addrBytes := ethCommon.FromHex(addressStr)
 		
-		if p.AppCtx != nil && p.AppCtx.ChainPool != nil {
+		var nonceVal uint64
+		var gotNonce bool
+
+		blockParam := gjson.GetBytes(body, "params.1")
+		isLatestOrPending := true
+		if blockParam.Exists() {
+			blockStr := strings.ToLower(strings.TrimSpace(blockParam.String()))
+			if blockStr != "latest" && blockStr != "pending" && blockStr != "" {
+				isLatestOrPending = false
+			}
+		}
+
+		if isLatestOrPending && p.AppCtx != nil && p.AppCtx.ChainPool != nil {
 			chainClient, err := p.AppCtx.ChainPool.Get()
 			if err == nil {
 				asBytes, err := chainClient.GetAccountState(addrBytes, 10*time.Second)
 				if err == nil {
 					var as pb.AccountState
 					if err := proto.Unmarshal(asBytes, &as); err == nil {
-						nonce := as.Nonce
-						resp := rpc_client.JSONRPCResponse{
-							Jsonrpc: "2.0",
-							Result:  fmt.Sprintf("0x%x", nonce),
-							Id:      id,
-						}
-						utils.WriteJSON(w, resp)
-						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonce)
-						return
+						nonceVal = bytesToUint64(as.Nonce)
+						gotNonce = true
+						logger.Info("🔵 [http_handler] Sent TCP-based eth_getTransactionCount response: id=%v, address=%s, nonce=%d", id, addressStr, nonceVal)
 					} else {
 						logger.Warn("⚠️ [http_handler] eth_getTransactionCount unmarshal error: %v", err)
 					}
@@ -197,10 +205,71 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Fallback to upstream RPC if TCP fails or AppCtx isn't ready
-		logger.Warn("⚠️ [http_handler] eth_getTransactionCount falling back to upstream C++ EVM for address=%s", addressStr)
+		if gotNonce {
+			resp := rpc_client.JSONRPCResponse{
+				Jsonrpc: "2.0",
+				Result:  fmt.Sprintf("0x%x", nonceVal),
+				Id:      id,
+			}
+			utils.WriteJSON(w, resp)
+			return
+		}
+
+		// Fallback to upstream simple_chain Go DB/trie and intercept the response to ensure proper Ethereum hex encoding
+		logger.Info("🔵 [http_handler] eth_getTransactionCount falling back to upstream Go simple_chain DB for address=%s with intercepted capture", addressStr)
+		
+		rec := &responseCaptureWriter{
+			ResponseWriter: w,
+			body:           new(bytes.Buffer),
+			headers:        make(http.Header),
+			statusCode:     http.StatusOK,
+		}
+		
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		p.ReverseProxy.ServeHTTP(w, r)
+		p.ReverseProxy.ServeHTTP(rec, r)
+		
+		respBytes := rec.body.Bytes()
+		
+		// Copy captured headers to actual ResponseWriter, excluding Content-Length (which will be re-calculated)
+		for k, vv := range rec.headers {
+			if strings.ToLower(k) != "content-length" {
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+		}
+		
+		resultVal := gjson.GetBytes(respBytes, "result")
+		if resultVal.Exists() && resultVal.Type == gjson.String {
+			rawHex := resultVal.String()
+			sanitizedHex := sanitizeHex(rawHex)
+			
+			idVal := gjson.GetBytes(respBytes, "id")
+			var id interface{} = nil
+			if idVal.Exists() {
+				id = idVal.Value()
+			}
+			
+			sanitizedResp := rpc_client.JSONRPCResponse{
+				Jsonrpc: "2.0",
+				Result:  sanitizedHex,
+				Id:      id,
+			}
+			
+			finalBytes, err := json.Marshal(sanitizedResp)
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", strconv.Itoa(len(finalBytes)))
+				w.WriteHeader(rec.statusCode)
+				w.Write(finalBytes)
+				return
+			}
+		}
+		
+		// Fallback if parsing or marshal fails, write raw response with recalculated Content-Length
+		w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
+		w.WriteHeader(rec.statusCode)
+		w.Write(respBytes)
 		return
 
 	default:
@@ -218,4 +287,74 @@ func (p *RpcReverseProxy) errorHandler(w http.ResponseWriter, r *http.Request, e
 func (p *RpcReverseProxy) readonlyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	logger.Error("Readonly ReverseProxy error for %s %s: %v", r.Method, r.URL, err)
 	http.Error(w, "Readonly upstream server error", http.StatusBadGateway)
+}
+
+type responseCaptureWriter struct {
+	http.ResponseWriter
+	body       *bytes.Buffer
+	headers    http.Header
+	statusCode int
+}
+
+func (w *responseCaptureWriter) Header() http.Header {
+	return w.headers
+}
+
+func (w *responseCaptureWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
+}
+
+func (w *responseCaptureWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func sanitizeHex(rawHex string) string {
+	rawHex = strings.ToLower(strings.TrimSpace(rawHex))
+	rawHex = strings.TrimPrefix(rawHex, "0x")
+	rawHex = strings.TrimPrefix(rawHex, "0x")
+	sanitized := strings.TrimLeft(rawHex, "0")
+	if sanitized == "" {
+		return "0x0"
+	}
+	return "0x" + sanitized
+}
+
+func bytesToUint64(b []byte) uint64 {
+	var val uint64
+	for _, x := range b {
+		val = (val << 8) | uint64(x)
+	}
+	return val
+}
+
+func (p *RpcReverseProxy) forwardAndSanitizeGetTransactionCount(rpcURL string, reqBody []byte) ([]byte, error) {
+	resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	resultVal := gjson.GetBytes(bodyBytes, "result")
+	if resultVal.Exists() && resultVal.Type == gjson.String {
+		rawHex := resultVal.String()
+		sanitizedHex := sanitizeHex(rawHex)
+		idVal := gjson.GetBytes(bodyBytes, "id")
+		var id interface{} = nil
+		if idVal.Exists() {
+			id = idVal.Value()
+		}
+		sanitizedResp := rpc_client.JSONRPCResponse{
+			Jsonrpc: "2.0",
+			Result:  sanitizedHex,
+			Id:      id,
+		}
+		return json.Marshal(sanitizedResp)
+	}
+
+	return bodyBytes, nil
 }

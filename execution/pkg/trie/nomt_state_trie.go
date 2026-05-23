@@ -734,11 +734,14 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 
 	count := len(keys)
 
-	// Phase 1: PARALLEL — compute key paths only (no DB reads)
+	// Phase 1: PARALLEL — compute key paths + pre-fetch old values if missing.
+	// Safety Fallback: Use n.Get(key) in parallel to ensure deterministic wOldValues.
 	type batchEntry struct {
 		hexKey      string
 		originalKey []byte
 		keyPath     [32]byte
+		oldValue    []byte
+		oldLoaded   bool
 	}
 	entries := make([]batchEntry, count)
 
@@ -765,17 +768,38 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 				key := keys[i]
 				keyCopy := make([]byte, len(key))
 				copy(keyCopy, key)
+
+				var oldValue []byte
+				var oldLoaded bool
+
+				// If the caller provided the cached old value, use it.
+				// Otherwise, fall back to direct concurrent lookup.
+				if oldValues != nil && i < len(oldValues) && len(oldValues[i]) > 0 {
+					oldValue = oldValues[i]
+					oldLoaded = true
+				} else {
+					val, getErr := n.Get(keyCopy)
+					if getErr == nil {
+						oldLoaded = true
+						if len(val) > 0 {
+							oldValue = val
+						}
+					}
+				}
+
 				entries[i] = batchEntry{
 					hexKey:      hex.EncodeToString(key),
 					originalKey: keyCopy,
 					keyPath:     addressToKeyPathWithNamespace(n.namespace, key),
+					oldValue:    oldValue,
+					oldLoaded:   oldLoaded,
 				}
 			}
 		}(start, end)
 	}
 	wg.Wait()
 
-	// Phase 2: SEQUENTIAL — update dirty map + inject cached old values
+	// Phase 2: SEQUENTIAL — update dirty map + inject old values
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
 	n.writerMu.Lock()
@@ -789,10 +813,12 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		e := &entries[i]
 
 		if !n.wOldLoaded[e.hexKey] {
-			if oldValues != nil && len(oldValues[i]) > 0 {
-				n.wOldValues[e.hexKey] = oldValues[i]
+			if e.oldLoaded {
+				if e.oldValue != nil {
+					n.wOldValues[e.hexKey] = e.oldValue
+				}
+				n.wOldLoaded[e.hexKey] = true
 			}
-			n.wOldLoaded[e.hexKey] = true
 		}
 
 		n.wDirty[e.hexKey] = &nomtDirtyEntry{

@@ -148,17 +148,29 @@ sequenceDiagram
 
     Note over R: 🛡️ Lớp 2: resolve_leader_address()<br/>Gắn cứng 1 lần, persist vào store
 
-    Note over TX,Peers: ═══ BƯỚC 2: DIGEST-GATE ═══
+    Note over TX,Peers: ═══ BƯỚC 2: DIGEST-GATE + ZERO-TIMEOUT PEER ATTESTATION ═══
 
     alt Local Commit
         R->>R: 🛡️ Lớp 3: Buffer commit vào pending
-        R->>Peers: Query digest từ 2f+1 peers
-        Peers-->>R: Quorum digest
-        alt Digest Match
-            R->>R: Release commit → tiếp tục
-        else Digest Mismatch
-            R->>R: ⛔ DISCARD local commit
-            Peers->>R: CertifiedCommit thay thế
+        R->>Peers: Query digest từ 2f+1 peers (digest_verifier)
+        alt Quorum Digest Available
+            Peers-->>R: Quorum digest
+            alt Digest Match
+                R->>R: Release commit → tiếp tục
+            else Digest Mismatch (>30s)
+                R->>R: ⛔ STALE-EVICT: DISCARD local commit
+                Peers->>R: CertifiedCommit thay thế
+            end
+        else No Quorum Digest (cold-start / early epoch)
+            R->>R: 🛡️ ZERO-TIMEOUT: Peer Commit Attestation
+            R->>Peers: peer_commit_attestation(commit_idx, local_digest)
+            alt PeerAttestResult::Ok (2f+1 agree)
+                R->>R: Release commit → tiếp tục
+            else PeerAttestResult::Conflict
+                R->>R: ⛔ DISCARD — local commit sai
+            else PeerAttestResult::Insufficient
+                R->>R: ⏳ Stay PENDING (thà pending chứ không fork)
+            end
         end
     else CertifiedCommit từ Network
         R->>R: Bypass DIGEST-GATE → dispatch trực tiếp
@@ -275,16 +287,17 @@ Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (
 
 | # | Điểm chờ | Đang chờ gì? | Cơ chế | Trạng thái |
 |---|---|---|---|---|
-| ① | `is_transitioning` flag | Epoch transition hoàn tất | Timeout 120s force-clear | 🟢 **AN TOÀN** |
-| ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | 200ms poll loop. CertifiedCommit thay thế. Buffer giới hạn (MAX=100) | 🟢 **AN TOÀN** |
-| ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | 200ms poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
+| ① | `is_transitioning` flag | Epoch transition hoàn tất | Timeout **300s** force-clear (increased from 120s to allow heavy state trie updates during Go epoch transitions) | 🟢 **AN TOÀN** |
+| ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | Poll loop. CertifiedCommit thay thế. Buffer giới hạn (**MAX=2000**, tăng từ 500 để absorb 10+s high-TPS commits) | 🟢 **AN TOÀN** |
+| ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | Poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
 | ④ | Runtime Fork Guard | Go đạt `next_check_block` | Background task, Backoff 60s khi peers fail | 🟢 **AN TOÀN** |
 | ⑤ | CommitMutex | CommitBlockState hoàn tất | `commitMutex.Lock()/Unlock()`. Single-writer. Atomic pointer swap cho readers. | 🟢 **AN TOÀN** |
 | ⑥ | ProcessBlock I/O | NOMT trie flush | Bounded I/O. PersistAsync chạy inline trong commitToMemoryParallel. | 🟢 **AN TOÀN** |
-| ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout). 1 match = Accept. | 🟢 **AN TOÀN** |
+| ⑦ | Committee Hash | ≥1 peer xác nhận hash | Retry loop vĩnh viễn (5s timeout per peer). 1 match = Accept. Mismatch = HALT. | 🟢 **AN TOÀN** |
 | ⑧ | CommitSyncer | Peer trả blocks | RPC timeout + retry peer khác | 🟢 **AN TOÀN** |
 | ⑨ | TransactionPool Actor | Channel send/receive | Non-blocking Actor loop. NotifyChan cho event-driven wake. | 🟢 **AN TOÀN** |
 | ⑩ | Revert Gate (Block-as-Package) | verifyDraftBlock trước commit | 2 hash compare (~2ns). Nếu fail → revertDraftBlock (~1-5ms, bounded map clear + 1 PebbleDB write) | 🟢 **AN TOÀN** |
+| ⑪ | **ZERO-TIMEOUT Peer Attestation** | PeerAttestResult từ peers | **Data-driven** peer polling thay cho timeout. `peer_commit_attestation(commit_idx, digest)` → Ok/Conflict/Insufficient. Không dùng timeout/sleep. | 🟢 **AN TOÀN** |
 
 **Định lý Liveness:**
 > Với N node trong cluster (N ≥ 3f+1), nếu ≥ 2f+1 node online và có thể giao tiếp qua mạng, hệ thống Metanode **luôn tạo block mới** trong thời gian hữu hạn. Hệ thống **TUYỆT ĐỐI KHÔNG fork** trong mọi kịch bản.

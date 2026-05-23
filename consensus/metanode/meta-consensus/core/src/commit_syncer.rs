@@ -402,7 +402,8 @@ impl CommitSyncerSupervisor {
                                     tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
                                 }
                             } else {
-                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected? Restarting in {:?}...", restart_delay);
+                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected terminal halt (e.g. epoch mismatch). Stopping supervisor.");
+                                break;
                             }
                             
                             tokio::time::sleep(restart_delay).await;
@@ -1379,22 +1380,34 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 // We NEVER unlock based on timeout here. The system MUST wait 
                                 // until it successfully receives the commits to reconstruct the DAG.
                                 if is_schedule_pending {
-                                    // After 3 retries (~15s) with all peers at the same commit,
-                                    // it means the ENTIRE cluster is at this level and no one
-                                    // has historical commits to share. The schedule is already
-                                    // consistent across the cluster — safe to clear pending
-                                    // and fall through to Case C (deadlock breaker).
-                                    if retry_count >= 3 {
+                                    // ZERO-TIMEOUT (May 2026): Replace retry-count-based escalation
+                                    // with data-driven block hash verification.
+                                    // 
+                                    // OLD: After 3 retries (~15s), force-clear schedule_recovery_pending
+                                    // NEW: Require block_hash_verified=true before clearing.
+                                    // This ensures the node's state is bit-perfect against the network.
+                                    //
+                                    // If block hash is NOT verified, keep trying to fetch commits
+                                    // to rebuild the schedule — NEVER force-unlock.
+                                    let hash_verified = hub.is_block_hash_verified();
+                                    if retry_count >= 3 && hash_verified {
                                         tracing::warn!(
                                             "⚡ [ACTIVE-SYNC-RECOVERY] Case B→C ESCALATION (retry {}): \
-                                             Peers at same commit ({}) for {} retries. \
-                                             No historical commits available from ANY peer. \
-                                             Force-clearing schedule_recovery_pending — schedule is \
-                                             already consistent across the quorum-verified cluster.",
+                                             Peers at same commit ({}) for {} retries AND block hash VERIFIED. \
+                                             Schedule is consistent across the quorum-verified cluster. \
+                                             Clearing schedule_recovery_pending.",
                                             retry_count + 1, my_commit, retry_count
                                         );
                                         hub.set_schedule_recovery_pending(false);
                                         // Fall through to Case C below (deadlock breaker)
+                                    } else if retry_count >= 3 && !hash_verified {
+                                        tracing::warn!(
+                                            "🛡️ [ACTIVE-SYNC-RECOVERY] Case B→C BLOCKED (retry {}): \
+                                             Peers at same commit ({}) but block hash NOT YET VERIFIED. \
+                                             Cannot unlock — would risk fork. Waiting for POST-GATE-VERIFY.",
+                                            retry_count + 1, my_commit
+                                        );
+                                        return;
                                     } else {
                                         let num_commits: u32 = 300;
                                         let last_boundary = (my_commit / num_commits) * num_commits;
@@ -1593,11 +1606,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
-        let quorum_commit_index = std::cmp::max(
+        let local_epoch = self.inner.context.committee.epoch();
+        let mut quorum_commit_index = std::cmp::max(
             self.inner.commit_vote_monitor.quorum_commit_index(),
             self.coordination_hub.get_quorum_commit_index(),
         );
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
+
+        // If the highest seen epoch from peers is greater than our local epoch,
+        // we are lagging on epoch boundaries. Force quorum_commit_index forward
+        // to trigger CatchingUp phase and schedule commit sync downloads across epoch boundaries.
+        if self.inner.commit_vote_monitor.highest_seen_epoch() > local_epoch {
+            let batch_size = self.inner.context.parameters.commit_sync_batch_size;
+            quorum_commit_index = std::cmp::max(quorum_commit_index, local_commit_index + batch_size);
+        }
 
         // ═══════════════════════════════════════════════════════════════════════
         // ACTIVE SYNC RECOVERY: Removed. We no longer forcibly lower synced_commit_index
@@ -3067,7 +3089,11 @@ impl<C: NetworkClient> Inner<C> {
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);
             }
             for vote in block.commit_votes() {
-                if *vote == end_commit_ref {
+                // CROSS-EPOCH STAKE ALIGNMENT: Compare only index and digest.
+                // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0
+                // while validators vote with the actual active epoch (e.g., 2, 3, 4), causing
+                // accumulated_stake to incorrectly resolve to 0 and stall synchronization.
+                if vote.index == end_commit_ref.index && vote.digest == end_commit_ref.digest {
                     stake_aggregator.add(block.author(), &self.context.committee);
                 }
             }

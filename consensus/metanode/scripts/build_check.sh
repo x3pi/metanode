@@ -79,7 +79,7 @@ if [ "$BUILD_RUST" = true ]; then
 
     # Consensus (metanode binary)
     run_step "Consensus metanode (cargo build --release --locked)" \
-        bash -c "cd '$RUST_ROOT' && cargo build --release --locked"
+        bash -c "cd '$RUST_ROOT' && cargo build --release --locked -j 2"
 fi
 
 # ═══════════════════════════════════════════════════════════════════

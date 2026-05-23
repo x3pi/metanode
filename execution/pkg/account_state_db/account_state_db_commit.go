@@ -47,9 +47,6 @@ var (
 	batchValuesPool = sync.Pool{
 		New: func() interface{} { return make([][]byte, 0, 5000) },
 	}
-	batchOldValuesPool = sync.Pool{
-		New: func() interface{} { return make([][]byte, 0, 5000) },
-	}
 )
 
 // Commit persists all dirty account states to the trie and the underlying database.
@@ -606,10 +603,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	marshalResults := marshalResultsPool.Get().([]marshalResult)[:0]
 	batchKeys := batchKeysPool.Get().([][]byte)[:0]
 	batchValues := batchValuesPool.Get().([][]byte)[:0]
-	var batchOldValues [][]byte
-	if db.isFlatTrie {
-		batchOldValues = batchOldValuesPool.Get().([][]byte)[:0]
-	}
 
 	defer func() {
 		// Release slices back to pools (limit capacity to prevent memory leaks if spiked)
@@ -630,12 +623,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 				batchValues[i] = nil
 			}
 			batchValuesPool.Put(batchValues)
-		}
-		if db.isFlatTrie && batchOldValues != nil && cap(batchOldValues) < 20000 {
-			for i := range batchOldValues {
-				batchOldValues[i] = nil
-			}
-			batchOldValuesPool.Put(batchOldValues)
 		}
 	}()
 
@@ -780,42 +767,12 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// complete PersistAsync at different times → different old values
 	// → different NOMT hash computation → stateRoot fork (Block 2395).
 	// ═══════════════════════════════════════════════════════════════
-	type trieReadPending struct {
-		batchIdx int
-		address  common.Address
-	}
-	var pendingTrieReads []trieReadPending
-
 	// batchKeys and batchValues slices are pre-allocated via sync.Pool above.
 	for _, res := range marshalResults {
 		if res.err != nil {
 			logger.Error("Marshal error for %s: %v", res.address.Hex(), res.err)
 			updateErr = fmt.Errorf("marshal error for %s: %w", res.address.Hex(), res.err)
 			break
-		}
-
-		// Collect old value from LRU cache BEFORE updating it (Phase 2)
-		if db.isFlatTrie {
-			db.lruMu.RLock()
-			oldData, ok := db.lruCache[res.address]
-			if !ok {
-				oldData, ok = db.lruCacheOld[res.address]
-			}
-			db.lruMu.RUnlock()
-
-			if ok {
-				batchOldValues = append(batchOldValues, oldData)
-			} else {
-				// FORK-SAFETY FIX: Do NOT call db.trie.Get() here!
-				// PersistAsync from the previous block may not have swapped
-				// db.trie yet. Reading now returns stale data (2 blocks behind).
-				// Record a placeholder nil and backfill AFTER persistReady.
-				batchOldValues = append(batchOldValues, nil) // placeholder
-				pendingTrieReads = append(pendingTrieReads, trieReadPending{
-					batchIdx: len(batchOldValues) - 1,
-					address:  res.address,
-				})
-			}
 		}
 
 		batchKeys = append(batchKeys, res.address.Bytes())
@@ -874,25 +831,20 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			// Try FlatStateTrie first, then NomtStateTrie
 			if flatTrie, ok := db.trie.(*p_trie.FlatStateTrie); ok {
 				// ═══════════════════════════════════════════════════════════════
-				// FORK-SAFETY: Backfill trie reads for LRU cache misses.
-				// FlatStateTrie does not have a background CommitPayload flush,
-				// so waiting on persistReady was sufficient.
+				// 100% FORK-SAFETY GUARANTEE: Read old values directly from FlatStateTrie's
+				// DB backend instead of relying on the non-deterministic LRU cache.
+				//
+				// CRITICAL FIX (May 2026): Similar to the NOMT fix, using lruCache-sourced
+				// batchOldValues via BatchUpdateWithCachedOldValues caused non-deterministic
+				// stateRoot forks under high TPS load because of cache hit/miss divergence.
+				//
+				// FlatStateTrie's BatchUpdate reads old values via f.db.Get() in 16
+				// parallel goroutines directly from the database. This is the SINGLE
+				// SOURCE OF TRUTH and guarantees absolute determinism.
 				// ═══════════════════════════════════════════════════════════════
-				if len(pendingTrieReads) > 0 {
-					for _, pr := range pendingTrieReads {
-						if db.trie != nil {
-							trieOldData, _ := db.trie.Get(pr.address.Bytes())
-							if len(trieOldData) > 0 {
-								batchOldValues[pr.batchIdx] = trieOldData
-							}
-						}
-					}
-					logger.Debug("[FORK-FIX] Backfilled %d trie reads (FlatStateTrie)", len(pendingTrieReads))
-				}
-
-				if err := flatTrie.BatchUpdateWithCachedOldValues(batchKeys, batchValues, batchOldValues); err != nil {
-					logger.Error("BatchUpdateWithCachedOldValues failed: %v", err)
-					updateErr = fmt.Errorf("trie BatchUpdateWithCachedOldValues error: %w", err)
+				if err := flatTrie.BatchUpdate(batchKeys, batchValues); err != nil {
+					logger.Error("BatchUpdate (FlatStateTrie direct read) failed: %v", err)
+					updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 				}
 			} else if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 				// ═══════════════════════════════════════════════════════════════

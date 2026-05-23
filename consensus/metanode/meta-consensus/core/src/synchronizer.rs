@@ -579,7 +579,16 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
 
         let mut blocks = Vec::new();
         for result in futures::future::join_all(verification_tasks).await {
-            let verified_chunk = result.expect("Spawn blocking should not fail")?;
+            let verified_chunk = match result.expect("Spawn blocking should not fail") {
+                Ok(chunk) => chunk,
+                Err(ConsensusError::WrongEpoch { expected, actual }) => {
+                    if actual > expected {
+                        commit_vote_monitor.observe_highest_seen_epoch(actual);
+                    }
+                    return Err(ConsensusError::WrongEpoch { expected, actual });
+                }
+                Err(e) => return Err(e),
+            };
             blocks.extend(verified_chunk);
         }
 
@@ -1125,6 +1134,9 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
     }
 
     fn is_commit_lagging(&self) -> bool {
+        if self.commit_vote_monitor.highest_seen_epoch() > self.context.committee.epoch() {
+            return true;
+        }
         let last_commit_index = self.dag_state.read().last_commit_index();
         let quorum_commit_index = self.commit_vote_monitor.quorum_commit_index();
         let commit_threshold = last_commit_index
