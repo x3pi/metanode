@@ -1150,13 +1150,13 @@ impl ConsensusNode {
                                 }
                                 
                                 if check_block == 0 && peer_block > 0 {
-                                    tracing::warn!(
-                                        "⏳ [POST-GATE-VERIFY] Local is at genesis (0) but trusted network is at {}. \
-                                         Waiting for CatchingUp / STARTUP-SYNC to fetch blocks... (round {}/{})", 
-                                        peer_block, verify_round, MAX_VERIFY_ROUNDS
+                                    tracing::info!(
+                                        "✅ [POST-GATE-VERIFY] Local is at genesis (0) while network has progressed to {}. \
+                                         Proceeding to start consensus so that background CatchingUp can sync blocks.",
+                                        peer_block
                                     );
-                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                    continue;
+                                    coordination_hub.set_block_hash_verified(true);
+                                    break;
                                 }
                                 
                                 match crate::network::peer_rpc::fetch_blocks_from_peer(
