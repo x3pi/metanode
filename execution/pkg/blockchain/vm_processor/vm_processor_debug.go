@@ -655,6 +655,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		lastBlockHeader.BlockNumber()+1,
 		vmP.getLeaderAddress(lastBlockHeader),
 		vmP.mvmId,
+		isCache,
 	)
 
 	if span != nil {

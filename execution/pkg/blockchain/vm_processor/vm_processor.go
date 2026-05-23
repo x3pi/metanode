@@ -119,7 +119,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		defer mvm.UnprotectMVMApi(vmP.mvmId)
 	}
 	if tx.IsRegularTransaction() || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		rs, err := vmP.sendNative(execCtx, tx, mvmE)
+		rs, err := vmP.sendNative(execCtx, tx, mvmE, isCache)
 		if err != nil && span != nil {
 			span.SetError(err)
 		} else if span != nil {
@@ -407,6 +407,7 @@ func (vmP *VmProcessor) executeSmartContract(
 			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
+			isCache,
 		)
 
 	} else {
@@ -536,6 +537,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 		bFrom, bTo, tx.Amount(), operationType, tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
+		false,
 	)
 
 	if span != nil { // GUARD
@@ -590,6 +592,7 @@ func (vmP *VmProcessor) sendNative(
 	ctx context.Context,
 	tx types.Transaction,
 	mvmE *mvm.MVMApi,
+	isCache bool,
 ) (types.ExecuteSCResult, error) {
 	var span *trace.Span = nil        // Khởi tạo nil
 	var execCtx context.Context = ctx // Mặc định dùng context vào
@@ -633,6 +636,7 @@ func (vmP *VmProcessor) sendNative(
 		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.Amount(), tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
+		isCache,
 	)
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{

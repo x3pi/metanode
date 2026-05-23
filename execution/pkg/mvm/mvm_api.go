@@ -499,6 +499,7 @@ func (a *MVMApi) Execute(
 	bTxHash []byte,
 	relatedAddresses []common.Address,
 	isDebug bool,
+	isCache bool,
 ) *MVMExecuteResult {
 	bAmount := [32]byte{}
 	amount.FillBytes(bAmount[:])
@@ -554,6 +555,7 @@ func (a *MVMApi) Execute(
 		C._Bool(isDebug),
 		(*C.uchar)(cBRelatedAddresses), // Mảng bytes (20 * count)
 		(C.int)(totalAddresses),        // Số lượng addresses
+		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
@@ -697,6 +699,7 @@ func (a *MVMApi) SendNative(
 	blockNumber uint64,
 	blockCoinbase common.Address,
 	mvmId common.Address,
+	isCache bool,
 ) *MVMExecuteResult {
 	bAmount := [32]byte{}
 	amount.FillBytes(bAmount[:])
@@ -729,6 +732,7 @@ func (a *MVMApi) SendNative(
 		(*C.uchar)(cBBlockNumber),
 		(*C.uchar)(cBBlockCoinbase),
 		(*C.uchar)(cBBmvmId),
+		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
@@ -749,6 +753,7 @@ func (a *MVMApi) ProcessNativeMintBurn(
 	blockNumber uint64,
 	blockCoinbase common.Address,
 	mvmId common.Address,
+	isCache bool,
 ) *MVMExecuteResult {
 	bAmount := [32]byte{}
 	amount.FillBytes(bAmount[:])
@@ -782,6 +787,7 @@ func (a *MVMApi) ProcessNativeMintBurn(
 		(*C.uchar)(cBBlockNumber),
 		(*C.uchar)(cBBlockCoinbase),
 		(*C.uchar)(cBBmvmId),
+		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
@@ -799,6 +805,7 @@ func (a *MVMApi) NoncePlusOne(
 	blockNumber uint64,
 	blockCoinbase common.Address,
 	mvmId common.Address,
+	isCache bool,
 ) *MVMExecuteResult {
 	cBFrom := C.CBytes(bSender)
 	bBlockNumber := [32]byte{}
@@ -823,6 +830,7 @@ func (a *MVMApi) NoncePlusOne(
 		(*C.uchar)(cBBlockNumber),
 		(*C.uchar)(cBBlockCoinbase),
 		(*C.uchar)(cBBmvmId),
+		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
