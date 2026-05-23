@@ -298,10 +298,12 @@ metanode/
 | `commit_callbacks.rs` | 70 | **Rust→Go** commit notifications | 🔴 HIGH |
 | `state_attestation.rs` | 160 | State root attestation pre-commit | 🔴 HIGH |
 
-### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (31 files)
+### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (33 files)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `consensus_node.rs` | **3,750** | **Central node orchestrator** — 4-phase constructor, all lifecycle logic | 🔴 CRITICAL |
+| `consensus_node.rs` | **300** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
+| `setup_storage.rs` | **960** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
+| `setup_consensus.rs` | **2,400** | **Phase 2: Consensus setup** — startup state sync, runtime fork guard | 🔴 CRITICAL |
 | `epoch_monitor.rs` | 576 | Epoch health monitoring + alerts | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
 | `epoch_checkpoint.rs` | 270 | Epoch state persistence at boundaries | 🔴 HIGH |
