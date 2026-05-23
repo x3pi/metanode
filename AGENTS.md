@@ -48,6 +48,67 @@ while strictly avoiding over-engineering.
 
 ---
 
+## 🛡️ PART 2.5: ZERO-FORK INVARIANT (BẤT KHẢ XÂM PHẠM)
+
+> 🚨 **Đây là nguyên tắc tối thượng. MỌI thay đổi code PHẢI tuân thủ. Không có ngoại lệ.**
+
+### Nguyên tắc 1: 100% KHÔNG FORK
+
+- **Thà pending (chờ) chứ TUYỆT ĐỐI không fork.**
+- Một commit chỉ được dispatch khi có bằng chứng **data-driven** rằng 2f+1 peers
+  đồng ý trên cùng digest. Nếu chưa đủ bằng chứng → giữ trạng thái PENDING.
+- KHÔNG BAO GIỜ dispatch commit chưa verified dựa trên giả định, ước lượng,
+  hoặc bất kỳ heuristic nào không có peer confirmation.
+
+### Nguyên tắc 2: KHÔNG DÙNG TIMEOUT ĐỂ THOÁT DEADLOCK
+
+- **TUYỆT ĐỐI KHÔNG** dùng `sleep()`, `timeout()`, `Duration::from_secs()`,
+  hay bất kỳ cơ chế thời gian nào để quyết định dispatch commit.
+- Timeout tạo ra **non-determinism**: node A timeout trước node B → dispatch
+  khác nhau → **FORK**.
+- Thay thế bằng: **Peer Attestation** (hỏi peer qua CommitVoteMonitor) hoặc
+  **Quorum Verification** (chờ 2f+1 digest votes).
+
+### Nguyên tắc 3: ĐỒNG BỘ GIỮA CÁC NODE ĐỂ THOÁT DEADLOCK
+
+- Deadlock được phát hiện và giải quyết bằng **giao tiếp P2P data-driven**:
+  - `CommitVoteMonitor.vote_count_for_index()` → kiểm tra peers đã vote chưa
+  - `CommitVoteMonitor.has_any_digest_data()` → phát hiện TRUE cold-start
+  - `PeerAttestResult { Ok, Conflict, Insufficient }` → quyết định dispatch/discard/wait
+- **TRUE cold-start** (tất cả nodes cùng bắt đầu epoch mới, không ai có digest data)
+  → tất cả nodes có DAG giống hệt nhau → deterministic → safe to dispatch.
+- **Partial cold-start** (một số nodes đã có data, một số chưa) → `Insufficient`
+  → chờ cho đến khi đủ votes.
+
+### Nguyên tắc 4: HỆ THỐNG LUÔN TIẾN TRIỂN (NO PERMANENT DEADLOCK)
+
+- Miễn đủ số node hoạt động (≥ 2f+1), hệ thống LUÔN tiến triển:
+  - Nodes propose blocks → blocks chứa commit_votes → CommitVoteMonitor
+    tích lũy votes → đạt quorum → dispatch.
+  - Nếu chưa đạt quorum → commits stay PENDING → không block event loop
+    → nodes tiếp tục propose → votes tích lũy dần → eventually quorum.
+- **Không có vòng lặp chết**: propose blocks KHÔNG cần commits verified,
+  chỉ cần commits verified để dispatch sang Go execution.
+
+### Bảng quyết định (Decision Matrix)
+
+| Điều kiện | PeerAttestResult | Hành động |
+| :--- | :--- | :--- |
+| Không có digest data + không ai vote cho index này | `Ok` | TRUE cold-start, tất cả nodes identical → dispatch |
+| Không có digest data + có votes từ peers | `Insufficient` | Peers đang bắt đầu vote → chờ |
+| 2f+1 peers đồng ý digest | `Ok` | Quorum confirmed → dispatch |
+| 2f+1 peers khác digest | `Conflict` | Local commit sai → discard, chờ CertifiedCommit |
+| Có votes nhưng chưa đạt 2f+1 | `Insufficient` | Chưa đủ → chờ thêm votes |
+
+### Khi review/viết code, LUÔN kiểm tra:
+
+- [ ] Code có dùng `timeout`, `sleep`, `Duration` để quyết định dispatch không? → **CẤM**
+- [ ] Code có dispatch commit mà không verify digest với peers không? → **CẤM**
+- [ ] Code có `bypass` keyword nào không? → **PHẢI có peer attestation đi kèm**
+- [ ] Nếu commit chưa verified → nó có được giữ PENDING không? → **BẮT BUỘC**
+- [ ] Deadlock escape có dựa trên data từ peers không? → **BẮT BUỘC**
+
+
 ## 🔄 PART 3: ARCHITECTURAL CONTEXT
 
 > ⚠️ Reference this section ONLY when working on **State Recovery**, **Peer Sync**,
@@ -58,7 +119,8 @@ while strictly avoiding over-engineering.
 | **Data Corruption** | P2P Recovery — fetch state from a Quorum of Trusted Nodes. |
 | **Missing Data** | Anti-Entropy Sync via background gossip. |
 | **Congestion** | Backpressure signals to slow down producers. |
-| **State Forking** | Deterministic merging using Logic Clocks. |
+| **State Forking** | **KHÔNG ĐƯỢC XẢY RA.** Dùng Peer Attestation (PeerAttestResult) thay vì timeout. Nếu local digest ≠ quorum digest → discard local commit, chờ CertifiedCommit từ CommitSyncer. |
+| **Deadlock** | Data-driven peer polling qua CommitVoteMonitor. KHÔNG dùng timeout. Thà pending chứ không fork. Miễn ≥2f+1 nodes online → hệ thống tự tiến triển. |
 
 ---
 
