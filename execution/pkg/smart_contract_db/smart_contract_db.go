@@ -614,27 +614,32 @@ func (db *SmartContractDB) StorageRoot(address common.Address, customRoot ...*co
 func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ...*common.Hash) (trie.StateTrie, error) {
 
 	db.lastAccessTime.LoadOrStore(address, time.Now())
-	if t, ok := db.smartContractStorageTries.Load(address); ok {
 
-		if t == nil {
-			return nil, fmt.Errorf("trie is nil for address: %s", address.Hex())
+	// CRITICAL CONCURRENCY & FORK-SAFETY FIX (May 2026):
+	// If a customRoot is explicitly requested, bypass the cached trie lookup.
+	// This ensures that read-only queries or historical state checks do not get
+	// the dirty, active in-progress consensus trie from the cache, preventing
+	// concurrency data races and root mismatches.
+	hasCustomRoot := len(customRoot) > 0 && customRoot[0] != nil
+
+	if !hasCustomRoot {
+		if t, ok := db.smartContractStorageTries.Load(address); ok {
+			if t == nil {
+				return nil, fmt.Errorf("trie is nil for address: %s", address.Hex())
+			}
+			return t.(trie.StateTrie), nil
 		}
-
-		return t.(trie.StateTrie), nil
 	}
+
 	var root common.Hash
-	if len(customRoot) > 0 && customRoot[0] != nil {
+	if hasCustomRoot {
 		root = *customRoot[0]
 	} else {
-
 		as, err := db.accountStateDB.AccountState(address)
-
 		if err != nil || as.SmartContractState() == nil {
 			root = common.Hash{}
 		} else {
-
 			root = as.SmartContractState().StorageRoot()
-
 		}
 	}
 
@@ -653,7 +658,10 @@ func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ..
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trie for address: %s, root %s, error: %w", address.Hex(), root, err)
 	}
-	db.smartContractStorageTries.LoadOrStore(address, t) // Sử dụng LoadOrStore
+
+	if !hasCustomRoot {
+		db.smartContractStorageTries.Store(address, t) // Sử dụng Store thay vì LoadOrStore vì chúng ta đã load ở trên rồi
+	}
 
 	// Kết thúc đo thời gian và ghi log
 	return t, nil
