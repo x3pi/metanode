@@ -532,6 +532,19 @@ func processGroupsConcurrently(
 	}
 	dirtyDuration := time.Since(startDirty)
 
+	// ═══════════════════════════════════════════════════════════════
+	// FORK-DEBUG: Compute deterministic hash of all dirty accounts AFTER
+	// all TX processing and BATCH MUTATIONS but BEFORE IntermediateRoot.
+	// Compare this hash across nodes to narrow down fork root cause:
+	//   - Same dirtyHash → fork is in trie computation (IntermediateRoot)
+	//   - Different dirtyHash → fork is in TX processing (updateStateDB)
+	// ═══════════════════════════════════════════════════════════════
+	{
+		dirtyHash := chainState.GetAccountStateDB().DeterministicDirtyHash()
+		logger.Warn("🔍 [FORK-DEBUG] Block #%d: POST-EVM dirtyHash=%s (txCount=%d, groups=%d)",
+			lastBlockHeader.BlockNumber()+1, dirtyHash.Hex(), len(results), len(groupedGroups))
+	}
+
 	// FORK-SAFETY: Merge results in deterministic order (by group index)
 	startMerge := time.Now()
 

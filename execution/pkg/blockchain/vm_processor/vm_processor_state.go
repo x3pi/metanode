@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -924,6 +925,51 @@ func (vmP *VmProcessor) updateStateDB(
 			span.SetAttribute("updateWarningsOrErrors", updateErrors)
 		}
 	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// FORK-DEBUG: Log compact state fingerprint for EVERY TX that modified state.
+	// Compare across nodes to find the exact TX that causes divergence.
+	// Only logs for TXs with actual state changes to minimize noise.
+	// ═══════════════════════════════════════════════════════════════
+	if hasChanges {
+		// Collect all unique addresses that were modified by this TX
+		modifiedAddrs := make(map[string]bool)
+		for addr := range mvmRs.MapAddBalance {
+			modifiedAddrs[addr] = true
+		}
+		for addr := range mvmRs.MapSubBalance {
+			modifiedAddrs[addr] = true
+		}
+		for addr := range mvmRs.MapNonce {
+			modifiedAddrs[addr] = true
+		}
+		// Also include sender (gas fee deduction)
+		modifiedAddrs[transaction.FromAddress().Hex()] = true
+
+		// Sort addresses for deterministic output (enables cross-node diff)
+		sortedAddrs := make([]string, 0, len(modifiedAddrs))
+		for addr := range modifiedAddrs {
+			sortedAddrs = append(sortedAddrs, addr)
+		}
+		sort.Strings(sortedAddrs)
+
+		// Build compact state fingerprint
+		fingerprint := ""
+		for _, addrHex := range sortedAddrs {
+			fmtAddr := common.HexToAddress(addrHex)
+			as, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddr)
+			if err != nil || as == nil {
+				fingerprint += fmt.Sprintf(" %s=ERR", addrHex[:10])
+				continue
+			}
+			fingerprint += fmt.Sprintf(" %s:b=%s,p=%s,n=%d",
+				addrHex[:10], as.Balance().String(), as.PendingBalance().String(), as.Nonce())
+		}
+		logger.Warn("🔍 [FORK-DEBUG-TX] tx=%s from=%s status=%s |%s",
+			transaction.Hash().Hex()[:18], transaction.FromAddress().Hex()[:12],
+			mvmRs.Status.String(), fingerprint)
+	}
+
 	return hasChanges, finalErr // finalErr will be nil if no fatal error occurred
 }
 
