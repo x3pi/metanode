@@ -469,7 +469,7 @@ cmd_start() {
         
         log_info "🛠  Đang build Go (simple_chain)..."
         # Dùng trình biên dịch tận dụng số luồng tối đa, bỏ cờ '-a' để dùng Build Cache (~2s thay vì 3 phút)
-        (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && NUM_PROCS=$(nproc); if [ "$NUM_PROCS" -gt 1 ]; then NUM_PROCS=1; fi && CGO_ENABLED=1 go build -p $NUM_PROCS -o simple_chain .) || exit 1
+        (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && NUM_PROCS=$(nproc) && CGO_ENABLED=1 go build -p $NUM_PROCS -o simple_chain .) || exit 1
     fi
 
     # Kiểm tra binary tồn tại (chỉ cần Go, Rust nhúng via FFI)

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    # Core consensus packages
     "consensus/metanode",
     "consensus/client",
     "execution/pkg/nomt_ffi/rust_lib",
@@ -8,6 +9,24 @@ members = [
     "consensus/metanode/meta-consensus/config",
     "consensus/metanode/meta-consensus/meta-http",
     "consensus/metanode/meta-consensus/meta-tls",
+    # Shared crates (must be in workspace to share build cache)
+    "crates/meta-enum-compat-util",
+    "crates/meta-http",
+    "crates/meta-macros",
+    "crates/meta-proc-macros",
+    "crates/meta-protocol-config",
+    "crates/meta-protocol-config-macros",
+    "crates/meta-tls",
+    "crates/mysten-common",
+    "crates/mysten-metrics",
+    "crates/mysten-network",
+    "crates/prometheus-closure-metric",
+    "crates/shared-crypto",
+    "crates/telemetry-subscribers",
+    "crates/typed-store",
+    "crates/typed-store-derive",
+    "crates/typed-store-error",
+    "crates/typed-store-workspace-hack",
 ]
 resolver = "2"
 
