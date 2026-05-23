@@ -42,7 +42,7 @@ shared-crypto = { path = "../../../../crates/shared-crypto" }
 strum_macros = "0.26"
 meta-macros = { path = "../../../../crates/meta-macros" }
 meta-protocol-config = { path = "../../../../crates/meta-protocol-config" }
-meta-tls = { path = "../meta-tls" }
+meta-tls = { package = "meta-tls-consensus", path = "../meta-tls" }
 tap = "1.0"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
@@ -57,7 +57,7 @@ tracing = { workspace = true }
 typed-store = { path = "../../../../crates/typed-store" }
 tonic-rustls = "0.3.0"
 # Use local copy of meta-http (without dev-dependencies)
-meta-http = { path = "../meta-http" }
+meta-http = { package = "meta-http-consensus", path = "../meta-http" }
 
 [dev-dependencies]
 criterion = { version = "0.5.0", features = ["async", "async_tokio", "html_reports"] }
