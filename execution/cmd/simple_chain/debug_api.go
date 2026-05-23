@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/websocket"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -687,4 +688,197 @@ func (api *DebugApi) ListManagedConnections(ctx context.Context, params *Connect
 	})
 
 	return summaries, nil
+}
+
+// ModifiedAccountInfo represents differences/details of a modified account state.
+type ModifiedAccountInfo struct {
+	Address         string `json:"address"`
+	PreBalance      string `json:"preBalance"`
+	PostBalance     string `json:"postBalance"`
+	PreNonce        uint64 `json:"preNonce"`
+	PostNonce       uint64 `json:"postNonce"`
+	PreCodeHash     string `json:"preCodeHash"`
+	PostCodeHash    string `json:"postCodeHash"`
+	PreStorageRoot  string `json:"preStorageRoot"`
+	PostStorageRoot string `json:"postStorageRoot"`
+	PreDataHash     string `json:"preDataHash"`
+	PostDataHash    string `json:"postDataHash"`
+	IsNew           bool   `json:"isNew"`
+}
+
+// BlockStateDiffResult represents the results of evaluating the block execution state changes.
+type BlockStateDiffResult struct {
+	BlockNumber      uint64                         `json:"blockNumber"`
+	CalculatedRoot   string                         `json:"calculatedRoot"`
+	ModifiedAccounts map[string]ModifiedAccountInfo `json:"modifiedAccounts"`
+}
+
+// GetBlockStateDiff executes a block's transactions on a temporary parent state,
+// and returns all accounts that changed, their pre-state, post-state, and calculated state root.
+func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) (*BlockStateDiffResult, error) {
+	if blockNumber == 0 {
+		return nil, fmt.Errorf("GetBlockStateDiff: cannot get state diff for genesis block 0")
+	}
+
+	// 1. Get block data
+	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	if !ok {
+		return nil, fmt.Errorf("GetBlockStateDiff: cannot find block hash for block number %d", blockNumber)
+	}
+
+	blockData, err := api.App.chainState.GetBlockDatabase().GetBlockByHash(hash)
+	if err != nil {
+		logger.Warn("GetBlockStateDiff: error loading block %d: %v", blockNumber, err)
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to load block with hash %s: %w", hash.Hex(), err)
+	}
+
+	// 2. Get previous block data
+	oldBlockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber - 1)
+	if !ok {
+		return nil, fmt.Errorf("GetBlockStateDiff: cannot find previous block hash for block number %d", blockNumber-1)
+	}
+
+	oldBlockData, err := api.App.chainState.GetBlockDatabase().GetBlockByHash(oldBlockHash)
+	if err != nil {
+		logger.Warn("GetBlockStateDiff: error loading previous block %d: %v", blockNumber-1, err)
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to load previous block with hash %s: %w", oldBlockHash.Hex(), err)
+	}
+
+	// 3. Create TransactionStateDB for the block to fetch transactions
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to create TransactionStateDB for block %d: %w", blockNumber, err)
+	}
+
+	transactionHashes := blockData.Transactions()
+	txs := make([]types.Transaction, 0, len(transactionHashes))
+	for _, txHash := range transactionHashes {
+		tx, err := txDB.GetTransaction(txHash)
+		if err != nil {
+			return nil, fmt.Errorf("GetBlockStateDiff: cannot get transaction %s from state DB: %w", txHash.Hex(), err)
+		}
+		txs = append(txs, tx)
+	}
+
+	// 4. Group transactions
+	items := make([]grouptxns.Item, 0, len(txs))
+	for i, tx := range txs {
+		items = append(items, grouptxns.Item{
+			ID:        i,
+			Array:     tx.RelatedAddresses(),
+			GroupID:   0,
+			Tx:        tx,
+			TimeStart: time.Now(),
+		})
+	}
+	groupedGroups, _, err := grouptxns.GroupAndLimitTransactionsOptimized(items, mt_common.MAX_GROUP_GAS, mt_common.MAX_TOTAL_GAS, mt_common.MAX_GROUP_TIME, mt_common.MAX_TOTAL_TIME)
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to group transactions: %w", err)
+	}
+
+	// 5. Create temporary ChainState and a pre-state snapshot ChainState
+	blockDatabase := block.NewBlockDatabase(api.App.storageManager.GetStorageBlock())
+	tempChainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "")
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to create temporary ChainState: %w", err)
+	}
+
+	preChainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "")
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: failed to create pre-state ChainState: %w", err)
+	}
+
+	// 6. Execute transactions on tempChainState
+	tracedCtx, rootSpan := trace.NewTrace(ctx, "GetBlockStateDiffExecution", map[string]interface{}{
+		"blockNumber": blockNumber,
+	}, trace.NewSpanCollector())
+	defer rootSpan.End()
+
+	processResult, err := tx_processor.ProcessTransactions(
+		tracedCtx,
+		tempChainState,
+		groupedGroups,
+		false,
+		false,
+		blockData.Header().TimeStamp(),
+		blockData.Header().LeaderAddress(),
+		blockNumber,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockStateDiff: execution failed: %w", err)
+	}
+
+	// 7. Extract the differences for all modified accounts
+	modifiedMap := make(map[string]ModifiedAccountInfo)
+	for _, addr := range processResult.ModifiedAccounts {
+		// Read pre-state
+		preAS, err := preChainState.GetAccountStateDB().AccountStateReadOnly(addr)
+		var isNew bool
+		var preNonce uint64
+		var preBal, preCodeHash, preStorageRoot, preDataHash string
+		if err != nil || preAS == nil {
+			isNew = true
+			preBal = "0"
+			preNonce = 0
+			preCodeHash = "0x"
+			preStorageRoot = "0x"
+			preDataHash = "0x"
+		} else {
+			isNew = false
+			preBal = preAS.TotalBalance().String()
+			preNonce = preAS.Nonce()
+			if preAS.SmartContractState() != nil {
+				preCodeHash = preAS.SmartContractState().CodeHash().Hex()
+				preStorageRoot = preAS.SmartContractState().StorageRoot().Hex()
+			} else {
+				preCodeHash = "0x"
+				preStorageRoot = "0x"
+			}
+			if b, err := preAS.Marshal(); err == nil {
+				preDataHash = common.BytesToHash(crypto.Keccak256(b)).Hex()
+			}
+		}
+
+		// Read post-state from tempChainState
+		postAS, err := tempChainState.GetAccountStateDB().AccountStateReadOnly(addr)
+		var postBal, postCodeHash, postStorageRoot, postDataHash string
+		var postNonce uint64
+		if err == nil && postAS != nil {
+			postBal = postAS.TotalBalance().String()
+			postNonce = postAS.Nonce()
+			if postAS.SmartContractState() != nil {
+				postCodeHash = postAS.SmartContractState().CodeHash().Hex()
+				postStorageRoot = postAS.SmartContractState().StorageRoot().Hex()
+			} else {
+				postCodeHash = "0x"
+				postStorageRoot = "0x"
+			}
+			if b, err := postAS.Marshal(); err == nil {
+				postDataHash = common.BytesToHash(crypto.Keccak256(b)).Hex()
+			}
+		}
+
+		modifiedMap[addr.Hex()] = ModifiedAccountInfo{
+			Address:         addr.Hex(),
+			PreBalance:      preBal,
+			PostBalance:     postBal,
+			PreNonce:        preNonce,
+			PostNonce:       postNonce,
+			PreCodeHash:     preCodeHash,
+			PostCodeHash:    postCodeHash,
+			PreStorageRoot:  preStorageRoot,
+			PostStorageRoot: postStorageRoot,
+			PreDataHash:     preDataHash,
+			PostDataHash:    postDataHash,
+			IsNew:           isNew,
+		}
+	}
+
+	result := &BlockStateDiffResult{
+		BlockNumber:      blockNumber,
+		CalculatedRoot:   processResult.Root.Hex(),
+		ModifiedAccounts: modifiedMap,
+	}
+
+	return result, nil
 }
