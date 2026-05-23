@@ -17,7 +17,7 @@ metanode/
 │           ├── config/ ← Consensus configuration types
 │           └── types/  ← Shared consensus types
 ├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
-├── docs/               ← Architecture documentation & known bugs
+├── docs/               ← Architecture documentation & known bugs (e.g. docs/transaction_state_isolation.md)
 └── scripts/            ← Operational scripts
 ```
 
