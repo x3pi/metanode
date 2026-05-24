@@ -100,12 +100,19 @@ if [ -n "$2" ]; then
     SNAP_NAME="$2"
     echo -e "${BLUE}📸 Sử dụng snapshot chỉ định: ${NC}$SNAP_NAME"
 else
-    echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất...${NC}"
-    SNAP_NAME=$(curl -sf "$SNAP_API" 2>/dev/null \
-        | python3 -c "import sys,json; snaps=json.load(sys.stdin); print(max(snaps, key=lambda x: x['block_number'])['snapshot_name'])" 2>/dev/null) || true
+    echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất (đợi tối đa 120s)...${NC}"
+    for ((attempt=1; attempt<=30; attempt++)); do
+        SNAP_NAME=$(curl -sf "$SNAP_API" 2>/dev/null \
+            | python3 -c 'import sys,json; snaps=json.load(sys.stdin); print(max(snaps, key=lambda x: x["block_number"])["snapshot_name"] if snaps else "")' 2>/dev/null) || true
+        if [ -n "$SNAP_NAME" ]; then
+            break
+        fi
+        echo -e "   ⏳ Chưa tìm thấy snapshot từ API, đang đợi... (lần thử $attempt/30)"
+        sleep 4
+    done
     
     if [ -z "$SNAP_NAME" ]; then
-        echo -e "${RED}❌ Không lấy được snapshot từ API!${NC}"
+        echo -e "${RED}❌ Không lấy được snapshot từ API sau 120s!${NC}"
         echo "   Kiểm tra: curl $SNAP_API"
         exit 1
     fi
