@@ -1027,21 +1027,16 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 	if len(accumulatedResults.Transactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
 		bNum := epochData.GetBlockNumber()
-		if bNum > 0 {
-			// Live block with assigned block number cannot be empty due to duplicate drop in catch-up/sync.
-			// Return safety violation to stall/sync instead of forging a divergent empty block.
-			return fmt.Errorf("safety violation (Guard 3): 0 transactions after execution for assigned live block number %d at GEI %d", bNum, globalExecIndex)
+		if bNum == 0 {
+			// Fallback for bNum == 0
+			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
+			if lastCommittedBlockNumber == 0 {
+				lastCommittedBlockNumber = storage.GetLastBlockNumber()
+			}
+			bNum = lastCommittedBlockNumber + 1
 		}
-		
 
-		// Fallback for bNum == 0
-		lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
-		if lastCommittedBlockNumber == 0 {
-			lastCommittedBlockNumber = storage.GetLastBlockNumber()
-		}
-		bNum = lastCommittedBlockNumber + 1
-
-		logger.Info("🛡️ [GHOST-BLOCK-GUARD] LATE DROP: 0 valid txs out of %d (all duplicates). Creating empty block #%d to prevent gap. GEI=%d", 
+		logger.Warn("🛡️ [GHOST-BLOCK-GUARD] LATE DROP (relaxed Guard 3): 0 valid txs out of %d (all duplicates). Creating empty block #%d to prevent gap and deadlock. GEI=%d", 
 			len(allTransactions), bNum, globalExecIndex)
 		emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 		lastB := bp.GetLastBlock()
