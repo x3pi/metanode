@@ -67,7 +67,7 @@ pub async fn dispatch_commit(
     //   - shared_last_global_exec_index → for GEI tracking
     //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
-    if total_transactions == 0 && !has_system_tx {
+    if total_transactions == 0 && !has_system_tx && commit_index > 1 {
         tracing::trace!(
             "⏭️ [FAST-SKIP] Empty commit #{} (GEI expected={}) skipped — no transactions",
             commit_index, global_exec_index

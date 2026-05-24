@@ -1142,9 +1142,25 @@ impl ConsensusNode {
                     break;
                 }
                 match executor_client_for_proc.get_last_block_number().await {
-                    Ok((local_bn, _gei, true, local_hash, _epoch)) => {
+                    Ok((local_bn, _gei, true, _local_hash, _epoch)) => {
                         let check_block = local_bn;
-                        let effective_hash = local_hash;
+                        
+                        let effective_hash = if check_block > 0 {
+                            match executor_client_for_proc.get_blocks_range(check_block, check_block).await {
+                                Ok(blocks) if !blocks.is_empty() => blocks[0].block_hash.clone(),
+                                _ => {
+                                    tracing::warn!(
+                                        "⏳ [POST-GATE-VERIFY] Could not fetch block {} from local Go DB. \
+                                         Retrying... (round {}/{})",
+                                        check_block, verify_round, MAX_VERIFY_ROUNDS
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            vec![0; 32]
+                        };
                         
                         let is_zero_hash = effective_hash.iter().all(|&b| b == 0);
                         if is_zero_hash && check_block > 0 {
