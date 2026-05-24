@@ -8,8 +8,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -71,13 +69,11 @@ func (blockDatabase *BlockDatabase) SaveLastBlock(block types.Block) error {
 	if err := blockDatabase.db.BatchPut(batch); err != nil {
 		return err
 	}
-	if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
-		data, err := storage.SerializeBatch(batch)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Error marshaling receipt: %v", err))
-		}
-		blockDatabase.SetBlockBatch(data)
+	data, err := storage.SerializeBatch(batch)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error marshaling receipt: %v", err))
 	}
+	blockDatabase.SetBlockBatch(data)
 	return nil
 }
 

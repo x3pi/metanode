@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,6 +30,9 @@ import (
 )
 
 var (
+	// NomtAheadReplayMode enables bypassing transaction validation checks when NOMT is ahead of PebbleDB
+	NomtAheadReplayMode atomic.Bool
+
 	// GlobalTxProcessCounter tracks the number of TXs processed since the last LazyPebbleDB flush
 	GlobalTxProcessCounter uint64
 
@@ -696,18 +700,23 @@ func processSingleGroup(
 		}
 
 		if tx.GetNonce() != as.Nonce() {
-			err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
-			// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
-			logger.Warn("❌ [NONCE-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", err, tx.Hash().Hex(), tx.FromAddress().Hex())
+			if !NomtAheadReplayMode.Load() {
+				err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
+				// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
+				logger.Warn("❌ [NONCE-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", err, tx.Hash().Hex(), tx.FromAddress().Hex())
 
-			// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
-			// Including them causes duplicate TX hashes across multiple blocks when a client
-			// resends a batch, inflating the block's TX count and bloating the ledger.
-			failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
-			if enableTrace && txSpan != nil {
-				txSpan.End()
+				// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
+				// Including them causes duplicate TX hashes across multiple blocks when a client
+				// resends a batch, inflating the block's TX count and bloating the ledger.
+				failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
+				continue
+			} else {
+				logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-TX] Bypassing nonce mismatch check for tx %s (From: %s, tx.Nonce=%d, state.Nonce=%d)",
+					tx.Hash().Hex()[:16]+"...", tx.FromAddress().Hex(), tx.GetNonce(), as.Nonce())
 			}
-			continue
 		}
 		var rcp types.Receipt
 		if tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {

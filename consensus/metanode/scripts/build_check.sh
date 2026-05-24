@@ -86,11 +86,14 @@ fi
 # 3. GO BUILDS
 # ═══════════════════════════════════════════════════════════════════
 if [ "$BUILD_GO" = true ]; then
+    # Ensure Go links against the newly compiled static library by copying it to the sub-package target dir
+    mkdir -p "$RUST_ROOT/target/release"
+    cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
     echo -e "${CYAN}─── Go Builds ────────────────────────────────────────${NC}"
 
     # Go simple_chain binary
     run_step "Go simple_chain (go build)" \
-        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && NUM_PROCS=\$(nproc); if [ \$NUM_PROCS -gt 4 ]; then NUM_PROCS=4; fi && go build -p \$NUM_PROCS -o simple_chain ."
+        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && go clean -cache && NUM_PROCS=\$(nproc); if [ \$NUM_PROCS -gt 4 ]; then NUM_PROCS=4; fi && go build -p \$NUM_PROCS -o simple_chain ."
 fi
 
 # ═══════════════════════════════════════════════════════════════════

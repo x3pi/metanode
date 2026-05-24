@@ -142,19 +142,33 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
 
     let tx_data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
 
-    // Wait for the channel to be initialized (blocks Go caller until Rust is ready)
+    // Wait for the channel to be initialized (blocks Go caller until Rust is ready, with 5s timeout)
     let sender = {
         let mut guard = match FFI_TX_SENDER.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         
+        let timeout = std::time::Duration::from_secs(5);
         while guard.is_none() {
             info!("⏳ [FFI TX FLOW] Waiting for FFI_TX_SENDER to be initialized...");
-            guard = match FFI_TX_CONDVAR.wait(guard) {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let wait_res = FFI_TX_CONDVAR.wait_timeout(guard, timeout);
+            match wait_res {
+                Ok((g, timeout_result)) => {
+                    guard = g;
+                    if timeout_result.timed_out() {
+                        warn!("⚠️ [FFI TX FLOW] Timeout waiting for FFI_TX_SENDER to be initialized! Returning false.");
+                        return false;
+                    }
+                }
+                Err(poisoned) => {
+                    guard = poisoned.into_inner().0;
+                    break;
+                }
+            }
+        }
+        if guard.is_none() {
+            return false;
         }
         guard.clone().unwrap()
     };
@@ -327,10 +341,13 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
                         }
                     };
 
-                    if let Err(e) = initialized_node.run_main_loop().await {
+                    let run_result = initialized_node.run_main_loop().await;
+                    if let Err(e) = &run_result {
                         error!("Consensus main loop exited with error: {}", e);
                     }
 
+                    // FFI RESTART COOLDOWN: Wait for old thread/tasks to release database locks
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     restart_count += 1;
                     tracing::warn!(
                         "🔄 [FFI RESTART] Consensus Node crashed (restart #{}). \

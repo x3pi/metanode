@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/pathdetector"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
@@ -104,7 +103,7 @@ type SimpleChainConfig struct {
 	DNSServerAddress                   string             `json:"dns_server_address"`
 	Version                            string             `json:"version"`
 	ListTypeService                    string             `json:"list_type_service"`
-	ServiceType                        common.ServiceType `json:"service_type"`
+	ServiceType                        string             `json:"service_type"`
 	RpcPort                            string             `json:"rpc_port"`
 	DBType                             storage.DBType     `json:"db_type"`
 	GenesisFilePath                    string             `json:"genesis_file_path"`

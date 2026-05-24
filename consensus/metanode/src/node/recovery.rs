@@ -4,7 +4,7 @@
 use crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK;
 use crate::node::executor_client::ExecutorClient;
 use anyhow::Result;
-use consensus_core::{storage::rocksdb_store::RocksDBStore, storage::Store, BlockAPI, CommitAPI};
+use consensus_core::{BlockAPI, CommitAPI};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -13,7 +13,7 @@ pub async fn perform_block_recovery_check(
     go_last_block: u64,
     epoch_base_exec_index: u64,
     current_epoch: u64,
-    db_path: &std::path::PathBuf,
+    recovery_store: &Arc<dyn consensus_core::storage::Store>,
     node_id: u32,
 ) -> Result<()> {
     if node_id != 0 {
@@ -35,15 +35,6 @@ pub async fn perform_block_recovery_check(
         );
         return Ok(());
     }
-
-    // Ensure db exists before attempting to read it
-    if !db_path.exists() {
-        info!("✅ [RECOVERY] Local DB path does not exist. No commits to recover.");
-        return Ok(());
-    }
-
-    let recovery_store = RocksDBStore::new(db_path.to_str().unwrap());
-    
     // We MUST scan from the beginning of the epoch to reconstruct the fragment offset.
     // Assuming commit_index starts at 1 for the first commit after genesis/epoch base.
     let range = consensus_core::CommitRange::new(1..=u32::MAX);
@@ -84,7 +75,7 @@ pub async fn perform_block_recovery_check(
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
         let subdag = match consensus_core::try_load_committed_subdag_from_store(
-            &recovery_store,
+            recovery_store.as_ref(),
             commit,
             vec![],
         ) {

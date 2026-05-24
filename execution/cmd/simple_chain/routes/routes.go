@@ -19,7 +19,6 @@ func InitRoutes(
 	stateProcessor *processor.StateProcessor,
 	transactionProcessor *processor.TransactionProcessor,
 	subscribeProcessor *processor.SubscribeProcessor,
-	serviceType common.ServiceType,
 	messageSender network.MessageSender,
 ) {
 	// --- KHỞI TẠO RATE LIMITERS ---

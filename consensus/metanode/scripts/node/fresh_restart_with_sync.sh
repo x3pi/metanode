@@ -40,13 +40,11 @@ BINARY="$METANODE_ROOT/target/release/metanode"
 VALIDATOR_NODES=(0 1 2 3)
 ALL_NODES=(0 1 2 3 4)
 
-GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
+GO_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
-GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
-GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
+GO_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
-GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
+GO_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
 ulimit -n 100000 || true
@@ -87,7 +85,6 @@ done
 
 for id in "${ALL_NODES[@]}"; do
     tmux kill-session -t "go-master-$id" 2>/dev/null || true
-    tmux kill-session -t "go-sub-$id" 2>/dev/null || true
     tmux kill-session -t "metanode-$id" 2>/dev/null || true
 done
 pkill -9 -f "simple_chain" 2>/dev/null || true
@@ -170,7 +167,7 @@ else
 fi
 
 # ==============================================================================
-# STEP 4: START GO MASTERS + SUBS (all 5 nodes)
+# STEP 4: START GO NODES (all 5 nodes)
 # ==============================================================================
 echo -e "${BLUE}[4/5] 🐹 Starting Go processes (nodes 0-4)...${NC}"
 cd "$GO_SIMPLE_ROOT"
@@ -185,33 +182,15 @@ for i in "${!ALL_NODES[@]}"; do
     fi
     
     if [ "$id" -eq 4 ]; then
-        echo -e "  🚀 Go Master $id ${CYAN}(SyncOnly)${NC}..."
+        echo -e "  🚀 Go Node $id ${CYAN}(SyncOnly)${NC}..."
     else
-        echo -e "  🚀 Go Master $id..."
+        echo -e "  🚀 Go Node $id..."
     fi
-    tmux new-session -d -s "${GO_MASTER_SESSION[$i]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && exec ./simple_chain -config=${GO_MASTER_CONFIG[$i]} $PPROF_ARG >> \"$LOG_DIR/node_$id/go-master-stdout.log\" 2>&1"
+    tmux new-session -d -s "${GO_SESSION[$i]}" -c "$GO_SIMPLE_ROOT" \
+        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && exec ./simple_chain -config=${GO_CONFIG[$i]} $PPROF_ARG >> \"$LOG_DIR/node_$id/go-master-stdout.log\" 2>&1"
     sleep 2
 done
-
-
-
-# Start Go Subs — wait extra time for master to flush genesis state trie to disk
-sleep 5  # ← Master cần flush genesis AccountStatesRoot trước khi sub đọc
-for i in "${!ALL_NODES[@]}"; do
-    id=${ALL_NODES[$i]}; DATA="${GO_DATA_DIR[$i]}"
-    XAPIAN="sample/$DATA/data-write/data/xapian_node"
-    
-    if [ "$id" -eq 4 ]; then
-        echo -e "  🚀 Go Sub $id ${CYAN}(SyncOnly)${NC}..."
-    else
-        echo -e "  🚀 Go Sub $id..."
-    fi
-    tmux new-session -d -s "${GO_SUB_SESSION[$i]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && exec ./simple_chain -config=${GO_SUB_CONFIG[$i]} >> \"$LOG_DIR/node_$id/go-sub-stdout.log\" 2>&1"
-    sleep 1
-done
-sleep 8  # ← Chờ sub nodes ổn định và sync block đầu từ master
+sleep 5
 
 
 
@@ -227,11 +206,11 @@ echo ""
 echo -e "  ${BLUE}Validator Nodes (0-3):${NC}"
 for i in "${!VALIDATOR_NODES[@]}"; do
     id=${VALIDATOR_NODES[$i]}
-    echo "    Node $id: tmux attach -t go-master-$id | go-sub-$id"
+    echo "    Node $id: tmux attach -t go-master-$id"
 done
 echo ""
 echo -e "  ${CYAN}SyncOnly Node (4):${NC}"
-echo "    Node 4: tmux attach -t go-master-4 | go-sub-4"
+echo "    Node 4: tmux attach -t go-master-4"
 echo ""
 echo -e "  ${BLUE}Logs:${NC}    $LOG_DIR/node_N/"
 echo -e "  ${BLUE}Status:${NC}  tmux ls"

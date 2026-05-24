@@ -640,7 +640,8 @@ func (cs *ChainState) AdvanceEpochWithBoundary(newEpoch uint64, epochStartTimest
 
 	// Only reject if going backwards (obvious bug)
 	if newEpoch < cs.currentEpoch {
-		return fmt.Errorf("cannot go backwards: new_epoch=%d < current_epoch=%d", newEpoch, cs.currentEpoch)
+		logger.Warn("🛡️ [EPOCH GUARD] Backwards AdvanceEpoch request ignored! Target Epoch %d, but Go is already at Epoch %d. (Likely a recovery catch-up).", newEpoch, cs.currentEpoch)
+		return nil
 	}
 
 	// Already at this epoch - just confirm

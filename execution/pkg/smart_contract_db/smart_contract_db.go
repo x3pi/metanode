@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
@@ -349,7 +348,7 @@ func (db *SmartContractDB) CommitAllStorage() error {
 	}
 
 	// Network replication: serialize batches for Sub nodes (master only)
-	if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster && len(allBatches) > 0 {
+	if config.ConfigApp != nil && len(allBatches) > 0 {
 		data, err := storage.SerializeBatch(allBatches)
 		if err != nil {
 			logger.Error("CommitAllStorage serialize error:", err)
@@ -499,7 +498,7 @@ func (db *SmartContractDB) Commit() error {
 			return err
 		}
 
-		if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+		if config.ConfigApp != nil {
 			data, err := storage.SerializeBatch(batch)
 			if err != nil {
 				logger.Error("Error serializing code batch:", err)
@@ -557,7 +556,7 @@ func (db *SmartContractDB) Commit() error {
 	}
 
 	if len(globalEventLogBatch) > 0 {
-		if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+		if config.ConfigApp != nil {
 			data, err := storage.SerializeBatch(globalEventLogBatch)
 			if err != nil {
 				logger.Error("Error serializing event log batch:", err)

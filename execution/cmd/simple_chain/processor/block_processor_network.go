@@ -628,14 +628,12 @@ func (bp *BlockProcessor) ProcessBlockData(request network.Request) error {
 	reqBody := request.Message().Body()
 
 	// ══════════════════════════════════════════════════════════════════
-	// FORK SAFETY: Master nodes MUST NOT process raw blocks from P2P!
-	// Master nodes receive executable blocks exclusively from Rust via FFI.
+	// FORK SAFETY: Unified nodes MUST NOT process raw blocks from P2P!
+	// Unified nodes receive executable blocks exclusively from Rust via FFI.
 	// Processing P2P blocks causes GEI to jump without NOMT execution.
 	// ══════════════════════════════════════════════════════════════════
-	if bp.serviceType == p_common.ServiceTypeMaster {
-		logger.Warn("🛡️ [BLOCK DROP] Master node dropping P2P block. Master relies entirely on Rust for blocks.")
-		return nil
-	}
+	logger.Warn("🛡️ [BLOCK DROP] Dropping P2P block. Node relies entirely on Rust consensus for blocks.")
+	return nil
 
 	// ══════════════════════════════════════════════════════════════════
 	// SUB NODE SAFETY: Sub nodes MUST ONLY process blocks from their own Master.

@@ -106,6 +106,14 @@ pub async fn set_transition_handler_node(node: Arc<tokio::sync::Mutex<ConsensusN
     }
 }
 
+pub async fn clear_transition_handler_node() {
+    if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
+        let mut registry_guard = registry.write().await;
+        *registry_guard = None;
+        info!("🧹 Cleared node from global transition handler registry");
+    }
+}
+
 pub struct ConsensusNode {
     // Made fields pub(crate) so submodules can access them
     pub(crate) authority: Option<ConsensusAuthority>,

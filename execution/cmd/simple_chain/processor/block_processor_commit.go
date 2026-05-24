@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
@@ -68,7 +69,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// MVM Xapian database changes must be flushed to disk before `SaveLastBlock`,
 		// because `UpdateLastBlockNumber` can trigger an asynchronous node snapshot.
 		// ══════════════════════════════════════════════════════════════════
-		if bp.serviceType == p_common.ServiceTypeMaster && job.ProcessResults != nil {
+		if job.ProcessResults != nil {
 			// OPTIMIZATION: Dedup mvmIds — multiple TXs to the same contract share
 			// one MVMApi instance. CommitFullDb/RevertFullDb only needs to be called
 			// once per contract, not once per TX.
@@ -179,7 +180,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// Non-blocking send to prevent blocking commitWorker
 		// If indexingChannel is full, skip indexing for this block rather than blocking
 		// This ensures commitWorker can continue and send doneChan signal
-		if bp.serviceType == p_common.ServiceTypeMaster && bp.storageManager.IsExplorer() {
+		if bp.storageManager.IsExplorer() {
 			select {
 			case bp.indexingChannel <- job.Block.Header().BlockNumber():
 				// Successfully sent to indexing channel
@@ -260,7 +261,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// BACKUP: Serialize and persist BackupDb is DEFERRED to a background goroutine.
 		// This uses a coalescing queue to skip intermediate backups when catching up.
 		// ══════════════════════════════════════════════════════════════════
-		if bp.serviceType == p_common.ServiceTypeMaster && bp.storageManager.GetStorageBackupDb() != nil {
+		if bp.storageManager.GetStorageBackupDb() != nil {
 			bp.backupDbWg.Add(1)
 			select {
 			case bp.backupDbChannel <- job:
@@ -338,18 +339,30 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	// Count total tasks: txDB + Receipts + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
 	totalTasks := 2
 	if isStateChanging {
-		// CRITICAL FIX: SmartContractDB MUST commit sequentially BEFORE AccountStateDB!
-		// SmartContractDB.Commit() computes the new StorageRoot for contracts and late-binds
-		// them into AccountStateDB. If this runs in parallel with AccountStateDB.CommitPipeline(),
-		// a severe race condition occurs causing non-deterministic StateRoots (i.e. cluster forks).
-		scStart := time.Now()
-		if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
-			logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
-			return fmt.Errorf("SmartContractDB commit failed: %w", err)
-		}
-		logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
+		if tx_processor.NomtAheadReplayMode.Load() {
+			logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-COMMIT] Bypassing trie and state DB parallel commit because NomtAheadReplayMode is active.")
+			// Discard in-memory states to prevent leaks and double mutations
+			bp.chainState.GetAccountStateDB().Discard()
+			bp.chainState.GetSmartContractDB().Discard()
+			bp.chainState.GetStakeStateDB().Discard()
+			trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
+			
+			// We only run txDB and Receipts commits
+			totalTasks = 2
+		} else {
+			// CRITICAL FIX: SmartContractDB MUST commit sequentially BEFORE AccountStateDB!
+			// SmartContractDB.Commit() computes the new StorageRoot for contracts and late-binds
+			// them into AccountStateDB. If this runs in parallel with AccountStateDB.CommitPipeline(),
+			// a severe race condition occurs causing non-deterministic StateRoots (i.e. cluster forks).
+			scStart := time.Now()
+			if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
+				logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
+				return fmt.Errorf("SmartContractDB commit failed: %w", err)
+			}
+			logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
 
-		totalTasks += 3
+			totalTasks += 3
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -371,7 +384,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		resultsChan <- taskResult{name: "Receipts", err: err, duration: time.Since(start)}
 	}()
 
-	if isStateChanging {
+	if isStateChanging && !tx_processor.NomtAheadReplayMode.Load() {
 		// Launch ALL state-changing commits in parallel
 		wg.Add(3)
 

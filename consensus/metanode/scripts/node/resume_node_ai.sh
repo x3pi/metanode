@@ -25,12 +25,11 @@ LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"
 
 # Configs
-GO_MASTER_CONFIG="config-master-node${NODE_ID}.json"
-GO_SUB_CONFIG="config-sub-node${NODE_ID}.json"
+GO_CONFIG="config-master-node${NODE_ID}.json"
 RUST_CONFIG="config/node_${NODE_ID}.toml"
 DATA="node${NODE_ID}"
 
-GO_MASTER_SOCKET="/tmp/rust-go-node${NODE_ID}-master.sock"
+GO_SOCKET="/tmp/rust-go-node${NODE_ID}-master.sock"
 
 
 
@@ -57,20 +56,14 @@ mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/data-write/data/xapian_node"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up_write"
 
-echo -e "${BLUE}📋 Step 3: Start Go Master...${NC}"
+echo -e "${BLUE}📋 Step 3: Start Go Node...${NC}"
 cd "$GO_SIMPLE_ROOT"
-XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
+XAPIAN_NODE="sample/$DATA/data/data/xapian_node"
 export GOTOOLCHAIN=go1.23.5
 export GOMEMLIMIT=4GiB
-export XAPIAN_BASE_PATH="$XAPIAN_MASTER"
-nohup ./simple_chain -config="$GO_MASTER_CONFIG" > "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>&1 &
-echo -e "${GREEN}  🚀 Go Master started (nohup)${NC}"
-
-echo -e "${BLUE}📋 Step 4: Start Go Sub...${NC}"
-XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
-export XAPIAN_BASE_PATH="$XAPIAN_SUB"
-nohup ./simple_chain -config="$GO_SUB_CONFIG" > "$LOG_DIR/node_$NODE_ID/go-sub-stdout.log" 2>&1 &
-echo -e "${GREEN}  🚀 Go Sub started (nohup)${NC}"
+export XAPIAN_BASE_PATH="$XAPIAN_NODE"
+nohup ./simple_chain -config="$GO_CONFIG" > "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>&1 &
+echo -e "${GREEN}  🚀 Go Node started (nohup)${NC}"
 
 
 

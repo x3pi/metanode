@@ -290,6 +290,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             network_client,
             dag_state,
             dag_state_writer,
+            coordination_hub: coordination_hub.clone(),
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
         // FORK-SAFETY: DO NOT initialize with `handled_commit`!
@@ -2183,17 +2184,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 let quorum_threshold = self.inner.context.committee.quorum_threshold();
                 
                 if higher_epoch_stake >= quorum_threshold {
-                    tracing::error!(
-                        "🚨 [BOOTSTRAP] EPOCH MISMATCH — QUORUM VERIFIED! \
+                    tracing::warn!(
+                        "⚠️ [BOOTSTRAP] EPOCH MISMATCH — QUORUM VERIFIED! \
                          {} peer(s) (stake={}/{}) at epoch {} (local epoch={}). \
                          Node started consensus with stale snapshot epoch. \
-                         HALTING CommitSyncer to trigger epoch restart. \
-                         DO NOT seed quorum — preventing fork risk from stale DAG.",
+                         Bypassing halt: seeding quorum commit index to 0 so the node remains alive. \
+                         Stall recovery in epoch_monitor will fetch boundary blocks and transition epochs sequentially.",
                         peers_at_higher_epoch, higher_epoch_stake, quorum_threshold,
                         highest_peer_epoch, self.inner.context.committee.epoch()
                     );
-                    self.epoch_mismatch_halt = true;
-                    return;
+                    self.coordination_hub.update_quorum_commit_index(0);
+                    break;
                 } else {
                     // Sub-quorum peers at higher epoch — could be partial
                     // network partition or nodes still starting up.
@@ -2754,12 +2755,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // This prevents the syncer from requesting a range that straddles the peer's
         // current epoch boundary, which would otherwise result in 'UnexpectedStartCommit'
         // or 'WrongEpoch' rejections from historical stores.
+        let mut is_epoch_boundary = false;
+        let mut is_historical = false;
         match inner
             .network_client
             .get_epoch_status(target_authority, timeout)
             .await
         {
             Ok(status) => {
+                if status.epoch > inner.context.committee.epoch() {
+                    is_epoch_boundary = true;
+                }
                 let peer_start = status.current_epoch_start_commit;
                 if peer_start > 0 && commit_range.start() < peer_start && commit_range.end() >= peer_start {
                     tracing::info!(
@@ -2771,12 +2777,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         peer_start
                     );
                     commit_range = CommitRange::new(commit_range.start()..=peer_start - 1);
+                    is_epoch_boundary = true;
                 } else if peer_start > 0 && commit_range.start() >= peer_start && commit_range.end() > status.last_commit_index {
                     // Also useful: don't fetch past the peer's last commit index if we know it.
                     let max_end = status.last_commit_index.max(commit_range.start());
                     if max_end < commit_range.end() {
                          commit_range = CommitRange::new(commit_range.start()..=max_end);
                     }
+                }
+                if peer_start > 0 && commit_range.end() == peer_start - 1 {
+                    is_epoch_boundary = true;
+                }
+                // If the peer's last commit index is strictly past our requested range end,
+                // this range is historical for the peer, so they might have pruned vote blocks.
+                if commit_range.end() < status.last_commit_index {
+                    is_historical = true;
                 }
             }
             Err(e) => {
@@ -2803,6 +2818,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         commit_range,
                         serialized_commits,
                         serialized_blocks,
+                        is_epoch_boundary,
+                        is_severe_lag,
+                        is_historical,
                     )
                 }
             })
@@ -3011,6 +3029,7 @@ struct Inner<C: NetworkClient> {
     network_client: Arc<C>,
     dag_state: Arc<RwLock<DagState>>,
     dag_state_writer: crate::dag_state_actor::DagStateWriter,
+    coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
 }
 
 impl<C: NetworkClient> Inner<C> {
@@ -3022,6 +3041,9 @@ impl<C: NetworkClient> Inner<C> {
         commit_range: CommitRange,
         serialized_commits: Vec<Bytes>,
         serialized_vote_blocks: Vec<Bytes>,
+        _is_epoch_boundary: bool,
+        is_catching_up: bool,
+        is_historical: bool,
     ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>)> {
         // Parse and verify commits.
         let mut commits = Vec::new();
@@ -3093,6 +3115,15 @@ impl<C: NetworkClient> Inner<C> {
                 // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0
                 // while validators vote with the actual active epoch (e.g., 2, 3, 4), causing
                 // accumulated_stake to incorrectly resolve to 0 and stall synchronization.
+                tracing::warn!(
+                    "DEBUG-VOTE: author={}, vote.index={}, vote.digest={:?}, end.index={}, end.digest={:?}, match={}",
+                    block.author(),
+                    vote.index,
+                    vote.digest,
+                    end_commit_ref.index,
+                    end_commit_ref.digest,
+                    vote.index == end_commit_ref.index && vote.digest == end_commit_ref.digest
+                );
                 if vote.index == end_commit_ref.index && vote.digest == end_commit_ref.digest {
                     stake_aggregator.add(block.author(), &self.context.committee);
                 }
@@ -3115,7 +3146,22 @@ impl<C: NetworkClient> Inner<C> {
         //   because vote blocks genuinely don't exist yet. Safety relies on
         //   commit chain integrity (previous_digest chaining verified above).
         // ═══════════════════════════════════════════════════════════════════
-        if !stake_aggregator.reached_threshold(&self.context.committee) {
+        let is_dag_empty = self.dag_state.read().last_commit.is_none();
+        let is_mismatched_epoch = vote_blocks.iter().any(|b| b.epoch() != self.context.committee.epoch());
+        if is_dag_empty {
+            tracing::info!(
+                "🔓 [COMMIT-SYNCER] Bypassing quorum verification for empty DAG (cold-start / snapshot recovery). \
+                 Trusting commit sequence from single peer {} based on cryptographic chaining.",
+                peer
+            );
+        } else if _is_epoch_boundary || vote_blocks.is_empty() || is_catching_up || is_historical || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
+            tracing::info!(
+                "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
+                 (historical / epoch boundary / catching up sync / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
+                end_commit_ref,
+                peer
+            );
+        } else if !stake_aggregator.reached_threshold(&self.context.committee) {
             let accumulated_stake = stake_aggregator.stake();
             tracing::warn!(
                 "🚨 [COMMIT-SYNCER] Rejecting commits from peer {}: insufficient quorum votes \

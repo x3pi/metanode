@@ -27,15 +27,13 @@ LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"
 
 # ─── Config Maps ─────────────────────────────────────────────
-GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
+GO_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
 
-GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
-GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
+GO_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
 
-GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
+GO_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 EXECUTOR_SOCKET=("/tmp/executor0.sock" "/tmp/executor1.sock" "/tmp/executor2.sock" "/tmp/executor3.sock" "/tmp/executor4.sock")
 
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
@@ -71,10 +69,11 @@ if [ "$NEEDS_BUILD" = true ]; then
 fi
 
 RUST_CFG="$METANODE_ROOT/${RUST_CONFIG[$NODE_ID]}"
-GO_M_CFG="$GO_SIMPLE_ROOT/${GO_MASTER_CONFIG[$NODE_ID]}"
-GO_S_CFG="$GO_SIMPLE_ROOT/${GO_SUB_CONFIG[$NODE_ID]}"
+GO_CFG="$GO_SIMPLE_ROOT/${GO_CONFIG[$NODE_ID]}"
 
-for f in "$RUST_CFG" "$GO_M_CFG" "$GO_S_CFG"; do
+configs_to_check=("$RUST_CFG" "$GO_CFG")
+
+for f in "${configs_to_check[@]}"; do
     if [ ! -f "$f" ]; then
         echo "❌ Config not found: $f"
         exit 1
@@ -99,24 +98,15 @@ rm -f "/tmp/rust-go-node${NODE_ID}-master.sock" 2>/dev/null || true
 rm -f "/tmp/metanode-tx-${NODE_ID}.sock" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Sockets cleaned${NC}"
 
-# ─── Step 4: Start Go Master ────────────────────────────────
-echo -e "${BLUE}📋 Step 4: Start Go Master + Rust FFI...${NC}"
+# ─── Step 4: Start Go Node ────────────────────────────────
+echo -e "${BLUE}📋 Step 4: Start Go Node + Rust FFI...${NC}"
 cd "$GO_SIMPLE_ROOT"
 
-XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
-tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && exec ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+XAPIAN_NODE="sample/$DATA/data/data/xapian_node"
+tmux new-session -d -s "${GO_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
+    "ulimit -n 100000; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_NODE' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && exec ./simple_chain -config=${GO_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
 
-echo -e "${GREEN}  🚀 Go Master + Rust FFI started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
-
-# ─── Step 5: Start Go Sub ───────────────────────────────────
-echo -e "${BLUE}📋 Step 4: Start Go Sub...${NC}"
-
-XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
-tmux new-session -d -s "${GO_SUB_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=${GO_SUB_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-sub-stdout.log\" 2>&1"
-
-echo -e "${GREEN}  🚀 Go Sub started (${GO_SUB_SESSION[$NODE_ID]})${NC}"
+echo -e "${GREEN}  🚀 Go Node + Rust FFI started (${GO_SESSION[$NODE_ID]})${NC}"
 
 
 
@@ -127,8 +117,7 @@ echo -e "${GREEN}  ✅ Node $NODE_ID RESUMED${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${GREEN}  📊 tmux sessions:${NC}"
-echo "    Go Master: tmux attach -t ${GO_MASTER_SESSION[$NODE_ID]}"
-echo "    Go Sub:    tmux attach -t ${GO_SUB_SESSION[$NODE_ID]}"
+echo "    Go Node: tmux attach -t ${GO_SESSION[$NODE_ID]}"
 echo ""
 echo -e "${GREEN}  📁 Logs: $LOG_DIR/node_$NODE_ID/${NC}"
 echo ""
