@@ -785,6 +785,10 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 //
 // Writes to: currentEpoch, epochStartTimestampMs, epochBoundaryBlocks, epochStartTimestamps, epochBoundaryGeis
 func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs uint64, boundaryBlock uint64, boundaryGei uint64) {
+	// Align to second boundary (strip millisecond-level precision) to guarantee 100% deterministic consensus
+	// regardless of whether the node was online during consensus transition or synced epoch boundary via catch-up.
+	epochStartTimestampMs = (epochStartTimestampMs / 1000) * 1000
+
 	// Ensure maps are initialized (defensive against nil maps in tests or remote states)
 	if cs.epochStartTimestamps == nil {
 		cs.epochStartTimestamps = make(map[uint64]uint64)
@@ -1194,10 +1198,15 @@ func (cs *ChainState) LoadEpochData() error {
 		return fmt.Errorf("failed to unmarshal epoch data from %s: %w", source, err)
 	}
 
-	// Restore epoch state
+	// Restore epoch state and align timestamps to second boundary to ensure absolute consistency
 	cs.currentEpoch = epochData.CurrentEpoch
-	cs.epochStartTimestampMs = epochData.EpochStartTimestampMs
+	cs.epochStartTimestampMs = (epochData.EpochStartTimestampMs / 1000) * 1000
 	cs.epochStartTimestamps = epochData.EpochStartTimestamps
+	if cs.epochStartTimestamps != nil {
+		for epoch, ts := range cs.epochStartTimestamps {
+			cs.epochStartTimestamps[epoch] = (ts / 1000) * 1000
+		}
+	}
 	// NEW: Restore epoch boundary blocks (may be nil for older data)
 	if epochData.EpochBoundaryBlocks != nil {
 		cs.epochBoundaryBlocks = epochData.EpochBoundaryBlocks
