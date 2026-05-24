@@ -13,7 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	// Assume these paths are correct for your project structure
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -199,7 +198,7 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 
 	// Build AccountBatch for network replication.
 	var accountBatchData []byte
-	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+	if config.ConfigApp != nil {
 		if len(networkBatch) > 0 {
 			data, serErr := storage.SerializeBatch(networkBatch)
 			if serErr != nil {
@@ -366,7 +365,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	// We MUST use the 'batch' variable we just constructed above (which contains either MPT nodes or Flat entries).
 	// We CANNOT call db.trie.GetCommitBatch() again because for FlatStateTrie it is a one-shot read
 	// that clears its internal buffer, returning nil on the second call and breaking Sub-node state replication.
-	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+	if config.ConfigApp != nil {
 		if len(batch) > 0 {
 			// DEBUG MASTER COMMIT BATCH
 			logger.Debug("[DEBUG MASTER DB] CommitPipeline: serializing %d entries for network transfer", len(batch))

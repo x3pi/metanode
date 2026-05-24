@@ -1,15 +1,12 @@
 // @title processor/block_processor_txs.go
-// @markdown processor/block_processor_txs.go - Transaction processing for sub-nodes and channel-based architecture
+// @markdown processor/block_processor_txs.go - Transaction processing for unified block proposer node
 package processor
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	mt_config "github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
@@ -18,10 +15,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
-// TxsProcessor2 handles transaction processing with channel-based architecture
-
+// TxBatchForwarder handles transaction processing and forwarding to Rust FFI
 type TxBatchForwarder struct {
-	serviceType          string
 	transactionProcessor *TransactionProcessor
 	config               *mt_config.SimpleChainConfig
 	chainState           *blockchain.ChainState
@@ -30,7 +25,6 @@ type TxBatchForwarder struct {
 }
 
 func NewTxBatchForwarder(
-	serviceType string,
 	transactionProcessor *TransactionProcessor,
 	config *mt_config.SimpleChainConfig,
 	chainState *blockchain.ChainState,
@@ -38,7 +32,6 @@ func NewTxBatchForwarder(
 	messageSender network.MessageSender,
 ) *TxBatchForwarder {
 	return &TxBatchForwarder{
-		serviceType:          serviceType,
 		transactionProcessor: transactionProcessor,
 		config:               config,
 		chainState:           chainState,
@@ -54,14 +47,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 	// LOCALHOST OPTIMIZATION: Max transactions per batch limit
 	const maxTransactionsPerBatch = MaxTransactionsPerBatch
-	
-	// LOCALHOST OPTIMIZATION: Rate limitter
-	rateLimiter := time.NewTicker(1 * time.Millisecond)
-	defer rateLimiter.Stop()
-
-	// Control concurrency for sending TCP fallback
-	const maxConcurrentSends = MaxConcurrentSends
-	semaphore := make(chan struct{}, maxConcurrentSends)
 
 	// TBAB: Throughput-Based Adaptive Batching state
 	emaTPS := 0.0
@@ -69,11 +54,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 	for {
 		<-ticker.C
-
-		// Write (SUB-WRITE): sends TXs to local Rust, which forwards to validators
-		if bf.serviceType == string(p_common.ServiceTypeMaster) || bf.serviceType == string(p_common.ServiceTypeWrite) {
-			// FFI integration handles forwarding globally. No UDS socket connection needed.
-		}
 
 		setEmptyBlock := false
 		poolSizeBefore := bf.transactionProcessor.transactionPool.CountTransactions()
@@ -164,11 +144,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		// Chia nhỏ thành các batch nhỏ hơn để gửi
 		for batchStart := 0; batchStart < totalTxs; batchStart += maxTransactionsPerBatch {
-			// OPTIMIZED FOR LATENCY: Only apply rate limiting for TCP connections, NOT zero-copy FFI
-			if bf.serviceType == string(p_common.ServiceTypeReadonly) {
-				<-rateLimiter.C
-			}
-
 			batchEnd := batchStart + maxTransactionsPerBatch
 			if batchEnd > totalTxs {
 				batchEnd = totalTxs
@@ -190,162 +165,40 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				continue
 			}
 
-			// FFI Path (Master and Write nodes forward directly to embedded Rust process)
-			if bf.serviceType == string(p_common.ServiceTypeMaster) || bf.serviceType == string(p_common.ServiceTypeWrite) {
-				shouldLogSend := batchNum == 1 || batchNum == totalBatches
+			// FFI Path (forward directly to embedded Rust process)
+			shouldLogSend := batchNum == 1 || batchNum == totalBatches
+			if shouldLogSend {
+				logger.Info("📤 [TX FLOW] Sending batch [%d/%d]: %d transactions to Rust (size=%d bytes)",
+					batchNum, totalBatches, len(batchTxs), len(bTransaction))
+				logger.Info("🔥 [PROFILING] GoSub: Sent batch of %d TXs to Rust FFI at UnixMilli: %d (batch %d/%d)",
+					len(batchTxs), time.Now().UnixMilli(), batchNum, totalBatches)
+			}
+
+			// Gửi batch qua FFI (synchronous zero-copy injection)
+			success := executor.SubmitTransactionBatch(bTransaction)
+			if !success {
+				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
+					batchNum, totalBatches, len(batchTxs))
+				// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
+				remainingTxs := txs[batchStart:]
+				bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
+				for _, tx := range remainingTxs {
+					bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+				}
+				// Slow down slightly on backpressure
+				time.Sleep(50 * time.Millisecond)
+				break // Break out of the batch loop to wait for the next tick
+			} else {
 				if shouldLogSend {
-					logger.Info("📤 [TX FLOW] Sending batch [%d/%d]: %d transactions to Rust (size=%d bytes)",
-						batchNum, totalBatches, len(batchTxs), len(bTransaction))
-					logger.Info("🔥 [PROFILING] GoSub: Sent batch of %d TXs to Rust FFI at UnixMilli: %d (batch %d/%d)",
-						len(batchTxs), time.Now().UnixMilli(), batchNum, totalBatches)
-				}
-
-				// Gửi batch qua FFI (synchronous zero-copy injection)
-				success := executor.SubmitTransactionBatch(bTransaction)
-				if !success {
-					logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
+					logger.Info("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 						batchNum, totalBatches, len(batchTxs))
-					// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
-					remainingTxs := txs[batchStart:]
-					bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
-					for _, tx := range remainingTxs {
-						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
-					}
-					// Slow down slightly on backpressure
-					time.Sleep(50 * time.Millisecond)
-					break // Break out of the batch loop to wait for the next tick
-				} else {
-					if shouldLogSend {
-						logger.Info("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
-							batchNum, totalBatches, len(batchTxs))
-					}
-					// Pipeline stats: track TXs forwarded to Rust
-					GlobalPipelineStats.IncrTxsForwarded(int64(len(batchTxs)))
-					// ── RUST CONSENSUS TIMER: stamp when last batch enters Rust ──────
-					LastSendBatchTimeNano.Store(time.Now().UnixNano())
-					LastSendBatchTxCount.Store(int64(totalTxs))
-					// ─────────────────────────────────────────────────────────────────
 				}
-			}
-		}
-
-		// TCP Path (Fallback: Readonly/API nodes forward to Validators)
-		if bf.serviceType == string(p_common.ServiceTypeReadonly) {
-			// Marshal tất cả transactions một lần cho mode SINGLE
-			bTransaction, err := transaction.MarshalTransactions(txs)
-			if err != nil {
-				logger.Error("MarshalTransactions: %v", err)
-				continue
-			}
-
-			// Add transactions to pending manager
-			for _, tx := range txs {
-				bf.transactionProcessor.pendingTxManager.Add(tx, StatusProcessing)
-			}
-
-			var wg sync.WaitGroup
-			masterConnections := bf.connectionsManager.ConnectionsByType(p_common.MapConnectionTypeToIndex(p_common.MASTER_CONNECTION_TYPE))
-
-			// Retry logic nếu không có master connections
-			if len(masterConnections) == 0 {
-				logger.Warn("TxsProcessor2: không tìm thấy master connection, txCount=%d, retry sau 100ms",
-					len(txs))
-				time.Sleep(100 * time.Millisecond)
-				masterConnections = bf.connectionsManager.ConnectionsByType(p_common.MapConnectionTypeToIndex(p_common.MASTER_CONNECTION_TYPE))
-				if len(masterConnections) == 0 {
-					logger.Warn("TxsProcessor2: vẫn không tìm thấy master connection sau retry. Re-adding %d txs to pool.", len(txs))
-					bf.transactionProcessor.transactionPool.AddTransactions(txs)
-					for _, tx := range txs {
-						bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
-					}
-					continue
-				}
-			}
-
-			// Copy bTransaction một lần để tránh race condition và tối ưu memory
-			bTransactionCopy := make([]byte, len(bTransaction))
-			copy(bTransactionCopy, bTransaction)
-
-			// Gửi đến tất cả master connections
-			for address, conn := range masterConnections {
-				if conn == nil {
-					logger.Warn("TxsProcessor2: connection là nil, address=%s", address.Hex())
-					continue
-				}
-
-				// Kiểm tra connection sẵn sàng (tối ưu: check trước khi tạo goroutine)
-				if !conn.IsConnect() {
-					// Retry logic để đợi connection sẵn sàng
-					maxRetries := 10
-					retryDelay := 50 * time.Millisecond
-					connected := false
-
-					for retry := 0; retry < maxRetries; retry++ {
-						if conn.IsConnect() {
-							connected = true
-							break
-						}
-						if retry < maxRetries-1 {
-							time.Sleep(retryDelay)
-						}
-					}
-
-					if !connected {
-						logger.Warn("TxsProcessor2: connection không connected sau %d retries, bỏ qua, address=%s",
-							maxRetries, address.Hex())
-						continue
-					}
-				}
-
-				// Sử dụng semaphore để giới hạn số lượng goroutines đồng thời
-				wg.Add(1)
-				go func(c network.Connection, addr common.Address, txData []byte) {
-					defer wg.Done()
-
-					// Acquire semaphore
-					semaphore <- struct{}{}
-					defer func() { <-semaphore }()
-
-					// Thêm timeout để tránh goroutine treo
-					done := make(chan error, 1)
-					go func() {
-						done <- bf.messageSender.SendBytes(c, p_common.TransactionsFromSubTopic, txData)
-					}()
-
-					var sendSuccess bool
-					select {
-					case sendErr := <-done:
-						if sendErr != nil {
-							logger.Error("TxsProcessor2: lỗi khi gửi transaction đến %s: %v", addr.Hex(), sendErr)
-						} else {
-							sendSuccess = true
-						}
-					case <-time.After(5 * time.Second):
-						logger.Error("TxsProcessor2: timeout khi gửi transaction đến %s", addr.Hex())
-					}
-					
-					if !sendSuccess {
-						logger.Warn("⚠️ [TX FLOW] Sub node TCP send failed, re-adding %d txs to pool", len(txs))
-						bf.transactionProcessor.transactionPool.AddTransactions(txs)
-						for _, tx := range txs {
-							bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
-						}
-					}
-				}(conn, address, bTransactionCopy)
-			}
-
-			// Đợi tất cả goroutines hoàn tất với timeout
-			waitDone := make(chan struct{})
-			go func() {
-				wg.Wait()
-				close(waitDone)
-			}()
-
-			select {
-			case <-waitDone:
-				// Thành công, không cần log
-			case <-time.After(30 * time.Second):
-				logger.Warn("TxsProcessor2: timeout khi đợi goroutines hoàn tất (30s)")
+				// Pipeline stats: track TXs forwarded to Rust
+				GlobalPipelineStats.IncrTxsForwarded(int64(len(batchTxs)))
+				// ── RUST CONSENSUS TIMER: stamp when last batch enters Rust ──────
+				LastSendBatchTimeNano.Store(time.Now().UnixNano())
+				LastSendBatchTxCount.Store(int64(totalTxs))
+				// ─────────────────────────────────────────────────────────────────
 			}
 		}
 	}

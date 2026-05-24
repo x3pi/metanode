@@ -217,7 +217,7 @@ func TestEpochTransition_MultiEpochSequential(t *testing.T) {
 // Group 2: Error Handling & Edge Cases
 // ============================================================================
 
-func TestEpochTransition_BackwardRejected(t *testing.T) {
+func TestEpochTransition_BackwardIgnored(t *testing.T) {
 	env := setupTestEnv(t)
 	client := env.newClient()
 
@@ -225,13 +225,13 @@ func TestEpochTransition_BackwardRejected(t *testing.T) {
 	_, err := client.advanceEpoch(3, 1700000000000, 300)
 	require.NoError(t, err)
 
-	// Try to go back to epoch 1 — should get error
+	// Try to go back to epoch 1 — should succeed silently and return current epoch 3
 	resp, err := client.advanceEpoch(1, 1700000001000, 100)
-	require.NoError(t, err, "transport should succeed even if handler returns error")
+	require.NoError(t, err, "transport should succeed")
 
-	errPayload := resp.GetError()
-	require.NotEmpty(t, errPayload, "expected error response for backward epoch")
-	assert.Contains(t, errPayload, "cannot go backwards")
+	advResp := resp.GetAdvanceEpochResponse()
+	require.NotNil(t, advResp, "expected AdvanceEpochResponse for backward epoch")
+	assert.Equal(t, uint64(3), advResp.GetNewEpoch())
 }
 
 func TestEpochTransition_DuplicateIdempotent(t *testing.T) {

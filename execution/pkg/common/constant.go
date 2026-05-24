@@ -61,13 +61,7 @@ var (
 	CROSS_CHAIN_CONTRACT_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000B429C0B2")
 )
 
-type ServiceType string
 
-const (
-	ServiceTypeWrite    ServiceType = "SUB-WRITE"
-	ServiceTypeMaster   ServiceType = "MASTER"
-	ServiceTypeReadonly ServiceType = "SUB-READ"
-)
 
 type FolderBackup int
 

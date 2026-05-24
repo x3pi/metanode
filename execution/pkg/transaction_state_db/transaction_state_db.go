@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	// Import types
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -315,7 +314,7 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		if err := db.db.BatchPut(batch); err != nil {
 			return common.Hash{}, fmt.Errorf("failed to batch put to db: %w", err)
 		}
-		if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+		if config.ConfigApp != nil {
 			serStart := time.Now()
 			data, serErr := storage.SerializeBatch(flatBatch)
 			if serErr != nil {

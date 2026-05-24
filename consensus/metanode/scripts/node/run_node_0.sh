@@ -23,27 +23,24 @@ BINARY="$METANODE_ROOT/target/release/metanode"
 
 # Config Maps (Node 0 only)
 id=0
-GO_MASTER_CONFIG="config-master-node0.json"
-GO_SUB_CONFIG="config-sub-node0.json"
+GO_CONFIG="config-master-node0.json"
 GO_DATA_DIR="node0"
-GO_MASTER_SESSION="go-master-0"
-GO_SUB_SESSION="go-sub-0"
+GO_SESSION="go-master-0"
 RUST_SESSION="metanode-0"
-GO_MASTER_SOCKET="/tmp/rust-go-node0-master.sock"
+GO_SOCKET="/tmp/rust-go-node0-master.sock"
 RUST_CONFIG="config/node_0.toml"
 
 
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  🚀 FRESH START NODE 0 (Master, Sub, Rust) — keep keys, clean data${NC}"
+echo -e "${GREEN}  🚀 FRESH START NODE 0 (Go, Rust) — keep keys, clean data${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
 # Step 1: Stop Node 0 processes
 echo -e "${BLUE}📋 Step 1: Stop Node 0 processes...${NC}"
-tmux kill-session -t "$GO_MASTER_SESSION" 2>/dev/null || true
-tmux kill-session -t "$GO_SUB_SESSION" 2>/dev/null || true
+tmux kill-session -t "$GO_SESSION" 2>/dev/null || true
 tmux kill-session -t "$RUST_SESSION" 2>/dev/null || true
 sleep 2
 
@@ -78,21 +75,12 @@ rm -f /tmp/executor0.sock /tmp/rust-go-node0-master.sock /tmp/metanode-tx-0.sock
 
 echo -e "${GREEN}  ✅ Node 0 data cleaned${NC}"
 
-# Step 4: Start Go Master 0
-echo -e "${BLUE}📋 Step 3: Start Go Master 0...${NC}"
+# Step 4: Start Go Node 0
+echo -e "${BLUE}📋 Step 3: Start Go Node 0...${NC}"
 cd "$GO_SIMPLE_ROOT"
 XAPIAN="sample/$DATA/data/data/xapian_node"
 PPROF_ARG="--pprof-addr=localhost:6060"
-tmux new-session -d -s "$GO_MASTER_SESSION" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; ulimit -c unlimited; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export GOTRACEBACK=crash && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=$GO_MASTER_CONFIG $PPROF_ARG >> \"$LOG_DIR/node_0/go-master-stdout.log\" 2>&1"
-
-
-# Step 5: Start Go Sub 0
-echo -e "${BLUE}📋 Step 5: Start Go Sub 0...${NC}"
-XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
-tmux new-session -d -s "$GO_SUB_SESSION" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=$GO_SUB_CONFIG >> \"$LOG_DIR/node_0/go-sub-stdout.log\" 2>&1"
-
-
+tmux new-session -d -s "$GO_SESSION" -c "$GO_SIMPLE_ROOT" \
+    "ulimit -n 100000; ulimit -c unlimited; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export GOTRACEBACK=crash && export XAPIAN_BASE_PATH='$XAPIAN' && ./simple_chain -config=$GO_CONFIG $PPROF_ARG >> \"$LOG_DIR/node_0/go-master-stdout.log\" 2>&1"
 
 echo -e "${GREEN}  🎉 NODE 0 STARTED!${NC}"

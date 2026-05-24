@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-23
+> **Last updated:** 2026-05-24
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -170,7 +170,6 @@ metanode/
 | `block_processor_indexing.go` | 153 | Block indexing |
 | `block_processor_monitoring.go` | 175 | Health monitoring |
 | `block_processor_logs.go` | 222 | Log handling |
-| `block_processor_db_sync.go` | 100 | DB sync helpers |
 | `tx_batch_forwarder_core.go` | 352 | Tx batch → consensus forwarding |
 | `tx_validator_pool_core.go` | 729 | Tx validation pool |
 | `tx_virtual_executor_core.go` | 209 | Virtual/offchain tx execution |

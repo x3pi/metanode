@@ -462,7 +462,34 @@ pub fn start_unified_epoch_monitor(
                     .unwrap_or((0, 0, false, [0; 32], 0));
                 
                 if go_block < boundary_block {
-                    info!("⏳ [EPOCH MONITOR] Go is at block {}, waiting to reach boundary block {} for epoch {}. CoreThread or Stall Recovery will catch up.", go_block, boundary_block, target_epoch);
+                    info!("⏳ [EPOCH MONITOR] Go is at block {}, waiting to reach boundary block {} for epoch {}. Triggering active P2P sync for boundary catch-up...", go_block, boundary_block, target_epoch);
+                    if !peer_rpc.is_empty() {
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &peer_rpc,
+                            go_block + 1,
+                            boundary_block,
+                        )
+                        .await
+                        {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                info!("🚨 [EPOCH MONITOR] Fetched {} blocks up to boundary block {}. Executing blocks to un-stall epoch transition...", blocks.len(), boundary_block);
+                                match client_arc.sync_and_execute_blocks(blocks).await {
+                                    Ok((synced, last, _gei)) => {
+                                        info!("✅ [EPOCH MONITOR] Executed {} blocks (last={}) up to boundary.", synced, last);
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ [EPOCH MONITOR] sync_and_execute_blocks failed: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                info!("ℹ️ [EPOCH MONITOR] No boundary blocks available from peers (go_block={}, boundary_block={})", go_block, boundary_block);
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [EPOCH MONITOR] Boundary block fetch failed: {}", e);
+                            }
+                        }
+                    }
                     break; // Stop multi-epoch loop — retry in next monitor cycle
                 }
 

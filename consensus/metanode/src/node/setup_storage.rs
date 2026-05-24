@@ -781,20 +781,7 @@ impl ConsensusNode {
             info!("✅ [STARTUP] Executor client memory state synchronized successfully (block/GEI guards updated).");
         }
 
-        // Recovery check
-        if config.executor_read_enabled && last_global_exec_index > 0 {
-            if let Err(e) = super::recovery::perform_block_recovery_check(
-                &executor_client,
-                last_global_exec_index,
-                epoch_base_exec_index,
-                current_epoch,
-                &epoch_db_path,
-                config.node_id as u32,
-            )
-            .await {
-                warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
-            }
-        }
+
 
         let protocol_keypair = config.load_protocol_keypair()?;
         let network_keypair = config.load_network_keypair()?;

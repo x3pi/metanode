@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -797,7 +796,7 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 	}
 
 	// Handle replication batch for Sub nodes
-	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+	if config.ConfigApp != nil {
 		var stakeBatchData []byte
 		if nodeSet != nil && len(nodeSet.Nodes) > 0 {
 			// MPT path: use nodeSet for replication
@@ -948,7 +947,7 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	}
 
 	// Serialize for network replication (Master only)
-	if config.ConfigApp != nil && config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
+	if config.ConfigApp != nil {
 		if len(batch) > 0 {
 			data, serErr := storage.SerializeBatch(batch)
 			if serErr != nil {

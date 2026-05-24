@@ -20,16 +20,10 @@ echo -e "${GREEN}🛑 Stopping Node $NODE_ID (AI Version)...${NC}"
 # 1. Ask processes to shut down gracefully
 echo -e "${YELLOW}  📤 Sending SIGINT to node $NODE_ID processes...${NC}"
 
-# Find go-master
-MASTER_PIDS=$(pgrep -f "simple_chain -config=config-master-node$NODE_ID.json" || true)
-if [ -n "$MASTER_PIDS" ]; then
-    kill -SIGINT $MASTER_PIDS 2>/dev/null || true
-fi
-
-# Find go-sub
-SUB_PIDS=$(pgrep -f "simple_chain -config=config-sub-node$NODE_ID.json" || true)
-if [ -n "$SUB_PIDS" ]; then
-    kill -SIGINT $SUB_PIDS 2>/dev/null || true
+# Find go-node
+NODE_PIDS=$(pgrep -f "simple_chain -config=config-master-node$NODE_ID.json" || true)
+if [ -n "$NODE_PIDS" ]; then
+    kill -SIGINT $NODE_PIDS 2>/dev/null || true
 fi
 
 # Find rust metanode
@@ -39,7 +33,7 @@ if [ -n "$RUST_PIDS" ]; then
 fi
 
 # Fallback: kill tmux if it still exists from human user
-for sess in "go-master-$NODE_ID" "go-sub-$NODE_ID" "metanode-$NODE_ID"; do
+for sess in "go-master-$NODE_ID" "metanode-$NODE_ID"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
         tmux send-keys -t "$sess" C-c 2>/dev/null || true
     fi
@@ -49,14 +43,13 @@ echo "  ⏳ Waiting 5s for graceful shutdown..."
 sleep 5
 
 # 2. Force kill remaining and clean up tmux sessions
-for sess in "go-master-$NODE_ID" "go-sub-$NODE_ID" "metanode-$NODE_ID"; do
+for sess in "go-master-$NODE_ID" "metanode-$NODE_ID"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
         tmux kill-session -t "$sess" 2>/dev/null || true
     fi
 done
 
 pkill -9 -f "config-master-node$NODE_ID.json" 2>/dev/null || true
-pkill -9 -f "config-sub-node$NODE_ID.json" 2>/dev/null || true
 pkill -9 -f "config/node_$NODE_ID.toml" 2>/dev/null || true
 
 # 3. Clean sockets

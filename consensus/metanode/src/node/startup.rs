@@ -267,7 +267,8 @@ impl InitializedNode {
                     let is_alive = { self.node.lock().await.is_alive() };
                     if !is_alive {
                         tracing::error!("🔴 [SUPERVISOR] Lõi đồng thuận đã Crash! Kích hoạt quy trình Auto-Restart...");
-                        // Prevent waiting for graceful shutdown if internal components are dead
+                        // CRITICAL: Explicitly shut down node, servers, and clear global registry to release locks
+                        let _ = self.shutdown().await;
                         return Err(anyhow::anyhow!("ConsensusNode internal tasks crashed"));
                     }
                 }
@@ -312,6 +313,9 @@ impl InitializedNode {
         if let Err(e) = node.shutdown().await {
             error!("❌ [SHUTDOWN] Error during consensus shutdown: {}", e);
         }
+
+        // 5. Clear global transition handler registry reference to allow node GC
+        crate::node::clear_transition_handler_node().await;
 
         info!("Node stopped gracefully");
         Ok(())

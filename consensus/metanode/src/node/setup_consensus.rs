@@ -267,6 +267,25 @@ impl ConsensusNode {
             }
         });
 
+        // COLD-START-FIX (May 2026): Wire digest data checker to CommitVoteMonitor.
+        // This callback returns true ONLY when CommitVoteMonitor has received actual
+        // digest votes from P2P blocks, NOT when CommitSyncer has merely set QCI > 0.
+        let digest_checker_hub = coordination_hub.clone();
+        commit_processor = commit_processor.with_digest_data_checker(move || {
+            digest_checker_hub.has_digest_data()
+        });
+
+        // ZERO-TIMEOUT (May 2026): Wire peer commit attestation callback.
+        // Replaces COLD-START-BYPASS (10s) and SUSTAINED-LOAD-BYPASS (5s).
+        let peer_attest_hub = coordination_hub.clone();
+        commit_processor = commit_processor.with_peer_commit_attestation(move |index: u32, digest: [u8; 32]| {
+            if let Some(attestor) = peer_attest_hub.get_peer_commit_attestation() {
+                attestor(index, digest)
+            } else {
+                consensus_core::coordination_hub::PeerAttestResult::Insufficient // Not yet initialized
+            }
+        });
+
         // ExecutorClient for commit processing
         let initial_next_expected = if config.executor_read_enabled {
             storage.last_global_exec_index + 1
@@ -1789,6 +1808,24 @@ impl ConsensusNode {
             info!("📡 Keeping commit_consumer alive for SyncOnly mode to prevent channel close");
             (None, Some(commit_consumer))
         };
+
+        if let Some(ref auth) = authority {
+            if config.executor_read_enabled && storage.last_global_exec_index > 0 {
+                let recovery_store = auth.take_store();
+                info!("🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...");
+                if let Err(e) = super::recovery::perform_block_recovery_check(
+                    &executor_client_for_proc,
+                    storage.last_global_exec_index,
+                    storage.epoch_base_exec_index,
+                    storage.current_epoch,
+                    &recovery_store,
+                    config.node_id as u32,
+                )
+                .await {
+                    warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
+                }
+            }
+        }
 
         let transaction_client_proxy = authority
             .as_ref()

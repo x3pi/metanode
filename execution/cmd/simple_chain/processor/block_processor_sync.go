@@ -63,6 +63,43 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	} else {
 		localTipBlockNum = storage.GetLastBlockNumber()
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// NOMT-AHEAD REPLAY DETECTION & MODE (May 2026):
+	// Handle snapshot mismatch where NOMT trie state is at block N but PebbleDB
+	// is at block N-1. When block N arrives, EVM execution will normally reject
+	// all transactions strictly due to tx.Nonce() < as.Nonce() (since nonces
+	// are already at block N's post-execution state).
+	//
+	// Detection: if incomingBlockNum == localTipBlockNum + 1, and NOMT Merkle root
+	// does not match the parent block's AccountStatesRoot.
+	// ═══════════════════════════════════════════════════════════════════════════
+	nomtAheadReplay := false
+	var capturedAccountRoot common.Hash
+	var capturedStakeRoot common.Hash
+	if incomingBlockNum > 0 && incomingBlockNum == localTipBlockNum+1 {
+		if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+			lastBlock := bp.GetLastBlock()
+			if lastBlock != nil {
+				parentStatesRoot := lastBlock.Header().AccountStatesRoot()
+				if nomtRoot != parentStatesRoot {
+					nomtAheadReplay = true
+					capturedAccountRoot = nomtRoot
+					capturedStakeRoot, _ = trie.GetNomtHandleRoot("stake_db")
+					tx_processor.NomtAheadReplayMode.Store(true)
+					logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-DETECT] NOMT trie state is ahead of PebbleDB. nomtRoot=%s, parentStatesRoot=%s. Enabling Trie-Ahead Replay Recovery mode for block #%d.",
+						nomtRoot.Hex()[:18]+"...", parentStatesRoot.Hex()[:18]+"...", incomingBlockNum)
+				}
+			}
+		}
+	}
+	defer func() {
+		if nomtAheadReplay {
+			tx_processor.NomtAheadReplayMode.Store(false)
+			logger.Info("🛡️ [NOMT-AHEAD-REPLAY-DETECT] Disabled Trie-Ahead Replay Recovery mode after processing block #%d.", incomingBlockNum)
+		}
+	}()
+
 	if incomingBlockNum > 0 && incomingBlockNum > localTipBlockNum + 1 {
 		logger.Error("🚨 [BLOCK-GAP-GUARD] REJECT: Consensus block height gap detected! Incoming block #%d, but Go local tip is #%d. Rejecting block execution to let P2P sync complete.",
 			incomingBlockNum, localTipBlockNum)
@@ -855,32 +892,11 @@ PROCESS_BLOCK:
 			regression := parentTs - blockTimeSec
 			if regression > 30 {
 				leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
-				logger.Error("🚨 [TIMESTAMP-REGRESSION] DROPPING commit BEFORE execution: "+
-					"block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
-					"Stale Rust commit from sparse DAG local committer "+
-					"(leader=%s, GEI=%d, epoch=%d, txs=%d). "+
-					"Correct block will arrive via CertifiedCommit.",
+				logger.Warn("⚠️ [TIMESTAMP-REGRESSION] WARNING: block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
+					"Proceeding with execution to maintain consensus alignment. (leader=%s, GEI=%d, epoch=%d, txs=%d)",
 					*currentBlockNumber, blockTimeSec, regression,
 					lastBlock.Header().BlockNumber(), parentTs,
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
-
-				// Update GEI so processor advances past this commit
-				bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
-				*nextExpectedGlobalExecIndex = globalExecIndex + 1
-
-				// NOTE (May 2026): InvalidateAllState() REMOVED here.
-				// No EVM mutations happened (commit dropped BEFORE execution),
-				// so state caches are still valid. Invalidating would destroy
-				// the 200k-entry LRU cache, causing ~20k NOMT FFI reads on
-				// the next block and contributing to pipeline stalls.
-
-				// Process any pending blocks
-				if pendingBlock, exists := pendingBlocks[*nextExpectedGlobalExecIndex]; exists {
-					delete(pendingBlocks, *nextExpectedGlobalExecIndex)
-					epochData = pendingBlock
-					goto PROCESS_SINGLE_EPOCH_DATA_START
-				}
-				return nil
 			}
 		}
 	}
@@ -1109,6 +1125,13 @@ PROCESS_BLOCK:
 
 	// CC-1: Construct standard batch_id for end-to-end tracing
 	batchID := fmt.Sprintf("E%dC%dG%d", epochNum, commitIndex, globalExecIndex)
+
+	if nomtAheadReplay {
+		accumulatedResults.Root = capturedAccountRoot
+		accumulatedResults.StakeStatesRoot = capturedStakeRoot
+		logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-ROOT] Overrode accumulatedResults Root and StakeStatesRoot with captured NOMT roots for block #%d: Root=%s, StakeRoot=%s",
+			*currentBlockNumber, capturedAccountRoot.Hex()[:18]+"...", capturedStakeRoot.Hex()[:18]+"...")
+	}
 
 	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)

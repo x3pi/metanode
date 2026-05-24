@@ -18,12 +18,8 @@ var globalSnapshotManager *SnapshotManager
 // Gọi 1 lần duy nhất khi khởi động node
 // chainState dùng để tự phát hiện epoch transition (cho cả SUB-WRITE node)
 func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.ChainState) *SnapshotManager {
-	if !cfg.SnapshotEnabled || string(cfg.ServiceType) != "MASTER" {
-		if string(cfg.ServiceType) != "MASTER" && cfg.SnapshotEnabled {
-			logger.Warn("📸 [SNAPSHOT] Snapshot system DISABLED forcefully on SUB node to prevent concurrent write corruption")
-		} else {
-			logger.Info("📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered")
-		}
+	if !cfg.SnapshotEnabled {
+		logger.Info("📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered")
 
 		// Tạo lightweight SnapshotManager (disabled) chỉ để đăng ký callback cho log rotation
 		sm := &SnapshotManager{enabled: false}

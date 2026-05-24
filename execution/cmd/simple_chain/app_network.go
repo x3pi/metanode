@@ -7,7 +7,6 @@ import (
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
@@ -70,7 +69,7 @@ func (app *App) initHostNode() error {
 	hostNode, err := node.NewHostNode(
 		ctx,
 		app.config.Databases.RootPath,
-		string(app.config.ServiceType),
+		"MASTER",
 		app.connectionsManager,
 		app.messageSender,
 	)
@@ -88,12 +87,10 @@ func (app *App) initHostNode() error {
 	hostNode.AddTopicStorage(node.BackupStorageKey, app.storageManager.GetStorageBackupDb())
 	hostNode.SetBackupStorage(app.storageManager.GetStorageBackupDb())
 
-	// Setup fee addresses — chỉ Master load local, Sub sẽ fetch từ master trong Run()
-	if app.config.ServiceType == common.ServiceTypeMaster {
-		app.loadFreeFeeAddresses()
-		freeFeeAddressesSlice := ConvertAddressMapToStringSlice(FreeFeeAddresses)
-		app.node.SetFeeAddresses(freeFeeAddressesSlice)
-	}
+	// Setup fee addresses
+	app.loadFreeFeeAddresses()
+	freeFeeAddressesSlice := ConvertAddressMapToStringSlice(FreeFeeAddresses)
+	app.node.SetFeeAddresses(freeFeeAddressesSlice)
 
 	return nil
 }

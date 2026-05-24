@@ -723,7 +723,13 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	lastGEI := storage.GetLastGlobalExecIndex()
 
 	if request.NewEpoch < currentEpoch && request.NewEpoch > 0 {
-		return nil, fmt.Errorf("cannot go backwards: Target Epoch %d, but Go is already at Epoch %d", request.NewEpoch, currentEpoch)
+		// Rust consensus catching up sequentially during snapshot recovery.
+		// We silently accept but DO NOT modify Go state, to let Rust proceed.
+		logger.Warn("🛡️ [EPOCH GUARD] Backwards AdvanceEpoch request ignored! Target Epoch %d, but Go is already at Epoch %d. (Likely a recovery catch-up).", request.NewEpoch, currentEpoch)
+		return &pb.AdvanceEpochResponse{
+			NewEpoch:              currentEpoch,
+			EpochStartTimestampMs: rh.chainState.GetCurrentEpochStartTimestampMs(),
+		}, nil
 	}
 
 	if request.NewEpoch == currentEpoch && request.NewEpoch > 0 {

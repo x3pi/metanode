@@ -267,7 +267,6 @@ func (app *App) initProcessors() {
 		app.keyPair.Address(),
 		app.transactionStateDB,
 		app.eventSystem,
-		app.config.ServiceType,
 		config.PathSmartContractStorage,
 		app.config.ChainId.String(),
 		app.node,
@@ -294,7 +293,6 @@ func (app *App) initRoutes() {
 		app.stateProcessor,
 		app.transactionProcessor,
 		app.subscribeProcessor,
-		app.config.ServiceType,
 		app.messageSender,
 	)
 

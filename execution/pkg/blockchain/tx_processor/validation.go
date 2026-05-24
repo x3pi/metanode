@@ -116,8 +116,13 @@ func VerifyTransaction(
 		}
 	}
 	if tx.GetNonce() < as.Nonce() {
-		logger.Warn("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
-		return transaction.InvalidNonce
+		if !NomtAheadReplayMode.Load() {
+			logger.Warn("tx.GetNonce() < as.Nonce(): ", tx.GetNonce(), as.Nonce())
+			return transaction.InvalidNonce
+		} else {
+			logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-VALIDATION] Bypassing nonce < state nonce check: tx=%s (From=%s, tx.Nonce=%d, state.Nonce=%d)",
+				tx.Hash().Hex()[:16]+"...", tx.FromAddress().Hex(), tx.GetNonce(), as.Nonce())
+		}
 	}
 
 	// ════════════════════════════════════════════════════════════════

@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/types"
 
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -66,7 +65,6 @@ func InitProcessors(
 	validatorAddress common.Address,
 	transactionStateDB *transaction_state_db.TransactionStateDB,
 	eventSystem *mt_filters.EventSystem,
-	serviceType mt_common.ServiceType,
 	smartContractStorageDBPath string,
 	chainId string,
 	node *node.HostNode,
@@ -105,7 +103,6 @@ func InitProcessors(
 		connectionsManager,
 		messageSender,
 		eventSystem,
-		serviceType,
 		node,
 		storageManager,
 		chainState,

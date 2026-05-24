@@ -22,9 +22,9 @@ SRC_IP=${3:-127.0.0.1}
 SRC_RPC_PORT=$((8757 + (SRC_NODE == 0 ? 0 : SRC_NODE == 1 ? 1990 : SRC_NODE == 2 ? 1992 : SRC_NODE == 3 ? 1993 : 1991))) # Map for Node 0-4
 DST_RPC_PORT=$((8757 + (DST_NODE == 0 ? 0 : DST_NODE == 1 ? 1990 : DST_NODE == 2 ? 1992 : DST_NODE == 3 ? 1993 : 1991)))
 
-SNAPSHOT_PORT=$((8700 + SRC_NODE))
+SNAPSHOT_PORT=$((8600 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node"
+LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db changelog_db_account changelog_db_stake"
 
 TX_PUMP_PID=""
 
@@ -50,13 +50,14 @@ get_block_number() {
 }
 
 get_peer_info() {
-    local port=$1
-    curl -s --max-time 3 -X POST "http://127.0.0.1:$port" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"peer_info","params":[],"id":1}' 2>/dev/null
+    local node_id=$1
+    local port=$((19200 + node_id))
+    curl -s --max-time 3 "http://127.0.0.1:$port/peer_info" 2>/dev/null
 }
 
 start_tx_pump() {
     if [ ! -d "$TX_SENDER_DIR" ]; then return; fi
-    if [ ! -x "$TX_SENDER_DIR/tx_sender" ]; then (cd "$TX_SENDER_DIR" && go build -o tx_sender .) || true; fi
+    if [ ! -x "$TX_SENDER_DIR/tx_sender" ]; then (cd "$TX_SENDER_DIR" && go build -o tx_sender main.go) || true; fi
     "$TX_SENDER_DIR/tx_sender" --config "$TX_SENDER_DIR/config.json" --data "$TX_SENDER_DIR/data.json" --loop --node "127.0.0.1:4201" > /dev/null 2>&1 &
     TX_PUMP_PID=$!
     log "  🔫 TX Spammer started (PID: $TX_PUMP_PID) to force block production."
@@ -83,8 +84,8 @@ log "${BOLD}====================================================================
 # ═══════════════════════════════════════════════════════════════════
 log "\n${CYAN}[Phase 1] Preparation - Checking Source Node $SRC_NODE${NC}"
 
-SNAPSHOTS_JSON=$(curl -sf "${SNAPSHOT_URL}/api/snapshots" 2>/dev/null || echo "null")
-if [ "$SNAPSHOTS_JSON" = "null" ] || [ -z "$SNAPSHOTS_JSON" ]; then
+SNAPSHOTS_JSON=$(curl -sf "${SNAPSHOT_URL}/api/snapshots" 2>/dev/null || echo "failed")
+if [ "$SNAPSHOTS_JSON" = "failed" ] || [ -z "$SNAPSHOTS_JSON" ]; then
     log "${RED}❌ Node $SRC_NODE snapshot API is unresponsive. Is it running?${NC}"
     exit 1
 fi
@@ -95,7 +96,7 @@ if [ "$SNAPSHOT_COUNT" -eq 0 ]; then
     start_tx_pump
     for i in {1..12}; do
         sleep 5
-        SNAPSHOTS_JSON=$(curl -sf "${SNAPSHOT_URL}/api/snapshots" 2>/dev/null || echo "null")
+        SNAPSHOTS_JSON=$(curl -sf "${SNAPSHOT_URL}/api/snapshots" 2>/dev/null || echo "failed")
         SNAPSHOT_COUNT=$(echo "$SNAPSHOTS_JSON" | jq 'length' 2>/dev/null || echo "0")
         if [ "$SNAPSHOT_COUNT" -gt 0 ]; then break; fi
     done
@@ -191,19 +192,19 @@ sleep 10 # Let the system settle and allow health checks to run
 # ═══════════════════════════════════════════════════════════════════
 log "\n${CYAN}[Phase 4] Post-Recovery Integrity & Parity Audit${NC}"
 
-SRC_INFO=$(get_peer_info "$SRC_RPC_PORT")
-DST_INFO=$(get_peer_info "$DST_RPC_PORT")
+SRC_INFO=$(get_peer_info "$SRC_NODE")
+DST_INFO=$(get_peer_info "$DST_NODE")
 
 if [ -z "$SRC_INFO" ] || [ -z "$DST_INFO" ] || [[ "$SRC_INFO" == *"error"* ]] || [[ "$DST_INFO" == *"error"* ]]; then
     log "${RED}❌ Failed to query peer_info from nodes.${NC}"
     exit 1
 fi
 
-SRC_GEI=$(echo "$SRC_INFO" | jq -r '.result.global_exec_index')
-DST_GEI=$(echo "$DST_INFO" | jq -r '.result.global_exec_index')
+SRC_GEI=$(echo "$SRC_INFO" | jq -r '.last_global_exec_index')
+DST_GEI=$(echo "$DST_INFO" | jq -r '.last_global_exec_index')
 
-SRC_STATE=$(echo "$SRC_INFO" | jq -r '.result.state_root')
-DST_STATE=$(echo "$DST_INFO" | jq -r '.result.state_root')
+SRC_STATE=$(echo "$SRC_INFO" | jq -r '.state_root')
+DST_STATE=$(echo "$DST_INFO" | jq -r '.state_root')
 
 log "  📊 ${BOLD}State Metrics Comparison:${NC}"
 log "    Node $SRC_NODE (Source) -> GEI: $SRC_GEI | State Root: ${SRC_STATE:0:18}..."

@@ -22,13 +22,11 @@ LOG_DIR="$METANODE_ROOT/logs"
 BINARY="$METANODE_ROOT/target/release/metanode"
 
 # Config Maps
-GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
+GO_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
-GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
-GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
+GO_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
-GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
+GO_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
 
@@ -76,43 +74,21 @@ done
 echo -e "${GREEN}  ✅ Binary and configs ready${NC}"
 
 # ==============================================================================
-# Step 3: Start ALL Go Masters
+# Step 3: Start ALL Go Nodes
 # ==============================================================================
-echo -e "${BLUE}📋 Step 3: Start all Go Masters...${NC}"
+echo -e "${BLUE}📋 Step 3: Start all Go Nodes...${NC}"
 cd "$GO_SIMPLE_ROOT"
 
 for id in 0 1 2 3 4; do
     DATA="${GO_DATA_DIR[$id]}"
     XAPIAN="sample/$DATA/data/data/xapian_node"
     
-    echo -e "${GREEN}  🚀 Go Master $id (${GO_MASTER_SESSION[$id]})${NC}"
-    tmux new-session -d -s "${GO_MASTER_SESSION[$id]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && export MVM_LOG_DIR='$LOG_DIR/node_$id' && go run . -config=${GO_MASTER_CONFIG[$id]} >> \"$LOG_DIR/node_$id/go-master-stdout.log\" 2>&1"
+    echo -e "${GREEN}  🚀 Go Node $id (${GO_SESSION[$id]})${NC}"
+    tmux new-session -d -s "${GO_SESSION[$id]}" -c "$GO_SIMPLE_ROOT" \
+        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && export MVM_LOG_DIR='$LOG_DIR/node_$id' && ./simple_chain -config=${GO_CONFIG[$id]} >> \"$LOG_DIR/node_$id/go-master-stdout.log\" 2>&1"
     
     sleep 2
 done
-
-
-
-# ==============================================================================
-# Step 5: Start ALL Go Subs
-# ==============================================================================
-echo -e "${BLUE}📋 Step 5: Start all Go Subs...${NC}"
-cd "$GO_SIMPLE_ROOT"
-
-for id in 0 1 2 3 4; do
-    DATA="${GO_DATA_DIR[$id]}"
-    XAPIAN="sample/$DATA/data-write/data/xapian_node"
-    
-    echo -e "${GREEN}  🚀 Go Sub $id (${GO_SUB_SESSION[$id]})${NC}"
-    tmux new-session -d -s "${GO_SUB_SESSION[$id]}" -c "$GO_SIMPLE_ROOT" \
-        "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN' && export MVM_LOG_DIR='$LOG_DIR/node_$id' && go run . -config=${GO_SUB_CONFIG[$id]} >> \"$LOG_DIR/node_$id/go-sub-stdout.log\" 2>&1"
-    
-    sleep 1
-done
-
-echo "  ⏳ Waiting 5s for Go Subs..."
-sleep 5
 
 
 
@@ -125,7 +101,7 @@ echo -e "${GREEN}  🎉 ALL NODES RESUMED (0-4)!${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 for id in 0 1 2 3 4; do
-    echo -e "${GREEN}  Node $id:${NC} tmux attach -t go-master-$id | go-sub-$id"
+    echo -e "${GREEN}  Node $id:${NC} tmux attach -t go-master-$id"
 done
 echo ""
 echo -e "${GREEN}  📁 Logs: $LOG_DIR/node_N/${NC}"

@@ -174,6 +174,7 @@ Kết thúc MỌI response bằng một khối tóm tắt tiếng Việt theo đ
 ---
 ### 📋 Tóm tắt thay đổi
 - **Đã thay đổi:** [liệt kê file/struct/function bị ảnh hưởng]
+- **🛠️ Giải pháp áp dụng:** [mô tả chi tiết giải pháp kỹ thuật đã triển khai thực tế để giải quyết vấn đề]
 - **Blast radius:** [upstream/downstream bị tác động]
 - **🐛 Nguyên nhân lỗi:** [nếu là fix bug — mô tả tóm tắt root cause, ví dụ: race condition, nil pointer, sai thứ tự khởi tạo, thiếu lock, v.v.]
 - **Rủi ro tiềm ẩn:** [concurrency, state drift, breaking changes, cần đảm bảo 100% không fork thà pending chứ không fork, miễn đủ số node hoạt động thì hệ thống luôn tiến triển không deadlock]

@@ -45,13 +45,11 @@ NODE_DATA="$GO_SIMPLE_ROOT/sample/node${NODE_ID}"
 MASTER_RPC_PORTS=(8757 10747 10749 10750 10748)
 
 # Config maps
-GO_MASTER_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-GO_SUB_CONFIG=("config-sub-node0.json" "config-sub-node1.json" "config-sub-node2.json" "config-sub-node3.json" "config-sub-node4.json")
+GO_CONFIG=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
 GO_DATA_DIR=("node0" "node1" "node2" "node3" "node4")
-GO_MASTER_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
-GO_SUB_SESSION=("go-sub-0" "go-sub-1" "go-sub-2" "go-sub-3" "go-sub-4")
+GO_SESSION=("go-master-0" "go-master-1" "go-master-2" "go-master-3" "go-master-4")
 RUST_SESSION=("metanode-0" "metanode-1" "metanode-2" "metanode-3" "metanode-4")
-GO_MASTER_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
+GO_SOCKET=("/tmp/rust-go-node0-master.sock" "/tmp/rust-go-node1-master.sock" "/tmp/rust-go-node2-master.sock" "/tmp/rust-go-node3-master.sock" "/tmp/rust-go-node4-master.sock")
 RUST_CONFIG=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
 
 
@@ -297,22 +295,16 @@ echo -e "${BLUE}[5/7] 🚀 Khởi động tuần tự Node $NODE_ID...${NC}"
 cd "$GO_SIMPLE_ROOT"
 DATA="${GO_DATA_DIR[$NODE_ID]}"
 
-echo -e "${CYAN}  [5a] Go Master...${NC}"
-XAPIAN_MASTER="sample/$DATA/data/data/xapian_node"
-tmux new-session -d -s "${GO_MASTER_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_MASTER' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_MASTER_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
-echo -e "${GREEN}    🚀 Go Master started (${GO_MASTER_SESSION[$NODE_ID]})${NC}"
+echo -e "${CYAN}  [5a] Go Node...${NC}"
+XAPIAN_NODE="sample/$DATA/data/data/xapian_node"
+tmux new-session -d -s "${GO_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
+    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_NODE' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
+echo -e "${GREEN}    🚀 Go Node started (${GO_SESSION[$NODE_ID]})${NC}"
 
-echo -e "${CYAN}  [5b] Go Sub...${NC}"
-XAPIAN_SUB="sample/$DATA/data-write/data/xapian_node"
-tmux new-session -d -s "${GO_SUB_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_SUB' && ./simple_chain -config=${GO_SUB_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-sub-stdout.log\" 2>&1"
-echo -e "${GREEN}    🚀 Go Sub started (${GO_SUB_SESSION[$NODE_ID]})${NC}"
-
-echo -e "${CYAN}  [5c] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
+echo -e "${CYAN}  [5b] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10
 GO_BLOCK=$(grep -a "last_committed_block=" "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null | tail -1 | sed -n 's/.*last_committed_block=\([0-9]*\).*/\1/p') || true
-if [ -n "$GO_BLOCK" ]; then echo -e "${GREEN}    ✅ Go Master nhận snapshot — block=$GO_BLOCK${NC}"; fi
+if [ -n "$GO_BLOCK" ]; then echo -e "${GREEN}    ✅ Go Node nhận snapshot — block=$GO_BLOCK${NC}"; fi
 
 
 

@@ -16,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -104,7 +103,6 @@ type BlockProcessor struct {
 	eventSystem *mt_filters.EventSystem
 	state       State
 	mu          sync.RWMutex
-	serviceType p_common.ServiceType
 	node        *node.HostNode
 
 	storageManager                   *storage.StorageManager
@@ -389,7 +387,6 @@ func NewBlockProcessor(
 	connectionsManager network.ConnectionsManager,
 	messageSender network.MessageSender,
 	eventSystem *mt_filters.EventSystem,
-	serviceType p_common.ServiceType,
 	node *node.HostNode,
 	storageManager *storage.StorageManager,
 	chainState *blockchain.ChainState,
@@ -444,7 +441,6 @@ func NewBlockProcessor(
 		messageSender:        messageSender,
 		eventSystem:          eventSystem,
 		state:                StateNotLook,
-		serviceType:          serviceType,
 		storageManager:       storageManager,
 		chainState:           chainState,
 		genesisPath:          genesisPath,
@@ -477,7 +473,6 @@ func NewBlockProcessor(
 
 	// Phase 7: Initialize decoupled components
 	bp.txBatchForwarder = NewTxBatchForwarder(
-		string(serviceType),
 		transactionProcessor,
 		config,
 		chainState,
@@ -486,7 +481,7 @@ func NewBlockProcessor(
 	)
 
 	// Initialize BLS block signer for Master nodes
-	if serviceType == p_common.ServiceTypeMaster && config.Databases.BLSPrivateKey != "" {
+	if config.Databases.BLSPrivateKey != "" {
 		signer, err := block_signer.NewBlockSigner(config.Databases.BLSPrivateKey)
 		if err != nil {
 			logger.Warn("⚠️  [BLOCK SIGNER] Failed to initialize block signer: %v (blocks will not be signed)", err)
@@ -550,13 +545,11 @@ func NewBlockProcessor(
 	if bp.storageManager.IsExplorer() {
 		go bp.startIndexingProcess()
 	}
-	if serviceType == p_common.ServiceTypeMaster {
-		// go bp.commitWorker()
-		go bp.backupDbWorker() // Coalesced BackupDb builder
-		go bp.geiWorker()      // Coalesced GEI updates
-	}
+	// go bp.commitWorker()
+	go bp.backupDbWorker() // Coalesced BackupDb builder
+	go bp.geiWorker()      // Coalesced GEI updates
+	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
 	go bp.inputTPSWorker()
-	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
 
 	// 📸 SNAPSHOT SYSTEM + LOG ROTATION: Luôn khởi tạo
 	// InitSnapshotSystem đăng ký block commit callback cho LOG ROTATION (luôn cần)
@@ -643,9 +636,7 @@ func NewBlockProcessor(
 	// bp.lastBlock stays at genesis → RPC eth_blockNumber returns 0.
 	// This goroutine periodically syncs bp.lastBlock from DB.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if bp.serviceType == p_common.ServiceTypeMaster {
-		go bp.syncLastBlockFromDB()
-	}
+
 
 	return bp
 }

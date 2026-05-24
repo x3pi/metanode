@@ -11,8 +11,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -192,13 +190,11 @@ func (trieDatabae *TrieDatabase) IntermediateRoot() (common.Hash, error) {
 
 	if len(batch) > 0 { // Chỉ thực hiện BatchPut nếu có dữ liệu
 
-		if config.ConfigApp.ServiceType == p_common.ServiceTypeMaster {
-			data, err := storage.SerializeBatch(batch)
-			if err != nil {
-				logger.Error(fmt.Sprintf("Error marshaling receipt: %v", err))
-			}
-			trieDatabae.backUpDb = data
+		data, err := storage.SerializeBatch(batch)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Error marshaling receipt: %v", err))
 		}
+		trieDatabae.backUpDb = data
 	}
 	rootHash := trieDatabae.trieR.Hash()
 	trieDatabae.dirtyData.Clear()
