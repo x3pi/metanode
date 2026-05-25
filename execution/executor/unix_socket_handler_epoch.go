@@ -1386,23 +1386,11 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 				backupData = data
 			} else {
 				// Backup not ready — broadcastWorker may be lagging.
-				// Wait briefly with polling (up to 500ms, 50ms intervals).
-				for retry := 0; retry < 10; retry++ {
-					time.Sleep(50 * time.Millisecond)
-					data, getErr = backupStorage.Get(primaryKey)
-					if getErr == nil && len(data) > 0 {
-						backupData = data
-						logger.Info("📦 [BLOCK SYNC] Block #%d backup found after %dms wait", blockNum, (retry+1)*50)
-						break
-					}
-				}
-				if len(backupData) == 0 {
-					// Still no backup after 500ms — broadcastWorker too far behind.
-					// STOP serving here. Requester will retry this range later.
-					logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
-						blockNum, blockNum-1, len(blocks))
-					break
-				}
+				// STOP serving here immediately. Requester will retry this range later.
+				// Removing the 10x 50ms sleep polling to prevent cascading delays on large batch syncs.
+				logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
+					blockNum, blockNum-1, len(blocks))
+				break
 			}
 		}
 		blockData.BackupData = backupData
