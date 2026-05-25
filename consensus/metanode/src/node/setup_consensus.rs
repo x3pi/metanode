@@ -598,7 +598,11 @@ impl ConsensusNode {
                         sync_round, local_block, max_peer_block, gap, max_peer_gei
                     );
 
-                    let from_block = local_block + 1;
+                    // FORK-SAFETY (May 2026): Fetch starting from local_block instead of local_block + 1.
+                    // If the local tip block (local_block) has a mismatched/forked hash, Go must execute
+                    // and overwrite it to align with peer consensus BEFORE executing local_block + 1,
+                    // otherwise parent-hash check on local_block + 1 will fail and block catchup.
+                    let from_block = if local_block > 0 { local_block } else { 1 };
                     let to_block = max_peer_block;
 
                     use rand::seq::SliceRandom;
