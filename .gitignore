@@ -178,6 +178,13 @@ ehthumbs.db
 **/.env.local
 **/.env.production
 **/.env.staging
+# Deploy environment files (may contain SSH passwords / credentials)
+consensus/metanode/scripts/node/deploy.env
+consensus/metanode/scripts/node/deploy-3machines.env
+consensus/deploy/prod_deploy.env
+**/deploy-*.env
+**/deploy.env
+**/prod_deploy.env
 # Error/debug output files
 **/*.exe
 /exec_node
@@ -212,7 +219,9 @@ hybrid-storage-demo/
 **/k8s/
 **/*.key
 **/*.pem
-# **/*_key.json
+**/*_key.json
+**/*_protocol_key.json
+**/*_network_key.json
 **/known_hosts
 # Kubernetes
 **/*.lcov
