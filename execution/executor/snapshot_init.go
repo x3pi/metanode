@@ -73,7 +73,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	}
 
 	// Tạo SnapshotManager
-	sm := NewSnapshotManager(dataDir, snapshotDir, 2, blocksDelay)
+	sm := NewSnapshotManager(dataDir, snapshotDir, 5, blocksDelay)
 	sm.SetSnapshotFrequency(cfg.SnapshotFrequencyBlocks)
 	sm.SetSnapshotBlockOffset(cfg.SnapshotBlockOffset)
 	globalSnapshotManager = sm
