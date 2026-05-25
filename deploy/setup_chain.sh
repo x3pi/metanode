@@ -11,11 +11,8 @@ export CARGO_BUILD_JOBS=2
 # Xóa cờ dừng cũ nếu có
 rm -f /tmp/MTN_CHAIN_ERROR_STOP
 
-# Tự động lấy thư mục gốc của project tool-test
-TOOL_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-
-# Thư mục gốc của metanode (cùng cấp với tool-test)
-METANODE_DIR="$(cd "$TOOL_TEST_DIR/../metanode" && pwd)"
+# Thư mục gốc của metanode (cùng cấp với thư mục deploy)
+METANODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Suy ra thư mục script mtn-consensus
 METANODE_SCRIPT_DIR="$METANODE_DIR/consensus/metanode/scripts/node"
@@ -35,7 +32,7 @@ handle_error() {
     echo ""
     echo "❌ Lỗi xảy ra tại: $step_name. Đang thu thập log và tạo báo cáo..."
     
-    local report_file="$TOOL_TEST_DIR/scripts/error_report.txt"
+    local report_file="$METANODE_DIR/deploy/error_report.txt"
     echo "==================================================" > "$report_file"
     echo "🛑 ERROR REPORT: $step_name" >> "$report_file"
     echo "⏰ Time: $(date)" >> "$report_file"
@@ -114,7 +111,7 @@ echo "  -> Xóa genesis.json và copy từ genesis-main.json..."
 rm -f genesis.json
 cp genesis-main.json genesis.json
 
-cd "$TOOL_TEST_DIR/test_tps/gen_spam_keys"
+cd "$METANODE_DIR/execution/cmd/tool/test_tps/gen_spam_keys"
 echo "  -> Chạy Gen Spam Keys (count 50000)..."
 run_and_capture "Gen Spam Keys (Bước 1)" go run main.go --count 50000 --genesis-in "$METANODE_DIR/execution/cmd/simple_chain/genesis-main.json" --genesis-out "$METANODE_DIR/execution/cmd/simple_chain/genesis.json"
 

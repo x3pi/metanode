@@ -19,12 +19,11 @@ Một validator node hoàn chỉnh của Metanode bao gồm 3 tiến trình ho�
 
 ---
 
-## 🗺️ Các tài liệu vận hành cốt lõi
+## 🗺️ Hướng dẫn theo loại node
 
-Hãy đọc các hướng dẫn chi tiết dưới đây để triển khai node của bạn:
-
-* **[🚀 Hướng dẫn Triển khai Cụm Node](./deployment-guide)**: Cách cấu hình file `deploy.env` và sử dụng script tự động hóa để biên dịch, đẩy binary và khởi chạy cụm node 4 validator.
-* **[🌐 Triển khai Phân tán (Multi-Server)](./distributed-deployment)**: Cách thiết lập liên kết mạng giữa các node chạy trên các máy chủ vật lý khác nhau sử dụng Unix Domain Socket cho local IPC và TCP Socket cho P2P cross-machine peer discovery.
+* **[⚡ Chạy Validator Node](./validator-setup)** — Build, generate keys, đăng ký genesis, cấu hình, chạy với systemd
+* **[🔄 Chạy Sync-Only Node](./synconly-setup)** — Full node / RPC node, không cần keys, dùng cho explorer/dApp
+* **[🔑 Quản lý Keys](./key-management)** — Generate, backup, bảo mật, rotation
 
 ---
 

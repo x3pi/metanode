@@ -66,7 +66,12 @@ fi
 echo "📂 Đang gắn (mount) phân vùng BTRFS vào hệ thống..."
 mkdir -p ./sample
 if ! mountpoint -q ./sample; then
-    sudo mount "$BTRFS_DEV" ./sample
+    # Loopback file cần -o loop; LVM/block device mount trực tiếp
+    if [ "$USE_LOOPBACK" = true ]; then
+        sudo mount -o loop "$BTRFS_DEV" ./sample
+    else
+        sudo mount "$BTRFS_DEV" ./sample
+    fi
     echo "✅ Đã mount thành công!"
 else
     echo "⚠️  Phân vùng đã được mount sẵn vào ./sample."
@@ -77,8 +82,15 @@ echo "🔑 Cấp quyền sở hữu thư mục cho user hiện tại..."
 sudo chown -R $USER:$USER ./sample
 
 # 7. Thêm vào /etc/fstab để tự động mount sau khi restart (Chỉ chạy 1 lần)
-FSTAB_ENTRY="$(pwd)/metanode_btrfs.img $(pwd)/sample btrfs loop,defaults,nofail 0 0"
-if ! grep -q "$(pwd)/metanode_btrfs.img" /etc/fstab; then
+if [ "$USE_LOOPBACK" = true ]; then
+    FSTAB_SRC="$(pwd)/metanode_btrfs.img"
+    FSTAB_OPTS="loop,defaults,nofail"
+else
+    FSTAB_SRC="$BTRFS_DEV"
+    FSTAB_OPTS="defaults,nofail"
+fi
+FSTAB_ENTRY="$FSTAB_SRC $(pwd)/sample btrfs $FSTAB_OPTS 0 0"
+if ! grep -q "$(pwd)/sample" /etc/fstab; then
     echo "⚙️ Đang thêm cấu hình tự động mount vào /etc/fstab..."
     echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab > /dev/null
     echo "✅ Đã thêm vào fstab thành công!"
