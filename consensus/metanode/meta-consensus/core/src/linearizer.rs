@@ -267,21 +267,36 @@ impl Linearizer {
     /// timestamps by stake. To ensure that commit timestamp monotonicity is respected it is compared against the `last_commit_timestamp_ms`
     /// and the maximum of the two is returned.
     pub(crate) fn calculate_commit_timestamp(
-        _context: &Context,
-        _dag_state: &impl BlockStoreAPI,
+        context: &Context,
+        dag_state: &impl BlockStoreAPI,
         leader_block: &VerifiedBlock,
         last_commit_timestamp_ms: BlockTimestampMs,
     ) -> BlockTimestampMs {
         // ═══════════════════════════════════════════════════════════════════════════
-        // FORK-SAFETY CRITICAL FIX (May 2026):
-        // Previously used median_timestamp_by_stake which required ancestor blocks.
-        // During snapshot recovery, missing ancestor blocks caused returning nodes
-        // to compute different median timestamps from active nodes → hash divergence.
-        // We now STRICTLY use the leader's embedded timestamp. It is deterministic,
-        // universally agreed upon, and immune to DAG sparsity.
-        // Monotonicity is maintained via .max() against last_commit_timestamp_ms.
+        // DETERMINISTIC GUARDED MEDIAN TIMESTAMP (May 2026):
+        // We calculate the stake-weighted median timestamp over the set of parent
+        // blocks referenced by the leader block.
+        // Because of Guard 6 (which unconditionally defers the commit if any parent
+        // block referenced by the leader block is missing), every node executing
+        // this commit is guaranteed to have the exact same set of parent blocks
+        // locally. Therefore, this calculation is 100% deterministic and identical
+        // across all nodes, completely eliminating forks due to DAG sparsity.
+        // If the calculation fails (e.g. at round 1), it safely falls back to the
+        // leader block's embedded timestamp. Monotonicity is enforced via `.max()`.
         // ═══════════════════════════════════════════════════════════════════════════
-        leader_block.timestamp_ms().max(last_commit_timestamp_ms)
+        let parent_refs = leader_block
+            .ancestors()
+            .iter()
+            .filter(|block_ref| block_ref.round == leader_block.round() - 1)
+            .cloned()
+            .collect::<Vec<_>>();
+        let parent_blocks = dag_state.get_blocks(&parent_refs);
+        let blocks = parent_blocks.into_iter().flatten();
+
+        let ts = median_timestamp_by_stake(context, blocks)
+            .unwrap_or_else(|_| leader_block.timestamp_ms());
+
+        ts.max(last_commit_timestamp_ms)
     }
 
     pub(crate) fn linearize_sub_dag(
