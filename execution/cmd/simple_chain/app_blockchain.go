@@ -744,9 +744,9 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 	// Block header timestamp is in SECONDS, genesis.json has EpochTimestampMs in MILLISECONDS
 	var genesisTimestamp uint64
 	if app.genesis != nil && app.genesis.Config.EpochTimestampMs > 0 {
-		genesisTimestamp = app.genesis.Config.EpochTimestampMs / 1000 // Convert ms to seconds
-		logger.Info("✅ [GENESIS] Using timestamp from genesis.json: %d ms -> %d s",
-			app.genesis.Config.EpochTimestampMs, genesisTimestamp)
+		genesisTimestamp = app.genesis.Config.EpochTimestampMs // Use ms directly
+		logger.Info("✅ [GENESIS] Using timestamp from genesis.json: %d ms",
+			app.genesis.Config.EpochTimestampMs)
 	} else {
 		genesisTimestamp = 0
 		logger.Warn("⚠️ [GENESIS] No timestamp in genesis.json, using 0")

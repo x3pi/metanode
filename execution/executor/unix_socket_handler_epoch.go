@@ -487,7 +487,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		// Fallback: always derive from boundary block header (deterministic across nodes)
 		if blockData != nil {
 			blockHeader := blockData.Header()
-			epochTimestampMs = blockHeader.TimeStamp() * 1000 // Convert seconds to milliseconds
+			epochTimestampMs = blockHeader.TimeStamp()
 		}
 		if epochTimestampMs == 0 {
 			// FORK-SAFETY FIX: Block header has timestamp=0 (genesis or broken state or block skipped)
@@ -761,7 +761,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 			if err == nil {
 				headerTs := blockData.Header().TimeStamp()
 				if headerTs > 0 {
-					timestampMs = headerTs * 1000 // Convert seconds to milliseconds
+					timestampMs = headerTs
 					logger.Info("✅ [ADVANCE EPOCH] Derived timestamp from boundary block %d header: %d ms", request.BoundaryBlock, timestampMs)
 				}
 			}
@@ -929,16 +929,20 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		}
 		logger.Info("✅ [EPOCH BOUNDARY] Epoch 0 using GENESIS timestamp: %d ms", epochTimestamp)
 	} else {
-		// EPOCH N (N >= 1): Strictly use the timestamp provided by Rust during AdvanceEpoch.
-		// FORK-SAFETY FIX (G-C4): The local block header timestamp is non-deterministic
-		// across nodes, leading to divergent genesis blocks and 'InvalidGenesisAncestor' stalls.
-		// Rust passes the authoritative consensus timestamp which Go stored.
-		epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
-
-		if epochTimestamp == 0 {
-			logger.Error("🚨 [EPOCH BOUNDARY] CRITICAL: Epoch %d start timestamp is 0! "+
-				"AdvanceEpoch must have failed to record the timestamp.", epoch)
-			epochTimestamp = 1 // Fallback to avoid division by zero crashes
+		// EPOCH N (N >= 1): Retrieve the timestamp provided by Rust during AdvanceEpoch.
+		// FORK-SAFETY: Check specific epoch start timestamp, fallback to current epoch start timestamp.
+		var tsErr error
+		epochTimestamp, tsErr = rh.chainState.GetEpochStartTimestamp(epoch)
+		if tsErr != nil {
+			// Fallback: Check if it is the current epoch
+			if epoch == currentEpoch {
+				epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+			}
+			if epochTimestamp == 0 {
+				logger.Error("🚨 [EPOCH BOUNDARY] CRITICAL: Epoch %d start timestamp is 0! "+
+					"AdvanceEpoch must have failed to record the timestamp. error: %v", epoch, tsErr)
+				epochTimestamp = 1 // Fallback to avoid division by zero crashes
+			}
 		} else {
 			logger.Info("✅ [EPOCH BOUNDARY] Epoch %d strictly using authoritative stored timestamp: %d ms",
 				epoch, epochTimestamp)
@@ -1350,7 +1354,7 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			BlockNumber:      header.BlockNumber(),
 			BlockHash:        header.Hash().Bytes(),
 			Epoch:            header.Epoch(),
-			TimestampMs:      header.TimeStamp() * 1000,
+			TimestampMs:      header.TimeStamp(),
 			ParentHash:       header.LastBlockHash().Bytes(),
 			StateRoot:        header.AccountStatesRoot().Bytes(),
 			TransactionsRoot: header.TransactionsRoot().Bytes(),
@@ -2282,7 +2286,7 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		if blockchainInstance != nil {
 			lastBlock := blockchainInstance.GetLastBlock()
 			if lastBlock != nil {
-				lastBlockTimestampMs = lastBlock.Header().TimeStamp() * 1000
+				lastBlockTimestampMs = lastBlock.Header().TimeStamp()
 				stateRoot = lastBlock.Header().AccountStatesRoot().Bytes()
 			}
 		}
