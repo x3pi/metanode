@@ -320,6 +320,10 @@ pkg/storage/coverage.out
 **/*.profraw
 # Project specific
 *.py
+!deploy/**/*.py
+deploy/*_keys/
+deploy/*.env
+!deploy/*.env.example
 **/*.pyc
 **/__pycache__/
 __pycache__/
