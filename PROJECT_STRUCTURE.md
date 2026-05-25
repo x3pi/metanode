@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-24
+> **Last updated:** 2026-05-25
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -17,7 +17,7 @@ metanode/
 │           ├── config/ ← Consensus configuration types
 │           └── types/  ← Shared consensus types
 ├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
-├── docs/               ← Architecture documentation & known bugs (e.g. docs/transaction_state_isolation.md)
+├── docs/               ← Architecture documentation & known bugs (e.g. docs/real_vs_virtual_execution_isolation.md)
 └── scripts/            ← Operational scripts
 ```
 
