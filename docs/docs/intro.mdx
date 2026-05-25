@@ -1,0 +1,44 @@
+---
+sidebar_position: 1
+---
+
+# Giới thiệu Metanode
+
+Chào mừng bạn đến với trang tài liệu kỹ thuật chính thức của **Metanode** — Nền tảng Blockchain hiệu năng cao tương thích EVM với công cụ đồng thuận BFT/DAG an toàn tuyệt đối.
+
+Metanode được thiết kế với cấu trúc hai lớp tối ưu nhằm đạt được tốc độ xử lý giao dịch vượt trội đồng thời loại bỏ hoàn toàn khả năng xảy ra phân nhánh chuỗi (Fork):
+
+1. **Rust Consensus Engine (`consensus/`)**: Lớp đồng thuận chạy thuật toán BFT tối ưu dựa trên cấu trúc DAG. Áp dụng cơ chế **Zero-Timeout** và **Peer Attestation** để đảm bảo an toàn tuyệt đối mà không cần dùng thời gian chờ (timeout) để thoát deadlock.
+2. **Go Execution Engine (`execution/`)**: Lớp thực thi EVM-compatible song song hóa các giao dịch bằng mô hình **Actor Model**, kết hợp cơ chế Commit Pipeline và state-root calculation hiệu suất cao.
+
+---
+
+## Cấu trúc Tài liệu & Mã nguồn
+
+Toàn bộ tài liệu chi tiết và mã nguồn được tổ chức khoa học:
+
+* **`/note`**: Chứa toàn bộ các ghi chép kiến trúc sâu, sơ đồ luồng dữ liệu (BFT, Epoch, Restart, Sync Catchup...) được chuyển từ thư mục `/docs` cũ.
+* **`/docs`**: Website tài liệu Docusaurus hiện tại.
+* **`/execution`**: Mã nguồn Go Execution Layer.
+* **`/consensus`**: Mã nguồn Rust Consensus Node & Core BFT.
+
+---
+
+## Bắt đầu Nhanh
+
+### 🛠️ Build Kiểm Tra Toàn Bộ Dự Án
+Để kiểm tra tính hợp lệ và biên dịch toàn bộ các module (Go, Rust & FFI Bridge), bạn có thể chạy script kiểm thử tự động:
+
+```bash
+cd consensus/metanode/scripts
+./build_check.sh
+```
+
+### 💻 Chạy Web Tài Liệu Ở Local
+Để xem và cập nhật trực tiếp trang web tài liệu này ở máy cá nhân:
+
+```bash
+cd docs
+npm run start
+```
+*Mở [http://localhost:3000](http://localhost:3000) trên trình duyệt để trải nghiệm.*
