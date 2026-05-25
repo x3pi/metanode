@@ -113,11 +113,17 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		return blockNum, nil
 	}
 
-	// EXACT DUPLICATE REJECT: Reject duplicate unless explicitly rebuilding tries
+	// EXACT DUPLICATE REJECT: Reject duplicate unless explicitly rebuilding tries or there is a hash mismatch (fork at tip)
 	if blockNum == lastBlockNum && blockNum > 0 && !cfg.rebuildTries {
-		logger.Warn("⚠️ [SEQUENTIAL GUARD] DUPLICATE REJECT: block #%d == last committed #%d (hash: %s) — skipping",
-			blockNum, lastBlockNum, blockHash.Hex()[:18])
-		return blockNum, nil // Return without error — silently skip
+		bc := GetBlockChainInstance()
+		if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash != blockHash {
+			logger.Warn("⚠️ [SEQUENTIAL GUARD] Tip fork detected at block #%d: localHash (%s) != incomingHash (%s). Bypassing duplicate reject to allow overwrite.",
+				blockNum, localHash.Hex()[:18], blockHash.Hex()[:18])
+		} else {
+			logger.Warn("⚠️ [SEQUENTIAL GUARD] DUPLICATE REJECT: block #%d == last committed #%d (hash: %s) — skipping",
+				blockNum, lastBlockNum, blockHash.Hex()[:18])
+			return blockNum, nil // Return without error — silently skip
+		}
 	}
 
 	if blockNum > lastBlockNum+1 && lastBlockNum > 0 && !cfg.rebuildTries {

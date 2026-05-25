@@ -1386,23 +1386,11 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 				backupData = data
 			} else {
 				// Backup not ready — broadcastWorker may be lagging.
-				// Wait briefly with polling (up to 500ms, 50ms intervals).
-				for retry := 0; retry < 10; retry++ {
-					time.Sleep(50 * time.Millisecond)
-					data, getErr = backupStorage.Get(primaryKey)
-					if getErr == nil && len(data) > 0 {
-						backupData = data
-						logger.Info("📦 [BLOCK SYNC] Block #%d backup found after %dms wait", blockNum, (retry+1)*50)
-						break
-					}
-				}
-				if len(backupData) == 0 {
-					// Still no backup after 500ms — broadcastWorker too far behind.
-					// STOP serving here. Requester will retry this range later.
-					logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
-						blockNum, blockNum-1, len(blocks))
-					break
-				}
+				// STOP serving here immediately. Requester will retry this range later.
+				// Removing the 10x 50ms sleep polling to prevent cascading delays on large batch syncs.
+				logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
+					blockNum, blockNum-1, len(blocks))
+				break
 			}
 		}
 		blockData.BackupData = backupData
@@ -1550,23 +1538,38 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if localHash == blockHash {
 					isFullyExecuted = true
 				} else {
-					// ═══════════════════════════════════════════════════════════
-					// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
-					//
-					// During high-load sync, hash mismatches can occur transiently
-					// when a node receives blocks from a peer that decided a different
-					// leader (before digest-gate corrects it). Killing the node here
-					// causes cascading quorum loss → total cluster stall.
-					//
-					// Instead: SKIP this block entirely. The node continues processing
-					// and will receive the correct block via consensus commit path.
-					// This follows the mandate: "thà pending chứ không fork" —
-					// better to pend than to fork.
-					// ═══════════════════════════════════════════════════════════
-					logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
-						"SKIPPING this block (not wiping DB). Node will recover via consensus.",
-						blockNum, localHash[:8], blockHash[:8])
-					continue // Skip this block, process next one
+					if isPreConsensusSync {
+						// ═══════════════════════════════════════════════════════════
+						// STARTUP-SYNC FORK RESOLUTION (May 2026):
+						// During startup pre-consensus sync, if the local block has a different
+						// hash than the verified block fetched from peers, this indicates a local
+						// stale fork. We must FORCE execution and overwrite of this block so the local
+						// node is fully re-aligned with the peer consensus, allowing subsequent parent-hash
+						// checks to pass correctly.
+						// ═══════════════════════════════════════════════════════════
+						logger.Warn("⚠️ [STARTUP-SYNC-FORK] Local block #%d hash (%s) != leader hash (%s) during startup sync. "+
+							"FORCING execution/overwrite of this block to resolve local fork.",
+							blockNum, localHash.Hex()[:18], blockHash.Hex()[:18])
+						isFullyExecuted = false
+					} else {
+						// ═══════════════════════════════════════════════════════════
+						// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
+						//
+						// During high-load sync, hash mismatches can occur transiently
+						// when a node receives blocks from a peer that decided a different
+						// leader (before digest-gate corrects it). Killing the node here
+						// causes cascading quorum loss → total cluster stall.
+						//
+						// Instead: SKIP this block entirely. The node continues processing
+						// and will receive the correct block via consensus commit path.
+						// This follows the mandate: "thà pending chứ không fork" —
+						// better to pend than to fork.
+						// ═══════════════════════════════════════════════════════════
+						logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
+							"SKIPPING this block (not wiping DB). Node will recover via consensus.",
+							blockNum, localHash[:8], blockHash[:8])
+						continue // Skip this block, process next one
+					}
 				}
 			}
 		}
