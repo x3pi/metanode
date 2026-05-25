@@ -1828,6 +1828,33 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				lastExecutedGEI = blockGEI
 			}
 
+			// ═══════════════════════════════════════════════════════════════
+			// BLOCK-BY-BLOCK REALIGNMENT (May 2026):
+			// Realignment of Go's active in-memory trie state must happen block-by-block
+			// immediately after each block is committed to PebbleDB.
+			// ═══════════════════════════════════════════════════════════════
+			if trie.GetStateBackend() == trie.BackendNOMT {
+				newAccountRoot := header.AccountStatesRoot()
+				newStakeRoot := common.Hash(header.StakeStatesRoot())
+
+				// Realign account state trie block-by-block
+				if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
+					if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+						nomtTrie.RealignRoot(newAccountRoot)
+						asDB.SetOriginRootHash(newAccountRoot)
+					}
+				}
+				// Realign stake state trie block-by-block
+				if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
+					if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+						nomtTrie.RealignRoot(newStakeRoot)
+						stakeDB.SetOriginRootHash(newStakeRoot)
+					}
+				}
+				logger.Debug("🔧 [NOMT-SYNC-REALIGN] Block #%d: trie roots realigned block-by-block: account=%s, stake=%s",
+					blockNum, newAccountRoot.Hex()[:18]+"...", newStakeRoot.Hex()[:18]+"...")
+			}
+
 			// Broadcast transaction receipts for SyncOnly nodes if callback is configured and backupBytes/receipts are present
 			if rh.broadcastEventsAndReceiptsCallback != nil && len(backupBytes) > 0 {
 				backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)

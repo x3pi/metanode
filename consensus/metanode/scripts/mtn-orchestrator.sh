@@ -460,7 +460,7 @@ cmd_start() {
         # Note: We run go clean -cache with '|| true' to prevent crashes due to directory locks.
         # Bằng cách touch ffi_bridge.go, ta ép Go build biên dịch lại wrapper và link trực tiếp với libmetanode.a mới.
         log_info "🧹  Đang ép Go nhận diện FFI bridge mới (không xóa cache toàn cục)..."
-        # (cd "$GO_DIR" && go clean -cache || true)
+        (cd "$GO_DIR" && go clean -cache || true)
         touch "$BASE_DIR/execution/executor/ffi_bridge.go"
     fi
     if $build_go; then
