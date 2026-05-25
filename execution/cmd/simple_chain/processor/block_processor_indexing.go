@@ -92,13 +92,16 @@ func (bp *BlockProcessor) startIndexingProcess() {
 		}
 	}()
 
+	tickerSync := time.NewTicker(2 * time.Second)
+	defer tickerSync.Stop()
+
 	for {
 		select {
 		case blockNum := <-bp.indexingChannel:
 			bp.isSyncCompleted.Store(false)
 			bp.indexSingleBlock(blockNum)
 
-		case <-time.After(2 * time.Second):
+		case <-tickerSync.C:
 			if len(bp.indexingChannel) == 0 {
 				if !bp.isSyncCompleted.Load() {
 					logger.Info("Indexing queue empty, marking sync completed")
