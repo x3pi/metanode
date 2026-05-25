@@ -233,10 +233,9 @@ func NewChainStateWithGenesis(
 			// across all nodes with the same blockchain state.
 			var deterministicTimestamp uint64
 			if currentBlockHeader != nil && currentBlockHeader.TimeStamp() > 0 {
-				// Convert seconds to milliseconds
-				deterministicTimestamp = currentBlockHeader.TimeStamp() * 1000
-				logger.Info("🔧 [GENESIS EPOCH] Derived timestamp from currentBlockHeader: block=%d, timestamp_s=%d, timestamp_ms=%d",
-					currentBlockHeader.BlockNumber(), currentBlockHeader.TimeStamp(), deterministicTimestamp)
+				deterministicTimestamp = currentBlockHeader.TimeStamp()
+				logger.Info("🔧 [GENESIS EPOCH] Derived timestamp from currentBlockHeader: block=%d, timestamp_ms=%d",
+					currentBlockHeader.BlockNumber(), currentBlockHeader.TimeStamp())
 			} else {
 				// Absolute fallback: Use a fixed known timestamp (e.g., epoch 0 = 0)
 				// This should rarely happen in production
@@ -718,7 +717,7 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 				alignTimestampMs = cachedTs
 				logger.Info("✅ [SNAPSHOT FIX] Using cached timestamp %d for epoch %d", alignTimestampMs, blockEpoch)
 			} else {
-				alignTimestampMs = blockTimestamp * 1000
+				alignTimestampMs = blockTimestamp
 			}
 		} else {
 			// ═══════════════════════════════════════════════════════════════
@@ -740,7 +739,7 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 					for walkBlk != nil && scanned < 1000 {
 						if walkBlk.Header().Epoch() < blockEpoch {
 							trueBoundaryBlock = walkBlk.Header().BlockNumber()
-							alignTimestampMs = walkBlk.Header().TimeStamp() * 1000
+							alignTimestampMs = walkBlk.Header().TimeStamp()
 							logger.Info("✅ [SNAPSHOT FIX] Found true boundary block #%d (epoch %d) via parent chain walk",
 								trueBoundaryBlock, walkBlk.Header().Epoch())
 							break
@@ -760,7 +759,7 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 
 			// If we still don't have a timestamp, derive from block header
 			if alignTimestampMs == 0 {
-				alignTimestampMs = blockTimestamp * 1000
+				alignTimestampMs = blockTimestamp
 			}
 		}
 
@@ -785,9 +784,6 @@ func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTim
 //
 // Writes to: currentEpoch, epochStartTimestampMs, epochBoundaryBlocks, epochStartTimestamps, epochBoundaryGeis
 func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs uint64, boundaryBlock uint64, boundaryGei uint64) {
-	// Align to second boundary (strip millisecond-level precision) to guarantee 100% deterministic consensus
-	// regardless of whether the node was online during consensus transition or synced epoch boundary via catch-up.
-	epochStartTimestampMs = (epochStartTimestampMs / 1000) * 1000
 
 	// Ensure maps are initialized (defensive against nil maps in tests or remote states)
 	if cs.epochStartTimestamps == nil {
@@ -920,7 +916,7 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 			return false // ← DEFER epoch update
 		}
 
-		epochTimestampMs = boundaryBlockData.Header().TimeStamp() * 1000
+		epochTimestampMs = boundaryBlockData.Header().TimeStamp()
 		boundaryGei = boundaryBlockData.Header().GlobalExecIndex()
 		logger.Info("✅ [AUTO-EPOCH SYNC] Using BOUNDARY BLOCK timestamp and GEI (deterministic, no fallback)",
 			"boundary_block", boundaryBlock,
@@ -1198,15 +1194,10 @@ func (cs *ChainState) LoadEpochData() error {
 		return fmt.Errorf("failed to unmarshal epoch data from %s: %w", source, err)
 	}
 
-	// Restore epoch state and align timestamps to second boundary to ensure absolute consistency
+	// Restore epoch state - preserve exact millisecond precision without rounding
 	cs.currentEpoch = epochData.CurrentEpoch
-	cs.epochStartTimestampMs = (epochData.EpochStartTimestampMs / 1000) * 1000
+	cs.epochStartTimestampMs = epochData.EpochStartTimestampMs
 	cs.epochStartTimestamps = epochData.EpochStartTimestamps
-	if cs.epochStartTimestamps != nil {
-		for epoch, ts := range cs.epochStartTimestamps {
-			cs.epochStartTimestamps[epoch] = (ts / 1000) * 1000
-		}
-	}
 	// NEW: Restore epoch boundary blocks (may be nil for older data)
 	if epochData.EpochBoundaryBlocks != nil {
 		cs.epochBoundaryBlocks = epochData.EpochBoundaryBlocks

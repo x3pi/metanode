@@ -292,7 +292,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		// ═══════════════════════════════════════════════════════════════════
 		lastBlockForTs := bp.GetLastBlock()
 		if lastBlockForTs != nil && lastBlockForTs.Header().TimeStamp() > 0 {
-			commitTimestampMs = lastBlockForTs.Header().TimeStamp()*1000 + 1000
+			commitTimestampMs = lastBlockForTs.Header().TimeStamp() + 1000
 			logger.Warn("🛡️ [FORK-SAFETY] No consensus timestamp — using lastBlock.timestamp+1s = %d ms (GEI=%d, lastBlock=#%d)",
 				commitTimestampMs, globalExecIndex, lastBlockForTs.Header().BlockNumber())
 		} else {
@@ -885,17 +885,18 @@ PROCESS_BLOCK:
 	// calculate_commit_timestamp() uses median stake-weighted algorithm which
 	// always produces monotonically increasing timestamps under normal conditions.
 	// ═══════════════════════════════════════════════════════════════════════════
-	blockTimeSec := commitTimestampMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
-	if lastBlock != nil && blockTimeSec > 0 {
-		parentTs := lastBlock.Header().TimeStamp()
-		if parentTs > 0 && blockTimeSec < parentTs {
-			regression := parentTs - blockTimeSec
+	blockTimeMs := commitTimestampMs
+	blockTimeSec := blockTimeMs / 1000 // Convert ms→s for deterministic EVM block.timestamp
+	if lastBlock != nil && blockTimeMs > 0 {
+		parentTsMs := lastBlock.Header().TimeStamp()
+		if parentTsMs > 0 && blockTimeMs < parentTsMs {
+			regression := (parentTsMs - blockTimeMs) / 1000
 			if regression > 30 {
 				leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
 				logger.Warn("⚠️ [TIMESTAMP-REGRESSION] WARNING: block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
 					"Proceeding with execution to maintain consensus alignment. (leader=%s, GEI=%d, epoch=%d, txs=%d)",
 					*currentBlockNumber, blockTimeSec, regression,
-					lastBlock.Header().BlockNumber(), parentTs,
+					lastBlock.Header().BlockNumber(), parentTsMs / 1000,
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
 			}
 		}

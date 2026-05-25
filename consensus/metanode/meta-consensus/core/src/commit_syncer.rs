@@ -2801,7 +2801,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
 
         // 2. Fetch commits in the commit range from the target authority.
-        let (serialized_commits, serialized_blocks, _commit_infos) = inner
+        let (serialized_commits, serialized_blocks, commit_infos) = inner
             .network_client
             .fetch_commits(target_authority, commit_range.clone(), timeout)
             .await?;
@@ -2826,6 +2826,43 @@ impl<C: NetworkClient> CommitSyncer<C> {
             })
             .await
             .expect("Spawn blocking should not fail")?;
+
+        // Parse and persist CommitInfo records if they are non-empty and valid.
+        let mut commit_infos_to_write = Vec::new();
+        for (i, commit) in commits.iter().enumerate() {
+            if let Some(info_bytes) = commit_infos.get(i) {
+                if let Ok(info) = bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes) {
+                    if !info.reputation_scores.scores_per_authority.is_empty() {
+                        commit_infos_to_write.push((commit.reference(), info));
+                    }
+                }
+            }
+        }
+
+        if !commit_infos_to_write.is_empty() {
+            tracing::info!(
+                "[COMMIT-SYNCER] Persisting {} CommitInfo records to RocksDB from peer sync",
+                commit_infos_to_write.len()
+            );
+            let store_write_result = Handle::current()
+                .spawn_blocking({
+                    let inner = inner.clone();
+                    let commit_infos_to_write = commit_infos_to_write.clone();
+                    move || {
+                        let write_batch = crate::storage::WriteBatch {
+                            commit_info: commit_infos_to_write,
+                            ..Default::default()
+                        };
+                        inner.dag_state.read().store().write(write_batch)
+                    }
+                })
+                .await
+                .expect("Spawn blocking should not fail");
+
+            if let Err(e) = store_write_result {
+                tracing::error!("Failed to write CommitInfo to storage: {:?}", e);
+            }
+        }
 
         // 3. Fetch blocks referenced by the commits, from the same peer where commits are fetched.
         let mut block_refs: Vec<_> = commits.iter().flat_map(|c| c.blocks()).cloned().collect();

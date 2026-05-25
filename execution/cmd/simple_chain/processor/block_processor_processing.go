@@ -163,7 +163,7 @@ func (bp *BlockProcessor) ProcessorPool() {
 			if blockTimeSec == 0 {
 				if lastHeaderPtr := bp.chainState.GetcurrentBlockHeader(); lastHeaderPtr != nil && *lastHeaderPtr != nil {
 					lastHeader := *lastHeaderPtr
-					blockTimeSec = lastHeader.TimeStamp() + 1
+					blockTimeSec = lastHeader.TimeStamp()/1000 + 1
 				} else {
 					// 🚨 FORK-GUARD: Tuyệt đối KHÔNG sử dụng time.Now()
 					// Nếu chưa có genesis timestamp từ Rust consensus, transaction pool
@@ -291,8 +291,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Phase 2: Create Block Data
 	phase2Start := time.Now()
-	// CRITICAL FORK-SAFETY: Convert commitTimestampMs (from Rust) to seconds for BlockHeader
-	timestampSec := commitTimestampMs / 1000 // 0 if commitTimestampMs is 0 (fallback to time.Now())
+	// CRITICAL FORK-SAFETY: Keep commitTimestampMs (from Rust) directly for BlockHeader
+	timestampMs := commitTimestampMs // 0 if commitTimestampMs is 0 (fallback to time.Now())
 
 	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, even if it's the zero address.
 	// The zero address is used intentionally as a deterministic fallback for system transactions (EndOfEpoch)
@@ -341,13 +341,13 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		bl, err = GenerateBlockData(
 			lastConfirmedBlock.Header(), blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
-			accountRoot, stakeRootForBlock, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampSec, globalExecIndex,
+			accountRoot, stakeRootForBlock, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampMs, globalExecIndex,
 		)
 	} else {
 		bl, err = GenerateBlockDataReadOnly(
 			blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
-			common.Hash{}, common.Hash{}, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampSec, globalExecIndex,
+			common.Hash{}, common.Hash{}, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampMs, globalExecIndex,
 		)
 	}
 	if err != nil {
@@ -393,7 +393,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 					expectedParentHash.Hex(),
 					globalExecIndex,
 					blockLeaderAddress.Hex(),
-					timestampSec,
+					timestampMs,
 				))
 			}
 		}
