@@ -34,6 +34,7 @@ Nằm trong thư mục `consensus/`:
 - `history/block_hash_to_number/`: Ánh xạ `BlockHash -> BlockNumber`.
 - `history/txs_eth/`: Lưu trữ Raw Transaction bytes (Hex).
 - `history/transaction_state/`: Trạng thái chi tiết của Transaction.
+- `changelog_db_account/` & `changelog_db_stake/`: (Nằm ở cấp Root) Lưu lịch sử thay đổi (Changelog) của NOMT Trie, giúp truy vấn trạng thái tài khoản/stake ở một block bất kỳ trong quá khứ một cách cực nhanh.
 
 > [!IMPORTANT]
 > Tiến trình `RPCHistorySync` sẽ liên tục chạy ngầm trên RPC Node để tải và "bù đắp" (backfill) các block/receipt còn thiếu vào thư mục `history/` nếu node được phục hồi từ Snapshot.

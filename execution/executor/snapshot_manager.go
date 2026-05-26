@@ -134,13 +134,13 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"blocks",
 			"receipts",
 			"transaction_state",
-			"mapping",
+			"history/mapping",
 			"smart_contract_code",
 			"smart_contract_storage",
 			"stake_db",
 			"trie_database",
 			"backup_device_key_storage",
-			"rust_consensus", // NEW: Rust DAG data
+			"consensus/rust_consensus", // NEW: Rust DAG data
 			"chaindata",
 			"executor_state",
 		},
@@ -727,7 +727,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	}
 
 	// Tính checksum cho các thư mục quan trọng
-	criticalDirs := []string{"account_state", "blocks", "executor_state", "rust_consensus"}
+	criticalDirs := []string{"account_state", "blocks", "executor_state", "consensus/rust_consensus"}
 	for _, dirName := range criticalDirs {
 		dirPath := filepath.Join(snapshotPath, dirName)
 		if _, err := os.Stat(dirPath); err == nil {
