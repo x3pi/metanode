@@ -68,7 +68,13 @@ pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
 #[no_mangle]
 pub extern "C" fn metanode_pause_consensus() {
     info!("⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK...");
-    let guard = consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write().expect("Failed to acquire write lock for pausing consensus");
+    let guard = match consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            warn!("⚠️ [FFI] RUST_EXECUTION_LOCK was poisoned! Recovering lock to pause consensus.");
+            poisoned.into_inner()
+        }
+    };
     unsafe {
         PAUSE_GUARD = Some(std::mem::transmute(guard));
     }

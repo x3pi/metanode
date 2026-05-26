@@ -36,7 +36,7 @@ pub enum LagAlert {
 pub struct LagMonitor {
     executor_client: Arc<ExecutorClient>,
     shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
-    lag_alert_sender: tokio::sync::mpsc::UnboundedSender<LagAlert>,
+    lag_alert_sender: tokio::sync::mpsc::Sender<LagAlert>,
     moderate_lag_threshold: u64,
     severe_lag_threshold: u64,
 }
@@ -45,7 +45,7 @@ impl LagMonitor {
     pub fn new(
         executor_client: Arc<ExecutorClient>,
         shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
-        lag_alert_sender: tokio::sync::mpsc::UnboundedSender<LagAlert>,
+        lag_alert_sender: tokio::sync::mpsc::Sender<LagAlert>,
     ) -> Self {
         Self {
             executor_client,
@@ -116,7 +116,7 @@ impl LagMonitor {
             if rust_gei > 0 {
                 if gap > self.severe_lag_threshold {
                     // SEVERE LAG
-                    let _ = self.lag_alert_sender.send(LagAlert::SevereLag {
+                    let _ = self.lag_alert_sender.try_send(LagAlert::SevereLag {
                         rust_gei,
                         go_gei,
                         go_block_number,
@@ -126,7 +126,7 @@ impl LagMonitor {
                     currently_lagging = true;
                 } else if gap > self.moderate_lag_threshold {
                     // MODERATE LAG
-                    let _ = self.lag_alert_sender.send(LagAlert::ModerateLag {
+                    let _ = self.lag_alert_sender.try_send(LagAlert::ModerateLag {
                         rust_gei,
                         go_gei,
                         go_block_number,
@@ -138,7 +138,7 @@ impl LagMonitor {
                     // RECOVERED (hysteresis: gap must drop to half the moderate threshold)
                     let _ = self
                         .lag_alert_sender
-                        .send(LagAlert::Recovered { rust_gei, go_gei });
+                        .try_send(LagAlert::Recovered { rust_gei, go_gei });
                     currently_lagging = false;
                 } else {
                     // Healthy

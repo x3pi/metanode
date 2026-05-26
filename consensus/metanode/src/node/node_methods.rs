@@ -338,7 +338,7 @@ impl ConsensusNode {
             socket_path,
             move |epoch, timestamp, boundary| {
                 // Forward to transition handler
-                if let Err(e) = sender.send((epoch, timestamp, boundary, 0)) {
+                if let Err(e) = sender.try_send((epoch, timestamp, boundary, 0)) {
                     return Err(anyhow::anyhow!(
                         "Failed to forward epoch notification: {}",
                         e

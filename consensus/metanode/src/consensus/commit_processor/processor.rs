@@ -28,7 +28,7 @@ pub struct CommitProcessorConfig {
     pub tx_recycler: Option<Arc<TxRecycler>>,
     pub committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
     pub storage_path: Option<std::path::PathBuf>,
-    pub lag_alert_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::commit_processor::lag_monitor::LagAlert>>,
+    pub lag_alert_sender: Option<tokio::sync::mpsc::Sender<crate::consensus::commit_processor::lag_monitor::LagAlert>>,
     pub quorum_commit_index: Option<Arc<AtomicU32>>,
     pub committee_size: usize,
     pub digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
@@ -237,7 +237,7 @@ impl CommitProcessor {
     /// Set a sender for lag alerts
     pub fn with_lag_alert_sender(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<
+        sender: tokio::sync::mpsc::Sender<
             crate::consensus::commit_processor::lag_monitor::LagAlert,
         >,
     ) -> Self {

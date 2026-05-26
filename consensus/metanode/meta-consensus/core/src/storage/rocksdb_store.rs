@@ -66,6 +66,9 @@ impl RocksDBStore {
         // However, we MUST enable fsync to ensure durability guarantees and prevent equivocation on crash/restart.
         let mut db_options = default_db_options();
         db_options.options.set_use_fsync(true);
+        // BOUND FD LEAK: Restrict max open files to prevent RocksDB from exhausting OS limits
+        // when multiple legacy epoch stores are kept open for syncing.
+        db_options.options.set_max_open_files(1000);
 
         let mut metrics_conf = MetricConf::new("consensus");
         metrics_conf.read_sample_interval = SamplingInterval::new(Duration::from_secs(60), 0);
