@@ -963,6 +963,22 @@ func (bp *BlockProcessor) PersistLeaderAddress(gei uint64, addr common.Address) 
 	// In-memory cache
 	bp.leaderAddrCache.Store(gei, addr)
 
+	// MEMORY-SAFETY: Periodic cleanup to prevent unbounded growth.
+	// leaderAddrCache is a read-cache backed by BackupDB — pruning only
+	// causes a re-read from disk on miss. Zero fork risk.
+	const leaderCacheCleanupInterval = 10000
+	const leaderCacheKeepEntries = 5000
+	if gei > 0 && gei%leaderCacheCleanupInterval == 0 && gei > leaderCacheKeepEntries {
+		threshold := gei - leaderCacheKeepEntries
+		bp.leaderAddrCache.Range(func(key, _ interface{}) bool {
+			if k, ok := key.(uint64); ok && k < threshold {
+				bp.leaderAddrCache.Delete(key)
+			}
+			return true
+		})
+		logger.Debug("🧹 [MEMORY] Pruned leaderAddrCache entries below GEI %d", threshold)
+	}
+
 	// Persist to BackupDB
 	if bp.storageManager != nil {
 		backupDB := bp.storageManager.GetStorageBackupDb()

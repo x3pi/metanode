@@ -289,10 +289,10 @@ func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 		}()
 	case <-ctx.Done():
 		// Timeout hoặc context bị cancel trước khi có slot
+		// MEMORY-SAFETY: Removed redundant time.After(100ms) case — ctx already
+		// has a 5s timeout from the caller, so ctx.Done() is sufficient.
+		// time.After in select creates a new Timer per call that leaks until expiry.
 		logger.Warn("Device key send pool full or timeout, dropping request for %s", connectionTypeName)
-	case <-time.After(100 * time.Millisecond):
-		// Không có slot sau 100ms, log warning và bỏ qua
-		logger.Warn("Device key send pool full (timeout 100ms), dropping request for %s", connectionTypeName)
 	}
 }
 
