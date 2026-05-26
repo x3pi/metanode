@@ -147,7 +147,7 @@ pub struct ConsensusNode {
     pub(crate) executor_commit_enabled: bool,
     pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
-    pub(crate) epoch_transition_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
+    pub(crate) epoch_transition_sender: tokio::sync::mpsc::Sender<(u64, u64, u64, u64)>,
 
     // Handles for background tasks
     pub(crate) sync_task_handle: Option<crate::node::rust_sync_node::RustSyncHandle>,
@@ -233,8 +233,8 @@ pub(crate) struct ConsensusSetup {
     pub(crate) current_commit_index: Arc<AtomicU32>,
     pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
     pub(crate) committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
-    pub(crate) epoch_tx_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
-    pub(crate) epoch_tx_receiver: tokio::sync::mpsc::UnboundedReceiver<(u64, u64, u64, u64)>,
+    pub(crate) epoch_tx_sender: tokio::sync::mpsc::Sender<(u64, u64, u64, u64)>,
+    pub(crate) epoch_tx_receiver: tokio::sync::mpsc::Receiver<(u64, u64, u64, u64)>,
     pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
     pub(crate) protocol_config: ProtocolConfig,
     pub(crate) parameters: consensus_config::Parameters,

@@ -132,7 +132,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	// Initialize NOMT database if backend is "nomt" (must be before any NewStateTrie calls)
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
-		nomtPath := config.JoinPathIfNotURL(app.config.Databases.RootPath, "/nomt_db")
+		nomtPath := config.JoinPathIfNotURL(app.config.Databases.RootPath, "/consensus/nomt_db")
 		// Apply config with sensible defaults
 		commitConcurrency := app.config.NomtCommitConcurrency
 		if commitConcurrency <= 0 {
@@ -392,6 +392,9 @@ func (app *App) Run() error {
 	// We now always run as the primary unified execution engine (Master)
 	app.blockProcessor.StartBackgroundWorkers()
 	go app.blockProcessor.TxsProcessor2()
+
+	// Bắt đầu tiến trình tải dữ liệu history nếu là rpc node
+	go app.blockProcessor.StartRPCHistorySync()
 
 	// ── CRASH SAFETY: Periodic disk flush every 5 seconds ──────────────
 	// Keeps NoSync for maximum write throughput but limits crash data loss

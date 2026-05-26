@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -605,6 +606,14 @@ SKIP_GENESIS:
 				// ALSO align the commit index to avoid Rust skipping/re-running commits
 				storage.ForceSetLastHandledCommitIndex(uint32(metadata.LastHandledCommitIdx))
 				storage.UpdateLastHandledCommitEpoch(uint64(metadata.Epoch))
+
+				if metadata.RPCSupportedBlock > 0 {
+					syncKey := []byte("rpc_sync_last_checked_block")
+					buf := make([]byte, 8)
+					binary.BigEndian.PutUint64(buf, metadata.RPCSupportedBlock)
+					app.storageManager.GetStorageReceipt().Put(syncKey, buf)
+					logger.Info("✅ [STARTUP] Initialized rpc_sync_last_checked_block to %d from snapshot metadata", metadata.RPCSupportedBlock)
+				}
 
 				// NOTE: GEIAuthority singleton is not initialized yet at this point in startup.
 				// ForceSet calls above update the storage globals, which the singleton will

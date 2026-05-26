@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/binary"
 	"path/filepath"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -134,6 +135,24 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 			logger.Info("📸 [SNAPSHOT] Registered NOMT native snapshot callback")
 		}
 	}
+
+	// Đăng ký callback cho RPC Supported Block
+	sm.SetRpcSupportedBlockCallback(func() uint64 {
+		if chainState == nil || chainState.GetStorageManager() == nil || chainState.GetStorageManager().GetStorageReceipt() == nil {
+			return 0
+		}
+		dbReceipt := chainState.GetStorageManager().GetStorageReceipt()
+		syncKey := []byte("rpc_sync_last_checked_block")
+		if val, err := dbReceipt.Get(syncKey); err == nil && len(val) == 8 {
+			return binary.BigEndian.Uint64(val)
+		}
+		// Nếu node có Pruning.Mode == "full", trả về 0 (vì history bị prune)
+		if cfg.Pruning.Mode == "full" {
+			return 0
+		}
+		// Ngược lại, Master nodes mặc định có full history, snapshot chứa full block.
+		return storage.GetLastBlockNumber()
+	})
 
 	// Đăng ký callback vào storage.UpdateLastBlockNumber
 	// Mỗi khi block mới commit → kiểm tra epoch thay đổi

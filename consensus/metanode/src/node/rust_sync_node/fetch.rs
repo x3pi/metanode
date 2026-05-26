@@ -793,7 +793,7 @@ impl RustSyncNode {
                         {
                             let _ = self
                                 .epoch_transition_sender
-                                .send((epoch, timestamp, boundary, gei));
+                                .try_send((epoch, timestamp, boundary, gei));
                             self.current_epoch
                                 .store(epoch, std::sync::atomic::Ordering::SeqCst);
                         }

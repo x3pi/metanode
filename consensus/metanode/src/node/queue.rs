@@ -229,7 +229,7 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
             // If it times out, we treat it as a failure and let the retry/total_timeout logic handle it.
             match tokio::time::timeout(
                 std::time::Duration::from_millis(5000),
-                proxy.submit(all_valid.clone())
+                proxy.submit_no_wait(all_valid.clone())
             ).await {
                 Ok(Ok(_)) => {
                     successful_count += all_valid.len();

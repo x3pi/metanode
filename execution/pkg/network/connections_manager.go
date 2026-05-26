@@ -383,6 +383,7 @@ func (cm *ConnectionsManager) countConnectionsByType(cType int) int {
 func (cm *ConnectionsManager) HealthCheck() {
 	ticker := time.NewTicker(5 * time.Second)
 	go func() {
+		defer ticker.Stop()
 		for range ticker.C {
 			totalChecked := 0
 			totalRemoved := 0
