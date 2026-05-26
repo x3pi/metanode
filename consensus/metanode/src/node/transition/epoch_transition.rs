@@ -711,6 +711,16 @@ async fn poll_go_until_synced(
 // =============================================================================
 
 /// Remove old epoch directories beyond epochs_to_keep.
+///
+/// RESOURCE LEAK FIX (May 2026): Previously, `remove_dir_all()` ran BEFORE
+/// `remove_store()`, which meant RocksDB files were deleted while the DB handle
+/// still held file descriptors open. The OS kept the deleted files in memory
+/// (visible as "(deleted)" in /proc/PID/fd), leaking ~13 FDs per epoch.
+/// After 1100+ epochs, this accumulated 15K+ leaked FDs and thousands of
+/// orphaned goroutines/threads from the RocksDB background workers.
+///
+/// Fix: Drop the RocksDB handle FIRST (via remove_store + explicit drop),
+/// which properly closes all FDs, THEN delete the directory.
 fn cleanup_old_epochs(node: &mut ConsensusNode, new_epoch: u64, epochs_to_keep: usize) {
     let keep_from = new_epoch.saturating_sub(epochs_to_keep as u64);
     let epochs_dir = node.storage_path.join("epochs");
@@ -728,10 +738,17 @@ fn cleanup_old_epochs(node: &mut ConsensusNode, new_epoch: u64, epochs_to_keep: 
                                 "🗑️ [CLEANUP] Removing epoch {} (keep_from={})",
                                 epoch, keep_from
                             );
+                            // RESOURCE LEAK FIX: Drop the RocksDB store handle FIRST
+                            // to properly close all file descriptors. Only then delete
+                            // the directory. Without this, FDs leak as "(deleted)" entries.
+                            let removed_store = node.legacy_store_manager.remove_store(epoch);
+                            // Explicitly drop the Arc to trigger RocksDB close if this
+                            // was the last reference. This ensures FDs are released
+                            // BEFORE we delete the underlying files.
+                            drop(removed_store);
                             if let Err(e) = std::fs::remove_dir_all(entry.path()) {
                                 warn!("⚠️ [CLEANUP] Failed to remove epoch {}: {}", epoch, e);
                             }
-                            node.legacy_store_manager.remove_store(epoch);
                         }
                     }
                 }
@@ -739,3 +756,4 @@ fn cleanup_old_epochs(node: &mut ConsensusNode, new_epoch: u64, epochs_to_keep: 
         }
     }
 }
+

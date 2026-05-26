@@ -186,7 +186,7 @@ impl ConsensusNode {
         let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
 
         let (epoch_tx_sender, epoch_tx_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<(u64, u64, u64, u64)>();
+            tokio::sync::mpsc::channel::<(u64, u64, u64, u64)>(1000);
         let epoch_transition_callback =
             crate::consensus::commit_callbacks::create_epoch_transition_callback(
                 epoch_tx_sender.clone(),
@@ -598,7 +598,11 @@ impl ConsensusNode {
                         sync_round, local_block, max_peer_block, gap, max_peer_gei
                     );
 
-                    let from_block = local_block + 1;
+                    // FORK-SAFETY (May 2026): Fetch starting from local_block instead of local_block + 1.
+                    // If the local tip block (local_block) has a mismatched/forked hash, Go must execute
+                    // and overwrite it to align with peer consensus BEFORE executing local_block + 1,
+                    // otherwise parent-hash check on local_block + 1 will fail and block catchup.
+                    let from_block = if local_block > 0 { local_block } else { 1 };
                     let to_block = max_peer_block;
 
                     use rand::seq::SliceRandom;
@@ -1396,9 +1400,9 @@ impl ConsensusNode {
             .with_tx_recycler(tx_recycler.clone())
             .with_committed_transaction_hashes(committed_transaction_hashes.clone());
 
-        let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::unbounded_channel::<
+        let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::channel::<
             crate::consensus::commit_processor::lag_monitor::LagAlert,
-        >();
+        >(1000);
 
         commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
 

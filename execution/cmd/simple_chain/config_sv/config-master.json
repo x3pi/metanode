@@ -141,5 +141,6 @@
       "Path": "/backup_db/"
     }
   },
-  "nodes": {}
+  "nodes": {},
+  "is_rpc_node": true
 }

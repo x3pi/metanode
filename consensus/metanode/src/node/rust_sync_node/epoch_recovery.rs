@@ -325,7 +325,7 @@ impl RustSyncNode {
                     );
 
                     // Send epoch transition signal
-                    if let Err(e) = self.epoch_transition_sender.send((
+                    if let Err(e) = self.epoch_transition_sender.try_send((
                         trans.epoch,
                         trans.timestamp_ms,
                         trans.boundary_block,

@@ -20,7 +20,8 @@ metanode/
 ├── deploy/             ← Deployment scripts, key generator, and environment templates
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
-└── scripts/            ← Operational scripts
+├── scripts/            ← Operational scripts
+└── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
 ```
 
 ### Layer Interaction
@@ -160,6 +161,7 @@ metanode/
 |------|-------|------|
 | `block_processor_core.go` | 1,007 | Main block processor loop |
 | `block_processor_sync.go` | **1,252** | **Peer sync / state recovery** ⚠️ |
+| `explorer_history_sync.go`| 146 | Explorer historical data healing sync |
 | `block_processor_commit.go` | 642 | Block commit pipeline |
 | `block_processor_processing.go` | 764 | Tx execution pipeline |
 | `block_processor_network.go` | 1,089 | Network message handling |

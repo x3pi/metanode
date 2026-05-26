@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
@@ -20,7 +21,8 @@ import (
 )
 
 type Receipt struct {
-	proto *pb.Receipt
+	proto       *pb.Receipt
+	cachedBytes atomic.Pointer[[]byte]
 }
 
 func NewReceipt(
@@ -73,6 +75,7 @@ func NewReceipt(
 // setter
 func (r *Receipt) SetProcessingType(processingType pb.RECEIPT_PROCESSING_TYPE) {
 	r.proto.ProcessingType = processingType
+	r.cachedBytes.Store(nil)
 }
 
 func (r *Receipt) ProcessingType() pb.RECEIPT_PROCESSING_TYPE {
@@ -92,6 +95,7 @@ func (r *Receipt) ToTypes() types.Receipt {
 
 func (r *Receipt) SetRHash(rHash common.Hash) {
 	r.proto.RHash = rHash.Bytes()
+	r.cachedBytes.Store(nil)
 }
 
 func (r *Receipt) RHash() common.Hash {
@@ -110,11 +114,19 @@ func (r *Receipt) Unmarshal(b []byte) error {
 		return err
 	}
 	r.proto = receiptPb
+	r.cachedBytes.Store(&b)
 	return nil
 }
 
 func (r *Receipt) Marshal() ([]byte, error) {
-	return proto.MarshalOptions{Deterministic: true}.Marshal(r.proto)
+	if cached := r.cachedBytes.Load(); cached != nil {
+		return *cached, nil
+	}
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(r.proto)
+	if err == nil {
+		r.cachedBytes.Store(&b)
+	}
+	return b, err
 }
 
 func (r *Receipt) Proto() protoreflect.ProtoMessage {
@@ -170,6 +182,7 @@ func (r *Receipt) ToAddress() common.Address {
 
 func (r *Receipt) SetToAddress(toAddress common.Address) {
 	r.proto.ToAddress = toAddress.Bytes()
+	r.cachedBytes.Store(nil)
 }
 
 func (r *Receipt) GasUsed() uint64 {
@@ -190,6 +203,7 @@ func (r *Receipt) Return() []byte {
 
 func (r *Receipt) SetReturn(data []byte) {
 	r.proto.Return = data
+	r.cachedBytes.Store(nil)
 }
 
 func (r *Receipt) Status() pb.RECEIPT_STATUS {
@@ -244,6 +258,7 @@ func (r *Receipt) UpdateExecuteResult(
 	if exception == pb.EXCEPTION_ERR_ADDRESS_NOT_IN_RELATED {
 		logger.Info("_________________Receipt updated", "receipt", r.String())
 	}
+	r.cachedBytes.Store(nil)
 }
 
 func (r *Receipt) Json() ([]byte, error) {

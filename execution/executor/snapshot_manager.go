@@ -37,6 +37,7 @@ type SnapshotMetadata struct {
 	MetadataChecksum     string            `json:"metadata_checksum"`         // SHA256 of metadata (excluding this field)
 	CriticalChecksums    map[string]string `json:"critical_checksums"`        // SHA256 per critical dir
 	LastHandledCommitIdx uint64            `json:"last_handled_commit_index"` // Rust DAG commit position
+	RPCSupportedBlock    uint64            `json:"rpc_supported_block"`       // Tới block nào RPC đã được hỗ trợ
 }
 
 // SnapshotManager quản lý việc tạo và xoay vòng snapshot
@@ -96,6 +97,16 @@ type SnapshotManager struct {
 
 	// Callback to get the current exact StakeStatesRoot
 	stakeRootCallback func() string
+
+	// Callback to get the current RPC supported block
+	rpcSupportedBlockCallback func() uint64
+}
+
+// SetRpcSupportedBlockCallback registers a callback to fetch the current RPC supported block.
+func (sm *SnapshotManager) SetRpcSupportedBlockCallback(cb func() uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.rpcSupportedBlockCallback = cb
 }
 
 // NewSnapshotManager tạo instance mới của SnapshotManager
@@ -412,6 +423,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	stateRootCb := sm.stateRootCallback
 	stakeRootCb := sm.stakeRootCallback
 	flushCb := sm.forceFlushCallback
+	rpcSupportedBlockCb := sm.rpcSupportedBlockCallback
 	sm.mu.Unlock()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -477,6 +489,13 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	}
 	if actualBlockNumber == 0 {
 		actualBlockNumber = blockNumber
+	}
+
+	actualRPCSupportedBlock := uint64(0)
+	if rpcSupportedBlockCb != nil {
+		actualRPCSupportedBlock = rpcSupportedBlockCb()
+	} else {
+		actualRPCSupportedBlock = actualBlockNumber
 	}
 
 	rustDAGEpoch := uint64(0)
@@ -703,6 +722,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 		RustDAGEpoch:         rustDAGEpoch,
 		RustCommitIndex:      rustCommitIndex,
 		LastHandledCommitIdx: uint64(storage.GetLastHandledCommitIndex()),
+		RPCSupportedBlock:    actualRPCSupportedBlock,
 		CriticalChecksums:    make(map[string]string),
 	}
 
