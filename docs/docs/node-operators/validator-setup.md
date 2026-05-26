@@ -95,45 +95,9 @@ cp genesis.json metanode/execution/cmd/simple_chain/genesis.json
 
 ---
 
-## Bước 4 — Hoàn thiện file cấu hình `.env`
+## Bước 4 — Cấu hình Tường lửa (Firewall) ⚠️ Quan trọng
 
-Mở file `node-0_keys/validator.env` vừa được tạo và điền thêm 2 thông số còn thiếu:
-
-```bash
-nano node-0_keys/validator.env
-```
-
-**Các trường cần điền thêm:**
-
-```bash
-# Danh sách IP:port của TẤT CẢ validator KHÁC (không ghi IP của mình)
-PEER_RPC_ADDRESSES="\"VALIDATOR_1_IP:19201\", \"VALIDATOR_2_IP:19202\", \"VALIDATOR_3_IP:19203\""
-```
-
-:::note
-Tất cả các trường khác (keys, ports) đã được `gen_validator_entry.py` điền sẵn. Chỉ cần bổ sung `PEER_RPC_ADDRESSES`.
-:::
-
-**Bảng các biến quan trọng trong `.env`:**
-
-| Biến | Ý nghĩa | Ví dụ |
-|------|---------|-------|
-| `NODE_TYPE` | Loại node | `validator` |
-| `NODE_ID` | Index trong genesis.json (0-based) | `0` |
-| `PROTOCOL_KEY_FILE` | Đường dẫn tới `node_0_protocol_key.json` | tự động điền |
-| `NETWORK_KEY_FILE` | Đường dẫn tới `node_0_network_key.json` | tự động điền |
-| `BLS_PRIVATE_KEY` | Nội dung hex từ `node_0_authority_key.json` | tự động điền |
-| `ETH_PRIVATE_KEY` | Ethereum private key (hex, không có 0x) | tự động điền |
-| `ETH_ADDRESS` | Ethereum address (hex, không có 0x) | tự động điền |
-| `PEER_RPC_ADDRESSES` | IP:port của các validator khác | **cần điền thủ công** |
-| `RPC_PORT` | JSON-RPC port (DApp/wallet) | `:10746` |
-| `PEER_RPC_PORT` | Consensus port giữa các validators | `19200` |
-
----
-
-## Bước 4.5 — Cấu hình Tường lửa (Firewall) ⚠️ Quan trọng
-
-Để các node có thể kết nối với nhau qua internet hoặc mạng nội bộ, bạn cần mở các cổng mạng tương ứng. Script `setup_firewall.sh` đã được tự động tạo sẵn trong thư mục keys và cấu hình chính xác các cổng riêng biệt cho node này.
+Để các node có thể kết nối với nhau qua mạng, bạn cần mở các cổng mạng tương ứng. Script `setup_firewall.sh` đã được tự động tạo sẵn và cấu hình chính xác các cổng riêng biệt cho node này.
 
 **Chạy script để mở cổng qua UFW:**
 
@@ -142,35 +106,17 @@ cd metanode/deploy
 sudo bash ./node-0_keys/setup_firewall.sh
 ```
 
-Script này tự động:
-1. Đảm bảo luật SSH (cổng `22`) được bật để bạn không bị ngắt kết nối.
-2. Mở cổng **Consensus P2P** (`CONSENSUS_PORT`, mặc định `9000 + node_id`).
-3. Mở cổng **Execution P2P** (`P2P_PORT`, mặc định `6200 + node_id`).
-4. Mở cổng **Peer RPC** (`PEER_RPC_PORT`, mặc định `19200 + node_id`) phục vụ sync & attestation.
-5. Mở cổng **Snapshot Server** (`SNAPSHOT_SERVER_PORT`, mặc định `8600 + node_id`).
-6. Mở cổng **Metrics** (`METRICS_PORT`, mặc định `9100 + node_id`).
-7. Mở cổng **RPC Proxy (MetaMask)** (`8545 + node_id`) để các dApp bên ngoài kết nối.
-
 ---
 
-## Bước 5 — Chạy Install Script
+## Bước 5 — Khởi chạy Node (Install & Start)
 
-Script này tự động làm mọi việc: tạo system user, build binary, cài cấu hình, cài systemd services và khởi động node.
+Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
 
 ```bash
-cd metanode/deploy
-sudo bash install.sh --config node-0_keys/validator.env
+sudo bash systemd-cluster.sh setup --node 0 -y
 ```
 
-Script sẽ hỏi xác nhận trước khi bắt đầu. Sau khi xác nhận, quá trình build mất khoảng **10–15 phút** (chủ yếu là build Rust).
-
-**Những gì script thực hiện:**
-1. Tạo system user `metanode` (nếu chưa có)
-2. Tạo cấu trúc thư mục tại `/opt/metanode/node-0/`
-3. Build Go binary (`simple_chain`) và Rust binary (`metanode`) từ source
-4. Copy configs, keys, và `genesis.json` vào `/opt/metanode/node-0/`
-5. Cài đặt và enable 2 systemd services (có đính kèm ID node ở đuôi service)
-6. Khởi động cả 2 services
+Script này tự động làm mọi việc: tạo system user, build binary, cài cấu hình và khởi chạy cả 2 tiến trình Go (Execution) và Rust (Consensus). Sau khoảng **10–15 phút**, quá trình build sẽ hoàn tất.
 
 Kết thúc thành công sẽ hiển thị:
 ```
@@ -181,6 +127,27 @@ Kết thúc thành công sẽ hiển thị:
   - metanode-execution-0.service
   - metanode-consensus-0.service
 ══════════════════════════════════════
+```
+
+### Khởi chạy RPC Proxy (Tùy chọn cho MetaMask/dApp)
+
+Mặc định, service trên chỉ khởi chạy core node. Nếu bạn muốn mở endpoint RPC tương thích EVM (cho MetaMask hoặc dApp kết nối), hãy chạy thêm lệnh cài đặt RPC Proxy sau:
+
+```bash
+# Khởi chạy RPC Proxy cho Node 0 (tự động đọc port từ file .env)
+sudo bash install-rpc-systemd.sh --node 0
+```
+
+Lệnh này sẽ tự động build RPC client và tạo service `metanode-rpc-0` chạy ngầm.
+
+**Lệnh quản lý RPC:**
+```bash
+# Xem trạng thái và log RPC
+sudo systemctl status metanode-rpc-0
+journalctl -u metanode-rpc-0 -f
+
+# Dừng RPC (nếu muốn đóng endpoint)
+sudo bash install-rpc-systemd.sh --stop --node 0
 ```
 
 ---
