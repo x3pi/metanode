@@ -21,23 +21,23 @@ var (
 
 // Các hằng số đường dẫn con cho các thư mục database (tương đối so với RootPath)
 const (
-	PathAccountState           = "/account_state/"
-	PathTrie                   = "/trie_database/"
-	PathSmartContractCode      = "/smart_contract_code/"
-	PathSmartContractStorage   = "/smart_contract_storage/"
-	PathBlocks                 = "/blocks/"
-	PathReceipts               = "/receipts/"
-	PathTxsEth                 = "/txs_eth/"
-	PathBlocksHash             = "/blocks_hash/"
-	PathBackupDeviceKey        = "/backup_device_key_storage/"
-	PathTransactionBlockNumber = "/transaction_block_number/"
-	PathTransactionState       = "/transaction_state/"
-	PathBlockHashToNumber      = "/block_hash_to_number/"
-	PathWallets                = "/wallets/"
-	PathMapping                = "/mapping/"
-	PathBackup                 = "/backup_db/"
-	PathStake                  = "/stake_db/"
-	PathXapian                 = "/xapian"
+	PathAccountState           = "/consensus/account_state/"
+	PathTrie                   = "/consensus/trie_database/"
+	PathSmartContractCode      = "/consensus/smart_contract_code/"
+	PathSmartContractStorage   = "/consensus/smart_contract_storage/"
+	PathBlocks                 = "/history/blocks/"
+	PathReceipts               = "/history/receipts/"
+	PathTxsEth                 = "/history/txs_eth/"
+	PathBlocksHash             = "/history/blocks_hash/"
+	PathBackupDeviceKey        = "/consensus/backup_device_key_storage/"
+	PathTransactionBlockNumber = "/history/transaction_block_number/"
+	PathTransactionState       = "/history/transaction_state/"
+	PathBlockHashToNumber      = "/history/block_hash_to_number/"
+	PathWallets                = "/consensus/wallets/"
+	PathMapping                = "/consensus/mapping/"
+	PathBackup                 = "/consensus/backup_db/"
+	PathStake                  = "/consensus/stake_db/"
+	PathXapian                 = "/consensus/xapian"
 )
 
 // DatabasesConfig định nghĩa cấu trúc cho đối tượng "Databases" trong file JSON.
@@ -79,6 +79,7 @@ type SimpleChainConfig struct {
 	ExplorereReadOnlyDbPath string `json:"explorer_read_only_db_path"`
 
 	IsExplorer          bool `json:"is_explorer"`
+	IsRPCNode           bool `json:"is_rpc_node"`
 	ExplorerQueueSize   int  `json:"explorer_queue_size"`
 	ExplorerWorkerCount int  `json:"explorer_worker_count"`
 
@@ -138,8 +139,6 @@ type SimpleChainConfig struct {
 	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
 	SnapshotBlockOffset     int    `json:"snapshot_block_offset,omitempty"`     // Offset per-node để stagger snapshot (vd: node0=0, node1=100, node2=200). Đảm bảo không tất cả nodes snapshot cùng lúc
 
-	// Bật/tắt theo dõi lịch sử trạng thái bằng StateChangelogDB (cần cho NOMT khi cần truy vấn block cũ)
-	EnableHistoricalState bool `json:"enable_historical_state"`
 
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.
@@ -178,9 +177,8 @@ func JoinPathIfNotURL(basePath, path string) string {
 func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	var err error
 	loadConfig.Do(func() {
-		ConfigApp = &SimpleChainConfig{
-			EnableHistoricalState: true, // Mặc định bật tính năng trạng thái lịch sử
-		}
+		ConfigApp = &SimpleChainConfig{}
+
 		var raw []byte
 		raw, err = os.ReadFile(configPath)
 		if err != nil {
@@ -216,11 +214,11 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		if v := os.Getenv("META_SECURE_PASSWORD"); v != "" {
 			ConfigApp.Securepassword = v
 		}
-		if v := os.Getenv("META_ENABLE_HISTORICAL_STATE"); v != "" {
+		if v := os.Getenv("META_IS_RPC_NODE"); v != "" {
 			if v == "true" || v == "1" {
-				ConfigApp.EnableHistoricalState = true
+				ConfigApp.IsRPCNode = true
 			} else if v == "false" || v == "0" {
-				ConfigApp.EnableHistoricalState = false
+				ConfigApp.IsRPCNode = false
 			}
 		}
 

@@ -123,7 +123,7 @@ func NewChainStateWithGenesis(
 	//   - stake_db      → validator stake amounts
 	// They CANNOT be merged into one DB.
 	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string) *state_changelog.StateChangelogDB {
-		if config == nil || !config.EnableHistoricalState || backupPath == "" {
+		if config == nil || !config.IsRPCNode || backupPath == "" {
 			return nil
 		}
 		var baseDir string
