@@ -39,13 +39,13 @@ pub fn create_global_exec_index_callback(
 
 /// Creates an epoch transition callback that sends transition requests via channel
 pub fn create_epoch_transition_callback(
-    epoch_transition_sender: tokio::sync::mpsc::UnboundedSender<(u64, u64, u64, u64)>,
+    epoch_transition_sender: tokio::sync::mpsc::Sender<(u64, u64, u64, u64)>,
 ) -> impl Fn(u64, u64, u64, u64) -> Result<(), anyhow::Error> + Send + Sync + 'static {
     move |new_epoch, boundary_timestamp_ms, boundary_block, synced_global_exec_index| {
         info!("🎯 [SYSTEM TX CALLBACK] EndOfEpoch detected: epoch={}, boundary_timestamp_ms={}, boundary_block={}, synced_global_exec_index={}",
             new_epoch, boundary_timestamp_ms, boundary_block, synced_global_exec_index);
 
-        if let Err(e) = epoch_transition_sender.send((
+        if let Err(e) = epoch_transition_sender.try_send((
             new_epoch,
             boundary_timestamp_ms,
             boundary_block,

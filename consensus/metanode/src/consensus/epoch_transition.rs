@@ -1,7 +1,7 @@
 // Copyright (c) MetaNode Team
 // SPDX-License-Identifier: Apache-2.0
 
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
 
 use crate::config::NodeConfig;
@@ -9,7 +9,7 @@ use crate::config::NodeConfig;
 /// Starts the epoch transition handler task
 /// This task processes epoch transition requests from system transactions
 pub fn start_epoch_transition_handler(
-    mut receiver: UnboundedReceiver<(u64, u64, u64, u64)>,
+    mut receiver: Receiver<(u64, u64, u64, u64)>,
     config: NodeConfig,
 ) {
     tokio::spawn(async move {

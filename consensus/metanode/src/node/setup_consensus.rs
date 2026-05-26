@@ -186,7 +186,7 @@ impl ConsensusNode {
         let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
 
         let (epoch_tx_sender, epoch_tx_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<(u64, u64, u64, u64)>();
+            tokio::sync::mpsc::channel::<(u64, u64, u64, u64)>(1000);
         let epoch_transition_callback =
             crate::consensus::commit_callbacks::create_epoch_transition_callback(
                 epoch_tx_sender.clone(),
@@ -1400,9 +1400,9 @@ impl ConsensusNode {
             .with_tx_recycler(tx_recycler.clone())
             .with_committed_transaction_hashes(committed_transaction_hashes.clone());
 
-        let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::unbounded_channel::<
+        let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::channel::<
             crate::consensus::commit_processor::lag_monitor::LagAlert,
-        >();
+        >(1000);
 
         commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
 
