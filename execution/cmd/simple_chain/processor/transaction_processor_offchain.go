@@ -77,7 +77,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 			return nil, err
 		}
 
-		if stakeDB := chainStateNew.GetStakeStateDB(); stakeDB != nil && v.chainState.GetConfig().EnableHistoricalState {
+		if stakeDB := chainStateNew.GetStakeStateDB(); stakeDB != nil && v.chainState.GetConfig().IsRPCNode {
 			changelogDB := v.chainState.GetStakeChangelogDB()
 			if changelogDB != nil {
 				stakeDB.SetHistoricalContext(changelogDB, header.BlockNumber())
