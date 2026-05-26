@@ -48,6 +48,7 @@ for i in "${!ARGS[@]}"; do
             next=$((i+1))
             [ "$next" -lt "${#ARGS[@]}" ] && CONFIG_ENV="${ARGS[$next]}"
             ;;
+        --yes|-y) AUTO_YES="true" ;;
     esac
 done
 
@@ -118,12 +119,19 @@ echo -e "  Services     : ${CYAN}${SVC_EXECUTION} / ${SVC_CONSENSUS}${NC}"
 echo -e "  Repo         : ${CYAN}${REPO_URL}@${REPO_BRANCH}${NC}"
 echo ""
 
-read -p "  Proceed with installation? [y/N] " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    log_warn "Installation cancelled."
-    exit 0
+if [ "${AUTO_YES:-false}" != "true" ]; then
+    read -p "  Proceed with installation? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_warn "Installation cancelled."
+        exit 0
+    fi
 fi
+
+# Stop services if they are already running or in a restart loop to prevent "Text file busy"
+log_info "Stopping existing services (if any) to prevent file locks..."
+systemctl stop ${SVC_CONSENSUS}.service 2>/dev/null || true
+systemctl stop ${SVC_EXECUTION}.service 2>/dev/null || true
 
 # ──────────────────────────────────────────────────────────────────────────
 # STEP 1: Create system user and directory structure
@@ -407,27 +415,20 @@ log_ok "Copied genesis.json → $INSTALL_DIR/config/ & $INSTALL_DIR/bin/"
 # ──────────────────────────────────────────────────────────────────────────
 log_step "Step 4: Installing keys"
 
-if [ "$NODE_TYPE" = "validator" ]; then
-    if [ -z "$PROTOCOL_KEY_FILE" ] || [ -z "$NETWORK_KEY_FILE" ]; then
-        log_err "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are required for validator nodes"
-        log_err "Generate keys first: ./metanode generate -n 1 -o ./keys"
-        exit 1
-    fi
-    if [ ! -f "$PROTOCOL_KEY_FILE" ] || [ ! -f "$NETWORK_KEY_FILE" ]; then
-        log_err "Key file not found: $PROTOCOL_KEY_FILE or $NETWORK_KEY_FILE"
-        exit 1
-    fi
-    cp "$PROTOCOL_KEY_FILE" "$INSTALL_DIR/keys/protocol_key.json"
-    cp "$NETWORK_KEY_FILE"  "$INSTALL_DIR/keys/network_key.json"
-    chmod 600 "$INSTALL_DIR/keys/"*.json
-    chown "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR/keys/"*.json
-    log_ok "Validator keys installed to $INSTALL_DIR/keys/"
-else
-    # Sync-only: create empty key placeholders (not used)
-    echo '{}' > "$INSTALL_DIR/keys/protocol_key.json"
-    echo '{}' > "$INSTALL_DIR/keys/network_key.json"
-    log_ok "Sync-only: empty key placeholders created (no keys needed)"
+if [ -z "$PROTOCOL_KEY_FILE" ] || [ -z "$NETWORK_KEY_FILE" ]; then
+    log_err "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are required for all nodes"
+    log_err "Generate keys first: ./metanode generate -n 1 -o ./keys"
+    exit 1
 fi
+if [ ! -f "$PROTOCOL_KEY_FILE" ] || [ ! -f "$NETWORK_KEY_FILE" ]; then
+    log_err "Key file not found: $PROTOCOL_KEY_FILE or $NETWORK_KEY_FILE"
+    exit 1
+fi
+cp "$PROTOCOL_KEY_FILE" "$INSTALL_DIR/keys/protocol_key.json"
+cp "$NETWORK_KEY_FILE"  "$INSTALL_DIR/keys/network_key.json"
+chmod 600 "$INSTALL_DIR/keys/"*.json
+chown "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR/keys/"*.json
+log_ok "Network keys installed to $INSTALL_DIR/keys/"
 
 chown -R "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR"
 
@@ -519,8 +520,8 @@ Environment=GOMEMLIMIT=4GiB
 LimitNOFILE=100000
 
 # Logging
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:${INSTALL_DIR}/logs/execution/execution.log
+StandardError=append:${INSTALL_DIR}/logs/execution/execution.log
 SyslogIdentifier=${SVC_EXECUTION}
 
 [Install]
@@ -557,8 +558,8 @@ Environment=RUST_BACKTRACE=full
 LimitNOFILE=100000
 
 # Logging
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:${INSTALL_DIR}/logs/consensus/consensus.log
+StandardError=append:${INSTALL_DIR}/logs/consensus/consensus.log
 SyslogIdentifier=${SVC_CONSENSUS}
 
 [Install]

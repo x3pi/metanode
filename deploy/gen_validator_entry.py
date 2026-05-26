@@ -253,23 +253,30 @@ NETWORK_KEY_FILE={network_key_path}
     else:
         env_filename = os.path.join(keys_dir, "synconly.env")
         node_type_comment = "synconly"
-        keys_section = """\
-# ─── Network Keys (not needed for sync-only) ─────────────────────────────
-PROTOCOL_KEY_FILE=
-NETWORK_KEY_FILE=
+        keys_section = f"""\
+# ─── Network Keys (Sync-only still needs keys for P2P auth) ───────────────
+PROTOCOL_KEY_FILE={protocol_key_path}
+NETWORK_KEY_FILE={network_key_path}
 """
         snapshot_defaults = "SNAPSHOT_ENABLED=true\nSNAPSHOT_FREQUENCY=500\nSNAPSHOT_OFFSET=100"
         explorer_defaults  = "IS_EXPLORER=true\nEPOCHS_TO_KEEP=0"
 
-    rpc_port         = getattr(args, "rpc_port",          ":8757")
-    p2p_port         = getattr(args, "primary_port",      4000)
-    dns_port         = getattr(args, "dns_port",          7081)
-    peer_rpc_port    = getattr(args, "peer_rpc_port",     19200)
-    consensus_port   = getattr(args, "p2p_port",          9000)
-    snapshot_port    = getattr(args, "snapshot_port",     8600)
-    meta_rpc_port    = getattr(args, "meta_node_rpc_port",10100)
-    metrics_port     = getattr(args, "metrics_port",      9100)
     node_id          = getattr(args, "node_id",           0)
+    rpc_port         = getattr(args, "rpc_port",          f":{10746 + node_id}")
+    p2p_port         = getattr(args, "primary_port",      6200 + node_id)
+    dns_port         = getattr(args, "dns_port",          9080 + node_id)
+    peer_rpc_port    = getattr(args, "peer_rpc_port",     19200 + node_id)
+    consensus_port   = getattr(args, "p2p_port",          9000 + node_id)
+    snapshot_port    = getattr(args, "snapshot_port",     8600 + node_id)
+    meta_rpc_port    = getattr(args, "meta_node_rpc_port",10100 + node_id)
+    metrics_port     = getattr(args, "metrics_port",      9100 + node_id)
+
+    # Dynamically build PEER_RPC_ADDRESSES
+    peers = []
+    for i in range(args.total_nodes):
+        if i != node_id:
+            peers.append(f'"{args.ip}:{19200 + i}"')
+    peer_rpc_str = ", ".join(peers)
 
     content = f"""\
 # ════════════════════════════════════════════════════════════════════
@@ -298,8 +305,8 @@ ETH_ADDRESS={eth_addr_stripped}
 # ─── Source & Install paths ───────────────────────────────────────────────
 REPO_URL=https://github.com/x3pi/metanode.git
 REPO_BRANCH=main
-BUILD_DIR=/opt/metanode/src
-INSTALL_DIR=/opt/metanode
+BUILD_DIR=/opt/metanode/node-{node_id}/src
+INSTALL_DIR=/opt/metanode/node-{node_id}
 METANODE_USER=metanode
 
 
@@ -315,8 +322,8 @@ METRICS_PORT={metrics_port}
 
 # ─── Peers ────────────────────────────────────────────────────────────────
 # ⚠️  FILL THIS IN: IP:port of ALL OTHER validators (not yourself)
-# Example: PEER_RPC_ADDRESSES='"VALIDATOR_1_IP:19201", "VALIDATOR_2_IP:19202"'
-PEER_RPC_ADDRESSES='"127.0.0.1:19201", "127.0.0.1:19202", "127.0.0.1:19203"'
+# Auto-generated for local cluster test ({args.total_nodes} nodes):
+PEER_RPC_ADDRESSES='{peer_rpc_str}'
 
 # ─── Snapshot settings ────────────────────────────────────────────────────
 {snapshot_defaults}
@@ -328,6 +335,52 @@ PEER_RPC_ADDRESSES='"127.0.0.1:19201", "127.0.0.1:19202", "127.0.0.1:19203"'
     with open(env_filename, "w") as f:
         f.write(content)
     os.chmod(env_filename, 0o600)
+
+    # ─── Write a custom firewall script for this node ────────────────────────
+    fw_filename = os.path.join(keys_dir, "setup_firewall.sh")
+    fw_content = f"""\
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════
+#  Cấu hình Firewall (UFW) cho Node {node_id} ({node_type_comment})
+#  Chạy dưới quyền root (sudo)
+# ═══════════════════════════════════════════════════════════════════
+
+if [[ $EUID -ne 0 ]]; then
+   echo "❌ Script này cần chạy dưới quyền root (sudo)"
+   exit 1
+fi
+
+echo "🔧 Đang cấu hình luật tường lửa UFW cho Node {node_id}..."
+
+# Đảm bảo SSH không bị chặn
+ufw allow ssh
+
+# Mở cổng đồng thuận (Rust Consensus P2P)
+ufw allow {consensus_port}/tcp comment "Metanode Consensus P2P"
+
+# Mở cổng đồng bộ mempool (Go P2P)
+ufw allow {p2p_port}/tcp comment "Metanode Execution P2P"
+
+# Mở cổng Peer RPC (attest/sync)
+ufw allow {peer_rpc_port}/tcp comment "Metanode Peer RPC"
+
+# Mở cổng Snapshot Server
+ufw allow {snapshot_port}/tcp comment "Metanode Snapshot Server"
+
+# Mở cổng Metrics
+ufw allow {metrics_port}/tcp comment "Metanode Metrics"
+
+# Mở cổng RPC Client (MetaMask)
+ufw allow {8545 + node_id}/tcp comment "Metanode RPC Proxy"
+
+echo ""
+echo "🚀 Cấu hình tường lửa hoàn tất!"
+ufw status verbose
+"""
+    with open(fw_filename, "w") as f:
+        f.write(fw_content)
+    os.chmod(fw_filename, 0o700)
+
     return env_filename
 
 
@@ -341,10 +394,11 @@ def parse_args():
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
+    parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
     parser.add_argument("--ip",           default="127.0.0.1")
-    parser.add_argument("--p2p-port",     type=int, default=9000)
-    parser.add_argument("--primary-port", type=int, default=4000)
-    parser.add_argument("--worker-port",  type=int, default=4012)
+    parser.add_argument("--p2p-port",     type=int, default=None, help="Rust consensus P2P port (default: 9000 + node_id)")
+    parser.add_argument("--primary-port", type=int, default=None, help="Go P2P primary port (default: 6200 + node_id)")
+    parser.add_argument("--worker-port",  type=int, default=None, help="Go worker port (default: 4012 + node_id)")
     parser.add_argument("--description",  default=None)
     parser.add_argument("--website",      default="")
     parser.add_argument("--image",        default="")
@@ -359,6 +413,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Auto-calculate port defaults if not specified, based on node_id
+    if args.p2p_port is None:
+        args.p2p_port = 9000 + args.node_id
+    if args.primary_port is None:
+        args.primary_port = 6200 + args.node_id
+    if args.worker_port is None:
+        args.worker_port = 4012 + args.node_id
 
     keys_dir   = args.keys_dir or f"./{args.hostname}_keys"
     output     = args.output   or os.path.join(keys_dir, f"{args.hostname}_genesis.json")
@@ -407,18 +469,43 @@ def main():
         json.dump(entry, f, indent=2)
         f.write("\n")
 
+    # Auto merge into genesis-main.json if it exists
+    genesis_main_path = "genesis-main.json"
+    if os.path.exists(genesis_main_path):
+        try:
+            with open(genesis_main_path, "r") as gf:
+                g_data = json.load(gf)
+            
+            if "validators" in g_data:
+                updated = False
+                for i, v in enumerate(g_data["validators"]):
+                    if v.get("hostname") == args.hostname:
+                        g_data["validators"][i] = entry
+                        updated = True
+                        break
+                
+                if not updated:
+                    g_data["validators"].append(entry)
+                
+                with open(genesis_main_path, "w") as gf:
+                    json.dump(g_data, gf, indent=2)
+                    gf.write("\n")
+                
+                print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_main_path}")))
+                
+                # Copy to simple_chain folder
+                target_genesis = "../execution/cmd/simple_chain/genesis.json"
+                import shutil
+                shutil.copy2(genesis_main_path, target_genesis)
+                print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
+                
+        except Exception as e:
+            print(f"\n  ❌ Failed to auto-merge into {genesis_main_path}: {e}")
+
     os.chmod(keys_dir, 0o700)
 
     # Write complete ready-to-use .env file
     env_file = write_validator_env(bls, eth, args, keys_dir)
-
-    # Also copy/overwrite to current working directory as validator.env or synconly.env
-    cwd_env_name = "validator.env" if args.node_type == "validator" else "synconly.env"
-    try:
-        shutil.copy2(env_file, cwd_env_name)
-        os.chmod(cwd_env_name, 0o600)
-    except Exception as e:
-        print(yellow(f"  ⚠️  Could not copy to current directory {cwd_env_name}: {e}"))
 
     # Print summary
     print()
@@ -441,8 +528,10 @@ def main():
     print(bold("  📋 Next steps:"))
     print(f"  1. Edit {cyan(env_file)}:")
     print(f"       - Set PEER_RPC_ADDRESSES to the other validators' IPs")
-    print(f"  2. Send {cyan(output)} to the team → they merge into genesis.json")
-    print(f"  3. Once you receive genesis.json:")
+    print(f"  2. Entry auto-merged into {cyan('genesis-main.json')}.")
+    print(f"  3. Open firewall ports for this node:")
+    print(f"       sudo bash {keys_dir}/setup_firewall.sh")
+    print(f"  4. Once you receive genesis.json:")
     print(f"       sudo bash install.sh --config {env_file}")
     print()
 

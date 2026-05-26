@@ -11,31 +11,33 @@ Trang tài liệu này hướng dẫn chi tiết dành cho các **Node Operators
 
 ## 🏗️ Kiến trúc Cụm Node (Node Cluster)
 
-Một validator node hoàn chỉnh của Metanode bao gồm 3 tiến trình hoạt động đồng bộ và giao tiếp chéo qua Unix Domain Socket (UDS) và TCP:
+Một node hoàn chỉnh của Metanode chạy dưới dạng **systemd service** và bao gồm 2 tiến trình độc lập giao tiếp chéo qua Unix Domain Socket (UDS) và TCP:
 
-1. **`go-master-N`**: Tiến trình xử lý chính (Execution engine) ở Go.
-2. **`go-sub-N`**: Tiến trình xử lý phụ hỗ trợ giao dịch song song ở Go.
-3. **`metanode-N`**: Tiến trình đồng thuận BFT/DAG lõi viết bằng Rust.
+1. **`metanode-execution-N` (Go)**: Tầng thực thi (Execution Layer), xử lý và ghi nhận trạng thái giao dịch (EVM-compatible).
+2. **`metanode-consensus-N` (Rust)**: Tầng đồng thuận (Consensus Layer), chạy động cơ đồng thuận BFT/DAG lõi và điều phối thứ tự block.
+3. **`metanode-rpc-N` (Go - Tùy chọn)**: RPC Proxy Client mở cổng JSON-RPC/WSS công khai cho MetaMask và dApp (kết nối trực tiếp vào Execution qua TCP).
 
 ---
 
 ## 🗺️ Hướng dẫn theo loại node
 
-* **[⚡ Chạy Validator Node](./validator-setup)** — Build, generate keys, đăng ký genesis, cấu hình, chạy với systemd
-* **[🔄 Chạy Sync-Only Node](./synconly-setup)** — Full node / RPC node, không cần keys, dùng cho explorer/dApp
-* **[🔑 Quản lý Keys](./key-management)** — Generate, backup, bảo mật, rotation
+* **[⚡ Chạy Validator Node](./validator-setup)** — Hướng dẫn cài đặt, cấu hình và chạy một validator node độc lập.
+* **[🔄 Chạy Sync-Only Node](./synconly-setup)** — Full node đồng bộ dữ liệu mạng để làm RPC công khai hoặc phục vụ Explorer.
+* **[🚀 Triển khai Cụm Node Local](./deployment-guide)** — Hướng dẫn sử dụng bộ công cụ điều phối `systemd-cluster.sh` và `install-rpc-systemd.sh` trên cùng một máy chủ.
+* **[🔑 Quản lý Keys](./key-management)** — Sinh khóa, sao lưu, bảo mật và phân quyền các file keys.
 
 ---
 
-## 🔒 Port Mapping mặc định
+## 🔒 Port Mapping mặc định (Cụm Local 5 Nodes)
 
-Khi chạy cụm node thử nghiệm (ví dụ 4 nodes), các cổng mạng cố định được ánh xạ như sau để tránh xung đột:
+Khi chạy thử nghiệm nhiều node trên cùng một máy chủ vật lý, các cổng mạng được cấu hình tự động dựa trên chỉ số của node (`N` từ `0` đến `4`) để tránh xung đột cổng:
 
-| Dịch vụ | Node 0 | Node 1 | Node 2 | Node 3 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Go Master RPC** | `8757` | `10747` | `10749` | `10750` |
-| **Go Sub RPC** | `8646` | `10646` | `10650` | `10651` |
-| **Go Master Connect**| `4201` | `6201` | `6211` | `6221` |
-| **Rust P2P Consensus**| `9000` | `9001` | `9002` | `9003` |
-| **Rust Peer RPC** | `19000` | `19001` | `19002` | `19003` |
-| **Rust Metrics** | `9100` | `9101` | `9102` | `9103` |
+| Dịch vụ | Node 0 | Node 1 | Node 2 | Node 3 | Node 4 (Sync-only) | Công thức / File `.env` |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Execution RPC** | `10746` | `10747` | `10748` | `10749` | `10750` | `RPC_PORT` (`10746 + N`) |
+| **RPC Proxy (MetaMask)** | `8545` | `8546` | `8547` | `8548` | `8549` | `SERVER_PORT` (`8545 + N`) |
+| **Execution P2P** | `6200` | `6201` | `6202` | `6203` | `6204` | `P2P_PORT` (`6200 + N`) |
+| **Rust Consensus P2P** | `9000` | `9001` | `9002` | `9003` | `9004` | `CONSENSUS_PORT` (`9000 + N`) |
+| **Snapshot Server** | `8600` | `8601` | `8602` | `8603` | `8604` | `SNAPSHOT_SERVER_PORT` (`8600 + N`) |
+| **Consensus Metrics** | `9100` | `9101` | `9102` | `9103` | `9104` | `METRICS_PORT` (`9100 + N`) |
+

@@ -61,9 +61,10 @@ Thay `YOUR_PUBLIC_IP` bằng địa chỉ IP public của server và `0` bằng 
 
 | File | Mô tả | Bảo mật |
 |------|--------|---------|
-| `node_0_protocol_key.json` | BLS protocol key (Rust consensus) | 🔴 Bí mật tuyệt đối |
-| `node_0_network_key.json` | Ed25519 network key (Rust P2P) | 🔴 Bí mật tuyệt đối |
-| `node_0_authority_key.json` | BLS authority key (Go execution) | 🔴 Bí mật tuyệt đối |
+| `node-0_protocol_key.json` | BLS protocol key (Rust consensus) | 🔴 Bí mật tuyệt đối |
+| `node-0_network_key.json` | Ed25519 network key (Rust P2P) | 🔴 Bí mật tuyệt đối |
+| `node-0_authority_key.json` | BLS authority key (Go execution) | 🔴 Bí mật tuyệt đối |
+| `setup_firewall.sh` | Script mở cổng firewall UFW tự động cho node | ✅ Công khai |
 | `validator.env` | File cấu hình đã điền sẵn keys | 🔴 Không commit lên Git |
 | `node-0_genesis.json` | Thông tin đăng ký gửi genesis coordinator | ✅ Gửi cho team |
 
@@ -125,8 +126,30 @@ Tất cả các trường khác (keys, ports) đã được `gen_validator_entry
 | `ETH_PRIVATE_KEY` | Ethereum private key (hex, không có 0x) | tự động điền |
 | `ETH_ADDRESS` | Ethereum address (hex, không có 0x) | tự động điền |
 | `PEER_RPC_ADDRESSES` | IP:port của các validator khác | **cần điền thủ công** |
-| `RPC_PORT` | JSON-RPC port (DApp/wallet) | `:8757` |
+| `RPC_PORT` | JSON-RPC port (DApp/wallet) | `:10746` |
 | `PEER_RPC_PORT` | Consensus port giữa các validators | `19200` |
+
+---
+
+## Bước 4.5 — Cấu hình Tường lửa (Firewall) ⚠️ Quan trọng
+
+Để các node có thể kết nối với nhau qua internet hoặc mạng nội bộ, bạn cần mở các cổng mạng tương ứng. Script `setup_firewall.sh` đã được tự động tạo sẵn trong thư mục keys và cấu hình chính xác các cổng riêng biệt cho node này.
+
+**Chạy script để mở cổng qua UFW:**
+
+```bash
+cd metanode/deploy
+sudo bash ./node-0_keys/setup_firewall.sh
+```
+
+Script này tự động:
+1. Đảm bảo luật SSH (cổng `22`) được bật để bạn không bị ngắt kết nối.
+2. Mở cổng **Consensus P2P** (`CONSENSUS_PORT`, mặc định `9000 + node_id`).
+3. Mở cổng **Execution P2P** (`P2P_PORT`, mặc định `6200 + node_id`).
+4. Mở cổng **Peer RPC** (`PEER_RPC_PORT`, mặc định `19200 + node_id`) phục vụ sync & attestation.
+5. Mở cổng **Snapshot Server** (`SNAPSHOT_SERVER_PORT`, mặc định `8600 + node_id`).
+6. Mở cổng **Metrics** (`METRICS_PORT`, mặc định `9100 + node_id`).
+7. Mở cổng **RPC Proxy (MetaMask)** (`8545 + node_id`) để các dApp bên ngoài kết nối.
 
 ---
 
@@ -143,22 +166,21 @@ Script sẽ hỏi xác nhận trước khi bắt đầu. Sau khi xác nhận, qu
 
 **Những gì script thực hiện:**
 1. Tạo system user `metanode` (nếu chưa có)
-2. Tạo cấu trúc thư mục tại `/opt/metanode/`
+2. Tạo cấu trúc thư mục tại `/opt/metanode/node-0/`
 3. Build Go binary (`simple_chain`) và Rust binary (`metanode`) từ source
-4. Copy configs, keys, và `genesis.json` vào `/opt/metanode/`
-5. Cài đặt và enable 2 systemd services
+4. Copy configs, keys, và `genesis.json` vào `/opt/metanode/node-0/`
+5. Cài đặt và enable 2 systemd services (có đính kèm ID node ở đuôi service)
 6. Khởi động cả 2 services
 
 Kết thúc thành công sẽ hiển thị:
 ```
 ══════════════════════════════════════
   Installation complete!
+  Node ID: 0
+  Services installed:
+  - metanode-execution-0.service
+  - metanode-consensus-0.service
 ══════════════════════════════════════
-● metanode-execution.service - Metanode Execution Layer (Go)
-   Active: active (running)
-
-● metanode-consensus.service - Metanode Consensus Engine (Rust)
-   Active: active (running)
 ```
 
 ---
@@ -166,21 +188,21 @@ Kết thúc thành công sẽ hiển thị:
 ## Bước 6 — Kiểm tra node
 
 ```bash
-# Xem trạng thái services
-sudo systemctl status metanode-execution
-sudo systemctl status metanode-consensus
+# Xem trạng thái services (thay 0 bằng node_id của bạn)
+sudo systemctl status metanode-execution-0
+sudo systemctl status metanode-consensus-0
 
 # Follow log execution (Go) — real-time
-journalctl -u metanode-execution -f
+journalctl -u metanode-execution-0 -f
 
 # Follow log consensus (Rust) — lọc các sự kiện quan trọng
-journalctl -u metanode-consensus -f | grep -i "commit\|epoch\|peer\|block"
+journalctl -u metanode-consensus-0 -f | grep -i "commit\|epoch\|peer\|block"
 
 # Xem log trực tiếp từ file (Go execution layer)
-tail -f /opt/metanode/logs/execution/go-master/App.log
+tail -f /opt/metanode/node-0/logs/execution/execution.log
 
 # Kiểm tra block height (phải tăng dần)
-curl -s -X POST http://localhost:8757 \
+curl -s -X POST http://localhost:10746 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -194,22 +216,22 @@ Dấu hiệu node hoạt động tốt:
 
 ## Quản lý node
 
-### Lệnh cơ bản
+### Lệnh cơ bản (thay 0 bằng node_id của bạn)
 
 ```bash
 # Dừng node (Rust trước, Go sau — quan trọng!)
-sudo systemctl stop metanode-consensus
-sudo systemctl stop metanode-execution
+sudo systemctl stop metanode-consensus-0
+sudo systemctl stop metanode-execution-0
 
 # Khởi động lại (Go trước, Rust sau)
-sudo systemctl start metanode-execution
-sudo systemctl start metanode-consensus
+sudo systemctl start metanode-execution-0
+sudo systemctl start metanode-consensus-0
 
 # Restart nhanh
-sudo systemctl restart metanode-execution metanode-consensus
+sudo systemctl restart metanode-execution-0 metanode-consensus-0
 
 # Xem trạng thái cả hai
-sudo systemctl status metanode-execution metanode-consensus
+sudo systemctl status metanode-execution-0 metanode-consensus-0
 ```
 
 :::warning
@@ -221,10 +243,10 @@ Luôn dừng theo thứ tự: **Rust trước → Go sau**. Dừng Go trước k
 Nếu service bị crash nhiều lần liên tiếp, systemd sẽ chặn tự động restart (báo lỗi `Start request repeated too quickly`). Để gỡ khóa:
 
 ```bash
-sudo systemctl reset-failed metanode-execution
-sudo systemctl reset-failed metanode-consensus
-sudo systemctl start metanode-execution
-sudo systemctl start metanode-consensus
+sudo systemctl reset-failed metanode-execution-0
+sudo systemctl reset-failed metanode-consensus-0
+sudo systemctl start metanode-execution-0
+sudo systemctl start metanode-consensus-0
 ```
 
 ### Cập nhật phiên bản mới
@@ -235,10 +257,10 @@ git pull
 sudo bash deploy/install.sh --config /path/to/node-0_keys/validator.env
 ```
 
-### Cấu trúc thư mục sau cài đặt
+### Cấu trúc thư mục sau cài đặt (tại `/opt/metanode/node-0`)
 
 ```
-/opt/metanode/
+/opt/metanode/node-0/
 ├── bin/
 │   ├── simple_chain          # Go execution binary
 │   ├── metanode              # Rust consensus binary
@@ -254,5 +276,7 @@ sudo bash deploy/install.sh --config /path/to/node-0_keys/validator.env
 │   ├── execution/            # Go DB, snapshots, backup
 │   └── consensus/            # Rust DAG storage
 └── logs/
-    └── execution/go-master/  # Go application logs
+    ├── execution/            # Go logs
+    └── consensus/            # Rust logs
 ```
+
