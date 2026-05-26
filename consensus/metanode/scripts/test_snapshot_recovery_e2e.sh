@@ -24,7 +24,7 @@ DST_RPC_PORT=$((8757 + (DST_NODE == 0 ? 0 : DST_NODE == 1 ? 1990 : DST_NODE == 2
 
 SNAPSHOT_PORT=$((8600 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db changelog_db_account changelog_db_stake"
+LEVELDB_DIRS="account_state blocks receipts transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
 
 TX_PUMP_PID=""
 
@@ -123,7 +123,7 @@ DST="$GO_DIR/sample/node$DST_NODE"
 log "  🗑️ Wiping Node $DST_NODE state..."
 rm -rf "$DST/data" "$DST/data-write" "$DST/back_up" "$DST/back_up_write"
 rm -rf "$LOG_BASE/node_$DST_NODE" "$RUST_DIR/config/storage/node_$DST_NODE"
-rm -rf "$GO_DIR/sample/node${DST_NODE}/data/data/rust_consensus" 2>/dev/null || true
+rm -rf "$GO_DIR/sample/node${DST_NODE}/data/data/consensus/rust_consensus" 2>/dev/null || true
 
 log "  📥 Downloading Snapshot from Node $SRC_NODE..."
 DOWNLOAD_URL="${SNAPSHOT_URL}/files/${SNAP_NAME}/"
