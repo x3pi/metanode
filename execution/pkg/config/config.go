@@ -34,7 +34,7 @@ const (
 	PathTransactionState       = "/history/transaction_state/"
 	PathBlockHashToNumber      = "/history/block_hash_to_number/"
 	PathWallets                = "/consensus/wallets/"
-	PathMapping                = "/consensus/mapping/"
+	PathMapping                = "/history/mapping/"
 	PathBackup                 = "/consensus/backup_db/"
 	PathStake                  = "/consensus/stake_db/"
 	PathXapian                 = "/consensus/xapian"

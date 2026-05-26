@@ -358,7 +358,7 @@ var storageTypeToDirName = map[StorageType]string{
 	STORAGE_BLOCK:             "blocks",
 	STORAGE_RECEIPTS:          "receipts",
 	STORAGE_TRANSACTION:       "transaction_state",
-	STORAGE_MAPPING_DB:        "mapping",
+	STORAGE_MAPPING_DB:        "history/mapping",
 	STORAGE_CODE:              "smart_contract_code",
 	STORAGE_SMART_CONTRACT:    "smart_contract_storage",
 	STORAGE_STAKE:             "stake_db",
