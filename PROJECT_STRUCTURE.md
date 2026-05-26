@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-25
+> **Last updated:** 2026-05-26
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---

@@ -1,113 +1,147 @@
 ---
 sidebar_position: 5
-title: 🚀 Hướng dẫn Triển khai Cụm Node
+title: 🚀 Triển khai Cụm Node Local (Systemd)
 ---
 
-# 🚀 Hướng dẫn Triển khai Cụm Node
+# 🚀 Triển khai Cụm Node Local (Systemd)
 
-Metanode hỗ trợ hệ thống triển khai tự động hóa thông qua các script shell. Bạn chỉ cần cấu hình một file duy nhất `deploy.env`, hệ thống sẽ tự động build, đẩy binary qua SSH, tự động cập nhật IP và khởi động cụm node.
-
----
-
-## 📐 Mô hình Triển khai Cụm
-
-Sơ đồ phân bổ tiến trình chạy trên 2 máy chủ mẫu:
-
-```
-┌─────────────────────┐    ┌─────────────────────┐
-│  Server B           │    │  Server C           │
-│  192.168.1.231      │    │  192.168.1.232      │
-│                     │    │                     │
-│  Node 0 (Leader)    │    │  Node 2             │
-│  Node 1             │    │  Node 3             │
-└─────────────────────┘    └─────────────────────┘
-```
-
-Mỗi node đại diện cho 3 tiến trình chạy độc lập trong các session `tmux`: `go-master-N` + `go-sub-N` + `metanode-N`.
+Tài liệu này hướng dẫn cách sử dụng bộ công cụ điều phối để cài đặt, chạy, quản lý và khôi phục cụm gồm **5 node** (4 validator + 1 sync-only) trên cùng một máy chủ vật lý Linux thông qua hệ thống quản lý dịch vụ **systemd**.
 
 ---
 
-## ⚙️ Cấu hình Tự động — `deploy.env`
+## 🛠️ Bộ ba công cụ quản trị (Deploy Scripts)
 
-**Đây là file cấu hình duy nhất cần điều chỉnh.** Tất cả các địa chỉ IP trong tệp cấu hình của các node sẽ tự động đồng bộ theo mapping `NODE_SERVER`.
+Tất cả các công cụ quản trị nằm tại thư mục `deploy/` của repository:
+
+1. **`setup-cluster-btrfs.sh`**: Khởi tạo phân vùng hệ thống file **BTRFS** tại `/opt/metanode` để hỗ trợ sao lưu (snapshot) copy-on-write tốc độ cao.
+2. **`systemd-cluster.sh`**: Công cụ điều phối tổng (**Orchestrator**) quản lý cài đặt, khởi động, dừng và kiểm tra trạng thái của cả 5 node.
+3. **`install-rpc-systemd.sh`**: Công cụ cài đặt và chạy dịch vụ **RPC Proxy** (`metanode-rpc-N.service`) riêng biệt cho mỗi node.
+4. **`restore_node_systemd.sh`**: Công cụ khôi phục an toàn (Sequential & Fork-Safe) một node từ snapshot của node khác.
+
+---
+
+## 📂 Bước 1 — Thiết lập Phân vùng BTRFS cho Snapshot
+
+Snapshot trong Metanode sử dụng tính năng **reflink** (copy-on-write) để nhân bản dữ liệu tức thì mà không gây nghẽn đĩa. Hệ thống file thông thường (`ext4`) không được hỗ trợ.
+
+Chạy script cấu hình phân vùng BTRFS duy nhất 1 lần trước khi cài đặt cụm node:
 
 ```bash
-# Cấu hình kết nối SSH
-SSH_USER="abc"
-SSH_AUTH="password"          # Chọn "key" hoặc "password"
-SSH_PASSWORD="1234@abcd"
+cd deploy/
+sudo bash setup-cluster-btrfs.sh
+```
 
-# Địa chỉ IP của các Server đích
-SERVER_B="192.168.1.231"
-SERVER_C="192.168.1.232"
+**Cách thức hoạt động của script:**
+- Kiểm tra nếu máy có LVM (`ubuntu-vg`), nó sẽ tạo một Logical Volume 400GB chuẩn BTRFS.
+- Nếu không có LVM, nó sẽ tạo file ảnh ảo (Sparse File) 400GB làm loop device tại `/opt/metanode_cluster_btrfs.img` và định dạng BTRFS.
+- Gắn (mount) phân vùng vào `/opt/metanode`.
+- Cấu hình mount tự động khi khởi động lại hệ thống trong `/etc/fstab`.
 
-# Node → Server mapping (Chỉ định Node chạy trên Server nào)
-NODE_SERVER[0]="$SERVER_B"   # Node 0 chạy trên Server B
-NODE_SERVER[1]="$SERVER_B"   # Node 1 chạy trên Server B
-NODE_SERVER[2]="$SERVER_C"   # Node 2 chạy trên Server C
-NODE_SERVER[3]="$SERVER_C"   # Node 3 chạy trên Server C
+---
+
+## 🔑 Bước 2 — Tạo Keys cho Cụm Node
+
+Tạo thư mục cấu hình và khóa cho các node trong cluster:
+
+```bash
+# Tạo keys cho 4 Validator Node (0, 1, 2, 3)
+python3 gen_validator_entry.py --hostname node-0 --node-type validator --ip 127.0.0.1 --node-id 0
+python3 gen_validator_entry.py --hostname node-1 --node-type validator --ip 127.0.0.1 --node-id 1
+python3 gen_validator_entry.py --hostname node-2 --node-type validator --ip 127.0.0.1 --node-id 2
+python3 gen_validator_entry.py --hostname node-3 --node-type validator --ip 127.0.0.1 --node-id 3
+
+# Tạo keys cho 1 Sync-Only Node (4)
+python3 gen_validator_entry.py --hostname node-4 --node-type synconly --ip 127.0.0.1 --node-id 4
 ```
 
 ---
 
-## 🛠️ Sử dụng Lệnh Triển khai
+## 🚀 Bước 3 — Cài đặt và Chạy Cụm Node
 
-### Triển khai Toàn bộ (Full Deploy)
+### 1. Khởi tạo cụm mới (Xóa sạch dữ liệu cũ)
+Sử dụng lệnh `setup` để xóa toàn bộ cơ sở dữ liệu cũ, biên dịch mã nguồn và cài đặt lại cụm từ block 0 (genesis):
+
 ```bash
-./deploy_cluster.sh --all
+# Cài đặt toàn bộ 5 nodes (sẽ hỏi xác nhận xóa data)
+sudo bash systemd-cluster.sh setup
+
+# Cài đặt tự động đồng ý và bỏ qua bước hỏi
+sudo bash systemd-cluster.sh setup -y
 ```
 
-Các bước script sẽ tự động thực hiện:
-1. **Kiểm tra kết nối SSH** tới toàn bộ danh sách server.
-2. **Biên dịch cục bộ (Build local)** mã nguồn Rust & Go ra binary.
-3. **Dừng cụm node cũ (Stop old cluster)** đang chạy trên remote server.
-4. **Đẩy tài nguyên (Push)** binary và config files sang các server đích.
-5. **Cập nhật IP tự động (Update IPs)** dựa theo phân vùng map của `deploy.env`.
-6. **Làm sạch database cũ (Clean data)** và **Khởi chạy cụm node mới (Start nodes)**.
+### 2. Khởi động toàn bộ cụm node
+```bash
+sudo bash systemd-cluster.sh start
+```
+Thứ tự khởi động tự động: Khởi động execution layer (Go) -> chờ 3 giây -> khởi động consensus layer (Rust).
 
-### Các tùy chọn lệnh linh hoạt khác
+### 3. Cài đặt và khởi chạy RPC Proxy Services
+Dịch vụ RPC Proxy cần được khởi chạy riêng biệt để cung cấp endpoint JSON-RPC chuẩn cho MetaMask và dApps kết nối:
 
-* **Chỉ build binary:**
+```bash
+# Biên dịch rpc-client và cài đặt systemd service cho tất cả 5 node
+sudo bash install-rpc-systemd.sh
+
+# Cài đặt lại và bỏ qua bước build lại code (dùng binary hiện có)
+sudo bash install-rpc-systemd.sh --no-build
+
+# Cài đặt riêng cho chỉ Node 4
+sudo bash install-rpc-systemd.sh --node 4
+```
+
+---
+
+## ⚙️ Quản lý và Vận hành Cụm Node
+
+### Lệnh quản lý thông dụng của `systemd-cluster.sh`
+
+* **Xem bảng trạng thái dashboard:**
   ```bash
-  ./deploy_cluster.sh --build
+  bash systemd-cluster.sh status
   ```
-* **Chỉ đẩy binary và cập nhật file cấu hình IP:**
+  Cho biết trạng thái **Active** / **Inactive** của các service execution và consensus trên từng node.
+
+* **Kiểm tra chiều cao khối (Block Height) thời gian thực:**
   ```bash
-  ./deploy_cluster.sh --push --ips
+  bash systemd-cluster.sh check
   ```
-* **Chỉ khởi động cụm node:**
+
+* **Cập nhật binary/config mới (KHÔNG mất dữ liệu):**
   ```bash
-  ./deploy_cluster.sh --start
+  # Biên dịch lại code mới và cập nhật cấu hình cho toàn cụm, dữ liệu blockchain được giữ nguyên
+  sudo bash systemd-cluster.sh install
   ```
-* **Dừng toàn bộ cụm node:**
+
+* **Dừng an toàn (Graceful Stop):**
   ```bash
-  ./deploy_stop.sh
+  sudo bash systemd-cluster.sh stop
   ```
-* **Kiểm tra trạng thái sức khỏe cụm node:**
+
+* **Xem log thời gian thực:**
   ```bash
-  ./deploy_status.sh
+  # Xem log execution (Go) của Node 0
+  bash systemd-cluster.sh logs 0
+  
+  # Xem log consensus (Rust) của Node 0
+  bash systemd-cluster.sh logs 0 consensus
   ```
 
 ---
 
-## 🔍 Kiểm tra & Xử lý sự cố (Troubleshooting)
+## 📸 Khôi phục Node từ Snapshot (Fast Sync)
 
-### Kiểm tra Trạng thái Node
+Nếu một node bị lỗi dữ liệu hoặc bạn muốn đồng bộ nhanh một node mới mà không cần chạy lại từ block 0:
+
 ```bash
-./deploy_status.sh
-```
-Lệnh này sẽ kiểm tra trạng thái hoạt động của các session `tmux`, gRPC API health, chiều cao khối (block height), đồng bộ hóa consensus, và log tail của từng node.
+# Khôi phục Node 2 từ bản snapshot mới nhất lấy từ Node 0 (Local HTTP)
+sudo bash restore_node_systemd.sh 2
 
-### Xem log trực tiếp từ Remote Server
-```bash
-# Xem log của Go Master Node 0
-ssh abc@192.168.1.231 "tail -50 logs/node_0/go-master-stdout.log"
+# Khôi phục Node 1 từ một bản snapshot cụ thể tên snap_epoch_5_block_2500 từ Node 0
+sudo bash restore_node_systemd.sh 1 snap_epoch_5_block_2500
 
-# Xem log của Rust Consensus Node 0
-ssh abc@192.168.1.231 "tail -50 logs/node_0/rust.log"
+# Khôi phục Node 2 lấy snapshot mới nhất từ Node 1
+sudo bash restore_node_systemd.sh 2 "" 1
 ```
 
-### Kết nối vào TMUX session để Debug trực quan
-```bash
-ssh abc@192.168.1.231 "tmux attach -t go-master-0"
-```
+Script sẽ tự động dừng dịch vụ của node đích, tải snapshot qua HTTP, xóa dữ liệu cũ, khôi phục cấu trúc thư mục, thiết lập phân quyền sở hữu cho người dùng `metanode`, khởi động lại dịch vụ và giám sát quá trình đồng bộ (sync monitoring) phòng chống rẽ nhánh (fork).
+

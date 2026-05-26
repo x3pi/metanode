@@ -4,12 +4,14 @@
 #  Quản lý toàn bộ cluster (0-4 nodes) trên 1 máy qua systemd
 #
 #  Cách dùng:
+#    sudo bash systemd-cluster.sh setup              # Xóa data + cài mới (chạy lần đầu hoặc reset)
+#    sudo bash systemd-cluster.sh install            # Cập nhật binary/config, GIỮ NGUYÊN data
+#    sudo bash systemd-cluster.sh install --node 0   # Cài 1 node cụ thể
 #    sudo bash systemd-cluster.sh start              # Khởi động toàn bộ
 #    sudo bash systemd-cluster.sh stop               # Dừng toàn bộ
 #    sudo bash systemd-cluster.sh restart            # Restart toàn bộ
 #    sudo bash systemd-cluster.sh status             # Xem trạng thái
-#    sudo bash systemd-cluster.sh install            # Cài đặt lần đầu
-#    sudo bash systemd-cluster.sh install --node 0   # Cài 1 node cụ thể
+#    sudo bash systemd-cluster.sh check              # Kiểm tra block height
 #    sudo bash systemd-cluster.sh logs 0             # Xem log node 0
 #    sudo bash systemd-cluster.sh reset-failed       # Gỡ rate-limit
 # ═══════════════════════════════════════════════════════════════════
@@ -198,42 +200,120 @@ cmd_logs() {
         exit 1
     fi
 
-    local se=$(svc_exec $node_id)
-    local sc=$(svc_consensus $node_id)
+    local install_dir="/opt/metanode-${node_id}"
+    local exec_log="${install_dir}/logs/execution/execution.log"
+    local cons_log="${install_dir}/logs/consensus/consensus.log"
 
     case "$layer" in
         execution)
             log_info "Theo dõi log execution Node ${node_id} (Ctrl+C để thoát)..."
-            journalctl -u "$se" -f
+            tail -f "$exec_log" 2>/dev/null || echo "Chưa có file log $exec_log"
             ;;
         consensus)
             log_info "Theo dõi log consensus Node ${node_id} (Ctrl+C để thoát)..."
-            journalctl -u "$sc" -f | grep -i "commit\|epoch\|peer\|error\|block" || true
+            tail -f "$cons_log" 2>/dev/null | grep -i "commit\|epoch\|peer\|error\|block\|sync" || echo "Chưa có file log $cons_log"
             ;;
         both|*)
             log_info "Theo dõi log cả 2 service Node ${node_id} (Ctrl+C để thoát)..."
-            journalctl -u "$se" -u "$sc" -f
+            tail -f "$exec_log" "$cons_log" 2>/dev/null || echo "Chưa có file log"
             ;;
     esac
 }
 
 # ═══════════════════════════════════════════════════════════════════
-#  LỆNH: INSTALL — Cài đặt toàn bộ hoặc 1 node
+#  LỆNH: SETUP — Xóa toàn bộ data cũ rồi cài mới (fresh start)
+#  Dùng khi: Khởi tạo mạng lần đầu, reset testnet, thay genesis.json
+#  CẢNH BÁO: Toàn bộ blockchain data sẽ bị XÓA vĩnh viễn!
 # ═══════════════════════════════════════════════════════════════════
 
-cmd_install() {
+cmd_setup() {
     local only_node="all"
-    local fresh=false
+    local auto_yes=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
-            --fresh) fresh=true; shift ;;
+            -y|--yes) auto_yes="-y"; shift ;;
             *) shift ;;
         esac
     done
 
-    log_phase "CÀI ĐẶT CLUSTER METANODE"
+    # Xác nhận xóa data (trừ khi có -y)
+    if [ -z "$auto_yes" ]; then
+        echo ""
+        echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${RED}║  ⚠️  CẢNH BÁO: LỆNH SETUP SẼ XÓA TOÀN BỘ BLOCKCHAIN DATA  ║${NC}"
+        echo -e "${RED}║                                                              ║${NC}"
+        if [ "$only_node" = "all" ]; then
+        echo -e "${RED}║  Xóa data của: TẤT CẢ 5 NODE (0, 1, 2, 3, 4)               ║${NC}"
+        else
+        echo -e "${RED}║  Xóa data của: NODE ${only_node}                                        ║${NC}"
+        fi
+        echo -e "${RED}║                                                              ║${NC}"
+        echo -e "${RED}║  Bao gồm: execution db, consensus storage, snapshots, logs  ║${NC}"
+        echo -e "${RED}║  KHÔNG THỂ KHÔI PHỤC sau khi xóa!                          ║${NC}"
+        echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        read -p "  Bạn có chắc chắn muốn xóa data và cài lại? [y/N] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_warn "Đã hủy. Data không bị xóa."
+            exit 0
+        fi
+    fi
+
+    log_phase "SETUP CLUSTER METANODE (FRESH — XÓA DATA CŨ)"
+
+    # Dừng tất cả services trước khi xóa data
+    log_info "Dừng tất cả services trước khi xóa..."
+    cmd_stop "${only_node}" 2>/dev/null || true
+    sleep 2
+
+    # Xóa data
+    for i in "${!NODE_IDS[@]}"; do
+        local nid="${NODE_IDS[$i]}"
+        [ "$only_node" != "all" ] && [ "$only_node" != "$nid" ] && continue
+
+        local node_dir="/opt/metanode/node-${nid}"
+        if [ -d "$node_dir" ]; then
+            log_warn "Đang xóa data Node ${nid}: ${node_dir}/data/ và ${node_dir}/logs/..."
+            # Xóa execution data
+            rm -rf "${node_dir}/data/execution"
+            # Xóa consensus storage
+            rm -rf "${node_dir}/data/consensus"
+            # Xóa logs
+            rm -rf "${node_dir}/logs/execution"
+            rm -rf "${node_dir}/logs/consensus"
+            log_ok "Node ${nid}: data đã xóa sạch"
+        else
+            log_warn "Node ${nid}: thư mục ${node_dir} chưa tồn tại, bỏ qua"
+        fi
+    done
+
+    echo ""
+    log_info "Bắt đầu cài đặt lại sau khi xóa data..."
+    cmd_install --node "${only_node}" $auto_yes
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  LỆNH: INSTALL — Cập nhật binary/config, KHÔNG xóa data
+#  Dùng khi: Update code, thay đổi cấu hình, cài thêm node mới
+# ═══════════════════════════════════════════════════════════════════
+
+cmd_install() {
+    local only_node="all"
+    local auto_yes=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --node) only_node="$2"; shift 2 ;;
+            -y|--yes) auto_yes="-y"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    log_phase "CÀI ĐẶT / CẬP NHẬT CLUSTER METANODE"
+    log_info "(Data hiện tại được GIỮ NGUYÊN — dùng 'setup' nếu muốn xóa data)"
 
     for i in "${!NODE_IDS[@]}"; do
         local nid="${NODE_IDS[$i]}"
@@ -249,7 +329,7 @@ cmd_install() {
         fi
 
         log_info "Đang cài đặt Node ${nid} (${ntype})..."
-        bash "$DEPLOY_DIR/install.sh" --config "$cfg"
+        bash "$DEPLOY_DIR/install.sh" --config "$cfg" $auto_yes
         log_ok "Node ${nid} đã cài xong"
 
         if [ "$only_node" = "all" ] && [ "$i" -lt $(( ${#NODE_IDS[@]} - 1 )) ]; then
@@ -327,6 +407,7 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
+    setup)        cmd_setup "$@" ;;
     start)        cmd_start "$@" ;;
     stop)         cmd_stop "$@" ;;
     restart)      cmd_restart "$@" ;;
@@ -343,8 +424,11 @@ case "$CMD" in
         echo "  sudo bash $0 <command> [options]"
         echo ""
         echo "Commands:"
-        echo "  install              Cài đặt toàn bộ cluster (lần đầu)"
-        echo "  install --node N     Cài đặt chỉ Node N"
+        echo "  setup                XÓA DATA + cài mới (lần đầu / reset testnet)"
+        echo "  setup --node N       XÓA DATA + cài mới chỉ Node N"
+        echo "  setup -y             Không hỏi xác nhận"
+        echo "  install              Cập nhật binary/config, GIỮ NGUYÊN data"
+        echo "  install --node N     Cập nhật chỉ Node N"
         echo "  start                Khởi động toàn bộ cluster"
         echo "  start N              Khởi động chỉ Node N"
         echo "  stop                 Dừng toàn bộ cluster"
@@ -359,7 +443,9 @@ case "$CMD" in
         echo "  reset-failed         Gỡ bỏ rate-limit systemd (sau crash loop)"
         echo ""
         echo "Ví dụ:"
-        echo "  sudo bash $0 install             # Cài lần đầu"
+        echo "  sudo bash $0 setup               # Lần đầu hoặc reset mạng"
+        echo "  sudo bash $0 setup -y            # Reset không hỏi xác nhận"
+        echo "  sudo bash $0 install             # Update code, giữ data"
         echo "  sudo bash $0 start               # Khởi động tất cả"
         echo "  sudo bash $0 status              # Kiểm tra trạng thái"
         echo "  sudo bash $0 check               # Kiểm tra block height"
