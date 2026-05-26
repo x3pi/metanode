@@ -154,39 +154,69 @@ mkdir -p /opt/metanode/data/consensus
 
 ---
 
-### Bước 6 — Cài đặt 2 systemd service units
+### Bước 6 — Cài đặt 2 systemd service units (Giải thích chi tiết cấu hình)
 
-#### `metanode-execution.service` (Go)
+Khi chạy node, hệ thống không chạy binary trực tiếp mà chạy dưới nền thông qua **systemd**. Cấu hình này giúp tự động khởi động lại khi crash, quản lý log và kiểm soát tài nguyên.
+
+#### 1. `metanode-execution.service` (Go Layer)
 
 ```ini
 [Unit]
+Description=Metanode Execution Layer (Go) — Node {NODE_ID}
 After=network-online.target
-Before=metanode-consensus.service   # Go phải start TRƯỚC Rust
+Wants=network-online.target
+Before=metanode-consensus.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
 
 [Service]
+Type=simple
 User=metanode
+WorkingDirectory=/opt/metanode/bin
 ExecStart=/opt/metanode/bin/simple_chain -config=/opt/metanode/config/execution.json
-TimeoutStopSec=90  # ← BẮT BUỘC để DB flush đúng khi shutdown
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=15s
+Environment=GOTRACEBACK=all
+Environment=GOMEMLIMIT=4GiB
+LimitNOFILE=100000
+StandardOutput=append:/opt/metanode/logs/execution/execution.log
+StandardError=append:/opt/metanode/logs/execution/execution.log
 ```
 
-**`TimeoutStopSec=90` — Tại sao bắt buộc?**  
-Khi nhận SIGTERM, Go layer cần ~90s để:
-1. Flush pending blocks vào NOMT state database
-2. Ghi `last_block.dat` (dùng cho crash recovery)
-3. Đóng tất cả BoltDB/LevelDB files sạch sẽ
+**Phân tích chi tiết cấu hình Execution:**
+- **`Before=metanode-consensus.service`**: Systemd đảm bảo rằng dịch vụ Go sẽ được khởi động **trước** dịch vụ Rust. Điều này là bắt buộc vì Rust cần kết nối vào Unix Socket do Go tạo ra.
+- **`StartLimitBurst=3` / `StartLimitIntervalSec=600`**: Giới hạn khởi động lại (Rate-limit). Nếu tiến trình crash quá 3 lần trong vòng 10 phút (600s), systemd sẽ khóa không cho tự động chạy lại nữa để tránh boot-loop. (Để gỡ khóa dùng lệnh `systemctl reset-failed`).
+- **`ExecStop=/bin/kill -SIGTERM $MAINPID` & `TimeoutStopSec=90`**: Khi dừng dịch vụ, gửi tín hiệu `SIGTERM` một cách mềm mại (graceful shutdown) và chờ tối đa 90 giây. **Đây là cấu hình quan trọng nhất (CRITICAL)**. Go layer cần thời gian để flush pending blocks vào NOMT state database và đóng tất cả tệp BoltDB/LevelDB sạch sẽ. Nếu systemd ép đóng (SIGKILL) quá sớm, database sẽ bị corrupt.
+- **`Restart=on-failure` & `RestartSec=15s`**: Nếu process chết bất thường, tự động khởi động lại sau 15 giây.
+- **`Environment=GOMEMLIMIT=4GiB`**: Giới hạn soft-limit cho Garbage Collector của Go, giúp Go xả bộ nhớ hiệu quả hơn khi đạt ngưỡng 4GB RAM, tránh bị OOM (Out Of Memory) trên các máy cấu hình thấp.
+- **`LimitNOFILE=100000`**: Tăng giới hạn số lượng file mở đồng thời (file descriptors). Hệ thống blockchain cần mở hàng nghìn connection P2P và các file cơ sở dữ liệu. Giới hạn mặc định (1024) của Linux là quá nhỏ và sẽ gây lỗi `too many open files`.
+- **`StandardOutput / StandardError`**: Chuyển hướng toàn bộ console logs ghi đè (append) vào file `execution.log` để dễ dàng tracking, thay vì chỉ lưu trong memory buffer của journald.
 
-Nếu systemd kill quá sớm (mặc định 90s), database có thể corrupt và phải restore từ snapshot.
-
-#### `metanode-consensus.service` (Rust)
+#### 2. `metanode-consensus.service` (Rust Layer)
 
 ```ini
 [Unit]
-Requires=metanode-execution.service   # Rust PHỤ THUỘC vào Go
-After=metanode-execution.service       # Rust khởi động SAU Go
+Description=Metanode Consensus Engine (Rust) — Node {NODE_ID}
+After=network-online.target metanode-execution.service
+Wants=network-online.target
+Requires=metanode-execution.service
+...
+[Service]
+ExecStart=/opt/metanode/bin/metanode start --config /opt/metanode/config/consensus.toml
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10s
+Environment=RUST_BACKTRACE=full
+LimitNOFILE=100000
+...
 ```
 
-**Tại sao Rust phụ thuộc vào Go?**  
-Rust consensus engine kết nối vào Go qua Unix Domain Socket (`/tmp/rust-go-nodeX-master.sock`). Socket này chỉ tồn tại sau khi Go đã khởi động và sẵn sàng. Nếu Rust start trước → không có socket → crash.
+**Phân tích chi tiết cấu hình Consensus:**
+- **`Requires=metanode-execution.service` & `After=metanode-execution.service`**: Ràng buộc cứng (Hard dependency). Rust service chỉ được khởi động SAU KHI Go service đã khởi động. Nếu Go service bị crash hoặc bị dừng bằng tay, systemd sẽ **tự động dừng** theo dịch vụ Rust. Tại sao? Vì Rust kết nối qua Unix Domain Socket của Go, không có Go thì Rust sẽ crash do mất liên lạc.
+- **`Environment=RUST_BACKTRACE=full`**: Nếu Rust gặp lỗi nghiêm trọng (panic), nó sẽ in ra toàn bộ lịch sử call stack (backtrace) vào file log để các lập trình viên dễ dàng debug.
+- **`TimeoutStopSec=60`**: Tương tự Go, Rust cũng có 60 giây để ghi nhận trạng thái DAG/Committee và đóng cơ sở dữ liệu RocksDB an toàn.
 
 ---
 

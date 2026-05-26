@@ -69,78 +69,9 @@ cp /path/to/genesis.json metanode/execution/cmd/simple_chain/genesis.json
 
 ---
 
-## Bước 4 — Hoàn thiện file cấu hình `.env`
+## Bước 4 — Cấu hình Tường lửa (Firewall) ⚠️ Quan trọng
 
-Mở file `node-sync-1_keys/synconly.env` và điền thêm các thông số còn thiếu:
-
-```bash
-nano node-sync-1_keys/synconly.env
-```
-
-**Các trường cần điền thêm:**
-
-```bash
-# Trỏ tới các validator để đồng bộ
-PEER_RPC_ADDRESSES="\"VALIDATOR_0_IP:19200\", \"VALIDATOR_1_IP:19201\", \"VALIDATOR_2_IP:19202\""
-```
-
-**Bảng các biến quan trọng trong `.env`:**
-
-| Biến | Ý nghĩa | Giá trị mặc định |
-|------|---------|-----------------|
-| `NODE_TYPE` | Loại node | `synconly` |
-| `NODE_ID` | ID node — dùng số lớn hơn số validator (VD: genesis có 4 validators → dùng 5+) | `5` |
-| `BLS_PRIVATE_KEY` | BLS key bất kỳ (không cần trong genesis) | tự động điền |
-| `ETH_PRIVATE_KEY` | ETH private key bất kỳ | tự động điền |
-| `ETH_ADDRESS` | ETH address tương ứng | tự động điền |
-| `RPC_PORT` | JSON-RPC port cho DApp/wallet | `:8762` |
-| `PEER_RPC_PORT` | Consensus sync port | `19205` |
-| `PEER_RPC_ADDRESSES` | IP:port các validator để sync | **cần điền thủ công** |
-| `SNAPSHOT_ENABLED` | Bật snapshot để node khác fast-sync từ bạn | `true` |
-| `IS_EXPLORER` | Archive toàn bộ lịch sử | `true` |
-| `EPOCHS_TO_KEEP` | `0` = lưu tất cả (archive mode) | `0` |
-
-:::note
-Sync-Only node **không cần keys thật**. `BLS_PRIVATE_KEY` và `ETH_PRIVATE_KEY` chỉ dùng để ký MetaTx outgoing, không ảnh hưởng đến consensus. Bạn có thể dùng keypair mới hoàn toàn (script sẽ tự generate).
-:::
-
----
-
----
-
-## Bước 4.5 — Setup BTRFS cho Snapshot ⚠️ Bắt buộc
-
-Sync-Only node mặc định bật `SNAPSHOT_ENABLED=true` trong `.env`. Nếu file system không phải BTRFS/XFS, **node sẽ crash ngay khi khởi động** với lỗi:
-```
-CRITICAL: Reflink (btrfs/xfs) is required for snapshotting. Please disable snapshot_enabled or use a supported filesystem.
-```
-
-Snapshot cần **reflink** (Copy-on-Write) của BTRFS/XFS để sao chép dữ liệu tức thì, không cần thời gian chờ. Ext4 thông thường không hỗ trợ.
-
-**Chạy script setup BTRFS một lần trước khi install:**
-
-```bash
-cd metanode/deploy
-sudo bash setup-cluster-btrfs.sh
-```
-
-Script sẽ tự động:
-- Thử tạo phân vùng 400GB chuẩn BTRFS từ LVM (`ubuntu-vg`) nếu có.
-- Nếu không có LVM: tạo sparse file 400GB tại `/opt/metanode_cluster_btrfs.img` làm loop device.
-- Format BTRFS và mount vào `/opt/metanode`.
-- Thêm entry vào `/etc/fstab` để tự mount sau khi reboot.
-
-**Hoặc tắt snapshot** nếu không cần (ví dụ: node chỉ dùng nội bộ, không cần cho node khác sync nhanh):
-```bash
-# Trong synconly.env:
-SNAPSHOT_ENABLED=false
-```
-
----
-
-## Bước 4.6 — Cấu hình Tường lửa (Firewall) ⚠️ Quan trọng
-
-Để các node có thể kết nối với nhau qua internet hoặc mạng nội bộ, bạn cần mở các cổng mạng tương ứng. Script `setup_firewall.sh` đã được tự động tạo sẵn trong thư mục keys và cấu hình chính xác các cổng riêng biệt cho node này.
+Để các node có thể kết nối với nhau qua mạng, bạn cần mở các cổng mạng tương ứng. Script `setup_firewall.sh` đã được tự động tạo sẵn và cấu hình chính xác các cổng riêng biệt cho node này.
 
 **Chạy script để mở cổng qua UFW:**
 
@@ -149,25 +80,18 @@ cd metanode/deploy
 sudo bash ./node-sync-1_keys/setup_firewall.sh
 ```
 
-Script này tự động:
-1. Đảm bảo luật SSH (cổng `22`) được bật để bạn không bị ngắt kết nối.
-2. Mở cổng **Consensus P2P** (`CONSENSUS_PORT`, mặc định `9000 + node_id`).
-3. Mở cổng **Execution P2P** (`P2P_PORT`, mặc định `6200 + node_id`).
-4. Mở cổng **Peer RPC** (`PEER_RPC_PORT`, mặc định `19200 + node_id`) phục vụ sync & attestation.
-5. Mở cổng **Snapshot Server** (`SNAPSHOT_SERVER_PORT`, mặc định `8600 + node_id`).
-6. Mở cổng **Metrics** (`METRICS_PORT`, mặc định `9100 + node_id`).
-7. Mở cổng **RPC Proxy (MetaMask)** (`8545 + node_id`) để các dApp bên ngoài kết nối.
-
 ---
 
-## Bước 5 — Chạy Install Script
+## Bước 5 — Khởi chạy Node (Install & Start)
+
+Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
 
 ```bash
-cd metanode/deploy
-sudo bash install.sh --config node-sync-1_keys/synconly.env
+sudo bash systemd-cluster.sh setup --node 4 -y
 ```
+*(Thay `4` bằng Node ID của bạn).*
 
-Script tự động: build binary từ source, tạo cấu hình, cài systemd services và khởi động node. Quá trình mất khoảng **10–15 phút**.
+Script này tự động làm mọi việc: tạo system user, build binary, cài cấu hình và khởi chạy cả 2 tiến trình Go (Execution) và Rust (Consensus). Sau khoảng **10–15 phút**, quá trình build sẽ hoàn tất.
 
 **Những gì script thực hiện:**
 1. Tạo system user `metanode`
@@ -175,7 +99,34 @@ Script tự động: build binary từ source, tạo cấu hình, cài systemd s
 3. Build Go (`simple_chain`) và Rust (`metanode`) binary từ source
 4. Copy configs và `genesis.json` vào `/opt/metanode/node-<node_id>/`
 5. Cài đặt và enable 2 systemd services (VD: `metanode-execution-4`, `metanode-consensus-4`)
+6. Khởi chạy cả 2 services
+1. Tạo system user `metanode`
+2. Tạo cấu trúc thư mục tại `/opt/metanode/node-<node_id>/`
+3. Build Go (`simple_chain`) và Rust (`metanode`) binary từ source
+4. Copy configs và `genesis.json` vào `/opt/metanode/node-<node_id>/`
+5. Cài đặt và enable 2 systemd services (VD: `metanode-execution-4`, `metanode-consensus-4`)
 6. Khởi động cả 2 services
+
+### Khởi chạy RPC Proxy (Tùy chọn cho MetaMask/dApp)
+
+Mặc định, service trên chỉ khởi chạy core node. Nếu bạn muốn mở endpoint RPC tương thích EVM (cho MetaMask hoặc dApp kết nối), hãy chạy thêm lệnh cài đặt RPC Proxy sau:
+
+```bash
+# Khởi chạy RPC Proxy cho Node 4 (tự động đọc port từ file .env)
+sudo bash install-rpc-systemd.sh --node 4
+```
+
+Lệnh này sẽ tự động build RPC client và tạo service `metanode-rpc-4` chạy ngầm.
+
+**Lệnh quản lý RPC:**
+```bash
+# Xem trạng thái và log RPC
+sudo systemctl status metanode-rpc-4
+journalctl -u metanode-rpc-4 -f
+
+# Dừng RPC (nếu muốn đóng endpoint)
+sudo bash install-rpc-systemd.sh --stop --node 4
+```
 
 ---
 
