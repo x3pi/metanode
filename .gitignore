@@ -219,9 +219,6 @@ hybrid-storage-demo/
 **/k8s/
 **/*.key
 **/*.pem
-**/*_key.json
-**/*_protocol_key.json
-**/*_network_key.json
 **/known_hosts
 # Kubernetes
 **/*.lcov
