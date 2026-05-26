@@ -227,8 +227,8 @@ for folder in "$SNAP_DIR"/*; do
   fi
 done
 # 🚨 CRITICAL: Remove `rust_consensus` imported from the snapshot to avoid split-brain.
-# Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a potentially dirty ahead-of-time DAG.
-rm -rf "$NODE_DATA/data/data/rust_consensus" 2>/dev/null || true
+# This forces the restored node to resync DAG state from peers.
+rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Removed dirty rust_consensus to force clean Phase: Bootstrapping${NC}"
 
 echo -e "${GREEN}  ✅ Data dirs copied${NC}"

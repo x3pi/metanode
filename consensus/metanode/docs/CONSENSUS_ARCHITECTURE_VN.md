@@ -469,7 +469,7 @@ sequenceDiagram
     Admin->>Script: ./restore_node.sh 1
     Script->>Go: Stop node process
     Script->>Go: Copy snapshot to data dir
-    Script->>DAG: rm -rf rust_consensus (clean DAG)
+    Script->>DAG: rm -rf consensus/rust_consensus (clean DAG)
     Script->>Go: Restart node
     
     Go->>Rust: FFI init: last_block=N, hash=0x00..00 (sentinel)

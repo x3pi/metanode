@@ -314,7 +314,8 @@ pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_
 
                     // Override storage path to live inside Go's data directory if provided
                     if !data_dir_str.is_empty() {
-                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
+                        // Override storage path for MystiCeti DAG storage
+                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("consensus").join("rust_consensus");
                         info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
                     }
 
@@ -386,7 +387,7 @@ fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Pat
 }
 
 /// Restore Rust consensus state from a snapshot directory.
-/// Purges data_dir/rust_consensus and copies snapshot_dir/rust_consensus into it safely.
+/// Purges data_dir/consensus/rust_consensus and copies snapshot_dir/consensus/rust_consensus into it safely.
 #[no_mangle]
 pub extern "C" fn metanode_restore_from_snapshot(data_dir_ptr: *const c_char, snapshot_dir_ptr: *const c_char) -> bool {
     let data_dir_str = unsafe {
@@ -399,8 +400,9 @@ pub extern "C" fn metanode_restore_from_snapshot(data_dir_ptr: *const c_char, sn
         CStr::from_ptr(snapshot_dir_ptr).to_string_lossy().into_owned()
     };
 
-    let target_dir = std::path::PathBuf::from(&data_dir_str).join("rust_consensus");
-    let source_dir = std::path::PathBuf::from(&snapshot_dir_str).join("rust_consensus");
+    // Target directory (the working consensus directory that needs to be replaced)
+    let target_dir = std::path::PathBuf::from(&data_dir_str).join("consensus").join("rust_consensus");
+    let source_dir = std::path::PathBuf::from(&snapshot_dir_str).join("consensus").join("rust_consensus");
 
     if !source_dir.exists() {
         error!("[FFI Restore] Snapshot source dir not found: {:?}", source_dir);

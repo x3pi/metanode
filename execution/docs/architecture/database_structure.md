@@ -21,8 +21,7 @@ Dưới đây là bảng tổng hợp tất cả các thư mục con lưu trữ 
 
 | Tên Hằng Số (Go) | Thư Mục Tương Đối | Ý Nghĩa / Mục Đích Sử Dụng | Loại Database (Backend) |
 | :--- | :--- | :--- | :--- |
-| `PathAccountState` | `/account_state/` | Lưu trữ số dư, nonce và các thông tin cơ bản của tài khoản người dùng. | NOMT / ShardelDB |
-| `PathTrie` | `/trie_database/` | Hệ thống Trie Storage (State Trie) phục vụ cho truy xuất và tính toán State Root. | ShardelDB / NOMT |
+| `account_state` | `/consensus/account_state/` | Lưu Account State (số dư, nonce, storage root của account). Dùng PebbleDB hoặc chuyển tiếp sang NOMT nếu bật. | PebbleDB / NOMT |
 | `PathSmartContractCode` | `/smart_contract_code/` | Chứa mã byte-code tĩnh của các smart contract đã deploy. | ShardelDB |
 | `PathSmartContractStorage` | `/smart_contract_storage/` | Lưu trữ state map động (các biến state) của các smart contract. | ShardelDB |
 | `PathBlocks` | `/blocks/` | Lưu trữ dữ liệu block hoàn chỉnh sau khi có consensus, phục vụ đồng bộ mạng. | ShardelDB |
@@ -39,7 +38,7 @@ Dưới đây là bảng tổng hợp tất cả các thư mục con lưu trữ 
 | `PathStake` | `/stake_db/` | Quản lý danh sách Validators, số dư Stake và cấu trúc biểu quyết. | NOMT / ShardelDB |
 | `PathXapian` | `/xapian/` | Lưu trữ chỉ mục tìm kiếm văn bản toàn văn phục vụ trình khám phá Explorer. | Xapian C++ |
 | `nomt_db` (Fixed) | `/nomt_db/` | Thư mục gốc cho CSDL NOMT phân bổ nếu hệ thống kích hoạt `state_backend="nomt"`. | NOMT |
-| `rust_consensus` (Rust)| `/rust_consensus/` | **(Thuộc tầng Consensus)** CSDL của lõi Rust Mysticeti (DAG, Certificates, Block proposals). Được FFI Bridge tự động override cấu hình của `node_X.toml` để gom chung vào `RootPath`. | RocksDB |
+| `rust_consensus` (Rust)| `/consensus/rust_consensus/` | **(Thuộc tầng Consensus)** CSDL của lõi Rust Mysticeti (DAG, Certificates, Block proposals). Được FFI Bridge tự động override cấu hình của `node_X.toml` để gom chung vào `RootPath`. | RocksDB |
 
 ## 3. Quy Ước Hoạt Động (Shared DB vs Fragmented DB)
 

@@ -447,7 +447,7 @@ run_single_round() {
     find "$dst_data" -name ".lock" -path "*/nomt_db/*" -delete 2>/dev/null || true
     # CRITICAL: Remove dirty rust_consensus inherited from snapshot to avoid split-brain.
     # Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a stale DAG.
-    rm -rf "$dst_data/data/data/rust_consensus" 2>/dev/null || true
+    rm -rf "$dst_data/data/data/consensus/rust_consensus" 2>/dev/null || true
     # Verify NOMT stake_db has actual data files (stakeRoot=0x00 fork guard)
     local nomt_stake_dir="$dst_data/data/data/nomt_db/stake_db"
     if [ -d "$nomt_stake_dir" ]; then
