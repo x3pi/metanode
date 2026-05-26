@@ -2,6 +2,7 @@ package processor
 
 import (
 	"encoding/binary"
+	"runtime"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -107,13 +108,20 @@ func (bp *BlockProcessor) StartRPCHistorySync() {
 					// Successfully checked (and potentially fixed) this block
 					lastCheckedBlock = blockNum
 					
-					// Save to DB
-					buf := make([]byte, 8)
-					binary.BigEndian.PutUint64(buf, blockNum)
-					dbReceipt.Put(syncKey, buf)
+					// Save to DB every 100 blocks or if we had to fix missing data
+					if missing || blockNum%100 == 0 {
+						buf := make([]byte, 8)
+						binary.BigEndian.PutUint64(buf, blockNum)
+						dbReceipt.Put(syncKey, buf)
+					}
 
-					// Small sleep to yield CPU and prevent locking up the node during heavy sync
-					time.Sleep(10 * time.Millisecond)
+					if missing {
+						// Small sleep to prevent spamming the master node after a network fetch
+						time.Sleep(10 * time.Millisecond)
+					} else if blockNum%100 == 0 {
+						// Yield CPU occasionally during fast local DB scanning
+						runtime.Gosched()
+					}
 				}
 			}
 
