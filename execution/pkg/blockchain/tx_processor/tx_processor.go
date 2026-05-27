@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -436,7 +435,8 @@ func processGroupsConcurrently(
 		groupMetas[i] = groupMeta{mvmId: mvmId, groupCtx: gCtx, span: gSpan}
 	}
 
-	numWorkers := runtime.NumCPU()
+	const maxTxWorkers = 16
+	numWorkers := maxTxWorkers
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
 	}
@@ -478,6 +478,7 @@ func processGroupsConcurrently(
 	startEVM := time.Now()
 
 	nativeRoundRobin := 0
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	for i, group := range groupedGroups {
 		// Identify if this group contains smart contract execution
 		var contractAddr *common.Address
@@ -489,8 +490,41 @@ func processGroupsConcurrently(
 			}
 		}
 
+		// CRITICAL CONCURRENCY FIX: Identify if any transaction in this group touches
+		// special/virtual contracts (Staking, Cross-Chain, or Account Settings).
+		// If so, we MUST route the entire group to Worker 0 to execute them sequentially
+		// and prevent updateStateDB / StakeStateDB concurrent data races.
+		isSpecialContractGroup := false
+		for _, item := range group.Items {
+			toAddr := item.Tx.ToAddress()
+			fromAddr := item.Tx.FromAddress()
+			if toAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+				toAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
+				toAddr == accountSettingAddr ||
+				fromAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+				fromAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
+				fromAddr == accountSettingAddr {
+				isSpecialContractGroup = true
+				break
+			}
+			for _, addr := range item.Tx.RelatedAddresses() {
+				if addr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+					addr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
+					addr == accountSettingAddr {
+					isSpecialContractGroup = true
+					break
+				}
+			}
+			if isSpecialContractGroup {
+				break
+			}
+		}
+
 		var workerIdx int
-		if contractAddr != nil {
+		if isSpecialContractGroup {
+			// Route to Worker 0 to guarantee sequential execution of all special contract transactions.
+			workerIdx = 0
+		} else if contractAddr != nil {
 			// Hash contract address to route to a specific worker
 			h := 0
 			for _, b := range contractAddr.Bytes() {
