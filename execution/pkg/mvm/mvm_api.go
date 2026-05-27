@@ -21,6 +21,8 @@ typedef struct {
 import "C"
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -45,6 +47,7 @@ var (
 	apiInstances          sync.Map
 	protectedApiInstances sync.Map
 	apiInstanceCount      atomic.Int32
+	offChainCounter       uint64
 )
 
 type AccountStateDB interface {
@@ -427,7 +430,21 @@ func (a *MVMApi) Call(
 	bBlockCoinbase := blockCoinbase.Bytes()
 	cBBlockNumber := C.CBytes(bBlockNumber[:])
 	cBBlockCoinbase := C.CBytes(bBlockCoinbase)
-	cBBmvmId := C.CBytes(mvmId.Bytes())
+	var randomizedMvmId common.Address
+	if isOffChain {
+		bBmvmIdBytes := make([]byte, 20)
+		copy(bBmvmIdBytes[0:8], mvmId.Bytes()[0:8])
+		val := atomic.AddUint64(&offChainCounter, 1)
+		binary.BigEndian.PutUint64(bBmvmIdBytes[8:16], val)
+		_, _ = rand.Read(bBmvmIdBytes[16:20])
+
+		randomizedMvmId = common.BytesToAddress(bBmvmIdBytes)
+		apiInstances.Store(randomizedMvmId, a)
+		defer apiInstances.Delete(randomizedMvmId)
+	} else {
+		randomizedMvmId = mvmId
+	}
+	cBBmvmId := C.CBytes(randomizedMvmId.Bytes())
 	cBTxHash := C.CBytes(bTxHash)
 	defer C.free(unsafe.Pointer(cBSender))
 	defer C.free(unsafe.Pointer(cBContractAddress))

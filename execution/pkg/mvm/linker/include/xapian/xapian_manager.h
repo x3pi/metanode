@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <sstream>
+#include <condition_variable>
 #include <filesystem>
 #include <chrono>     // Needed for time_point
 #include <mutex>      // Needed for mutex
@@ -40,6 +41,19 @@ public:
   static std::string generateUuidLogicalId();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
+  mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
+
+  // --- Concurrency Control ---
+  // Giới hạn tối đa 4 luồng tìm kiếm chạy đồng thời trên mỗi database.
+  // Giúp bảo vệ tài nguyên CPU và File Descriptors khi chạy tải cao.
+  static constexpr int MAX_CONCURRENT_SEARCHES = 4;
+  int active_searches = 0;
+  std::mutex search_semaphore_mutex;
+  std::condition_variable search_semaphore_cv;
+
+  void acquireSearchSlot();
+  void releaseSearchSlot();
+
   mutable std::mutex db_mutex; // Mutex to protect all operations on db
 
   // Thêm thành viên để lưu khóa mvmId liên kết
@@ -118,7 +132,6 @@ private:
   // --- Idle Tracking ---
   std::chrono::steady_clock::time_point last_access_time;
   std::mutex access_mutex;
-  mutable std::mutex changes_mutex;
   // --- Change Tracking ---
   // std::vector<XapianLog::LogEntry> staged_changes_log; // <-- Kiểu mới
   XapianLog::ComprehensiveLog comprehensive_log;

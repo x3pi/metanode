@@ -72,6 +72,7 @@ class XapianSearcher
 {
 public:
     explicit XapianSearcher(const std::string &db_path);
+    explicit XapianSearcher(Xapian::Database database);
     ~XapianSearcher() = default;
     void dumpIndex();
 

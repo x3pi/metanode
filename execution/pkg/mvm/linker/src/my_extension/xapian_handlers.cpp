@@ -1,3 +1,5 @@
+#include <shared_mutex>
+#include <memory>
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 // Xapian database handlers - extracted from my_extension.cpp for
@@ -804,7 +806,17 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       std::filesystem::path fullPath = mvm::createFullPath(address, dbName);
 
-      XapianSearcher searcher(fullPath);
+      auto manager = XapianManager::getInstance(dbName, address, isReset);
+      if (!manager) {
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        return mvm::Code(32, 0); // Trả về lỗi
+      }
+
+      std::lock_guard<std::shared_mutex> search_lock(manager->changes_mutex);
+
+      XapianSearcher searcher(this->isOffChain
+          ? Xapian::Database(fullPath.string())
+          : Xapian::Database(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1706,7 +1718,17 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       std::filesystem::path fullPath = mvm::createFullPath(address, dbName);
 
-      XapianSearcher searcher(fullPath);
+      auto manager = XapianManager::getInstance(dbName, address, isReset);
+      if (!manager) {
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        return mvm::Code(32, 0); // Trả về lỗi
+      }
+
+      std::lock_guard<std::shared_mutex> search_lock(manager->changes_mutex);
+
+      XapianSearcher searcher(this->isOffChain
+          ? Xapian::Database(fullPath.string())
+          : Xapian::Database(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1755,10 +1777,8 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
 
       std::vector<RangeFilter> range_filters =
           convertJsonToRangeFilters(decodedData["options"]);
-      std::cerr << "[searcher] dumpIndex" << std::endl;
 
-      searcher.dumpIndex();
-      std::cerr << "[searcher] dumpIndex: " << blockNumber << std::endl;
+     
 
       auto [results1, total1] = searcher.search(
           queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
