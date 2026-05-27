@@ -142,13 +142,13 @@ impl TxRecycler {
 
     /// Mark TXs as confirmed (committed). Called by commit_processor when processing sub-DAGs.
     /// `committed_tx_data` is the raw TX bytes from committed blocks.
-    pub async fn confirm_committed(&self, committed_tx_data: &[Vec<u8>]) {
+    pub async fn confirm_committed<T: AsRef<[u8]> + Sync>(&self, committed_tx_data: &[T]) {
         // Pre-compute hashes concurrently to minimize the Mutex lock duration.
         // Hashing 50k transactions sequentially takes significant time.
         use rayon::prelude::*;
         let hashes: Vec<[u8; 32]> = committed_tx_data
             .par_iter()
-            .map(|tx_data| Self::hash_tx(tx_data))
+            .map(|tx_data| Self::hash_tx(tx_data.as_ref()))
             .collect();
 
         let mut pending = self.pending.lock().await;

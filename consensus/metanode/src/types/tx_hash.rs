@@ -11,7 +11,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/transaction.rs"));
 }
 
-use proto::{AccessTuple, Transaction};
+use proto::Transaction;
 
 /// Hash một single Transaction bytes — KHÔNG thử decode array.
 ///
@@ -20,7 +20,7 @@ use proto::{AccessTuple, Transaction};
 /// Loại bỏ hoàn toàn false-positive decode.
 pub fn calculate_transaction_hash_single(tx_data: &[u8]) -> Vec<u8> {
     if let Ok(tx) = Transaction::decode(tx_data) {
-        return calculate_single_transaction_hash(&tx);
+        return calculate_single_transaction_hash(tx);
     }
     warn!("Failed to parse single Transaction protobuf, using raw data hash");
     Keccak256::digest(tx_data).to_vec()
@@ -28,34 +28,27 @@ pub fn calculate_transaction_hash_single(tx_data: &[u8]) -> Vec<u8> {
 
 /// Calculate hash for a single Transaction using TransactionHashData
 /// This is the official hash calculation that matches Go implementation
-fn calculate_single_transaction_hash(tx: &Transaction) -> Vec<u8> {
+fn calculate_single_transaction_hash(tx: Transaction) -> Vec<u8> {
     // Create TransactionHashData from Transaction
     let hash_data = proto::TransactionHashData {
-        from_address: tx.from_address.clone(),
-        to_address: tx.to_address.clone(),
-        amount: tx.amount.clone(),
+        from_address: tx.from_address,
+        to_address: tx.to_address,
+        amount: tx.amount,
         max_gas: tx.max_gas,
         max_gas_price: tx.max_gas_price,
         max_time_use: tx.max_time_use,
-        data: tx.data.clone(),
+        data: tx.data,
         r#type: tx.r#type,
-        last_device_key: tx.last_device_key.clone(),
-        new_device_key: tx.new_device_key.clone(),
-        nonce: tx.nonce.clone(),
+        last_device_key: tx.last_device_key,
+        new_device_key: tx.new_device_key,
+        nonce: tx.nonce,
         chain_id: tx.chain_id,
-        r: tx.r.clone(),
-        s: tx.s.clone(),
-        v: tx.v.clone(),
-        gas_tip_cap: tx.gas_tip_cap.clone(),
-        gas_fee_cap: tx.gas_fee_cap.clone(),
-        access_list: tx
-            .access_list
-            .iter()
-            .map(|at| AccessTuple {
-                address: at.address.clone(),
-                storage_keys: at.storage_keys.clone(),
-            })
-            .collect(),
+        r: tx.r,
+        s: tx.s,
+        v: tx.v,
+        gas_tip_cap: tx.gas_tip_cap,
+        gas_fee_cap: tx.gas_fee_cap,
+        access_list: tx.access_list,
     };
 
     // Encode TransactionHashData to protobuf bytes
@@ -63,7 +56,7 @@ fn calculate_single_transaction_hash(tx: &Transaction) -> Vec<u8> {
     if let Err(e) = hash_data.encode(&mut buf) {
         warn!("Failed to encode TransactionHashData: {}", e);
         // Fallback: hash the raw transaction data
-        let hash = Keccak256::digest(&tx.data);
+        let hash = Keccak256::digest(&hash_data.data);
         return hash.to_vec();
     }
 
