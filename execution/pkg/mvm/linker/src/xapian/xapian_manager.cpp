@@ -125,6 +125,23 @@ XapianManager::XapianManager(const std::string &db_name,
       db_name(db_name)                       // Lưu tên database
 {}
 
+void XapianManager::acquireSearchSlot()
+{
+    std::unique_lock<std::mutex> lock(search_semaphore_mutex);
+    search_semaphore_cv.wait(lock, [this]() {
+        return active_searches < MAX_CONCURRENT_SEARCHES;
+    });
+    active_searches++;
+}
+
+void XapianManager::releaseSearchSlot()
+{
+    std::lock_guard<std::mutex> lock(search_semaphore_mutex);
+    active_searches--;
+    search_semaphore_cv.notify_one();
+}
+
+
 // Lấy tên của database
 std::string XapianManager::getDbName() const { return this->db_name; }
 
@@ -235,7 +252,7 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
 Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blockNumber)
 {
     touch();
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
 
     try
     {
@@ -289,7 +306,7 @@ Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blo
 bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         bool just_started = false;
@@ -338,7 +355,7 @@ bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber)
 Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         bool just_started = false;
@@ -439,7 +456,7 @@ Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, 
 Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         bool just_started = false;
@@ -515,7 +532,7 @@ Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term
 Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         bool just_started = false;
@@ -596,7 +613,7 @@ Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &te
 Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_data, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         bool just_started = false;
@@ -673,7 +690,7 @@ Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_
 DocumentInfo XapianManager::get_document(Xapian::docid did, uint256_t blockNumber)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     try
     {
         Xapian::Document doc = db.get_document(did);
@@ -720,7 +737,7 @@ DocumentInfo XapianManager::get_document(Xapian::docid did, uint256_t blockNumbe
 // Lấy dữ liệu thô của document tại một block number
 std::string XapianManager::get_data(Xapian::docid did, uint256_t blockNumber) {
   touch();
-  std::lock_guard<std::mutex> db_lock(changes_mutex);
+  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
   try {
     Xapian::Document doc = db.get_document(did);
     // Kiểm tra slot 254 (đã bị xóa)
@@ -752,7 +769,7 @@ std::string XapianManager::get_data(Xapian::docid did, uint256_t blockNumber) {
 std::string XapianManager::get_value(Xapian::docid did, Xapian::valueno slot,
                                      bool isSerialise, uint256_t blockNumber) {
   touch();
-  std::lock_guard<std::mutex> db_lock(changes_mutex);
+  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
   try {
     Xapian::Document doc = db.get_document(did);
     // Kiểm tra slot 254 (đã bị xóa)
@@ -804,7 +821,7 @@ std::string XapianManager::get_value(Xapian::docid did, Xapian::valueno slot,
 std::vector<std::string> XapianManager::get_terms(Xapian::docid did,
                                                   uint256_t blockNumber) {
   touch();
-  std::lock_guard<std::mutex> db_lock(changes_mutex);
+  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
   std::vector<std::string> terms;
   try {
     Xapian::Document doc = db.get_document(did);
@@ -840,7 +857,7 @@ std::vector<std::string> XapianManager::get_terms(Xapian::docid did,
 // Commit các thay đổi đã được staged vào database Xapian
 bool XapianManager::commit_changes() {
   touch(); // Cập nhật thời gian truy cập
-  std::lock_guard<std::mutex> lock(
+  std::lock_guard<std::shared_mutex> lock(
       changes_mutex); // Khóa để kiểm tra và xóa staged_changes_log
   if (comprehensive_log.xapian_doc_logs.empty()) {
     return true; // Không có gì để commit
@@ -859,7 +876,7 @@ bool XapianManager::commit_changes() {
 
 // Tính toán hash của các thay đổi đã được staged
 std::array<uint8_t, 32u> XapianManager::getChangeHash() {
-  std::lock_guard<std::mutex> lock(
+  std::lock_guard<std::shared_mutex> lock(
       changes_mutex); // Khóa để truy cập staged_changes_log
   if (comprehensive_log.xapian_doc_logs.empty()) {
     return {0}; // Trả về hash 0 nếu không có thay đổi
@@ -895,7 +912,7 @@ std::array<uint8_t, 32u> XapianManager::getChangeHash() {
 
 // Lấy danh sách các log entry đã được staged
 std::vector<XapianLog::LogEntry> XapianManager::getChangeLogs() {
-  std::lock_guard<std::mutex> lock(
+  std::lock_guard<std::shared_mutex> lock(
       changes_mutex); // Khóa để truy cập staged_changes_log
   return comprehensive_log.xapian_doc_logs; // Trả về bản sao của vector log
 }
@@ -999,7 +1016,7 @@ bool XapianManager::replay_log(
     return true; // Không có gì để replay
   }
 
-  std::lock_guard<std::mutex> changes_lock(
+  std::lock_guard<std::shared_mutex> changes_lock(
       changes_mutex); // Khóa log thay đổi trong suốt quá trình replay
 
   // Quan trọng: Replay không nên thêm lại vào staged_changes_log
@@ -1094,7 +1111,7 @@ bool XapianManager::replay_log(
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
 // lại DB
 bool XapianManager::revertUncommittedChanges() {
-  std::lock_guard<std::mutex> lock(changes_mutex); // Khóa để thao tác an toàn
+  std::lock_guard<std::shared_mutex> lock(changes_mutex); // Khóa để thao tác an toàn
   
   // FORK-SAFETY: Return immediately if there are no uncommitted changes
   if (comprehensive_log.xapian_doc_logs.empty()) {
@@ -1179,14 +1196,14 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
 XapianLog::ComprehensiveLog XapianManager::getComprehensiveChangeLogs() const
 {
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     return comprehensive_log;
 }
 
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
 XapianLog::ComprehensiveLog XapianManager::removeLogsUntilNearestEndCommand()
 {
-    std::lock_guard<std::mutex> lock(changes_mutex);
+    std::lock_guard<std::shared_mutex> lock(changes_mutex);
     comprehensive_log.removeLogsUntilNearestEndCommand();
     return comprehensive_log;
 }

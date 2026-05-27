@@ -487,7 +487,7 @@ void XapianRegistry::cancelTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::mutex> lock(manager_ptr->changes_mutex);
+            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
             if (manager_ptr->has_started)
             {
                 try {
@@ -517,7 +517,7 @@ void XapianRegistry::commitTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::mutex> lock(manager_ptr->changes_mutex);
+            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
             if (manager_ptr->has_started)
             {
                 try {
