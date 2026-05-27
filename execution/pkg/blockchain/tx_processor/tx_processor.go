@@ -435,7 +435,26 @@ func processGroupsConcurrently(
 		groupMetas[i] = groupMeta{mvmId: mvmId, groupCtx: gCtx, span: gSpan}
 	}
 
-	const maxTxWorkers = 16
+	// ═══════════════════════════════════════════════════════════════
+	// CRITICAL FORK FIX (May 2026): Force single-threaded execution.
+	//
+	// ROOT CAUSE: updateStateDB() runs inside parallel workers and calls
+	// AddPendingBalance/SubTotalBalance/PlusOneNonce directly on shared
+	// AccountStateDB. When the C++ EVM executes smart contract calls,
+	// it can internally CALL/TRANSFER to addresses NOT listed in the
+	// TX's RelatedAddresses. This causes cross-group concurrent mutations
+	// on the same account → non-deterministic stateRoot → FORK.
+	//
+	// FIX: maxTxWorkers=1 forces ALL groups through a single worker,
+	// guaranteeing strictly sequential execution (deterministic).
+	//
+	// PERFORMANCE: ~3-5x slower block processing. This is a stopgap
+	// until the full StateDelta refactor is implemented (defer all
+	// state mutations to post-parallel batch phase).
+	//
+	// ZERO-FORK INVARIANT: Thà chậm chứ TUYỆT ĐỐI không fork.
+	// ═══════════════════════════════════════════════════════════════
+	const maxTxWorkers = 1
 	numWorkers := maxTxWorkers
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
