@@ -27,6 +27,8 @@ members = [
     "crates/typed-store-derive",
     "crates/typed-store-error",
     "crates/typed-store-workspace-hack",
+    # Tools
+    "crates/metanode-keytool",
 ]
 resolver = "2"
 
@@ -50,3 +52,7 @@ tonic-prost = "0.14.2"
 tonic-build = "0.14.2"
 base64 = "0.21.2"
 tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

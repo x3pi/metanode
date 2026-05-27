@@ -2,16 +2,16 @@
 """
 gen_validator_entry.py  — All-in-one validator key + genesis entry generator.
 
-Generates BLS keys + ETH keys + complete genesis validator entry in ONE STEP.
-No need to run metanode generate or key_eth.go separately.
+Generates BLS keys + ETH keys + complete genesis validator entry in ONE STEP using Rust keytool.
+No Go/key_eth.go dependency.
 
 Usage:
-  python3 gen_validator_entry.py \\
-    --hostname  node-0 \\
-    --ip        1.2.3.4 \\
-    --description "My Validator" \\
-    --website   "https://myvalidator.com" \\
-    --keys-dir  ./validator_keys \\
+  python3 gen_validator_entry.py \
+    --hostname  node-0 \
+    --ip        1.2.3.4 \
+    --description "My Validator" \
+    --website   "https://myvalidator.com" \
+    --keys-dir  ./validator_keys \
     --output    my_validator.json
 
   # Then merge into genesis:
@@ -20,25 +20,23 @@ Usage:
 Options:
   --hostname    NAME      Validator hostname, e.g. node-0 (required)
   --ip          IP        Public IP of this validator (default: 127.0.0.1)
-  --p2p-port    PORT      Rust consensus P2P port (default: 9000)
-  --primary-port PORT     Go P2P primary port (default: 4000)
-  --worker-port  PORT     Go worker port (default: 4012)
+  --p2p-port    PORT      Rust consensus P2P port (default: 9000 + node_id)
+  --primary-port PORT     Go P2P primary port (default: 6200 + node_id)
+  --worker-port  PORT     Go worker port (default: 4012 + node_id)
   --description TEXT      Validator description
   --website     URL       Validator website
   --image       URL       Validator image URL
   --stake       AMOUNT    Stake in wei (default: 1000 MTN = 1000000000000000000000)
-  --commission  RATE      Commission rate %% (default: 5)
+  --commission  RATE      Commission rate % (default: 5)
   --keys-dir    DIR       Where to save all generated keys (default: ./<hostname>_keys)
   --output      FILE      Output genesis entry JSON (default: <hostname>_genesis.json)
   --metanode-bin PATH     Path to metanode binary (auto-detected if not set)
-  --key-eth-dir PATH      Path to key_eth.go directory (auto-detected if not set)
 """
 
 import json
 import sys
 import os
 import subprocess
-import tempfile
 import argparse
 import shutil
 from pathlib import Path
@@ -57,13 +55,10 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT   = SCRIPT_DIR.parent  # metanode/
 
 METANODE_BIN_CANDIDATES = [
+    REPO_ROOT / "target/release/metanode",
     REPO_ROOT / "consensus/metanode/target/release/metanode",
     Path("/opt/metanode/bin/metanode"),
     Path(shutil.which("metanode") or ""),
-]
-
-KEY_ETH_DIR_CANDIDATES = [
-    REPO_ROOT / "execution/cmd/tool/key",
 ]
 
 
@@ -80,95 +75,54 @@ def find_metanode_bin(override=None):
     return None
 
 
-def find_key_eth_dir(override=None):
-    if override:
-        p = Path(override)
-        if (p / "key_eth.go").exists():
-            return str(p)
-        print(red(f"ERROR: key_eth.go not found in: {override}"))
-        sys.exit(1)
-    for candidate in KEY_ETH_DIR_CANDIDATES:
-        if (candidate / "key_eth.go").exists():
-            return str(candidate)
-    return None
-
-
-# ─── Step 1: Generate BLS/consensus keys via metanode binary ──────────────────
-def generate_bls_keys(metanode_bin: str, output_dir: str, hostname: str) -> dict:
+# ─── Step 1 & 2: Generate keys via Rust keytool ─────────────────────────────
+def generate_keys_via_keytool(metanode_bin: str, keys_dir: str) -> tuple:
     """
-    Calls: metanode generate -n 1 -o <output_dir>
-    Returns the first authority's keys from the generated committee.json
+    Calls: metanode keytool generate validator --out-dir <keys_dir>
+    Returns (bls_dict, eth_dict) by reading generated JSONs.
     """
-    print(f"  → Generating BLS keys via {cyan(metanode_bin)} ...")
+    print(f"  → Generating keys via {cyan(metanode_bin)} keytool ...")
+    os.makedirs(keys_dir, exist_ok=True)
+    
     result = subprocess.run(
-        [metanode_bin, "generate", "-n", "1", "-o", output_dir],
+        [metanode_bin, "keytool", "generate", "validator", "--out-dir", keys_dir],
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(red(f"ERROR: metanode generate failed:\n{result.stderr}"))
+        print(red(f"ERROR: metanode keytool failed:\n{result.stderr}"))
         sys.exit(1)
 
-    committee_file = os.path.join(output_dir, "committee.json")
-    if not os.path.exists(committee_file):
-        print(red(f"ERROR: committee.json not found after generation: {committee_file}"))
-        sys.exit(1)
+    # Read generated files
+    auth_file = os.path.join(keys_dir, "authority_key.json")
+    proto_file = os.path.join(keys_dir, "protocol_key.json")
+    net_file = os.path.join(keys_dir, "network_key.json")
+    eth_file = os.path.join(keys_dir, "eth_key.json")
 
-    with open(committee_file) as f:
-        committee = json.load(f)
+    for fpath in [auth_file, proto_file, net_file, eth_file]:
+        if not os.path.exists(fpath):
+            print(red(f"ERROR: Key file not found after generation: {fpath}"))
+            sys.exit(1)
 
-    auth = committee["authorities"][0]
-    
-    # Read authority key (private)
-    authority_key_raw = ""
-    auth_key_file = os.path.join(output_dir, "node_0_authority_key.json")
-    if os.path.exists(auth_key_file):
-        with open(auth_key_file) as f:
-            content = f.read().strip()
-            # The file may be a plain hex string or JSON
-            try:
-                data = json.loads(content)
-                authority_key_raw = data if isinstance(data, str) else content
-            except Exception:
-                authority_key_raw = content
+    with open(auth_file) as f:
+        auth_data = json.load(f)
+    with open(proto_file) as f:
+        proto_data = json.load(f)
+    with open(net_file) as f:
+        net_data = json.load(f)
+    with open(eth_file) as f:
+        eth_data = json.load(f)
 
-    return {
-        "authority_key":  auth["authority_key"],
-        "protocol_key":   auth["protocol_key"],
-        "network_key":    auth["network_key"],
-        "authority_key_private": authority_key_raw,   # BLSPrivateKey for config
-        "generated_hostname": auth.get("hostname", "node-0"),
+    bls = {
+        "authority_key": auth_data["public_key_base64"],
+        "protocol_key": proto_data["public_key_base64"],
+        "network_key": net_data["public_key_base64"],
+        "authority_key_private": auth_data["private_key_hex"],
     }
-
-
-# ─── Step 2: Generate ETH key via key_eth.go ─────────────────────────────────
-def generate_eth_key(key_eth_dir: str) -> dict:
-    """
-    Calls: go run key_eth.go
-    Returns: {"private_key": "hex", "address": "0xHEX"}
-    """
-    print(f"  → Generating ETH key via {cyan(key_eth_dir + '/key_eth.go')} ...")
-    result = subprocess.run(
-        ["go", "run", "key_eth.go"],
-        capture_output=True, text=True,
-        cwd=key_eth_dir
-    )
-    if result.returncode != 0:
-        print(red(f"ERROR: go run key_eth.go failed:\n{result.stderr}"))
-        sys.exit(1)
-
-    priv_key = ""
-    address  = ""
-    for line in result.stdout.strip().splitlines():
-        if "ETH_PRIVATE_KEY:" in line:
-            priv_key = line.split(":", 1)[1].strip()   # keeps "0x..." prefix
-        elif "ETH_ADDRESS:" in line:
-            address = line.split(":", 1)[1].strip()    # keeps "0x..." prefix
-
-    if not priv_key or not address:
-        print(red(f"ERROR: Could not parse ETH key output:\n{result.stdout}"))
-        sys.exit(1)
-
-    return {"private_key": priv_key, "address": address}
+    eth = {
+        "private_key": eth_data["ETH_PRIVATE_KEY"],
+        "address": eth_data["ETH_ADDRESS"]
+    }
+    return bls, eth
 
 
 # ─── Step 3: Build validator entry ───────────────────────────────────────────
@@ -180,7 +134,7 @@ def build_validator_entry(bls: dict, eth: dict, args) -> dict:
 
     return {
         "address":                       eth_address_lower,
-        "eth_private_key":               eth["private_key"],          # ← thêm vào
+        "eth_private_key":               eth["private_key"],
         "primary_address":               primary_address,
         "worker_address":                worker_address,
         "p2p_address":                   p2p_address,
@@ -201,42 +155,18 @@ def build_validator_entry(bls: dict, eth: dict, args) -> dict:
     }
 
 
-# ─── Step 4: Save keys and output ─────────────────────────────────────────────
-def save_keys(bls: dict, eth: dict, keys_dir: str, bls_src_dir: str, hostname: str):
-    os.makedirs(keys_dir, exist_ok=True)
-
-    # Copy BLS key files from temp dir
-    for fname in os.listdir(bls_src_dir):
-        src = os.path.join(bls_src_dir, fname)
-        # Rename node_0_* → hostname_*
-        dst_name = fname.replace("node_0", hostname)
-        dst = os.path.join(keys_dir, dst_name)
-        shutil.copy2(src, dst)
-        os.chmod(dst, 0o600)
-
-    # Save ETH key
-    eth_key_file = os.path.join(keys_dir, "eth_key.json")
-    with open(eth_key_file, "w") as f:
-        json.dump({
-            "ETH_PRIVATE_KEY": eth["private_key"],
-            "ETH_ADDRESS":     eth["address"]
-        }, f, indent=2)
-    os.chmod(eth_key_file, 0o600)
-
-
 def write_validator_env(bls: dict, eth: dict, args, keys_dir: str) -> str:
     """
     Write a complete, ready-to-use validator.env (or synconly.env)
-    with all generated keys pre-filled. Only PEER_RPC_ADDRESSES and
-    GENESIS_FILE need to be filled in manually.
+    with all generated keys pre-filled.
     """
     bls_private_hex  = bls.get("authority_key_private", "")
     eth_priv_stripped = eth["private_key"].lstrip("0x")
     eth_addr_stripped = eth["address"].lstrip("0x").lower()
 
     keys_dir_abs = os.path.abspath(keys_dir)
-    protocol_key_path = os.path.join(keys_dir_abs, f"{args.hostname}_protocol_key.json")
-    network_key_path  = os.path.join(keys_dir_abs, f"{args.hostname}_network_key.json")
+    protocol_key_path = os.path.join(keys_dir_abs, "protocol_key.json")
+    network_key_path  = os.path.join(keys_dir_abs, "network_key.json")
 
     is_validator = (args.node_type == "validator")
 
@@ -338,8 +268,7 @@ PEER_RPC_ADDRESSES='{peer_rpc_str}'
 
     # ─── Write a custom firewall script for this node ────────────────────────
     fw_filename = os.path.join(keys_dir, "setup_firewall.sh")
-    fw_content = f"""\
-#!/bin/bash
+    fw_content = f"""#!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
 #  Cấu hình Firewall (UFW) cho Node {node_id} ({node_type_comment})
 #  Chạy dưới quyền root (sudo)
@@ -384,11 +313,10 @@ ufw status verbose
     return env_filename
 
 
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="All-in-one: generate BLS + ETH keys + genesis validator entry"
+        description="All-in-one: generate keys via keytool + genesis validator entry"
     )
     parser.add_argument("--hostname",     required=True, help="Validator hostname, e.g. node-0")
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
@@ -407,7 +335,6 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
-    parser.add_argument("--key-eth-dir",  default=None)
     return parser.parse_args()
 
 
@@ -434,35 +361,22 @@ def main():
 
     # Auto-detect tools
     metanode_bin = find_metanode_bin(args.metanode_bin)
-    key_eth_dir  = find_key_eth_dir(args.key_eth_dir)
 
     if not metanode_bin:
         print(red("ERROR: metanode binary not found. Build it first:"))
-        print(red("  cd consensus/metanode && cargo build --release --bin metanode"))
+        print(red("  cd consensus/metanode && cargo build --release"))
         print(red("  Or specify: --metanode-bin /path/to/metanode"))
         sys.exit(1)
 
-    if not key_eth_dir:
-        print(red("ERROR: key_eth.go not found. Specify: --key-eth-dir /path/to/dir"))
-        sys.exit(1)
+    # Step 1 & 2: Generate keys directly via keytool
+    print(bold("Step 1/2 — Generating validator keys (BLS + Ed25519 + ETH)"))
+    bls, eth = generate_keys_via_keytool(metanode_bin, keys_dir)
+    print(green(f"  ✅ Keys generated and saved to {keys_dir}"))
+    print(green(f"  ✅ ETH address: {eth['address']}"))
 
-    # Step 1: Generate BLS keys into a temp directory, then copy to keys_dir
-    with tempfile.TemporaryDirectory() as tmpdir:
-        print(bold("Step 1/3 — Generating BLS consensus keys"))
-        bls = generate_bls_keys(metanode_bin, tmpdir, args.hostname)
-        print(green(f"  ✅ BLS keys generated (hostname: {bls['generated_hostname']})"))
-
-        # Step 2: Generate ETH key
-        print(bold("\nStep 2/3 — Generating ETH key"))
-        eth = generate_eth_key(key_eth_dir)
-        print(green(f"  ✅ ETH address: {eth['address']}"))
-
-        # Step 3: Build genesis entry
-        print(bold("\nStep 3/3 — Building genesis validator entry"))
-        entry = build_validator_entry(bls, eth, args)
-
-        # Save keys from tempdir → keys_dir
-        save_keys(bls, eth, keys_dir, tmpdir, args.hostname)
+    # Step 3: Build genesis entry
+    print(bold("\nStep 2/2 — Building genesis validator entry"))
+    entry = build_validator_entry(bls, eth, args)
 
     # Write genesis entry
     with open(output, "w") as f:
@@ -495,7 +409,6 @@ def main():
                 
                 # Copy to simple_chain folder
                 target_genesis = "../execution/cmd/simple_chain/genesis.json"
-                import shutil
                 shutil.copy2(genesis_main_path, target_genesis)
                 print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
                 
@@ -524,7 +437,6 @@ def main():
     print(bold("  🔴 BACKUP YOUR KEYS IMMEDIATELY:"))
     print(f"     cp -r {keys_dir} ~/backup_{args.hostname}_$(date +%Y%m%d)")
     print()
-    env_basename = os.path.basename(env_file)
     print(bold("  📋 Next steps:"))
     print(f"  1. Edit {cyan(env_file)}:")
     print(f"       - Set PEER_RPC_ADDRESSES to the other validators' IPs")

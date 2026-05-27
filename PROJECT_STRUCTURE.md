@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-26
+> **Last updated:** 2026-05-27
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -268,6 +268,7 @@ metanode/
 | `typed-store-workspace-hack` | Workspace dependency hack |
 | `telemetry-subscribers` | Tracing/telemetry subscribers |
 | `prometheus-closure-metric` | Prometheus metric helpers |
+| `metanode-keytool` | **Library & CLI tool** — generate BLS12-381/Ed25519/ETH keys for validators. Also integrated as a subcommand under the main `metanode` CLI. |
 
 ---
 

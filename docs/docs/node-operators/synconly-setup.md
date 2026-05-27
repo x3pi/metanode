@@ -76,6 +76,9 @@ cp /path/to/genesis.json metanode/execution/cmd/simple_chain/genesis.json
 **Chạy script để mở cổng qua UFW:**
 
 ```bash
+**Chạy script để mở cổng qua UFW:**
+
+```bash
 cd metanode/deploy
 sudo bash ./node-sync-1_keys/setup_firewall.sh
 ```
@@ -84,10 +87,11 @@ sudo bash ./node-sync-1_keys/setup_firewall.sh
 
 ## Bước 5 — Khởi chạy Node (Install & Start)
 
-Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
+Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `cluster/systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
 
 ```bash
-sudo bash systemd-cluster.sh setup --node 4 -y
+cd metanode/deploy
+sudo bash cluster/systemd-cluster.sh setup --node 4 -y
 ```
 *(Thay `4` bằng Node ID của bạn).*
 
@@ -100,12 +104,6 @@ Script này tự động làm mọi việc: tạo system user, build binary, cà
 4. Copy configs và `genesis.json` vào `/opt/metanode/node-<node_id>/`
 5. Cài đặt và enable 2 systemd services (VD: `metanode-execution-4`, `metanode-consensus-4`)
 6. Khởi chạy cả 2 services
-1. Tạo system user `metanode`
-2. Tạo cấu trúc thư mục tại `/opt/metanode/node-<node_id>/`
-3. Build Go (`simple_chain`) và Rust (`metanode`) binary từ source
-4. Copy configs và `genesis.json` vào `/opt/metanode/node-<node_id>/`
-5. Cài đặt và enable 2 systemd services (VD: `metanode-execution-4`, `metanode-consensus-4`)
-6. Khởi động cả 2 services
 
 ### Khởi chạy RPC Proxy (Tùy chọn cho MetaMask/dApp)
 
@@ -113,7 +111,7 @@ Mặc định, service trên chỉ khởi chạy core node. Nếu bạn muốn m
 
 ```bash
 # Khởi chạy RPC Proxy cho Node 4 (tự động đọc port từ file .env)
-sudo bash install-rpc-systemd.sh --node 4
+sudo bash cluster/install-rpc-systemd.sh --node 4
 ```
 
 Lệnh này sẽ tự động build RPC client và tạo service `metanode-rpc-4` chạy ngầm.
@@ -125,7 +123,7 @@ sudo systemctl status metanode-rpc-4
 journalctl -u metanode-rpc-4 -f
 
 # Dừng RPC (nếu muốn đóng endpoint)
-sudo bash install-rpc-systemd.sh --stop --node 4
+sudo bash cluster/install-rpc-systemd.sh --stop --node 4
 ```
 
 ---
@@ -165,7 +163,7 @@ curl http://localhost:8600/api/snapshots
 # 2. Chạy script khôi phục tự động cho systemd (tham số: <node_id> [tên_snapshot] [id_node_nguồn])
 cd metanode/deploy
 # Ví dụ: Khôi phục Node 4 lấy snapshot mới nhất từ Node 0
-sudo bash restore_node_systemd.sh 4
+sudo bash cluster/restore_node_systemd.sh 4
 ```
 
 Script sẽ tự động dừng services của Node 4, xóa data cũ, tải snapshot qua HTTP, xóa `rust_consensus` thừa, dọn dẹp khóa LOCK, cấp quyền cho user `metanode` và khởi động lại dịch vụ an toàn.

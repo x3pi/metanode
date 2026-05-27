@@ -13,7 +13,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RPC_DIR="$(realpath "$SCRIPT_DIR/../execution/cmd/rpc/cmd/rpc-client")"
+RPC_DIR="$(realpath "$SCRIPT_DIR/../../execution/cmd/rpc/cmd/rpc-client")"
 
 # ─── Màu sắc ─────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -84,11 +84,11 @@ fi
 NODE_IDS=(0 1 2 3 4)
 NODE_TYPES=(validator validator validator validator synconly)
 NODE_CONFIGS=(
-    "$SCRIPT_DIR/node-0_keys/validator.env"
-    "$SCRIPT_DIR/node-1_keys/validator.env"
-    "$SCRIPT_DIR/node-2_keys/validator.env"
-    "$SCRIPT_DIR/node-3_keys/validator.env"
-    "$SCRIPT_DIR/node-4_keys/synconly.env"
+    "$SCRIPT_DIR/../node-0_keys/validator.env"
+    "$SCRIPT_DIR/../node-1_keys/validator.env"
+    "$SCRIPT_DIR/../node-2_keys/validator.env"
+    "$SCRIPT_DIR/../node-3_keys/validator.env"
+    "$SCRIPT_DIR/../node-4_keys/synconly.env"
 )
 
 # ─── Kiểm tra jq ─────────────────────────────────────────────────
