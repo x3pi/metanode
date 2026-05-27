@@ -355,9 +355,9 @@ func (sm *StorageManager) FlushAll() error {
 // These MUST match the directory names used by restore_node.sh and snapshot_manager.go.
 var storageTypeToDirName = map[StorageType]string{
 	STORAGE_ACCOUNT:           "account_state",
-	STORAGE_BLOCK:             "blocks",
-	STORAGE_RECEIPTS:          "receipts",
-	STORAGE_TRANSACTION:       "transaction_state",
+	STORAGE_BLOCK:             "history/blocks",
+	STORAGE_RECEIPTS:          "history/receipts",
+	STORAGE_TRANSACTION:       "history/transaction_state",
 	STORAGE_MAPPING_DB:        "history/mapping",
 	STORAGE_CODE:              "smart_contract_code",
 	STORAGE_SMART_CONTRACT:    "smart_contract_storage",
