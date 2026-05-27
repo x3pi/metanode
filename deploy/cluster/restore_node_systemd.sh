@@ -24,6 +24,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Quyền Root
 if [ "${EUID:-0}" -ne 0 ]; then
@@ -35,9 +36,9 @@ fi
 # ─── Đọc cấu hình Node đích ──────────────────────────────────────
 ENV_FILE=""
 if [ "$NODE_ID" -eq 4 ]; then
-    ENV_FILE="$SCRIPT_DIR/node-4_keys/synconly.env"
+    ENV_FILE="$DEPLOY_DIR/node-4_keys/synconly.env"
 else
-    ENV_FILE="$SCRIPT_DIR/node-${NODE_ID}_keys/validator.env"
+    ENV_FILE="$DEPLOY_DIR/node-${NODE_ID}_keys/validator.env"
 fi
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -60,9 +61,9 @@ fi
 
 SRC_ENV_FILE=""
 if [ "$SOURCE_NODE" -eq 4 ]; then
-    SRC_ENV_FILE="$SCRIPT_DIR/node-4_keys/synconly.env"
+    SRC_ENV_FILE="$DEPLOY_DIR/node-4_keys/synconly.env"
 else
-    SRC_ENV_FILE="$SCRIPT_DIR/node-${SOURCE_NODE}_keys/validator.env"
+    SRC_ENV_FILE="$DEPLOY_DIR/node-${SOURCE_NODE}_keys/validator.env"
 fi
 
 # Đọc SNAPSHOT_SERVER_PORT từ node nguồn
@@ -86,9 +87,9 @@ get_node_rpc_port() {
     local nid="$1"
     local cfg=""
     if [ "$nid" -eq 4 ]; then
-        cfg="$SCRIPT_DIR/node-4_keys/synconly.env"
+        cfg="$DEPLOY_DIR/node-4_keys/synconly.env"
     else
-        cfg="$SCRIPT_DIR/node-${nid}_keys/validator.env"
+        cfg="$DEPLOY_DIR/node-${nid}_keys/validator.env"
     fi
     if [ -f "$cfg" ]; then
         local port=$(grep "^RPC_PORT=" "$cfg" 2>/dev/null | cut -d'=' -f2 | tr -d ':' | tr -d '"' || true)

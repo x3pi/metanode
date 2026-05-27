@@ -64,7 +64,7 @@ fi
 
 if [ ! -f "$CONFIG_ENV" ]; then
     log_err "Config file not found: $CONFIG_ENV"
-    log_err "Please create a config file (see validator.env.example)"
+    log_err "Please create a config file (see single-node/templates/validator.env.example)"
     exit 1
 fi
 
@@ -196,7 +196,8 @@ log_info "Building Rust consensus engine (this may take ~10 minutes)..."
 EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/consensus/metanode' && cargo build --release --bin metanode" 2>&1 | \
     grep -E "^(error|warning: unused|Compiling|Finished|error\[)" || true
-RUST_BIN="$SRC_DIR/consensus/metanode/target/release/metanode"
+RUST_BIN="$SRC_DIR/target/release/metanode"
+[ -f "$RUST_BIN" ] || RUST_BIN="$SRC_DIR/consensus/metanode/target/release/metanode"
 [ -f "$RUST_BIN" ] || { log_err "Rust build failed — binary not found"; exit 1; }
 log_ok "Rust binary built: $RUST_BIN"
 
@@ -417,7 +418,7 @@ log_step "Step 4: Installing keys"
 
 if [ -z "$PROTOCOL_KEY_FILE" ] || [ -z "$NETWORK_KEY_FILE" ]; then
     log_err "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are required for all nodes"
-    log_err "Generate keys first: ./metanode generate -n 1 -o ./keys"
+    log_err "Generate keys first: ./metanode keytool generate validator --out-dir ./keys"
     exit 1
 fi
 if [ ! -f "$PROTOCOL_KEY_FILE" ] || [ ! -f "$NETWORK_KEY_FILE" ]; then

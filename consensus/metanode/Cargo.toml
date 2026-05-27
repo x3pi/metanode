@@ -67,6 +67,7 @@ socket2 = "0.5"  # For TCP socket keepalive support
 
 # CLI
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
+metanode-keytool = { path = "../../crates/metanode-keytool" }
 once_cell = "1.21.3"
 futures = "0.3.31"
 rayon = "1.11.0"
@@ -78,9 +79,9 @@ prost-build = "0.14.1"
 tempfile = { workspace = true }
 
 # Patch dependencies to fix axum-server compilation issue
-[patch.crates-io]
-# Try to use a compatible version of hyper-util
-# This is a workaround for axum-server compilation issue
+# [patch.crates-io]
+# # Try to use a compatible version of hyper-util
+# # This is a workaround for axum-server compilation issue
 
 [[bin]]
 name = "metanode"
