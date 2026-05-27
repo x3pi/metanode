@@ -43,7 +43,7 @@ cargo build --release --bin metanode
 
 ## Bước 2 — Generate Keys & File cấu hình
 
-Script `gen_validator_entry.py` tự động tạo toàn bộ BLS keys, ETH keypair, và sinh file `.env` cấu hình sẵn:
+Script `gen_validator_entry.py` tự động sử dụng Rust `keytool` để tạo toàn bộ validator keys, ETH keypair, và sinh file cấu hình `.env` tự động:
 
 ```bash
 cd metanode/deploy
@@ -61,9 +61,10 @@ Thay `YOUR_PUBLIC_IP` bằng địa chỉ IP public của server và `0` bằng 
 
 | File | Mô tả | Bảo mật |
 |------|--------|---------|
-| `node-0_protocol_key.json` | BLS protocol key (Rust consensus) | 🔴 Bí mật tuyệt đối |
-| `node-0_network_key.json` | Ed25519 network key (Rust P2P) | 🔴 Bí mật tuyệt đối |
-| `node-0_authority_key.json` | BLS authority key (Go execution) | 🔴 Bí mật tuyệt đối |
+| `authority_key.json` | BLS authority key (Go execution) | 🔴 Bí mật tuyệt đối |
+| `protocol_key.json` | Ed25519 protocol key (Rust consensus) | 🔴 Bí mật tuyệt đối |
+| `network_key.json` | Ed25519 network key (Rust P2P) | 🔴 Bí mật tuyệt đối |
+| `eth_key.json` | secp256k1 ETH key (phục vụ nhận thưởng) | 🔴 Bí mật tuyệt đối |
 | `setup_firewall.sh` | Script mở cổng firewall UFW tự động cho node | ✅ Công khai |
 | `validator.env` | File cấu hình đã điền sẵn keys | 🔴 Không commit lên Git |
 | `node-0_genesis.json` | Thông tin đăng ký gửi genesis coordinator | ✅ Gửi cho team |
@@ -110,10 +111,11 @@ sudo bash ./node-0_keys/setup_firewall.sh
 
 ## Bước 5 — Khởi chạy Node (Install & Start)
 
-Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
+Thay vì cài đặt thủ công, bạn có thể dùng công cụ tự động hóa `cluster/systemd-cluster.sh` để biên dịch binary, tạo cấu hình và khởi chạy các service dưới nền chỉ với 1 lệnh:
 
 ```bash
-sudo bash systemd-cluster.sh setup --node 0 -y
+cd metanode/deploy
+sudo bash cluster/systemd-cluster.sh setup --node 0 -y
 ```
 
 Script này tự động làm mọi việc: tạo system user, build binary, cài cấu hình và khởi chạy cả 2 tiến trình Go (Execution) và Rust (Consensus). Sau khoảng **10–15 phút**, quá trình build sẽ hoàn tất.

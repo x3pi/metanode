@@ -48,9 +48,10 @@ validator.env          install.sh            /opt/metanode/
 
 ```bash
 useradd --system --no-create-home --shell /usr/sbin/nologin metanode
-mkdir -p /opt/metanode/{bin,config,keys,data,logs}
-chown -R metanode:metanode /opt/metanode
-chmod 750 /opt/metanode/keys   # Chỉ owner đọc được keys
+# Thư mục cài đặt mặc định là /opt/metanode-${NODE_ID} để hỗ trợ chạy nhiều node trên cùng server
+mkdir -p /opt/metanode-${NODE_ID}/{bin,config,keys,data,logs}
+chown -R metanode:metanode /opt/metanode-${NODE_ID}
+chmod 750 /opt/metanode-${NODE_ID}/keys   # Chỉ owner đọc được keys
 ```
 
 **Tại sao cần system user riêng?**  
@@ -60,26 +61,26 @@ chmod 750 /opt/metanode/keys   # Chỉ owner đọc được keys
 
 | Đường dẫn | Mục đích |
 |-----------|---------|
-| `/opt/metanode/bin/` | Chứa 2 binary: `simple_chain` (Go), `metanode` (Rust) |
-| `/opt/metanode/config/` | File cấu hình sinh ra từ `.env` |
-| `/opt/metanode/keys/` | Private keys (chmod 600, chỉ user `metanode` đọc được) |
-| `/opt/metanode/data/execution/` | Database của Go execution layer (NOMT state backend) |
-| `/opt/metanode/data/consensus/` | DAG storage của Rust consensus engine |
-| `/opt/metanode/logs/` | Log files (thêm vào ngoài journald) |
+| `/opt/metanode-${NODE_ID}/bin/` | Chứa 2 binary: `simple_chain` (Go), `metanode` (Rust) |
+| `/opt/metanode-${NODE_ID}/config/` | File cấu hình sinh ra từ `.env` |
+| `/opt/metanode-${NODE_ID}/keys/` | Private keys (chmod 600, chỉ user `metanode` đọc được) |
+| `/opt/metanode-${NODE_ID}/data/execution/` | Database của Go execution layer (NOMT state backend) |
+| `/opt/metanode-${NODE_ID}/data/consensus/` | DAG storage của Rust consensus engine |
+| `/opt/metanode-${NODE_ID}/logs/` | Log files (thêm vào ngoài journald) |
 
 ---
 
 ### Bước 2 — Clone và Build từ source
 
 ```bash
-git clone --branch main https://github.com/x3pi/metanode.git /opt/metanode/src
+git clone --branch main https://github.com/x3pi/metanode.git /opt/metanode-${NODE_ID}/src
 
 # Build Rust binary (~10 phút)
-cd /opt/metanode/src/consensus/metanode
+cd /opt/metanode-${NODE_ID}/src/consensus/metanode
 cargo build --release --bin metanode
 
 # Build Go binary (~2 phút)
-cd /opt/metanode/src/execution/cmd/simple_chain
+cd /opt/metanode-${NODE_ID}/src/execution/cmd/simple_chain
 CGO_ENABLED=1 go build -o simple_chain .
 ```
 
@@ -105,8 +106,8 @@ Script tạo **2 file config** từ các biến trong `.env`:
 | `rpc_port` | `RPC_PORT` | JSON-RPC endpoint cho DApp |
 | `peer_rpc_port` | `PEER_RPC_PORT` | Giao tiếp giữa các validator |
 | `rust_*_socket_path` | `NODE_ID` | IPC sockets với Rust layer |
-| `genesis_file_path` | Cố định | Trỏ vào `/opt/metanode/config/genesis.json` |
-| `RootPath` | Cố định | `/opt/metanode/data/execution/db` |
+| `genesis_file_path` | Cố định | Trỏ vào `/opt/metanode-${NODE_ID}/config/genesis.json` |
+| `RootPath` | Cố định | `/opt/metanode-${NODE_ID}/data/execution/db` |
 
 #### `consensus.toml` (Rust layer config)
 
@@ -117,7 +118,7 @@ Script tạo **2 file config** từ các biến trong `.env`:
 | `executor_commit_enabled` | `NODE_TYPE` | `false` nếu sync-only |
 | `peer_rpc_port` | `PEER_RPC_PORT` | Phải khớp với Go |
 | `peer_rpc_addresses` | `PEER_RPC_ADDRESSES` | Danh sách validator khác |
-| `protocol_key_path` | Cố định | `/opt/metanode/keys/protocol_key.json` |
+| `protocol_key_path` | Cố định | `/opt/metanode-${NODE_ID}/keys/protocol_key.json` |
 
 ---
 
@@ -125,10 +126,10 @@ Script tạo **2 file config** từ các biến trong `.env`:
 
 **Validator node:**
 ```bash
-cp /path/to/node_0_protocol_key.json /opt/metanode/keys/protocol_key.json
-cp /path/to/node_0_network_key.json  /opt/metanode/keys/network_key.json
-chmod 600 /opt/metanode/keys/*.json
-chown metanode:metanode /opt/metanode/keys/*.json
+cp /path/to/protocol_key.json /opt/metanode-${NODE_ID}/keys/protocol_key.json
+cp /path/to/network_key.json  /opt/metanode-${NODE_ID}/keys/network_key.json
+chmod 600 /opt/metanode-${NODE_ID}/keys/*.json
+chown metanode:metanode /opt/metanode-${NODE_ID}/keys/*.json
 ```
 
 **Sync-only node:**  
@@ -143,11 +144,11 @@ Key files phải có `chmod 600`. Nếu user khác đọc được private key, 
 ### Bước 5 — Tạo cấu trúc data directories
 
 ```bash
-mkdir -p /opt/metanode/data/execution/db/data/xapian_node
+mkdir -p /opt/metanode-${NODE_ID}/data/execution/db/data/xapian_node
 #                                      ↑ NOMT state backend yêu cầu cấu trúc này
-mkdir -p /opt/metanode/data/execution/backup
-mkdir -p /opt/metanode/data/execution/snapshots
-mkdir -p /opt/metanode/data/consensus
+mkdir -p /opt/metanode-${NODE_ID}/data/execution/backup
+mkdir -p /opt/metanode-${NODE_ID}/data/execution/snapshots
+mkdir -p /opt/metanode-${NODE_ID}/data/consensus
 ```
 
 `xapian_node` là thư mục database phụ dùng cho full-text search trong block explorer. Nó phải tồn tại trước khi node chạy, kể cả khi `is_explorer=false`.
@@ -170,10 +171,9 @@ StartLimitIntervalSec=600
 StartLimitBurst=3
 
 [Service]
-Type=simple
 User=metanode
-WorkingDirectory=/opt/metanode/bin
-ExecStart=/opt/metanode/bin/simple_chain -config=/opt/metanode/config/execution.json
+WorkingDirectory=/opt/metanode-${NODE_ID}/bin
+ExecStart=/opt/metanode-${NODE_ID}/bin/simple_chain -config=/opt/metanode-${NODE_ID}/config/execution.json
 ExecStop=/bin/kill -SIGTERM $MAINPID
 TimeoutStopSec=90
 Restart=on-failure
@@ -181,8 +181,8 @@ RestartSec=15s
 Environment=GOTRACEBACK=all
 Environment=GOMEMLIMIT=4GiB
 LimitNOFILE=100000
-StandardOutput=append:/opt/metanode/logs/execution/execution.log
-StandardError=append:/opt/metanode/logs/execution/execution.log
+StandardOutput=append:/opt/metanode-${NODE_ID}/logs/execution/execution.log
+StandardError=append:/opt/metanode-${NODE_ID}/logs/execution/execution.log
 ```
 
 **Phân tích chi tiết cấu hình Execution:**
@@ -204,7 +204,7 @@ Wants=network-online.target
 Requires=metanode-execution.service
 ...
 [Service]
-ExecStart=/opt/metanode/bin/metanode start --config /opt/metanode/config/consensus.toml
+ExecStart=/opt/metanode-${NODE_ID}/bin/metanode start --config /opt/metanode-${NODE_ID}/config/consensus.toml
 TimeoutStopSec=60
 Restart=on-failure
 RestartSec=10s
@@ -214,7 +214,7 @@ LimitNOFILE=100000
 ```
 
 **Phân tích chi tiết cấu hình Consensus:**
-- **`Requires=metanode-execution.service` & `After=metanode-execution.service`**: Ràng buộc cứng (Hard dependency). Rust service chỉ được khởi động SAU KHI Go service đã khởi động. Nếu Go service bị crash hoặc bị dừng bằng tay, systemd sẽ **tự động dừng** theo dịch vụ Rust. Tại sao? Vì Rust kết nối qua Unix Domain Socket của Go, không có Go thì Rust sẽ crash do mất liên lạc.
+- **`Requires=metanode-execution-${NODE_ID}.service` & `After=metanode-execution-${NODE_ID}.service`**: Ràng buộc cứng (Hard dependency). Rust service chỉ được khởi động SAU KHI Go service đã khởi động. Nếu Go service bị crash hoặc bị dừng bằng tay, systemd sẽ **tự động dừng** theo dịch vụ Rust. Tại sao? Vì Rust kết nối qua Unix Domain Socket của Go, không có Go thì Rust sẽ crash do mất liên lạc.
 - **`Environment=RUST_BACKTRACE=full`**: Nếu Rust gặp lỗi nghiêm trọng (panic), nó sẽ in ra toàn bộ lịch sử call stack (backtrace) vào file log để các lập trình viên dễ dàng debug.
 - **`TimeoutStopSec=60`**: Tương tự Go, Rust cũng có 60 giây để ghi nhận trạng thái DAG/Committee và đóng cơ sở dữ liệu RocksDB an toàn.
 
@@ -224,10 +224,10 @@ LimitNOFILE=100000
 
 ```bash
 systemctl daemon-reload
-systemctl enable metanode-execution metanode-consensus  # Auto-start on boot
-systemctl start metanode-execution   # Start Go trước
-sleep 5                               # Chờ Go tạo socket
-systemctl start metanode-consensus   # Start Rust sau
+systemctl enable metanode-execution-${NODE_ID} metanode-consensus-${NODE_ID}  # Auto-start on boot
+systemctl start metanode-execution-${NODE_ID}   # Start Go trước
+sleep 5                                         # Chờ Go tạo socket
+systemctl start metanode-consensus-${NODE_ID}   # Start Rust sau
 ```
 
 ---
@@ -265,7 +265,7 @@ Khi mỗi node **chạy trên server riêng**, tất cả cổng có thể giữ
 ## Cấu trúc thư mục sau khi cài đặt
 
 ```
-/opt/metanode/
+/opt/metanode-${NODE_ID}/
 ├── bin/
 │   ├── simple_chain          # Go execution binary
 │   └── metanode              # Rust consensus binary
