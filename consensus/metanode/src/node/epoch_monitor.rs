@@ -72,6 +72,9 @@ pub fn start_unified_epoch_monitor(
         const STALL_MIN_GAP: u64 = 2;        // Minimum block gap to consider "stalled"
         const STALL_FETCH_BATCH: u64 = 500;   // Max blocks to fetch per recovery cycle
 
+        let mut last_known_epoch: u64 = 0;
+        let mut last_known_mode: Option<crate::node::NodeMode> = None;
+
         loop {
             // T3-4: Use adaptive interval
             let current_interval = if fast_cycles_remaining > 0 {
@@ -118,14 +121,37 @@ pub fn start_unified_epoch_monitor(
             };
 
             // 3. Get current Rust epoch from node
-            let (rust_epoch, current_mode) =
-                if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                    let node_guard = node_arc.lock().await;
-                    (node_guard.current_epoch, node_guard.node_mode.clone())
-                } else {
-                    debug!("⚠️ [EPOCH MONITOR] Node not registered yet, waiting...");
+            // DEADLOCK PREVENTION: Use non-blocking try_lock with a fallback to the last known
+            // state. During epoch transition, transition_to_epoch_from_system_tx locks the node
+            // and calls poll_go_until_synced which awaits. If epoch_monitor calls lock().await,
+            // it deadlocks, preventing STALL RECOVERY from executing to help Go catch up.
+            let lock_res = if let Some(node_arc) = crate::node::get_transition_handler_node().await {
+                match node_arc.try_lock() {
+                    Ok(node_guard) => {
+                        last_known_epoch = node_guard.current_epoch;
+                        last_known_mode = Some(node_guard.node_mode.clone());
+                        Some((node_guard.current_epoch, node_guard.node_mode.clone()))
+                    }
+                    Err(_) => {
+                        if let Some(ref mode) = last_known_mode {
+                            debug!("⏳ [EPOCH MONITOR] Node registry lock is busy (transition in progress). Falling back to last known: epoch={}, mode={:?}", last_known_epoch, mode);
+                            Some((last_known_epoch, mode.clone()))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
+            let (rust_epoch, current_mode) = match lock_res {
+                Some(res) => res,
+                None => {
+                    debug!("⚠️ [EPOCH MONITOR] Node not registered yet or lock busy with no last known state, waiting...");
                     continue;
-                };
+                }
+            };
 
             // ═══════════════════════════════════════════════════════════════
             // BLOCK SYNC: REMOVED — sync_loop is the sole owner of block sync.
