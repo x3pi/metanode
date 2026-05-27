@@ -473,6 +473,19 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	mappingBatch, _ = blockchain.GetBlockChainInstance().GenerateMappingBatchForBlock(bl)
 
+	// Index Ethereum transaction hashes to Meta transaction hashes in memory/DB
+	if len(processResults.Transactions) > 0 {
+		for _, tx := range processResults.Transactions {
+			ethTx := tx.ToEthTransaction()
+			if ethTx != nil {
+				ethHash := ethTx.Hash()
+				if ethHash != (common.Hash{}) {
+					blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethHash, tx.Hash())
+				}
+			}
+		}
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// FORK-SAFETY FIX: Synchronous commit for Rust-driven execution path.
 	//
