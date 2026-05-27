@@ -246,6 +246,13 @@ start_go_master() {
         pprof_flag="--pprof-addr="
     fi
 
+    # Configure Heaptrack via USE_HEAPTRACK environment variable (e.g. USE_HEAPTRACK=0 or USE_HEAPTRACK=all)
+    local heaptrack_prefix=""
+    if [ "${USE_HEAPTRACK:-false}" = "true" ] || [ "${USE_HEAPTRACK:-}" = "${node_id}" ] || [ "${USE_HEAPTRACK:-}" = "all" ]; then
+        heaptrack_prefix="heaptrack "
+        log_info "  🔍 Kích hoạt Heaptrack cho Node ${node_id}..."
+    fi
+
     # Build command with crash diagnostics wrapper
     local cmd="ulimit -n 100000; ulimit -c unlimited; "
     cmd+="export RUST_BACKTRACE=full && "
@@ -255,7 +262,7 @@ start_go_master() {
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="set -o pipefail; "
     cmd+="echo \"═══ [NODE ${node_id}] PID=\$\$ Started at \$(date '+%Y-%m-%d %H:%M:%S') ═══\"; "
-    cmd+="./simple_chain -config=${config} ${pprof_flag} 2>&1 | tee >(sed -u 's/\x1b\[[0-9;]*[mGK]//g' >> \"${log_file}\"); "
+    cmd+="${heaptrack_prefix}./simple_chain -config=${config} ${pprof_flag} 2>&1 | tee >(sed -u 's/\x1b\[[0-9;]*[mGK]//g' >> \"${log_file}\"); "
     cmd+="EXIT_CODE=\${PIPESTATUS[0]}; "
     cmd+="echo ''; "
     cmd+="echo '╔═══════════════════════════════════════════════════════════╗'; "
