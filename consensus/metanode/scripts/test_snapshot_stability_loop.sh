@@ -432,10 +432,19 @@ run_single_round() {
     local dl_nomt=$(find "$dl_dir/nomt_db" -type f 2>/dev/null | wc -l)
     log "- 📦 Downloaded $dl_total files total ($dl_nomt in nomt_db/) from HTTP server"
 
-    mkdir -p "$dst_data/data/data" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
+    mkdir -p "$dst_data/data/data/history" "$dst_data/data/data/consensus" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
     for dir_name in $LEVELDB_DIRS; do
-        [ -d "$dl_dir/$dir_name" ] && mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
+        if [ -d "$dl_dir/$dir_name" ]; then
+            if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
+                mv "$dl_dir/$dir_name" "$dst_data/data/data/history/$dir_name"
+            elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
+                mv "$dl_dir/$dir_name" "$dst_data/data/data/consensus/$dir_name"
+            else
+                mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
+            fi
+        fi
     done
+    [ -d "$dl_dir/other" ] && { mkdir -p "$dst_data/data"; cp -r "$dl_dir/other" "$dst_data/data/"; }
     [ -d "$dl_dir/chaindata" ] && mv "$dl_dir/chaindata" "$dst_data/data/data/chaindata"
     [ -f "$dl_dir/metadata.json" ] && mv "$dl_dir/metadata.json" "$dst_data/data/data/metadata.json"
     [ -d "$dl_dir/back_up" ] && cp -r "$dl_dir/back_up/"* "$dst_data/back_up/" 2>/dev/null || true
@@ -449,7 +458,7 @@ run_single_round() {
     # Rust must start from GEI=0 and jump to Go's GEI, rather than inheriting a stale DAG.
     rm -rf "$dst_data/data/data/consensus/rust_consensus" 2>/dev/null || true
     # Verify NOMT stake_db has actual data files (stakeRoot=0x00 fork guard)
-    local nomt_stake_dir="$dst_data/data/data/nomt_db/stake_db"
+    local nomt_stake_dir="$dst_data/data/data/consensus/nomt_db/stake_db"
     if [ -d "$nomt_stake_dir" ]; then
         local stake_file_count=$(find "$nomt_stake_dir" -type f 2>/dev/null | wc -l)
         if [ "$stake_file_count" -eq 0 ]; then
@@ -468,11 +477,11 @@ run_single_round() {
     # ── Pre-flight Check: Verify NOMT Registry Parity ──
     log "### Pre-flight Check: NOMT Registry"
     local checksum_fail=0
-    for file in "$dst_data/data/data/nomt_registry_"*.bin; do
+    for file in "$dst_data/data/data/consensus/nomt_db/nomt_registry_"*.bin; do
         [ ! -f "$file" ] && continue
         local fname=$(basename "$file")
         local dst_md5=$(md5sum "$file" | awk '{print $1}')
-        local src_md5=$(md5sum "$GO_DIR/sample/node${SRC_NODE}/data/data/$fname" 2>/dev/null | awk '{print $1}' || echo "missing_in_src")
+        local src_md5=$(md5sum "$GO_DIR/sample/node${SRC_NODE}/data/data/consensus/nomt_db/$fname" 2>/dev/null | awk '{print $1}' || echo "missing_in_src")
         if [ "$dst_md5" != "$src_md5" ]; then
             log "- ❌ Checksum mismatch for $fname: src=$src_md5, dst=$dst_md5"
             checksum_fail=1

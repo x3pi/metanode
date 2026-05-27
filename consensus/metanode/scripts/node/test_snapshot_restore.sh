@@ -144,12 +144,23 @@ mkdir -p "$DST/back_up_write"
 
 # 5a. Move LevelDB dirs to BOTH Master (data/data) and Sub (data-write/data)
 echo "  📁 Mapping LevelDB & Xapian dirs..."
-for dir_name in $LEVELDB_DIRS; do
+mkdir -p "$DST/data/data/history" "$DST/data-write/data/history"
+mkdir -p "$DST/data/data/consensus" "$DST/data-write/data/consensus"
+for dir_name in $LEVELDB_DIRS nomt_db; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
-        # Copy to Master
-        cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/"
-        # Copy to Sub
-        cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data-write/data/"
+        if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
+            # History
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/history/"
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data-write/data/history/"
+        elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
+            # Consensus
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/consensus/"
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data-write/data/consensus/"
+        else
+            # Other
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/"
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data-write/data/"
+        fi
         echo -e "${GREEN}    ✅ $dir_name/${NC}"
     fi
 done
@@ -170,6 +181,16 @@ if [ -d "$DOWNLOAD_DIR/back_up_write" ]; then
     echo -e "${GREEN}    ✅ back_up_write/ → $SIZE${NC}"
 else
     echo -e "${YELLOW}    ⚠️  back_up_write/ not in snapshot${NC}"
+fi
+
+# 5d. Move metadata.json and other/ if present
+if [ -f "$DOWNLOAD_DIR/metadata.json" ]; then
+    cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/metadata.json" 2>/dev/null || true
+    cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/data/data/metadata.json" 2>/dev/null || true
+fi
+if [ -d "$DOWNLOAD_DIR/other" ]; then
+    mkdir -p "$DST/data"
+    cp -a "$DOWNLOAD_DIR/other" "$DST/data/"
 fi
 
 # Show restored sizes

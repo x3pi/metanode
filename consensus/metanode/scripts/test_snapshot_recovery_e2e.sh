@@ -137,13 +137,21 @@ if [ ! -d "$DOWNLOAD_DIR" ] || [ -z "$(ls -A "$DOWNLOAD_DIR")" ]; then
 fi
 
 log "  📂 Restoring state..."
-mkdir -p "$DST/data/data" "$DST/back_up" "$DST/data-write" "$DST/back_up_write"
+mkdir -p "$DST/data/data/history" "$DST/data/data/consensus" "$DST/back_up" "$DST/data-write" "$DST/back_up_write"
 for dir_name in $LEVELDB_DIRS; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
-        mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
+        if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
+            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/history/$dir_name"
+        elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
+            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/consensus/$dir_name"
+        else
+            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
+        fi
     fi
 done
 
+[ -d "$DOWNLOAD_DIR/other" ] && { mkdir -p "$DST/data"; cp -r "$DOWNLOAD_DIR/other" "$DST/data/"; }
+[ -f "$DOWNLOAD_DIR/metadata.json" ] && { cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/metadata.json" 2>/dev/null || true; cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/data/data/metadata.json" 2>/dev/null || true; }
 if [ -d "$DOWNLOAD_DIR/back_up" ]; then cp -r "$DOWNLOAD_DIR/back_up/"* "$DST/back_up/" 2>/dev/null || true; fi
 if [ -d "$DOWNLOAD_DIR/data-write" ]; then cp -r "$DOWNLOAD_DIR/data-write/"* "$DST/data-write/" 2>/dev/null || true; fi
 if [ -d "$DOWNLOAD_DIR/back_up_write" ]; then cp -r "$DOWNLOAD_DIR/back_up_write/"* "$DST/back_up_write/" 2>/dev/null || true; fi

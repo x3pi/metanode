@@ -253,6 +253,7 @@ fi
 
 echo "  📁 Mapping data dirs with history compat..."
 mkdir -p "$NODE_DATA/data/data/history"
+mkdir -p "$NODE_DATA/data/data/consensus"
 for folder in "$SNAP_DIR"/*; do
   folder_name=$(basename "$folder")
   if [ "$folder_name" = "back_up" ]; then
@@ -260,10 +261,21 @@ for folder in "$SNAP_DIR"/*; do
   elif [ "$folder_name" = "metadata.json" ] || [ "$folder_name" = "index.html" ]; then
       continue
   elif [ -d "$folder" ]; then
-      if [ "$folder_name" = "blocks" ] || [ "$folder_name" = "receipts" ] || [ "$folder_name" = "transaction_state" ]; then
-          echo "    📦 [COMPAT] Mapping old $folder_name directly into history/$folder_name..."
+      if [ "$folder_name" = "blocks" ] || [ "$folder_name" = "receipts" ] || [ "$folder_name" = "transaction_state" ] || [ "$folder_name" = "mapping" ] || [ "$folder_name" = "changelog_db_account" ] || [ "$folder_name" = "changelog_db_stake" ]; then
+          echo "    📦 Mapping history database: $folder_name -> history/$folder_name..."
           cp -a "$folder" "$NODE_DATA/data/data/history/"
+      elif [ "$folder_name" = "history" ]; then
+          echo "    📦 Mapping history directory directly..."
+          cp -a "$folder"/* "$NODE_DATA/data/data/history/" 2>/dev/null || true
+      elif [ "$folder_name" = "nomt_db" ] || [ "$folder_name" = "smart_contract_code" ] || [ "$folder_name" = "smart_contract_storage" ] || [ "$folder_name" = "backup_device_key_storage" ] || [ "$folder_name" = "xapian" ] || [ "$folder_name" = "xapian_node" ]; then
+          echo "    📦 Mapping consensus database: $folder_name -> consensus/$folder_name..."
+          cp -a "$folder" "$NODE_DATA/data/data/consensus/"
+      elif [ "$folder_name" = "other" ]; then
+          echo "    📦 Mapping explorer database: other -> other..."
+          mkdir -p "$NODE_DATA/data"
+          cp -a "$folder" "$NODE_DATA/data/"
       else
+          echo "    📦 Mapping other data folder: $folder_name -> data/data/$folder_name..."
           cp -a "$folder" "$NODE_DATA/data/data/"
       fi
   fi
@@ -316,15 +328,12 @@ if [ -f "$NODE_DATA/back_up/epoch_data_backup.json" ]; then
     fi
 fi
 
-REQUIRED_DIRS=("blocks" "nomt_db" "transaction_state")
-for dir in "${REQUIRED_DIRS[@]}"; do
-    if [ -d "$NODE_DATA/data/data/$dir" ]; then
-        echo -e "${GREEN}  ✅ $dir/ — present in Master${NC}"
-    else
-        echo -e "${RED}  ❌ $dir/ — MISSING!${NC}"
-        VALIDATION_OK=false
-    fi
-done
+if [ -d "$NODE_DATA/data/data/history/blocks" ] && [ -d "$NODE_DATA/data/data/consensus/nomt_db" ] && [ -d "$NODE_DATA/data/data/history/transaction_state" ]; then
+    echo -e "${GREEN}  ✅ Required databases (blocks, nomt_db, transaction_state) — present in Master${NC}"
+else
+    echo -e "${RED}  ❌ Missing required databases under history/ or consensus/!${NC}"
+    VALIDATION_OK=false
+fi
 
 PEBBLE_SIZE=$(du -sh "$NODE_DATA/back_up" 2>/dev/null | awk '{print $1}')
 if [ -n "$PEBBLE_SIZE" ] && [ "$PEBBLE_SIZE" != "0" ]; then
