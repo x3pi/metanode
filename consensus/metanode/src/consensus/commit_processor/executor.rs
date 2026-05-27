@@ -194,7 +194,7 @@ pub async fn dispatch_commit(
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
                         // Collect committed TX data for TxRecycler confirmation
-                        let mut committed_tx_data: Vec<Vec<u8>> = Vec::new();
+                        let mut committed_tx_data: Vec<&[u8]> = Vec::new();
                         for block in &subdag.blocks {
                             for tx in block.transactions() {
                                 let tx_data = tx.data();
@@ -208,7 +208,7 @@ pub async fn dispatch_commit(
                                     );
                                 hashes_guard.insert(tx_hash.clone());
                                 
-                                committed_tx_data.push(tx_data.to_vec());
+                                committed_tx_data.push(tx_data);
                                 batch_hashes.push(tx_hash);
                                 tracked_count += 1;
                             }
