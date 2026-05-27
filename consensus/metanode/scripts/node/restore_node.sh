@@ -199,20 +199,56 @@ mkdir -p "$NODE_DATA/data/data"
 mkdir -p "$NODE_DATA/back_up"
 
 if [ "$SNAP_MODE" = "network" ]; then
-    TEMP_SNAP="/tmp/snapshot_restore_$$"
-    mkdir -p "$TEMP_SNAP"
-    echo -e "${CYAN}  📥 Downloading snapshot via HTTP...${NC}"
-    wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
-        "$SNAP_FILES_URL/$SNAP_NAME/" \
-        -P "$TEMP_SNAP" 2>&1 || {
-        echo -e "${RED}  ❌ Download thất bại!${NC}"
-        rm -rf "$TEMP_SNAP"
-        exit 1
-    }
-    if [ -d "$TEMP_SNAP/$SNAP_NAME" ]; then SNAP_DL_DIR="$TEMP_SNAP/$SNAP_NAME"; else SNAP_DL_DIR="$TEMP_SNAP"; fi
-    DL_SIZE=$(du -sh "$SNAP_DL_DIR" 2>/dev/null | awk '{print $1}')
-    echo -e "${GREEN}  ✅ Downloaded: $DL_SIZE${NC}"
-    SNAP_DIR="$SNAP_DL_DIR"
+    # Thử tải file tar trước tiên vì nó nguyên tử và nhanh hơn gấp 10 lần!
+    TAR_NAME="${SNAP_NAME}.tar"
+    TAR_URL="$SNAP_FILES_URL/$TAR_NAME"
+    
+    echo -e "${CYAN}  📥 Thử tải snapshot dưới dạng Tarball nguyên tử qua HTTP...${NC}"
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+    
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo -e "${GREEN}  ✅ Tìm thấy file Tarball trên server. Bắt đầu tải...${NC}"
+        TEMP_TAR="/tmp/${TAR_NAME}_$$"
+        wget -c -q --show-progress "$TAR_URL" -O "$TEMP_TAR" || {
+            echo -e "${RED}  ❌ Tải Tarball thất bại!${NC}"
+            rm -f "$TEMP_TAR"
+            exit 1
+        }
+        echo -e "${CYAN}  📦 Đang giải nén Tarball trực tiếp...${NC}"
+        
+        # Tạo thư mục đích cho việc giải nén
+        local_snap_dir="$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/$SNAP_NAME"
+        rm -rf "$local_snap_dir" 2>/dev/null || true
+        mkdir -p "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}"
+        
+        # Giải nén
+        tar -xf "$TEMP_TAR" -C "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/" 2>/dev/null || {
+            # Nếu lệnh trên bị lỗi cấu trúc thư mục, giải nén ra tmp rồi di chuyển
+            mkdir -p "/tmp/extract_$$"
+            tar -xf "$TEMP_TAR" -C "/tmp/extract_$$"
+            mv "/tmp/extract_$$/$SNAP_NAME" "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/"
+            rm -rf "/tmp/extract_$$"
+        }
+        rm -f "$TEMP_TAR"
+        SNAP_DIR="$local_snap_dir"
+        SNAP_MODE="local" # Chuyển sang local mode để tiếp tục copy dữ liệu phía dưới
+        echo -e "${GREEN}  ✅ Tarball đã giải nén xong tại local${NC}"
+    else
+        echo -e "${YELLOW}  ⚠️  Không tìm thấy file Tarball (server chạy phiên bản cũ). Fallback tải đệ quy từng file...${NC}"
+        TEMP_SNAP="/tmp/snapshot_restore_$$"
+        mkdir -p "$TEMP_SNAP"
+        wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
+            "$SNAP_FILES_URL/$SNAP_NAME/" \
+            -P "$TEMP_SNAP" 2>&1 || {
+            echo -e "${RED}  ❌ Download thất bại!${NC}"
+            rm -rf "$TEMP_SNAP"
+            exit 1
+        }
+        if [ -d "$TEMP_SNAP/$SNAP_NAME" ]; then SNAP_DL_DIR="$TEMP_SNAP/$SNAP_NAME"; else SNAP_DL_DIR="$TEMP_SNAP"; fi
+        DL_SIZE=$(du -sh "$SNAP_DL_DIR" 2>/dev/null | awk '{print $1}')
+        echo -e "${GREEN}  ✅ Downloaded: $DL_SIZE${NC}"
+        SNAP_DIR="$SNAP_DL_DIR"
+    fi
 fi
 
 echo "  📁 Mapping data dirs..."
