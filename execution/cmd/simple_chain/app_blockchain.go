@@ -163,6 +163,9 @@ func (app *App) initBlockchain() error {
 
 					trie_database.CreateTrieDatabaseManager(app.storageManager.GetStorageDatabaseTrie(), app.chainState.GetAccountStateDB())
 					blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+					if app.chainState != nil {
+						blockchain.GetBlockChainInstance().SetChangelogDB(app.chainState.GetChangelogDB())
+					}
 					goto SKIP_GENESIS
 				}
 			}
@@ -189,6 +192,9 @@ func (app *App) initBlockchain() error {
 
 		// Initialize blockchain
 		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		if app.chainState != nil {
+			blockchain.GetBlockChainInstance().SetChangelogDB(app.chainState.GetChangelogDB())
+		}
 		blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
 		blockchain.GetBlockChainInstance().Commit()
 		logger.Info("lastblock header 1: %v", app.startLastBlock.Header())
@@ -476,6 +482,9 @@ func (app *App) initBlockchain() error {
 
 		// Initialize blockchain
 		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		if app.chainState != nil {
+			blockchain.GetBlockChainInstance().SetChangelogDB(app.chainState.GetChangelogDB())
+		}
 		blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
 		blockchain.GetBlockChainInstance().Commit()
 

@@ -455,6 +455,9 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 	if err != nil {
 		return nil, err
 	}
+	if nomtTrie, ok := accountStateTrie.(*mt_trie.NomtStateTrie); ok && app.chainState != nil {
+		nomtTrie.SetChangelogDB(app.chainState.GetChangelogDB())
+	}
 	if app.blockProcessor != nil {
 		app.blockProcessor.SetTrieCache(trieCacheKey, accountStateTrie)
 	}
