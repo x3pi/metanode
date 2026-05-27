@@ -757,6 +757,23 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	}
 
 	logger.Info("📸 [SNAPSHOT] ✅ %s snapshot created: %s (took %v)", strings.ToUpper(method), snapshotName, time.Since(startTime))
+
+	// Run background tarball packaging to prevent network download race conditions
+	go func() {
+		tarStart := time.Now()
+		tarName := snapshotName + ".tar"
+		tarPath := filepath.Join(sm.snapshotBaseDir, tarName)
+		logger.Info("📦 [SNAPSHOT-TAR] Creating atomic tarball in background: %s", tarName)
+
+		// Package the directory relative to its base directory to keep structure neat
+		cmd := exec.Command("tar", "-cf", tarPath, "-C", sm.snapshotBaseDir, snapshotName)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			logger.Error("❌ [SNAPSHOT-TAR] Failed to create tarball: %v, output: %s", err, string(output))
+		} else {
+			logger.Info("📦 [SNAPSHOT-TAR] ✅ Tarball created successfully: %s (took %v)", tarName, time.Since(tarStart))
+		}
+	}()
+
 	return nil
 }
 
@@ -787,6 +804,16 @@ func (sm *SnapshotManager) RotateSnapshots() error {
 		if err := os.RemoveAll(snapshotPath); err != nil {
 			logger.Error("📸 [SNAPSHOT] Failed to delete snapshot %s: %v", snapshotPath, err)
 			continue
+		}
+
+		// Also clean up any associated background tarball file
+		tarPath := snapshotPath + ".tar"
+		if _, err := os.Stat(tarPath); err == nil {
+			if err := os.Remove(tarPath); err != nil {
+				logger.Error("📸 [SNAPSHOT] Failed to delete associated tarball %s: %v", tarPath, err)
+			} else {
+				logger.Info("📸 [SNAPSHOT] 🗑️  Deleted associated tarball: %s.tar", snapshots[i].SnapshotName)
+			}
 		}
 
 		logger.Info("📸 [SNAPSHOT] ✅ Deleted: %s", snapshots[i].SnapshotName)
