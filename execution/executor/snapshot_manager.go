@@ -131,9 +131,9 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 		enabled:          true,
 		levelDBDirs: []string{
 			"account_state",
-			"blocks",
-			"receipts",
-			"transaction_state",
+			"history/blocks",
+			"history/receipts",
+			"history/transaction_state",
 			"history/mapping",
 			"smart_contract_code",
 			"smart_contract_storage",
@@ -665,7 +665,14 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 
 				for _, entry := range entries {
 					name := entry.Name()
-					if processedDirs[name] {
+					// CRITICAL: processedDirs already contains levels like history/blocks.
+					// But we must also explicitly skip "data" and "back_up" at the root level,
+					// because "data" is the parent folder containing PebbleDBs/NOMT databases
+					// which have already been atomically checkpointed/snapshotted in Phase 1 & 1.5.
+					// "back_up" has also been explicitly handled in Phase 2.5/2.
+					// Copying them recursively here leads to redundant copies (double data size)
+					// and corrupted nested directory structures on restore.
+					if processedDirs[name] || name == "data" || name == "back_up" {
 						continue
 					}
 					srcPath := filepath.Join(sm.snapshotSourceDir, name)
