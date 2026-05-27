@@ -251,7 +251,8 @@ if [ "$SNAP_MODE" = "network" ]; then
     fi
 fi
 
-echo "  📁 Mapping data dirs..."
+echo "  📁 Mapping data dirs with history compat..."
+mkdir -p "$NODE_DATA/data/data/history"
 for folder in "$SNAP_DIR"/*; do
   folder_name=$(basename "$folder")
   if [ "$folder_name" = "back_up" ]; then
@@ -259,7 +260,12 @@ for folder in "$SNAP_DIR"/*; do
   elif [ "$folder_name" = "metadata.json" ] || [ "$folder_name" = "index.html" ]; then
       continue
   elif [ -d "$folder" ]; then
-      cp -a "$folder" "$NODE_DATA/data/data/"
+      if [ "$folder_name" = "blocks" ] || [ "$folder_name" = "receipts" ] || [ "$folder_name" = "transaction_state" ]; then
+          echo "    📦 [COMPAT] Mapping old $folder_name directly into history/$folder_name..."
+          cp -a "$folder" "$NODE_DATA/data/data/history/"
+      else
+          cp -a "$folder" "$NODE_DATA/data/data/"
+      fi
   fi
 done
 # 🚨 CRITICAL: Remove `rust_consensus` imported from the snapshot to avoid split-brain.
