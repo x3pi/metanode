@@ -34,6 +34,9 @@ enum Commands {
         #[arg(short, long, default_value = "config")]
         output: PathBuf,
     },
+    /// CLI keytool for validator key generation and inspection
+    #[command(subcommand)]
+    Keytool(metanode_keytool::Commands),
 }
 
 #[tokio::main]
@@ -71,6 +74,9 @@ async fn main() -> Result<()> {
             info!("Generating configuration for {} nodes...", nodes);
             NodeConfig::generate_multiple(nodes, &output).await?;
             info!("Configuration files generated in: {:?}", output);
+        }
+        Commands::Keytool(cmd) => {
+            metanode_keytool::run_keytool(cmd)?;
         }
     }
 
