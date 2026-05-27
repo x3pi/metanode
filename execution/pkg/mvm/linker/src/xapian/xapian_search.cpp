@@ -82,17 +82,12 @@ decodeQuerySearchCallData(const std::vector<uint8_t> &call_data) {
   return result;
 }
 
-// Constructor (Giữ nguyên)
-XapianSearcher::XapianSearcher(const std::string &db_path) {
-  try {
-    db = Xapian::Database(db_path);
-    std::cerr << "Mở database_____ '" << db_path << std::endl;
-  } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi mở database '" << db_path << "': " << e.get_msg()
-              << std::endl;
-    throw;
-  }
+XapianSearcher::XapianSearcher(const std::string &db_path)
+    : db(db_path)
+{
+    std::cerr << "Mở database '" << db_path << "'" << std::endl;
 }
+XapianSearcher::XapianSearcher(Xapian::Database database) : db(database) {}
 
 // Phương thức tìm kiếm gốc
 std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
