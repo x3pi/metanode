@@ -496,8 +496,8 @@ After=network-online.target
 Wants=network-online.target
 # Consensus depends on execution — execution must start first
 Before=${SVC_CONSENSUS}.service
-StartLimitIntervalSec=600
-StartLimitBurst=3
+#StartLimitIntervalSec=600
+#StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -510,9 +510,8 @@ ExecStop=/bin/kill -SIGTERM \$MAINPID
 
 # Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
 TimeoutStopSec=90
-
-Restart=on-failure
-RestartSec=15s
+#Restart=on-failure
+#RestartSec=15s
 
 # Environment
 Environment=GOTRACEBACK=all
@@ -536,8 +535,8 @@ Documentation=https://github.com/x3pi/metanode
 After=network-online.target ${SVC_EXECUTION}.service
 Wants=network-online.target
 Requires=${SVC_EXECUTION}.service
-StartLimitIntervalSec=600
-StartLimitBurst=3
+#StartLimitIntervalSec=600
+#StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -549,9 +548,8 @@ ExecStart=${INSTALL_DIR}/bin/metanode start --config ${INSTALL_DIR}/config/conse
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 
 TimeoutStopSec=60
-
-Restart=on-failure
-RestartSec=10s
+#Restart=on-failure
+#RestartSec=10s
 
 # Environment
 Environment=RUST_BACKTRACE=full
