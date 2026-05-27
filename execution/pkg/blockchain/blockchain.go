@@ -11,6 +11,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	mtn_types "github.com/meta-node-blockchain/meta-node/types"
@@ -49,6 +50,7 @@ type BlockChain struct {
 
 	blockDatabase  *block.BlockDatabase
 	storageManager *storage.StorageManager
+	changelogDB    *state_changelog.StateChangelogDB // Reference to state changelog DB for historical lookups
 
 	// Dirty Storage (Write buffer)
 	// Sử dụng pointer *sync.Map để có thể swap nhanh khi commit
@@ -343,6 +345,14 @@ func (bc *BlockChain) GetLastBlock() mtn_types.Block {
 	return block
 }
 
+func (bc *BlockChain) SetChangelogDB(db *state_changelog.StateChangelogDB) {
+	bc.changelogDB = db
+}
+
+func (bc *BlockChain) GetChangelogDB() *state_changelog.StateChangelogDB {
+	return bc.changelogDB
+}
+
 func (bc *BlockChain) NewAccountStateDBFromBlock(blockHeader mtn_types.BlockHeader) (*account_state_db.AccountStateDB, error) {
 	accountStateTrie, err := trie.NewStateTrie(
 		blockHeader.AccountStatesRoot(),
@@ -351,6 +361,9 @@ func (bc *BlockChain) NewAccountStateDBFromBlock(blockHeader mtn_types.BlockHead
 	)
 	if err != nil {
 		return nil, err
+	}
+	if nomtTrie, ok := accountStateTrie.(*trie.NomtStateTrie); ok && bc.changelogDB != nil {
+		nomtTrie.SetChangelogDB(bc.changelogDB)
 	}
 	return account_state_db.NewAccountStateDB(
 		accountStateTrie,

@@ -447,4 +447,4 @@ test_sort.rs
 patch_http_handler.sh
 
 consensus/metanode/docs/block_flow_go_rust/metanode.code-workspace
-execution/cmd/simple_chain/heaptrack.simple_chain.953238.zst
+execution/cmd/simple_chain/heaptrack.simple_chain.*.zst
