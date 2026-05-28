@@ -430,7 +430,14 @@ func (vmP *VmProcessor) updateStateDB(
 		if len(mvmRs.MapNonce) > 0 {
 			details := make(map[string]string)
 			fatalError := false
-			for address, nonceBytes := range mvmRs.MapNonce {
+			// FORK FIX: Sort nonce addresses for deterministic break-on-error behavior
+			sortedNonceAddrsRevert := make([]string, 0, len(mvmRs.MapNonce))
+			for addr := range mvmRs.MapNonce {
+				sortedNonceAddrsRevert = append(sortedNonceAddrsRevert, addr)
+			}
+			sort.Strings(sortedNonceAddrsRevert)
+			for _, address := range sortedNonceAddrsRevert {
+				nonceBytes := mvmRs.MapNonce[address]
 				fmtAddress := common.HexToAddress(address)
 				newNonceBig := big.NewInt(0).SetBytes(nonceBytes)
 				newNonce, err := utils.BigIntToUint64(newNonceBig)
@@ -498,7 +505,14 @@ func (vmP *VmProcessor) updateStateDB(
 	// --- AddBalance ---
 	if len(mvmRs.MapAddBalance) > 0 {
 		details := make(map[string]string)
-		for address, addAmountBytes := range mvmRs.MapAddBalance {
+		// FORK FIX: Sort addresses for deterministic order
+		sortedAddBalAddrs := make([]string, 0, len(mvmRs.MapAddBalance))
+		for addr := range mvmRs.MapAddBalance {
+			sortedAddBalAddrs = append(sortedAddBalAddrs, addr)
+		}
+		sort.Strings(sortedAddBalAddrs)
+		for _, address := range sortedAddBalAddrs {
+			addAmountBytes := mvmRs.MapAddBalance[address]
 			fmtAddress := common.HexToAddress(address)
 			addAmount := big.NewInt(0).SetBytes(addAmountBytes)
 			vmP.chainState.GetAccountStateDB().AddPendingBalance(fmtAddress, addAmount)
@@ -515,7 +529,14 @@ func (vmP *VmProcessor) updateStateDB(
 	if len(mvmRs.MapSubBalance) > 0 {
 		details := make(map[string]string)
 		fatalError := false
-		for address, subAmountBytes := range mvmRs.MapSubBalance {
+		// FORK FIX: Sort addresses for deterministic break-on-error behavior
+		sortedSubBalAddrs := make([]string, 0, len(mvmRs.MapSubBalance))
+		for addr := range mvmRs.MapSubBalance {
+			sortedSubBalAddrs = append(sortedSubBalAddrs, addr)
+		}
+		sort.Strings(sortedSubBalAddrs)
+		for _, address := range sortedSubBalAddrs {
+			subAmountBytes := mvmRs.MapSubBalance[address]
 			fmtAddress := common.HexToAddress(address)
 			subAmount := big.NewInt(0).SetBytes(subAmountBytes)
 
@@ -559,7 +580,14 @@ func (vmP *VmProcessor) updateStateDB(
 	if len(mvmRs.MapNonce) > 0 {
 		details := make(map[string]string)
 		fatalError := false
-		for address, nonceBytes := range mvmRs.MapNonce {
+		// FORK FIX: Sort nonce addresses for deterministic break-on-error behavior
+		sortedNonceAddrs := make([]string, 0, len(mvmRs.MapNonce))
+		for addr := range mvmRs.MapNonce {
+			sortedNonceAddrs = append(sortedNonceAddrs, addr)
+		}
+		sort.Strings(sortedNonceAddrs)
+		for _, address := range sortedNonceAddrs {
+			nonceBytes := mvmRs.MapNonce[address]
 			fmtAddress := common.HexToAddress(address)
 			newNonceBig := big.NewInt(0).SetBytes(nonceBytes)
 			newNonce, err := utils.BigIntToUint64(newNonceBig)
@@ -681,7 +709,14 @@ func (vmP *VmProcessor) updateStateDB(
 		}
 		// Apply state...
 		logger.Debug("[DEPLOY-STATE] Starting deploy state loop, MapCodeHash len=%d", len(mvmRs.MapCodeHash))
-		for address, newCodeHashBytes := range mvmRs.MapCodeHash {
+		// FORK FIX: Sort code hash addresses for deterministic break-on-error behavior
+		sortedCodeHashAddrs := make([]string, 0, len(mvmRs.MapCodeHash))
+		for addr := range mvmRs.MapCodeHash {
+			sortedCodeHashAddrs = append(sortedCodeHashAddrs, addr)
+		}
+		sort.Strings(sortedCodeHashAddrs)
+		for _, address := range sortedCodeHashAddrs {
+			newCodeHashBytes := mvmRs.MapCodeHash[address]
 			addrDetails := map[string]string{}
 			fmtAddress := common.HexToAddress(address)
 			newCodeHash := common.BytesToHash(newCodeHashBytes)
@@ -750,7 +785,14 @@ func (vmP *VmProcessor) updateStateDB(
 	// --- Code Change ---
 	if len(mvmRs.MapCodeChange) > 0 {
 		details := make(map[string]map[string]string)
-		for address, code := range mvmRs.MapCodeChange {
+		// FORK FIX: Sort code change addresses for deterministic order
+		sortedCodeChangeAddrs := make([]string, 0, len(mvmRs.MapCodeChange))
+		for addr := range mvmRs.MapCodeChange {
+			sortedCodeChangeAddrs = append(sortedCodeChangeAddrs, addr)
+		}
+		sort.Strings(sortedCodeChangeAddrs)
+		for _, address := range sortedCodeChangeAddrs {
+			code := mvmRs.MapCodeChange[address]
 			addrDetails := map[string]string{}
 			fmtAddress := common.HexToAddress(address)
 			codeHashBytes, ok := mvmRs.MapCodeHash[address]
@@ -788,14 +830,43 @@ func (vmP *VmProcessor) updateStateDB(
 	if len(mvmRs.MapStorageChange) > 0 {
 		details := make(map[string]map[string]string)
 		totalSlotsUpdated := 0
-		for address, rawStorages := range mvmRs.MapStorageChange {
+
+		// ═══════════════════════════════════════════════════════════════
+		// CRITICAL FORK FIX (May 2026): Sort contract addresses for
+		// deterministic processing order. Go map iteration is
+		// non-deterministic — different nodes iterate in different order.
+		// ═══════════════════════════════════════════════════════════════
+		sortedAddresses := make([]string, 0, len(mvmRs.MapStorageChange))
+		for address := range mvmRs.MapStorageChange {
+			sortedAddresses = append(sortedAddresses, address)
+		}
+		sort.Strings(sortedAddresses)
+
+		for _, address := range sortedAddresses {
+			rawStorages := mvmRs.MapStorageChange[address]
 			slotDetails := make(map[string]string)
 			fmtAddress := common.HexToAddress(address)
 
-			// Collect all slots into batch arrays
+			// ═══════════════════════════════════════════════════════════
+			// CRITICAL FORK FIX: Sort storage slot keys deterministically.
+			// rawStorages is map[string][]byte — Go map iteration order
+			// is non-deterministic. Different nodes pass keys to
+			// BatchSetStorageValues in different order → BatchUpdate's
+			// 16 parallel workers read old values in different order →
+			// different wOldValues → different NOMT Merkle root → FORK.
+			//
+			// Sorting ensures ALL nodes process slots in identical order.
+			// ═══════════════════════════════════════════════════════════
+			sortedSlots := make([]string, 0, len(rawStorages))
+			for slotHex := range rawStorages {
+				sortedSlots = append(sortedSlots, slotHex)
+			}
+			sort.Strings(sortedSlots)
+
 			keys := make([][]byte, 0, len(rawStorages))
 			vals := make([][]byte, 0, len(rawStorages))
-			for slotHex, value := range rawStorages {
+			for _, slotHex := range sortedSlots {
+				value := rawStorages[slotHex]
 				slotBytes := common.FromHex(slotHex)
 				keys = append(keys, slotBytes)
 				vals = append(vals, value)
@@ -829,7 +900,13 @@ func (vmP *VmProcessor) updateStateDB(
 	if len(mvmRs.MapStorageChange) > 0 {
 		details := make(map[string]string)
 		fatalError := false
-		for address := range mvmRs.MapStorageChange {
+		// FORK FIX: Sort addresses for deterministic Storage Root Update order
+		sortedStorageRootAddrs := make([]string, 0, len(mvmRs.MapStorageChange))
+		for addr := range mvmRs.MapStorageChange {
+			sortedStorageRootAddrs = append(sortedStorageRootAddrs, addr)
+		}
+		sort.Strings(sortedStorageRootAddrs)
+		for _, address := range sortedStorageRootAddrs {
 			fmtAddress := common.HexToAddress(address)
 			newStorageRoot := vmP.chainState.GetSmartContractDB().StorageRoot(fmtAddress)
 			err := vmP.chainState.GetAccountStateDB().SetStorageRoot(fmtAddress, newStorageRoot)
@@ -867,7 +944,14 @@ func (vmP *VmProcessor) updateStateDB(
 	if len(mvmRs.MapFullDbHash) > 0 {
 		details := make(map[string]map[string]string)
 		dbHashUpdateErrors := []string{}
-		for addressHex, newHashBytes := range mvmRs.MapFullDbHash {
+		// FORK FIX: Sort MapFullDbHash addresses for deterministic order
+		sortedDbHashAddrs := make([]string, 0, len(mvmRs.MapFullDbHash))
+		for addr := range mvmRs.MapFullDbHash {
+			sortedDbHashAddrs = append(sortedDbHashAddrs, addr)
+		}
+		sort.Strings(sortedDbHashAddrs)
+		for _, addressHex := range sortedDbHashAddrs {
+			newHashBytes := mvmRs.MapFullDbHash[addressHex]
 			addrDetails := map[string]string{"newPartialHash": common.Bytes2Hex(newHashBytes)}
 			fmtAddress := common.HexToAddress(addressHex)
 			accountState, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
