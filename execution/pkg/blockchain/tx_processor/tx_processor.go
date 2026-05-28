@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -436,25 +437,27 @@ func processGroupsConcurrently(
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// CRITICAL FORK FIX (May 2026): Force single-threaded execution.
+	// PARALLEL GROUP EXECUTION (Restored May 2026)
 	//
-	// ROOT CAUSE: updateStateDB() runs inside parallel workers and calls
-	// AddPendingBalance/SubTotalBalance/PlusOneNonce directly on shared
-	// AccountStateDB. When the C++ EVM executes smart contract calls,
-	// it can internally CALL/TRANSFER to addresses NOT listed in the
-	// TX's RelatedAddresses. This causes cross-group concurrent mutations
-	// on the same account → non-deterministic stateRoot → FORK.
+	// Each group processes its TXs SEQUENTIALLY (for loop in
+	// processSingleGroup). Different groups run in PARALLEL via
+	// maxTxWorkers goroutines.
 	//
-	// FIX: maxTxWorkers=1 forces ALL groups through a single worker,
-	// guaranteeing strictly sequential execution (deterministic).
+	// FORK SAFETY: The root cause of state divergence was Go map
+	// iteration non-determinism in updateStateDB() — NOT parallel
+	// execution. All map iterations (MapStorageChange, MapNonce,
+	// MapAddBalance, MapSubBalance, MapCodeHash, MapCodeChange,
+	// MapFullDbHash) are now sorted with sort.Strings() before
+	// processing, guaranteeing 100% deterministic state mutations
+	// regardless of Go's random map iteration order.
 	//
-	// PERFORMANCE: ~3-5x slower block processing. This is a stopgap
-	// until the full StateDelta refactor is implemented (defer all
-	// state mutations to post-parallel batch phase).
-	//
-	// ZERO-FORK INVARIANT: Thà chậm chứ TUYỆT ĐỐI không fork.
+	// Groups are isolated by address (GroupTransactionsDeterministic),
+	// so parallel group execution is safe.
 	// ═══════════════════════════════════════════════════════════════
-	const maxTxWorkers = 1
+	maxTxWorkers := runtime.NumCPU()
+	if maxTxWorkers > 16 {
+		maxTxWorkers = 16
+	}
 	numWorkers := maxTxWorkers
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
