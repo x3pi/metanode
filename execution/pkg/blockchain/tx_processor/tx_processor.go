@@ -502,23 +502,40 @@ func processGroupsConcurrently(
 
 	nativeRoundRobin := 0
 	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	for i, group := range groupedGroups {
-		// Identify if this group contains smart contract execution to check for special contracts.
-		// Note: contractAddr is no longer used for hashing since we do perfect round-robin.
-		for _, item := range group.Items {
-			if !item.Tx.IsRegularTransaction() && !item.Tx.IsDeployContract() {
-				break
-			}
-		}
+	blsSelector := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
+	blsOnlyGroupCount := 0
 
+	for i, group := range groupedGroups {
 		// CRITICAL CONCURRENCY FIX: Identify if any transaction in this group touches
 		// special/virtual contracts (Staking, Cross-Chain, or Account Settings).
 		// If so, we MUST route the entire group to Worker 0 to execute them sequentially
 		// and prevent updateStateDB / StakeStateDB concurrent data races.
+		//
+		// EXCEPTION: BLS-only groups (all items are setBlsPublicKey with nonce=0)
+		// are SAFE for parallel execution because:
+		//   1. Each BLS TX is from a UNIQUE sender (no shared state between TXs)
+		//   2. They only mutate in-memory AccountState (SetPublicKeyBls, SetNonce, SetLastHash)
+		//   3. They do NOT touch StakeStateDB, SmartContractDB, or any EVM/MVM state
+		//   4. DirtyAccounts are applied in indexed order after wg.Wait()
 		isSpecialContractGroup := false
+		isBLSOnlyGroup := true // Assume BLS-only until proven otherwise
+
 		for _, item := range group.Items {
 			toAddr := item.Tx.ToAddress()
 			fromAddr := item.Tx.FromAddress()
+
+			// Check if this TX is a BLS setBlsPublicKey(nonce=0)
+			if toAddr == accountSettingAddr && item.Tx.GetNonce() == 0 {
+				dataInput := item.Tx.CallData().Input()
+				if len(dataInput) >= 4 && bytes.Equal(dataInput[:4], blsSelector) {
+					// This TX IS a BLS setBlsPublicKey — continue checking other TXs
+					continue
+				}
+			}
+
+			// This TX is NOT a BLS setBlsPublicKey — mark group as non-BLS-only
+			isBLSOnlyGroup = false
+
 			if toAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
 				toAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
 				toAddr == accountSettingAddr ||
@@ -542,7 +559,17 @@ func processGroupsConcurrently(
 		}
 
 		var workerIdx int
-		if isSpecialContractGroup {
+		if isBLSOnlyGroup {
+			// ═══════════════════════════════════════════════════════════════
+			// BLS-ONLY GROUP: Safe to round-robin across ALL workers.
+			// Each BLS TX operates on a unique sender address (independent state).
+			// No EVM/MVM calls, no StakeStateDB mutations, no lock contention.
+			// This prevents Worker 0 starvation when processing 30K+ BLS TXs.
+			// ═══════════════════════════════════════════════════════════════
+			workerIdx = nativeRoundRobin % numWorkers
+			nativeRoundRobin++
+			blsOnlyGroupCount++
+		} else if isSpecialContractGroup {
 			// Route to Worker 0 to guarantee sequential execution of all special contract transactions.
 			workerIdx = 0
 		} else {
@@ -557,6 +584,10 @@ func processGroupsConcurrently(
 			idx:  i,
 			meta: groupMetas[i],
 		}
+	}
+	if blsOnlyGroupCount > 0 {
+		logger.Info("⚡ [BLS-PARALLEL] Distributed %d BLS-only groups across %d workers (instead of serializing to Worker 0)",
+			blsOnlyGroupCount, numWorkers)
 	}
 
 	// Close channels to signal workers to stop
@@ -580,14 +611,14 @@ func processGroupsConcurrently(
 	// ═══════════════════════════════════════════════════════════════
 	startDirty := time.Now()
 	totalBlockGasFee := big.NewInt(0)
+	var allDirtyAccounts []types.AccountState
 	for _, gRs := range results {
 		if gRs.TotalGasFee != nil && gRs.TotalGasFee.Sign() > 0 {
 			totalBlockGasFee.Add(totalBlockGasFee, gRs.TotalGasFee)
 		}
-		for _, dirtyAs := range gRs.DirtyAccounts {
-			chainState.GetAccountStateDB().PublicSetDirtyAccountState(dirtyAs)
-		}
+		allDirtyAccounts = append(allDirtyAccounts, gRs.DirtyAccounts...)
 	}
+	chainState.GetAccountStateDB().PublicSetDirtyAccountStateBatch(allDirtyAccounts)
 	if totalBlockGasFee.Sign() > 0 && leaderAddr != (common.Address{}) {
 		chainState.GetAccountStateDB().AddPendingBalance(leaderAddr, totalBlockGasFee)
 	}
