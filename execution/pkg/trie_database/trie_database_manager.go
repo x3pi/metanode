@@ -180,6 +180,7 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 				return err
 			}
 			as.SmartContractState().DeleteTrieDatabaseMapValue(trieDB.dbName)
+			as.MarkDirty()
 			manager.accountStateDB.PublicSetDirtyAccountState(as)
 		case Reverted:
 			trieDB.Discard()
@@ -240,6 +241,7 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 				return err
 			}
 			as.SmartContractState().SetTrieDatabaseMapValue(job.trieDB.dbName, job.root.Bytes())
+			as.MarkDirty()
 			manager.accountStateDB.PublicSetDirtyAccountState(as)
 			logger.Info("Updated IntermediateRoot for TrieDatabase (parallel)", "id", job.id, "root", job.root)
 		}
