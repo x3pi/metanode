@@ -14,7 +14,6 @@ import (
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -92,14 +91,7 @@ func (bp *BlockProcessor) commitWorker() {
 					}
 					mvmAPI := mvm.GetMVMApi(mvmId)
 					if mvmAPI != nil {
-						mvmRs := mvmAPI.GetExecuteResult()
-						if mvmRs != nil {
-							if mvmRs.Status == pb.RECEIPT_STATUS_THREW || mvmRs.Status == pb.RECEIPT_STATUS_HALTED {
-								mvmAPI.RevertFullDb()
-							} else {
-								mvmAPI.CommitFullDb()
-							}
-						}
+						mvmAPI.CommitFullDb()
 						mvm.UnprotectMVMApi(mvmId)
 						committedMvmIds[mvmId] = struct{}{}
 					}
