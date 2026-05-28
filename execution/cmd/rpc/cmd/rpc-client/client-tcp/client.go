@@ -125,7 +125,11 @@ func NewClient(
 		clientContext.ConnectionsManager.AddParentConnection(parentConn)
 		clientContext.SocketServer.OnConnect(parentConn)
 		go clientContext.SocketServer.HandleConnection(parentConn)
-		go clientContext.SocketServer.Listen("0.0.0.0:8080")
+		listenAddr := config.ConnectionAddress()
+		if listenAddr == "" {
+			listenAddr = "0.0.0.0:8080"
+		}
+		go clientContext.SocketServer.Listen(listenAddr)
 		client.startKeepAliveLoop()
 	}
 	client.transactionController = controllers.NewTransactionController(
