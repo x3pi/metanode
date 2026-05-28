@@ -125,7 +125,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	startExec := time.Now()
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 	execDuration := time.Since(startExec)
-	logger.Debug("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
+	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -184,12 +184,12 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// --- PERF SUMMARY for blocks with TXs ---
 	if len(allTransactions) > 0 {
-		logger.Debug("[PERF] Block #%d Phase Breakdown (txCount=%d):", blockNum, len(allTransactions))
-		logger.Debug("  [PERF]   TX Execution (Parallel): %v", execDuration)
-		logger.Debug("  [PERF]   IntermediateRoot (TrieDB): %v", trieDBIRDuration)
-		logger.Debug("  [PERF]   IntermediateRoot (AccountDB): %v (Parallel)", accountIRDuration)
-		logger.Debug("  [PERF]   IntermediateRoot (StakeDB): %v (Parallel)", stakeIRDuration)
-		logger.Debug("  [PERF]   TOTAL IR (Wall Clock): %v", trieDBIRDuration+utils.MaxDuration(accountIRDuration, stakeIRDuration))
+		logger.Info("[PERF] Block #%d Phase Breakdown (txCount=%d):", blockNum, len(allTransactions))
+		logger.Info("  [PERF]   TX Execution (Parallel): %v", execDuration)
+		logger.Info("  [PERF]   IntermediateRoot (TrieDB): %v", trieDBIRDuration)
+		logger.Info("  [PERF]   IntermediateRoot (AccountDB): %v (Parallel)", accountIRDuration)
+		logger.Info("  [PERF]   IntermediateRoot (StakeDB): %v (Parallel)", stakeIRDuration)
+		logger.Info("  [PERF]   TOTAL IR (Wall Clock): %v", trieDBIRDuration+utils.MaxDuration(accountIRDuration, stakeIRDuration))
 	} else {
 		logger.Debug("[PERF] IntermediateRoot (StakeState): %v, block: %v", stakeIRDuration, blockNum)
 	}
