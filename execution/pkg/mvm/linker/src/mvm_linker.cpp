@@ -1353,3 +1353,7 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce) {
     State::getInstance(address)->setNonce(uint256_t(nonce));
   }
 }
+void MVM_cancelTransaction(unsigned char *mvmId) {
+  registry.cancelTransaction(mvmId);
+  registry.unregisterAllManagersForMvmId(mvmId);
+}
