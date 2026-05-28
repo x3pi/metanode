@@ -225,6 +225,7 @@ type Receipt struct {
 	TransactionIndex uint64                  `protobuf:"varint,12,opt,name=TransactionIndex,proto3" json:"TransactionIndex,omitempty"`
 	ProcessingType   RECEIPT_PROCESSING_TYPE `protobuf:"varint,13,opt,name=ProcessingType,proto3,enum=receipt.RECEIPT_PROCESSING_TYPE" json:"ProcessingType,omitempty"` // Thêm trường này
 	RHash            []byte                  `protobuf:"bytes,14,opt,name=RHash,proto3" json:"RHash,omitempty"`
+	GroupIndex       uint64                  `protobuf:"varint,15,opt,name=GroupIndex,proto3" json:"GroupIndex,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -348,6 +349,13 @@ func (x *Receipt) GetRHash() []byte {
 		return x.RHash
 	}
 	return nil
+}
+
+func (x *Receipt) GetGroupIndex() uint64 {
+	if x != nil {
+		return x.GroupIndex
+	}
+	return 0
 }
 
 type GetTransactionReceiptRequest struct {

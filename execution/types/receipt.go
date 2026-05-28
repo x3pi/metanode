@@ -37,6 +37,9 @@ type Receipt interface {
 	SetProcessingType(processingType pb.RECEIPT_PROCESSING_TYPE)
 	ProcessingType() pb.RECEIPT_PROCESSING_TYPE
 	TransactionIndex() uint64
+	SetTransactionIndex(txIndex uint64)
+	GroupIndex() uint64
+	SetGroupIndex(groupIndex uint64)
 	// setter
 	UpdateExecuteResult(
 		status pb.RECEIPT_STATUS,

@@ -468,9 +468,13 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
-	// Phase 2: Sort by txHash for deterministic order
+	// Phase 2: Sort by TransactionIndex for deterministic block-order insertion.
+	// TransactionIndex is stamped in processGroupsConcurrently (GroupID order → sequential).
+	// All nodes produce the same TransactionIndex for the same block TX list.
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].txHash.Cmp(entries[j].txHash) < 0
+		ti := r.dirtyReceipts[entries[i].txHash].TransactionIndex()
+		tj := r.dirtyReceipts[entries[j].txHash].TransactionIndex()
+		return ti < tj
 	})
 
 	// Phase 3: Update trie

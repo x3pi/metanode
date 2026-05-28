@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -20,7 +21,7 @@ import (
 )
 
 // MarshalBlockToMap converts a mt_types.Block to a map[string]interface{}.
-func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Hash) (mt_types.Transaction, error)) (map[string]interface{}, error) {
+func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Hash) (mt_types.Transaction, error), storageReceipt storage.Storage) (map[string]interface{}, error) {
 	// Create a map to hold the block data.
 	blockMap := make(map[string]interface{})
 	// note có thể metamask dùng hai trường blockHash blockNumber để ánh xạ vơi recipte
@@ -75,6 +76,33 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 		return nil, fmt.Errorf("fetchTx is nil while fullTx is requested")
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// GROUP INFO FROM STORED RECEIPTS: Read GroupIndex/TransactionIndex that were
+	// stamped during block processing — no need to re-run GroupTransactionsDeterministic.
+	// ═══════════════════════════════════════════════════════════════════════
+	type txGroupInfo struct {
+		groupIndex       uint64
+		transactionIndex uint64
+	}
+	groupInfoMap := make(map[common.Hash]txGroupInfo, len(txHashes))
+
+	// Open the receipt trie for this block (read-only, no new trie is created)
+	rcpDb, rcpErr := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt)
+	if rcpErr != nil {
+		logger.Warn("⚠️ [RPC-BLOCK] Cannot open receipt trie for block #%d: %v. GroupIndex will be unavailable.",
+			block.Header().BlockNumber(), rcpErr)
+	} else {
+		for _, txHash := range txHashes {
+			rcp, err := rcpDb.GetReceipt(txHash)
+			if err == nil {
+				groupInfoMap[txHash] = txGroupInfo{
+					groupIndex:       rcp.GroupIndex(),
+					transactionIndex: rcp.TransactionIndex(),
+				}
+			}
+		}
+	}
+
 	for _, txHash := range txHashes {
 		tx, err := fetchTx(txHash)
 		if err != nil {
@@ -94,6 +122,13 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 		txMap["v"] = (*hexutil.Big)(v)                             // Giá trị V trong chữ ký
 		txMap["r"] = (*hexutil.Big)(r)                             // Giá trị R trong chữ ký
 		txMap["s"] = (*hexutil.Big)(s)                             // Giá trị S trong chữ ký
+
+		// Add grouping info from stored receipts (stamped during block processing)
+		if info, exists := groupInfoMap[tx.Hash()]; exists {
+			txMap["groupId"] = hexutil.EncodeUint64(info.groupIndex)
+			txMap["transactionIndex"] = hexutil.EncodeUint64(info.transactionIndex)
+		}
+
 		transactions = append(transactions, txMap)
 	}
 	blockMap["transactions"] = transactions // Mảng các giao dịch trong khối
@@ -149,7 +184,7 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		}
 	}
 
-	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx)
+	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
 	if err != nil {
 		return nil
 	}
@@ -289,7 +324,7 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 		}
 	}
 
-	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx)
+	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
 	if err != nil {
 		return nil
 	}

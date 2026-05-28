@@ -218,6 +218,20 @@ func (r *Receipt) TransactionIndex() uint64 {
 	return r.proto.TransactionIndex
 }
 
+func (r *Receipt) SetTransactionIndex(txIndex uint64) {
+	r.proto.TransactionIndex = txIndex
+	r.cachedBytes.Store(nil)
+}
+
+func (r *Receipt) GroupIndex() uint64 {
+	return r.proto.GroupIndex
+}
+
+func (r *Receipt) SetGroupIndex(groupIndex uint64) {
+	r.proto.GroupIndex = groupIndex
+	r.cachedBytes.Store(nil)
+}
+
 // setter
 func (r *Receipt) UpdateExecuteResult(
 	status pb.RECEIPT_STATUS,

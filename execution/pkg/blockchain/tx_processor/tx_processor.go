@@ -653,14 +653,24 @@ func processGroupsConcurrently(
 	allExecuteSCResults := make([]types.ExecuteSCResult, 0, totalSCResults)
 	allMvmIdMap := make(map[common.Hash]common.Address, totalTxs)
 
-	for _, gRs := range results {
+	// blockTxIndex is the running transaction position in the final block (deterministic).
+	// It increments across groups in sorted group order (GroupID 0, 1, 2, ...).
+	blockTxIndex := uint64(0)
+	for groupIdx, gRs := range results {
+		// Stamp GroupIndex + TransactionIndex onto every receipt in this group
+		// before appending so the trie encodes deterministic ordering info.
+		for _, rcp := range *gRs.rcpPtr {
+			rcp.SetGroupIndex(uint64(groupIdx))
+			rcp.SetTransactionIndex(blockTxIndex)
+			blockTxIndex++
+		}
 		allTransactions = append(allTransactions, *gRs.txPtr...)
 		allReceipts = append(allReceipts, *gRs.rcpPtr...)
 		allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
 		for h, addr := range *gRs.mvmPtr {
 			allMvmIdMap[h] = addr
 		}
-		
+
 		// Return slices and maps to pools to prevent GC overhead
 		txSlicePool.Put(gRs.txPtr)
 		receiptSlicePool.Put(gRs.rcpPtr)
