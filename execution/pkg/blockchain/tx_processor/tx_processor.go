@@ -498,12 +498,10 @@ func processGroupsConcurrently(
 	nativeRoundRobin := 0
 	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	for i, group := range groupedGroups {
-		// Identify if this group contains smart contract execution
-		var contractAddr *common.Address
+		// Identify if this group contains smart contract execution to check for special contracts.
+		// Note: contractAddr is no longer used for hashing since we do perfect round-robin.
 		for _, item := range group.Items {
 			if !item.Tx.IsRegularTransaction() && !item.Tx.IsDeployContract() {
-				addr := item.Tx.ToAddress()
-				contractAddr = &addr
 				break
 			}
 		}
@@ -542,15 +540,10 @@ func processGroupsConcurrently(
 		if isSpecialContractGroup {
 			// Route to Worker 0 to guarantee sequential execution of all special contract transactions.
 			workerIdx = 0
-		} else if contractAddr != nil {
-			// Hash contract address to route to a specific worker
-			h := 0
-			for _, b := range contractAddr.Bytes() {
-				h += int(b)
-			}
-			workerIdx = h % numWorkers
 		} else {
-			// SendNative or Deploy: load balance across workers
+			// Because groups are ALREADY independent (guaranteed by GroupTransactionsDeterministic),
+			// we don't need to hash the contract address! We can just round-robin them perfectly
+			// to achieve maximum parallelism and prevent worker starvation from hash collisions.
 			workerIdx = nativeRoundRobin % numWorkers
 			nativeRoundRobin++
 		}
