@@ -554,8 +554,6 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	blockNumberBigInt := tx.BlockNumber.ToInt()
 	blockNumberInt64 := blockNumberBigInt.Int64()
 
-	bl := api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNumberInt64), false)
-
 	events := receipt.EventLogs()
 	logs := make([]interface{}, len(events))
 	for i, logData := range events {
@@ -569,7 +567,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 			Address:          common.BytesToAddress(logData.Address).Hex(),
 			Data:             fmt.Sprintf("0x%s", common.Bytes2Hex(logData.Data)),
 			TransactionHash:  hashEth.Hex(),
-			BlockHash:        fmt.Sprintf("%s", bl["hash"]), // Sử dụng fmt.Sprintf để định dạng chuỗi
+			BlockHash:        blockHash.Hex(),
 			Topics:           topics,
 			LogIndex:         hexutil.EncodeUint64(uint64(i)),
 			TransactionIndex: hexutil.EncodeUint64(0),
@@ -586,7 +584,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		"logsBloom":         "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
 		"transactionIndex":  hexutil.EncodeUint64(receipt.TransactionIndex()),
 		"groupIndex":        hexutil.EncodeUint64(receipt.GroupIndex()), // Debug: deterministic group order
-		"blockHash":         bl["hash"],
+		"blockHash":         blockHash,
 		"blockNumber":       hexutil.EncodeUint64(uint64(blockNumberInt64)),
 		"effectiveGasPrice": hexutil.EncodeUint64(receipt.GasFee()),
 		"from":              receipt.FromAddress(),

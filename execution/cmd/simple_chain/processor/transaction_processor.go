@@ -157,12 +157,18 @@ func NewTransactionProcessor(
 		injectionQueue: make(chan injectionRequest, InjectionQueueSize),
 	}
 
+	// FORK-SAFETY: Shared RWMutex between virtual execution (RLock) and real
+	// block processing (Lock). This prevents concurrent cgo calls to C++ MVM
+	// that cause non-deterministic stateRoot divergence across nodes.
+	blockProcessingLock := &sync.RWMutex{}
+
 	// Initialize the embedded TxVirtualExecutor
 	tp.TxVirtualExecutor = NewTxVirtualExecutor(
 		nil, // env is set via SetEnvironment later
 		messageSender,
 		chainState,
 		storageManager,
+		blockProcessingLock,
 	)
 
 	pendingTxManager := NewPendingTransactionManager()
@@ -175,6 +181,7 @@ func NewTransactionProcessor(
 		eventSystem,
 		transactionPool,
 		pendingTxManager,
+		blockProcessingLock,
 	)
 
 	tp.MonitorCacheSize()
@@ -458,13 +465,40 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 
 	logger.Info("🔥 ProcessTransactionsFromClient: Received batch of %d transactions", len(transactions))
 
+	var processedTransactions []types.Transaction
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// FORK-SAFETY: Virtual execution MUST be sequential, NOT parallel.
+	//
+	// Root cause of fork at block #505 (May 2026):
+	// Each ProcessSingleTransactionVirtual() calls C++ MVM via cgo.
+	// C++ State::instances is indexed by CONTRACT ADDRESS (not mvmId).
+	// When 177 goroutines run virtual execution concurrently, multiple
+	// goroutines writing to the same contract's storage slots causes
+	// non-deterministic dirty state in the C++ cache. This dirty state
+	// persists and contaminates the REAL execution that follows, producing
+	// different stateRoot on different nodes depending on goroutine timing.
+	//
+	// Fix: Run virtual execution sequentially. Virtual execution only
+	// populates RelatedAddresses metadata — it does not need high throughput.
+	// The real parallelism happens downstream in processGroupsConcurrently.
+	// ═══════════════════════════════════════════════════════════════════════
+	for _, tx := range transactions {
+		updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(tx)
+		if err != nil {
+			logger.Warn("Dropped transaction from batch during virtual execution: hash=%s, err=%v", tx.Hash().Hex(), err)
+			continue
+		}
+		processedTransactions = append(processedTransactions, updatedTx)
+	}
+
 	queueFullErrs := 0
 
 	// FORK-SAFETY AND PERFORMANCE: Bypass the injectionQueue worker pool entirely
 	// for batched transactions from the TPS blast tool.
 	// The `AddTransactionsToPool` method internally takes the lock ONCE and validates in bulk.
-	if len(transactions) > 0 {
-		errors := tp.AddTransactionsToPool(transactions)
+	if len(processedTransactions) > 0 {
+		errors := tp.AddTransactionsToPool(processedTransactions)
 		for i, err := range errors {
 			if err != nil {
 				queueFullErrs++
@@ -480,8 +514,8 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 					}
 				}
 				logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: txHash=%s, code=%d, msg=%s",
-					transactions[i].Hash().Hex(), errCode, errMsg)
-				tp.sendTransactionError(request.Connection(), transactions[i].Hash(), errCode, errMsg, nil, "")
+					processedTransactions[i].Hash().Hex(), errCode, errMsg)
+				tp.sendTransactionError(request.Connection(), processedTransactions[i].Hash(), errCode, errMsg, nil, "")
 			}
 		}
 	}

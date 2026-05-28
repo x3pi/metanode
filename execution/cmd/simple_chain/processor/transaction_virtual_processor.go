@@ -96,6 +96,11 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		tx.Hash().Hex(), tx.IsCallContract(), tx.IsDeployContract(), isAccountSetting, needsEVM)
 
 	if needsEVM {
+		// FORK-SAFETY: Acquire shared read lock before EVM execution via cgo.
+		// This prevents concurrent execution with real block processing (which holds exclusive Lock).
+		v.blockProcessingLock.RLock()
+		defer v.blockProcessingLock.RUnlock()
+
 		headerPtr := v.chainState.GetcurrentBlockHeader()
 		if headerPtr == nil {
 			return nil, fmt.Errorf("current block header is nil"), nil

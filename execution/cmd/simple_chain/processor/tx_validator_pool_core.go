@@ -43,6 +43,10 @@ type TxValidatorPool struct {
 	transactionPool   *transaction_pool.TransactionPool
 	pendingTxManager  *PendingTransactionManager
 	excludedItems     []grouptxns.Item
+
+	// FORK-SAFETY: Shared lock — Lock() during real block execution blocks
+	// all virtual execution goroutines that hold RLock().
+	blockProcessingLock *sync.RWMutex
 }
 
 func NewTxValidatorPool(
@@ -53,16 +57,18 @@ func NewTxValidatorPool(
 	eventSystem *mt_filters.EventSystem,
 	transactionPool *transaction_pool.TransactionPool,
 	pendingTxManager *PendingTransactionManager,
+	blockProcessingLock *sync.RWMutex,
 ) *TxValidatorPool {
 	return &TxValidatorPool{
-		env:               env,
-		offChainProcessor: offChainProcessor,
-		chainState:        chainState,
-		storageManager:    storageManager,
-		eventSystem:       eventSystem,
-		transactionPool:   transactionPool,
-		pendingTxManager:  pendingTxManager,
-		excludedItems:     make([]grouptxns.Item, 0),
+		env:                 env,
+		offChainProcessor:   offChainProcessor,
+		chainState:          chainState,
+		storageManager:      storageManager,
+		eventSystem:         eventSystem,
+		transactionPool:     transactionPool,
+		pendingTxManager:    pendingTxManager,
+		excludedItems:       make([]grouptxns.Item, 0),
+		blockProcessingLock: blockProcessingLock,
 	}
 }
 
@@ -511,7 +517,13 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startExecution := time.Now()
+	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution.
+	// This blocks ALL virtual execution goroutines (which hold shared RLock)
+	// from making concurrent cgo calls to C++ MVM during committed block processing.
+	// Virtual executions will resume after real block processing completes.
+	vp.blockProcessingLock.Lock()
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
 	if execDuration.Milliseconds() > 100 {
@@ -570,6 +582,57 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		logger.Error("GroupAndLimitTransactionsOptimized failed: %v", err)
 		return tx_processor.ProcessResult{}, fmt.Errorf("GroupAndLimitTransactionsOptimized failed: %w", err)
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// DETERMINISTIC RE-GROUPING (Proposer Path Alignment)
+	//
+	// Although GroupAndLimitTransactionsOptimized selected and limited the transactions
+	// to fit block size / gas constraints, we MUST execute them using the EXACT same
+	// deterministic grouping algorithm (GroupTransactionsDeterministic) and native
+	// address filtering as the validator / replay path.
+	//
+	// This ensures that:
+	//   1. The execution order of transaction groups matches the replay path.
+	//   2. Sequential GroupID assignment matches, yielding identical mvmId (C++ DB paths).
+	//   3. Receipts' GroupIndex and TransactionIndex are stamped identically.
+	//   4. The resulting stateRoot computed by the proposer matches the validator's.
+	// ═══════════════════════════════════════════════════════════════════════════
+	var selectedTxs []types.Transaction
+	for _, group := range groupedGroups {
+		for _, item := range group.Items {
+			tx := item.Tx
+			tx.AddRelatedAddress(tx.FromAddress())
+			tx.AddRelatedAddress(tx.ToAddress())
+			selectedTxs = append(selectedTxs, tx)
+		}
+	}
+
+	deterministicItems := make([]grouptxns.Item, 0, len(selectedTxs))
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	nativeParallelAddrs := map[common.Address]struct{}{
+		accountSettingAddr:                   {},
+		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+	}
+	for i, tx := range selectedTxs {
+		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
+		for _, addr := range tx.RelatedAddresses() {
+			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+				groupAddrs = append(groupAddrs, addr)
+			}
+		}
+		if len(groupAddrs) == 0 {
+			groupAddrs = append(groupAddrs, tx.FromAddress())
+		}
+		deterministicItems = append(deterministicItems, grouptxns.Item{
+			ID:      i,
+			Array:   groupAddrs,
+			GroupID: 0,
+			Tx:      tx,
+		})
+	}
+
+	deterministicGroups := grouptxns.GroupTransactionsDeterministic(deterministicItems)
+
 	ctx := context.Background()
 
 	var baseCtx context.Context
@@ -587,7 +650,11 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		baseCtx = ctx
 		rootSpan = nil
 	}
-	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution (pool path).
+	vp.blockProcessingLock.Lock()
+	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	vp.blockProcessingLock.Unlock()
+	return result, err
 }
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding

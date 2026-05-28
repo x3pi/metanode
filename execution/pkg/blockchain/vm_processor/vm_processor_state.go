@@ -413,6 +413,7 @@ func (vmP *VmProcessor) updateStateDB(
 		// even if the transaction ultimately throws an exception mid-execution.
 		// We MUST ONLY clear the specific mvmId instance to prevent global wipe data races
 		// during parallel group execution.
+		mvm.UnprotectMVMApi(mvmId)
 		mvm.ClearMVMApi(mvmId)
 
 		// NOTE: We DO NOT manually refund transaction.Amount() here.
