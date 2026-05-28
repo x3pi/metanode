@@ -53,7 +53,7 @@ public:
     static std::unordered_map<uint256_t, shared_ptr<State>, AddressStdHash> instances;
     static std::shared_mutex instances_mutex;
 
-    State(const uint256_t &addr) : address(addr), nonce(0) {} // Đặt giá trị mặc định cho nonce
+    State(const uint256_t &addr) : address(addr), nonce(0), last_interaction_time(std::chrono::steady_clock::now()) {} // Đặt giá trị mặc định cho nonce và khởi tạo thời gian tương tác
      // Phương thức mới để cập nhật thời gian tương tác
     void update_interaction_time();
 
