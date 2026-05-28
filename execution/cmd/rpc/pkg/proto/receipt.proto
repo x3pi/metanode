@@ -53,7 +53,8 @@ message Receipt {
     uint64 TransactionIndex = 12;
     RECEIPT_PROCESSING_TYPE ProcessingType = 13; // Thêm trường này
     bytes RHash = 14;
-} 
+    uint64 GroupIndex = 15;
+}
 
 message GetTransactionReceiptRequest {
   bytes TransactionHash = 1;      // Hash của transaction cần lấy receipt

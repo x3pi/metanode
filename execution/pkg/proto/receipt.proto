@@ -52,6 +52,9 @@ message Receipt {
     uint64 TransactionIndex = 12;
     RECEIPT_PROCESSING_TYPE ProcessingType = 13; // Thêm trường này
     bytes RHash = 14;
+    // GroupIndex: chỉ số nhóm được gán bởi GroupTransactionsDeterministic.
+    // Giống nhau trên mọi node với cùng 1 tập TX → an toàn đưa vào trie.
+    uint64 GroupIndex = 15;
 } 
 
 
