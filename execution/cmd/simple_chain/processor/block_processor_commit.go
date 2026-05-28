@@ -89,11 +89,38 @@ func (bp *BlockProcessor) commitWorker() {
 					if _, done := committedMvmIds[mvmId]; done {
 						continue
 					}
+					committedMvmIds[mvmId] = struct{}{}
+				}
+			}
+
+			// ═══════════════════════════════════════════════════════════════
+			// PARALLEL XAPIAN FLUSH: Each mvmId has an isolated Xapian DB
+			// (separate directory on disk). CommitFullDb for mvmId_A has zero
+			// shared state with mvmId_B, so they can safely flush in parallel.
+			// For blocks with N contracts, this reduces commit time from
+			// N × flush_time to max(flush_time) — significant when N > 2.
+			// ═══════════════════════════════════════════════════════════════
+			if len(committedMvmIds) > 1 {
+				var xapianWg sync.WaitGroup
+				for mvmId := range committedMvmIds {
+					xapianWg.Add(1)
+					go func(id common.Address) {
+						defer xapianWg.Done()
+						mvmAPI := mvm.GetMVMApi(id)
+						if mvmAPI != nil {
+							mvmAPI.CommitFullDb()
+							mvm.UnprotectMVMApi(id)
+						}
+					}(mvmId)
+				}
+				xapianWg.Wait()
+			} else {
+				// Single mvmId — no goroutine overhead needed
+				for mvmId := range committedMvmIds {
 					mvmAPI := mvm.GetMVMApi(mvmId)
 					if mvmAPI != nil {
 						mvmAPI.CommitFullDb()
 						mvm.UnprotectMVMApi(mvmId)
-						committedMvmIds[mvmId] = struct{}{}
 					}
 				}
 			}

@@ -568,6 +568,20 @@ func (db *AccountStateDB) PublicSetDirtyAccountState(as types.AccountState) {
 	db.setDirtyAccountState(as)
 }
 
+// PublicSetDirtyAccountStateBatch stores multiple account states in the dirty cache.
+func (db *AccountStateDB) PublicSetDirtyAccountStateBatch(accounts []types.AccountState) {
+	if db == nil {
+		return
+	}
+	for _, as := range accounts {
+		if as == nil || !as.IsDirty() {
+			continue
+		}
+		db.dirtyAccounts.Store(as.Address(), as)
+	}
+}
+
+
 // getOrCreateAccountState retrieves an account state, optimized for concurrency.
 // It first checks the dirty cache (sync.Map). If not found (cache miss),
 // it reads from the underlying trie. If not in the trie, it creates a new state.

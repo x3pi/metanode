@@ -162,6 +162,14 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 		return bytes.Compare(a[:], b[:])
 	})
 
+	type updateJob struct {
+		trieDB *TrieDatabase
+		id     common.Hash
+		root   common.Hash
+		err    error
+	}
+	var jobs []updateJob
+
 	for _, id := range trieIDs {
 		trieDB := manager.trieDatabases[id]
 		switch trieDB.GetStatus() {
@@ -175,14 +183,9 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 			manager.accountStateDB.PublicSetDirtyAccountState(as)
 		case Reverted:
 			trieDB.Discard()
-		default: // Bao gồm cả trạng thái Committed và các trạng thái khác
+		default: // Committed or other active status
 			// ═══════════════════════════════════════════════════════════════════
 			// CRITICAL FORK-SAFETY FIX (Apr 2026): Ignore unmodified TrieDatabases.
-			//
-			// Read-only queries (e.g. eth_call) instantiate TrieDatabases in the
-			// manager to perform reads. If we unconditionally update SmartContractState,
-			// the node executing eth_call will generate an EMPTY_TRIE_HASH and mark
-			// the account dirty, causing its state root to diverge from the cluster.
 			// ═══════════════════════════════════════════════════════════════════
 			hasChanges := false
 			trieDB.dirtyData.Range(func(key, value interface{}) bool {
@@ -194,21 +197,54 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 				continue // Skip unmodified read-only query databases
 			}
 
-			root, err := trieDB.IntermediateRoot()
-			if err != nil {
-				logger.Error("Failed to get IntermediateRoot TrieDatabase", "id", id, "error", err)
-				return err
-			}
-			as, err := manager.accountStateDB.AccountState(trieDB.address)
-			if err != nil {
-				logger.Error("Failed to get AccountState", "id", id, "error", err)
-				return err
-			}
-			as.SmartContractState().SetTrieDatabaseMapValue(trieDB.dbName, root.Bytes())
-			manager.accountStateDB.PublicSetDirtyAccountState(as)
-			logger.Info("Updated IntermediateRoot for TrieDatabase", "id", id, "root", root)
+			// Add to parallel jobs list
+			jobs = append(jobs, updateJob{
+				trieDB: trieDB,
+				id:     id,
+			})
 		}
 	}
+
+	// ─── PARALLEL EXECUTION OF TRIE INTERMEDIATE ROOT ───────────────────
+	// Each TrieDatabase operates on its own memory and trie structure,
+	// so running them in parallel is 100% race-free and speeds up blocks
+	// that touch multiple contract tables.
+	if len(jobs) > 0 {
+		var wg sync.WaitGroup
+		for i := range jobs {
+			wg.Add(1)
+			go func(jobIdx int) {
+				defer wg.Done()
+				root, err := jobs[jobIdx].trieDB.IntermediateRoot()
+				jobs[jobIdx].root = root
+				jobs[jobIdx].err = err
+			}(i)
+		}
+		wg.Wait()
+
+		// Verify no errors occurred during parallel execution
+		for _, job := range jobs {
+			if job.err != nil {
+				logger.Error("Failed to get IntermediateRoot TrieDatabase in parallel", "id", job.id, "error", job.err)
+				return job.err
+			}
+		}
+
+		// ─── SEQUENTIAL INTEGRATION TO ACCOUNT STATE DB ─────────────────────
+		// Apply the calculated roots sequentially to avoid concurrent map write
+		// races in SmartContractState and keep execution order 100% deterministic.
+		for _, job := range jobs {
+			as, err := manager.accountStateDB.AccountState(job.trieDB.address)
+			if err != nil {
+				logger.Error("Failed to get AccountState", "id", job.id, "error", err)
+				return err
+			}
+			as.SmartContractState().SetTrieDatabaseMapValue(job.trieDB.dbName, job.root.Bytes())
+			manager.accountStateDB.PublicSetDirtyAccountState(as)
+			logger.Info("Updated IntermediateRoot for TrieDatabase (parallel)", "id", job.id, "root", job.root)
+		}
+	}
+
 	// Xóa các ID Deleted
 	for _, id := range trieIDs {
 		trieDB := manager.trieDatabases[id]
