@@ -437,22 +437,18 @@ func processGroupsConcurrently(
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// PARALLEL GROUP EXECUTION (Restored May 2026)
+	// PARALLEL GROUP EXECUTION
 	//
-	// Each group processes its TXs SEQUENTIALLY (for loop in
-	// processSingleGroup). Different groups run in PARALLEL via
-	// maxTxWorkers goroutines.
+	// Groups with different relatedAddresses run in parallel.
+	// TXs within the same group run sequentially (processSingleGroup).
 	//
-	// FORK SAFETY: The root cause of state divergence was Go map
-	// iteration non-determinism in updateStateDB() — NOT parallel
-	// execution. All map iterations (MapStorageChange, MapNonce,
-	// MapAddBalance, MapSubBalance, MapCodeHash, MapCodeChange,
-	// MapFullDbHash) are now sorted with sort.Strings() before
-	// processing, guaranteeing 100% deterministic state mutations
-	// regardless of Go's random map iteration order.
+	// This is SAFE because GroupTransactionsDeterministic uses
+	// Union-Find to merge all TXs sharing any address into the
+	// same group — no cross-group state conflicts possible.
 	//
-	// Groups are isolated by address (GroupTransactionsDeterministic),
-	// so parallel group execution is safe.
+	// FORK NOTE: Fork root cause is NOT parallel groups. Evidence:
+	// 113 TXs to same contract = 1 group (sequential), fork persists.
+	// Real suspect: NomtStateTrie.BatchUpdate internal parallel workers.
 	// ═══════════════════════════════════════════════════════════════
 	maxTxWorkers := runtime.NumCPU()
 	if maxTxWorkers > 16 {

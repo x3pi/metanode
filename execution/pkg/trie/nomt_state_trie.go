@@ -1,10 +1,12 @@
 package trie
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -442,6 +444,38 @@ func (n *NomtStateTrie) Get(key []byte) ([]byte, error) {
 	return val, nil
 }
 
+// getNoLock retrieves a value without acquiring writerMu.RLock().
+// MUST only be called when holding n.writerMu.Lock() or in single-threaded context.
+func (n *NomtStateTrie) getNoLock(key []byte, hexKey string) ([]byte, error) {
+	if entry, ok := n.wDirty[hexKey]; ok {
+		return entry.value, nil
+	}
+
+	view := n.loadReadView()
+
+	if view.dirty != nil {
+		if entry, ok := view.dirty[hexKey]; ok {
+			return entry.value, nil
+		}
+	}
+	if view.committing != nil {
+		if entry, ok := view.committing[hexKey]; ok {
+			return entry.value, nil
+		}
+	}
+
+	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
+	val, found, err := n.handle.Read(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("nomt read error for key %x: %w", key, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return val, nil
+}
+
+
 // GetAll returns all key-value pairs by reading from the knownKeys registry.
 // Each known key is fetched from NOMT individually.
 // LOCK-FREE for dirty/committing access via atomic read view.
@@ -610,6 +644,11 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 		return nil
 	}
 
+	// CRITICAL CONCURRENCY FIX: Hold the write lock for the ENTIRE function
+	// to prevent concurrent transaction groups from racing on Phase 1 reads vs Phase 2 writes.
+	n.writerMu.Lock()
+	defer n.writerMu.Unlock()
+
 	count := len(keys)
 
 	// Phase 1: PARALLEL — compute key paths + read old values from NOMT
@@ -622,7 +661,11 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 	}
 	entries := make([]batchEntry, count)
 
-	numWorkers := 16
+	// Restore high-performance parallel reads (dynamic CPU-based workers)
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 32 {
+		numWorkers = 32 // Cap at 32 to prevent excessive goroutine scheduling overhead
+	}
 	if count < numWorkers {
 		numWorkers = count
 	}
@@ -648,15 +691,10 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 				keyPath := addressToKeyPathWithNamespace(n.namespace, key)
 				hexKey := hex.EncodeToString(key)
 
-				// CRITICAL FORK-SAFETY FIX: Use n.Get(key) instead of n.handle.Read(keyPath).
-				// n.handle.Read() only sees data flushed to disk via CommitPayload.
-				// If a previous block modified this key but hasn't flushed yet,
-				// handle.Read() returns STALE data. This stale data becomes the `oldValue`
-				// passed to NOMT C++, resulting in a divergent Merkle hash (CHAIN BROKEN).
-				// n.Get() correctly checks wDirty, view.dirty, and view.committing first.
+				// Use getNoLock to avoid deadlocking since the main goroutine holds writerMu.Lock()
 				var oldVal []byte
 				var loaded bool
-				val, getErr := n.Get(keyCopy)
+				val, getErr := n.getNoLock(keyCopy, hexKey)
 				if getErr == nil {
 					loaded = true
 					if len(val) > 0 {
@@ -678,9 +716,6 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 
 	// Phase 2: SEQUENTIAL — update dirty map
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
-
-	n.writerMu.Lock()
-	defer n.writerMu.Unlock()
 
 	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Lock()
@@ -732,6 +767,11 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		return nil
 	}
 
+	// CRITICAL CONCURRENCY FIX: Hold the write lock for the ENTIRE function
+	// to prevent concurrent transaction groups from racing on Phase 1 reads vs Phase 2 writes.
+	n.writerMu.Lock()
+	defer n.writerMu.Unlock()
+
 	count := len(keys)
 
 	// Phase 1: PARALLEL — compute key paths + pre-fetch old values if missing.
@@ -745,7 +785,11 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	}
 	entries := make([]batchEntry, count)
 
-	numWorkers := 16
+	// Restore high-performance parallel workers (dynamic CPU-based workers)
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 32 {
+		numWorkers = 32 // Cap at 32 to prevent excessive goroutine scheduling overhead
+	}
 	if count < numWorkers {
 		numWorkers = count
 	}
@@ -778,7 +822,8 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 					oldValue = oldValues[i]
 					oldLoaded = true
 				} else {
-					val, getErr := n.Get(keyCopy)
+					// Use getNoLock to avoid deadlocking since the main goroutine holds writerMu.Lock()
+					val, getErr := n.getNoLock(keyCopy, hex.EncodeToString(key))
 					if getErr == nil {
 						oldLoaded = true
 						if len(val) > 0 {
@@ -801,9 +846,6 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 
 	// Phase 2: SEQUENTIAL — update dirty map + inject old values
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
-
-	n.writerMu.Lock()
-	defer n.writerMu.Unlock()
 
 	if !n.isReplicationSync && !skipRegistry {
 		n.knownKeysMu.Lock()
@@ -1008,6 +1050,22 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		sortedDirtyKeys = append(sortedDirtyKeys, hexKey)
 	}
 	sort.Strings(sortedDirtyKeys)
+
+	// FORK-DIAG: Hash the dirty snapshot + old values for cross-node comparison
+	if strings.HasPrefix(string(n.namespace), "smart_contract_storage") && len(sortedDirtyKeys) > 0 {
+		diagHash := sha256.New()
+		for _, hexKey := range sortedDirtyKeys {
+			entry := committingSnapshot[hexKey]
+			diagHash.Write([]byte(hexKey))
+			diagHash.Write(entry.value)
+			if oldVal, ok := oldValuesSnapshot[hexKey]; ok {
+				diagHash.Write(oldVal)
+			}
+		}
+		digestHex := hex.EncodeToString(diagHash.Sum(nil)[:16])
+		logger.Warn("[FORK-DIAG] Commit namespace=%s dirtyCount=%d oldCount=%d digest=%s",
+			string(n.namespace), len(committingSnapshot), len(oldValuesSnapshot), digestHex)
+	}
 
 	for _, hexKey := range sortedDirtyKeys {
 		entry := committingSnapshot[hexKey]
