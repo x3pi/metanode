@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -453,153 +452,36 @@ func processGroupsConcurrently(
 	// 113 TXs to same contract = 1 group (sequential), fork persists.
 	// Real suspect: NomtStateTrie.BatchUpdate internal parallel workers.
 	// ═══════════════════════════════════════════════════════════════
-	maxTxWorkers := runtime.NumCPU()
-	// ALLOW FULL SCALE: Removed the strict 16-worker cap. High-end servers (e.g. 64-128 cores)
-	// can now utilize all their cores to process independent TX groups in parallel.
-	if maxTxWorkers > 1024 {
-		maxTxWorkers = 1024
-	}
-	numWorkers := maxTxWorkers
-	if numWorkers > len(groupedGroups) {
-		numWorkers = len(groupedGroups)
-	}
-	if numWorkers == 0 {
-		numWorkers = 1
-	}
-
 	// ═══════════════════════════════════════════════════════════════
-	// WORKER POOL: Channel-based routing to prevent data races.
-	// We map Smart Contract transactions to specific workers based on their
-	// mvmId hash. This guarantees sequential execution for a specific contract,
-	// eliminating the updateStateDB data race and ensuring deterministic stateRoot.
+	// PARALLEL GROUP EXECUTION
+	//
+	// Groups with different relatedAddresses run in parallel.
+	// TXs within the same group run sequentially (processSingleGroup).
+	//
+	// This is SAFE because GroupTransactionsDeterministic uses
+	// Union-Find to merge all TXs sharing any address into the
+	// same group — no cross-group state conflicts possible.
 	// ═══════════════════════════════════════════════════════════════
-
-	type workerJob struct {
-		idx  int
-		meta groupMeta
-	}
-	workerChans := make([]chan workerJob, numWorkers)
 	var wg sync.WaitGroup
-	wg.Add(numWorkers)
+	wg.Add(len(groupedGroups))
 
-	for w := 0; w < numWorkers; w++ {
-		workerChans[w] = make(chan workerJob, len(groupedGroups)) // buffered
-		go func(wIdx int) {
+	for i := range groupedGroups {
+		go func(groupIdx int) {
 			defer wg.Done()
-			for job := range workerChans[wIdx] {
-				meta := job.meta
-				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[job.idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
-				results[job.idx] = result // Write to indexed position — deterministic order
-				if enableTrace && meta.span != nil {
-					meta.span.End()
-				}
+			meta := groupMetas[groupIdx]
+			result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[groupIdx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+			results[groupIdx] = result // Write to indexed position — deterministic order
+			if enableTrace && meta.span != nil {
+				meta.span.End()
 			}
-		}(w)
+		}(i)
 	}
 
 	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
 	startEVM := time.Now()
-
-	nativeRoundRobin := 0
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	blsSelector := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
-	blsOnlyGroupCount := 0
-
-	for i, group := range groupedGroups {
-		// CRITICAL CONCURRENCY FIX: Identify if any transaction in this group touches
-		// special/virtual contracts (Staking, Cross-Chain, or Account Settings).
-		// If so, we MUST route the entire group to Worker 0 to execute them sequentially
-		// and prevent updateStateDB / StakeStateDB concurrent data races.
-		//
-		// EXCEPTION: BLS-only groups (all items are setBlsPublicKey with nonce=0)
-		// are SAFE for parallel execution because:
-		//   1. Each BLS TX is from a UNIQUE sender (no shared state between TXs)
-		//   2. They only mutate in-memory AccountState (SetPublicKeyBls, SetNonce, SetLastHash)
-		//   3. They do NOT touch StakeStateDB, SmartContractDB, or any EVM/MVM state
-		//   4. DirtyAccounts are applied in indexed order after wg.Wait()
-		isSpecialContractGroup := false
-		isBLSOnlyGroup := true // Assume BLS-only until proven otherwise
-
-		for _, item := range group.Items {
-			toAddr := item.Tx.ToAddress()
-			fromAddr := item.Tx.FromAddress()
-
-			// Check if this TX is a BLS setBlsPublicKey(nonce=0)
-			if toAddr == accountSettingAddr && item.Tx.GetNonce() == 0 {
-				dataInput := item.Tx.CallData().Input()
-				if len(dataInput) >= 4 && bytes.Equal(dataInput[:4], blsSelector) {
-					// This TX IS a BLS setBlsPublicKey — continue checking other TXs
-					continue
-				}
-			}
-
-			// This TX is NOT a BLS setBlsPublicKey — mark group as non-BLS-only
-			isBLSOnlyGroup = false
-
-			if toAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-				toAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-				toAddr == accountSettingAddr ||
-				fromAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-				fromAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-				fromAddr == accountSettingAddr {
-				isSpecialContractGroup = true
-				break
-			}
-			for _, addr := range item.Tx.RelatedAddresses() {
-				if addr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-					addr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-					addr == accountSettingAddr {
-					isSpecialContractGroup = true
-					break
-				}
-			}
-			if isSpecialContractGroup {
-				break
-			}
-		}
-
-		var workerIdx int
-		if isBLSOnlyGroup {
-			// ═══════════════════════════════════════════════════════════════
-			// BLS-ONLY GROUP: Safe to round-robin across ALL workers.
-			// Each BLS TX operates on a unique sender address (independent state).
-			// No EVM/MVM calls, no StakeStateDB mutations, no lock contention.
-			// This prevents Worker 0 starvation when processing 30K+ BLS TXs.
-			// ═══════════════════════════════════════════════════════════════
-			workerIdx = nativeRoundRobin % numWorkers
-			nativeRoundRobin++
-			blsOnlyGroupCount++
-		} else if isSpecialContractGroup {
-			// Route to Worker 0 to guarantee sequential execution of all special contract transactions.
-			workerIdx = 0
-		} else {
-			// Because groups are ALREADY independent (guaranteed by GroupTransactionsDeterministic),
-			// we don't need to hash the contract address! We can just round-robin them perfectly
-			// to achieve maximum parallelism and prevent worker starvation from hash collisions.
-			workerIdx = nativeRoundRobin % numWorkers
-			nativeRoundRobin++
-		}
-
-		workerChans[workerIdx] <- workerJob{
-			idx:  i,
-			meta: groupMetas[i],
-		}
-	}
-	if blsOnlyGroupCount > 0 {
-		logger.Info("⚡ [BLS-PARALLEL] Distributed %d BLS-only groups across %d workers (instead of serializing to Worker 0)",
-			blsOnlyGroupCount, numWorkers)
-	}
-
-	// Close channels to signal workers to stop
-	for w := 0; w < numWorkers; w++ {
-		close(workerChans[w])
-	}
-
 	if enableTrace {
-		funcSpan.AddEvent("AllWorkersLaunched", map[string]interface{}{"numWorkers": numWorkers})
+		funcSpan.AddEvent("AllGoroutinesLaunched", map[string]interface{}{"groupCount": len(groupedGroups)})
 	}
-
-	// Wait for all workers to complete
 	wg.Wait()
 	evmDuration := time.Since(startEVM)
 	// ─────────────────────────────────────────────────────────────
@@ -686,8 +568,8 @@ func processGroupsConcurrently(
 	if groupCount > 0 {
 		avgPerGroup = evmDuration / time.Duration(groupCount)
 	}
-	logger.Debug("🧮 [PERF-EVM] groups=%d | workers=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
-		groupCount, numWorkers, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
+	logger.Debug("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
+		groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
 	// ─────────────────────────────────────────────────────────────
 
 	if enableTrace {

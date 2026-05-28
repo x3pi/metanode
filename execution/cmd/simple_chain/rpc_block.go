@@ -89,17 +89,19 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	// Open the receipt trie for this block (read-only, no new trie is created)
 	rcpDb, rcpErr := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt)
 	if rcpErr != nil {
-		logger.Warn("⚠️ [RPC-BLOCK] Cannot open receipt trie for block #%d: %v. GroupIndex will be unavailable.",
-			block.Header().BlockNumber(), rcpErr)
-	} else {
-		for _, txHash := range txHashes {
-			rcp, err := rcpDb.GetReceipt(txHash)
-			if err == nil {
-				groupInfoMap[txHash] = txGroupInfo{
-					groupIndex:       rcp.GroupIndex(),
-					transactionIndex: rcp.TransactionIndex(),
-				}
-			}
+		logger.Error("❌ [RPC-BLOCK] Cannot open receipt trie for block #%d: %v", block.Header().BlockNumber(), rcpErr)
+		return nil, fmt.Errorf("cannot open receipt trie for block %d: %w", block.Header().BlockNumber(), rcpErr)
+	}
+
+	for _, txHash := range txHashes {
+		rcp, err := rcpDb.GetReceipt(txHash)
+		if err != nil {
+			logger.Error("❌ [RPC-BLOCK] Receipt not found for tx %s in block #%d", txHash.Hex(), block.Header().BlockNumber())
+			return nil, fmt.Errorf("receipt not found for tx %s: %w", txHash.Hex(), err)
+		}
+		groupInfoMap[txHash] = txGroupInfo{
+			groupIndex:       rcp.GroupIndex(),
+			transactionIndex: rcp.TransactionIndex(),
 		}
 	}
 
@@ -143,7 +145,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 //   - When blockNr is -4 the chain safe block is returned.
 //   - When fullTx is true all transactions in the block are returned, otherwise
 //     only the transaction hash is returned.
-func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) map[string]interface{} {
+func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
 	var blockData mt_types.Block // Corrected type
 	if number == rpc.LatestBlockNumber {
 		currentHeader := api.App.chainState.GetcurrentBlockHeader()
@@ -155,15 +157,15 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		}
 	} else {
 		if number.Int64() >= 0 && uint64(number.Int64()) > storage.GetLastBlockNumber() {
-			return nil
+			return nil, nil
 		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(number.Int64()))
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		blockData = blockchain.GetBlockChainInstance().GetBlock(hash)
 		if blockData == nil {
-			return nil
+			return nil, nil
 		}
 	}
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
@@ -176,7 +178,7 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
 			if err != nil {
 				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
-				return nil
+				return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
 			}
 			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
 				return txDB.GetTransaction(hash)
@@ -186,10 +188,10 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 
 	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
-	return blockMap
+	return blockMap, nil
 }
 
 // decodeBCSSystemTransaction decodes a BCS-encoded SystemTransaction from Rust into a
@@ -300,10 +302,10 @@ func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, numb
 
 // GetBlockByHash returns the requested block. When fullTx is true all transactions in the block are returned in full
 // detail, otherwise only the transaction hash is returned.
-func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) map[string]interface{} {
+func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
 	blockData := blockchain.GetBlockChainInstance().GetBlock(hash)
 	if blockData == nil {
-		return nil // Return nil if there's an error
+		return nil, nil // Return nil, nil if block not found
 	}
 
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
@@ -316,7 +318,7 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
 			if err != nil {
 				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
-				return nil
+				return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
 			}
 			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
 				return txDB.GetTransaction(hash)
@@ -326,9 +328,9 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 
 	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return blockMap
+	return blockMap, nil
 }
 
 func (api *MetaAPI) BlockNumber() string {

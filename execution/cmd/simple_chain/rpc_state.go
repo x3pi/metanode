@@ -221,9 +221,9 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		targetBlockNumber = uint64(blockNr.Int64())
 		foundBlockNumber = true
-		blockMap = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
+		blockMap, _ = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
 	} else if hash, ok := blockNrOrHash.Hash(); ok {
-		blockMap = api.GetBlockByHash(ctx, hash, false)
+		blockMap, _ = api.GetBlockByHash(ctx, hash, false)
 		if blockMap != nil {
 			if numStr, okStr := blockMap["number"].(string); okStr {
 				if num, err := hexutil.DecodeUint64(numStr); err == nil {

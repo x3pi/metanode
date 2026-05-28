@@ -131,6 +131,10 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
 
+	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.
+	v.blockProcessingLock.RLock()
+	defer v.blockProcessingLock.RUnlock()
+
 	if executeTransaction.IsCallContract() {
 		mvmResult = mvmOffChain.Call(
 			executeTransaction.FromAddress().Bytes(),
@@ -292,6 +296,10 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
+
+	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.
+	v.blockProcessingLock.RLock()
+	defer v.blockProcessingLock.RUnlock()
 
 	if executeTransaction.IsCallContract() {
 		mvmResult = mvmOffChain.Call(
