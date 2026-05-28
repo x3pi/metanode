@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -88,6 +90,7 @@ type groupResultExt struct {
 	mvmPtr        *map[common.Hash]common.Address
 	Error         error
 	DirtyAccounts []types.AccountState
+	TotalGasFee   *big.Int
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -576,10 +579,17 @@ func processGroupsConcurrently(
 	// order (deterministic across all nodes).
 	// ═══════════════════════════════════════════════════════════════
 	startDirty := time.Now()
+	totalBlockGasFee := big.NewInt(0)
 	for _, gRs := range results {
+		if gRs.TotalGasFee != nil && gRs.TotalGasFee.Sign() > 0 {
+			totalBlockGasFee.Add(totalBlockGasFee, gRs.TotalGasFee)
+		}
 		for _, dirtyAs := range gRs.DirtyAccounts {
 			chainState.GetAccountStateDB().PublicSetDirtyAccountState(dirtyAs)
 		}
+	}
+	if totalBlockGasFee.Sign() > 0 && leaderAddr != (common.Address{}) {
+		chainState.GetAccountStateDB().AddPendingBalance(leaderAddr, totalBlockGasFee)
 	}
 	dirtyDuration := time.Since(startDirty)
 
@@ -682,6 +692,7 @@ func processSingleGroup(
 		MvmIdMap:         mvmMap,
 	}
 	startGroup := time.Now()
+	totalGasFee := big.NewInt(0)
 
 	failedSenders := make(map[common.Address]bool) // Đánh dấu nếu sender đã bị lỗi trong group này
 	// blockTime is now passed from Rust consensus for deterministic execution across all nodes
@@ -1076,31 +1087,91 @@ func processSingleGroup(
 		var exRs types.ExecuteSCResult
 		vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
 		usedMvmId := tx.ToAddress()
-		if tx.IsDeployContract() || tx.IsRegularTransaction() || !isCache {
-			vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
-			usedMvmId = mvmId
-		}
-		gRs.MvmIdMap[tx.Hash()] = usedMvmId
-		// logger.Debug("1.ExecuteSmartContract MVMId:")
-		exRs, err = vmP.ExecuteTransactionWithMvmId(txCtx, tx, false, isCache)
-		if err != nil {
-			rcp = createErrorReceipt(tx, toAddress, err)
-			if exRs != nil {
-				rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-				gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, exRs)
+		
+		if tx.IsRegularTransaction() {
+			// ═══════════════════════════════════════════════════════════════
+			// BATCH MUTATIONS for Native TX: bypass MVM and DB locks
+			// ═══════════════════════════════════════════════════════════════
+			_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+			gasLimit := uint64(mt_common.TRANSFER_GAS_COST)
+			if isFree {
+				gasLimit = uint64(mt_common.MAX_GASS_FEE)
 			}
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
-			logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
-			failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+			gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
+			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
-	
-			if enableTrace && txSpan != nil {
-				txSpan.End()
+			if as.TotalBalance().Cmp(totalCost) < 0 {
+				err := fmt.Errorf("insufficient balance for transfer")
+				rcp := createErrorReceipt(tx, toAddress, err)
+				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
+				failedSenders[tx.FromAddress()] = true
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
+				continue
 			}
-			continue
+
+			// Mutate sender (in memory)
+			as.SubTotalBalance(totalCost)
+			as.PlusOneNonce()
+			as.SetLastHash(tx.Hash())
+			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+
+			// Mutate receiver (in memory)
+			asTo, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
+			if asTo == nil {
+				asTo = state.NewAccountState(tx.ToAddress())
+			}
+			asTo.AddBalance(tx.Amount())
+
+			// Accumulate gas fee for later batch update to coinbase
+			totalGasFee.Add(totalGasFee, gasFee)
+
+			// Defer dirty updates to post-parallel phase
+			gRs.DirtyAccounts = append(gRs.DirtyAccounts, as)
+			if tx.FromAddress() != tx.ToAddress() {
+				gRs.DirtyAccounts = append(gRs.DirtyAccounts, asTo)
+			}
+
+			// Sync C++ cache to prevent stale nonce for subsequent EVM TXs (if any)
+			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce())
+
+			// Generate fake MVM result
+			exRs = smart_contract.NewExecuteSCResult(
+				tx.Hash(), pb.RECEIPT_STATUS_RETURNED, pb.EXCEPTION_NONE, nil,
+				mt_common.TRANSFER_GAS_COST, common.Hash{},
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+			)
+
+		} else {
+			if tx.IsDeployContract() || !isCache {
+				vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
+				usedMvmId = mvmId
+			}
+			gRs.MvmIdMap[tx.Hash()] = usedMvmId
+			// logger.Debug("1.ExecuteSmartContract MVMId:")
+			exRs, err = vmP.ExecuteTransactionWithMvmId(txCtx, tx, false, isCache)
+			if err != nil {
+				rcp = createErrorReceipt(tx, toAddress, err)
+				if exRs != nil {
+					rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
+					gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, exRs)
+				}
+				gRs.Receipts = append(gRs.Receipts, rcp)
+				gRs.Transactions = append(gRs.Transactions, tx)
+				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
+				failedSenders[tx.FromAddress()] = true // ❗ Đánh dấu lỗi
+
+				if enableTrace && txSpan != nil {
+					txSpan.End()
+				}
+				continue
+			}
+			logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
+			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
+			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 		}
-		logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
 		rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
 		chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 		chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
@@ -1140,6 +1211,7 @@ func processSingleGroup(
 		mvmPtr:        mvmMapPtr,
 		Error:         gRs.Error,
 		DirtyAccounts: gRs.DirtyAccounts,
+		TotalGasFee:   totalGasFee,
 	}
 }
 
