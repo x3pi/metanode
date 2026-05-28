@@ -40,6 +40,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -496,6 +497,7 @@ func (a *MVMApi) Call(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
 }
 
@@ -576,6 +578,7 @@ func (a *MVMApi) Execute(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
 }
 
@@ -753,6 +756,7 @@ func (a *MVMApi) SendNative(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
 }
 
@@ -808,6 +812,7 @@ func (a *MVMApi) ProcessNativeMintBurn(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
 }
 
@@ -851,6 +856,7 @@ func (a *MVMApi) NoncePlusOne(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
 }
 
@@ -913,7 +919,100 @@ func (a *MVMApi) Deploy(
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
+	a.enforceStrictAccessLists()
 	return a.rs
+}
+
+func (a *MVMApi) enforceStrictAccessLists() {
+	if a.rs == nil {
+		return
+	}
+
+	// Virtual Execution mode: DYNAMIC DISCOVERY of modified states
+	if a.extendedMode {
+		for addr := range a.rs.MapAddBalance {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		for addr := range a.rs.MapSubBalance {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		for addr := range a.rs.MapStorageChange {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		for addr := range a.rs.MapCodeChange {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		for addr := range a.rs.MapFullDbHash {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		for addr := range a.rs.MapNonce {
+			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
+		}
+		return
+	}
+
+	checkAccess := func(address string) bool {
+		addr := common.HexToAddress(address)
+		if !a.InRelatedAddress(addr) {
+			logger.Error("❌ [STRICT_ACCESS] Transaction accessed undeclared address %s. Reverting!", addr.Hex())
+			return false
+		}
+		return true
+	}
+
+	isViolation := false
+	for addr := range a.rs.MapAddBalance {
+		if !checkAccess(addr) {
+			isViolation = true
+			break
+		}
+	}
+	if !isViolation {
+		for addr := range a.rs.MapSubBalance {
+			if !checkAccess(addr) {
+				isViolation = true
+				break
+			}
+		}
+	}
+	if !isViolation {
+		for addr := range a.rs.MapStorageChange {
+			if !checkAccess(addr) {
+				isViolation = true
+				break
+			}
+		}
+	}
+	if !isViolation {
+		for addr := range a.rs.MapCodeChange {
+			if !checkAccess(addr) {
+				isViolation = true
+				break
+			}
+		}
+	}
+	if !isViolation {
+		for addr := range a.rs.MapFullDbHash {
+			if !checkAccess(addr) {
+				isViolation = true
+				break
+			}
+		}
+	}
+	if !isViolation {
+		for addr := range a.rs.MapNonce {
+			if !checkAccess(addr) {
+				isViolation = true
+				break
+			}
+		}
+	}
+
+	if isViolation {
+		a.rs.Status = pb.RECEIPT_STATUS_THREW
+		a.rs.Exception = pb.EXCEPTION_ERR_WRITE_PROTECTION
+		a.rs.Exmsg = "STRICT_ACCESS_VIOLATION: Accessed undeclared state"
+	}
 }
 
 func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
@@ -1066,6 +1165,19 @@ func GetStorageValue(
 	bAddress := C.GoBytes(unsafe.Pointer(address), 20)
 	bKey := C.GoBytes(unsafe.Pointer(key), 32)
 	fAddress := common.BytesToAddress(bAddress)
+
+	// STRICT ACCESS LIST CHECK FOR SLOAD
+	if mvmApi.extendedMode {
+		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
+			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
+		}
+	} else {
+		if !mvmApi.InRelatedAddress(fAddress) {
+			logger.Error("❌ [DEBUG SLOAD Exception] Address not in RelatedAddresses: %s for mvmId: %s", fAddress.Hex(), fmvmId.Hex())
+			return nil, false
+		}
+	}
+
 	logger.Debug("GetStorageValue address: ", fAddress, hex.EncodeToString(bKey))
 	bValue, success := mvmApi.smartContractDb.StorageValue(fAddress, bKey)
 	cValue := C.CBytes(bValue)
