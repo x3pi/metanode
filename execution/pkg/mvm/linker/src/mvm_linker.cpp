@@ -493,7 +493,9 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     } else {
       unsigned char *mvmId_to_query = gs.get_block_context().mvmId;
       registry.cancelTransaction(mvmId_to_query);
-      registry.unregisterAllManagersForMvmId(mvmId_to_query);
+      if (isOffChain) {
+        registry.unregisterAllManagersForMvmId(mvmId_to_query);
+      }
     }
 
     std::cerr << "[PROCESS_RESULT_DEBUG] Constructing pendingResult"
