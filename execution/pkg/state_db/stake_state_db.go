@@ -999,6 +999,20 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════
+	// Step 0: IMMEDIATE PERSIST GATE UNBLOCK (DEFERRED)
+	// Signal that trie swap AND CommitPayload are complete.
+	// We use defer to ensure it ALWAYS closes even if an error occurs,
+	// preventing permanent deadlocks in the consensus pipeline.
+	// ═══════════════════════════════════════════════════════════════
+	defer func() {
+		if result.PersistChannel != nil {
+			close(result.PersistChannel)
+		} else {
+			close(db.persistReady)
+		}
+	}()
+
+	// ═══════════════════════════════════════════════════════════════
 	// Step 1: Persist to DB (slow, disk I/O)
 	// ═══════════════════════════════════════════════════════════════
 	if len(result.Batch) > 0 {
@@ -1049,13 +1063,6 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	db.trie = newTrieToSet
 	db.originRootHash = result.FinalHash
 	db.muCommit.Unlock()
-
-	// FORK-SAFETY: Signal that trie swap is complete.
-	if result.PersistChannel != nil {
-		close(result.PersistChannel)
-	} else {
-		close(db.persistReady)
-	}
 
 	logger.Debug("PersistAsync (StakeStateDB): trie swapped to new root %s, persistReady signaled", result.FinalHash)
 	return nil

@@ -442,6 +442,20 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════
+	// Step 0: IMMEDIATE PERSIST GATE UNBLOCK (DEFERRED)
+	// Signal that trie swap AND CommitPayload are complete.
+	// We use defer to ensure it ALWAYS closes even if an error occurs,
+	// preventing permanent deadlocks in the consensus pipeline.
+	// ═══════════════════════════════════════════════════════════════
+	defer func() {
+		if result.PersistChannel != nil {
+			close(result.PersistChannel)
+		} else {
+			close(db.persistReady)
+		}
+	}()
+
+	// ═══════════════════════════════════════════════════════════════
 	// Step 1: Persist to LevelDB (slow, disk I/O — this is the part
 	// we moved out of the critical path)
 	// ═══════════════════════════════════════════════════════════════
@@ -500,18 +514,6 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
 			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
 		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════
-	// Step 4: IMMEDIATE PERSIST GATE UNBLOCK
-	// Signal that trie swap AND CommitPayload are complete.
-	// This MUST happen after CommitPayload to guarantee strict sequential
-	// ordering so the next block's IntermediateRoot waits for completion.
-	// ═══════════════════════════════════════════════════════════════
-	if result.PersistChannel != nil {
-		close(result.PersistChannel)
-	} else {
-		close(db.persistReady)
 	}
 
 	return nil
