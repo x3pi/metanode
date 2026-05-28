@@ -15,6 +15,7 @@ Tài liệu này mô tả chi tiết cơ chế phân luồng xử lý giao dịc
    - Nếu $T_2$ ảnh hưởng đến địa chỉ $B$ và $C$.
    - Thuật toán sẽ gộp $T_1$ và $T_2$ thành **cùng một nhóm** (RelativeGroup) vì chúng cùng chia sẻ địa chỉ $B$.
 3. **Tính Độc Lập:** Kết quả của bước này là một danh sách các `RelativeGroup`. Giao dịch ở nhóm 1 và nhóm 2 **hoàn toàn không chạm vào bất kỳ tài khoản chung nào**. Do đó, chúng có thể được thực thi song song (Parallel) một cách an toàn tuyệt đối.
+4. **Sắp Xếp Thứ Tự Trong Nhóm:** Để đảm bảo tính nhất quán tuyệt đối giữa Leader và Replay/Sync nodes, các giao dịch trong mỗi `RelativeGroup` được sắp xếp theo thuộc tính `ID` tăng dần (tức chỉ số vị trí ban đầu trong block). Điều này bảo toàn chính xác thứ tự thực thi EVM ban đầu.
 
 ---
 
@@ -29,10 +30,13 @@ Nơi diễn ra: `executeGroupsParallel` (trong `tx_processor.go`)
 - **Thực thi cô lập (Isolated Execution):** 
   - Trong quá trình chạy EVM, các worker chỉ **đọc** (Read) dữ liệu từ State Trie (trie chung).
   - Khi cần **ghi** (Write), thay vì ghi đè trực tiếp lên DB gây lock contention, dữ liệu mới sẽ được ghi vào một bản ghi tạm thời (`DirtyAccounts` / `ValidatorState` nội bộ của group).
-- **Các loại giao dịch trong pha song song:**
-  - **Chuyển tiền thông thường (Transfer):** Hoàn toàn chạy song song.
-  - **Giao dịch Smart Contract (EVM):** Nếu tương tác với các hợp đồng khác nhau, chạy song song.
-  - **Giao dịch Cross-Chain / System (Ví dụ: SetBlsPublicKey):** Áp dụng kỹ thuật "Batch Mutation". Việc cập nhật trực tiếp DB được trì hoãn (Deferred) và đánh dấu dirty để ghi sau.
+- **Nguyên lý song song (Địa chỉ liên quan quyết định):** Việc chạy song song hay tuần tự **hoàn toàn phụ thuộc vào địa chỉ liên quan (Related Addresses) của giao dịch chứ không phụ thuộc vào loại giao dịch (Transfer hay EVM)**:
+  - Bất kỳ giao dịch nào (Transfer, Smart Contract, hay System) nếu không chia sẻ địa chỉ liên quan với các giao dịch khác sẽ được Union-Find xếp vào các nhóm khác nhau và chạy song song.
+  - Ngược lại, nếu có chung địa chỉ liên quan (ví dụ: cùng địa chỉ gửi `From`, nhận `To`, hoặc ví gọi hợp đồng), chúng sẽ bị gộp vào cùng một nhóm để thực thi tuần tự nhằm bảo toàn tính toàn vẹn trạng thái.
+  - **Trường hợp ngoại lệ (Địa chỉ hệ thống dùng chung / Dispatch point):** Các địa chỉ ảo đóng vai trò định tuyến hoặc đăng ký hệ thống nhưng không thay đổi trạng thái nội bộ của chính địa chỉ đó (ví dụ: `ACCOUNT_SETTING_ADDRESS_SELECT` dùng đăng ký BLS, hay `VALIDATOR_CONTRACT_ADDRESS` dùng stake) sẽ được **loại bỏ (exclude) khỏi mảng gom nhóm của Union-Find**. Điều này ngăn việc toàn bộ giao dịch hệ thống bị dồn về một luồng tuần tự duy nhất, cho phép chúng chạy song song an toàn (do chỉ thay đổi trạng thái trên tài khoản riêng của sender).
+- **Xử lý đặc biệt trong pha song song:**
+  - **Giao dịch Read-Only:** Được tách vào các nhóm riêng biệt để tối ưu hóa đọc song song.
+  - **Giao dịch Cross-Chain / System (Ví dụ: SetBlsPublicKey):** Áp dụng kỹ thuật "Batch Mutation". Việc cập nhật DB thực tế được trì hoãn và tổng hợp ghi nhận ở Phase 2 (Dirty State Merge).
 
 ### Phase 2: Tổng Hợp Đồng Bộ (Deterministic Merge Phase)
 Nơi diễn ra: Nửa sau của `ProcessTransactions` (Sau `wg.Wait()`)
@@ -59,7 +63,8 @@ Khi tiến hành fix bug hoặc tối ưu TPS, hệ thống yêu cầu tuân th�
 - Nếu bạn cần dùng Mutex, điều đó chứng tỏ thuật toán chia nhóm (Union-Find) đã bỏ sót một `RelatedAddress` hoặc thiết kế đang tạo ra thắt cổ chai (bottleneck) không đáng có. 
 
 ### 🛡️ Quy tắc 3: Sắp xếp Deterministic
-- Trước khi gọi `BatchUpdate` vào Trie (ví dụ `NomtStateTrie`), mảng các địa chỉ `DirtyAddresses` phải được **Sort** (ví dụ `slices.SortFunc`). Nếu không sort, do đặc tính của HashMap (Go `map` iterators are random), thứ tự insert sẽ khác nhau giữa các node dẫn đến lệch `StateRoot` -> **FORK**.
+- **Sắp xếp DirtyAddresses:** Trước khi gọi `BatchUpdate` vào Trie (ví dụ `NomtStateTrie`), mảng các địa chỉ `DirtyAddresses` phải được **Sort** (ví dụ `slices.SortFunc`). Nếu không sort, do đặc tính của HashMap (Go `map` iterators are random), thứ tự insert sẽ khác nhau giữa các node dẫn đến lệch `StateRoot` -> **FORK**.
+- **Sắp xếp giao dịch trong nhóm (Group Items Sorting):** Các giao dịch trong cùng một nhóm `RelativeGroup` phải được sắp xếp theo thuộc tính `ID` tăng dần (chỉ số vị trí ban đầu trong block). Không được sắp xếp theo `FromAddress`/`Nonce`/`Hash` trong pha replay vì sẽ làm lệch thứ tự thực thi so với thứ tự đề xuất ban đầu của Leader, dẫn đến lệch trạng thái EVM.
 
 ### 🛡️ Quy tắc 4: Cập Nhật Trạng Thái Tức Thời (State Sync Caching)
 - Khi một Sender có nhiều TXs trong cùng một Group (cùng Nonce list liên tiếp), việc xử lý EVM phải liên tục cập nhật bộ đệm Nonce (`Sync C++ State cache`). Nếu không, EVM sẽ từ chối giao dịch thứ hai do Nonce cũ (Stale Nonce).
@@ -85,6 +90,7 @@ Dưới đây là các nguyên nhân cốt lõi từng gây fork trạng thái t
 | **Stale cache read during PersistAsync** | Block tiếp theo thực hiện Preload hoặc Read-Only check đọc trúng dữ liệu Trie cũ khi background writer chưa hoàn tất swap Trie. | Dùng cổng chặn `persistReady` channel kết hợp SeqLock `cacheEpoch` để trì hoãn đọc cho đến khi Trie được swap hoàn chỉnh. |
 | **Concurrent write to state map** | Chạy song song `IntermediateRoot()` cho các Contract Trie mà cập nhật map `trieDatabaseMap` đồng thời. | Tách pha tính toán Root (Parallel) ra khỏi pha ghi nhận kết quả (Sequential Deterministic). |
 | **Duplicate Nonce execution** | Nhiều giao dịch cùng nonce lọt vào block xử lý song song do pool verification không đồng bộ. | Kiểm tra nonce nghiêm ngặt trong `processSingleGroup` trước khi EVM chạy, reject lập tức nếu trùng lặp. |
+| **Mismatched execution order** | Khác biệt về thứ tự sắp xếp giao dịch trong nhóm giữa Proposer path (`GroupAndLimitTransactionsOptimized`) và Replay path (`GroupTransactionsDeterministic`) gây lệch EVM state. | Sắp xếp giao dịch trong từng nhóm `RelativeGroup` thống nhất theo `ID` tăng dần (thứ tự xuất hiện ban đầu trong block). |
 
 ---
 
