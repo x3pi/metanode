@@ -292,25 +292,12 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 4: DETERMINISTIC SORT within each group
-	// Sort by (FromAddress, Nonce, Hash) — guarantees:
-	//   - Same sender's TXs are consecutive and nonce-ordered
-	//   - Different senders within same group have stable order
+	// Sort by ID (original block index) ascending.
+	// This guarantees replay matches proposer execution order.
 	// ═══════════════════════════════════════════════════════════════
 	for i := range groups {
 		sort.Slice(groups[i].Items, func(a, b int) bool {
-			txA := groups[i].Items[a].Tx
-			txB := groups[i].Items[b].Tx
-			// Primary: sort by FromAddress (bytes comparison)
-			fromCmp := txA.FromAddress().Cmp(txB.FromAddress())
-			if fromCmp != 0 {
-				return fromCmp < 0
-			}
-			// Secondary: sort by Nonce (ascending — critical for EVM execution order)
-			if txA.GetNonce() != txB.GetNonce() {
-				return txA.GetNonce() < txB.GetNonce()
-			}
-			// Tertiary: sort by Hash (tiebreaker — shouldn't happen with unique nonces)
-			return txA.Hash().Cmp(txB.Hash()) < 0
+			return groups[i].Items[a].ID < groups[i].Items[b].ID
 		})
 	}
 
