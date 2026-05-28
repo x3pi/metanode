@@ -106,6 +106,11 @@ type NomtStateTrie struct {
 	activeSession          *nomt_ffi.Session
 	pendingFinishedSession *nomt_ffi.FinishedSession
 
+	// pendingChangelog holds changelog entries generated during Commit
+	// to be asynchronously flushed to disk during CommitPayload
+	pendingChangelog      []state_changelog.StateChange
+	pendingChangelogBlock uint64
+
 	// lastCommitBatch for network replication (protected by writerMu)
 	lastCommitBatch [][2][]byte
 
@@ -901,7 +906,6 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 	n.sessionInitMu.Lock()
 	defer n.sessionInitMu.Unlock()
 
-	// Double check
 	n.sessionMu.Lock()
 	if n.activeSession != nil {
 		s := n.activeSession
@@ -910,17 +914,30 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 	}
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
+	changes := n.pendingChangelog
+	blockNum := n.pendingChangelogBlock
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
 	n.sessionMu.Unlock()
 
 	// Perform slow FFI operations OUTSIDE sessionMu to avoid blocking the fast path
-	if fs != nil {
+	if fs != nil || len(changes) > 0 {
 		startDrain := time.Now()
 		logger.Info("⏳ [NOMT-SYNC-DRAIN] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
-		if err := fs.CommitPayload(n.handle); err != nil {
-			logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
-		} else {
-			logger.Info("✅ [NOMT-SYNC-DRAIN] Successfully drained pendingFinishedSession in %v (namespace=%s)", time.Since(startDrain), string(n.namespace))
+		
+		if fs != nil {
+			if err := fs.CommitPayload(n.handle); err != nil {
+				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+			}
 		}
+		
+		if n.changelogDB != nil && len(changes) > 0 {
+			if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
+				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
+			}
+		}
+		
+		logger.Info("✅ [NOMT-SYNC-DRAIN] Successfully drained pendingFinishedSession in %v (namespace=%s)", time.Since(startDrain), string(n.namespace))
 
 		// Clear committing from readView since data is now on disk
 		n.writerMu.Lock()
@@ -1114,8 +1131,8 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	newRoot := e_common.BytesToHash(newRootBytes[:])
 
 	// STATE CHANGELOG
+	var changes []state_changelog.StateChange
 	if n.changelogDB != nil && n.currentCommitBlock > 0 {
-		var changes []state_changelog.StateChange
 		for _, hexKey := range sortedDirtyKeys {
 			entry := committingSnapshot[hexKey]
 			changes = append(changes, state_changelog.StateChange{
@@ -1124,9 +1141,10 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 				NewValue: entry.value,
 			})
 		}
-		if err := n.changelogDB.WriteBlockChanges(n.currentCommitBlock, changes); err != nil {
-			logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB: %v", err)
-		}
+		// ═══════════════════════════════════════════════════════════════
+		// FIX: Move changelog disk I/O out of the execution critical path.
+		// Queue the changes to be asynchronously flushed to disk during CommitPayload.
+		// ═══════════════════════════════════════════════════════════════
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -1138,6 +1156,10 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	n.sessionMu.Lock()
 	n.pendingFinishedSession = fs
 	n.activeSession = nil
+	if len(changes) > 0 {
+		n.pendingChangelog = changes
+		n.pendingChangelogBlock = n.currentCommitBlock
+	}
 	n.sessionMu.Unlock()
 
 	n.lastCommitBatch = replicationBatch
@@ -1264,20 +1286,33 @@ func (n *NomtStateTrie) Copy() StateTrie {
 	return t
 }
 
-// CommitPayload executes the slow disk I/O portion of a finished commit session.
-// This is called asynchronously by `PersistAsync` pipelines.
 func (n *NomtStateTrie) CommitPayload() error {
 	n.sessionMu.Lock()
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
+	changes := n.pendingChangelog
+	blockNum := n.pendingChangelogBlock
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
 	n.sessionMu.Unlock()
 
-	if fs == nil {
+	if fs == nil && len(changes) == 0 {
 		return nil // Nothing to commit to disk
 	}
 
-	if err := fs.CommitPayload(n.handle); err != nil {
-		return fmt.Errorf("NomtStateTrie CommitPayload failed: %w", err)
+	if fs != nil {
+		if err := fs.CommitPayload(n.handle); err != nil {
+			return fmt.Errorf("NomtStateTrie CommitPayload failed: %w", err)
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// ASYNC CHANGELOG FLUSH
+	// ═══════════════════════════════════════════════════════════════
+	if n.changelogDB != nil && len(changes) > 0 {
+		if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
+			logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB asynchronously: %v", err)
+		}
 	}
 
 	// Data is now on disk. Clear committing from readView so Get() reads
