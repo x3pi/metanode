@@ -451,8 +451,10 @@ func processGroupsConcurrently(
 	// Real suspect: NomtStateTrie.BatchUpdate internal parallel workers.
 	// ═══════════════════════════════════════════════════════════════
 	maxTxWorkers := runtime.NumCPU()
-	if maxTxWorkers > 16 {
-		maxTxWorkers = 16
+	// ALLOW FULL SCALE: Removed the strict 16-worker cap. High-end servers (e.g. 64-128 cores)
+	// can now utilize all their cores to process independent TX groups in parallel.
+	if maxTxWorkers > 1024 {
+		maxTxWorkers = 1024
 	}
 	numWorkers := maxTxWorkers
 	if numWorkers > len(groupedGroups) {
