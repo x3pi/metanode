@@ -319,6 +319,14 @@ func ClearMVMApi(mvmId common.Address) {
 		return
 	}
 	instance, loaded := apiInstances.LoadAndDelete(mvmId)
+
+	// FORK-SAFETY FIX: BẮT BUỘC phải dọn dẹp state bên C++ EVM
+	// Nếu không, dirty logs từ VirtualExecution sẽ bị kẹt lại và cộng dồn vào Real Execution
+	// gây ra lệch DataHash (MapFullDbHash)
+	cBBmvmId := C.CBytes(mvmId.Bytes())
+	C.MVM_cancelTransaction((*C.uchar)(cBBmvmId))
+	C.free(unsafe.Pointer(cBBmvmId))
+
 	if !loaded {
 		return
 	}
