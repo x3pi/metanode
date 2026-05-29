@@ -100,6 +100,9 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	ProcessResult,
 	error,
 ) {
+	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
+	mvm.CallClearAllStateInstances()
+
 	defer func() {
 		mvm.ClearAllMVMApi()
 		mvm.CallClearAllStateInstances()
@@ -229,6 +232,9 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	ProcessResult,
 	error,
 ) {
+	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
+	mvm.CallClearAllStateInstances()
+
 	defer func() {
 		mvm.ClearAllMVMApi()
 		mvm.CallClearAllStateInstances()

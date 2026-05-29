@@ -9,11 +9,13 @@ import (
 	"math/big"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
@@ -242,6 +244,15 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		}
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
+		if !tx.IsDeployContract() {
+			dbOwnerAddr := tx.ToAddress()
+			if dbOwnerAddr == common.HexToAddress("0x0000000000000000000000000000000000000106") {
+				dbOwnerAddr = tx.FromAddress()
+			}
+			if xapAddr, ok := extractXapianDBAddress(dbOwnerAddr, tx.Data()); ok {
+				tx.AddRelatedAddress(xapAddr)
+			}
+		}
 		preloadSet[tx.FromAddress()] = struct{}{}
 		if !tx.IsDeployContract() {
 			preloadSet[tx.ToAddress()] = struct{}{}
@@ -433,6 +444,15 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	for _, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
+		if !tx.IsDeployContract() {
+			dbOwnerAddr := tx.ToAddress()
+			if dbOwnerAddr == common.HexToAddress("0x0000000000000000000000000000000000000106") {
+				dbOwnerAddr = tx.FromAddress()
+			}
+			if xapAddr, ok := extractXapianDBAddress(dbOwnerAddr, tx.Data()); ok {
+				tx.AddRelatedAddress(xapAddr)
+			}
+		}
 	}
 
 	// OPTIMIZATION: Wait for PreloadAccounts concurrently (deterministic — safe for fork-safety)
@@ -470,6 +490,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	nativeParallelAddrs := map[common.Address]struct{}{
 		accountSettingAddr:                   {},
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
 	}
 	for i, tx := range txs {
 		// Build grouping addresses: filter out native dispatch addresses
@@ -603,6 +624,15 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 			tx := item.Tx
 			tx.AddRelatedAddress(tx.FromAddress())
 			tx.AddRelatedAddress(tx.ToAddress())
+			if !tx.IsDeployContract() {
+				dbOwnerAddr := tx.ToAddress()
+				if dbOwnerAddr == common.HexToAddress("0x0000000000000000000000000000000000000106") {
+					dbOwnerAddr = tx.FromAddress()
+				}
+				if xapAddr, ok := extractXapianDBAddress(dbOwnerAddr, tx.Data()); ok {
+					tx.AddRelatedAddress(xapAddr)
+				}
+			}
 			selectedTxs = append(selectedTxs, tx)
 		}
 	}
@@ -612,6 +642,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	nativeParallelAddrs := map[common.Address]struct{}{
 		accountSettingAddr:                   {},
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
 	}
 	for i, tx := range selectedTxs {
 		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
@@ -793,4 +824,38 @@ func (vp *TxValidatorPool) ProcessAndPartitionTransactions(n int) ([][]grouptxns
 	}
 
 	return partitionedGroups, nil
+}
+
+// extractXapianDBAddress parses the Xapian DB name from the transaction calldata
+// and hashes it alongside the db owner address to create a deterministic pseudo-address for grouping.
+func extractXapianDBAddress(dbOwnerAddress common.Address, txData []byte) (common.Address, bool) {
+	if len(txData) == 0 {
+		return common.Address{}, false
+	}
+
+	dataStr := string(txData)
+	dbName := ""
+	
+	idx := strings.Index(dataStr, `"dbname"`)
+	if idx != -1 {
+		part := dataStr[idx:]
+		firstQuote := strings.Index(part, `:`)
+		if firstQuote != -1 {
+			valPart := part[firstQuote+1:]
+			startQuote := strings.Index(valPart, `"`)
+			if startQuote != -1 {
+				endQuote := strings.Index(valPart[startQuote+1:], `"`)
+				if endQuote != -1 {
+					dbName = valPart[startQuote+1 : startQuote+1+endQuote]
+				}
+			}
+		}
+	}
+
+	if dbName == "" {
+		return common.Address{}, false
+	}
+
+	hash := crypto.Keccak256Hash([]byte("xapian_db_prefix_" + dbOwnerAddress.Hex() + "_" + dbName))
+	return common.BytesToAddress(hash.Bytes()[:20]), true
 }
