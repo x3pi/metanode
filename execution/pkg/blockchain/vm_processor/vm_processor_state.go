@@ -382,6 +382,7 @@ func (vmP *VmProcessor) updateStateDB(
 	mvmRs *mvm.MVMExecuteResult,
 	mvmId common.Address,
 	isFreeGass bool,
+	isCache bool,
 ) (bool, error) {
 	var span *trace.Span = nil // Khởi tạo nil
 
@@ -423,8 +424,13 @@ func (vmP *VmProcessor) updateStateDB(
 		// even if the transaction ultimately throws an exception mid-execution.
 		// We MUST ONLY clear the specific mvmId instance to prevent global wipe data races
 		// during parallel group execution.
-		mvm.UnprotectMVMApi(mvmId)
-		mvm.ClearMVMApi(mvmId)
+		// BUT: If isCache is true, we must NOT unprotect/clear the MVMApi instance immediately
+		// because other transactions in the same Group need it, and it will be committed/cleared
+		// at the end of the block in block_processor_commit.go.
+		if !isCache {
+			mvm.UnprotectMVMApi(mvmId)
+			mvm.ClearMVMApi(mvmId)
+		}
 
 		// NOTE: We DO NOT manually refund transaction.Amount() here.
 		// `processSingleGroup` no longer pre-deducts the balance in Go prior to execution.

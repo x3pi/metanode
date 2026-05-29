@@ -684,7 +684,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	// Cập nhật trạng thái DB dựa trên kết quả từ MVM
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, vmP.mvmId, isFreeSender)
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, vmP.mvmId, isFreeSender, isCache)
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after NoncePlusOne: %w", err)
 		if span != nil {
