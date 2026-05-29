@@ -131,6 +131,14 @@ func (r *Receipts) GetReceipt(hash common.Hash) (types.Receipt, error) {
 		logger.Debug("[RECEIPT GET] Receipt not found in trie: hash=%s, err=%v", hash.Hex(), err)
 		return nil, ErrorReceiptNotFound
 	}
+	if len(data) == 0 {
+		// Sync nodes write receipts directly to r.db (PebbleDB) but bypass flat trie.
+		// Fall back to reading receipt bytes directly from PebbleDB.
+		data, _ = r.db.Get(hash.Bytes())
+		if len(data) == 0 {
+			return nil, ErrorReceiptNotFound
+		}
+	}
 	var receipt = &Receipt{}
 
 	err = receipt.Unmarshal(data)
