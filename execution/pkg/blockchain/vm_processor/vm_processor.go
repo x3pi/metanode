@@ -347,6 +347,9 @@ func (vmP *VmProcessor) readOnlyCall(
 	// ✅ Đưa exception message vào Return field nếu Return empty và có exception
 	returnData := prepareReturnDataWithExceptionMessage(mvmResult.Return, mvmResult.Exmsg, mvmResult.Status, mvmResult.Exception)
 	rs := smart_contract.NewExecuteSCResult(tx.Hash(), mvmResult.Status, mvmResult.Exception, returnData, mvmResult.GasUsed, common.Hash{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if mvmResult != nil && mvmResult.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmResult.MapFullDbLogs)
+	}
 	if span != nil { // GUARD
 		span.SetAttribute("resultStatus", rs.ReceiptStatus().String())
 		span.SetAttribute("resultGasUsed", rs.GasUsed())

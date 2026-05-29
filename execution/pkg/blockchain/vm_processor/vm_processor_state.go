@@ -114,6 +114,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 			mvmRs.GasUsed, common.Hash{}, mapAddBalance, mapSubBalance,
 			mvmRs.MapNonce, nil, nil, nil, nil, nil, nil, nil,
 		)
+		if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+			rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+		}
 		if span != nil { // GUARD
 			span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())
 			span.SetAttribute("finalResultException", rs.Exception().String())
@@ -313,6 +316,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		nil, nil,
 		eventLogs,
 	)
+	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
 
 	if span != nil { // GUARD for final attributes
 		span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())
@@ -340,7 +346,7 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 
 	transactionHash := transaction.Hash()
 
-	return smart_contract.NewExecuteSCResult(
+	rs := smart_contract.NewExecuteSCResult(
 		transactionHash,
 		mvmRs.Status,
 		mvmRs.Exception,
@@ -362,7 +368,11 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 		nil,
 		nil,
 		nil,
-	), nil
+	)
+	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
+	return rs, nil
 }
 
 // updateStateDB cập nhật trạng thái DB dựa trên kết quả MVM.
