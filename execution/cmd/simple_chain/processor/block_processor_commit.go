@@ -634,7 +634,6 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		receiptBatchSerialized = job.Receipts.GetReceiptBatchPut()
 	}
 	if len(receiptBatchSerialized) == 0 && job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
-		// Fallback: marshal receipts manually (for legacy/non-FlatStateTrie backends)
 		logger.Warn("⚠️ [BACKUP] Block #%d: ReceiptBatchPut from trie commit is empty, falling back to manual marshal", blockNum)
 		var rb [][2][]byte
 		for _, r := range job.ProcessResults.Receipts {
@@ -652,7 +651,6 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		txBatchSerialized = job.TxDB.GetTxBatchPut()
 	}
 	if len(txBatchSerialized) == 0 && job.ProcessResults != nil && len(job.ProcessResults.Transactions) > 0 {
-		// Fallback: marshal transactions manually (for legacy/non-FlatStateTrie backends)
 		logger.Warn("⚠️ [BACKUP] Block #%d: TxBatchPut from trie commit is empty, falling back to manual marshal", blockNum)
 		var tb [][2][]byte
 		for _, tx := range job.ProcessResults.Transactions {
