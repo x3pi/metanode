@@ -187,6 +187,7 @@ func (vmP *VmProcessor) deploySmartContract(
 	mvmId common.Address,
 	isCache bool,
 ) (types.ExecuteSCResult, error) {
+	defer mvm.ClearMVMApi(mvmId)
 	var span *trace.Span = nil          // Khởi tạo nil
 	var deployCtx context.Context = ctx // Mặc định dùng context vào
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
@@ -271,7 +272,6 @@ func (vmP *VmProcessor) deploySmartContract(
 	}
 	// logger.Error("ClearMVM: 3: %v", mvmId)
 
-	mvm.ClearMVMApi(mvmId) // Luôn clear MVM API
 	return rs, nil
 }
 
@@ -361,6 +361,12 @@ func (vmP *VmProcessor) executeSmartContract(
 	mvmE *mvm.MVMApi,
 	isCache bool,
 ) (types.ExecuteSCResult, error) {
+	var success bool
+	defer func() {
+		if !success || !isCache {
+			mvm.ClearMVMApi(mvmE.GetKey())
+		}
+	}()
 	var span *trace.Span = nil        // Khởi tạo nil
 	var execCtx context.Context = ctx // Mặc định dùng context vào
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
@@ -470,9 +476,7 @@ func (vmP *VmProcessor) executeSmartContract(
 	if span != nil { // GUARD
 		span.AddEvent("MVMApiPersistsAfterExecute", map[string]interface{}{"mvmId": currentMvmId.Hex()})
 	}
-	if !isCache {
-		mvm.ClearMVMApi(mvmE.GetKey())
-	}
+	success = true
 	return rs, nil
 }
 

@@ -798,6 +798,7 @@ func processSingleGroup(
 			}
 			rcp, exRs, txFailed := ccHandler.HandleTransaction(txCtx, chainState, tx, mvmId, enableTrace, blockTime)
 			logger.Info("[CC EXECUTE] TX %s type=%d → HandleTransaction result: %v", tx.Hash().Hex(), tx.GetType(), rcp)
+			gRs.MvmIdMap[tx.Hash()] = mvmId
 			gRs.Receipts = append(gRs.Receipts, rcp)
 			gRs.Transactions = append(gRs.Transactions, tx)
 			if exRs != nil {
