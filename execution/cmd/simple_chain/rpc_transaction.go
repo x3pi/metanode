@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -33,59 +34,61 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashEth)
 	hashTx := hashEth
 
-	if !ok {
-
-		hash, ok := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
-		if !ok {
-
-			return nil, fmt.Errorf("transaction not found by hash: %v", hashEth)
-		}
-
-		blockNumber, ok = blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hash)
-		if !ok {
-			if rawTx, success := blockchain.GetBlockChainInstance().GetTxFromCache(hashEth); success {
-				txE := new(types.Transaction)
-				if err := txE.UnmarshalBinary(rawTx); err != nil {
-					logger.Warn("failed to unmarshal transaction from cache", "hash", hashEth.Hex(), "error", err)
-				} else {
-					v, r, s := txE.RawSignatureValues()
-					signer := types.NewCancunSigner(api.App.config.ChainId)
-
-					from, err := types.Sender(signer, txE)
-					if err != nil {
-						return nil, fmt.Errorf("transaction not found Sender by hash: %v", hashEth)
-					}
-					return &RPCTransaction{
-						Gas:                 hexutil.Uint64(0), //Ch
-						GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(0)),
-						GasFeeCap:           (*hexutil.Big)(new(big.Int).SetUint64(0)),
-						GasTipCap:           (*hexutil.Big)(new(big.Int).SetUint64(0)),
-						MaxFeePerBlobGas:    (*hexutil.Big)(new(big.Int).SetUint64(0)),
-						Hash:                txE.Hash(),
-						Input:               txE.Data(),
-						Nonce:               hexutil.Uint64(txE.Nonce()),
-						To:                  txE.To(),
-						TransactionIndex:    (*hexutil.Uint64)(new(uint64)),
-						Value:               (*hexutil.Big)(txE.Value()),
-						Type:                hexutil.Uint64(0),
-						V:                   (*hexutil.Big)(v),
-						R:                   (*hexutil.Big)(r),
-						S:                   (*hexutil.Big)(s),
-						YParity:             nil,
-						BlockHash:           (*common.Hash)(common.Hash{}.Bytes()),
-						BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(0)),
-						Accesses:            nil,
-						ChainID:             (*hexutil.Big)(txE.ChainId()),
-						BlobVersionedHashes: nil,
-						From:                from,
-					}, nil
-				}
+	if !ok || blockNumber > storage.GetLastBlockNumber() {
+		// Try bls mapping
+		hash, okBls := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
+		if okBls {
+			blockNumber, ok = blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hash)
+			if ok && blockNumber <= storage.GetLastBlockNumber() {
+				hashTx = hash
+				goto PROCESS_COMMITTED
 			}
-
-			return nil, fmt.Errorf("blockNumber not found by transaction hash: %v", hashEth)
 		}
-		hashTx = hash
+
+		// Fallback to cache as a pending transaction
+		if rawTx, success := blockchain.GetBlockChainInstance().GetTxFromCache(hashEth); success {
+			txE := new(types.Transaction)
+			if err := txE.UnmarshalBinary(rawTx); err != nil {
+				logger.Warn("failed to unmarshal transaction from cache", "hash", hashEth.Hex(), "error", err)
+				return nil, fmt.Errorf("failed to unmarshal transaction from cache: %w", err)
+			}
+			v, r, s := txE.RawSignatureValues()
+			signer := types.NewCancunSigner(api.App.config.ChainId)
+
+			from, err := types.Sender(signer, txE)
+			if err != nil {
+				return nil, fmt.Errorf("transaction not found Sender by hash: %v", hashEth)
+			}
+			return &RPCTransaction{
+				Gas:                 hexutil.Uint64(txE.Gas()),
+				GasPrice:            (*hexutil.Big)(txE.GasPrice()),
+				GasFeeCap:           (*hexutil.Big)(txE.GasFeeCap()),
+				GasTipCap:           (*hexutil.Big)(txE.GasTipCap()),
+				MaxFeePerBlobGas:    (*hexutil.Big)(txE.BlobGasFeeCap()),
+				Hash:                txE.Hash(),
+				Input:               txE.Data(),
+				Nonce:               hexutil.Uint64(txE.Nonce()),
+				To:                  txE.To(),
+				TransactionIndex:    nil,
+				Value:               (*hexutil.Big)(txE.Value()),
+				Type:                hexutil.Uint64(uint64(txE.Type())),
+				V:                   (*hexutil.Big)(v),
+				R:                   (*hexutil.Big)(r),
+				S:                   (*hexutil.Big)(s),
+				YParity:             nil,
+				BlockHash:           nil,
+				BlockNumber:         nil,
+				Accesses:            nil,
+				ChainID:             (*hexutil.Big)(txE.ChainId()),
+				BlobVersionedHashes: nil,
+				From:                from,
+			}, nil
+		}
+
+		return nil, fmt.Errorf("transaction not found by hash: %v", hashEth)
 	}
+
+PROCESS_COMMITTED:
 
 	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
 
@@ -97,14 +100,22 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	var err error
 	blockData, err := api.App.chainState.GetBlockDatabase().GetBlockByHash(hash)
 	if err != nil {
-		logger.Warn("Error loading block from file:", err)
-		return nil, err
+		logger.Error("❌ [RPC-TX] Error loading block from file: %v", err)
+		return nil, nil
 	}
 
-	txDB, _ := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+	if err != nil {
+		logger.Error("❌ [RPC-TX] failed to open transaction state DB: %v", err)
+		return nil, nil
+	}
 	tx, err := txDB.GetTransaction(hashTx)
 	if err != nil {
-		return nil, err
+		logger.Error("❌ [RPC-TX] failed to get transaction: %v", err)
+		return nil, nil
+	}
+	if tx == nil {
+		return nil, nil
 	}
 	v, r, s := tx.RawSignatureValues()
 	address := tx.ToAddress()
@@ -112,13 +123,28 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		address = crypto.CreateAddress(tx.FromAddress(), tx.GetNonce())
 
 	}
+
+	var txIndexVal uint64
+	var found bool
+	for idx, tHash := range blockData.Transactions() {
+		if tHash == hashTx || tHash == hashEth {
+			txIndexVal = uint64(idx)
+			found = true
+			break
+		}
+	}
+	if !found {
+		logger.Error("❌ [RPC-TX] transaction %s not found in block %d transaction list", hashEth.Hex(), blockNumber)
+		return nil, nil
+	}
+
 	// Nếu tìm thấy giao dịch có hash khớp, trả về nó
 	return &RPCTransaction{
 		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
 		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(0), //Ch
-		GasPrice:            nil,
+		Gas:                 hexutil.Uint64(tx.MaxGas()),
+		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
 		GasFeeCap:           nil,
 		GasTipCap:           nil,
 		MaxFeePerBlobGas:    nil,
@@ -126,7 +152,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		Input:               tx.CallData().Input(),
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
 		To:                  (*common.Address)(address.Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(new(uint64)),
+		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
 		Value:               (*hexutil.Big)(tx.Amount()),
 		Type:                hexutil.Uint64(0),
 		Accesses:            nil,
@@ -522,8 +548,8 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	}
 
 	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
-	if !ok {
-		return nil, nil // Trả về nil nếu không tìm thấy giao dịch
+	if !ok || blockNumber > storage.GetLastBlockNumber() {
+		return nil, nil // Trả về nil nếu không tìm thấy giao dịch hoặc chưa committed
 	}
 
 	// Bước 3: Lấy block hash từ block number
@@ -535,26 +561,40 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	// Bước 4: Lấy toàn bộ dữ liệu của block
 	blockData, err := api.App.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
 	if err != nil {
+		logger.Error("❌ [RPC-RECEIPT] failed to get block by hash %s: %v", blockHash.Hex(), err)
+		return nil, nil
+	}
+	if blockData == nil {
 		return nil, nil
 	}
 
 	rcpDb, err := receipt.NewReceiptsFromRoot(blockData.Header().ReceiptRoot(), api.App.storageManager.GetStorageReceipt())
 	if err != nil {
+		logger.Error("❌ [RPC-RECEIPT] failed to open receipts DB from root: %v", err)
 		return nil, nil
 	}
 	// typeHash := "mtnHash"
-	receipt, err := rcpDb.GetReceipt(searchHash)
+	rcp, err := rcpDb.GetReceipt(searchHash)
 	if err != nil {
-		return nil, nil // Trả về lỗi nếu không tìm thấy
+		if err == receipt.ErrorReceiptNotFound {
+			return nil, nil
+		}
+		logger.Error("❌ [RPC-RECEIPT] failed to get receipt: %v", err)
+		return nil, nil
 	}
-	tx, err := api.GetTransactionByHash(ctx, receipt.TransactionHash())
+	tx, err := api.GetTransactionByHash(ctx, rcp.TransactionHash())
 	if err != nil {
-		return nil, nil // Trả về lỗi nếu không tìm thấy
+		logger.Error("❌ [RPC-RECEIPT] failed to get transaction for receipt: %v", err)
+		return nil, nil
+	}
+	if tx == nil {
+		logger.Error("❌ [RPC-RECEIPT] transaction not found for receipt: %s", rcp.TransactionHash().Hex())
+		return nil, nil
 	}
 	blockNumberBigInt := tx.BlockNumber.ToInt()
 	blockNumberInt64 := blockNumberBigInt.Int64()
 
-	events := receipt.EventLogs()
+	events := rcp.EventLogs()
 	logs := make([]interface{}, len(events))
 	for i, logData := range events {
 		topics := make([]string, len(logData.Topics)) // Tạo mảng string để lưu trữ topics đã chuyển đổi
@@ -577,28 +617,28 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	receiptMap := map[string]interface{}{
 		// "typeHash":          typeHash,
 		"type":              hexutil.EncodeUint64(2),
-		"status":            swapStatusNumber(int32(receipt.Status().Number())),
+		"status":            swapStatusNumber(int32(rcp.Status().Number())),
 		"transactionHash":   hashEth,
-		"gasUsed":           hexutil.EncodeUint64(receipt.GasUsed()),
+		"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed()),
 		"logs":              logs,
-		"logsBloom":         "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-		"transactionIndex":  hexutil.EncodeUint64(receipt.TransactionIndex()),
-		"groupIndex":        hexutil.EncodeUint64(receipt.GroupIndex()), // Debug: deterministic group order
+		"logsBloom":         "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+		"transactionIndex":  hexutil.EncodeUint64(rcp.TransactionIndex()),
+		"groupIndex":        hexutil.EncodeUint64(rcp.GroupIndex()), // Debug: deterministic group order
 		"blockHash":         blockHash,
 		"blockNumber":       hexutil.EncodeUint64(uint64(blockNumberInt64)),
-		"effectiveGasPrice": hexutil.EncodeUint64(receipt.GasFee()),
-		"from":              receipt.FromAddress(),
+		"effectiveGasPrice": hexutil.EncodeUint64(rcp.GasFee()),
+		"from":              rcp.FromAddress(),
 		"cumulativeGasUsed": hexutil.EncodeUint64(mt_common.BLOCK_GAS_LIMIT),
 	}
 	// Thêm revertReason nếu tx bị lỗi (status != RETURNED)
-	if receipt.Return() != nil && len(receipt.Return()) > 0 && receipt.Status().Number() != 0 {
-		receiptMap["return"] = fmt.Sprintf("0x%s", common.Bytes2Hex(receipt.Return()))
+	if rcp.Return() != nil && len(rcp.Return()) > 0 && rcp.Status().Number() != 0 {
+		receiptMap["return"] = fmt.Sprintf("0x%s", common.Bytes2Hex(rcp.Return()))
 	}
-	if (receipt.ToAddress() == common.Address{}) {
-		toAddressDeploy := crypto.CreateAddress(receipt.FromAddress(), uint64(tx.Nonce))
+	if (rcp.ToAddress() == common.Address{}) {
+		toAddressDeploy := crypto.CreateAddress(rcp.FromAddress(), uint64(tx.Nonce))
 		receiptMap["contractAddress"] = toAddressDeploy
 	} else {
-		receiptMap["to"] = receipt.ToAddress()
+		receiptMap["to"] = rcp.ToAddress()
 	}
 
 	return receiptMap, nil
@@ -623,7 +663,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 		beginBlock = blockNumber
 		endBlock = blockNumber
 	} else {
-		lastBlockNum := api.App.blockProcessor.GetLastBlock().Header().BlockNumber()
+		lastBlockNum := storage.GetLastBlockNumber()
 
 		begin := rpc.LatestBlockNumber.Int64()
 		if crit.FromBlock != nil {

@@ -16,6 +16,7 @@ import (
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
@@ -81,8 +82,21 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, input hexutil.Bytes,
 		rs, err = api.App.transactionProcessor.ProcessTransactionOffChain(txM)
 	} else {
 		// Slow path: Load specific historical block and state root
-		currentBlock := api.App.blockProcessor.GetLastBlock()
-		header := currentBlock.Header() // Default to latest
+		var header mt_types.BlockHeader
+		lastBlockNum := storage.GetLastBlockNumber()
+		if lastBlockNum > 0 {
+			hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(lastBlockNum)
+			if ok {
+				if loadedBlock, errLoad := api.App.chainState.GetBlockDatabase().GetBlockByHash(hash); errLoad == nil {
+					header = loadedBlock.Header()
+				}
+			}
+		}
+		if header == nil {
+			if currentBlock := api.App.blockProcessor.GetLastBlock(); currentBlock != nil {
+				header = currentBlock.Header()
+			}
+		}
 
 		if blockNrOrHash.BlockNumber != nil && *blockNrOrHash.BlockNumber >= 0 {
 			bn := *blockNrOrHash.BlockNumber
@@ -205,7 +219,7 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
 	if blockNr, ok := blockNrOrHash.Number(); ok {
-		if blockNr == rpc.LatestBlockNumber || blockNr == rpc.PendingBlockNumber {
+		if blockNr == rpc.PendingBlockNumber {
 			as, err := api.App.chainState.GetAccountStateDB().AccountStateReadOnly(address)
 			if err != nil {
 				return nil, err
@@ -217,13 +231,19 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	var blockMap map[string]interface{}
 	var targetBlockNumber uint64
 	var foundBlockNumber bool
-
+	var errGetBlock error
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		targetBlockNumber = uint64(blockNr.Int64())
 		foundBlockNumber = true
-		blockMap, _ = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
+		blockMap, errGetBlock = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
+		if errGetBlock != nil {
+			return nil, fmt.Errorf("failed to get block by number: %w", errGetBlock)
+		}
 	} else if hash, ok := blockNrOrHash.Hash(); ok {
-		blockMap, _ = api.GetBlockByHash(ctx, hash, false)
+		blockMap, errGetBlock = api.GetBlockByHash(ctx, hash, false)
+		if errGetBlock != nil {
+			return nil, fmt.Errorf("failed to get block by hash: %w", errGetBlock)
+		}
 		if blockMap != nil {
 			if numStr, okStr := blockMap["number"].(string); okStr {
 				if num, err := hexutil.DecodeUint64(numStr); err == nil {
