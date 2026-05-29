@@ -2195,6 +2195,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 	// Now apply the remaining batches (where 'nomt:' prefixed keys were stripped)
 	for _, entry := range entries {
 		if batch, ok := aggregatedBatches[entry.name]; ok && len(batch) > 0 && entry.storage != nil {
+			trie.UpdateBucketCacheFromBatch(entry.storage, batch)
 			if err := entry.storage.BatchPut(batch); err != nil {
 				return nil, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
 			}
