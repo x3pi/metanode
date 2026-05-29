@@ -1031,7 +1031,8 @@ func processSingleGroup(
 		
 		if tx.IsRegularTransaction() {
 			// ═══════════════════════════════════════════════════════════════
-			// BATCH MUTATIONS for Native TX: bypass MVM and DB locks
+			// BATCH MUTATIONS for Native TX: Use DB locks to prevent data races
+			// with concurrent EVM groups modifying the same account.
 			// ═══════════════════════════════════════════════════════════════
 			_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
 			gasLimit := uint64(mt_common.TRANSFER_GAS_COST)
@@ -1041,9 +1042,11 @@ func processSingleGroup(
 			gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
-			if as.TotalBalance().Cmp(totalCost) < 0 {
-				err := fmt.Errorf("insufficient balance for transfer")
-				rcp := createErrorReceipt(tx, toAddress, err)
+			// Mutate sender (thread-safe)
+			err = chainState.GetAccountStateDB().SubTotalBalance(tx.FromAddress(), totalCost)
+			if err != nil {
+				// Thread-safe check: if err is returned, it means insufficient balance (or lock issue)
+				rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("insufficient balance for transfer"))
 				gRs.Receipts = append(gRs.Receipts, rcp)
 				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
@@ -1052,31 +1055,23 @@ func processSingleGroup(
 				}
 				continue
 			}
-
-			// Mutate sender (in memory)
-			as.SubTotalBalance(totalCost)
-			as.PlusOneNonce()
-			as.SetLastHash(tx.Hash())
+			chainState.GetAccountStateDB().PlusOneNonce(tx.FromAddress())
+			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
-			// Mutate receiver (in memory)
-			asTo, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
-			if asTo == nil {
-				asTo = state.NewAccountState(tx.ToAddress())
-			}
-			asTo.AddBalance(tx.Amount())
+			// Mutate receiver (thread-safe)
+			chainState.GetAccountStateDB().AddBalance(tx.ToAddress(), tx.Amount())
 
 			// Accumulate gas fee for later batch update to coinbase
 			totalGasFee.Add(totalGasFee, gasFee)
 
-			// Defer dirty updates to post-parallel phase
-			gRs.DirtyAccounts = append(gRs.DirtyAccounts, as)
-			if tx.FromAddress() != tx.ToAddress() {
-				gRs.DirtyAccounts = append(gRs.DirtyAccounts, asTo)
-			}
-
 			// Sync C++ cache to prevent stale nonce for subsequent EVM TXs (if any)
-			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce())
+			// Wait, we need the new nonce! Fetch it thread-safely:
+			// as was fetched at the beginning, but its nonce might be stale now.
+			// However, since FromAddress is grouped, no other native TX is modifying it,
+			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
+			// So we can just use as.Nonce() + 1
+			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce() + 1)
 
 			// Generate fake MVM result
 			exRs = smart_contract.NewExecuteSCResult(
