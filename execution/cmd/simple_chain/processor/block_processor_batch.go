@@ -300,9 +300,12 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	}
 
 	logger.Warn("APPLY_BATCH_DEBUG: allFullDbLogs count=%d", len(allFullDbLogs))
-	for _, logMap := range allFullDbLogs {
-		logger.Warn("APPLY_BATCH_DEBUG: Replaying FullDbLogs for map with %d entries", len(logMap))
-		mvm.CallReplayFullDbLogs(logMap)
+	for idx, logMap := range allFullDbLogs {
+		logger.Warn("APPLY_BATCH_DEBUG: Replaying FullDbLogs batch %d/%d with %d entries", idx+1, len(allFullDbLogs), len(logMap))
+		result := mvm.CallReplayFullDbLogs(logMap)
+		if result == 0 {
+			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs FAILED for batch %d/%d (%d entries) — Xapian DB may be OUT OF SYNC! This WILL cause stateRoot/receiptsRoot divergence.", idx+1, len(allFullDbLogs), len(logMap))
+		}
 	}
 
 	// CRITICAL FORK-SAFETY: Clear C++ EVM State Cache after applying network blocks.
@@ -387,8 +390,11 @@ func (bp *BlockProcessor) applyBlockBatchForMapping(blockBatch []*storage.BackUp
 		}
 	}
 
-	for _, logMap := range allFullDbLogs {
-		mvm.CallReplayFullDbLogs(logMap)
+	for idx, logMap := range allFullDbLogs {
+		result := mvm.CallReplayFullDbLogs(logMap)
+		if result == 0 {
+			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs (mapping) FAILED for batch %d/%d (%d entries) — Xapian DB may be OUT OF SYNC!", idx+1, len(allFullDbLogs), len(logMap))
+		}
 	}
 
 	return nil

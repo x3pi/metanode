@@ -42,9 +42,12 @@ type PebbleDB struct {
 var (
 	sharedPebbleCacheOnce sync.Once
 	sharedPebbleCache     *pebble.Cache
+
+	sharedPebbleTableCacheOnce sync.Once
+	sharedPebbleTableCache     *pebble.TableCache
 )
 
-func getSharedPebbleCache() *pebble.Cache {
+func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
 		// 1GB shared block cache across all PebbleDB instances.
 		// With 4 nodes × 4 DBs per node, each DB gets ~64MB effective cache
@@ -55,6 +58,17 @@ func getSharedPebbleCache() *pebble.Cache {
 	})
 	sharedPebbleCache.Ref()
 	return sharedPebbleCache
+}
+
+func GetSharedPebbleTableCache() *pebble.TableCache {
+	sharedPebbleTableCacheOnce.Do(func() {
+		cache := GetSharedPebbleCache()
+		// 16 shards, size 10000 (plenty for our open files)
+		sharedPebbleTableCache = pebble.NewTableCache(cache, 16, 10000)
+		logger.Info("✅ [PEBBLE] Created shared table cache (shards=16, size=10000)")
+	})
+	sharedPebbleTableCache.Ref()
+	return sharedPebbleTableCache
 }
 
 // NewPebbleDB creates a new PebbleDB instance (not yet opened).
@@ -80,7 +94,9 @@ func (p *PebbleDB) Open(parallelism int) error {
 		MemTableSize: 256 << 20,
 		// Block cache: use a process-wide shared 4GB cache for better cross-DB
 		// cache utilization.
-		Cache: getSharedPebbleCache(),
+		Cache: GetSharedPebbleCache(),
+		// Shared Table cache: use a process-wide shared table cache to limit table cache goroutines.
+		TableCache: GetSharedPebbleTableCache(),
 		// Up to 4 memtables before stalling (allows more write buffering)
 		MemTableStopWritesThreshold: 4,
 

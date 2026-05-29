@@ -430,9 +430,23 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	// does not track/forward this field. Without addresses, the EVM's isAddressAllowed
 	// check will fail for native TXs (BLS registration) causing receipt status=0x0
 	// on some nodes but 0x1 on others → receiptsRoot divergence → FORK.
-	for _, tx := range txs {
+	// We run virtual execution to dynamically recover the same RelatedAddresses as the proposer.
+	type virtualExecutor interface {
+		ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte)
+	}
+	ve, isVe := vp.offChainProcessor.(virtualExecutor)
+
+	for i, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
+		if isVe && (tx.IsCallContract() || tx.IsDeployContract()) {
+			updatedTx, err, _ := ve.ProcessSingleTransactionVirtual(tx)
+			if err == nil && updatedTx != nil {
+				txs[i] = updatedTx
+			} else {
+				logger.Warn("⚠️ [FORK-SAFETY] Virtual execution failed during validation for tx %s: %v", tx.Hash().Hex(), err)
+			}
+		}
 	}
 
 	// OPTIMIZATION: Wait for PreloadAccounts concurrently (deterministic — safe for fork-safety)

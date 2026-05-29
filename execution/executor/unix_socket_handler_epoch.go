@@ -2216,8 +2216,11 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 	// This matches the behavior of applyBlockBatch() in block_processor_batch.go.
 	// ═══════════════════════════════════════════════════════════════════════════════
 	if len(backupDb.FullDbLogs) > 0 {
-		for _, logMap := range backupDb.FullDbLogs {
-			mvm.CallReplayFullDbLogs(logMap)
+		for idx, logMap := range backupDb.FullDbLogs {
+			result := mvm.CallReplayFullDbLogs(logMap)
+			if result == 0 {
+				logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs (epoch sync) FAILED for batch %d/%d (%d entries) block #%d — Xapian DB may be OUT OF SYNC!", idx+1, len(backupDb.FullDbLogs), len(logMap), backupDb.BockNumber)
+			}
 		}
 		logger.Debug("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
 	}
