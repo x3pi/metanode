@@ -128,5 +128,10 @@ func (ps *PrefixedStorage) GetPrefix() []byte { return ps.prefix }
 // Flush delegates to the inner storage.
 func (ps *PrefixedStorage) Flush() error { return ps.inner.Flush() }
 
+// Unwrap returns the underlying database instance.
+func (ps *PrefixedStorage) Unwrap() interface{} {
+	return ps.inner
+}
+
 // Compile-time check: PrefixedStorage must implement storage.Storage.
 var _ storage.Storage = (*PrefixedStorage)(nil)
