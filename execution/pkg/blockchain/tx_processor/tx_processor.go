@@ -1026,8 +1026,8 @@ func processSingleGroup(
 		)
 
 		var exRs types.ExecuteSCResult
-		vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
-		usedMvmId := tx.ToAddress()
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
+		usedMvmId := mvmId
 		
 		if tx.IsRegularTransaction() {
 			// ═══════════════════════════════════════════════════════════════
@@ -1086,10 +1086,8 @@ func processSingleGroup(
 			)
 
 		} else {
-			if tx.IsDeployContract() || !isCache {
-				vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
-				usedMvmId = mvmId
-			}
+			// CRITICAL FORK FIX: We removed `tx.ToAddress()` as the cache key and ALWAYS use `mvmId` (Group ID).
+			// This prevents cross-block C++ EVM dirty state leaks and concurrency corruption.
 			gRs.MvmIdMap[tx.Hash()] = usedMvmId
 			// logger.Debug("1.ExecuteSmartContract MVMId:")
 			exRs, err = vmP.ExecuteTransactionWithMvmId(txCtx, tx, false, isCache)
