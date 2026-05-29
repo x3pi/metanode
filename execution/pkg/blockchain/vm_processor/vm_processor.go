@@ -244,7 +244,7 @@ func (vmP *VmProcessor) deploySmartContract(
 		span.AddEvent("UpdatingStateDBAfterDeploy", nil)
 	}
 
-	_, err := vmP.updateStateDB(deployCtx, tx, mvmResult, mvmId, isFree) // Truyền deployCtx xuống
+	_, err := vmP.updateStateDB(deployCtx, tx, mvmResult, mvmId, isFree, isCache) // Truyền deployCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after deploy: %w", err)
 		if span != nil { // GUARD
@@ -448,7 +448,7 @@ func (vmP *VmProcessor) executeSmartContract(
 	}
 
 	startStateDB := time.Now()
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, isCache) // Pass execCtx xuống
 	stateDBDuration := time.Since(startStateDB)
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after execute: %w", err)
@@ -566,7 +566,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 		span.AddEvent("UpdatingStateDBAfterProcessNativeMintBurn", map[string]interface{}{"mvmIdToUpdate": currentMvmId.Hex()})
 	}
 
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, false) // Pass execCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after processNativeMintBurn: %w", err)
 		if span != nil { // GUARD
@@ -664,7 +664,7 @@ func (vmP *VmProcessor) sendNative(
 		span.AddEvent("UpdatingStateDBAfterExecute", map[string]interface{}{"mvmIdToUpdate": currentMvmId.Hex()})
 	}
 
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, isCache) // Pass execCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after execute: %w", err)
 		if span != nil { // GUARD
@@ -736,7 +736,7 @@ func (vmP *VmProcessor) ProcessMVMResult(
 	mvmId common.Address,
 	isFree bool,
 ) (types.ExecuteSCResult, error) {
-	_, err := vmP.updateStateDB(ctx, tx, mvmResult, mvmId, isFree)
+	_, err := vmP.updateStateDB(ctx, tx, mvmResult, mvmId, isFree, false)
 	if err != nil {
 		rs, _ := vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
 		return rs, err
