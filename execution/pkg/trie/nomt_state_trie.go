@@ -1082,6 +1082,26 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		digestHex := hex.EncodeToString(diagHash.Sum(nil)[:16])
 		logger.Warn("[FORK-DIAG] Commit namespace=%s dirtyCount=%d oldCount=%d digest=%s",
 			string(n.namespace), len(committingSnapshot), len(oldValuesSnapshot), digestHex)
+
+		// FORK-DIAG: Per-key fingerprints for pinpointing exact divergence
+		for i, hexKey := range sortedDirtyKeys {
+			entry := committingSnapshot[hexKey]
+			newHash := sha256.Sum256(entry.value)
+			newFP := hex.EncodeToString(newHash[:8])
+			keyPathHex := hex.EncodeToString(entry.keyPath[:8])
+
+			oldFP := "nil"
+			oldLen := 0
+			if oldVal, ok := oldValuesSnapshot[hexKey]; ok && len(oldVal) > 0 {
+				oldHash := sha256.Sum256(oldVal)
+				oldFP = hex.EncodeToString(oldHash[:8])
+				oldLen = len(oldVal)
+			}
+
+			logger.Warn("[FORK-DIAG][KEY-%d] ns=%s key=%s kpath=%s oldFP=%s(%d) newFP=%s(%d)",
+				i, string(n.namespace), hexKey[:16], keyPathHex,
+				oldFP, oldLen, newFP, len(entry.value))
+		}
 	}
 
 	for _, hexKey := range sortedDirtyKeys {
