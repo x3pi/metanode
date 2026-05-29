@@ -1525,6 +1525,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		blockNum := header.BlockNumber()
 		blockGEI := header.GlobalExecIndex()
 
+		// 🔍 DIAGNOSTIC: Log TX order from SYNC (for SyncOnly node)
+		txs := blk.Transactions()
+		if len(txs) > 0 {
+			logger.Info("📥 [SYNC-TX-ORDER] Block #%d (GEI=%d), txs=%d", blockNum, blockGEI, len(txs))
+			for i, tx := range txs {
+				if i < 5 || i == len(txs)-1 { // Log 5 first and 1 last tx to avoid spam
+					logger.Info("  |_ [SYNC-TX-ORDER] pos[%d/%d]: hash=%s", 
+						i, len(txs)-1, tx.Hex()[:18]+"...")
+				}
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
 		// CRITICAL FIX: We MUST read GEI freshly in the loop. Caching it outside

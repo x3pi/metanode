@@ -103,6 +103,9 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 			groupIndex:       rcp.GroupIndex(),
 			transactionIndex: rcp.TransactionIndex(),
 		}
+		// 🔍 DIAGNOSTIC: Log GroupIndex/TransactionIndex from receipt trie (helps debug m4 mismatch)
+		logger.Info("📋 [RPC-RECEIPT-IDX] Block #%d tx=%s...→ groupId=%d, txIndex=%d",
+			block.Header().BlockNumber(), txHash.Hex()[:18], rcp.GroupIndex(), rcp.TransactionIndex())
 	}
 
 	for _, txHash := range txHashes {
