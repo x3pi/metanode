@@ -528,6 +528,10 @@ cmd_start() {
             rm -rf "$GO_DIR"/snapshot_*node${i}* 2>/dev/null || true
         done
         rm -rf "$GO_DIR"/snapshot_data* 2>/dev/null || true
+        log_step "Xóa Xapian DB data (đảm bảo đồng bộ sạch giữa các node)..."
+        for i in $(seq 0 $((NUM_NODES - 1))); do
+            rm -rf "$GO_DIR/sample/node${i}/data/data/consensus/xapian" 2>/dev/null || true
+        done
         log_step "Xóa logs..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
             if [ "$i" = "$exclude_node" ]; then continue; fi
