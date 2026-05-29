@@ -80,6 +80,7 @@ type ProcessResult struct {
 	MvmIdMap         map[common.Hash]common.Address
 	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	ModifiedAccounts []common.Address
+	FullDbLogs       []map[string][]byte
 }
 
 type groupResultExt struct {
@@ -200,6 +201,13 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		modifiedAccounts = chainState.GetAccountStateDB().DirtyAccountAddresses()
 	}
 
+	var allFullDbLogs []map[string][]byte
+	for _, scRs := range allExecuteSCResults {
+		if logs := scRs.MapFullDbLogs(); len(logs) > 0 {
+			allFullDbLogs = append(allFullDbLogs, logs)
+		}
+	}
+
 	processResult := ProcessResult{
 		Transactions:     allTransactions,
 		Receipts:         allReceipts,
@@ -211,6 +219,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		MvmIdMap:         mvmIdMap,
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
+		FullDbLogs:       allFullDbLogs,
 	}
 	return processResult, nil
 }
@@ -302,6 +311,13 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		modifiedAccounts = chainState.GetAccountStateDB().DirtyAccountAddresses()
 	}
 
+	var allFullDbLogs []map[string][]byte
+	for _, scRs := range allExecuteSCResults {
+		if logs := scRs.MapFullDbLogs(); len(logs) > 0 {
+			allFullDbLogs = append(allFullDbLogs, logs)
+		}
+	}
+
 	processResult := ProcessResult{
 		Transactions:     allTransactions,
 		Receipts:         allReceipts,
@@ -313,6 +329,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		MvmIdMap:         mvmIdMap,
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
+		FullDbLogs:       allFullDbLogs,
 	}
 	// Send result to channel
 	// Consider if sending on the channel should happen outside the lock if it blocks

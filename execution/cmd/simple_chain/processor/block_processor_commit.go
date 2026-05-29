@@ -639,6 +639,11 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		txBatchSerialized, _ = storage.SerializeBatch(tb)
 	}
 
+	var fullDbLogs []map[string][]byte
+	if job.ProcessResults != nil {
+		fullDbLogs = job.ProcessResults.FullDbLogs
+	}
+
 	backupData := storage.BackUpDb{
 		BockNumber:                blockNum,
 		BockBatch:                 bockBatchSerialized,
@@ -651,7 +656,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		MapppingBatch:             job.MappingBatch,
 		StakeState:                job.StakeBatch,
 		TrieDatabaseBatchPut:      job.TrieBatchSnapshot,
-		FullDbLogs:                nil, 
+		FullDbLogs:                fullDbLogs, 
 	}
 
 	backupBytes, err := storage.SerializeBackupDb(backupData)
