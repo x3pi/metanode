@@ -182,8 +182,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "Failed to create XapianManager" << std::endl;
         return mvm::Code(32, 0);
       }
+      if (!this->isOffChain) {
+        registry.registerManager(this->mvmId, manager);
+      }
 
-      auto newDocID = manager->new_document(rawData, blockNumber);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
 
       std::cerr << "[DEBUG] XAPIAN_NEW_DOCUMENT: dbname=" << dbname
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
@@ -289,7 +292,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo =
-          manager->delete_document(static_cast<int>(number), blockNumber);
+          manager->delete_document(static_cast<int>(number), blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -358,7 +361,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo = manager->add_term(static_cast<int>(number),
-                                       input_argument["term"], blockNumber);
+                                       input_argument["term"], blockNumber, this->mvmId);
 
       std::cerr << "[DEBUG] XAPIAN_ADD_TERM_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -426,7 +429,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       auto docInfo =
           manager->index_text(static_cast<int>(docId), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
-                              input_argument["prefix"], blockNumber);
+                              input_argument["prefix"], blockNumber, this->mvmId);
 
       std::cerr << "[DEBUG] XAPIAN_INDEX_TEXT_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(docId)
@@ -492,7 +495,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo =
-          manager->set_data(static_cast<int>(number), rawData, blockNumber);
+          manager->set_data(static_cast<int>(number), rawData, blockNumber, this->mvmId);
 
       std::cerr << "[DEBUG] XAPIAN_SET_DATA_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -555,7 +558,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       auto docInfo = manager->add_value(
           hex_to_uint64(input_argument["docId"]),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
-          input_argument["isSerialise"].get<bool>(), blockNumber);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = decimalToHex(docInfo);
@@ -1102,8 +1105,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         std::cerr << "Failed to create XapianManager" << std::endl;
         return mvm::Code(32, 0);
       }
+      if (!this->isOffChain) {
+        registry.registerManager(this->mvmId, manager);
+      }
 
-      auto newDocID = manager->new_document(rawData, blockNumber);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(newDocID);
@@ -1198,7 +1204,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo =
-          manager->delete_document(static_cast<int>(number), blockNumber);
+          manager->delete_document(static_cast<int>(number), blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -1267,7 +1273,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo = manager->add_term(static_cast<int>(number),
-                                       input_argument["term"], blockNumber);
+                                       input_argument["term"], blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = std::to_string(docInfo);
@@ -1323,7 +1329,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto docInfo =
           manager->index_text(static_cast<int>(docId), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
-                              input_argument["prefix"], blockNumber);
+                              input_argument["prefix"], blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = std::to_string(docInfo);
@@ -1403,7 +1409,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto docInfo =
-          manager->set_data(static_cast<int>(number), rawData, blockNumber);
+          manager->set_data(static_cast<int>(number), rawData, blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -1454,7 +1460,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto docInfo = manager->add_value(
           hex_to_uint64(input_argument["docId"]),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
-          input_argument["isSerialise"].get<bool>(), blockNumber);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = decimalToHex(docInfo);

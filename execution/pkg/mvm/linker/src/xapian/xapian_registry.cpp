@@ -412,6 +412,24 @@ bool XapianRegistry::commitChangesForMvmId(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
+            {
+                std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+                if (manager_ptr->active_mvm_id == key)
+                {
+                    if (manager_ptr->has_started)
+                    {
+                        try {
+                            manager_ptr->db.commit_transaction();
+                        } catch (...) {
+                            all_succeeded = false;
+                        }
+                        manager_ptr->has_started = false;
+                    }
+                    manager_ptr->active_mvm_id.clear();
+                    manager_ptr->tx_cond.notify_all();
+                }
+            }
+
             // Gọi saveAllAndCommit (hiện tại tương đương commit_changes)
             if (!manager_ptr->saveAllAndCommit())
             {
@@ -452,6 +470,25 @@ bool XapianRegistry::revertChangesForMvmId(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
+            {
+                std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+                if (manager_ptr->active_mvm_id == key)
+                {
+                    if (manager_ptr->has_started)
+                    {
+                        try {
+                            manager_ptr->removeLogsUntilNearestEndCommand();
+                            manager_ptr->db.cancel_transaction();
+                        } catch (...) {
+                            all_succeeded = false;
+                        }
+                        manager_ptr->has_started = false;
+                    }
+                    manager_ptr->active_mvm_id.clear();
+                    manager_ptr->tx_cond.notify_all();
+                }
+            }
+
             // Gọi hàm revert trên từng manager
             if (!manager_ptr->revertUncommittedChanges())
             {
@@ -487,16 +524,21 @@ void XapianRegistry::cancelTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
-            if (manager_ptr->has_started)
+            std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+            if (manager_ptr->active_mvm_id == key)
             {
-                try {
-                    manager_ptr->removeLogsUntilNearestEndCommand();
-                    manager_ptr->db.cancel_transaction();
-                } catch (...) {
-                    // Bỏ qua lỗi khi cancel
+                if (manager_ptr->has_started)
+                {
+                    try {
+                        manager_ptr->removeLogsUntilNearestEndCommand();
+                        manager_ptr->db.cancel_transaction();
+                    } catch (...) {
+                        // Bỏ qua lỗi khi cancel
+                    }
+                    manager_ptr->has_started = false;
                 }
-                manager_ptr->has_started = false;
+                manager_ptr->active_mvm_id.clear();
+                manager_ptr->tx_cond.notify_all();
             }
         }
     }
@@ -517,15 +559,20 @@ void XapianRegistry::commitTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
-            if (manager_ptr->has_started)
+            std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+            if (manager_ptr->active_mvm_id == key)
             {
-                try {
-                    manager_ptr->db.commit_transaction();
-                } catch (...) {
-                    // Bỏ qua lỗi khi commit
+                if (manager_ptr->has_started)
+                {
+                    try {
+                        manager_ptr->db.commit_transaction();
+                    } catch (...) {
+                        // Bỏ qua lỗi khi commit
+                    }
+                    manager_ptr->has_started = false;
                 }
-                manager_ptr->has_started = false;
+                manager_ptr->active_mvm_id.clear();
+                manager_ptr->tx_cond.notify_all();
             }
         }
     }

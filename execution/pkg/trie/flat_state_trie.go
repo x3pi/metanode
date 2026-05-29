@@ -1,6 +1,7 @@
 package trie
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -111,7 +112,35 @@ func makeBucketKey(bucketIdx byte) []byte {
 }
 
 func dbCacheKey(db FlatStateDB) string {
-	return fmt.Sprintf("%p", db)
+	if db == nil {
+		return ""
+	}
+	// Traverse and collect all prefixes and the underlying root DB pointer
+	var prefixes [][]byte
+	var rootDB interface{} = db
+
+	for {
+		if ps, ok := rootDB.(interface{ GetPrefix() []byte }); ok {
+			prefixes = append(prefixes, ps.GetPrefix())
+		}
+		
+		if uw, ok := rootDB.(interface{ Unwrap() FlatStateDB }); ok {
+			rootDB = uw.Unwrap()
+		} else if uw, ok := rootDB.(interface{ Unwrap() interface{} }); ok {
+			rootDB = uw.Unwrap()
+		} else {
+			break
+		}
+	}
+	
+	// Join all prefixes in reverse order
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("%p", rootDB))
+	for i := len(prefixes) - 1; i >= 0; i-- {
+		buf.WriteByte(':')
+		buf.Write(prefixes[i])
+	}
+	return buf.String()
 }
 
 // dirtyEntry caches decoded key bytes alongside the dirty value,
@@ -885,3 +914,83 @@ func computeRootFromBuckets(buckets [256]e_common.Hash) e_common.Hash {
 	rootBufPool.Put(dataPtr)
 	return h
 }
+
+// UpdateBucketCacheFromBatch updates globalBucketCache for a DB using the written batch.
+// This is critical during block synchronization (applyBackupDbBatches) to ensure
+// in-memory FlatStateTrie cache is synchronized with the raw PebbleDB writes,
+// preventing subsequent NewFlatStateTrieFromRoot calls from using stale caches or
+// triggering Bucket load mismatches.
+func UpdateBucketCacheFromBatch(db FlatStateDB, batch [][2][]byte) {
+	if db == nil || len(batch) == 0 {
+		return
+	}
+
+	baseCacheKey := dbCacheKey(db)
+
+	// Group the batch updates by their specific cache key.
+	// For example, some updates might belong directly to the database cacheKey (e.g. "fb:X"),
+	// and some might belong to specific smart contracts (e.g. "<address>fb:X").
+	updates := make(map[string][][2][]byte)
+
+	for _, kv := range batch {
+		key := kv[0]
+		// Case 1: Direct bucket key (len == 4, e.g. "fb:X")
+		if len(key) == 4 && key[0] == 'f' && key[1] == 'b' && key[2] == ':' {
+			updates[baseCacheKey] = append(updates[baseCacheKey], kv)
+		}
+		// Case 2: Contract-prefixed bucket key (len == 24, e.g. "<address>fb:X")
+		if len(key) == 24 && key[20] == 'f' && key[21] == 'b' && key[22] == ':' {
+			contractAddress := key[:20]
+			specificCacheKey := baseCacheKey + ":" + string(contractAddress)
+			strippedKey := key[20:]
+			updates[specificCacheKey] = append(updates[specificCacheKey], [2][]byte{strippedKey, kv[1]})
+		}
+	}
+
+	for cacheKey, kvs := range updates {
+		// Try to load existing cached buckets or initialize fresh ones
+		var buckets *[256]e_common.Hash
+		if cached, ok := globalBucketCache.Load(cacheKey); ok {
+			oldBuckets := cached.(*[256]e_common.Hash)
+			buckets = new([256]e_common.Hash)
+			*buckets = *oldBuckets
+		} else {
+			buckets = new([256]e_common.Hash)
+			
+			// Resolve prefix if cacheKey corresponds to a prefixed contract database
+			var prefix []byte
+			if len(cacheKey) > len(baseCacheKey)+1 && cacheKey[len(baseCacheKey)] == ':' {
+				prefix = []byte(cacheKey[len(baseCacheKey)+1:])
+			}
+			
+			// Read current buckets from DB to initialize
+			for i := 0; i < 256; i++ {
+				bucketKey := makeBucketKey(byte(i))
+				if len(prefix) > 0 {
+					prefixedKey := make([]byte, len(prefix)+len(bucketKey))
+					copy(prefixedKey, prefix)
+					copy(prefixedKey[len(prefix):], bucketKey)
+					bucketKey = prefixedKey
+				}
+				data, err := db.Get(bucketKey)
+				if err == nil && len(data) == 32 {
+					copy(buckets[i][:], data)
+				}
+			}
+		}
+
+		// Apply batch updates to buckets
+		for _, kv := range kvs {
+			key := kv[0]
+			if len(key) == 4 && key[0] == 'f' && key[1] == 'b' && key[2] == ':' {
+				bucketIdx := key[3]
+				if len(kv[1]) == 32 {
+					copy(buckets[bucketIdx][:], kv[1])
+				}
+			}
+		}
+
+		globalBucketCache.Store(cacheKey, buckets)
+	}
+}
+

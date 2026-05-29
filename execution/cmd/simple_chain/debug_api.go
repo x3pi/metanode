@@ -32,7 +32,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
-	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -734,10 +733,8 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 	}
 
 	var changelogDB *state_changelog.StateChangelogDB
-	if api.App != nil && api.App.chainState != nil && api.App.chainState.GetAccountStateDB() != nil {
-		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*p_trie.NomtStateTrie); ok {
-			changelogDB = nomtTrie.GetChangelogDB()
-		}
+	if api.App != nil && api.App.chainState != nil {
+		changelogDB = api.App.chainState.GetChangelogDB()
 	}
 
 	if changelogDB == nil {
