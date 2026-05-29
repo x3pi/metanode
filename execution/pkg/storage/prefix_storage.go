@@ -127,3 +127,8 @@ func (ps *PrefixStorage) GetPrefix() []byte {
 	return ps.prefix
 }
 
+// Unwrap returns the underlying database instance.
+func (ps *PrefixStorage) Unwrap() interface{} {
+	return ps.db
+}
+

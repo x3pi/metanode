@@ -115,6 +115,10 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 
 		vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, blockTime, common.Address{})
 		mvm.ProtectMVMApi(mvmId)
+		defer func() {
+			mvm.UnprotectMVMApi(mvmId)
+			mvm.ClearMVMApi(mvmId)
+		}()
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
 			/*toAccountState, getAccErr := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress())
@@ -191,8 +195,6 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		updatedTx.AddRelatedAddress(tx.FromAddress())
 		updatedTx.AddRelatedAddress(tx.ToAddress())
 		updatedTx.SetReadOnly(!statusUpdate)
-		mvm.UnprotectMVMApi(mvmId)
-		mvm.ClearMVMApi(mvmId)
 		return updatedTx, nil, exRs.Return()
 	}
 

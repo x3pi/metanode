@@ -65,18 +65,18 @@ public:
   XapianManager(const std::string &db_path, const mvm::Address &addr);
 
   // --- Document Operations (Log changes before execution) ---
-  Xapian::docid new_document(const std::string &data, uint256_t blockNumber);
-  bool delete_document(Xapian::docid did, uint256_t blockNumber);
+  Xapian::docid new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
+  bool delete_document(Xapian::docid did, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid add_value(Xapian::docid did, Xapian::valueno slot,
                           const std::string &value, bool isSerialise,
-                          uint256_t blockNumber);
+                          uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid add_term(Xapian::docid did, const std::string &term,
-                         uint256_t blockNumber);
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid set_data(Xapian::docid did, const std::string &data,
-                         uint256_t blockNumber);
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid index_text(Xapian::docid did, const std::string &text_to_index,
                            Xapian::termcount wdf_inc, const std::string prefix,
-                           uint256_t blockNumber);
+                           uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::Document clone_document(const Xapian::Document &source_doc);
 
   // --- Read Operations ---
@@ -126,6 +126,8 @@ public:
   XapianLog::ComprehensiveLog removeLogsUntilNearestEndCommand();
   std::string getDbName() const; // <-- Thêm khai báo này
   bool has_started = false;
+  std::string active_mvm_id;
+  std::condition_variable_any tx_cond;
   friend class XapianRegistry; // Cho phép Registry truy cập changes_mutex
 
 private:

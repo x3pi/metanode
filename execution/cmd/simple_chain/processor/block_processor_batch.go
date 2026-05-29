@@ -263,6 +263,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 			wg.Add(1)
 			go func(storageName string, db storage.Storage, batch [][2][]byte) {
 				defer wg.Done()
+				p_trie.UpdateBucketCacheFromBatch(db, batch)
 				err := db.BatchPut(batch)
 				resultChan <- storageResult{name: storageName, err: err}
 			}(name, storageDb, combinedBatch)
