@@ -615,26 +615,8 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		bockBatchSerialized, _ = storage.SerializeBatch(blockBatch)
 	}
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// RECEIPT BATCH FIX (May 2026): Use the trie-committed ReceiptBatchPut.
-	//
-	// ROOT CAUSE OF BUG: Previously, this code marshaled receipts manually with
-	// key = raw txHash.Bytes(). But FlatStateTrie (used for receipts on NOMT
-	// backend) stores entries with key = "fs:" + txHash. When SyncOnly nodes
-	// received this backup and wrote it to StorageReceipt, the keys didn't
-	// match FlatStateTrie.Get() → GroupIndex/TransactionIndex always read as 0.
-	//
-	// FIX: Use job.Receipts.GetReceiptBatchPut() which returns the batch from
-	// FlatStateTrie.Commit() — already has correct "fs:" prefix keys + bucket
-	// accumulators. This ensures sync nodes write receipt data with the exact
-	// same key format that FlatStateTrie.Get() expects.
-	// ═══════════════════════════════════════════════════════════════════════════
 	var receiptBatchSerialized []byte
-	if job.Receipts != nil {
-		receiptBatchSerialized = job.Receipts.GetReceiptBatchPut()
-	}
-	if len(receiptBatchSerialized) == 0 && job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
-		logger.Warn("⚠️ [BACKUP] Block #%d: ReceiptBatchPut from trie commit is empty, falling back to manual marshal", blockNum)
+	if job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
 		var rb [][2][]byte
 		for _, r := range job.ProcessResults.Receipts {
 			b, err := r.Marshal()
@@ -645,13 +627,8 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		receiptBatchSerialized, _ = storage.SerializeBatch(rb)
 	}
 
-	// Same FlatStateTrie prefix fix as ReceiptBatchPut above.
 	var txBatchSerialized []byte
-	if job.TxDB != nil {
-		txBatchSerialized = job.TxDB.GetTxBatchPut()
-	}
-	if len(txBatchSerialized) == 0 && job.ProcessResults != nil && len(job.ProcessResults.Transactions) > 0 {
-		logger.Warn("⚠️ [BACKUP] Block #%d: TxBatchPut from trie commit is empty, falling back to manual marshal", blockNum)
+	if job.ProcessResults != nil && len(job.ProcessResults.Transactions) > 0 {
 		var tb [][2][]byte
 		for _, tx := range job.ProcessResults.Transactions {
 			b, err := tx.Marshal()
