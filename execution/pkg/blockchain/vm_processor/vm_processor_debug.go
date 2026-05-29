@@ -94,6 +94,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 			break
 		}
 	}
+	defer mvm.ClearMVMApi(mvmIdDebug)
 	
 	if span != nil { // GUARD
 		span.SetAttribute("debugMvmId", mvmIdDebug.Hex())
@@ -110,7 +111,6 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 	}
 	// logger.Error("ClearMVM: 4", mvmIdDebug)
 
-	mvm.ClearMVMApi(mvmIdDebug) // Luôn clear
 	if span != nil {            // GUARD
 		span.AddEvent("ClearedDebugMVMApi", map[string]interface{}{"mvmIdCleared": mvmIdDebug.Hex()})
 	}
@@ -621,6 +621,12 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
+	var success bool
+	defer func() {
+		if !success || !isCache {
+			mvm.ClearMVMApi(vmP.mvmId)
+		}
+	}()
 
 	if isCache {
 		mvm.ProtectMVMApi(vmP.mvmId)
@@ -701,8 +707,6 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		span.AddEvent("ClearingMVMApiAfterNonceOnly", map[string]interface{}{"mvmIdToClear": vmP.mvmId.Hex()})
 	}
 	
-	if !isCache {
-		mvm.ClearMVMApi(vmP.mvmId)
-	}
+	success = true
 	return rs, nil
 }
