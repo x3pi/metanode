@@ -182,6 +182,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "Failed to create XapianManager" << std::endl;
         return mvm::Code(32, 0);
       }
+      if (!this->isOffChain) {
+        registry.registerManager(this->mvmId, manager);
+      }
 
       auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
 
@@ -1101,6 +1104,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       if (!manager) {
         std::cerr << "Failed to create XapianManager" << std::endl;
         return mvm::Code(32, 0);
+      }
+      if (!this->isOffChain) {
+        registry.registerManager(this->mvmId, manager);
       }
 
       auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
