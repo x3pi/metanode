@@ -249,11 +249,9 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
 }
 
 static std::string getMvmIdKey(const unsigned char *mvmId) {
-    if (mvmId == nullptr) {
-        return "";
-    }
-    return std::string(reinterpret_cast<const char *>(mvmId), 20);
+    return XapianRegistry::generateMvmIdKey(mvmId);
 }
+
 
 // Thêm một document mới vào database
 Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId)
