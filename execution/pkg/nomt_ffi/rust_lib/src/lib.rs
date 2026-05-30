@@ -704,3 +704,67 @@ pub extern "C" fn nomt_checkpoint(
         }
     }
 }
+
+/// Generate a Merkle proof for the given key path.
+/// - `handle`: NOMT database handle
+/// - `key`: 32-byte key path
+/// - `proof_out`: Pointer to receive the allocated proof byte array
+/// - `proof_len`: Pointer to receive the length of the proof byte array
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn nomt_generate_proof(
+    handle: *const NomtHandle,
+    key: *const u8,
+    proof_out: *mut *mut u8,
+    proof_len: *mut usize,
+) -> c_int {
+    if handle.is_null() || key.is_null() || proof_out.is_null() || proof_len.is_null() {
+        eprintln!("[nomt_ffi] nomt_generate_proof: null pointer argument");
+        return -1;
+    }
+
+    let handle_ref = unsafe { &*handle };
+    let key_slice = unsafe { std::slice::from_raw_parts(key, 32) };
+    let mut key_path = [0u8; 32];
+    key_path.copy_from_slice(key_slice);
+
+    let session = handle_ref.db.begin_session(nomt::SessionParams::default());
+    match session.prove(key_path) {
+        Ok(proof) => {
+            match bincode::serialize(&proof) {
+                Ok(mut serialized) => {
+                    serialized.shrink_to_fit();
+                    let ptr = serialized.as_mut_ptr();
+                    let len = serialized.len();
+                    
+                    unsafe {
+                        *proof_out = ptr;
+                        *proof_len = len;
+                    }
+                    
+                    // Prevent Rust from freeing the vector
+                    std::mem::forget(serialized);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("[nomt_ffi] nomt_generate_proof: serialization failed: {}", e);
+                    -1
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_generate_proof: proof generation failed: {}", e);
+            -1
+        }
+    }
+}
+
+/// Free the proof byte array allocated by `nomt_generate_proof`.
+#[no_mangle]
+pub extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
+    if !proof_ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(proof_ptr, len, len);
+        }
+    }
+}

@@ -1577,3 +1577,17 @@ func ApplyNomtReplicationBatches(
 
 	return sessionsToFlush, nil
 }
+
+// GenerateProof generates a Merkle proof for a specific key
+func (n *NomtStateTrie) GenerateProof(key []byte) ([]byte, error) {
+	// Hash the raw key to get the 32-byte KeyPath
+	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
+
+	// Call the C-FFI bridge
+	proof, err := n.handle.GenerateProof(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("NomtStateTrie GenerateProof failed: %w", err)
+	}
+
+	return proof, nil
+}
