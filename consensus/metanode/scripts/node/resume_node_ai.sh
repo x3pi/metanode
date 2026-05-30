@@ -56,14 +56,24 @@ mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/data-write/data/xapian_node"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up"
 mkdir -p "$GO_SIMPLE_ROOT/sample/$DATA/back_up_write"
 
+echo -e "${BLUE}📋 Step 2.5: Clean stale UDS sockets...${NC}"
+rm -f "/tmp/executor${NODE_ID}.sock" 2>/dev/null || true
+rm -f "/tmp/rust-go-node${NODE_ID}-master.sock" 2>/dev/null || true
+rm -f "/tmp/metanode-tx-${NODE_ID}.sock" 2>/dev/null || true
+echo -e "${GREEN}  ✅ Sockets cleaned${NC}"
+
 echo -e "${BLUE}📋 Step 3: Start Go Node...${NC}"
 cd "$GO_SIMPLE_ROOT"
 XAPIAN_NODE="sample/$DATA/data/data/xapian_node"
+ulimit -n 100000
+export RUST_BACKTRACE=full
+export GOTRACEBACK=crash
 export GOTOOLCHAIN=go1.23.5
 export GOMEMLIMIT=4GiB
 export XAPIAN_BASE_PATH="$XAPIAN_NODE"
+export MVM_LOG_DIR="$LOG_DIR/node_$NODE_ID"
 nohup ./simple_chain -config="$GO_CONFIG" > "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>&1 &
-echo -e "${GREEN}  🚀 Go Node started (nohup)${NC}"
+echo -e "${GREEN}  🚀 Go Node + Rust FFI started (nohup)${NC}"
 
 
 

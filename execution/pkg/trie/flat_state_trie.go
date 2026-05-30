@@ -172,8 +172,9 @@ type FlatStateTrie struct {
 	// for replication to Sub nodes. Without this, Sub nodes never receive the actual data.
 	lastCommitBatch [][2][]byte
 
-	isHash bool
-	mu     sync.RWMutex
+	isHash        bool
+	bucketsLoaded bool
+	mu            sync.RWMutex
 }
 
 // Compile-time check: FlatStateTrie must implement StateTrie.
@@ -182,11 +183,12 @@ var _ StateTrie = (*FlatStateTrie)(nil)
 // NewFlatStateTrie creates a new empty FlatStateTrie.
 func NewFlatStateTrie(db FlatStateDB, isHash bool) *FlatStateTrie {
 	ft := &FlatStateTrie{
-		db:        db,
-		dirty:     make(map[string]*dirtyEntry),
-		oldValues: make(map[string][]byte),
-		oldLoaded: make(map[string]bool),
-		isHash:    isHash,
+		db:            db,
+		dirty:         make(map[string]*dirtyEntry),
+		oldValues:     make(map[string][]byte),
+		oldLoaded:     make(map[string]bool),
+		isHash:        isHash,
+		bucketsLoaded: true, // starts empty, so buckets are conceptually loaded
 	}
 	ft.rootHash = computeRootFromBuckets(ft.buckets)
 	return ft
@@ -208,34 +210,47 @@ func NewFlatStateTrieFromRoot(rootHash e_common.Hash, db FlatStateDB, isHash boo
 		ft.buckets = *buckets
 		ft.rootHash = computeRootFromBuckets(ft.buckets)
 		if ft.rootHash == rootHash {
+			ft.bucketsLoaded = true
 			return ft, nil
 		}
-		// Cache hit but hash mismatch — fall through to DB
+		// Cache hit but hash mismatch — fall through to lazy loading
 	}
 
-	// Fallback: load bucket accumulators from DB
-	for i := 0; i < 256; i++ {
-		data, err := db.Get(makeBucketKey(byte(i)))
-		if err == nil && len(data) == 32 {
-			copy(ft.buckets[i][:], data)
-		}
-	}
-	ft.rootHash = computeRootFromBuckets(ft.buckets)
-
-	// With sharded/async DBs, bucket reads may not reflect latest writes.
-	// Trust the committed rootHash if buckets don't match.
-	if ft.rootHash != rootHash {
-		logger.Warn("[FlatStateTrie] Bucket load mismatch (expected=%s, computed=%s) — using committed hash",
-			rootHash.Hex()[:16], ft.rootHash.Hex()[:16])
-		ft.rootHash = rootHash
-	}
-
+	// Defer loading bucket accumulators from DB until they are needed for mutation (Update/BatchUpdate).
+	// Set the rootHash directly.
+	ft.rootHash = rootHash
+	ft.bucketsLoaded = false
 	return ft, nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StateTrie interface implementation
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ensureBucketsLoaded loads the 256 bucket accumulators from the database
+// if they haven't been loaded yet.
+// MUST be called under write lock (f.mu.Lock()).
+func (f *FlatStateTrie) ensureBucketsLoaded() {
+	if f.bucketsLoaded {
+		return
+	}
+
+	for i := 0; i < 256; i++ {
+		data, err := f.db.Get(makeBucketKey(byte(i)))
+		if err == nil && len(data) == 32 {
+			copy(f.buckets[i][:], data)
+		} else {
+			f.buckets[i] = e_common.Hash{}
+		}
+	}
+	f.bucketsLoaded = true
+
+	computed := computeRootFromBuckets(f.buckets)
+	if computed != f.rootHash {
+		logger.Warn("[FlatStateTrie] Lazy bucket load mismatch (expected=%s, computed=%s) — using committed hash",
+			f.rootHash.Hex()[:16], computed.Hex()[:16])
+	}
+}
 
 // Get retrieves the value for a key. O(1) — direct DB read.
 func (f *FlatStateTrie) Get(key []byte) ([]byte, error) {
@@ -296,6 +311,8 @@ func (f *FlatStateTrie) Update(key, value []byte) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	// Load old value for bucket hash computation (only once per key per block)
 	if !f.oldLoaded[hexKey] {
@@ -414,6 +431,8 @@ func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
 	// ═══════════════════════════════════════════════════════════════
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	for i := 0; i < n; i++ {
 		e := &entries[i]
@@ -541,6 +560,8 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	// ═══════════════════════════════════════════════════════════════
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	for i := 0; i < n; i++ {
 		e := &entries[i]
@@ -734,6 +755,8 @@ func (f *FlatStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		return f.rootHash, nil, nil, nil
 	}
 
+	f.ensureBucketsLoaded()
+
 	// 1. Update bucket accumulators (reuses shared applyDirtyToBuckets)
 	f.dirtyBuckets = f.applyDirtyToBuckets(&f.buckets)
 
@@ -817,13 +840,14 @@ func (f *FlatStateTrie) Copy() StateTrie {
 	}
 
 	return &FlatStateTrie{
-		db:        f.db,
-		dirty:     newDirty,
-		oldValues: newOldValues,
-		oldLoaded: newOldLoaded,
-		buckets:   f.buckets,
-		rootHash:  f.rootHash,
-		isHash:    f.isHash,
+		db:            f.db,
+		dirty:         newDirty,
+		oldValues:     newOldValues,
+		oldLoaded:     newOldLoaded,
+		buckets:       f.buckets,
+		rootHash:      f.rootHash,
+		isHash:        f.isHash,
+		bucketsLoaded: f.bucketsLoaded,
 	}
 }
 
