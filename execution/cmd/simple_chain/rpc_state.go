@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -334,7 +339,6 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 }
 
 // GetProof returns the Merkle proof for a given account address at a specific block.
-// This is currently supported only when the state backend is NOMT.
 func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	// Resolve block map to get stateRoot
 	var blockMap map[string]interface{}
@@ -342,7 +346,6 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		if blockNr == rpc.PendingBlockNumber {
-			// Get pending block state root if needed, but here we just get the latest block for simplicity
 			blockMap, errGetBlock = api.GetBlockByNumber(ctx, rpc.LatestBlockNumber, false)
 		} else {
 			blockMap, errGetBlock = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
@@ -371,24 +374,267 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 		return nil, fmt.Errorf("unexpected type for stateRoot: %T", stateRootInterface)
 	}
 
-	// Get the trie instance
+	// Try to get trie directly (works for latest block or MPT backend)
 	accountStateTrie, err := api.App.GetAccountStateTrie(stateRoot)
+	if err == nil {
+		// Only use the direct trie if its root actually matches the requested block's stateRoot!
+		// For NOMT, GetAccountStateTrie always returns the latest global trie, so we must check.
+		if accountStateTrie.Hash() == stateRoot {
+			if nomtTrie, ok := accountStateTrie.(*mt_trie.NomtStateTrie); ok {
+				proof, errGen := nomtTrie.GenerateProof(address.Bytes())
+				if errGen == nil {
+					return proof, nil
+				}
+			}
+		}
+	}
+
+	// If direct access fails (e.g. historical block in NOMT), fallback to reconstruction
+	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
+		logger.Info("🔍 [GetProof] Direct trie access failed, falling back to reconstructHistoricalTrie for block %v", blockNrOrHash)
+		verifyCacheMu.Lock()
+		defer verifyCacheMu.Unlock()
+	
+		trie, _, _, _, _, errReconstruct := api.reconstructHistoricalTrieLocked(ctx, blockNrOrHash)
+		if errReconstruct != nil {
+			return nil, fmt.Errorf("failed to reconstruct historical trie: %w", errReconstruct)
+		}
+		
+		proof, errProof := trie.GenerateProof(address.Bytes())
+		if errProof != nil {
+			return nil, fmt.Errorf("failed to generate proof from reconstructed trie: %w", errProof)
+		}
+		return proof, nil
+	}
+
+	return nil, fmt.Errorf("failed to get proof: direct access error=%v", err)
+}
+
+var (
+	verifyCacheMu      sync.Mutex
+	verifyCachedTrie   *mt_trie.NomtStateTrie
+	verifyCachedBlock  uint64
+	verifyCachedDir    string
+	verifyCachedHandle *nomt_ffi.Handle
+)
+
+func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (
+	*mt_trie.NomtStateTrie, uint64, common.Hash, bool, int, error) {
+    
+	// 1. Get block and expected state root
+	var blockMap map[string]interface{}
+	var targetBlockNumber uint64
+	var errGetBlock error
+
+	if blockNr, ok := blockNrOrHash.Number(); ok {
+		targetBlockNumber = uint64(blockNr.Int64())
+		blockMap, errGetBlock = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
+	} else if hash, ok := blockNrOrHash.Hash(); ok {
+		blockMap, errGetBlock = api.GetBlockByHash(ctx, hash, false)
+		if blockMap != nil {
+			if numStr, okStr := blockMap["number"].(string); okStr {
+				if num, err := hexutil.DecodeUint64(numStr); err == nil {
+					targetBlockNumber = num
+				}
+			}
+		}
+	}
+
+	if errGetBlock != nil || blockMap == nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to get block: %w", errGetBlock)
+	}
+
+	stateRootInterface := blockMap["stateRoot"]
+	var expectedRoot common.Hash
+	switch v := stateRootInterface.(type) {
+	case common.Hash:
+		expectedRoot = v
+	case string:
+		expectedRoot = common.HexToHash(v)
+	case []byte:
+		expectedRoot = common.BytesToHash(v)
+	default:
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("unexpected type for stateRoot: %T", stateRootInterface)
+	}
+
+	// 2. Check if ChangelogDB is available and state backend is NOMT
+	if mt_trie.GetStateBackend() != mt_trie.BackendNOMT {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("VerifyHistoricalRoot is only supported for NOMT state backend")
+	}
+
+	changelogDB := api.App.chainState.GetChangelogDB()
+	if changelogDB == nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("ChangelogDB is not available")
+	}
+
+	// 3. Get all known addresses from current trie
+	lastBlock := api.App.blockProcessor.GetLastBlock()
+	if lastBlock == nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to get last block")
+	}
+	currentTrie, err := api.App.GetAccountStateTrie(lastBlock.Header().AccountStatesRoot())
+	if err != nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to get account state trie: %w", err)
+	}
+	nomtTrie, ok := currentTrie.(*mt_trie.NomtStateTrie)
+	if !ok {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("current trie is not NomtStateTrie")
+	}
+
+	allEntries, err := nomtTrie.GetAll()
+	if err != nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to get all keys: %w", err)
+	}
+	uniqueAddrs, err := changelogDB.GetAllUniqueAddresses()
+	if err == nil {
+		for _, addr := range uniqueAddrs {
+			hexKey := hex.EncodeToString(addr)
+			if _, exists := allEntries[hexKey]; !exists {
+				currentVal, _ := nomtTrie.Get(addr)
+				allEntries[hexKey] = currentVal
+			}
+		}
+	}
+
+	// FAST PATH
+	if verifyCachedTrie != nil && targetBlockNumber == verifyCachedBlock+1 {
+		changes, errChange := changelogDB.GetBlockChanges(targetBlockNumber)
+		if errChange == nil {
+			for _, change := range changes {
+				val := change.NewValue
+				if bytes.Equal(val, []byte("DEL")) {
+					verifyCachedTrie.Update(change.Key, []byte{})
+				} else {
+					verifyCachedTrie.Update(change.Key, val)
+				}
+			}
+
+			// Commit with persistToDisk=true
+			_, _, _, errCommit := verifyCachedTrie.Commit(true)
+			if errCommit != nil {
+				return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit cached trie: %w", errCommit)
+			}
+			if err := verifyCachedTrie.CommitPayload(); err != nil {
+				return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit payload to cached trie: %w", err)
+			}
+
+			verifyCachedBlock = targetBlockNumber
+			return verifyCachedTrie, targetBlockNumber, expectedRoot, true, -1, nil
+		}
+	}
+
+	// FULL REBUILD PATH
+	if verifyCachedTrie != nil {
+		verifyCachedHandle.Close()
+		os.RemoveAll(verifyCachedDir)
+		verifyCachedTrie = nil
+	}
+
+	tempDir, err := os.MkdirTemp("", "nomt_verify_*")
+	if err != nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+
+	tempHandle, err := nomt_ffi.Open(tempDir, 1, 64, 64)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to init temp nomt handle: %w", err)
+	}
+
+	tempTrie := mt_trie.NewNomtStateTrie(tempHandle, false, "account_state")
+
+	allAddressesToVerify := make(map[string]bool)
+	for hexKey := range allEntries {
+		allAddressesToVerify[hexKey] = true
+	}
+
+	genesisAddrs := make(map[string][]byte)
+	if api.App.genesis != nil {
+		for _, account := range api.App.genesis.Alloc {
+			a := account.ToAccountState()
+			a.PlusOneNonce()
+			b, err := a.Marshal()
+			if err == nil {
+				genesisAddrs[hex.EncodeToString(a.Address().Bytes())] = b
+			}
+		}
+	}
+	for hexKey := range genesisAddrs {
+		allAddressesToVerify[hexKey] = true
+	}
+
+	addressesToQuery := make([][]byte, 0, len(allAddressesToVerify))
+	for hexKey := range allAddressesToVerify {
+		address, errDecode := hex.DecodeString(hexKey)
+		if errDecode != nil {
+			continue
+		}
+		addressesToQuery = append(addressesToQuery, address)
+	}
+
+	historicalStates := changelogDB.GetHistoricalStates(addressesToQuery, targetBlockNumber)
+
+	for _, address := range addressesToQuery {
+		hexKey := hex.EncodeToString(address)
+		hState := historicalStates[string(address)]
+
+		if hState.Found {
+			if len(hState.Value) > 0 {
+				tempTrie.Update(address, hState.Value)
+			}
+		} else {
+			if hState.HasAny {
+				if genBytes, ok := genesisAddrs[hexKey]; ok {
+					tempTrie.Update(address, genBytes)
+				}
+			} else {
+				if currentVal, exists := allEntries[hexKey]; exists && len(currentVal) > 0 {
+					tempTrie.Update(address, currentVal)
+				} else if genBytes, ok := genesisAddrs[hexKey]; ok {
+					tempTrie.Update(address, genBytes)
+				}
+			}
+		}
+	}
+
+	_, _, _, errCommit := tempTrie.Commit(true)
+	if errCommit != nil {
+		tempHandle.Close()
+		os.RemoveAll(tempDir)
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit temp trie: %w", errCommit)
+	}
+	if err := tempTrie.CommitPayload(); err != nil {
+		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit payload to temp trie: %w", err)
+	}
+
+	verifyCachedTrie = tempTrie
+	verifyCachedHandle = tempHandle
+	verifyCachedDir = tempDir
+	verifyCachedBlock = targetBlockNumber
+
+	return verifyCachedTrie, targetBlockNumber, expectedRoot, false, len(allEntries), nil
+}
+
+// VerifyHistoricalRoot recreates the NOMT trie at a historical block using ChangelogDB
+// to verify if the computed root matches the stateRoot in the block header.
+func (api *MetaAPI) VerifyHistoricalRoot(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (map[string]interface{}, error) {
+	verifyCacheMu.Lock()
+	defer verifyCacheMu.Unlock()
+
+	trie, targetBlockNumber, expectedRoot, fastPath, numEntries, err := api.reconstructHistoricalTrieLocked(ctx, blockNrOrHash)
 	if err != nil {
 		return nil, err
 	}
 
-	// Type assert to NomtStateTrie to use GenerateProof
-	nomtTrie, ok := accountStateTrie.(*mt_trie.NomtStateTrie)
-	if !ok {
-		return nil, fmt.Errorf("GetProof is only supported for NOMT state trie backend")
-	}
+	recoveredRoot := trie.Hash()
+	match := recoveredRoot == expectedRoot
 
-	// Generate proof for the address
-	proof, err := nomtTrie.GenerateProof(address.Bytes())
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate proof: %w", err)
-	}
-
-	return proof, nil
+	return map[string]interface{}{
+		"targetBlock":   targetBlockNumber,
+		"expectedRoot":  expectedRoot.Hex(),
+		"recoveredRoot": recoveredRoot.Hex(),
+		"match":         match,
+		"num_entries":   numEntries,
+		"fast_path":     fastPath,
+	}, nil
 }
-
