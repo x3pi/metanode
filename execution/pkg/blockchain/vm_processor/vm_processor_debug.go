@@ -630,9 +630,8 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
-	var success bool
 	defer func() {
-		if !success || !isCache {
+		if !isCache {
 			mvm.ClearMVMApi(vmP.mvmId)
 		}
 	}()
@@ -716,6 +715,5 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		span.AddEvent("ClearingMVMApiAfterNonceOnly", map[string]interface{}{"mvmIdToClear": vmP.mvmId.Hex()})
 	}
 	
-	success = true
 	return rs, nil
 }

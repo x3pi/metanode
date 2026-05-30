@@ -96,7 +96,20 @@ func GetAuthoritativeBlockQueue() <-chan *AuthoritativeBlockRequest {
 }
 
 //export cgo_execute_block
-func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
+func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_execute_block: %v", r)
+			ret = C.bool(false)
+		}
+	}()
+
+	// Sanity check length to prevent overflow or out-of-memory allocations
+	if length == 0 || length > 100*1024*1024 {
+		logger.Error("[FFI Bridge] Invalid block length from Rust: %d", length)
+		return C.bool(false)
+	}
+
 	data := C.GoBytes(unsafe.Pointer(payload), C.int(length))
 
 	var subDag pb.ExecutableBlock
@@ -197,9 +210,22 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) C.bool {
 }
 
 //export cgo_process_rpc_request
-func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload **C.uint8_t, outLen *C.size_t) C.bool {
+func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload **C.uint8_t, outLen *C.size_t) (ret C.bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_process_rpc_request: %v", r)
+			ret = C.bool(false)
+		}
+	}()
+
 	if defaultRequestHandler == nil {
 		logger.Error("[FFI Bridge] defaultRequestHandler is nil")
+		return C.bool(false)
+	}
+
+	// Sanity check length to prevent overflow or out-of-memory allocations
+	if reqLen == 0 || reqLen > 100*1024*1024 {
+		logger.Error("[FFI Bridge] Invalid rpc request length from Rust: %d", reqLen)
 		return C.bool(false)
 	}
 
