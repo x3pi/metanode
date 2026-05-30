@@ -128,6 +128,20 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		if err := batch.Set(key, val, pebble.Sync); err != nil {
 			return fmt.Errorf("failed to set changelog key: %w", err)
 		}
+
+		// FORK-DIAG & HISTORICAL ROOT FIX:
+		// If this is the VERY FIRST time this address is modified, we must record its OldValue
+		// at block 0, so that queries for states before this block can find the genesis state.
+		if !c.HasAnyEntry(change.Key) {
+			oldKey := c.encodeKey(change.Key, 0)
+			oldVal := change.OldValue
+			if len(oldVal) == 0 {
+				oldVal = []byte("DEL")
+			}
+			if err := batch.Set(oldKey, oldVal, pebble.Sync); err != nil {
+				return fmt.Errorf("failed to set genesis changelog key: %w", err)
+			}
+		}
 	}
 
 	// Use pebble.Sync instead of NoSync to ensure durability of historical changelogs,
@@ -256,6 +270,70 @@ func (c *StateChangelogDB) GetStateAt(address []byte, targetBlock uint64) ([]byt
 	return nil, fmt.Errorf("historical state not found in changelog for block %d", targetBlock)
 }
 
+// GetAllUniqueAddresses returns a list of all unique addresses that have ever been recorded in the changelog.
+func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var addresses [][]byte
+	prefix := []byte(fmt.Sprintf("%s:", c.namespace))
+	
+	opts := &pebble.IterOptions{
+		LowerBound: prefix,
+	}
+	
+	iter, err := c.db.NewIter(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	searchKey := make([]byte, len(prefix))
+	copy(searchKey, prefix)
+	
+	for iter.SeekGE(searchKey); iter.Valid(); {
+		key := iter.Key()
+		if !bytes.HasPrefix(key, prefix) {
+			break
+		}
+		
+		// Key format: namespace:address:blockNumber
+		if len(key) < len(prefix)+9 {
+			iter.Next()
+			continue
+		}
+		
+		// Extract address With Colon: "address:"
+		addrWithColon := key[len(prefix) : len(key)-8]
+		addr := addrWithColon
+		// Strip the trailing ':' if present
+		if len(addrWithColon) > 0 && addrWithColon[len(addrWithColon)-1] == ':' {
+			addr = addrWithColon[:len(addrWithColon)-1]
+		}
+		
+		addrCopy := make([]byte, len(addr))
+		copy(addrCopy, addr)
+		addresses = append(addresses, addrCopy)
+		
+		// Optimization: Skip Scan (SeekGE) to the next address instead of iterating all block changes
+		// Since keys are `prefix + addr + : + blockNumber`
+		// We can jump to the next address by seeking to `prefix + addr + ;`
+		// Because ';' (0x3B) is ':' (0x3A) + 1.
+		nextSearchKey := make([]byte, len(prefix)+len(addr)+1)
+		copy(nextSearchKey, prefix)
+		copy(nextSearchKey[len(prefix):], addr)
+		nextSearchKey[len(nextSearchKey)-1] = ':' + 1 // 0x3B
+		
+		iter.SeekGE(nextSearchKey)
+	}
+	
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	
+	return addresses, nil
+}
+
 // HasAnyEntry checks if the given address has ANY changelog entry (at any block).
 // This is used for progressive accuracy: if an address has zero entries, it means
 // the account was never modified since changelog tracking started, so the current
@@ -303,4 +381,61 @@ func (c *StateChangelogDB) encodeKey(address []byte, blockNumber uint64) []byte 
 	
 	key = append(key, blockBytes...)
 	return key
+}
+
+// HistoricalState holds the batch result of a historical state query
+type HistoricalState struct {
+	Value  []byte // State value at target block (nil if deleted)
+	Found  bool   // True if an entry was found <= targetBlock
+	HasAny bool   // True if ANY entry exists for this address
+}
+
+// GetHistoricalStates efficiently queries the historical state for multiple addresses
+// by reusing a single Pebble iterator, drastically reducing iterator allocation overhead.
+func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock uint64) map[string]HistoricalState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	result := make(map[string]HistoricalState, len(addresses))
+	
+	opts := &pebble.IterOptions{}
+	iter, err := c.db.NewIter(opts)
+	if err != nil {
+		return result
+	}
+	defer iter.Close()
+
+	for _, address := range addresses {
+		state := HistoricalState{}
+		
+		startKey := c.encodeKeyPrefix(address)
+		searchKey := c.encodeKey(address, targetBlock+1)
+
+		// 1. Check for state <= targetBlock
+		if iter.SeekLT(searchKey) {
+			if bytes.HasPrefix(iter.Key(), startKey) {
+				val := iter.Value()
+				if !bytes.Equal(val, []byte("DEL")) {
+					ret := make([]byte, len(val))
+					copy(ret, val)
+					state.Value = ret
+				}
+				state.Found = true
+				state.HasAny = true
+				result[string(address)] = state
+				continue
+			}
+		}
+		
+		// 2. If not found, check if it has ANY entry (SeekGE)
+		if iter.SeekGE(startKey) {
+			if bytes.HasPrefix(iter.Key(), startKey) {
+				state.HasAny = true
+			}
+		}
+		
+		result[string(address)] = state
+	}
+
+	return result
 }
