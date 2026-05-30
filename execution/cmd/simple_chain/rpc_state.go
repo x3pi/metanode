@@ -332,3 +332,63 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 
 	return accountStateDB.AccountState(address)
 }
+
+// GetProof returns the Merkle proof for a given account address at a specific block.
+// This is currently supported only when the state backend is NOMT.
+func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
+	// Resolve block map to get stateRoot
+	var blockMap map[string]interface{}
+	var errGetBlock error
+
+	if blockNr, ok := blockNrOrHash.Number(); ok {
+		if blockNr == rpc.PendingBlockNumber {
+			// Get pending block state root if needed, but here we just get the latest block for simplicity
+			blockMap, errGetBlock = api.GetBlockByNumber(ctx, rpc.LatestBlockNumber, false)
+		} else {
+			blockMap, errGetBlock = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
+		}
+	} else if hash, ok := blockNrOrHash.Hash(); ok {
+		blockMap, errGetBlock = api.GetBlockByHash(ctx, hash, false)
+	}
+
+	if errGetBlock != nil {
+		return nil, fmt.Errorf("failed to get block: %w", errGetBlock)
+	}
+	if blockMap == nil {
+		return nil, fmt.Errorf("block not found")
+	}
+
+	stateRootInterface := blockMap["stateRoot"]
+	var stateRoot common.Hash
+	switch v := stateRootInterface.(type) {
+	case common.Hash:
+		stateRoot = v
+	case string:
+		stateRoot = common.HexToHash(v)
+	case []byte:
+		stateRoot = common.BytesToHash(v)
+	default:
+		return nil, fmt.Errorf("unexpected type for stateRoot: %T", stateRootInterface)
+	}
+
+	// Get the trie instance
+	accountStateTrie, err := api.App.GetAccountStateTrie(stateRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	// Type assert to NomtStateTrie to use GenerateProof
+	nomtTrie, ok := accountStateTrie.(*mt_trie.NomtStateTrie)
+	if !ok {
+		return nil, fmt.Errorf("GetProof is only supported for NOMT state trie backend")
+	}
+
+	// Generate proof for the address
+	proof, err := nomtTrie.GenerateProof(address.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate proof: %w", err)
+	}
+
+	return proof, nil
+}
+

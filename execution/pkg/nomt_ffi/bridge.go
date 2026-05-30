@@ -2,7 +2,7 @@ package nomt_ffi
 
 /*
 #cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR}/rust_lib/target/release -lmtn_nomt -lm -ldl -lpthread
+#cgo LDFLAGS: -L${SRCDIR}/../../../target/release -lmtn_nomt -lm -ldl -lpthread
 #include "nomt_ffi.h"
 #include <stdlib.h>
 */
@@ -668,4 +668,28 @@ func (fs *FinishedSession) Abort() {
 		h.activeCond.Broadcast()
 		h.sessionsMu.Unlock()
 	}
+}
+
+// GenerateProof generates a Merkle proof for a given key.
+func (h *Handle) GenerateProof(key [32]byte) ([]byte, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var proofPtr *C.uint8_t
+	var proofLen C.size_t
+
+	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
+
+	res := C.nomt_generate_proof(h.ptr, keyPtr, &proofPtr, &proofLen)
+	if res != 0 {
+		return nil, fmt.Errorf("nomt_generate_proof failed")
+	}
+
+	if proofPtr == nil || proofLen == 0 {
+		return nil, nil // Or return empty slice
+	}
+
+	defer C.nomt_free_proof(proofPtr, proofLen)
+
+	return C.GoBytes(unsafe.Pointer(proofPtr), C.int(proofLen)), nil
 }

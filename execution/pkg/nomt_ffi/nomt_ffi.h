@@ -45,4 +45,8 @@ int nomt_checkpoint(const NomtHandle* handle, const char* src_path, const char* 
 }
 #endif
 
+/* Proof Generation */
+int nomt_generate_proof(const NomtHandle* handle, const uint8_t* key, uint8_t** proof_out, size_t* proof_len);
+void nomt_free_proof(uint8_t* proof_ptr, size_t proof_len);
+
 #endif /* MTN_NOMT_FFI_H */
