@@ -256,7 +256,16 @@ pub async fn fetch_blocks_from_peer(
     );
 
     let mut all_blocks = Vec::new();
-    let batch_size = 1000u64; // Optimize: 1000 blocks reduces TCP connection churn and speeds up sync
+    
+    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
+    let batch_size = if total_blocks >= 1000 {
+        200u64 // Lệch xa -> Batch lớn để đuổi nhanh
+    } else if total_blocks >= 200 {
+        100u64 // Lệch vừa -> Batch vừa
+    } else {
+        50u64  // Gần kịp -> Batch nhỏ để nhanh chóng commit
+    };
+    
     let mut current_from = from_block;
 
     while current_from <= to_block {

@@ -244,6 +244,13 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	// ═══════════════════════════════════════════════════════════════════════════
 	rpcTimeout := 10 * time.Second // default for general queries
 	switch req := request.GetPayload().(type) {
+	case *pb.Request_GetBlocksRangeRequest:
+		// Fetching blocks for sync: allow extra time to prevent FFI timeouts on large batches
+		batchSize := req.GetBlocksRangeRequest.GetToBlock() - req.GetBlocksRangeRequest.GetFromBlock() + 1
+		rpcTimeout = time.Duration(batchSize/10+60) * time.Second // e.g., 100 blocks = 70s
+		if rpcTimeout > 300*time.Second {
+			rpcTimeout = 300 * time.Second // max 5 minutes
+		}
 	case *pb.Request_SyncBlocksRequest:
 		// EXECUTE mode
 		blockCount := len(req.SyncBlocksRequest.GetBlocks())

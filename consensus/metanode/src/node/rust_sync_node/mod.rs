@@ -85,7 +85,7 @@ impl Default for RustSyncConfig {
             fetch_interval_secs: 2,
             turbo_fetch_interval_ms: 50, // OPTIMIZED: 50ms (was 200ms) for fast catchup
             fetch_batch_size: 500,       // OPTIMIZED: 500 (was 100) blocks per fetch
-            turbo_batch_size: 2000,      // OPTIMIZED: 2000 (was 500) for aggressive catchup
+            turbo_batch_size: 200,      // OPTIMIZED: 200 (was 2000) for fast but reliable chunked fetch
             fetch_timeout_secs: 30,      // OPTIMIZED: 30s (was 10s) for larger batches
             peer_rpc_addresses: vec![],  // Configure for WAN sync
         }

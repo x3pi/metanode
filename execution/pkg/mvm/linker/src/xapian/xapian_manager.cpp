@@ -273,7 +273,7 @@ Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blo
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -344,7 +344,7 @@ bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber, co
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -415,7 +415,7 @@ Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, 
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -546,7 +546,7 @@ Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -644,7 +644,7 @@ Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &te
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -747,7 +747,7 @@ Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
