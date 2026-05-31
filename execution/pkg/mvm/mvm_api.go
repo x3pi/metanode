@@ -1319,3 +1319,8 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 func ClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
+
+// CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
+func CommitAllXapian() {
+	C.MVM_commitAllXapian()
+}

@@ -39,6 +39,7 @@ public:
                                                     bool isReset);
   static constexpr const char *LOGICAL_ID_GENERATED_PREFIX = "uuid:";
   static std::string generateUuidLogicalId();
+  static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit

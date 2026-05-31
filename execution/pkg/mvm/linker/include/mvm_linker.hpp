@@ -208,7 +208,7 @@ void testMemLeakGS(int total_address, unsigned char *b_addresses);
 void clearAllStateInstances();
 void updateStateNonce(unsigned char *b_address, unsigned long long nonce);
 extern void MVM_cancelTransaction(unsigned char *mvmId);
-
+extern void MVM_commitAllXapian();
 #ifdef __cplusplus
 }
 #endif
