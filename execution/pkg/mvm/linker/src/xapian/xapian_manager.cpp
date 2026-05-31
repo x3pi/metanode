@@ -1014,6 +1014,24 @@ bool XapianManager::commit_changes() {
   }
 }
 
+void XapianManager::commitAllInstances() {
+  std::shared_lock<std::shared_mutex> lock(instances_mutex);
+  for (auto &pair : instances) {
+    auto manager = pair.second;
+    if (manager) {
+      std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
+      if (!manager->has_started) {
+        try {
+          manager->db.commit();
+          manager->comprehensive_log.xapian_doc_logs.clear();
+        } catch (...) {
+          // Ignore errors during background flush
+        }
+      }
+    }
+  }
+}
+
 // Tính toán hash của các thay đổi đã được staged
 std::array<uint8_t, 32u> XapianManager::getChangeHash() {
   std::lock_guard<std::shared_mutex> lock(

@@ -1403,3 +1403,6 @@ void MVM_cancelTransaction(unsigned char *mvmId) {
   registry.cancelTransaction(mvmId);
   registry.unregisterAllManagersForMvmId(mvmId);
 }
+void MVM_commitAllXapian() {
+  XapianManager::commitAllInstances();
+}
