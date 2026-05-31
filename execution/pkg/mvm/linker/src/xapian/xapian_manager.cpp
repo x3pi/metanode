@@ -1341,11 +1341,13 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
     return false; // Không tìm thấy instance để hủy
 }
 
-// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
-XapianLog::ComprehensiveLog XapianManager::getComprehensiveChangeLogs() const
+// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER
+XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 {
     std::lock_guard<std::shared_mutex> lock(changes_mutex);
-    return comprehensive_log;
+    XapianLog::ComprehensiveLog log_copy = std::move(comprehensive_log);
+    comprehensive_log.xapian_doc_logs.clear();
+    return log_copy;
 }
 
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
