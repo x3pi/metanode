@@ -572,7 +572,7 @@ impl PeerRpcServer {
         };
 
         // Limit batch size to prevent DoS or timeouts on huge blocks
-        let max_batch = 1000u64;
+        let max_batch = 500u64;
         let actual_to = std::cmp::min(to, from + max_batch - 1);
 
         info!(
@@ -584,7 +584,7 @@ impl PeerRpcServer {
         // CRITICAL: Add timeout to prevent peer RPC handler from hanging
         // if Go Master is busy or not responding.
         let fetch_result = timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(300),
             executor.get_blocks_range(from, actual_to)
         ).await;
 
