@@ -815,11 +815,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::lock_guard<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      XapianSearcher searcher(this->isOffChain
-          ? Xapian::Database(fullPath.string())
-          : Xapian::Database(manager->db));
+      XapianSearcher searcher(Xapian::Database(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1730,11 +1728,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::lock_guard<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      XapianSearcher searcher(this->isOffChain
-          ? Xapian::Database(fullPath.string())
-          : Xapian::Database(manager->db));
+      XapianSearcher searcher(Xapian::Database(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
