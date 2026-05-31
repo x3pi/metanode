@@ -259,9 +259,11 @@ pub async fn fetch_blocks_from_peer(
     
     // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
     let batch_size = if total_blocks >= 1000 {
-        200u64 // Lệch xa -> Batch lớn để đuổi nhanh
+        500u64 // Lệch cực xa -> Max batch server cho phép
     } else if total_blocks >= 200 {
-        100u64 // Lệch vừa -> Batch vừa
+        200u64 // Lệch xa -> Batch lớn
+    } else if total_blocks >= 50 {
+        100u64 // Lệch vừa
     } else {
         50u64  // Gần kịp -> Batch nhỏ để nhanh chóng commit
     };
@@ -445,7 +447,17 @@ pub async fn fetch_executable_blocks_from_peer(
     );
 
     let mut all_blocks = Vec::new();
-    let batch_size = 100u64;
+    
+    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
+    let batch_size = if total >= 1000 {
+        500u64 // Lệch cực xa -> Max batch server cho phép
+    } else if total >= 200 {
+        200u64 // Lệch xa -> Batch lớn
+    } else if total >= 50 {
+        100u64 // Lệch vừa
+    } else {
+        50u64  // Gần kịp -> Batch nhỏ
+    };
     let mut current_from = from_gei;
 
     while current_from <= to_gei {
