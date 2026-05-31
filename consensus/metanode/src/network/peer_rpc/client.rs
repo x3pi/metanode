@@ -265,7 +265,9 @@ pub async fn fetch_blocks_from_peer(
     } else if total_blocks >= 50 {
         100u64 // Lệch vừa
     } else {
-        50u64  // Gần kịp -> Batch nhỏ để nhanh chóng commit
+        // Nếu chỉ lệch 1 block, hệ thống vẫn chỉ lấy 1 block (nhờ hàm min ở dưới)
+        // Số 50 ở đây chỉ mang ý nghĩa: "Trong một lần hỏi TCP, lấy TỐI ĐA 50 block"
+        50u64
     };
     
     let mut current_from = from_block;
@@ -456,7 +458,9 @@ pub async fn fetch_executable_blocks_from_peer(
     } else if total >= 50 {
         100u64 // Lệch vừa
     } else {
-        50u64  // Gần kịp -> Batch nhỏ
+        // Tương tự, nếu chỉ thiếu 1 block thì vẫn lấy ngay 1 block
+        // Số 50 u64 là giới hạn "TỐI ĐA" cho mỗi request HTTP
+        50u64
     };
     let mut current_from = from_gei;
 
