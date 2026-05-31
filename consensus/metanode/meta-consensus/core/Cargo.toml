@@ -35,6 +35,7 @@ nom = "7.1.3"
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
+sha3 = "0.10.6"
 rand = { workspace = true }
 rustls = "0.23"
 serde = { workspace = true }
@@ -67,6 +68,7 @@ telemetry-subscribers = { path = "../../../../crates/telemetry-subscribers" }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+prost-build = "0.14.1"
 
 [[bench]]
 name = "commit_finalizer_bench"

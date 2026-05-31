@@ -660,6 +660,7 @@ impl CommitProcessor {
                 if let Some(ref verifier) = digest_verifier {
                     // Collect indices to dispatch — MUST be contiguous from the lowest
                     let mut verified_indices: Vec<u32> = Vec::new();
+                    let mut discarded_indices: Vec<u32> = Vec::new();
                     for (&local_idx, local_commit) in pending_local_commits.iter() {
                         let local_digest = local_commit.commit_ref.digest.into_inner();
                         let is_epoch_boundary = local_commit.extract_end_of_epoch_transaction().is_some();
@@ -678,57 +679,16 @@ impl CommitProcessor {
                                 if quorum_digest == local_digest {
                                     verified_indices.push(local_idx);
                                 } else {
-                                    // DIVERGENT — Local commit disagrees with network quorum.
-                                    //
-                                    // Check how long this commit has been stuck. If it's been
-                                    // divergent for >30s, the local commit is STALE (likely from
-                                    // a previous epoch's DAG state). Discard it to unblock the
-                                    // pipeline — next_expected_index stays at this slot, so the
-                                    // correct CertifiedCommit will fill it when it arrives.
-                                    let divergence_age = pending_local_timestamps
-                                        .get(&local_idx)
-                                        .map(|ts| std::time::Instant::now().duration_since(*ts).as_secs())
-                                        .unwrap_or(0);
-                                    
-                                    if divergence_age >= 30 {
-                                        // ═══════════════════════════════════════════════════
-                                        // STALE-COMMIT EVICTION (May 2026):
-                                        //
-                                        // After 30s of divergence, this local commit is stale.
-                                        // Common cause: epoch-local commit indices reset each
-                                        // epoch, so commit N in epoch K has a completely
-                                        // different digest than commit N in epoch K+2.
-                                        // If a stale commit persists in the buffer, it blocks
-                                        // ALL subsequent commits permanently.
-                                        //
-                                        // Safety: We only DISCARD — never dispatch. The slot
-                                        // (next_expected_index) stays open for the correct
-                                        // CertifiedCommit from CommitSyncer.
-                                        // ═══════════════════════════════════════════════════
-                                        warn!(
-                                            "🗑️ [DIGEST-GATE STALE-EVICT] Commit {} DISCARDED after {}s divergence! \
-                                             local_digest={}, quorum_digest={}. \
-                                             Stale local commit evicted — slot stays open for CertifiedCommit.",
-                                            local_idx, divergence_age,
-                                            hex::encode(&local_digest[..4]),
-                                            hex::encode(&quorum_digest[..4])
-                                        );
-                                        // Mark for removal after iteration (can't modify during iter)
-                                        // We break here; the removal happens below via verified_indices
-                                        // using a special marker. Actually, let's just collect for removal.
-                                        break; // Will be handled by post-loop eviction below
-                                    } else {
-                                        warn!(
-                                            "🚨 [DIGEST-GATE POLL] Commit {} DIVERGENT! local={}, quorum={}. \
-                                             BLOCKING all subsequent commits until resolved ({}s/30s). \
-                                             Waiting for CertifiedCommit to replace.",
-                                            local_idx,
-                                            hex::encode(&local_digest[..4]),
-                                            hex::encode(&quorum_digest[..4]),
-                                            divergence_age
-                                        );
-                                        break; // STRICT ORDER: stop at first unverified
-                                    }
+                                    warn!(
+                                        "🚨 [DIGEST-GATE POLL] Commit {} CONFLICT (DIVERGENT)! local={}, quorum={}. \
+                                         Local commit is wrong (quorum confirmed different digest). \
+                                         DISCARDING immediately. Slot stays open for CertifiedCommit.",
+                                        local_idx,
+                                        hex::encode(&local_digest[..4]),
+                                        hex::encode(&quorum_digest[..4])
+                                    );
+                                    discarded_indices.push(local_idx);
+                                    break; // STRICT ORDER: stop evaluating, wait for CertifiedCommit
                                 }
                             }
                             None => {
@@ -783,16 +743,11 @@ impl CommitProcessor {
                                 // 2f+1 peers agree on the digest. Conflict means our
                                 // local commit is wrong. Insufficient means we can't
                                 // verify yet — stay pending (thà pending chứ không fork).
-                                // ═══════════════════════════════════════════════════════
-                                let peer_attest_result = if !digest_has_data {
-                                    if let Some(ref attestor) = peer_commit_attestation {
-                                        let local_digest = local_commit.commit_ref.digest.into_inner();
-                                        Some(attestor(local_idx, local_digest))
-                                    } else {
-                                        None // No attestor available
-                                    }
+                                let peer_attest_result = if let Some(ref attestor) = peer_commit_attestation {
+                                    let local_digest = local_commit.commit_ref.digest.into_inner();
+                                    Some(attestor(local_idx, local_digest))
                                 } else {
-                                    None // Digest data exists — use QCI-AHEAD path instead
+                                    None // No attestor available
                                 };
 
                                 if quorum_gc_bypass {
@@ -818,10 +773,9 @@ impl CommitProcessor {
                                          DISCARDING from pending buffer. CertifiedCommit will replace.",
                                         local_idx
                                     );
-                                    // Mark for eviction — don't push to verified
-                                    pending_local_commits.remove(&local_idx);
-                                    pending_local_timestamps.remove(&local_idx);
-                                    break; // STRICT ORDER: re-evaluate remaining
+                                    // Mark for eviction
+                                    discarded_indices.push(local_idx);
+                                    break; // STRICT ORDER: stop evaluating, wait for CertifiedCommit
                                 } else {
                                     // QCI-AHEAD-BYPASS: digest_has_data=true,
                                     // verifier returns None, check if QCI already passed this commit.
@@ -847,42 +801,10 @@ impl CommitProcessor {
                         }
                     }
                     
-                    // ═══════════════════════════════════════════════════════════
-                    // STALE-EVICT CLEANUP: Remove divergent commits that exceeded
-                    // the 30s timeout. These are NOT dispatched — just discarded.
-                    // The slot (next_expected_index) stays open for the correct
-                    // CertifiedCommit from CommitSyncer or receiver channel.
-                    // ═══════════════════════════════════════════════════════════
-                    {
-                        let now = std::time::Instant::now();
-                        let stale_indices: Vec<u32> = pending_local_commits.iter()
-                            .filter(|(&idx, commit)| {
-                                // Only evict if we have a quorum digest that DISAGREES
-                                if let Some(ref v) = digest_verifier {
-                                    let local_d = commit.commit_ref.digest.into_inner();
-                                    if let Some(quorum_d) = v(idx) {
-                                        if quorum_d != local_d {
-                                            let age = pending_local_timestamps.get(&idx)
-                                                .map(|ts| now.duration_since(*ts).as_secs())
-                                                .unwrap_or(0);
-                                            return age >= 30;
-                                        }
-                                    }
-                                }
-                                false
-                            })
-                            .map(|(&idx, _)| idx)
-                            .collect();
-                        
-                        for idx in stale_indices {
-                            pending_local_commits.remove(&idx);
-                            pending_local_timestamps.remove(&idx);
-                            warn!(
-                                "🗑️ [STALE-EVICT] Removed divergent commit {} from pending buffer. \
-                                 Slot open for CertifiedCommit.",
-                                idx
-                            );
-                        }
+                    // Remove collected discarded indices
+                    for idx in discarded_indices {
+                        pending_local_commits.remove(&idx);
+                        pending_local_timestamps.remove(&idx);
                     }
                     
                     // Dispatch verified commits in strict ascending order
@@ -1024,13 +946,13 @@ impl CommitProcessor {
                                 } else {
                                     warn!(
                                         "🚨 [DIGEST-GATE OOO] Pending local commit {} DIVERGENT! \
-                                         local={}, quorum={}. BLOCKING OOO drain. \
-                                         Buffered for CertifiedCommit.",
+                                         local={}, quorum={}. DISCARDING immediately. \
+                                         Slot open for CertifiedCommit.",
                                         next_expected_index,
                                         hex::encode(&local_digest[..4]),
                                         hex::encode(&quorum_digest[..4])
                                     );
-                                    false
+                                    break; // Break the while loop to discard and wait for CertifiedCommit
                                 }
                             }
                             None => {
@@ -1072,10 +994,10 @@ impl CommitProcessor {
                                                 PeerAttestResult::Conflict => {
                                                     warn!(
                                                         "🚨 [DIGEST-GATE-OOO PEER-ATTEST] Commit {} CONFLICT: \
-                                                         peers disagree on digest. Blocking OOO drain.",
+                                                         peers disagree on digest. DISCARDING immediately.",
                                                         next_expected_index
                                                     );
-                                                    false
+                                                    break; // Break the while loop to discard and wait for CertifiedCommit
                                                 }
                                                 PeerAttestResult::Insufficient => {
                                                     // Not enough peers — stay pending

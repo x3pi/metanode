@@ -21,6 +21,7 @@ import (
 
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -696,7 +697,11 @@ func processSingleGroup(
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
 		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
-			failedSenders[tx.FromAddress()] = true
+			
+			if errVerify.Code != transaction.InvalidNonce.Code {
+				failedSenders[tx.FromAddress()] = true
+			}
+			
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -712,7 +717,10 @@ func processSingleGroup(
 				// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
 				// Including them causes duplicate TX hashes across multiple blocks when a client
 				// resends a batch, inflating the block's TX count and bloating the ledger.
-				failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+				if tx.GetNonce() > as.Nonce() {
+					failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+				}
+				
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}

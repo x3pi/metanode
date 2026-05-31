@@ -324,25 +324,19 @@ pub async fn start_recycler_background(
         // Collect stale TXs
         let stale_txs = recycler.collect_stale().await;
 
-        if !stale_txs.is_empty() {
-            let count = stale_txs.len();
-            info!(
-                "♻️ [TX RECYCLER] Re-submitting {} stale TXs to consensus",
-                count
-            );
-
-            // Re-submit in a single batch
-            match transaction_client.submit(stale_txs).await {
+        for tx in stale_txs {
+            let single_tx_vec = vec![tx];
+            match transaction_client.submit(single_tx_vec).await {
                 Ok((block_ref, _indices, _)) => {
                     info!(
-                        "♻️ [TX RECYCLER] Successfully recycled {} TXs into block {:?}",
-                        count, block_ref
+                        "♻️ [TX RECYCLER] Successfully recycled stale TX into block {:?}",
+                        block_ref
                     );
                 }
                 Err(e) => {
                     warn!(
-                        "♻️ [TX RECYCLER] Failed to re-submit {} stale TXs: {}",
-                        count, e
+                        "♻️ [TX RECYCLER] Failed to re-submit stale TX: {}",
+                        e
                     );
                 }
             }

@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-28
+> **Last updated:** 2026-05-30
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -414,6 +414,7 @@ metanode/
 | `block.rs` | 840 | Block types + serialization | 🟡 MED |
 | `core/proposer.rs` | 826 | Block proposal logic | 🔴 HIGH |
 | `block_verifier.rs` | 802 | Block signature + content verification | 🔴 HIGH |
+| `tx_group_filter.rs` | 120 | Union-Find transaction grouping & limit check | 🟢 LOW |
 
 ### Supporting Files (<500 lines)
 | File | Lines | Role |

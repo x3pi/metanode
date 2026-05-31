@@ -67,7 +67,17 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	transactions := make([]interface{}, 0, len(txHashes))
 	if !fullTx {
 		for _, txHash := range txHashes {
-			transactions = append(transactions, txHash.String())
+			ethHash := txHash
+			if fetchTx != nil {
+				if tx, err := fetchTx(txHash); err == nil && tx != nil {
+					if ethTx := tx.ToEthTransaction(); ethTx != nil {
+						if h := ethTx.Hash(); h != (common.Hash{}) {
+							ethHash = h
+						}
+					}
+				}
+			}
+			transactions = append(transactions, ethHash.Hex())
 		}
 		blockMap["transactions"] = transactions
 		return blockMap, nil
@@ -113,7 +123,14 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 		}
 		txMap := make(map[string]interface{})
 		v, r, s := tx.RawSignatureValues()
-		txMap["hash"] = tx.Hash()
+		
+		ethHash := tx.Hash()
+		if ethTx := tx.ToEthTransaction(); ethTx != nil {
+			if h := ethTx.Hash(); h != (common.Hash{}) {
+				ethHash = h
+			}
+		}
+		txMap["hash"] = ethHash
 		txMap["from"] = tx.FromAddress()                           // Địa chỉ người gửi
 		txMap["to"] = tx.ToAddress()                               // Địa chỉ người nhận
 		txMap["value"] = (*hexutil.Big)(tx.Amount())               // Số lượng tiền được chuyển
@@ -177,20 +194,18 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		return nil, nil
 	}
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
-	if fullTx {
-		if len(blockData.Transactions()) == 0 {
-			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-				return nil, fmt.Errorf("no transactions in block")
-			}
-		} else {
-			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
-			if err != nil {
-				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
-				return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
-			}
-			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-				return txDB.GetTransaction(hash)
-			}
+	if len(blockData.Transactions()) == 0 {
+		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+			return nil, fmt.Errorf("no transactions in block")
+		}
+	} else {
+		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+		if err != nil {
+			logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
+			return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
+		}
+		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+			return txDB.GetTransaction(hash)
 		}
 	}
 
@@ -317,20 +332,18 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 	}
 
 	var fetchTx func(common.Hash) (mt_types.Transaction, error)
-	if fullTx {
-		if len(blockData.Transactions()) == 0 {
-			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-				return nil, fmt.Errorf("no transactions in block")
-			}
-		} else {
-			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
-			if err != nil {
-				logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
-				return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
-			}
-			fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
-				return txDB.GetTransaction(hash)
-			}
+	if len(blockData.Transactions()) == 0 {
+		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+			return nil, fmt.Errorf("no transactions in block")
+		}
+	} else {
+		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
+		if err != nil {
+			logger.Warn("⚠️ [RPC] Failed to open transaction state DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
+			return nil, fmt.Errorf("failed to open transaction state DB: %w", err)
+		}
+		fetchTx = func(hash common.Hash) (mt_types.Transaction, error) {
+			return txDB.GetTransaction(hash)
 		}
 	}
 
@@ -400,6 +413,12 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 	v, r, s := tx.RawSignatureValues()
 
 	txIndexVal := uint64(index)
+	ethHash := tx.Hash()
+	if ethTx := tx.ToEthTransaction(); ethTx != nil {
+		if h := ethTx.Hash(); h != (common.Hash{}) {
+			ethHash = h
+		}
+	}
 	return &RPCTransaction{
 		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
@@ -409,7 +428,7 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 		GasFeeCap:           nil,
 		GasTipCap:           nil,
 		MaxFeePerBlobGas:    nil,
-		Hash:                tx.Hash(),
+		Hash:                ethHash,
 		Input:               tx.CallData().Input(),
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
 		To:                  (*common.Address)(tx.ToAddress().Bytes()),
@@ -460,6 +479,12 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 	v, r, s := tx.RawSignatureValues()
 
 	txIndexVal := uint64(index)
+	ethHash := tx.Hash()
+	if ethTx := tx.ToEthTransaction(); ethTx != nil {
+		if h := ethTx.Hash(); h != (common.Hash{}) {
+			ethHash = h
+		}
+	}
 	return &RPCTransaction{
 		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
@@ -469,7 +494,7 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 		GasFeeCap:           nil,
 		GasTipCap:           nil,
 		MaxFeePerBlobGas:    nil,
-		Hash:                tx.Hash(),
+		Hash:                ethHash,
 		Input:               tx.CallData().Input(),
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
 		To:                  (*common.Address)(tx.ToAddress().Bytes()),

@@ -1717,16 +1717,36 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 					// ═══════════════════════════════════════════════════════════════
 					// PRE-EXECUTION VERIFICATION:
-					// Metanode block headers store the PRE-EXECUTION state root.
-					// We must verify it BEFORE applying the block's state changes.
+					// Metanode block headers store the POST-EXECUTION state root.
+					// To verify the state before applying block N, we must verify it against
+					// the POST-EXECUTION root of block N-1 (parent block).
 					// ═══════════════════════════════════════════════════════════════
-					expectedAccountRoot := header.AccountStatesRoot()
-					if hasRootBefore && expectedAccountRoot != (common.Hash{}) && expectedAccountRoot != trie.EmptyRootHash {
-						if rootBeforeApply != expectedAccountRoot {
+					var expectedPreRoot common.Hash
+					var hasExpectedPreRoot bool
+					if blockNum > 1 {
+						prevBlockNum := blockNum - 1
+						if prevHash, ok := bc.GetBlockHashByNumber(prevBlockNum); ok && prevHash != (common.Hash{}) {
+							if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
+								expectedPreRoot = prevBlock.Header().AccountStatesRoot()
+								hasExpectedPreRoot = true
+							}
+						}
+					} else {
+						// For block #1, the parent is block #0 (genesis)
+						if prevHash, ok := bc.GetBlockHashByNumber(0); ok && prevHash != (common.Hash{}) {
+							if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
+								expectedPreRoot = prevBlock.Header().AccountStatesRoot()
+								hasExpectedPreRoot = true
+							}
+						}
+					}
+
+					if hasRootBefore && hasExpectedPreRoot && expectedPreRoot != (common.Hash{}) && expectedPreRoot != trie.EmptyRootHash {
+						if rootBeforeApply != expectedPreRoot {
 							logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
-								"localRoot=%s, expected=%s, block=#%d. "+
+								"localRoot=%s, expectedPreRoot=%s, block=#%d. "+
 								"This node's state has diverged BEFORE this block was applied!",
-								rootBeforeApply.Hex(), expectedAccountRoot.Hex(), blockNum)
+								rootBeforeApply.Hex(), expectedPreRoot.Hex(), blockNum)
 						} else {
 							logger.Debug("✅ [NOMT-SYNC-VERIFY] PRE-execution root matches: %s", rootBeforeApply.Hex()[:18]+"...")
 						}
@@ -2152,6 +2172,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 		{"Receipt", backupDb.ReceiptBatchPut, rh.storageManager.GetStorageReceipt()},
 		{"Transaction", backupDb.TxBatchPut, rh.storageManager.GetStorageTransaction()},
 		{"StakeState", backupDb.StakeState, rh.storageManager.GetStorageStake()},
+		{"Mapping", backupDb.MapppingBatch, rh.storageManager.GetStorageMapping()},
 	}
 
 	aggregatedBatches := make(map[string][][2][]byte)

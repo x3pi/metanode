@@ -33,6 +33,7 @@ func (bp *BlockProcessor) commitWorker() {
 				// FENCE jobs have no block — use job.Epoch from async update
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Epoch)
 			}
+			storage.SetCommitLock(false) // Release commit lock on FENCE job
 			if job.DoneChan != nil {
 				close(job.DoneChan)
 				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
@@ -241,6 +242,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// Sub-nodes will fetch the block from Master's primary BlockDatabase
 		// via the existing network sync mechanism (HandleSyncBlocksRequest).
 		// ══════════════════════════════════════════════════════════════════
+		storage.SetCommitLock(false) // Release PebbleDB commit lock after block is fully committed
 		if job.DoneChan != nil {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
