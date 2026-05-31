@@ -370,8 +370,8 @@ XapianRegistry::getGroupChangeLogsForMvmId(unsigned char *mvmId) const
         {
             if (manager_ptr)
             {
-                // Lấy ComprehensiveLog từ manager (chỉ chứa log của manager đó)
-                XapianLog::ComprehensiveLog manager_log = manager_ptr->getComprehensiveChangeLogs();
+                // Lấy ComprehensiveLog từ manager (và xóa log cũ khỏi manager)
+                XapianLog::ComprehensiveLog manager_log = manager_ptr->extractComprehensiveChangeLogs();
 
                 // Di chuyển (move) các bản ghi log từ manager_log vào log tổng hợp của nhóm
                 // để tránh sao chép không cần thiết, tăng hiệu quả.
