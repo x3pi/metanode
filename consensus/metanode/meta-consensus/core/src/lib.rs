@@ -48,6 +48,7 @@ mod threshold_clock;
 mod transaction;
 mod transaction_certifier;
 mod universal_committer;
+pub(crate) mod tx_group_filter;
 
 /// Consensus test utilities.
 #[cfg(test)]

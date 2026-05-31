@@ -187,7 +187,16 @@ impl SignedBlockVerifier {
 
         let batch: Vec<_> = block.transactions().iter().map(|t| t.data()).collect();
 
-        self.check_transactions(&batch)
+        self.check_transactions(&batch)?;
+
+        // Enforce group size limit per block/commit
+        if !crate::tx_group_filter::verify_group_limit(block.transactions(), crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
+            return Err(ConsensusError::InvalidTransaction(
+                "Block contains transactions exceeding group size limit".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub(crate) fn check_transactions(&self, batch: &[&[u8]]) -> ConsensusResult<()> {
