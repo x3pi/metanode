@@ -152,9 +152,10 @@ func (bp *BlockProcessor) ProcessorPool() {
 			bp.processingLockChan <- struct{}{}
 
 			// Acquired lock, proceed with processing
-			// TPS OPTIMIZATION: CommitLock check removed — was blocking here
-			// during the entire block commit cycle (71% of wall time).
-			// AccountStateDB.lockedFlag provides the necessary safety.
+			// Block until previous PebbleDB commit is complete
+			for storage.GetCommitLock() {
+				time.Sleep(1 * time.Millisecond)
+			}
 			setEmptyBlock := false
 
 			// CRITICAL FORK-SAFETY FIX: Use deterministic blockTime passed from consensus
@@ -471,7 +472,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		stakeBatch = bp.chainState.GetStakeStateDB().GetStakeBatch()
 	}
 
-	mappingBatch, _ = blockchain.GetBlockChainInstance().GenerateMappingBatchForBlock(bl)
+	mappingBatch, _ = blockchain.GetBlockChainInstance().GenerateMappingBatchForBlock(bl, processResults.Transactions)
 
 	// Index Ethereum transaction hashes to Meta transaction hashes in memory/DB
 	if len(processResults.Transactions) > 0 {
@@ -521,14 +522,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	//   Effective per-block time = max(EVM, Commit) instead of sum(EVM + Commit).
 	//   Expected throughput improvement: 2-3x.
 	// ═══════════════════════════════════════════════════════════════════════════
-	var doneChan chan struct{} // nil = non-blocking pipeline mode
+	doneChan := make(chan struct{}, 1)
 
 	job := CommitJob{
 		Block:                     bl,
 		ProcessResults:            &processResults,
 		Receipts:                  receipts,
 		TxDB:                      txDB,
-		DoneChan:                  doneChan, // nil — commitWorker skips signal
+		DoneChan:                  doneChan, // Signal when database commit is complete
 		MappingWg:                 &mappingWg,
 		TrieBatchSnapshot:         trieBatchSnapshot,
 		AccountBatch:              accountBatch,
@@ -565,20 +566,22 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
 		logger.Warn("🔥 [SATURATION] commitChannel is %d/%d full (Pipeline stalled)!", len(bp.commitChannel), cap(bp.commitChannel))
 	}
+	
+	// Acquire PebbleDB commit lock to prevent overlapping executions
+	storage.SetCommitLock(true)
 	bp.commitChannel <- job
 
 	// ═══════════════════════════════════════════════════════════════
-	// TPS PIPELINE: No blocking wait. commitWorker processes the job
-	// asynchronously. The next block can begin EVM execution immediately.
-	// commitChannel (cap=8) provides natural backpressure if Go
-	// can't persist fast enough — bounded pipeline depth prevents
-	// memory accumulation and GC thrashing.
+	// SYNCHRONOUS COMMIT: Wait for commitWorker to finish PebbleDB persist.
+	// This prevents Block N+1 from executing/committing before Block N
+	// has completed writing to disk, eliminating the out-of-order tip race.
 	// ═══════════════════════════════════════════════════════════════
-	logger.Debug("⚡ [PIPELINE] Block #%d commit dispatched (non-blocking, GEI=%d, pending=%d)",
-		currentBlockNumber, globalExecIndex, len(bp.commitChannel))
+	logger.Debug("⚡ [SYNCHRONOUS] Block #%d commit dispatched (blocking, GEI=%d)",
+		currentBlockNumber, globalExecIndex)
 
-	// NO MORE BLOCKING: execution loop immediately continues to next block
-	// Disk persistence (SaveLastBlock, PrepareBackup) runs async in commitWorker
+	// Block until block commit is fully complete to PebbleDB
+	<-doneChan
+
 	phase4Elapsed := time.Since(phase4Start)
 	overallElapsed := time.Since(overallStart)
 

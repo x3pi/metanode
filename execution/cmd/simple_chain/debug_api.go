@@ -247,7 +247,7 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	// QUAN TRỌNG: Phải gọi End() trước khi cố gắng lấy span từ exporter
 	defer rootSpan.End()
 
-	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "") // Empty backupPath for temporary chain state
+	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "skip_epoch_data")
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}

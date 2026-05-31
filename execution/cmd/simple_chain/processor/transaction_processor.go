@@ -486,6 +486,10 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	for _, tx := range transactions {
 		updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(tx)
 		if err != nil {
+			if f, errFile := os.OpenFile("/tmp/my_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
+				f.WriteString(fmt.Sprintf("VirtualExecError: %v\n", err))
+				f.Close()
+			}
 			logger.Warn("Dropped transaction from batch during virtual execution: hash=%s, err=%v", tx.Hash().Hex(), err)
 			continue
 		}
@@ -520,6 +524,10 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 		}
 	}
 
+	if f, errFile := os.OpenFile("/tmp/my_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
+		f.WriteString(fmt.Sprintf("AddTransactionsToPool called with %d txs. Total errors: %d\n", len(processedTransactions), queueFullErrs))
+		f.Close()
+	}
 	logger.Info("🔥 ProcessTransactionsFromClient: Added batch to pool. Total errors: %d", queueFullErrs)
 
 	if queueFullErrs > 0 {

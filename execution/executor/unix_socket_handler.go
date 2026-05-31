@@ -109,7 +109,7 @@ func (rh *RequestHandler) HandleBlockRequest(request *pb.BlockRequest) (*pb.Vali
 	}
 
 	blockDatabase := block.NewBlockDatabase(rh.storageManager.GetStorageBlock())
-	chainStateNew, err := blockchain.NewChainState(rh.storageManager, blockDatabase, blockData.Header(), rh.chainState.GetConfig(), rh.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+	chainStateNew, err := blockchain.NewChainState(rh.storageManager, blockDatabase, blockData.Header(), rh.chainState.GetConfig(), rh.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
 		return nil, fmt.Errorf("could not create new chain state: %w", err)
 	}

@@ -108,10 +108,11 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		blHeader := *headerPtr
 
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temporary chain state for virtual execution: %w", err), nil
 		}
+		defer chainStateNew.Close()
 
 		vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, blockTime, common.Address{})
 		mvm.ProtectMVMApi(mvmId)
@@ -396,11 +397,12 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		}
 		blHeader := *headerPtr
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ failed to create temporary chain state: %v, cannot simulate inbound targets", err)
 			return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
 		}
+		defer chainStateNew.Close()
 
 		for i, item := range targets {
 			if item.Target == (common.Address{}) {

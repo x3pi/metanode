@@ -120,7 +120,7 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 
 	blockDatabase := block.NewBlockDatabase(bv.storageManager.GetStorageBlock())
 
-	chainState, err := blockchain.NewChainState(bv.storageManager, blockDatabase, oldBlockData.Header(), bv.chainState.GetConfig(), bv.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+	chainState, err := blockchain.NewChainState(bv.storageManager, blockDatabase, oldBlockData.Header(), bv.chainState.GetConfig(), bv.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}

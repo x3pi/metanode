@@ -753,22 +753,26 @@ impl PeerRpcServer {
             }
 
             if !all_tx_bytes.is_empty() {
-                match submitter.submit(all_tx_bytes.clone()).await {
-                    Ok((_block_ref, _indices, _status_rx)) => {
-                        info!(
-                            "📡 [TX SUBMIT] Received {} TXs from peer, submitted {} to local consensus",
-                            tx_count, all_tx_bytes.len()
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "📡 [TX SUBMIT] Failed to submit {} TXs to consensus: {}",
-                            all_tx_bytes.len(),
-                            e
-                        );
-                        decode_errors.push(format!("Consensus submit error: {}", e));
+                const MAX_BUNDLE_SIZE: usize = 500;
+                let chunks: Vec<Vec<Vec<u8>>> = if all_tx_bytes.len() <= MAX_BUNDLE_SIZE {
+                    vec![all_tx_bytes.clone()]
+                } else {
+                    all_tx_bytes.chunks(MAX_BUNDLE_SIZE).map(|c| c.to_vec()).collect()
+                };
+
+                for chunk in chunks {
+                    match submitter.submit(chunk).await {
+                        Ok((_block_ref, _indices, _status_rx)) => {}
+                        Err(e) => {
+                            warn!("📡 [TX SUBMIT] Failed to submit chunk of TXs to consensus: {}", e);
+                            decode_errors.push(format!("Consensus submit error: {}", e));
+                        }
                     }
                 }
+                info!(
+                    "📡 [TX SUBMIT] Received {} TXs from peer, submitted {} to local consensus",
+                    tx_count, all_tx_bytes.len()
+                );
             }
 
             let submitted = if decode_errors.iter().any(|e| e.contains("Consensus submit")) {

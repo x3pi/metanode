@@ -74,12 +74,31 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 # 2. RUST BUILDS
 # ═══════════════════════════════════════════════════════════════════
+# Calculate safe parallel compiler jobs based on RAM and CPU
+TOTAL_MEM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}' || echo 8)
+if [ -z "$TOTAL_MEM_GB" ] || [ "$TOTAL_MEM_GB" -le 0 ]; then
+    TOTAL_MEM_GB=8
+fi
+NUM_CORES=$(nproc 2>/dev/null || echo 2)
+
+# Rust limits: each job needs ~3GB RAM. Limit to max 24 jobs.
+RUST_JOBS=$(( TOTAL_MEM_GB / 3 ))
+if [ $RUST_JOBS -lt 1 ]; then RUST_JOBS=1; fi
+if [ $RUST_JOBS -gt $NUM_CORES ]; then RUST_JOBS=$NUM_CORES; fi
+if [ $RUST_JOBS -gt 24 ]; then RUST_JOBS=24; fi
+
+# Go limits: CGO linking needs ~4-5GB RAM per process. Limit to max 8 jobs.
+GO_JOBS=$(( TOTAL_MEM_GB / 5 ))
+if [ $GO_JOBS -lt 1 ]; then GO_JOBS=1; fi
+if [ $GO_JOBS -gt $NUM_CORES ]; then GO_JOBS=$NUM_CORES; fi
+if [ $GO_JOBS -gt 8 ]; then GO_JOBS=8; fi
+
 if [ "$BUILD_RUST" = true ]; then
-    echo -e "${CYAN}─── Rust Builds ──────────────────────────────────────${NC}"
+    echo -e "${CYAN}─── Rust Builds (Dùng ${RUST_JOBS}/${NUM_CORES} cores) ──────────────────${NC}"
 
     # Consensus (metanode binary)
     run_step "Consensus metanode (cargo build --release --locked)" \
-        bash -c "cd '$RUST_ROOT' && cargo build --release --locked -j 2"
+        bash -c "cd '$RUST_ROOT' && cargo build --release --locked -j $RUST_JOBS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════
@@ -89,11 +108,11 @@ if [ "$BUILD_GO" = true ]; then
     # Ensure Go links against the newly compiled static library by copying it to the sub-package target dir
     mkdir -p "$RUST_ROOT/target/release"
     cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
-    echo -e "${CYAN}─── Go Builds ────────────────────────────────────────${NC}"
+    echo -e "${CYAN}─── Go Builds (Dùng ${GO_JOBS}/${NUM_CORES} cores) ────────────────────${NC}"
 
     # Go simple_chain binary
     run_step "Go simple_chain (go build)" \
-        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && go clean -cache && NUM_PROCS=\$(nproc); if [ \$NUM_PROCS -gt 4 ]; then NUM_PROCS=4; fi && go build -p \$NUM_PROCS -o simple_chain ."
+        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain ."
 fi
 
 # ═══════════════════════════════════════════════════════════════════
