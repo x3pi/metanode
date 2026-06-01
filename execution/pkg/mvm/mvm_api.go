@@ -197,7 +197,12 @@ func ConfigureXapianBasePath(path string) {
 }
 
 func init() {
-	// Không cần khởi động goroutine dọn dẹp nữa.
+        // Tăng giới hạn xả tự động (flush threshold) của Xapian lên 10 triệu modifications (~1GB)
+        // Điều này ngăn chặn Xapian tự động xả dữ liệu gây block quá trình thực thi,
+        // để dành việc xả đĩa cho Background Worker (chạy mỗi 10s)
+        if os.Getenv("XAPIAN_FLUSH_THRESHOLD") == "" {
+                os.Setenv("XAPIAN_FLUSH_THRESHOLD", "10000000")
+        }
 }
 
 func GetOrCreateMVMApi(
