@@ -130,5 +130,11 @@
   "snapshot_source_dir": "./sample/node0/data",
   "snapshot_server_port": 8600,
   "state_backend": "nomt",
-  "is_rpc_node": true
+  "is_rpc_node": true,
+  "log": {
+    "level": "warn",
+    "format": "text",
+    "console_output": true,
+    "file_output": false
+  }
 }

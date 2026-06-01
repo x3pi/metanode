@@ -37,3 +37,9 @@ peer_rpc_addresses = ["127.0.0.1:19201", "127.0.0.1:19202", "127.0.0.1:19203", "
 
 # Number of epochs to keep for cross-epoch sync support (0 = archive mode)
 epochs_to_keep = 5
+
+[log]
+level = "warn"
+format = "text"
+console_output = true
+file_output = false

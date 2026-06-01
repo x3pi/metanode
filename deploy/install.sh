@@ -356,7 +356,13 @@ cat > "$INSTALL_DIR/config/execution.json" <<EOF
     "nomt_leaf_cache_mb": 1024,
     "rust_config_path": "${INSTALL_DIR}/config/consensus.toml",
     "is_explorer": ${IS_EXPLORER:-false},
-    "explorer_db_path": "${INSTALL_DIR}/data/execution/explorer"
+    "explorer_db_path": "${INSTALL_DIR}/data/execution/explorer",
+    "log": {
+        "level": "${LOG_LEVEL:-info}",
+        "format": "${LOG_FORMAT:-text}",
+        "console_output": ${LOG_CONSOLE_OUTPUT:-true},
+        "file_output": ${LOG_FILE_OUTPUT:-false}
+    }
 }
 EOF
 log_ok "Generated: $INSTALL_DIR/config/execution.json"
@@ -402,6 +408,12 @@ epoch_monitor_poll_interval_secs = 5
 peer_rpc_port = ${PEER_RPC_PORT}
 peer_rpc_addresses = [${PEER_RPC_ADDRESSES}]
 epochs_to_keep = ${EPOCHS_TO_KEEP:-5}
+
+[log]
+level = "${LOG_LEVEL:-info}"
+format = "${LOG_FORMAT:-text}"
+console_output = ${LOG_CONSOLE_OUTPUT:-true}
+file_output = ${LOG_FILE_OUTPUT:-false}
 EOF
 log_ok "Generated: $INSTALL_DIR/config/consensus.toml"
 
