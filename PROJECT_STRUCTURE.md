@@ -341,7 +341,9 @@ metanode/
 | `consensus_node.rs` | **236** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
 | `setup_storage/mod.rs` | **838** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
 | `setup_storage/index_sync.rs` | 115 | Helper to determine Go last global execution index | 🟡 MED |
-| `setup_consensus/mod.rs` | **1,881** | **Phase 2: Consensus setup** — orchestrates startup synchronization | 🔴 CRITICAL |
+| `setup_consensus/mod.rs` | **1,066** | **Phase 2: Consensus setup** — orchestrates consensus initialization | 🔴 CRITICAL |
+| `setup_consensus/startup_sync.rs` | 651 | Startup block sync loop implementation | 🔴 HIGH |
+| `setup_consensus/verification.rs` | 231 | Post-gate and background block hash verification | 🔴 HIGH |
 | `setup_consensus/fork_guard.rs` | 149 | Runtime Fork Guard background hash verification | 🔴 HIGH |
 | `epoch_monitor.rs` | 675 | Epoch health monitoring + alerts | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
