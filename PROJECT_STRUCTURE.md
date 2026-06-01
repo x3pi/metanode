@@ -108,21 +108,37 @@ metanode/
 │  └──────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────┐   │
 │  │  meta-consensus/core/src/  ← BFT ENGINE │   │
-│  │  ├── authority_node.rs    ← Authority    │   │
-│  │  ├── authority_service.rs ← Lifecycle    │   │
-│  │  ├── linearizer.rs       ← DAG→linear   │   │
+│  │  ├── authority_node/      ← Authority node module │   │
+│  │  │   ├── mod.rs          ← Authority node orchestration │   │
+│  │  │   └── tests.rs        ← Authority node unit tests │   │
+│  │  ├── authority_service/   ← Authority service module │   │
+│  │  │   ├── mod.rs          ← Lifecycle coordinator │   │
+│  │  │   ├── handlers.rs     ← RPC server handlers │   │
+│  │  │   └── broadcast.rs    ← Block broadcast stream │   │
+│  │  ├── linearizer/          ← DAG→linear commit ordering │   │
+│  │  │   ├── mod.rs          ← Deterministic commit ordering │   │
+│  │  │   └── tests.rs        ← Linearizer unit tests │   │
 │  │  ├── commit_syncer/      ← Commit sync module │   │
 │  │  │   ├── mod.rs          ← Coord loop         │   │
 │  │  │   ├── fetcher.rs      ← P2P network fetch  │   │
 │  │  │   └── cold_start.rs   ← Sync transition    │   │
-│  │  ├── commit_finalizer.rs ← Finalization  │   │
+│  │  ├── commit_finalizer/   ← Commit finalization module │   │
+│  │  │   ├── mod.rs          ← Finalizer loop     │   │
+│  │  │   └── types.rs        ← Finalization state structs │   │
 │  │  ├── coordination_hub.rs ← Peer attest   │   │
 │  │  ├── commit_vote_monitor.rs← Digest vote │   │
-│  │  ├── synchronizer.rs     ← Block sync    │   │
+│  │  ├── synchronizer/      ← Block sync module  │   │
+│  │  │   ├── mod.rs          ← Event loop         │   │
+│  │  │   ├── fetcher.rs      ← Fetch blocks P2P   │   │
+│  │  │   └── scheduler.rs    ← Scheduled fetches  │   │
+│  │  ├── block_manager/      ← Block manager module │   │
+│  │  │   ├── mod.rs          ← Block validation/acceptance │   │
+│  │  │   └── types.rs        ← Suspended blocks state │   │
 │  │  ├── dag_state/           ← DAG state    │   │
 │  │  ├── core/                ← Proposer     │   │
 │  │  ├── storage/             ← RocksDB      │   │
 │  │  └── network/             ← tonic gRPC   │   │
+│  │  └── ...                  │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
 ```
@@ -134,10 +150,10 @@ metanode/
 | Layer | Files | Lines of Code |
 |-------|-------|---------------|
 | Go Execution (`execution/`) | ~835 | ~237K |
-| Rust Consensus (`consensus/metanode/src/`) | ~86 | ~28K |
-| Rust Core Engine (`meta-consensus/core/src/`) | ~76 | ~45K |
+| Rust Consensus (`consensus/metanode/src/`) | ~88 | ~28K |
+| Rust Core Engine (`meta-consensus/core/src/`) | ~83 | ~45K |
 | Shared Crates (`crates/`) | ~81 | ~23K |
-| **Total** | **~1078** | **~333K** |
+| **Total** | **~1087** | **~333K** |
 
 ---
 
@@ -319,13 +335,20 @@ metanode/
 | `commit_callbacks.rs` | 65 | **Rust→Go** commit notifications | 🔴 HIGH |
 | `state_attestation.rs` | 144 | State root attestation pre-commit | 🔴 HIGH |
 
-### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (33 files)
+### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (35 files)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
 | `consensus_node.rs` | **236** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
-| `setup_storage.rs` | **940** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
-| `setup_consensus.rs` | **2,017** | **Phase 2: Consensus setup** — startup state sync, runtime fork guard | 🔴 CRITICAL |
-| `epoch_monitor.rs` | 675 | Epoch health monitoring + alerts | 🔴 HIGH |
+| `setup_storage/mod.rs` | **838** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
+| `setup_storage/index_sync.rs` | 115 | Helper to determine Go last global execution index | 🟡 MED |
+| `setup_consensus/mod.rs` | **1,066** | **Phase 2: Consensus setup** — orchestrates consensus initialization | 🔴 CRITICAL |
+| `setup_consensus/startup_sync.rs` | 651 | Startup block sync loop implementation | 🔴 HIGH |
+| `setup_consensus/verification.rs` | 231 | Post-gate and background block hash verification | 🔴 HIGH |
+| `setup_consensus/fork_guard.rs` | 149 | Runtime Fork Guard background hash verification | 🔴 HIGH |
+| `epoch_monitor/mod.rs` | **221** | **Unified epoch monitor** — coordinates health checks and delegates transitions | 🔴 HIGH |
+| `epoch_monitor/stall_recovery.rs` | 134 | Validator block stall recovery via active P2P sync | 🔴 HIGH |
+| `epoch_monitor/sync_only_advance.rs` | 113 | SyncOnly sequential epoch advancement | 🔴 HIGH |
+| `epoch_monitor/validator_transition.rs` | 268 | Validator multi-epoch catchup transition | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
 | `epoch_checkpoint.rs` | 321 | Epoch state persistence at boundaries | 🔴 HIGH |
 | `epoch_store.rs` | 206 | Epoch metadata storage | 🟡 MED |
@@ -413,15 +436,19 @@ metanode/
 | File | Lines | Role | Risk |
 |------|-------|------|------|
 | `commit_syncer/mod.rs` | **2,812** | Commit synchronization main coordination loop | 🔴 CRITICAL |
-| `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
-| `synchronizer.rs` | 2,175 | DAG block synchronization | 🔴 HIGH |
-| `dag_state/dag_state_impl.rs` | 1,873 | DAG state machine implementation | 🔴 HIGH |
-| `authority_service.rs` | 1,745 | Authority lifecycle service | 🔴 HIGH |
-| `commit_finalizer.rs` | 1,605 | Commit finalization logic | 🔴 HIGH |
+| `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
+| `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
+| `dag_state/tests.rs` | 1,376 | DAG state unit test suite | 🟢 TEST |
 | `network/tonic_network.rs` | 1,433 | tonic gRPC network layer | 🟡 MED |
-| `block_manager.rs` | 1,300 | Block validation + storage | 🔴 HIGH |
-| `authority_node.rs` | 1,193 | Authority node orchestration | 🔴 HIGH |
-| `linearizer.rs` | 1,169 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
+| `authority_service/handlers.rs` | 907 | RPC handlers for block subscription and fetching | 🔴 HIGH |
+| `commit_finalizer/mod.rs` | 900 | Commit finalization coordination loop | 🔴 HIGH |
+| `block_manager/mod.rs` | 672 | Suspended/missing blocks tracking and acceptance | 🔴 HIGH |
+| `authority_node/mod.rs` | 724 | Authority node orchestration | 🔴 HIGH |
+| `linearizer/mod.rs` | 571 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
+| `linearizer/tests.rs` | 600 | Linearizer unit tests | 🟢 TEST |
+| `core_tests/commits.rs` | 955 | Core commit and scheduler tests | 🟢 TEST |
+| `core_tests/proposal.rs` | 809 | Core proposal and timeout tests | 🟢 TEST |
+| `core_tests/ancestors.rs` | 512 | Core ancestors and round signals tests | 🟢 TEST |
 | `metrics.rs` | 1,104 | Prometheus metrics definitions | 🟢 LOW |
 | `leader_schedule.rs` | 1,072 | Leader election scheduling (stake-weighted) | 🔴 HIGH |
 | `commit.rs` | 1,051 | Commit types + verification | 🔴 HIGH |
@@ -436,6 +463,9 @@ metanode/
 ### Supporting Files (<500 lines)
 | File | Lines | Role |
 |------|-------|------|
+| `authority_node/tests.rs` | 471 | Authority node unit tests |
+| `core_tests/recovery.rs` | 295 | Core consensus crash recovery tests |
+| `core_tests/mod.rs` | 190 | Core tests common helpers and setup |
 | `coordination_hub.rs` | 593 | **Peer attestation hub** — ZERO-TIMEOUT peer commit verification |
 | `core/commit_manager.rs` | 569 | Commit decision management |
 | `subscriber.rs` | 446 | Block subscription |
@@ -444,6 +474,7 @@ metanode/
 | `recovery_barrier.rs` | 411 | Recovery synchronization barrier |
 | `dag_state/write.rs` | 650 | DAG state write operations |
 | `dag_state/read.rs` | 449 | DAG state read operations |
+| `dag_state/dag_state_impl.rs` | 498 | DAG state machine implementation |
 | `core_thread.rs` | 584 | Core consensus thread |
 | `commit_vote_monitor.rs` | 303 | **Digest vote tracking** — commit hash quorum verification |
 | `commit_consumer.rs` | 159 | Commit consumption interface |
@@ -458,7 +489,12 @@ metanode/
 | `storage/rocksdb_store.rs` | 472 | RocksDB persistent store |
 | `commit_syncer/fetcher.rs` | 495 | P2P block and commit fetch loop |
 | `commit_syncer/cold_start.rs` | 233 | Sync status transition decisions |
+| `synchronizer/fetcher.rs` | 275 | P2P block fetch worker and verifier |
 | `storage/mem_store.rs` | 275 | In-memory store (testing) |
+| `authority_service/mod.rs` | 182 | Authority lifecycle service coordinator |
+| `authority_service/broadcast.rs` | 203 | Block broadcast stream and counters |
+| `commit_finalizer/types.rs` | 88 | State structs for commit finalization |
+| `block_manager/types.rs` | 40 | State structs for block manager |
 
 ---
 

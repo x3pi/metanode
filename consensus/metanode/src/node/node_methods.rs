@@ -82,6 +82,7 @@ impl ConsensusNode {
     pub async fn shutdown(&mut self) -> Result<()> {
         info!("Shutting down consensus node...");
         let _ = self.stop_sync_task().await;
+        epoch_monitor::stop_epoch_monitor(self.epoch_monitor_handle.take()).await;
         if let Some(authority) = self.authority.take() {
             authority.stop().await;
         }
@@ -428,6 +429,20 @@ impl Drop for ConsensusNode {
             self.authority.is_some(),
             self.coordination_hub.is_epoch_transitioning()
         );
+
+        // Abort background handles to prevent Tokio task leaks.
+        if let Some(ref handle) = self.epoch_monitor_handle {
+            handle.abort();
+        }
+        if let Some(ref handle) = self.notification_server_handle {
+            handle.abort();
+        }
+        if let Some(mut handle) = self.sync_task_handle.take() {
+            if let Some(tx) = handle.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            handle.task_handle.abort();
+        }
 
         // Capture backtrace to identify the source of the drop
         let backtrace = std::backtrace::Backtrace::capture();

@@ -39,6 +39,7 @@ mod tests {
             network_address: "127.0.0.1:9004".to_string(),
             timestamp_ms: 1234567890000,
             last_global_exec_index: 0,
+            state_root: "".to_string(),
         };
 
         let json = serde_json::to_string(&info).unwrap();
