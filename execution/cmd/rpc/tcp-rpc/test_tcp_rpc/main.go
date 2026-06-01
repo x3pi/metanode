@@ -32,9 +32,9 @@ func protoReceiptToRpcReceipt(rcpt *pb.Receipt) *pb.RpcReceipt {
 	if rcpt == nil {
 		return nil
 	}
-	status := "0x1"
+	status := pb.RECEIPT_STATUS_RETURNED
 	if rcpt.Status == pb.RECEIPT_STATUS_THREW || rcpt.Status == pb.RECEIPT_STATUS_TRANSACTION_ERROR {
-		status = "0x0"
+		status = pb.RECEIPT_STATUS_HALTED
 	}
 	gasUsed := fmt.Sprintf("0x%x", rcpt.GasUsed)
 	txHash := common.BytesToHash(rcpt.TransactionHash).Hex()
@@ -200,10 +200,10 @@ func sendTxExpectError(
 	}
 	fmt.Printf("  ⚠️ Transaction did NOT revert (txHash=%s), checking receipt...\n", txHash)
 	receipt := waitReceiptPoll(tcpClient, txHash)
-	if receipt != nil && receipt.Status != "0x1" {
-		fmt.Printf("  ✅ Receipt shows revert: status=%s\n", receipt.Status)
+	if receipt != nil && receipt.Status != pb.RECEIPT_STATUS_RETURNED {
+		fmt.Printf("  ✅ Receipt shows revert: status=%v\n", receipt.Status)
 	} else if receipt != nil {
-		fmt.Printf("  ❌ Transaction succeeded unexpectedly: status=%s\n", receipt.Status)
+		fmt.Printf("  ❌ Transaction succeeded unexpectedly: status=%v\n", receipt.Status)
 	}
 }
 

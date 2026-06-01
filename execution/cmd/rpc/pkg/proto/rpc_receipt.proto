@@ -1,5 +1,6 @@
 syntax = "proto3";
 package rpc_request;
+import "receipt.proto";
 
 option go_package = "/proto";
 
@@ -29,7 +30,7 @@ message RpcReceipt {
     string From = 2;
     string To = 3;
     string ContractAddress = 4;       // Nếu deploy contract
-    string Status = 5;                // "0x1" = success, "0x0" = fail
+    receipt.RECEIPT_STATUS Status = 5; // Dùng enum pb.RECEIPT_STATUS trực tiếp
     string GasUsed = 6;              // Hex string
     string CumulativeGasUsed = 7;
     string EffectiveGasPrice = 8;
@@ -41,4 +42,14 @@ message RpcReceipt {
     string LogsBloom = 14;
     bytes ReturnData = 15;            // Return data từ EVM execution
     string Exception = 16;            // Exception type nếu có lỗi
+}
+
+message GetTransactionReceiptRequest {
+  bytes TransactionHash = 1;      // Hash của transaction cần lấy receipt
+}
+
+// GetTransactionReceiptResponse - Response chứa receipt data
+message GetTransactionReceiptResponse {
+  RpcReceipt Receipt = 1;  // RpcReceipt (null nếu không tìm thấy)
+  string Error = 2;                     // Error message nếu có lỗi
 }

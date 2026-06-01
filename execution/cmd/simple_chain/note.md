@@ -28,9 +28,4 @@ key
     "index": 49997,
     "private_key": "6451950adcce1e30efc6c029bbba140fdfcda79756047c8605709173d1600ff3",
     "address": "0x7EB655B6A3f58DE47CA598385ba531A8f4e156B1"
-  },
-  {
-    "index": 49998,
-    "private_key": "3b6e5c303928bd05a74394d4cf440b578a9fc4f41618011b51fa7ad1121e0d94",
-    "address": "0x09f3fc68e7A532737903BD5111235e2eCfd7A31C"
   }
