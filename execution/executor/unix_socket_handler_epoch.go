@@ -235,8 +235,8 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			// 	fromBlock, lastBlockNumber)
 		}
 	}
-	logger.Info("📦 [BLOCK SYNC] Using BlockNumber mode: from=%d (start=%d), to=%d (lastBlock=%d, lastHandledCommit=%d, lastHandledEpoch=%d)",
-		fromBlock, startBlock, toBlock, lastBlockNumber, storage.GetLastHandledCommitIndex(), storage.GetLastHandledCommitEpoch())
+	// logger.Info("📦 [BLOCK SYNC] Using BlockNumber mode: from=%d (start=%d), to=%d (lastBlock=%d, lastHandledCommit=%d, lastHandledEpoch=%d)",
+	// 	fromBlock, startBlock, toBlock, lastBlockNumber, storage.GetLastHandledCommitIndex(), storage.GetLastHandledCommitEpoch())
 
 	var blocks []*pb.BlockData
 
@@ -320,8 +320,8 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 				// Backup not ready — broadcastWorker may be lagging.
 				// STOP serving here immediately. Requester will retry this range later.
 				// Removing the 10x 50ms sleep polling to prevent cascading delays on large batch syncs.
-				logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
-					blockNum, blockNum-1, len(blocks))
+				// logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
+				// 	blockNum, blockNum-1, len(blocks))
 				break
 			}
 		}
@@ -331,11 +331,11 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 
 	count := uint64(len(blocks))
 	if count == 0 {
-		logger.Info("📦 [BLOCK SYNC] ⚠️ Returning 0 blocks (from=%d, to=%d, lastBlock=%d). "+
-			"Check: (1) BlockHashByNumber index missing? (2) Backup data not ready? (3) Epoch/commit filter?",
-			fromBlock, toBlock, lastBlockNumber)
+		// logger.Info("📦 [BLOCK SYNC] ⚠️ Returning 0 blocks (from=%d, to=%d, lastBlock=%d). "+
+		// 	"Check: (1) BlockHashByNumber index missing? (2) Backup data not ready? (3) Epoch/commit filter?",
+		// 	fromBlock, toBlock, lastBlockNumber)
 	} else {
-		logger.Info("📦 [BLOCK SYNC] ✅ Returning %d blocks (from=%d, to=%d)", count, fromBlock, toBlock)
+		// logger.Info("📦 [BLOCK SYNC] ✅ Returning %d blocks (from=%d, to=%d)", count, fromBlock, toBlock)
 	}
 
 	return &pb.GetBlocksRangeResponse{
