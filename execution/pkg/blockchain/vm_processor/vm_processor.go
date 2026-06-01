@@ -97,6 +97,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
 		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
 		result := vmP.readOnlyCall(execCtx, tx, mvmROnly)
 		if span != nil {
