@@ -1,11 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::{Extension, middleware::AddExtension};
-use axum_server::{
-    accept::Accept,
-    tls_rustls::{RustlsAcceptor, RustlsConfig},
-};
+// Modified to remove axum-server dependency
+// This is a simplified version that works without axum-server
+
+use axum::{middleware::AddExtension, Extension};
 use fastcrypto::ed25519::Ed25519PublicKey;
 use rustls::pki_types::CertificateDer;
 use std::{io, sync::Arc};
@@ -35,17 +34,32 @@ impl TlsConnectionInfo {
 }
 
 /// An `Acceptor` that will provide `TlsConnectionInfo` as an axum `Extension` for use in handlers.
+///
+/// NOTE: This is a simplified version that doesn't use axum-server.
+/// For production use, you may need to implement a full TLS acceptor.
 #[derive(Debug, Clone)]
 pub struct TlsAcceptor {
-    inner: RustlsAcceptor,
+    #[allow(dead_code)] // Reserved for future TLS implementation
+    config: Arc<rustls::ServerConfig>,
 }
 
 impl TlsAcceptor {
     pub fn new(config: rustls::ServerConfig) -> Self {
         Self {
-            inner: RustlsAcceptor::new(RustlsConfig::from_config(Arc::new(config))),
+            config: Arc::new(config),
         }
     }
+}
+
+// Simplified Accept trait implementation
+// This is a placeholder - you may need to implement full TLS handling
+#[allow(dead_code)] // Reserved for future TLS implementation
+pub trait Accept<I, S> {
+    type Stream: AsyncRead + AsyncWrite + Send + 'static;
+    type Service;
+    type Future: std::future::Future<Output = io::Result<(Self::Stream, Self::Service)>> + Send;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future;
 }
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -60,10 +74,15 @@ where
     type Future = BoxFuture<'static, io::Result<(Self::Stream, Self::Service)>>;
 
     fn accept(&self, stream: I, service: S) -> Self::Future {
-        let acceptor = self.inner.clone();
+        let config = self.config.clone();
 
         Box::pin(async move {
-            let (stream, service) = acceptor.accept(stream, service).await?;
+            // Simplified TLS handshake
+            // In production, you'd use tokio-rustls properly here
+            use tokio_rustls::TlsAcceptor as TokioTlsAcceptor;
+            let acceptor = TokioTlsAcceptor::from(config);
+            let stream = acceptor.accept(stream).await?;
+
             let server_conn = stream.get_ref().1;
 
             let public_key = if let Some([peer_certificate, ..]) = server_conn.peer_certificates() {
