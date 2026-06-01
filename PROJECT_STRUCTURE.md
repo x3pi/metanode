@@ -419,7 +419,7 @@ metanode/
 | `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
 | `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
 | `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
-| `dag_state/dag_state_impl.rs` | 1,873 | DAG state machine implementation | 🔴 HIGH |
+| `dag_state/tests.rs` | 1,376 | DAG state unit test suite | 🟢 TEST |
 | `authority_service.rs` | 1,745 | Authority lifecycle service | 🔴 HIGH |
 | `commit_finalizer.rs` | 1,605 | Commit finalization logic | 🔴 HIGH |
 | `network/tonic_network.rs` | 1,433 | tonic gRPC network layer | 🟡 MED |
@@ -448,6 +448,7 @@ metanode/
 | `recovery_barrier.rs` | 411 | Recovery synchronization barrier |
 | `dag_state/write.rs` | 650 | DAG state write operations |
 | `dag_state/read.rs` | 449 | DAG state read operations |
+| `dag_state/dag_state_impl.rs` | 498 | DAG state machine implementation |
 | `core_thread.rs` | 584 | Core consensus thread |
 | `commit_vote_monitor.rs` | 303 | **Digest vote tracking** — commit hash quorum verification |
 | `commit_consumer.rs` | 159 | Commit consumption interface |
