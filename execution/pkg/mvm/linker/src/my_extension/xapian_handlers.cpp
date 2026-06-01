@@ -200,7 +200,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(newDocID);
-      manager->dump_all_documents(blockNumber);
+      // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
 
       return encodeArgument(uint256Abi, hexNumber);
     }
@@ -374,7 +374,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                      "(document not found or Xapian error)"
                   << std::endl;
       }
-      manager->dump_all_documents(blockNumber);
+      // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -444,7 +444,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                "(failed to index)"
             << std::endl;
       }
-      manager->dump_all_documents(blockNumber);
+      // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
       auto encodedData = encodeArgument(uint256Abi, hexNumber);
