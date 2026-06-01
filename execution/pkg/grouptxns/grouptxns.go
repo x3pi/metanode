@@ -35,7 +35,7 @@ type GroupResult struct {
 	ExecuteSCResults []types.ExecuteSCResult
 	Error            error
 	AsRoot           common.Hash
-	DirtyAccounts    []types.AccountState               // Deferred dirty accounts — applied after parallel phase
+	DirtyAccounts    []types.AccountState           // Deferred dirty accounts — applied after parallel phase
 	MvmIdMap         map[common.Hash]common.Address // Maps tx.Hash to its executing mvmId
 }
 
@@ -233,6 +233,11 @@ func GroupAndLimitTransactionsOptimized(items []Item, maxGroupGas uint64, maxTot
 			if nonceA != nonceB {
 				return nonceA < nonceB
 			}
+			maxGasA := relativeGroups[i].Items[a].Tx.MaxGas()
+			maxGasB := relativeGroups[i].Items[b].Tx.MaxGas()
+			if maxGasA != maxGasB {
+				return maxGasA > maxGasB // Giảm dần theo MaxGas
+			}
 			return relativeGroups[i].Items[a].ID < relativeGroups[i].Items[b].ID
 		})
 	}
@@ -306,6 +311,11 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 			nonceB := groups[i].Items[b].Tx.GetNonce()
 			if nonceA != nonceB {
 				return nonceA < nonceB
+			}
+			maxGasA := groups[i].Items[a].Tx.MaxGas()
+			maxGasB := groups[i].Items[b].Tx.MaxGas()
+			if maxGasA != maxGasB {
+				return maxGasA > maxGasB // Giảm dần theo MaxGas
 			}
 			return groups[i].Items[a].ID < groups[i].Items[b].ID
 		})
