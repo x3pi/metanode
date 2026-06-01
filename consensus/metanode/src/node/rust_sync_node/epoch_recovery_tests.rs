@@ -42,7 +42,7 @@ fn make_test_sync_node(
     initial_epoch: u64,
     initial_global_exec_index: u32,
     epoch_base_index: u64,
-) -> (RustSyncNode, mpsc::UnboundedReceiver<(u64, u64, u64)>) {
+) -> (RustSyncNode, mpsc::Receiver<(u64, u64, u64, u64)>) {
     let executor_client = Arc::new(ExecutorClient::new(
         false,
         false,
@@ -50,7 +50,7 @@ fn make_test_sync_node(
         "/dev/null".to_string(),
         None,
     ));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(100);
     let node = RustSyncNode::new(
         executor_client,
         tx,
@@ -142,8 +142,9 @@ fn test_epoch_transition_sender() {
     // Verify receiver gets the correct data
     let received = rx.try_recv();
     assert!(received.is_ok());
-    let (epoch, timestamp, boundary) = received.unwrap();
+    let (epoch, timestamp, boundary, boundary_gei) = received.unwrap();
     assert_eq!(epoch, 2);
     assert_eq!(timestamp, 1234567890);
     assert_eq!(boundary, 5000);
+    assert_eq!(boundary_gei, 100);
 }

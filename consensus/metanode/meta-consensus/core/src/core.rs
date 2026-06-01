@@ -319,5 +319,4 @@ impl Core {
 pub(crate) use crate::core_signals::{CoreSignals, CoreSignalsReceivers};
 
 #[cfg(test)]
-#[path = "core_tests.rs"]
 mod core_tests;

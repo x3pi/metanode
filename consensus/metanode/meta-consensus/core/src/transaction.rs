@@ -123,7 +123,7 @@ impl TransactionConsumer {
         // Handle one batch of incoming transactions from TransactionGuard.
         // The method will return `None` if all the transactions can be included in the block. Otherwise some or all of the transactions will be
         // excluded from the block and the method will return a new TransactionGuard with the remaining transactions.
-        let mut handle_txs = |mut t: TransactionsGuard| -> Option<TransactionsGuard> {
+        let mut handle_txs = |t: TransactionsGuard| -> Option<TransactionsGuard> {
             let transactions_num = t.transactions.len() as u64;
             if transactions_num == 0 {
                 acks.push((t.included_in_block_ack, vec![PING_TRANSACTION_INDEX]));

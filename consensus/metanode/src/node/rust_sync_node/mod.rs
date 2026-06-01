@@ -42,7 +42,7 @@ use tracing::info;
 
 /// Handle to control the RustSyncNode
 pub struct RustSyncHandle {
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub task_handle: tokio::task::JoinHandle<()>,
 }
 
