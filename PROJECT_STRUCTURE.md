@@ -150,10 +150,10 @@ metanode/
 | Layer | Files | Lines of Code |
 |-------|-------|---------------|
 | Go Execution (`execution/`) | ~835 | ~237K |
-| Rust Consensus (`consensus/metanode/src/`) | ~86 | ~28K |
+| Rust Consensus (`consensus/metanode/src/`) | ~88 | ~28K |
 | Rust Core Engine (`meta-consensus/core/src/`) | ~83 | ~45K |
 | Shared Crates (`crates/`) | ~81 | ~23K |
-| **Total** | **~1085** | **~333K** |
+| **Total** | **~1087** | **~333K** |
 
 ---
 
@@ -335,12 +335,14 @@ metanode/
 | `commit_callbacks.rs` | 65 | **Rust→Go** commit notifications | 🔴 HIGH |
 | `state_attestation.rs` | 144 | State root attestation pre-commit | 🔴 HIGH |
 
-### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (33 files)
+### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (35 files)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
 | `consensus_node.rs` | **236** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
-| `setup_storage.rs` | **940** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
-| `setup_consensus.rs` | **2,017** | **Phase 2: Consensus setup** — startup state sync, runtime fork guard | 🔴 CRITICAL |
+| `setup_storage/mod.rs` | **838** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
+| `setup_storage/index_sync.rs` | 115 | Helper to determine Go last global execution index | 🟡 MED |
+| `setup_consensus/mod.rs` | **1,881** | **Phase 2: Consensus setup** — orchestrates startup synchronization | 🔴 CRITICAL |
+| `setup_consensus/fork_guard.rs` | 149 | Runtime Fork Guard background hash verification | 🔴 HIGH |
 | `epoch_monitor.rs` | 675 | Epoch health monitoring + alerts | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
 | `epoch_checkpoint.rs` | 321 | Epoch state persistence at boundaries | 🔴 HIGH |
