@@ -90,7 +90,7 @@ type SnapshotManager struct {
 	pauseCallback           func()
 	resumeCallback          func()
 	rustPauseCallback       func()
-	rustResumeCallback func()
+	rustResumeCallback      func()
 
 	// Callback to get the current exact StateRoot
 	stateRootCallback func() string
@@ -430,7 +430,7 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	// PHASE 0: FREEZE TOÀN BỘ EXECUTION
 	// ═══════════════════════════════════════════════════════════════════════════
 	pausedGo := false
-	
+
 	// 1. Dừng Go Master (acquires ExecutionMutex, calls WaitForPersistence)
 	// Việc này đảm bảo không có block mới nào được đẩy vào commitChannel nữa.
 	// Nó cũng drain toàn bộ commit queue cũ, đưa memory state về sync hoàn toàn.
@@ -955,7 +955,7 @@ func (sm *SnapshotManager) ForceSnapshotNow(blockNumber uint64, epoch uint64) {
 		// Use createAtomicSnapshot which PAUSES Go+Rust → captures state → resumes
 		var createErr error
 		createErr = sm.createAtomicSnapshot(epoch, blockNumber, blockNumber, sm.snapshotMethod)
-		
+
 		var rotateErr error
 		if createErr == nil {
 			rotateErr = sm.RotateSnapshots()
