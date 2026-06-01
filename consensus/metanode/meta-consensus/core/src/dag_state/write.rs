@@ -274,6 +274,26 @@ impl DagState {
     pub fn add_commit(&mut self, commit: TrustedCommit) {
         let time_diff = if let Some(last_commit) = &self.last_commit {
             if commit.index() <= last_commit.index() {
+                let local_commits = self.store.scan_commits((commit.index()..=commit.index()).into())
+                    .unwrap_or_default();
+                let local_commit_opt = local_commits.into_iter().next();
+                
+                if let Some(local_commit) = local_commit_opt {
+                    if local_commit.digest() != commit.digest() {
+                        tracing::warn!(
+                            "🚨 [DIVERGENCE-OVERWRITE] Overwriting divergent historical commit {} with network-certified commit (digest: {:?})",
+                            commit.index(),
+                            commit.digest()
+                        );
+                        self.commits_to_delete.push((local_commit.index(), local_commit.digest()));
+                        self.commits_to_write.push(commit.clone());
+                        if Some(commit.index()) == self.last_commit.as_ref().map(|c| c.index()) {
+                            self.last_commit = Some(commit);
+                        }
+                        return;
+                    }
+                }
+                
                 tracing::warn!(
                     "⏭️ [SCHEDULE-RECOVERY] Skipping DagState state update for historical commit {} (last commit index {}). This is EXPECTED during LeaderSwapTable reconstruction.",
                     commit.index(),
@@ -508,10 +528,12 @@ impl DagState {
         // Flush buffered data to storage.
         let pending_blocks = std::mem::take(&mut self.blocks_to_write);
         let pending_commits = std::mem::take(&mut self.commits_to_write);
+        let pending_commits_to_delete = std::mem::take(&mut self.commits_to_delete);
         let pending_commit_info = std::mem::take(&mut self.commit_info_to_write);
         let pending_finalized_commits = std::mem::take(&mut self.finalized_commits_to_write);
         if pending_blocks.is_empty()
             && pending_commits.is_empty()
+            && pending_commits_to_delete.is_empty()
             && pending_commit_info.is_empty()
             && pending_finalized_commits.is_empty()
         {
@@ -523,7 +545,7 @@ impl DagState {
         let context = self.context.clone();
 
         debug!(
-            "Flushing {} blocks ({}), {} commits ({}), {} commit infos ({}), {} finalized commits ({}) to storage.",
+            "Flushing {} blocks ({}), {} commits ({}), {} commits to delete ({:?}), {} commit infos ({}), {} finalized commits ({}) to storage.",
             pending_blocks.len(),
             pending_blocks
                 .iter()
@@ -534,6 +556,8 @@ impl DagState {
                 .iter()
                 .map(|c| c.reference().to_string())
                 .join(","),
+            pending_commits_to_delete.len(),
+            pending_commits_to_delete,
             pending_commit_info.len(),
             pending_commit_info
                 .iter()
@@ -548,6 +572,7 @@ impl DagState {
         let write_batch = WriteBatch::new(
             pending_blocks,
             pending_commits,
+            pending_commits_to_delete,
             pending_commit_info,
             pending_finalized_commits,
         );

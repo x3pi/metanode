@@ -173,6 +173,8 @@ pub struct ConsensusNode {
     #[allow(dead_code)]
     pub(crate) _commit_consumer_holder: Option<CommitConsumerArgs>,
 
+    pub(crate) commit_consumer_monitor: Arc<consensus_core::CommitConsumerMonitor>,
+
     /// Multi-epoch committee cache: ETH addresses keyed by epoch
     /// Keeps last 3 epochs to support lookups during epoch transitions
     /// Updated when committee is loaded, used by CommitProcessor to send leader_address to Go
@@ -228,6 +230,7 @@ pub(crate) struct ConsensusSetup {
     /// Critical health flag. Set to true if any background Station crashes.
     pub(crate) is_terminally_failed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) commit_consumer_holder: Option<CommitConsumerArgs>,
+    pub(crate) commit_consumer_monitor: Arc<consensus_core::CommitConsumerMonitor>,
     pub(crate) transaction_client_proxy: Option<Arc<TransactionClientProxy>>,
     pub(crate) executor_client_for_proc: Arc<ExecutorClient>,
     pub(crate) current_commit_index: Arc<AtomicU32>,

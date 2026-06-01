@@ -69,11 +69,11 @@ func TestUpdateLastBlockNumber_Callback(t *testing.T) {
 	assert.Equal(t, uint64(42), atomic.LoadUint64(&called))
 }
 
-// ---------- CommitLock (no-op) ----------
+// ---------- CommitLock ----------
 
-func TestCommitLock_AlwaysFalse(t *testing.T) {
+func TestCommitLock_State(t *testing.T) {
 	SetCommitLock(true)
-	assert.False(t, GetCommitLock())
+	assert.True(t, GetCommitLock())
 
 	SetCommitLock(false)
 	assert.False(t, GetCommitLock())

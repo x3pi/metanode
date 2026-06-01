@@ -34,6 +34,7 @@ type ExecuteSCResult struct {
 
 	mapNativeSmartContractUpdateStorage map[common.Address][][2][]byte
 	eventLogs                           []types.EventLog
+	mapFullDbLogs                       map[string][]byte
 }
 
 func NewExecuteSCResult(
@@ -325,6 +326,15 @@ func (r *ExecuteSCResult) MapStorageAddressTouchedAddresses() map[common.Address
 func (r *ExecuteSCResult) MapNativeSmartContractUpdateStorage() map[common.Address][][2][]byte {
 	return r.mapNativeSmartContractUpdateStorage
 }
+
+func (r *ExecuteSCResult) MapFullDbLogs() map[string][]byte {
+	return r.mapFullDbLogs
+}
+
+func (r *ExecuteSCResult) SetMapFullDbLogs(logs map[string][]byte) {
+	r.mapFullDbLogs = logs
+}
+
 
 func ExecuteSCResultsFromProto(pbData []*pb.ExecuteSCResult) []types.ExecuteSCResult {
 	results := make([]types.ExecuteSCResult, len(pbData))

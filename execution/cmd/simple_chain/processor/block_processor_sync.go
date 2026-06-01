@@ -163,6 +163,19 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 	}
 
 	// ═════════════════════════════════════════════════════════════════════
+	// STALE EPOCH GUARD: Discard commits from previous epochs.
+	// Once Go has advanced to a higher epoch, any incoming commit with a
+	// lower epoch number is stale (belongs to a finalized epoch) and must
+	// be discarded to prevent duplicate block execution / state divergence.
+	// ═════════════════════════════════════════════════════════════════════
+	activeEpoch := bp.chainState.GetCurrentEpoch()
+	if epochNum < activeEpoch {
+		logger.Warn("🛡️ [EPOCH-GUARD] Skipping stale commit from previous epoch: incoming epoch=%d < active epoch=%d (commitIndex=%d, GEI=%d)",
+			epochNum, activeEpoch, commitIndex, globalExecIndex)
+		return nil
+	}
+
+	// ═════════════════════════════════════════════════════════════════════
 	// CRITICAL FORK-SAFETY FIX: Epoch transition commit_index reset
 	//
 	// EPOCH-INFLATION GUARD (May 2026):

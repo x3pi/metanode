@@ -72,7 +72,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 
 	if executeTransaction.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 		if err != nil {
 			return nil, err
 		}
@@ -93,7 +93,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 
 	if executeTransaction.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +120,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, v.storageManager.GetStorageAccount())
 
 	blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		}
 		lastBlockHeader := *headerPtr
 
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 
 		if err != nil {
 			return nil, err
@@ -235,7 +235,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		}
 		lastBlockHeader := *headerPtr
 
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			return nil, err
 		}
@@ -250,7 +250,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	if executeTransaction.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
 		lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 		if err != nil {
 			return nil, err
 		}
@@ -286,7 +286,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, v.storageManager.GetStorageAccount())
 
 	blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "") // Empty backupPath for temporary chain state
+	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +403,7 @@ func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, blockV
 
 	if tx.IsCallContract() || tx.IsDeployContract() {
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blockVal.Header(), v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blockVal.Header(), v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temporary chain state for debug execution: %w", err)
 		}

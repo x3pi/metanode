@@ -58,7 +58,8 @@ impl ExecutorClient {
     /// Sync blocks to local Go Master (store-only mode)
     /// Used by SyncOnly nodes to write blocks received from peers
     pub async fn sync_blocks(&self, blocks: Vec<proto::BlockData>) -> Result<(u64, u64)> {
-        self.sync_blocks_inner(blocks, false).await
+        let (count, last_block, _) = self.sync_blocks_inner(blocks, false).await?;
+        Ok((count, last_block))
     }
 
     /// Sync AND EXECUTE blocks through NOMT on local Go Master
@@ -68,10 +69,7 @@ impl ExecutorClient {
         &self,
         blocks: Vec<proto::BlockData>,
     ) -> Result<(u64, u64, u64)> {
-        let (count, last_block) = self.sync_blocks_inner(blocks, true).await?;
-        // last_executed_gei is embedded in last_block for execute mode
-        // (the inner method returns it via the response)
-        Ok((count, last_block, 0)) // GEI returned separately below
+        self.sync_blocks_inner(blocks, true).await
     }
 
     /// Internal: sync blocks with optional execute_mode flag
@@ -79,13 +77,13 @@ impl ExecutorClient {
         &self,
         blocks: Vec<proto::BlockData>,
         execute_mode: bool,
-    ) -> Result<(u64, u64)> {
+    ) -> Result<(u64, u64, u64)> {
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
 
         if blocks.is_empty() {
-            return Ok((0, 0));
+            return Ok((0, 0, 0));
         }
 
         let total_blocks = blocks.len();
@@ -104,6 +102,7 @@ impl ExecutorClient {
         let chunk_size: usize = if execute_mode { 250 } else { 250 };
         let mut total_synced_count = 0u64;
         let mut final_synced_block = 0u64;
+        let mut final_executed_gei = 0u64;
 
         for chunk_idx in (0..blocks.len()).step_by(chunk_size) {
             let end_idx = std::cmp::min(chunk_idx + chunk_size, blocks.len());
@@ -132,6 +131,9 @@ impl ExecutorClient {
                     if resp.last_synced_block > final_synced_block {
                         final_synced_block = resp.last_synced_block;
                     }
+                    if resp.last_executed_gei > final_executed_gei {
+                        final_executed_gei = resp.last_executed_gei;
+                    }
                 }
                 Some(proto::response::Payload::Error(e)) => {
                     return Err(anyhow::anyhow!("Go Master error: {}", e));
@@ -141,9 +143,9 @@ impl ExecutorClient {
         }
 
         info!(
-            "✅ [BLOCK SYNC] Successfully synced {} blocks (last: {}, mode={})",
-            total_synced_count, final_synced_block, mode_str
+            "✅ [BLOCK SYNC] Successfully synced {} blocks (last: {}, last_gei: {}, mode={})",
+            total_synced_count, final_synced_block, final_executed_gei, mode_str
         );
-        Ok((total_synced_count, final_synced_block))
+        Ok((total_synced_count, final_synced_block, final_executed_gei))
     }
 }

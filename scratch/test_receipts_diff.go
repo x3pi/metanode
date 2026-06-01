@@ -52,11 +52,19 @@ func callRPC(url string, method string, params []interface{}) (map[string]interf
 
 func main() {
 	m0Url := "http://127.0.0.1:8757"
-	m1Url := "http://127.0.0.1:10749"
-	blockNumHex := "0x1fe" // 510
+	m1Url := "http://127.0.0.1:10747"
+	blockNumHex := "0x1f8" // 504
 
-	m0Block, _ := callRPC(m0Url, "eth_getBlockByNumber", []interface{}{blockNumHex, true})
-	m0Txs := m0Block["transactions"].([]interface{})
+	m0Block, err := callRPC(m0Url, "eth_getBlockByNumber", []interface{}{blockNumHex, true})
+	if err != nil || m0Block == nil {
+		fmt.Println("Error fetching block from m0:", err)
+		return
+	}
+	m0Txs, ok := m0Block["transactions"].([]interface{})
+	if !ok {
+		fmt.Println("No transactions in block")
+		return
+	}
 
 	diffCount := 0
 	for _, txI := range m0Txs {

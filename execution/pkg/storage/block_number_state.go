@@ -35,6 +35,9 @@ var (
 	// lastAssignedBlockNumber tracks the highest block number assigned by Rust FFI
 	// before it's necessarily committed to DB. Used to prevent block numbering overlap.
 	lastAssignedBlockNumber uint64
+
+	// commitLock is used to serialize block commits to PebbleDB
+	commitLock uint32
 )
 
 // Update state constants
@@ -50,11 +53,6 @@ const (
 var StateChangeChan = make(chan uint32, 128)
 var ConnectChangeChan = make(chan uint32, 128)
 
-// TPS OPTIMIZATION: CommitLock removed — was causing 71% idle time by blocking
-// ProcessorPool while blocks committed. AccountStateDB.lockedFlag already provides
-// the necessary concurrent access safety.
-// var commitLock uint32 // REMOVED
-
 func InitIncrementingCounterFromBootTime() {
 	// Lấy Unix timestamp hiện tại (số giây kể từ Epoch).
 	// Bạn có thể dùng `time.Now().UnixMilli()` nếu cần độ chính xác mili giây.
@@ -69,17 +67,18 @@ func GetIncrementingCounter() uint64 {
 	return atomic.AddUint64(&incrementingCounter, 1) // Tăng giá trị cho lần gọi tiếp theo
 }
 
-// TPS OPTIMIZATION: CommitLock functions are now no-ops.
-// Previously, SetCommitLock(true) was called at the start of ProcessTransactions,
-// and GetCommitLock() blocked ProcessorPool from starting the next batch.
-// This created a serial pipeline where only one block could process at a time.
-// AccountStateDB.lockedFlag already prevents concurrent IntermediateRoot calls.
+// SetCommitLock sets the commit lock status.
 func SetCommitLock(lock bool) {
-	// NO-OP: Removed to enable overlapping block execution
+	if lock {
+		atomic.StoreUint32(&commitLock, 1)
+	} else {
+		atomic.StoreUint32(&commitLock, 0)
+	}
 }
 
+// GetCommitLock returns whether the commit lock is set.
 func GetCommitLock() bool {
-	return false // Never locked — always allow processing
+	return atomic.LoadUint32(&commitLock) == 1
 }
 
 func UpdateLastBlockNumber(blockNumber uint64) {

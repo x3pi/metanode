@@ -187,7 +187,11 @@ func (vmP *VmProcessor) deploySmartContract(
 	mvmId common.Address,
 	isCache bool,
 ) (types.ExecuteSCResult, error) {
-	defer mvm.ClearMVMApi(mvmId)
+	defer func() {
+		if !isCache {
+			mvm.ClearMVMApi(mvmId)
+		}
+	}()
 	var span *trace.Span = nil          // Khởi tạo nil
 	var deployCtx context.Context = ctx // Mặc định dùng context vào
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
@@ -244,7 +248,7 @@ func (vmP *VmProcessor) deploySmartContract(
 		span.AddEvent("UpdatingStateDBAfterDeploy", nil)
 	}
 
-	_, err := vmP.updateStateDB(deployCtx, tx, mvmResult, mvmId, isFree) // Truyền deployCtx xuống
+	_, err := vmP.updateStateDB(deployCtx, tx, mvmResult, mvmId, isFree, isCache) // Truyền deployCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after deploy: %w", err)
 		if span != nil { // GUARD
@@ -347,6 +351,9 @@ func (vmP *VmProcessor) readOnlyCall(
 	// ✅ Đưa exception message vào Return field nếu Return empty và có exception
 	returnData := prepareReturnDataWithExceptionMessage(mvmResult.Return, mvmResult.Exmsg, mvmResult.Status, mvmResult.Exception)
 	rs := smart_contract.NewExecuteSCResult(tx.Hash(), mvmResult.Status, mvmResult.Exception, returnData, mvmResult.GasUsed, common.Hash{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if mvmResult != nil && mvmResult.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmResult.MapFullDbLogs)
+	}
 	if span != nil { // GUARD
 		span.SetAttribute("resultStatus", rs.ReceiptStatus().String())
 		span.SetAttribute("resultGasUsed", rs.GasUsed())
@@ -361,9 +368,8 @@ func (vmP *VmProcessor) executeSmartContract(
 	mvmE *mvm.MVMApi,
 	isCache bool,
 ) (types.ExecuteSCResult, error) {
-	var success bool
 	defer func() {
-		if !success || !isCache {
+		if !isCache {
 			mvm.ClearMVMApi(mvmE.GetKey())
 		}
 	}()
@@ -445,7 +451,7 @@ func (vmP *VmProcessor) executeSmartContract(
 	}
 
 	startStateDB := time.Now()
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, isCache) // Pass execCtx xuống
 	stateDBDuration := time.Since(startStateDB)
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after execute: %w", err)
@@ -476,7 +482,6 @@ func (vmP *VmProcessor) executeSmartContract(
 	if span != nil { // GUARD
 		span.AddEvent("MVMApiPersistsAfterExecute", map[string]interface{}{"mvmId": currentMvmId.Hex()})
 	}
-	success = true
 	return rs, nil
 }
 
@@ -563,7 +568,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 		span.AddEvent("UpdatingStateDBAfterProcessNativeMintBurn", map[string]interface{}{"mvmIdToUpdate": currentMvmId.Hex()})
 	}
 
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, false) // Pass execCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after processNativeMintBurn: %w", err)
 		if span != nil { // GUARD
@@ -661,7 +666,7 @@ func (vmP *VmProcessor) sendNative(
 		span.AddEvent("UpdatingStateDBAfterExecute", map[string]interface{}{"mvmIdToUpdate": currentMvmId.Hex()})
 	}
 
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree) // Pass execCtx xuống
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, currentMvmId, isFree, isCache) // Pass execCtx xuống
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after execute: %w", err)
 		if span != nil { // GUARD
@@ -733,7 +738,7 @@ func (vmP *VmProcessor) ProcessMVMResult(
 	mvmId common.Address,
 	isFree bool,
 ) (types.ExecuteSCResult, error) {
-	_, err := vmP.updateStateDB(ctx, tx, mvmResult, mvmId, isFree)
+	_, err := vmP.updateStateDB(ctx, tx, mvmResult, mvmId, isFree, false)
 	if err != nil {
 		rs, _ := vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
 		return rs, err

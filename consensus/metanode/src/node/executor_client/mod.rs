@@ -83,6 +83,8 @@ pub struct ExecutorClient {
     pub(crate) last_processed_epoch: Arc<tokio::sync::Mutex<u64>>,
     /// Semaphore to limit concurrent FFI RPC calls, preventing thread starvation and Go-side contention
     pub(crate) rpc_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Timestamp (ms) of the last gap query to Go Master to prevent FFI query flooding
+    pub(crate) last_gap_query_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Production safety constants
@@ -202,6 +204,7 @@ impl ExecutorClient {
             next_block_number: Arc::new(tokio::sync::Mutex::new(0)),
             last_processed_epoch: Arc::new(tokio::sync::Mutex::new(0)),
             rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            last_gap_query_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 

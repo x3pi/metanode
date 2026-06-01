@@ -80,6 +80,13 @@ impl Store for MemStore {
             }
         }
 
+        for (index, digest) in write_batch.commits_to_delete {
+            inner.commits.remove(&(index, digest));
+            inner.commit_info.remove(&(index, digest));
+            inner.finalized_commits.remove(&(index, digest));
+            inner.commit_votes.retain(|&(idx, dig, _)| idx != index || dig != digest);
+        }
+
         for commit in write_batch.commits {
             inner
                 .commits
