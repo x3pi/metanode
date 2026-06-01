@@ -1,7 +1,7 @@
 syntax = "proto3";
 package receipt;
 import "event_log.proto";
-import "rpc_receipt.proto";
+
 
 option go_package = "/proto";
 option java_package = "com.meta_node.protos.compiled.receipt";
@@ -56,15 +56,7 @@ message Receipt {
     uint64 GroupIndex = 15;
 }
 
-message GetTransactionReceiptRequest {
-  bytes TransactionHash = 1;      // Hash của transaction cần lấy receipt
-}
 
-// GetTransactionReceiptResponse - Response chứa receipt data
-message GetTransactionReceiptResponse {
-  rpc_request.RpcReceipt Receipt = 1;  // RpcReceipt (null nếu không tìm thấy)
-  string Error = 2;                     // Error message nếu có lỗi
-}
 
 message Receipts {
     repeated Receipt Receipts = 1;

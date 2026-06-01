@@ -152,7 +152,7 @@ func (srv *RpcTcpServer) handleGetNonce(request t_network.Request) error {
 // receiptToRpcReceipt converts internal receipt to pb.RpcReceipt
 func receiptToRpcReceipt(rcp *receipt.Receipt, tx types.Transaction) *pb.RpcReceipt {
 	rpcReceipt := &pb.RpcReceipt{
-		Status: fmt.Sprintf("0x%x", rcp.Status()),
+		Status: pb.RECEIPT_STATUS(rcp.Status()),
 	}
 	if tx != nil {
 		rpcReceipt.TransactionHash = tx.Hash().Hex()
@@ -170,7 +170,7 @@ func jsonToRpcReceipt(m map[string]interface{}) *pb.RpcReceipt {
 		From:              getStr(m, "from"),
 		To:                getStr(m, "to"),
 		ContractAddress:   getStr(m, "contractAddress"),
-		Status:            getStr(m, "status"),
+		Status:            parseStatus(getStr(m, "status")),
 		GasUsed:           getStr(m, "gasUsed"),
 		CumulativeGasUsed: getStr(m, "cumulativeGasUsed"),
 		EffectiveGasPrice: getStr(m, "effectiveGasPrice"),
@@ -222,4 +222,14 @@ func getBoolVal(m map[string]interface{}, key string) bool {
 		return v
 	}
 	return false
+}
+
+func parseStatus(s string) pb.RECEIPT_STATUS {
+	if s == "0x1" || s == "1" || s == "RETURNED" {
+		return pb.RECEIPT_STATUS_RETURNED
+	}
+	if s == "0x0" || s == "0" || s == "HALTED" {
+		return pb.RECEIPT_STATUS_HALTED
+	}
+	return pb.RECEIPT_STATUS_RETURNED
 }
