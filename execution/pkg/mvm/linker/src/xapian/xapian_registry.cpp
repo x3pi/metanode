@@ -370,8 +370,8 @@ XapianRegistry::getGroupChangeLogsForMvmId(unsigned char *mvmId) const
         {
             if (manager_ptr)
             {
-                // Lấy ComprehensiveLog từ manager (chỉ chứa log của manager đó)
-                XapianLog::ComprehensiveLog manager_log = manager_ptr->getComprehensiveChangeLogs();
+                // Lấy ComprehensiveLog từ manager (và xóa log cũ khỏi manager)
+                XapianLog::ComprehensiveLog manager_log = manager_ptr->extractComprehensiveChangeLogs();
 
                 // Di chuyển (move) các bản ghi log từ manager_log vào log tổng hợp của nhóm
                 // để tránh sao chép không cần thiết, tăng hiệu quả.
@@ -412,17 +412,30 @@ bool XapianRegistry::commitChangesForMvmId(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            // Gọi saveAllAndCommit (hiện tại tương đương commit_changes)
-            if (!manager_ptr->saveAllAndCommit())
             {
-                all_succeeded = false; // Đánh dấu thất bại nếu một commit không thành công
-                                       // Có thể dừng lại ngay hoặc tiếp tục commit các manager khác (hiện tại là tiếp tục)
+                std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+                if (manager_ptr->active_mvm_id == key)
+                {
+                    if (manager_ptr->has_started)
+                    {
+                        try {
+                            manager_ptr->db.commit_transaction();
+                        } catch (...) {
+                            all_succeeded = false;
+                        }
+                        manager_ptr->has_started = false;
+                    }
+                    manager_ptr->active_mvm_id.clear();
+                    manager_ptr->tx_cond.notify_all();
+                }
             }
+            // XÓA: Không gọi saveAllAndCommit() (db.commit()) ở đây để tránh fsync I/O blocking.
+            // Xapian sẽ tự động lưu memory-mapped và OS sẽ flush xuống disk.
+            // Nếu có crash, STARTUP-SYNC của Metanode sẽ tự động replay trạng thái.
         }
         else
         {
             // Bỏ qua con trỏ null (lỗi logic nếu xảy ra)
-            // all_succeeded = false; // Nếu muốn coi đây là lỗi
         }
     }
 
@@ -452,6 +465,25 @@ bool XapianRegistry::revertChangesForMvmId(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
+            {
+                std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+                if (manager_ptr->active_mvm_id == key)
+                {
+                    if (manager_ptr->has_started)
+                    {
+                        try {
+                            manager_ptr->removeLogsUntilNearestEndCommand();
+                            manager_ptr->db.cancel_transaction();
+                        } catch (...) {
+                            all_succeeded = false;
+                        }
+                        manager_ptr->has_started = false;
+                    }
+                    manager_ptr->active_mvm_id.clear();
+                    manager_ptr->tx_cond.notify_all();
+                }
+            }
+
             // Gọi hàm revert trên từng manager
             if (!manager_ptr->revertUncommittedChanges())
             {
@@ -487,16 +519,21 @@ void XapianRegistry::cancelTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
-            if (manager_ptr->has_started)
+            std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+            if (manager_ptr->active_mvm_id == key)
             {
-                try {
-                    manager_ptr->removeLogsUntilNearestEndCommand();
-                    manager_ptr->db.cancel_transaction();
-                } catch (...) {
-                    // Bỏ qua lỗi khi cancel
+                if (manager_ptr->has_started)
+                {
+                    try {
+                        manager_ptr->removeLogsUntilNearestEndCommand();
+                        manager_ptr->db.cancel_transaction();
+                    } catch (...) {
+                        // Bỏ qua lỗi khi cancel
+                    }
+                    manager_ptr->has_started = false;
                 }
-                manager_ptr->has_started = false;
+                manager_ptr->active_mvm_id.clear();
+                manager_ptr->tx_cond.notify_all();
             }
         }
     }
@@ -517,15 +554,20 @@ void XapianRegistry::commitTransaction(unsigned char *mvmId)
     {
         if (manager_ptr)
         {
-            std::lock_guard<std::shared_mutex> lock(manager_ptr->changes_mutex);
-            if (manager_ptr->has_started)
+            std::unique_lock<std::shared_mutex> lock(manager_ptr->changes_mutex);
+            if (manager_ptr->active_mvm_id == key)
             {
-                try {
-                    manager_ptr->db.commit_transaction();
-                } catch (...) {
-                    // Bỏ qua lỗi khi commit
+                if (manager_ptr->has_started)
+                {
+                    try {
+                        manager_ptr->db.commit_transaction();
+                    } catch (...) {
+                        // Bỏ qua lỗi khi commit
+                    }
+                    manager_ptr->has_started = false;
                 }
-                manager_ptr->has_started = false;
+                manager_ptr->active_mvm_id.clear();
+                manager_ptr->tx_cond.notify_all();
             }
         }
     }

@@ -937,6 +937,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// Range+Delete reuses the same map structure, avoiding the GC spike.
 	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
 		db.dirtyAccounts.Delete(key)
+		// CRITICAL FIX: The account was modified and committed to the trie.
+		// If its old (pre-modification) state was cached in loadedAccounts, we MUST evict it!
+		// Otherwise, subsequent reads in the next block will hit the stale loadedAccounts
+		// cache instead of reading the new state from the trie, causing infinite nonce loops.
+		db.loadedAccounts.Delete(key)
 		return true
 	})
 

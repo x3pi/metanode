@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"context"
 	"errors"
 	"fmt"
@@ -32,7 +33,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
-	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -247,7 +247,7 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	// QUAN TRỌNG: Phải gọi End() trước khi cố gắng lấy span từ exporter
 	defer rootSpan.End()
 
-	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "") // Empty backupPath for temporary chain state
+	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "skip_epoch_data")
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
@@ -706,18 +706,26 @@ func (api *DebugApi) ListManagedConnections(ctx context.Context, params *Connect
 
 // ModifiedAccountInfo represents differences/details of a modified account state.
 type ModifiedAccountInfo struct {
-	Address         string `json:"address"`
-	PreBalance      string `json:"preBalance"`
-	PostBalance     string `json:"postBalance"`
-	PreNonce        uint64 `json:"preNonce"`
-	PostNonce       uint64 `json:"postNonce"`
-	PreCodeHash     string `json:"preCodeHash"`
-	PostCodeHash    string `json:"postCodeHash"`
-	PreStorageRoot  string `json:"preStorageRoot"`
-	PostStorageRoot string `json:"postStorageRoot"`
-	PreDataHash     string `json:"preDataHash"`
-	PostDataHash    string `json:"postDataHash"`
-	IsNew           bool   `json:"isNew"`
+	Address           string            `json:"address"`
+	PreBalance        string            `json:"preBalance"`
+	PostBalance       string            `json:"postBalance"`
+	PreNonce          uint64            `json:"preNonce"`
+	PostNonce         uint64            `json:"postNonce"`
+	PreCodeHash       string            `json:"preCodeHash"`
+	PostCodeHash      string            `json:"postCodeHash"`
+	PreStorageRoot    string            `json:"preStorageRoot"`
+	PostStorageRoot   string            `json:"postStorageRoot"`
+	PreMapFullDbHash  string            `json:"preMapFullDbHash,omitempty"`
+	PostMapFullDbHash string            `json:"postMapFullDbHash,omitempty"`
+	PreSimpleDbHash   string            `json:"preSimpleDbHash,omitempty"`
+	PostSimpleDbHash  string            `json:"postSimpleDbHash,omitempty"`
+	PreLogsHash       string            `json:"preLogsHash,omitempty"`
+	PostLogsHash      string            `json:"postLogsHash,omitempty"`
+	PreTrieDBMap      map[string]string `json:"preTrieDBMap,omitempty"`
+	PostTrieDBMap     map[string]string `json:"postTrieDBMap,omitempty"`
+	PreDataHash       string            `json:"preDataHash"`
+	PostDataHash      string            `json:"postDataHash"`
+	IsNew             bool              `json:"isNew"`
 }
 
 // BlockStateDiffResult represents the results of evaluating the block execution state changes.
@@ -734,10 +742,8 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 	}
 
 	var changelogDB *state_changelog.StateChangelogDB
-	if api.App != nil && api.App.chainState != nil && api.App.chainState.GetAccountStateDB() != nil {
-		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*p_trie.NomtStateTrie); ok {
-			changelogDB = nomtTrie.GetChangelogDB()
-		}
+	if api.App != nil && api.App.chainState != nil {
+		changelogDB = api.App.chainState.GetChangelogDB()
 	}
 
 	if changelogDB == nil {
@@ -755,6 +761,8 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 		hexAddr := addr.Hex()
 		
 		var postBal, postCodeHash, postStorageRoot, postDataHash string
+		var postMapFullDbHash, postSimpleDbHash, postLogsHash string
+		var postTrieDBMap map[string]string
 		var postNonce uint64
 		if len(change.NewValue) > 0 {
 			postAS := state.NewAccountState(addr)
@@ -764,6 +772,15 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 				if postAS.SmartContractState() != nil {
 					postCodeHash = postAS.SmartContractState().CodeHash().Hex()
 					postStorageRoot = postAS.SmartContractState().StorageRoot().Hex()
+					postMapFullDbHash = postAS.SmartContractState().MapFullDbHash().Hex()
+					postSimpleDbHash = postAS.SmartContractState().SimpleDbHash().Hex()
+					postLogsHash = postAS.SmartContractState().LogsHash().Hex()
+					if postAS.SmartContractState().TrieDatabaseMap() != nil {
+						postTrieDBMap = make(map[string]string)
+						for k, v := range postAS.SmartContractState().TrieDatabaseMap() {
+							postTrieDBMap[k] = hex.EncodeToString(v)
+						}
+					}
 				} else {
 					postCodeHash = "0x"
 					postStorageRoot = "0x"
@@ -775,6 +792,8 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 		var isNew bool
 		var preNonce uint64
 		var preBal, preCodeHash, preStorageRoot, preDataHash string
+		var preMapFullDbHash, preSimpleDbHash, preLogsHash string
+		var preTrieDBMap map[string]string
 		oldVal, err := changelogDB.GetStateAt(change.Key, blockNumber-1)
 		if err != nil || len(oldVal) == 0 {
 			isNew = true
@@ -792,6 +811,15 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 				if preAS.SmartContractState() != nil {
 					preCodeHash = preAS.SmartContractState().CodeHash().Hex()
 					preStorageRoot = preAS.SmartContractState().StorageRoot().Hex()
+					preMapFullDbHash = preAS.SmartContractState().MapFullDbHash().Hex()
+					preSimpleDbHash = preAS.SmartContractState().SimpleDbHash().Hex()
+					preLogsHash = preAS.SmartContractState().LogsHash().Hex()
+					if preAS.SmartContractState().TrieDatabaseMap() != nil {
+						preTrieDBMap = make(map[string]string)
+						for k, v := range preAS.SmartContractState().TrieDatabaseMap() {
+							preTrieDBMap[k] = hex.EncodeToString(v)
+						}
+					}
 				} else {
 					preCodeHash = "0x"
 					preStorageRoot = "0x"
@@ -801,18 +829,26 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 		}
 
 		modifiedMap[hexAddr] = ModifiedAccountInfo{
-			Address:         hexAddr,
-			PreBalance:      preBal,
-			PostBalance:     postBal,
-			PreNonce:        preNonce,
-			PostNonce:       postNonce,
-			PreCodeHash:     preCodeHash,
-			PostCodeHash:    postCodeHash,
-			PreStorageRoot:  preStorageRoot,
-			PostStorageRoot: postStorageRoot,
-			PreDataHash:     preDataHash,
-			PostDataHash:    postDataHash,
-			IsNew:           isNew,
+			Address:           hexAddr,
+			PreBalance:        preBal,
+			PostBalance:       postBal,
+			PreNonce:          preNonce,
+			PostNonce:         postNonce,
+			PreCodeHash:       preCodeHash,
+			PostCodeHash:      postCodeHash,
+			PreStorageRoot:    preStorageRoot,
+			PostStorageRoot:   postStorageRoot,
+			PreMapFullDbHash:  preMapFullDbHash,
+			PostMapFullDbHash: postMapFullDbHash,
+			PreSimpleDbHash:   preSimpleDbHash,
+			PostSimpleDbHash:  postSimpleDbHash,
+			PreLogsHash:       preLogsHash,
+			PostLogsHash:      postLogsHash,
+			PreTrieDBMap:      preTrieDBMap,
+			PostTrieDBMap:     postTrieDBMap,
+			PreDataHash:       preDataHash,
+			PostDataHash:      postDataHash,
+			IsNew:             isNew,
 		}
 	}
 

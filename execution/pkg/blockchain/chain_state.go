@@ -123,7 +123,7 @@ func NewChainStateWithGenesis(
 	//   - stake_db      → validator stake amounts
 	// They CANNOT be merged into one DB.
 	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string) *state_changelog.StateChangelogDB {
-		if config == nil || !config.IsRPCNode || backupPath == "" {
+		if config == nil || !config.IsRPCNode || backupPath == "" || backupPath == "skip_epoch_data" {
 			return nil
 		}
 		var baseDir string
@@ -143,8 +143,13 @@ func NewChainStateWithGenesis(
 		return cdb
 	}
 
+	useRegistry := true
+	if backupPath == "skip_epoch_data" {
+		useRegistry = false
+	}
+
 	accountStorage := sm.GetStorageAccount()
-	accountStateTrie, err := trie.NewStateTrie(currentBlockHeader.AccountStatesRoot(), accountStorage, true)
+	accountStateTrie, err := trie.NewStateTrie(currentBlockHeader.AccountStatesRoot(), accountStorage, useRegistry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account state trie: %v", err)
 	}
@@ -154,7 +159,7 @@ func NewChainStateWithGenesis(
 	}
 
 	stakeStorage := sm.GetStorageStake()
-	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, true)
+	stakeStateTrie, err := trie.NewStateTrie(common.Hash(currentBlockHeader.StakeStatesRoot()), stakeStorage, useRegistry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stake state trie: %v", err)
 	}
@@ -200,55 +205,59 @@ func NewChainStateWithGenesis(
 	cs.stakeStateDB.Store(stakeStateDB)
 	cs.smartContractDB.Store(scDB)
 
-	// CRITICAL: Log backup path to verify node-specific path is used
-	if backupPath == "" {
-		logger.Warn("⚠️ [EPOCH PERSISTENCE] backupPath is empty - epoch data will use fallback /tmp path (NOT RECOMMENDED for multi-node setups)")
-	} else {
-		logger.Info("📁 [EPOCH PERSISTENCE] Using node-specific backup path: %s", backupPath)
-	}
-
-	// Try to load persisted epoch data first (NOW USING CORRECT NODE-SPECIFIC PATH)
-	logger.Info("🔄 [EPOCH PERSISTENCE] Attempting to load epoch data from database...")
-	if err := cs.LoadEpochData(); err != nil {
-		logger.Warn("Failed to load epoch data from database, will use genesis config", "error", err)
-	} else {
-		logger.Info("✅ [EPOCH PERSISTENCE] Successfully loaded epoch data - current_epoch={}, epoch_timestamp_ms={}",
-			cs.currentEpoch, cs.epochStartTimestampMs)
-	}
-
-	// Initialize genesis epoch only if no persisted data was loaded
-	if cs.currentEpoch == 0 && cs.epochStartTimestampMs == 0 {
-		// Set attestation interval from genesis config
-		if genesisConfig != nil && genesisConfig.AttestationInterval > 0 {
-			cs.attestationInterval = genesisConfig.AttestationInterval
-			logger.Info("🔏 [ATTESTATION] Interval set from genesis: every %d blocks", cs.attestationInterval)
-		}
-
-		if genesisConfig != nil && genesisConfig.EpochTimestampMs > 0 {
-			cs.InitializeGenesisEpoch(genesisConfig.EpochTimestampMs)
+	if backupPath != "skip_epoch_data" {
+		// CRITICAL: Log backup path to verify node-specific path is used
+		if backupPath == "" {
+			logger.Warn("⚠️ [EPOCH PERSISTENCE] backupPath is empty - epoch data will use fallback /tmp path (NOT RECOMMENDED for multi-node setups)")
 		} else {
-			// CRITICAL FIX: Use DETERMINISTIC timestamp from the current block header
-			// instead of time.Now() which causes epoch mismatch across different Go instances
-			// The currentBlockHeader is passed during construction and should be consistent
-			// across all nodes with the same blockchain state.
-			var deterministicTimestamp uint64
-			if currentBlockHeader != nil && currentBlockHeader.TimeStamp() > 0 {
-				deterministicTimestamp = currentBlockHeader.TimeStamp()
-				logger.Info("🔧 [GENESIS EPOCH] Derived timestamp from currentBlockHeader: block=%d, timestamp_ms=%d",
-					currentBlockHeader.BlockNumber(), currentBlockHeader.TimeStamp())
-			} else {
-				// Absolute fallback: Use a fixed known timestamp (e.g., epoch 0 = 0)
-				// This should rarely happen in production
-				deterministicTimestamp = 0
-				logger.Warn("⚠️ [GENESIS EPOCH] No valid block header available, using epoch 0 timestamp=0")
-			}
-			cs.InitializeGenesisEpoch(deterministicTimestamp)
+			logger.Info("📁 [EPOCH PERSISTENCE] Using node-specific backup path: %s", backupPath)
 		}
 
-		// Save initial genesis epoch data
-		if err := cs.SaveEpochData(); err != nil {
-			logger.Warn("Failed to save initial genesis epoch data", "error", err)
+		// Try to load persisted epoch data first (NOW USING CORRECT NODE-SPECIFIC PATH)
+		logger.Info("🔄 [EPOCH PERSISTENCE] Attempting to load epoch data from database...")
+		if err := cs.LoadEpochData(); err != nil {
+			logger.Warn("Failed to load epoch data from database, will use genesis config", "error", err)
+		} else {
+			logger.Info("✅ [EPOCH PERSISTENCE] Successfully loaded epoch data - current_epoch={}, epoch_timestamp_ms={}",
+				cs.currentEpoch, cs.epochStartTimestampMs)
 		}
+
+		// Initialize genesis epoch only if no persisted data was loaded
+		if cs.currentEpoch == 0 && cs.epochStartTimestampMs == 0 {
+			// Set attestation interval from genesis config
+			if genesisConfig != nil && genesisConfig.AttestationInterval > 0 {
+				cs.attestationInterval = genesisConfig.AttestationInterval
+				logger.Info("🔏 [ATTESTATION] Interval set from genesis: every %d blocks", cs.attestationInterval)
+			}
+
+			if genesisConfig != nil && genesisConfig.EpochTimestampMs > 0 {
+				cs.InitializeGenesisEpoch(genesisConfig.EpochTimestampMs)
+			} else {
+				// CRITICAL FIX: Use DETERMINISTIC timestamp from the current block header
+				// instead of time.Now() which causes epoch mismatch across different Go instances
+				// The currentBlockHeader is passed during construction and should be consistent
+				// across all nodes with the same blockchain state.
+				var deterministicTimestamp uint64
+				if currentBlockHeader != nil && currentBlockHeader.TimeStamp() > 0 {
+					deterministicTimestamp = currentBlockHeader.TimeStamp()
+					logger.Info("🔧 [GENESIS EPOCH] Derived timestamp from currentBlockHeader: block=%d, timestamp_ms=%d",
+						currentBlockHeader.BlockNumber(), currentBlockHeader.TimeStamp())
+				} else {
+					// Absolute fallback: Use a fixed known timestamp (e.g., epoch 0 = 0)
+					// This should rarely happen in production
+					deterministicTimestamp = 0
+					logger.Warn("⚠️ [GENESIS EPOCH] No valid block header available, using epoch 0 timestamp=0")
+				}
+				cs.InitializeGenesisEpoch(deterministicTimestamp)
+			}
+
+			// Save initial genesis epoch data
+			if err := cs.SaveEpochData(); err != nil {
+				logger.Warn("Failed to save initial genesis epoch data", "error", err)
+			}
+		}
+	} else {
+		logger.Info("🚀 [EPOCH PERSISTENCE] Skipping epoch data loading and initialization for virtual/temporary chain state")
 	}
 
 	headerCopy := currentBlockHeader
@@ -1242,4 +1251,22 @@ func (cs *ChainState) CheckpointChangelogs(destBaseDir string) error {
 		logger.Info("✅ [STATE CHANGELOG] Checkpointed changelog_db_stake to %s", cPath)
 	}
 	return nil
+}
+
+// Close releases any resources held by the chain state databases and tries.
+func (cs *ChainState) Close() {
+	if asDB := cs.GetAccountStateDB(); asDB != nil {
+		asDB.Close()
+	}
+	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+		if closer, ok := stakeDB.Trie().(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+	if cs.changelogDB != nil {
+		cs.changelogDB.Close()
+	}
+	if cs.stakeChangelogDB != nil {
+		cs.stakeChangelogDB.Close()
+	}
 }

@@ -96,6 +96,11 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		tx.Hash().Hex(), tx.IsCallContract(), tx.IsDeployContract(), isAccountSetting, needsEVM)
 
 	if needsEVM {
+		// FORK-SAFETY: Acquire shared read lock before EVM execution via cgo.
+		// This prevents concurrent execution with real block processing (which holds exclusive Lock).
+		v.blockProcessingLock.RLock()
+		defer v.blockProcessingLock.RUnlock()
+
 		headerPtr := v.chainState.GetcurrentBlockHeader()
 		if headerPtr == nil {
 			return nil, fmt.Errorf("current block header is nil"), nil
@@ -103,13 +108,18 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		blHeader := *headerPtr
 
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temporary chain state for virtual execution: %w", err), nil
 		}
+		defer chainStateNew.Close()
 
 		vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, blockTime, common.Address{})
 		mvm.ProtectMVMApi(mvmId)
+		defer func() {
+			mvm.UnprotectMVMApi(mvmId)
+			mvm.ClearMVMApi(mvmId)
+		}()
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
 			/*toAccountState, getAccErr := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress())
@@ -186,8 +196,6 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		updatedTx.AddRelatedAddress(tx.FromAddress())
 		updatedTx.AddRelatedAddress(tx.ToAddress())
 		updatedTx.SetReadOnly(!statusUpdate)
-		mvm.UnprotectMVMApi(mvmId)
-		mvm.ClearMVMApi(mvmId)
 		return updatedTx, nil, exRs.Return()
 	}
 
@@ -389,11 +397,12 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 		}
 		blHeader := *headerPtr
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "")
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, blHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
 		if err != nil {
 			logger.Warn("[VIRTUAL CC batchSubmit] ⚠️ failed to create temporary chain state: %v, cannot simulate inbound targets", err)
 			return updatedTx, nil, []byte(fmt.Sprintf("execute:%d/%d", voteCount, total))
 		}
+		defer chainStateNew.Close()
 
 		for i, item := range targets {
 			if item.Target == (common.Address{}) {

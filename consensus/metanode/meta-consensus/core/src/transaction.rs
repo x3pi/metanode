@@ -117,68 +117,113 @@ impl TransactionConsumer {
         let mut acks = Vec::new();
         let mut total_bytes = 0;
         let mut limit_reached = LimitReached::AllTransactionsIncluded;
+        // FIX: Increase max_group_size from 2 to 500 (MAX_BUNDLE_SIZE) so that FFI batches are not dropped by TX-DROP-GUARD.
+        let mut group_verifier = crate::tx_group_filter::IncrementalGroupVerifier::new(crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE, self.max_num_transactions_in_block as usize);
 
         // Handle one batch of incoming transactions from TransactionGuard.
-        // The method will return `None` if all the transactions can be included in the block. Otherwise none of the transactions will be
-        // included in the block and the method will return the TransactionGuard.
-        let mut handle_txs = |t: TransactionsGuard| -> Option<TransactionsGuard> {
-            // If no transactions are submitted, it means that the transaction guard represents a ping transaction.
-            // In this case, we need to push the `PING_TRANSACTION_INDEX` to the indices vector.
+        // The method will return `None` if all the transactions can be included in the block. Otherwise some or all of the transactions will be
+        // excluded from the block and the method will return a new TransactionGuard with the remaining transactions.
+        let mut handle_txs = |mut t: TransactionsGuard| -> Option<TransactionsGuard> {
             let transactions_num = t.transactions.len() as u64;
             if transactions_num == 0 {
                 acks.push((t.included_in_block_ack, vec![PING_TRANSACTION_INDEX]));
                 return None;
             }
 
-            // Check if the total bytes of the transactions exceed the max transactions in block bytes.
-            let transactions_bytes =
-                t.transactions.iter().map(|t| t.data().len()).sum::<usize>() as u64;
-            if total_bytes + transactions_bytes > self.max_transactions_in_block_bytes {
-                limit_reached = LimitReached::MaxBytes;
-                return Some(t);
-            }
-            if transactions.len() as u64 + transactions_num > self.max_num_transactions_in_block {
-                limit_reached = LimitReached::MaxNumOfTransactions;
-                return Some(t);
+            let mut accepted_txs = Vec::new();
+            let mut remaining_txs = Vec::new();
+            let mut local_total_bytes = 0;
+
+            let mut iter = t.transactions.into_iter();
+            while let Some(tx) = iter.next() {
+                let tx_bytes = tx.data().len() as u64;
+
+                if total_bytes + local_total_bytes + tx_bytes > self.max_transactions_in_block_bytes {
+                    limit_reached = LimitReached::MaxBytes;
+                    remaining_txs.push(tx);
+                    remaining_txs.extend(iter);
+                    break;
+                }
+
+                if transactions.len() as u64 + accepted_txs.len() as u64 + 1 > self.max_num_transactions_in_block {
+                    limit_reached = LimitReached::MaxNumOfTransactions;
+                    remaining_txs.push(tx);
+                    remaining_txs.extend(iter);
+                    break;
+                }
+
+                let mut test_verifier = group_verifier.clone();
+                if !test_verifier.add_tx(&tx) {
+                    limit_reached = LimitReached::MaxNumOfTransactions;
+                    remaining_txs.push(tx);
+                    continue; // Skip this tx but continue checking others in the batch
+                }
+                group_verifier = test_verifier;
+
+                local_total_bytes += tx_bytes;
+                accepted_txs.push(tx);
             }
 
-            total_bytes += transactions_bytes;
+            if accepted_txs.is_empty() {
+                // Not a single transaction from this batch fits the limits!
+                // Just return the whole thing back.
+                return Some(TransactionsGuard {
+                    transactions: remaining_txs,
+                    included_in_block_ack: t.included_in_block_ack,
+                });
+            }
+
+            total_bytes += local_total_bytes;
 
             // Calculate indices for this batch
             let start_idx = transactions.len() as TransactionIndex;
             let indices: Vec<TransactionIndex> =
-                (start_idx..start_idx + t.transactions.len() as TransactionIndex).collect();
+                (start_idx..start_idx + accepted_txs.len() as TransactionIndex).collect();
 
             // The transactions can be consumed, register its ack and transaction
             // indices to be sent with the ack.
             acks.push((t.included_in_block_ack, indices));
-            transactions.extend(t.transactions);
+            transactions.extend(accepted_txs);
+
+            if !remaining_txs.is_empty() {
+                // Some transactions were accepted, some were left over.
+                // Create a dummy ack for the remaining ones.
+                let (dummy_tx, _) = tokio::sync::oneshot::channel();
+                return Some(TransactionsGuard {
+                    transactions: remaining_txs,
+                    included_in_block_ack: dummy_tx,
+                });
+            }
+
             None
         };
 
         if let Some(t) = self.pending_transactions.take() {
+            let t_len = t.transactions.len();
             if let Some(pending_transactions) = handle_txs(t) {
-                // ⚠️ TX-DROP-GUARD: This batch is too large to fit even in an EMPTY block.
-                // Root cause: Caller sent a single TransactionGuard with more TXs than
-                // max_num_transactions_in_block OR total bytes exceed max_transactions_in_block_bytes.
-                // Fix: the FFI layer (tx_socket_server.rs) must chunk batches to MAX_BUNDLE_SIZE
-                // BEFORE calling submit_no_wait() so this path is NEVER hit.
-                let drop_count = pending_transactions.transactions.len();
-                let drop_bytes: usize = pending_transactions.transactions.iter()
-                    .map(|tx| tx.data().len())
-                    .sum();
-                tracing::error!(
-                    "🚫 [TX-DROP-GUARD] Dropping {} transactions ({} bytes) — batch exceeds block limits \
-                     (max_txs={}, max_bytes={}). CALLER BUG: FFI layer must pre-chunk to <= MAX_BUNDLE_SIZE.",
-                    drop_count,
-                    drop_bytes,
-                    self.max_num_transactions_in_block,
-                    self.max_transactions_in_block_bytes
-                );
-                debug_fatal!(
-                    "Previously pending transaction(s) should fit into an empty block! Dropping: {:?}",
-                    pending_transactions.transactions
-                );
+                if pending_transactions.transactions.len() == t_len {
+                    // ⚠️ TX-DROP-GUARD: This batch is too large to fit even in an EMPTY block.
+                    // Root cause: Caller sent a single TransactionGuard where even the first transaction
+                    // exceeds max_num_transactions_in_block OR max_transactions_in_block_bytes OR group_limit.
+                    let drop_count = pending_transactions.transactions.len();
+                    let drop_bytes: usize = pending_transactions.transactions.iter()
+                        .map(|tx| tx.data().len())
+                        .sum();
+                    tracing::error!(
+                        "🚫 [TX-DROP-GUARD] Dropping {} transactions ({} bytes) — transaction exceeds empty block limits \
+                         (max_txs={}, max_bytes={}).",
+                        drop_count,
+                        drop_bytes,
+                        self.max_num_transactions_in_block,
+                        self.max_transactions_in_block_bytes
+                    );
+                    debug_fatal!(
+                        "Previously pending transaction(s) should fit into an empty block! Dropping: {:?}",
+                        pending_transactions.transactions
+                    );
+                } else {
+                    self.pending_transactions = Some(pending_transactions);
+                }
             }
         }
 
@@ -191,6 +236,7 @@ impl TransactionConsumer {
                 break;
             }
         }
+        drop(handle_txs);
 
         if !transactions.is_empty() {
             tracing::info!(

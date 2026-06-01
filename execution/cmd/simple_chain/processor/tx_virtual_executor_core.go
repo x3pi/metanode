@@ -36,6 +36,11 @@ type TxVirtualExecutor struct {
 	readOnlyResultChan       chan tx_processor.ProcessResult
 	readTxLimiter            chan struct{}
 	offChainExecutionLimiter chan struct{}
+
+	// FORK-SAFETY: Shared lock between virtual execution (RLock) and real block
+	// processing (Lock). Prevents concurrent cgo calls to C++ MVM that cause
+	// non-deterministic stateRoot divergence across nodes.
+	blockProcessingLock *sync.RWMutex
 }
 
 func NewTxVirtualExecutor(
@@ -43,6 +48,7 @@ func NewTxVirtualExecutor(
 	messageSender network.MessageSender,
 	chainState *blockchain.ChainState,
 	storageManager *storage.StorageManager,
+	blockProcessingLock *sync.RWMutex,
 ) *TxVirtualExecutor {
 	v := &TxVirtualExecutor{
 		env:                      env,
@@ -53,6 +59,7 @@ func NewTxVirtualExecutor(
 		readOnlyResultChan:       make(chan tx_processor.ProcessResult, 1000),
 		readTxLimiter:            make(chan struct{}, maxConcurrentReadTx),
 		offChainExecutionLimiter: make(chan struct{}, maxConcurrentOffChainExecution),
+		blockProcessingLock:      blockProcessingLock,
 	}
 	return v
 }

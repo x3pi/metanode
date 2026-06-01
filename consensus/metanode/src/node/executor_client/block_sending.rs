@@ -472,12 +472,21 @@ impl ExecutorClient {
                 let min_buffered = *buffer.keys().next().unwrap_or(&0);
                 let gap = min_buffered.saturating_sub(*next_expected);
 
-                if gap > 100 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last_query = self.last_gap_query_ms.load(std::sync::atomic::Ordering::Relaxed);
+                let should_sync = gap > 100 || (gap > 0 && now_ms.saturating_sub(last_query) >= 1000);
+
+                if should_sync {
+                    let next_expected_val = *next_expected;
+                    self.last_gap_query_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                     drop(buffer);
                     drop(next_expected);
 
-                    warn!("⚠️  [SEQUENTIAL-BUFFER] Large gap detected: min_buffered={}, gap={}. Syncing with Go using fast 2-second timeout...", 
-                        min_buffered, gap);
+                    warn!("⚠️  [SEQUENTIAL-BUFFER] Gap detected: min_buffered={}, next_expected={}, gap={}. Syncing with Go using fast 2-second timeout...", 
+                        min_buffered, next_expected_val, gap);
 
                     // CRITICAL FIX: Use get_last_global_exec_index() instead of get_last_block_number()
                     // get_last_block_number() returns Go block NUMBER (counts only non-empty commits)

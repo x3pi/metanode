@@ -33,6 +33,7 @@ func (bp *BlockProcessor) commitWorker() {
 				// FENCE jobs have no block — use job.Epoch from async update
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Epoch)
 			}
+			storage.SetCommitLock(false) // Release commit lock on FENCE job
 			if job.DoneChan != nil {
 				close(job.DoneChan)
 				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
@@ -78,7 +79,7 @@ func (bp *BlockProcessor) commitWorker() {
 				isCall := tx.IsCallContract()
 				isDeploy := tx.IsDeployContract()
 
-				if (isCall || isDeploy) && !tx.GetReadOnly() && tx.GetNonce() != 0 && tx.ToAddress() != utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT) && tx.ToAddress() != utils.GetAddressSelector(p_common.IDENTIFIER_STAKE) {
+				if (isCall || isDeploy) && !tx.GetReadOnly() && tx.ToAddress() != utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT) && tx.ToAddress() != utils.GetAddressSelector(p_common.IDENTIFIER_STAKE) {
 					mvmId, exists := job.ProcessResults.MvmIdMap[tx.Hash()]
 					if !exists {
 						if isCall {
@@ -241,6 +242,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// Sub-nodes will fetch the block from Master's primary BlockDatabase
 		// via the existing network sync mechanism (HandleSyncBlocksRequest).
 		// ══════════════════════════════════════════════════════════════════
+		storage.SetCommitLock(false) // Release PebbleDB commit lock after block is fully committed
 		if job.DoneChan != nil {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
@@ -639,6 +641,11 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		txBatchSerialized, _ = storage.SerializeBatch(tb)
 	}
 
+	var fullDbLogs []map[string][]byte
+	if job.ProcessResults != nil {
+		fullDbLogs = job.ProcessResults.FullDbLogs
+	}
+
 	backupData := storage.BackUpDb{
 		BockNumber:                blockNum,
 		BockBatch:                 bockBatchSerialized,
@@ -651,7 +658,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		MapppingBatch:             job.MappingBatch,
 		StakeState:                job.StakeBatch,
 		TrieDatabaseBatchPut:      job.TrieBatchSnapshot,
-		FullDbLogs:                nil, 
+		FullDbLogs:                fullDbLogs, 
 	}
 
 	backupBytes, err := storage.SerializeBackupDb(backupData)

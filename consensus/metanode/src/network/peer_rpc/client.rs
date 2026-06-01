@@ -256,7 +256,20 @@ pub async fn fetch_blocks_from_peer(
     );
 
     let mut all_blocks = Vec::new();
-    let batch_size = 1000u64; // Optimize: 1000 blocks reduces TCP connection churn and speeds up sync
+    
+    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
+    let batch_size = if total_blocks >= 1000 {
+        500u64 // Lệch cực xa -> Max batch server cho phép
+    } else if total_blocks >= 200 {
+        200u64 // Lệch xa -> Batch lớn
+    } else if total_blocks >= 50 {
+        100u64 // Lệch vừa
+    } else {
+        // Nếu chỉ lệch 1 block, hệ thống vẫn chỉ lấy 1 block (nhờ hàm min ở dưới)
+        // Số 50 ở đây chỉ mang ý nghĩa: "Trong một lần hỏi TCP, lấy TỐI ĐA 50 block"
+        50u64
+    };
+    
     let mut current_from = from_block;
 
     while current_from <= to_block {
@@ -436,7 +449,19 @@ pub async fn fetch_executable_blocks_from_peer(
     );
 
     let mut all_blocks = Vec::new();
-    let batch_size = 100u64;
+    
+    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
+    let batch_size = if total >= 1000 {
+        500u64 // Lệch cực xa -> Max batch server cho phép
+    } else if total >= 200 {
+        200u64 // Lệch xa -> Batch lớn
+    } else if total >= 50 {
+        100u64 // Lệch vừa
+    } else {
+        // Tương tự, nếu chỉ thiếu 1 block thì vẫn lấy ngay 1 block
+        // Số 50 u64 là giới hạn "TỐI ĐA" cho mỗi request HTTP
+        50u64
+    };
     let mut current_from = from_gei;
 
     while current_from <= to_gei {

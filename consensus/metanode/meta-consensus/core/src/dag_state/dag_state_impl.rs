@@ -17,7 +17,7 @@ use crate::{
     block::{genesis_blocks, BlockAPI, VerifiedBlock, GENESIS_ROUND},
     commit::{
         load_committed_subdag_from_store, CommitAPI as _, CommitInfo, CommitRef, CommitVote,
-        TrustedCommit, GENESIS_COMMIT_INDEX,
+        TrustedCommit, GENESIS_COMMIT_INDEX, CommitIndex, CommitDigest,
     },
     context::Context,
     dag_state::types::BlockInfo,
@@ -87,6 +87,7 @@ pub struct DagState {
     // inserted into the local DAG or sent to output.
     pub(crate) blocks_to_write: Vec<VerifiedBlock>,
     pub(crate) commits_to_write: Vec<TrustedCommit>,
+    pub(crate) commits_to_delete: Vec<(CommitIndex, CommitDigest)>,
 
     // Buffers the reputation scores & last_committed_rounds to be flushed with the
     // next dag state flush. Not writing eagerly is okay because we can recover reputation scores
@@ -118,6 +119,10 @@ impl DagState {
 
     pub fn take_baseline_reputation_scores(&mut self) -> Option<Vec<(AuthorityIndex, u64)>> {
         self.baseline_reputation_scores.take()
+    }
+
+    pub fn has_baseline_reputation_scores(&self) -> bool {
+        self.baseline_reputation_scores.is_some()
     }
 
     /// Initializes DagState from storage.
@@ -271,6 +276,7 @@ impl DagState {
             pending_commit_votes: VecDeque::new(),
             blocks_to_write: vec![],
             commits_to_write: vec![],
+            commits_to_delete: vec![],
             commit_info_to_write: vec![],
             finalized_commits_to_write: vec![],
             scoring_subdag,

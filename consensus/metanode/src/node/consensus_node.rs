@@ -161,6 +161,7 @@ impl ConsensusNode {
             committed_transaction_hashes: consensus.committed_transaction_hashes,
             pending_epoch_transitions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             _commit_consumer_holder: consensus.commit_consumer_holder,
+            commit_consumer_monitor: consensus.commit_consumer_monitor,
             epoch_eth_addresses: consensus.epoch_eth_addresses_arc.clone(),
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),

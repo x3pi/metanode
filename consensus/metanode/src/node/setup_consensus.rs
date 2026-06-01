@@ -1794,6 +1794,8 @@ impl ConsensusNode {
             coordination_hub.set_startup_sync_active(false);
         }
 
+        let commit_consumer_monitor = commit_consumer.monitor();
+
         let (authority, commit_consumer_holder) = if start_as_validator {
             info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
 
@@ -1870,6 +1872,7 @@ impl ConsensusNode {
             tx_recycler,
             is_terminally_failed,
             epoch_eth_addresses_arc,
+            commit_consumer_monitor,
         })
     }
 

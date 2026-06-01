@@ -9,6 +9,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
 // StateChangelogDB manages historical state diffs per block
@@ -35,6 +36,8 @@ type StateChange struct {
 func NewStateChangelogDB(path string, namespace string) (*StateChangelogDB, error) {
 	opts := &pebble.Options{
 		DisableWAL: false,
+		Cache:      storage.GetSharedPebbleCache(),
+		TableCache: storage.GetSharedPebbleTableCache(),
 	}
 
 	db, err := pebble.Open(path, opts)

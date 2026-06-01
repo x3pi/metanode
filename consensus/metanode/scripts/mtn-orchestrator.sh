@@ -449,34 +449,49 @@ cmd_start() {
     log_info "🔄 Cập nhật IP config về 127.0.0.1..."
     "$SCRIPT_DIR/node/update_ips.sh" 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 || true
 
+    # Calculate safe parallel compiler jobs based on RAM and CPU
+    local TOTAL_MEM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}' || echo 8)
+    if [ -z "$TOTAL_MEM_GB" ] || [ "$TOTAL_MEM_GB" -le 0 ]; then
+        TOTAL_MEM_GB=8
+    fi
+    local NUM_CORES=$(nproc 2>/dev/null || echo 2)
+
+    # Rust limits: each job needs ~3GB RAM. Limit to max 24 jobs.
+    local RUST_JOBS=$(( TOTAL_MEM_GB / 3 ))
+    if [ $RUST_JOBS -lt 1 ]; then RUST_JOBS=1; fi
+    if [ $RUST_JOBS -gt $NUM_CORES ]; then RUST_JOBS=$NUM_CORES; fi
+    if [ $RUST_JOBS -gt 24 ]; then RUST_JOBS=24; fi
+
+    # Go limits: CGO linking needs ~4-5GB RAM per process. Limit to max 8 jobs.
+    local GO_JOBS=$(( TOTAL_MEM_GB / 5 ))
+    if [ $GO_JOBS -lt 1 ]; then GO_JOBS=1; fi
+    if [ $GO_JOBS -gt $NUM_CORES ]; then GO_JOBS=$NUM_CORES; fi
+    if [ $GO_JOBS -gt 8 ]; then GO_JOBS=8; fi
+
     # Build processes
     if $build_nomt; then
-        log_info "🛠  Đang build NOMT FFI (Rust)..."
-        (cd "$BASE_DIR/execution/pkg/nomt_ffi/rust_lib" && cargo build --release) || exit 1
+        log_info "🛠  Đang build NOMT FFI (Rust - Dùng $RUST_JOBS/$NUM_CORES cores)..."
+        (cd "$BASE_DIR/execution/pkg/nomt_ffi/rust_lib" && cargo build --release -j $RUST_JOBS) || exit 1
     fi
     if $build_evm; then
         log_info "🛠  Đang build EVM (C++ MVM)..."
         (cd "$BASE_DIR/execution/pkg/mvm" && chmod +x build.sh && ./build.sh) || exit 1
     fi
     if $build_rust; then
-        log_info "🛠  Đang build Rust (metanode)..."
-        (cd "$RUST_DIR" && cargo build --release) || exit 1
+        log_info "🛠  Đang build Rust (metanode - Dùng $RUST_JOBS/$NUM_CORES cores)..."
+        (cd "$RUST_DIR" && cargo build --release -j $RUST_JOBS) || exit 1
         
-        # CRITICAL FIX: Clean the Go build cache so it relinks the new libmetanode.a.
-        # This replaces the need to 'touch' source files manually.
-        # Note: We run go clean -cache with '|| true' to prevent crashes due to directory locks.
-        # Bằng cách touch ffi_bridge.go, ta ép Go build biên dịch lại wrapper và link trực tiếp với libmetanode.a mới.
-        log_info "🧹  Đang ép Go nhận diện FFI bridge mới (không xóa cache toàn cục)..."
-        (cd "$GO_DIR" && go clean -cache || true)
-        touch "$BASE_DIR/execution/executor/ffi_bridge.go"
+        # CRITICAL FIX: Touch source files that import "C" to force Go to relink the new libmetanode.a,
+        # avoiding cache invalidation of Go standard libraries via `go clean -cache`.
+        log_info "🧹  Đang ép Go nhận diện FFI bridge mới bằng cách touch bridge files..."
+        touch "$BASE_DIR/execution/executor/ffi_bridge.go" "$BASE_DIR/execution/pkg/nomt_ffi/bridge.go"
     fi
     if $build_go; then
         log_info "🛠  Đang build Protobuf cho Go (simple_chain)..."
         (cd "$BASE_DIR/execution/pkg/proto" && export PATH="$HOME/go/bin:${GOPATH:-$HOME/go}/bin:$PATH" && ./protoc.sh) || exit 1
         
-        log_info "🛠  Đang build Go (simple_chain)..."
-        # Dùng trình biên dịch tận dụng số luồng tối đa, bỏ cờ '-a' để dùng Build Cache (~2s thay vì 3 phút)
-        (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && NUM_PROCS=$(nproc) && CGO_ENABLED=1 go build -p $NUM_PROCS -o simple_chain .) || exit 1
+        log_info "🛠  Đang build Go (simple_chain - Dùng $GO_JOBS/$NUM_CORES cores)..."
+        (cd "$GO_DIR" && rm -f simple_chain && CGO_ENABLED=1 go env && CGO_ENABLED=1 go build -p $GO_JOBS -o simple_chain .) || exit 1
     fi
 
     # Kiểm tra binary tồn tại (chỉ cần Go, Rust nhúng via FFI)
@@ -528,6 +543,10 @@ cmd_start() {
             rm -rf "$GO_DIR"/snapshot_*node${i}* 2>/dev/null || true
         done
         rm -rf "$GO_DIR"/snapshot_data* 2>/dev/null || true
+        log_step "Xóa Xapian DB data (đảm bảo đồng bộ sạch giữa các node)..."
+        for i in $(seq 0 $((NUM_NODES - 1))); do
+            rm -rf "$GO_DIR/sample/node${i}/data/data/consensus/xapian" 2>/dev/null || true
+        done
         log_step "Xóa logs..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
             if [ "$i" = "$exclude_node" ]; then continue; fi
