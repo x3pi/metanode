@@ -648,23 +648,23 @@ fn test_sync_metrics_creation() {
 
 #[tokio::test]
 async fn test_debounce_prevents_rapid_transitions() {
-    let manager = Arc::new(StateTransitionManager::new(1, true));
+    let manager = Arc::new(StateTransitionManager::new(1, false));
 
     // First transition succeeds
-    manager.try_start_epoch_transition(2, "test").await.unwrap();
-    manager.complete_epoch_transition(2).await;
-    assert_eq!(manager.current_epoch(), 2);
+    manager.try_start_mode_transition(true, "test").await.unwrap();
+    manager.complete_mode_transition(true).await;
+    assert!(manager.is_validator());
 
     // Immediate second transition should be debounced (within 3s window)
-    let result = manager.try_start_epoch_transition(3, "test").await;
+    let result = manager.try_start_mode_transition(false, "test").await;
     assert!(
         matches!(result, Err(TransitionError::Debouncing { .. })),
         "Expected Debouncing error, got {:?}",
         result
     );
 
-    // Epoch should still be 2
-    assert_eq!(manager.current_epoch(), 2);
+    // Mode should still be validator
+    assert!(manager.is_validator());
 }
 
 #[test]
