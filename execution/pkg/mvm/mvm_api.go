@@ -251,7 +251,7 @@ func LenApiInstances() int {
 }
 
 func RemoveOldApiInstances() {
-	const targetSize = 50000
+	const targetSize = 2000
 	
 	// Lớp bảo vệ 1: Fast-path check với atomic counter
 	// Nếu tổng số instance (bao gồm cả protected) còn nhỏ hơn targetSize,
