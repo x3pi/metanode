@@ -454,7 +454,11 @@ func (a *MVMApi) Call(
 
 		randomizedMvmId = common.BytesToAddress(bBmvmIdBytes)
 		apiInstances.Store(randomizedMvmId, a)
-		defer apiInstances.Delete(randomizedMvmId)
+		ProtectMVMApi(randomizedMvmId)
+		defer func() {
+			UnprotectMVMApi(randomizedMvmId)
+			apiInstances.Delete(randomizedMvmId)
+		}()
 	} else {
 		randomizedMvmId = mvmId
 	}
@@ -902,7 +906,27 @@ func (a *MVMApi) Deploy(
 	bBlockCoinbase := blockCoinbase.Bytes()
 	cBBlockNumber := C.CBytes(bBlockNumber[:])
 	cBBlockCoinbase := C.CBytes(bBlockCoinbase)
-	cBBmvmId := C.CBytes(mvmId.Bytes())
+
+	var randomizedMvmId common.Address
+	if isOffChain {
+		bBmvmIdBytes := make([]byte, 20)
+		copy(bBmvmIdBytes[0:8], mvmId.Bytes()[0:8])
+		val := atomic.AddUint64(&offChainCounter, 1)
+		binary.BigEndian.PutUint64(bBmvmIdBytes[8:16], val)
+		_, _ = rand.Read(bBmvmIdBytes[16:20])
+
+		randomizedMvmId = common.BytesToAddress(bBmvmIdBytes)
+		apiInstances.Store(randomizedMvmId, a)
+		ProtectMVMApi(randomizedMvmId)
+		defer func() {
+			UnprotectMVMApi(randomizedMvmId)
+			apiInstances.Delete(randomizedMvmId)
+		}()
+	} else {
+		randomizedMvmId = mvmId
+	}
+
+	cBBmvmId := C.CBytes(randomizedMvmId.Bytes())
 	cBTxHash := C.CBytes(bTxHash)
 	defer C.free(unsafe.Pointer(cBSender))
 	defer C.free(unsafe.Pointer(cBContractConstructor))
