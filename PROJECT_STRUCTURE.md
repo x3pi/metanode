@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-30
+> **Last updated:** 2026-06-01
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -111,7 +111,10 @@ metanode/
 │  │  ├── authority_node.rs    ← Authority    │   │
 │  │  ├── authority_service.rs ← Lifecycle    │   │
 │  │  ├── linearizer.rs       ← DAG→linear   │   │
-│  │  ├── commit_syncer.rs    ← Commit sync   │   │
+│  │  ├── commit_syncer/      ← Commit sync module │   │
+│  │  │   ├── mod.rs          ← Coord loop         │   │
+│  │  │   ├── fetcher.rs      ← P2P network fetch  │   │
+│  │  │   └── cold_start.rs   ← Sync transition    │   │
 │  │  ├── commit_finalizer.rs ← Finalization  │   │
 │  │  ├── coordination_hub.rs ← Peer attest   │   │
 │  │  ├── commit_vote_monitor.rs← Digest vote │   │
@@ -409,7 +412,7 @@ metanode/
 ### Key Files (>500 lines)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `commit_syncer.rs` | **3,506** | Commit synchronization + peer fetching + cold-start | 🔴 CRITICAL |
+| `commit_syncer/mod.rs` | **2,812** | Commit synchronization main coordination loop | 🔴 CRITICAL |
 | `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
 | `synchronizer.rs` | 2,175 | DAG block synchronization | 🔴 HIGH |
 | `dag_state/dag_state_impl.rs` | 1,873 | DAG state machine implementation | 🔴 HIGH |
@@ -453,6 +456,8 @@ metanode/
 | `context.rs` | 187 | Consensus context |
 | `error.rs` | 254 | Error types |
 | `storage/rocksdb_store.rs` | 472 | RocksDB persistent store |
+| `commit_syncer/fetcher.rs` | 495 | P2P block and commit fetch loop |
+| `commit_syncer/cold_start.rs` | 233 | Sync status transition decisions |
 | `storage/mem_store.rs` | 275 | In-memory store (testing) |
 
 ---
@@ -487,7 +492,7 @@ metanode/
 | Epoch transition | `processor/block_processor_epoch.go` + `src/consensus/epoch_transition.rs` | Data loss |
 | Commit processor | `src/consensus/commit_processor/` | Ordering violation |
 | Linearizer | `meta-consensus/core/src/linearizer.rs` | Fork (non-deterministic commit) |
-| CommitSyncer | `meta-consensus/core/src/commit_syncer.rs` | Sync failure / stale data |
+| CommitSyncer | `meta-consensus/core/src/commit_syncer/mod.rs` | Sync failure / stale data |
 | Tx batch forwarder | `processor/tx_batch_forwarder_core.go` | Tx loss |
 | Mining/PoH | `pkg/mining/` + `pkg/poh/` | Timing regression |
 | Snapshot manager | `executor/snapshot_manager.go` | Data corruption during restore |
