@@ -19,7 +19,7 @@ use crate::{
     linearizer::Linearizer,
     storage::Store,
     transaction_certifier::TransactionCertifier,
-    CommitConsumerArgs, CommittedSubDag,
+    CommitConsumerArgs, CommitIndex, CommittedSubDag,
 };
 
 /// Role of CommitObserver
@@ -51,6 +51,8 @@ pub(crate) struct CommitObserver {
     /// causing all senders to be dropped and the receiver to see a closed channel.
     #[allow(dead_code)]
     commit_sender_keeper: UnboundedSender<CommittedSubDag>,
+    /// Last processed commit index, initialized from Go's replay_after_commit_index
+    last_processed_commit_index: CommitIndex,
 }
 
 impl CommitObserver {
@@ -71,6 +73,7 @@ impl CommitObserver {
             dag_state.clone(),
             transaction_certifier.clone(),
             commit_consumer.commit_sender.clone(),
+            Some(commit_consumer.replay_after_commit_index),
         );
 
         // Clone the sender to keep it alive in the observer.
@@ -87,6 +90,7 @@ impl CommitObserver {
             commit_interpreter,
             commit_finalizer_handle,
             commit_sender_keeper,
+            last_processed_commit_index: commit_consumer.replay_after_commit_index,
         };
         observer.recover_and_send_commits(&commit_consumer).await;
 
@@ -162,6 +166,7 @@ impl CommitObserver {
                     self.dag_state.clone(),
                     self.transaction_certifier.clone(),
                     self.commit_sender_keeper.clone(),
+                    Some(self.last_processed_commit_index),
                 );
                 
                 // Retry sending the commit
@@ -169,7 +174,10 @@ impl CommitObserver {
                     tracing::error!("🚨 [COMMIT-OBSERVER] Auto-restart failed! Could not queue commit: {:?}", e2);
                 } else {
                     tracing::info!("✅ [COMMIT-OBSERVER] CommitFinalizer auto-restart successful.");
+                    self.last_processed_commit_index = commit.commit_ref.index;
                 }
+            } else {
+                self.last_processed_commit_index = commit.commit_ref.index;
             }
         }
 
@@ -351,12 +359,17 @@ impl CommitObserver {
                         self.dag_state.clone(),
                         self.transaction_certifier.clone(),
                         self.commit_sender_keeper.clone(),
+                        Some(self.last_processed_commit_index),
                     );
                     // Retry once
                     if let Err(e2) = self.commit_finalizer_handle.send(committed_sub_dag) {
                         tracing::error!("🚨 Failed to re-queue commit during recovery: {:?}", e2);
                         break;
+                    } else {
+                        self.last_processed_commit_index = last_sent_commit_index;
                     }
+                } else {
+                    self.last_processed_commit_index = last_sent_commit_index;
                 }
 
                 self.context

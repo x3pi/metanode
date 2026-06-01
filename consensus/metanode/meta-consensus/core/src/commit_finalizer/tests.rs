@@ -57,6 +57,7 @@ fn create_commit_finalizer_fixture() -> Fixture {
         dag_state.clone(),
         transaction_certifier.clone(),
         commit_sender,
+        None,
     );
     Fixture {
         context,

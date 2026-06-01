@@ -411,6 +411,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// block 470's root → new consensus blocks get wrong state_root → FORK.
 	// ═══════════════════════════════════════════════════════════════════════════
 	isPreConsensusSync := request.GetExecuteMode()
+	if rh.chainState != nil && rh.chainState.GetConfig() != nil && rh.chainState.GetConfig().ServiceType == "MASTER" {
+		if !isPreConsensusSync {
+			logger.Info("🛡️ [SYNC-SAFETY] Forcing execute_mode=true for Master/Validator node to prevent state root freeze")
+			isPreConsensusSync = true
+		}
+	}
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
 		if rh.snapshotManager != nil {
