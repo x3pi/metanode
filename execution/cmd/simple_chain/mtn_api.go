@@ -25,6 +25,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining" // Import mining package
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -185,6 +186,16 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 }
 
 func (api *MtnAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	var isExistOverloaded bool
+	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
+	if exists {
+		var ok bool
+		isExistOverloaded, ok = value.(bool)
+		if ok && isExistOverloaded {
+			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
+		}
+	}
+
 	txD := &mt_proto.TransactionWithDeviceKey{}
 	err := proto.Unmarshal(input, txD)
 	if err != nil {
