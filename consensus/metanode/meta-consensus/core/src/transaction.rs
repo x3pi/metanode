@@ -152,13 +152,11 @@ impl TransactionConsumer {
                     break;
                 }
 
-                let mut test_verifier = group_verifier.clone();
-                if !test_verifier.add_tx(&tx) {
+                if !group_verifier.add_tx(&tx) {
                     limit_reached = LimitReached::MaxNumOfTransactions;
                     remaining_txs.push(tx);
                     continue; // Skip this tx but continue checking others in the batch
                 }
-                group_verifier = test_verifier;
 
                 local_total_bytes += tx_bytes;
                 accepted_txs.push(tx);

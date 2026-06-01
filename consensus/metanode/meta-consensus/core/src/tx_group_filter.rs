@@ -5,7 +5,7 @@ use prost::Message;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 
-pub const MAX_TRANSACTION_GROUP_SIZE: usize = 2;
+pub const MAX_TRANSACTION_GROUP_SIZE: usize = 500;
 
 #[allow(dead_code)]
 pub mod proto {
@@ -147,6 +147,24 @@ impl IncrementalGroupVerifier {
     /// Note: If this returns false, the internal state might be partially updated.
     pub fn add_tx(&mut self, tx: &crate::block::Transaction) -> bool {
         let i = self.next_index;
+        let addrs = get_group_addresses(tx.data());
+        
+        // Dry-run check before mutating any state
+        let mut unique_roots = std::collections::HashSet::new();
+        let mut new_size = 1; // Count this new transaction
+        for addr in &addrs {
+            if let Some(&existing_root) = self.addr_to_root.get(addr) {
+                let root_j = self.uf.find(existing_root);
+                if unique_roots.insert(root_j) {
+                    new_size += self.component_sizes[root_j];
+                }
+            }
+        }
+        
+        if new_size > self.max_group_size {
+            return false; // Limit exceeded, abort without mutating
+        }
+
         self.next_index += 1;
         
         // Ensure uf and component_sizes have enough capacity (should not happen if capacity is set correctly)
@@ -157,20 +175,15 @@ impl IncrementalGroupVerifier {
             self.component_sizes[i] = 1;
         }
 
-        let addrs = get_group_addresses(tx.data());
-        
         for addr in addrs {
             if let Some(&existing_root) = self.addr_to_root.get(&addr) {
                 let root_i = self.uf.find(i);
                 let root_j = self.uf.find(existing_root);
                 
                 if root_i != root_j {
-                    let new_size = self.component_sizes[root_i] + self.component_sizes[root_j];
-                    if new_size > self.max_group_size {
-                        return false;
-                    }
+                    let combined_size = self.component_sizes[root_i] + self.component_sizes[root_j];
                     self.uf.parent[root_i] = root_j;
-                    self.component_sizes[root_j] = new_size;
+                    self.component_sizes[root_j] = combined_size;
                 }
             } else {
                 self.addr_to_root.insert(addr, i);
