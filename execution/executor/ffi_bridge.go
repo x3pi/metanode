@@ -317,7 +317,7 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	// Allocate memory in C to return the response
 	cResLen := C.size_t(len(resData))
 	cResData := (*C.uint8_t)(C.malloc(cResLen))
-	
+
 	// Copy to C memory
 	// There is a neat trick: unsafe.Slice
 	cSlice := unsafe.Slice((*byte)(unsafe.Pointer(cResData)), len(resData))

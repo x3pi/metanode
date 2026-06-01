@@ -122,7 +122,7 @@ func TestNoFork_ValidatorSort_DuplicateKeys(t *testing.T) {
 		{authorityKey: []byte("same-key"), address: "0x02", p2pAddress: "p2p-x"},
 		{authorityKey: []byte("other-key"), address: "0x03", p2pAddress: "p2p-w"},
 	}
-	
+
 	sortValidatorsByAuthorityKey(validators)
 	assert.Len(t, validators, 4)
 
