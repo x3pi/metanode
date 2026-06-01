@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -487,18 +488,30 @@ func processGroupsConcurrently(
 	// same group — no cross-group state conflicts possible.
 	// ═══════════════════════════════════════════════════════════════
 	var wg sync.WaitGroup
-	wg.Add(len(groupedGroups))
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > len(groupedGroups) {
+		numWorkers = len(groupedGroups)
+	}
 
-	for i := range groupedGroups {
-		go func(groupIdx int) {
+	var nextIdx uint32
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
 			defer wg.Done()
-			meta := groupMetas[groupIdx]
-			result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[groupIdx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
-			results[groupIdx] = result // Write to indexed position — deterministic order
-			if enableTrace && meta.span != nil {
-				meta.span.End()
+			for {
+				groupIdx := int(atomic.AddUint32(&nextIdx, 1) - 1)
+				if groupIdx >= len(groupedGroups) {
+					break
+				}
+				meta := groupMetas[groupIdx]
+				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[groupIdx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+				results[groupIdx] = result // Write to indexed position — deterministic order
+				if enableTrace && meta.span != nil {
+					meta.span.End()
+				}
 			}
-		}(i)
+		}()
 	}
 
 	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
