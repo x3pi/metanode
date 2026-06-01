@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +21,7 @@ import (
 
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -81,6 +81,7 @@ type ProcessResult struct {
 	MvmIdMap         map[common.Hash]common.Address
 	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	ModifiedAccounts []common.Address
+	FullDbLogs       []map[string][]byte
 }
 
 type groupResultExt struct {
@@ -100,6 +101,9 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	ProcessResult,
 	error,
 ) {
+	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
+	mvm.CallClearAllStateInstances()
+
 	defer func() {
 		mvm.ClearAllMVMApi()
 		mvm.CallClearAllStateInstances()
@@ -201,6 +205,13 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		modifiedAccounts = chainState.GetAccountStateDB().DirtyAccountAddresses()
 	}
 
+	var allFullDbLogs []map[string][]byte
+	for _, scRs := range allExecuteSCResults {
+		if logs := scRs.MapFullDbLogs(); len(logs) > 0 {
+			allFullDbLogs = append(allFullDbLogs, logs)
+		}
+	}
+
 	processResult := ProcessResult{
 		Transactions:     allTransactions,
 		Receipts:         allReceipts,
@@ -212,6 +223,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		MvmIdMap:         mvmIdMap,
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
+		FullDbLogs:       allFullDbLogs,
 	}
 	return processResult, nil
 }
@@ -221,6 +233,9 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	ProcessResult,
 	error,
 ) {
+	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
+	mvm.CallClearAllStateInstances()
+
 	defer func() {
 		mvm.ClearAllMVMApi()
 		mvm.CallClearAllStateInstances()
@@ -303,6 +318,13 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		modifiedAccounts = chainState.GetAccountStateDB().DirtyAccountAddresses()
 	}
 
+	var allFullDbLogs []map[string][]byte
+	for _, scRs := range allExecuteSCResults {
+		if logs := scRs.MapFullDbLogs(); len(logs) > 0 {
+			allFullDbLogs = append(allFullDbLogs, logs)
+		}
+	}
+
 	processResult := ProcessResult{
 		Transactions:     allTransactions,
 		Receipts:         allReceipts,
@@ -314,6 +336,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		MvmIdMap:         mvmIdMap,
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
+		FullDbLogs:       allFullDbLogs,
 	}
 	// Send result to channel
 	// Consider if sending on the channel should happen outside the lock if it blocks
@@ -453,153 +476,36 @@ func processGroupsConcurrently(
 	// 113 TXs to same contract = 1 group (sequential), fork persists.
 	// Real suspect: NomtStateTrie.BatchUpdate internal parallel workers.
 	// ═══════════════════════════════════════════════════════════════
-	maxTxWorkers := runtime.NumCPU()
-	// ALLOW FULL SCALE: Removed the strict 16-worker cap. High-end servers (e.g. 64-128 cores)
-	// can now utilize all their cores to process independent TX groups in parallel.
-	if maxTxWorkers > 1024 {
-		maxTxWorkers = 1024
-	}
-	numWorkers := maxTxWorkers
-	if numWorkers > len(groupedGroups) {
-		numWorkers = len(groupedGroups)
-	}
-	if numWorkers == 0 {
-		numWorkers = 1
-	}
-
 	// ═══════════════════════════════════════════════════════════════
-	// WORKER POOL: Channel-based routing to prevent data races.
-	// We map Smart Contract transactions to specific workers based on their
-	// mvmId hash. This guarantees sequential execution for a specific contract,
-	// eliminating the updateStateDB data race and ensuring deterministic stateRoot.
+	// PARALLEL GROUP EXECUTION
+	//
+	// Groups with different relatedAddresses run in parallel.
+	// TXs within the same group run sequentially (processSingleGroup).
+	//
+	// This is SAFE because GroupTransactionsDeterministic uses
+	// Union-Find to merge all TXs sharing any address into the
+	// same group — no cross-group state conflicts possible.
 	// ═══════════════════════════════════════════════════════════════
-
-	type workerJob struct {
-		idx  int
-		meta groupMeta
-	}
-	workerChans := make([]chan workerJob, numWorkers)
 	var wg sync.WaitGroup
-	wg.Add(numWorkers)
+	wg.Add(len(groupedGroups))
 
-	for w := 0; w < numWorkers; w++ {
-		workerChans[w] = make(chan workerJob, len(groupedGroups)) // buffered
-		go func(wIdx int) {
+	for i := range groupedGroups {
+		go func(groupIdx int) {
 			defer wg.Done()
-			for job := range workerChans[wIdx] {
-				meta := job.meta
-				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[job.idx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
-				results[job.idx] = result // Write to indexed position — deterministic order
-				if enableTrace && meta.span != nil {
-					meta.span.End()
-				}
+			meta := groupMetas[groupIdx]
+			result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[groupIdx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+			results[groupIdx] = result // Write to indexed position — deterministic order
+			if enableTrace && meta.span != nil {
+				meta.span.End()
 			}
-		}(w)
+		}(i)
 	}
 
 	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
 	startEVM := time.Now()
-
-	nativeRoundRobin := 0
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	blsSelector := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
-	blsOnlyGroupCount := 0
-
-	for i, group := range groupedGroups {
-		// CRITICAL CONCURRENCY FIX: Identify if any transaction in this group touches
-		// special/virtual contracts (Staking, Cross-Chain, or Account Settings).
-		// If so, we MUST route the entire group to Worker 0 to execute them sequentially
-		// and prevent updateStateDB / StakeStateDB concurrent data races.
-		//
-		// EXCEPTION: BLS-only groups (all items are setBlsPublicKey with nonce=0)
-		// are SAFE for parallel execution because:
-		//   1. Each BLS TX is from a UNIQUE sender (no shared state between TXs)
-		//   2. They only mutate in-memory AccountState (SetPublicKeyBls, SetNonce, SetLastHash)
-		//   3. They do NOT touch StakeStateDB, SmartContractDB, or any EVM/MVM state
-		//   4. DirtyAccounts are applied in indexed order after wg.Wait()
-		isSpecialContractGroup := false
-		isBLSOnlyGroup := true // Assume BLS-only until proven otherwise
-
-		for _, item := range group.Items {
-			toAddr := item.Tx.ToAddress()
-			fromAddr := item.Tx.FromAddress()
-
-			// Check if this TX is a BLS setBlsPublicKey(nonce=0)
-			if toAddr == accountSettingAddr && item.Tx.GetNonce() == 0 {
-				dataInput := item.Tx.CallData().Input()
-				if len(dataInput) >= 4 && bytes.Equal(dataInput[:4], blsSelector) {
-					// This TX IS a BLS setBlsPublicKey — continue checking other TXs
-					continue
-				}
-			}
-
-			// This TX is NOT a BLS setBlsPublicKey — mark group as non-BLS-only
-			isBLSOnlyGroup = false
-
-			if toAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-				toAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-				toAddr == accountSettingAddr ||
-				fromAddr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-				fromAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-				fromAddr == accountSettingAddr {
-				isSpecialContractGroup = true
-				break
-			}
-			for _, addr := range item.Tx.RelatedAddresses() {
-				if addr == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-					addr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
-					addr == accountSettingAddr {
-					isSpecialContractGroup = true
-					break
-				}
-			}
-			if isSpecialContractGroup {
-				break
-			}
-		}
-
-		var workerIdx int
-		if isBLSOnlyGroup {
-			// ═══════════════════════════════════════════════════════════════
-			// BLS-ONLY GROUP: Safe to round-robin across ALL workers.
-			// Each BLS TX operates on a unique sender address (independent state).
-			// No EVM/MVM calls, no StakeStateDB mutations, no lock contention.
-			// This prevents Worker 0 starvation when processing 30K+ BLS TXs.
-			// ═══════════════════════════════════════════════════════════════
-			workerIdx = nativeRoundRobin % numWorkers
-			nativeRoundRobin++
-			blsOnlyGroupCount++
-		} else if isSpecialContractGroup {
-			// Route to Worker 0 to guarantee sequential execution of all special contract transactions.
-			workerIdx = 0
-		} else {
-			// Because groups are ALREADY independent (guaranteed by GroupTransactionsDeterministic),
-			// we don't need to hash the contract address! We can just round-robin them perfectly
-			// to achieve maximum parallelism and prevent worker starvation from hash collisions.
-			workerIdx = nativeRoundRobin % numWorkers
-			nativeRoundRobin++
-		}
-
-		workerChans[workerIdx] <- workerJob{
-			idx:  i,
-			meta: groupMetas[i],
-		}
-	}
-	if blsOnlyGroupCount > 0 {
-		logger.Info("⚡ [BLS-PARALLEL] Distributed %d BLS-only groups across %d workers (instead of serializing to Worker 0)",
-			blsOnlyGroupCount, numWorkers)
-	}
-
-	// Close channels to signal workers to stop
-	for w := 0; w < numWorkers; w++ {
-		close(workerChans[w])
-	}
-
 	if enableTrace {
-		funcSpan.AddEvent("AllWorkersLaunched", map[string]interface{}{"numWorkers": numWorkers})
+		funcSpan.AddEvent("AllGoroutinesLaunched", map[string]interface{}{"groupCount": len(groupedGroups)})
 	}
-
-	// Wait for all workers to complete
 	wg.Wait()
 	evmDuration := time.Since(startEVM)
 	// ─────────────────────────────────────────────────────────────
@@ -686,8 +592,8 @@ func processGroupsConcurrently(
 	if groupCount > 0 {
 		avgPerGroup = evmDuration / time.Duration(groupCount)
 	}
-	logger.Debug("🧮 [PERF-EVM] groups=%d | workers=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
-		groupCount, numWorkers, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
+	logger.Debug("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
+		groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
 	// ─────────────────────────────────────────────────────────────
 
 	if enableTrace {
@@ -791,7 +697,11 @@ func processSingleGroup(
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
 		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
-			failedSenders[tx.FromAddress()] = true
+			
+			if errVerify.Code != transaction.InvalidNonce.Code {
+				failedSenders[tx.FromAddress()] = true
+			}
+			
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -807,7 +717,10 @@ func processSingleGroup(
 				// FORK-SAFETY & DATA INTEGRITY: Do NOT include invalid nonce TXs in the block.
 				// Including them causes duplicate TX hashes across multiple blocks when a client
 				// resends a batch, inflating the block's TX count and bloating the ledger.
-				failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+				if tx.GetNonce() > as.Nonce() {
+					failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
+				}
+				
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}
@@ -916,6 +829,7 @@ func processSingleGroup(
 			}
 			rcp, exRs, txFailed := ccHandler.HandleTransaction(txCtx, chainState, tx, mvmId, enableTrace, blockTime)
 			logger.Info("[CC EXECUTE] TX %s type=%d → HandleTransaction result: %v", tx.Hash().Hex(), tx.GetType(), rcp)
+			gRs.MvmIdMap[tx.Hash()] = mvmId
 			gRs.Receipts = append(gRs.Receipts, rcp)
 			gRs.Transactions = append(gRs.Transactions, tx)
 			if exRs != nil {
@@ -1126,12 +1040,13 @@ func processSingleGroup(
 		)
 
 		var exRs types.ExecuteSCResult
-		vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
-		usedMvmId := tx.ToAddress()
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
+		usedMvmId := mvmId
 		
 		if tx.IsRegularTransaction() {
 			// ═══════════════════════════════════════════════════════════════
-			// BATCH MUTATIONS for Native TX: bypass MVM and DB locks
+			// BATCH MUTATIONS for Native TX: Use DB locks to prevent data races
+			// with concurrent EVM groups modifying the same account.
 			// ═══════════════════════════════════════════════════════════════
 			_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
 			gasLimit := uint64(mt_common.TRANSFER_GAS_COST)
@@ -1141,9 +1056,11 @@ func processSingleGroup(
 			gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
-			if as.TotalBalance().Cmp(totalCost) < 0 {
-				err := fmt.Errorf("insufficient balance for transfer")
-				rcp := createErrorReceipt(tx, toAddress, err)
+			// Mutate sender (thread-safe)
+			err = chainState.GetAccountStateDB().SubTotalBalance(tx.FromAddress(), totalCost)
+			if err != nil {
+				// Thread-safe check: if err is returned, it means insufficient balance (or lock issue)
+				rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("insufficient balance for transfer"))
 				gRs.Receipts = append(gRs.Receipts, rcp)
 				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
@@ -1152,31 +1069,23 @@ func processSingleGroup(
 				}
 				continue
 			}
-
-			// Mutate sender (in memory)
-			as.SubTotalBalance(totalCost)
-			as.PlusOneNonce()
-			as.SetLastHash(tx.Hash())
+			chainState.GetAccountStateDB().PlusOneNonce(tx.FromAddress())
+			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
-			// Mutate receiver (in memory)
-			asTo, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
-			if asTo == nil {
-				asTo = state.NewAccountState(tx.ToAddress())
-			}
-			asTo.AddBalance(tx.Amount())
+			// Mutate receiver (thread-safe)
+			chainState.GetAccountStateDB().AddBalance(tx.ToAddress(), tx.Amount())
 
 			// Accumulate gas fee for later batch update to coinbase
 			totalGasFee.Add(totalGasFee, gasFee)
 
-			// Defer dirty updates to post-parallel phase
-			gRs.DirtyAccounts = append(gRs.DirtyAccounts, as)
-			if tx.FromAddress() != tx.ToAddress() {
-				gRs.DirtyAccounts = append(gRs.DirtyAccounts, asTo)
-			}
-
 			// Sync C++ cache to prevent stale nonce for subsequent EVM TXs (if any)
-			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce())
+			// Wait, we need the new nonce! Fetch it thread-safely:
+			// as was fetched at the beginning, but its nonce might be stale now.
+			// However, since FromAddress is grouped, no other native TX is modifying it,
+			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
+			// So we can just use as.Nonce() + 1
+			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce() + 1)
 
 			// Generate fake MVM result
 			exRs = smart_contract.NewExecuteSCResult(
@@ -1186,10 +1095,8 @@ func processSingleGroup(
 			)
 
 		} else {
-			if tx.IsDeployContract() || !isCache {
-				vmP = vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
-				usedMvmId = mvmId
-			}
+			// CRITICAL FORK FIX: We removed `tx.ToAddress()` as the cache key and ALWAYS use `mvmId` (Group ID).
+			// This prevents cross-block C++ EVM dirty state leaks and concurrency corruption.
 			gRs.MvmIdMap[tx.Hash()] = usedMvmId
 			// logger.Debug("1.ExecuteSmartContract MVMId:")
 			exRs, err = vmP.ExecuteTransactionWithMvmId(txCtx, tx, false, isCache)

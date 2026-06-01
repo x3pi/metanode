@@ -248,18 +248,32 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
   }
 }
 
+static std::string getMvmIdKey(const unsigned char *mvmId) {
+    return XapianRegistry::generateMvmIdKey(mvmId);
+}
+
+
 // Thêm một document mới vào database
-Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blockNumber)
+Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch();
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
 
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -293,26 +307,44 @@ Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blo
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0; /* Trả về 0 nếu có lỗi Xapian */
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0; /* Trả về 0 nếu có lỗi standard */
     }
 }
 
 
 // Đánh dấu một document là đã bị xóa (soft delete) tại một block number cụ thể
-bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber)
+bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
+
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -339,29 +371,51 @@ bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber)
     }
     catch (const Xapian::DocNotFoundError &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return false; /* Document không tồn tại */
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return false; /* Lỗi Xapian khác */
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return false; /* Lỗi standard */
     }
 }
 
 // Thêm một value vào một slot của document, có xử lý versioning theo blockNumber
-Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber)
+Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
+
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -390,10 +444,18 @@ Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, 
             }
             catch (const std::invalid_argument &)
             {
+                if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+                    active_mvm_id.clear();
+                    tx_cond.notify_all();
+                }
                 return 0; /* Định dạng số không hợp lệ */
             }
             catch (const std::out_of_range &)
             {
+                if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+                    active_mvm_id.clear();
+                    tx_cond.notify_all();
+                }
                 return 0; /* Số ngoài phạm vi */
             }
         }
@@ -439,30 +501,52 @@ Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, 
     }
     catch (const Xapian::DocNotFoundError &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
 }
 
 
 // Thêm một term vào document, có xử lý versioning theo blockNumber
-Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term, uint256_t blockNumber)
+Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
+
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -516,29 +600,51 @@ Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term
     }
     catch (const Xapian::DocNotFoundError &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
 }
 
 // Index một đoạn text vào document (thêm các term được tạo ra từ text)
-Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber)
+Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
+
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -597,29 +703,51 @@ Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &te
     }
     catch (const Xapian::DocNotFoundError &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0;
     }
 }
 
 // Đặt (ghi đè) dữ liệu thô cho một document, có xử lý versioning
-Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_data, uint256_t blockNumber)
+Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_data, uint256_t blockNumber, const unsigned char *mvmId)
 {
     touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::string mvm_key = getMvmIdKey(mvmId);
+    std::unique_lock<std::shared_mutex> lock(changes_mutex);
+    if (!mvm_key.empty()) {
+        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
+            tx_cond.wait(lock);
+        }
+        if (active_mvm_id.empty()) {
+            active_mvm_id = mvm_key;
+        }
+    }
+
     try
     {
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -673,14 +801,26 @@ Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_
     }
     catch (const Xapian::DocNotFoundError &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0; // Document không tồn tại
     }
     catch (const Xapian::Error &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0; // Lỗi Xapian
     }
     catch (const std::exception &)
     {
+        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
+            active_mvm_id.clear();
+            tx_cond.notify_all();
+        }
         return 0; // Lỗi standard
     }
 }
@@ -871,6 +1011,24 @@ bool XapianManager::commit_changes() {
     return false; // Commit thất bại
   } catch (const std::exception &) {
     return false; // Commit thất bại
+  }
+}
+
+void XapianManager::commitAllInstances() {
+  std::shared_lock<std::shared_mutex> lock(instances_mutex);
+  for (auto &pair : instances) {
+    auto manager = pair.second;
+    if (manager) {
+      std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
+      if (!manager->has_started) {
+        try {
+          manager->db.commit();
+          manager->comprehensive_log.xapian_doc_logs.clear();
+        } catch (...) {
+          // Ignore errors during background flush
+        }
+      }
+    }
   }
 }
 
@@ -1111,7 +1269,7 @@ bool XapianManager::replay_log(
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
 // lại DB
 bool XapianManager::revertUncommittedChanges() {
-  std::lock_guard<std::shared_mutex> lock(changes_mutex); // Khóa để thao tác an toàn
+  std::unique_lock<std::shared_mutex> lock(changes_mutex); // Khóa để thao tác an toàn
   
   // FORK-SAFETY: Return immediately if there are no uncommitted changes
   if (comprehensive_log.xapian_doc_logs.empty()) {
@@ -1130,12 +1288,20 @@ bool XapianManager::revertUncommittedChanges() {
     // Mở lại database từ đường dẫn đã lưu
     db = Xapian::WritableDatabase(
         mvm::createFullPath(address, db_name).string(), Xapian::DB_OPEN);
+    active_mvm_id.clear();
+    tx_cond.notify_all();
     return true; // Revert thành công
   } catch (const Xapian::Error &) {
+    active_mvm_id.clear();
+    tx_cond.notify_all();
     return false; /* Lỗi Xapian khi đóng/mở lại DB */
   } catch (const std::exception &) {
+    active_mvm_id.clear();
+    tx_cond.notify_all();
     return false; /* Lỗi standard */
   } catch (...) {
+    active_mvm_id.clear();
+    tx_cond.notify_all();
     return false; /* Lỗi không xác định */
   }
 }
@@ -1193,11 +1359,13 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
     return false; // Không tìm thấy instance để hủy
 }
 
-// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
-XapianLog::ComprehensiveLog XapianManager::getComprehensiveChangeLogs() const
+// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER
+XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 {
     std::lock_guard<std::shared_mutex> lock(changes_mutex);
-    return comprehensive_log;
+    XapianLog::ComprehensiveLog log_copy = std::move(comprehensive_log);
+    comprehensive_log.xapian_doc_logs.clear();
+    return log_copy;
 }
 
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged

@@ -39,6 +39,7 @@ public:
                                                     bool isReset);
   static constexpr const char *LOGICAL_ID_GENERATED_PREFIX = "uuid:";
   static std::string generateUuidLogicalId();
+  static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
@@ -65,18 +66,18 @@ public:
   XapianManager(const std::string &db_path, const mvm::Address &addr);
 
   // --- Document Operations (Log changes before execution) ---
-  Xapian::docid new_document(const std::string &data, uint256_t blockNumber);
-  bool delete_document(Xapian::docid did, uint256_t blockNumber);
+  Xapian::docid new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
+  bool delete_document(Xapian::docid did, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid add_value(Xapian::docid did, Xapian::valueno slot,
                           const std::string &value, bool isSerialise,
-                          uint256_t blockNumber);
+                          uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid add_term(Xapian::docid did, const std::string &term,
-                         uint256_t blockNumber);
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid set_data(Xapian::docid did, const std::string &data,
-                         uint256_t blockNumber);
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::docid index_text(Xapian::docid did, const std::string &text_to_index,
                            Xapian::termcount wdf_inc, const std::string prefix,
-                           uint256_t blockNumber);
+                           uint256_t blockNumber, const unsigned char *mvmId = nullptr);
   Xapian::Document clone_document(const Xapian::Document &source_doc);
 
   // --- Read Operations ---
@@ -122,10 +123,12 @@ public:
 
   bool replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay);
 
-  XapianLog::ComprehensiveLog getComprehensiveChangeLogs() const;
+  XapianLog::ComprehensiveLog extractComprehensiveChangeLogs();
   XapianLog::ComprehensiveLog removeLogsUntilNearestEndCommand();
   std::string getDbName() const; // <-- Thêm khai báo này
   bool has_started = false;
+  std::string active_mvm_id;
+  std::condition_variable_any tx_cond;
   friend class XapianRegistry; // Cho phép Registry truy cập changes_mutex
 
 private:

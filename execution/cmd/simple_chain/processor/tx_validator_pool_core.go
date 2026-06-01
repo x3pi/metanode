@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"os"
 	"bytes"
 	"context"
 	"fmt"
@@ -43,6 +44,10 @@ type TxValidatorPool struct {
 	transactionPool   *transaction_pool.TransactionPool
 	pendingTxManager  *PendingTransactionManager
 	excludedItems     []grouptxns.Item
+
+	// FORK-SAFETY: Shared lock — Lock() during real block execution blocks
+	// all virtual execution goroutines that hold RLock().
+	blockProcessingLock *sync.RWMutex
 }
 
 func NewTxValidatorPool(
@@ -53,16 +58,18 @@ func NewTxValidatorPool(
 	eventSystem *mt_filters.EventSystem,
 	transactionPool *transaction_pool.TransactionPool,
 	pendingTxManager *PendingTransactionManager,
+	blockProcessingLock *sync.RWMutex,
 ) *TxValidatorPool {
 	return &TxValidatorPool{
-		env:               env,
-		offChainProcessor: offChainProcessor,
-		chainState:        chainState,
-		storageManager:    storageManager,
-		eventSystem:       eventSystem,
-		transactionPool:   transactionPool,
-		pendingTxManager:  pendingTxManager,
-		excludedItems:     make([]grouptxns.Item, 0),
+		env:                 env,
+		offChainProcessor:   offChainProcessor,
+		chainState:          chainState,
+		storageManager:      storageManager,
+		eventSystem:         eventSystem,
+		transactionPool:     transactionPool,
+		pendingTxManager:    pendingTxManager,
+		excludedItems:       make([]grouptxns.Item, 0),
+		blockProcessingLock: blockProcessingLock,
 	}
 }
 
@@ -211,6 +218,14 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // It verifies them individually but adds them to the pool and pending manager in bulk
 // to minimize lock contention.
 func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction, skipVerification bool) []error {
+	if f, err := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal called with %d txs\n", len(txs)))
+		for i, tx := range txs {
+			f.WriteString(fmt.Sprintf("  tx[%d]: From=%v, Nonce=%d, Hash=%v\n", i, tx.FromAddress().String(), tx.GetNonce(), tx.Hash().Hex()))
+		}
+		f.Close()
+	}
+
 	if len(txs) == 0 {
 		return nil
 	}
@@ -307,13 +322,22 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		wg.Wait()
 	}
 
+	// Create file logger
+	var logFile *os.File
+	var err error
+	if logFile, err = os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		defer logFile.Close()
+	}
+
 	for i, tx := range txs {
 		if tx == nil {
 			errorsList[i] = fmt.Errorf("tx nil")
+			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - tx nil\n", i)) }
 			continue
 		}
 
 		if errorsList[i] != nil {
+			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - parallel verification failed: %v\n", i, errorsList[i])) }
 			continue // Failed in parallel verification Phase
 		}
 
@@ -321,12 +345,14 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			// File uploads not supported in batch optimized path for simplicity; log error
 			logger.Error("HandleFileTransactionNoReceipt not supported in AddTransactionsToPool yet")
 			errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
+			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - upload chunk error\n", i)) }
 			continue
 		}
 
 		conflict := vp.pendingTxManager.HasNonceConflict(tx)
 		if conflict {
 			errorsList[i] = fmt.Errorf(transaction.NonceConflictError.Description)
+			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - nonce conflict\n", i)) }
 			continue
 		}
 
@@ -334,6 +360,8 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	}
 
 	if len(validTxs) > 0 {
+		if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal: vp.transactionPool.AddTransactions called with %d txs\n", len(validTxs))) }
+		
 		// Bulk insert to pool (acquires lock ONCE)
 		vp.transactionPool.AddTransactions(validTxs)
 
@@ -424,9 +452,23 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	// does not track/forward this field. Without addresses, the EVM's isAddressAllowed
 	// check will fail for native TXs (BLS registration) causing receipt status=0x0
 	// on some nodes but 0x1 on others → receiptsRoot divergence → FORK.
-	for _, tx := range txs {
+	// We run virtual execution to dynamically recover the same RelatedAddresses as the proposer.
+	type virtualExecutor interface {
+		ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte)
+	}
+	ve, isVe := vp.offChainProcessor.(virtualExecutor)
+
+	for i, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
+		if isVe && (tx.IsCallContract() || tx.IsDeployContract()) {
+			updatedTx, err, _ := ve.ProcessSingleTransactionVirtual(tx)
+			if err == nil && updatedTx != nil {
+				txs[i] = updatedTx
+			} else {
+				logger.Warn("⚠️ [FORK-SAFETY] Virtual execution failed during validation for tx %s: %v", tx.Hash().Hex(), err)
+			}
+		}
 	}
 
 	// OPTIMIZATION: Wait for PreloadAccounts concurrently (deterministic — safe for fork-safety)
@@ -464,6 +506,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	nativeParallelAddrs := map[common.Address]struct{}{
 		accountSettingAddr:                   {},
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
 	}
 	for i, tx := range txs {
 		// Build grouping addresses: filter out native dispatch addresses
@@ -511,7 +554,13 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startExecution := time.Now()
+	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution.
+	// This blocks ALL virtual execution goroutines (which hold shared RLock)
+	// from making concurrent cgo calls to C++ MVM during committed block processing.
+	// Virtual executions will resume after real block processing completes.
+	vp.blockProcessingLock.Lock()
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
 	if execDuration.Milliseconds() > 100 {
@@ -570,6 +619,58 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		logger.Error("GroupAndLimitTransactionsOptimized failed: %v", err)
 		return tx_processor.ProcessResult{}, fmt.Errorf("GroupAndLimitTransactionsOptimized failed: %w", err)
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// DETERMINISTIC RE-GROUPING (Proposer Path Alignment)
+	//
+	// Although GroupAndLimitTransactionsOptimized selected and limited the transactions
+	// to fit block size / gas constraints, we MUST execute them using the EXACT same
+	// deterministic grouping algorithm (GroupTransactionsDeterministic) and native
+	// address filtering as the validator / replay path.
+	//
+	// This ensures that:
+	//   1. The execution order of transaction groups matches the replay path.
+	//   2. Sequential GroupID assignment matches, yielding identical mvmId (C++ DB paths).
+	//   3. Receipts' GroupIndex and TransactionIndex are stamped identically.
+	//   4. The resulting stateRoot computed by the proposer matches the validator's.
+	// ═══════════════════════════════════════════════════════════════════════════
+	var selectedTxs []types.Transaction
+	for _, group := range groupedGroups {
+		for _, item := range group.Items {
+			tx := item.Tx
+			tx.AddRelatedAddress(tx.FromAddress())
+			tx.AddRelatedAddress(tx.ToAddress())
+			selectedTxs = append(selectedTxs, tx)
+		}
+	}
+
+	deterministicItems := make([]grouptxns.Item, 0, len(selectedTxs))
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	nativeParallelAddrs := map[common.Address]struct{}{
+		accountSettingAddr:                   {},
+		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
+	}
+	for i, tx := range selectedTxs {
+		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
+		for _, addr := range tx.RelatedAddresses() {
+			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+				groupAddrs = append(groupAddrs, addr)
+			}
+		}
+		if len(groupAddrs) == 0 {
+			groupAddrs = append(groupAddrs, tx.FromAddress())
+		}
+		deterministicItems = append(deterministicItems, grouptxns.Item{
+			ID:      i,
+			Array:   groupAddrs,
+			GroupID: 0,
+			Tx:      tx,
+		})
+	}
+
+	deterministicGroups := grouptxns.GroupTransactionsDeterministic(deterministicItems)
+
 	ctx := context.Background()
 
 	var baseCtx context.Context
@@ -587,7 +688,11 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 		baseCtx = ctx
 		rootSpan = nil
 	}
-	return tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution (pool path).
+	vp.blockProcessingLock.Lock()
+	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	vp.blockProcessingLock.Unlock()
+	return result, err
 }
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding
@@ -638,15 +743,25 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				nonceMap[from]++
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
-				// Note: we just don't add it to validTxs or futureTxs
-				// It will be garbage collected and removed from pending manager later via timeout
 			}
 		}
+
+
 
 		// Re-add future transactions back to the pool
 		if len(futureTxs) > 0 {
 			vp.transactionPool.AddTransactions(futureTxs)
 		}
+
+		if f, errFile := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
+			f.WriteString(fmt.Sprintf("ProcessPoolSub: allTxs=%d, validTxs=%d, futureTxs=%d\n", len(allTxs), len(validTxs), len(futureTxs)))
+			if len(allTxs) > 0 {
+				f.WriteString(fmt.Sprintf("  Sample Tx: actualNonce=%d, expectedNonce=%d, from=%s\n", allTxs[0].GetNonce(), nonceMap[allTxs[0].FromAddress()]-1, allTxs[0].FromAddress().String()))
+			}
+			f.Close()
+		}
+
+		logger.Info("🔍 [DEBUG] ProcessPoolSub: allTxs=%d, validTxs=%d, futureTxs=%d", len(allTxs), len(validTxs), len(futureTxs))
 
 		txs = validTxs
 	}
@@ -727,3 +842,4 @@ func (vp *TxValidatorPool) ProcessAndPartitionTransactions(n int) ([][]grouptxns
 
 	return partitionedGroups, nil
 }
+

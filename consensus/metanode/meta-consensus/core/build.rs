@@ -12,6 +12,16 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     build_tonic_services(&out_dir);
 
+    // Compile transaction.proto
+    let tx_proto = Path::new("../../proto/transaction.proto");
+    if tx_proto.exists() {
+        println!("cargo:rerun-if-changed=../../proto/transaction.proto");
+        prost_build::Config::new()
+            .out_dir(&out_dir)
+            .compile_protos(&["../../proto/transaction.proto"], &["../../proto"])
+            .unwrap();
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=USE_TIDEHUNTER");
     println!("cargo::rustc-check-cfg=cfg(tidehunter)");

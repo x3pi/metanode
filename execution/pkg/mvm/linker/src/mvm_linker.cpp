@@ -1270,23 +1270,63 @@ int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries) {
     }
 
     std::shared_ptr<XapianManager> target_manager = nullptr;
+    std::filesystem::path replay_db_path = mvm::createFullPath(address, comp_log.db_name);
+
+    // FORK-FIX: Ensure directory exists before opening Xapian DB.
+    // The proposer creates this directory in XAPIAN_GET_OR_CREATE_DB handler,
+    // but during replay on validators, getInstance() was called directly
+    // without creating the directory first → Xapian::DB_CREATE_OR_OPEN throws
+    // because it cannot create files in a non-existent directory.
+    if (!std::filesystem::exists(replay_db_path)) {
+      std::error_code ec;
+      std::filesystem::create_directories(replay_db_path, ec);
+      if (ec) {
+        std::cerr << "[C++ Replay FATAL] Cannot create directory for db_name='"
+                  << comp_log.db_name << "' path=" << replay_db_path.string()
+                  << " error=" << ec.message() << std::endl;
+        overall_operation_success = false;
+        continue;
+      }
+      std::cerr << "[C++ Replay] Created directory: " << replay_db_path.string() << std::endl;
+    }
+
+    std::cerr << "[C++ Replay] Entry " << i << "/" << num_entries
+              << ": db_name='" << comp_log.db_name
+              << "' address=" << addr_hex
+              << " db_path=" << replay_db_path.string()
+              << " log_entries=" << comp_log.xapian_doc_logs.size()
+              << std::endl;
     try {
       target_manager =
           XapianManager::getInstance(comp_log.db_name, address, true);
+      std::cerr << "[C++ Replay] Entry " << i << ": getInstance OK" << std::endl;
+    } catch (const Xapian::DatabaseLockError &e) {
+      std::cerr << "[C++ Replay FATAL] DatabaseLockError for db_name '"
+                << comp_log.db_name << "' addr=" << addr_hex
+                << " path=" << replay_db_path.string()
+                << ": " << e.get_msg() << std::endl;
+      overall_operation_success = false;
+      continue;
+    } catch (const Xapian::Error &e) {
+      std::cerr << "[C++ Replay FATAL] Xapian::Error for db_name '"
+                << comp_log.db_name << "' addr=" << addr_hex
+                << " path=" << replay_db_path.string()
+                << " type=" << e.get_type()
+                << " msg=" << e.get_msg()
+                << " context=" << e.get_context() << std::endl;
+      overall_operation_success = false;
+      continue;
     } catch (const std::exception &e) {
-      std::cerr << "[C++ Replay Error] Exception when calling "
-                   "XapianManager::getInstance (reset=true) for db_name '"
-                << comp_log.db_name << "' and address " << addr_hex << ": "
-                << e.what() << std::endl;
-      std::cerr << "  - Entry index: " << i << std::endl;
+      std::cerr << "[C++ Replay FATAL] std::exception for db_name '"
+                << comp_log.db_name << "' addr=" << addr_hex
+                << " path=" << replay_db_path.string()
+                << ": " << e.what() << std::endl;
       overall_operation_success = false;
       continue;
     } catch (...) {
-      std::cerr << "[C++ Replay Error] Unknown exception when calling "
-                   "XapianManager::getInstance (reset=true) for db_name '"
-                << comp_log.db_name << "' and address " << addr_hex
-                << std::endl;
-      std::cerr << "  - Entry index: " << i << std::endl;
+      std::cerr << "[C++ Replay FATAL] Unknown exception for db_name '"
+                << comp_log.db_name << "' addr=" << addr_hex
+                << " path=" << replay_db_path.string() << std::endl;
       overall_operation_success = false;
       continue;
     }
@@ -1304,14 +1344,16 @@ int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries) {
     bool replay_success_for_this_entry = true;
 
     if (!comp_log.xapian_doc_logs.empty()) {
+      std::cerr << "[C++ Replay] Entry " << i << ": replaying "
+                << comp_log.xapian_doc_logs.size() << " log operations..." << std::endl;
       if (!target_manager->replay_log(comp_log.xapian_doc_logs)) {
-        std::cerr << "[C++ Replay Error] Replaying document logs failed."
-                  << std::endl;
-        std::cerr << "  - Entry index: " << i << std::endl;
-        std::cerr << "  - Address: " << addr_hex << std::endl;
-        std::cerr << "  - Total operations attempted: "
-                  << comp_log.xapian_doc_logs.size() << std::endl;
+        std::cerr << "[C++ Replay FATAL] replay_log FAILED for entry " << i
+                  << " addr=" << addr_hex
+                  << " db_name='" << comp_log.db_name << "'"
+                  << " ops=" << comp_log.xapian_doc_logs.size() << std::endl;
         replay_success_for_this_entry = false;
+      } else {
+        std::cerr << "[C++ Replay] Entry " << i << ": replay_log OK" << std::endl;
       }
     }
 
@@ -1319,19 +1361,23 @@ int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries) {
       try {
         if (target_manager->saveAllAndCommit()) {
           successful_replays_count++;
+          std::cerr << "[C++ Replay] Entry " << i << ": saveAllAndCommit OK" << std::endl;
         } else {
-          std::cerr << "[C++ Replay Error] saveAllAndCommit failed for address "
-                    << addr_hex << std::endl;
+          std::cerr << "[C++ Replay FATAL] saveAllAndCommit returned false for addr="
+                    << addr_hex << " db_name='" << comp_log.db_name << "'" << std::endl;
           overall_operation_success = false;
         }
+      } catch (const Xapian::Error &e) {
+        std::cerr << "[C++ Replay FATAL] Xapian::Error during saveAllAndCommit for addr="
+                  << addr_hex << " type=" << e.get_type()
+                  << " msg=" << e.get_msg() << std::endl;
+        overall_operation_success = false;
       } catch (const std::exception &e) {
-        std::cerr << "[C++ Replay Error] Exception during saveAllAndCommit for "
-                     "address "
+        std::cerr << "[C++ Replay FATAL] Exception during saveAllAndCommit for addr="
                   << addr_hex << ": " << e.what() << std::endl;
         overall_operation_success = false;
       } catch (...) {
-        std::cerr << "[C++ Replay Error] Unknown exception during "
-                     "saveAllAndCommit for address "
+        std::cerr << "[C++ Replay FATAL] Unknown exception during saveAllAndCommit for addr="
                   << addr_hex << std::endl;
         overall_operation_success = false;
       }
@@ -1356,4 +1402,7 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce) {
 void MVM_cancelTransaction(unsigned char *mvmId) {
   registry.cancelTransaction(mvmId);
   registry.unregisterAllManagersForMvmId(mvmId);
+}
+void MVM_commitAllXapian() {
+  XapianManager::commitAllInstances();
 }

@@ -1076,9 +1076,22 @@ func GlobalStateGet(
 		return C.int(0), nil, nil, nil, 0
 	}
 
-	if fAddress == common.HexToAddress("0x0000000000000000000000000000000000000101") ||
-		fAddress == common.HexToAddress("0x0000000000000000000000000000000000000102") ||
-		fAddress == common.HexToAddress("0x0000000000000000000000000000000000000004") {
+	isPrecompile := false
+	if fAddress[0] == 0 && fAddress[1] == 0 && fAddress[2] == 0 && fAddress[3] == 0 &&
+		fAddress[4] == 0 && fAddress[5] == 0 && fAddress[6] == 0 && fAddress[7] == 0 &&
+		fAddress[8] == 0 && fAddress[9] == 0 && fAddress[10] == 0 && fAddress[11] == 0 &&
+		fAddress[12] == 0 && fAddress[13] == 0 && fAddress[14] == 0 && fAddress[15] == 0 &&
+		fAddress[16] == 0 && fAddress[17] == 0 {
+		val := (uint16(fAddress[18]) << 8) | uint16(fAddress[19])
+		if val >= 1 && val <= 409 {
+			isPrecompile = true
+		}
+	}
+	if !isPrecompile && fAddress == common.HexToAddress("0x00000000000000000000000000000000b429c0b2") {
+		isPrecompile = true
+	}
+
+	if isPrecompile {
 		logger.Debug("[GLOBAL_STATE_GET] Precompiled contract detected: %v", fAddress.Hex())
 		balance := uint256.NewInt(0).Bytes32()
 		cBBalance := C.CBytes(balance[:])
@@ -1305,4 +1318,9 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 // This is necessary when snapshot state changes or sync process resets the chain
 func ClearAllStateInstances() {
 	C.clearAllStateInstances()
+}
+
+// CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
+func CommitAllXapian() {
+	C.MVM_commitAllXapian()
 }

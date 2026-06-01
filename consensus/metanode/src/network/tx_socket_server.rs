@@ -305,7 +305,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 60000;
+            const MAX_BUNDLE_SIZE: usize = 500;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
@@ -337,8 +337,10 @@ impl TxSocketServer {
                     recycler.track_submitted(&chunk_vec).await;
                 }
 
+                let chunk_len = chunk_vec.len();
                 match current_client.submit_no_wait(chunk_vec).await {
                     Ok(included_in_block_rx) => {
+                        info!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);
                         // total_submitted += chunk_len;
                         tokio::spawn(async move {
                             if let Ok((_block_ref, _indices, status_receiver)) = included_in_block_rx.await {

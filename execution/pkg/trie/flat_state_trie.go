@@ -1,6 +1,7 @@
 package trie
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -111,7 +112,35 @@ func makeBucketKey(bucketIdx byte) []byte {
 }
 
 func dbCacheKey(db FlatStateDB) string {
-	return fmt.Sprintf("%p", db)
+	if db == nil {
+		return ""
+	}
+	// Traverse and collect all prefixes and the underlying root DB pointer
+	var prefixes [][]byte
+	var rootDB interface{} = db
+
+	for {
+		if ps, ok := rootDB.(interface{ GetPrefix() []byte }); ok {
+			prefixes = append(prefixes, ps.GetPrefix())
+		}
+		
+		if uw, ok := rootDB.(interface{ Unwrap() FlatStateDB }); ok {
+			rootDB = uw.Unwrap()
+		} else if uw, ok := rootDB.(interface{ Unwrap() interface{} }); ok {
+			rootDB = uw.Unwrap()
+		} else {
+			break
+		}
+	}
+	
+	// Join all prefixes in reverse order
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("%p", rootDB))
+	for i := len(prefixes) - 1; i >= 0; i-- {
+		buf.WriteByte(':')
+		buf.Write(prefixes[i])
+	}
+	return buf.String()
 }
 
 // dirtyEntry caches decoded key bytes alongside the dirty value,
@@ -143,8 +172,9 @@ type FlatStateTrie struct {
 	// for replication to Sub nodes. Without this, Sub nodes never receive the actual data.
 	lastCommitBatch [][2][]byte
 
-	isHash bool
-	mu     sync.RWMutex
+	isHash        bool
+	bucketsLoaded bool
+	mu            sync.RWMutex
 }
 
 // Compile-time check: FlatStateTrie must implement StateTrie.
@@ -153,11 +183,12 @@ var _ StateTrie = (*FlatStateTrie)(nil)
 // NewFlatStateTrie creates a new empty FlatStateTrie.
 func NewFlatStateTrie(db FlatStateDB, isHash bool) *FlatStateTrie {
 	ft := &FlatStateTrie{
-		db:        db,
-		dirty:     make(map[string]*dirtyEntry),
-		oldValues: make(map[string][]byte),
-		oldLoaded: make(map[string]bool),
-		isHash:    isHash,
+		db:            db,
+		dirty:         make(map[string]*dirtyEntry),
+		oldValues:     make(map[string][]byte),
+		oldLoaded:     make(map[string]bool),
+		isHash:        isHash,
+		bucketsLoaded: true, // starts empty, so buckets are conceptually loaded
 	}
 	ft.rootHash = computeRootFromBuckets(ft.buckets)
 	return ft
@@ -179,34 +210,47 @@ func NewFlatStateTrieFromRoot(rootHash e_common.Hash, db FlatStateDB, isHash boo
 		ft.buckets = *buckets
 		ft.rootHash = computeRootFromBuckets(ft.buckets)
 		if ft.rootHash == rootHash {
+			ft.bucketsLoaded = true
 			return ft, nil
 		}
-		// Cache hit but hash mismatch — fall through to DB
+		// Cache hit but hash mismatch — fall through to lazy loading
 	}
 
-	// Fallback: load bucket accumulators from DB
-	for i := 0; i < 256; i++ {
-		data, err := db.Get(makeBucketKey(byte(i)))
-		if err == nil && len(data) == 32 {
-			copy(ft.buckets[i][:], data)
-		}
-	}
-	ft.rootHash = computeRootFromBuckets(ft.buckets)
-
-	// With sharded/async DBs, bucket reads may not reflect latest writes.
-	// Trust the committed rootHash if buckets don't match.
-	if ft.rootHash != rootHash {
-		logger.Warn("[FlatStateTrie] Bucket load mismatch (expected=%s, computed=%s) — using committed hash",
-			rootHash.Hex()[:16], ft.rootHash.Hex()[:16])
-		ft.rootHash = rootHash
-	}
-
+	// Defer loading bucket accumulators from DB until they are needed for mutation (Update/BatchUpdate).
+	// Set the rootHash directly.
+	ft.rootHash = rootHash
+	ft.bucketsLoaded = false
 	return ft, nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StateTrie interface implementation
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ensureBucketsLoaded loads the 256 bucket accumulators from the database
+// if they haven't been loaded yet.
+// MUST be called under write lock (f.mu.Lock()).
+func (f *FlatStateTrie) ensureBucketsLoaded() {
+	if f.bucketsLoaded {
+		return
+	}
+
+	for i := 0; i < 256; i++ {
+		data, err := f.db.Get(makeBucketKey(byte(i)))
+		if err == nil && len(data) == 32 {
+			copy(f.buckets[i][:], data)
+		} else {
+			f.buckets[i] = e_common.Hash{}
+		}
+	}
+	f.bucketsLoaded = true
+
+	computed := computeRootFromBuckets(f.buckets)
+	if computed != f.rootHash {
+		logger.Warn("[FlatStateTrie] Lazy bucket load mismatch (expected=%s, computed=%s) — using committed hash",
+			f.rootHash.Hex()[:16], computed.Hex()[:16])
+	}
+}
 
 // Get retrieves the value for a key. O(1) — direct DB read.
 func (f *FlatStateTrie) Get(key []byte) ([]byte, error) {
@@ -267,6 +311,8 @@ func (f *FlatStateTrie) Update(key, value []byte) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	// Load old value for bucket hash computation (only once per key per block)
 	if !f.oldLoaded[hexKey] {
@@ -385,6 +431,8 @@ func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
 	// ═══════════════════════════════════════════════════════════════
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	for i := 0; i < n; i++ {
 		e := &entries[i]
@@ -512,6 +560,8 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	// ═══════════════════════════════════════════════════════════════
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.ensureBucketsLoaded()
 
 	for i := 0; i < n; i++ {
 		e := &entries[i]
@@ -705,6 +755,8 @@ func (f *FlatStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		return f.rootHash, nil, nil, nil
 	}
 
+	f.ensureBucketsLoaded()
+
 	// 1. Update bucket accumulators (reuses shared applyDirtyToBuckets)
 	f.dirtyBuckets = f.applyDirtyToBuckets(&f.buckets)
 
@@ -788,13 +840,14 @@ func (f *FlatStateTrie) Copy() StateTrie {
 	}
 
 	return &FlatStateTrie{
-		db:        f.db,
-		dirty:     newDirty,
-		oldValues: newOldValues,
-		oldLoaded: newOldLoaded,
-		buckets:   f.buckets,
-		rootHash:  f.rootHash,
-		isHash:    f.isHash,
+		db:            f.db,
+		dirty:         newDirty,
+		oldValues:     newOldValues,
+		oldLoaded:     newOldLoaded,
+		buckets:       f.buckets,
+		rootHash:      f.rootHash,
+		isHash:        f.isHash,
+		bucketsLoaded: f.bucketsLoaded,
 	}
 }
 
@@ -885,3 +938,83 @@ func computeRootFromBuckets(buckets [256]e_common.Hash) e_common.Hash {
 	rootBufPool.Put(dataPtr)
 	return h
 }
+
+// UpdateBucketCacheFromBatch updates globalBucketCache for a DB using the written batch.
+// This is critical during block synchronization (applyBackupDbBatches) to ensure
+// in-memory FlatStateTrie cache is synchronized with the raw PebbleDB writes,
+// preventing subsequent NewFlatStateTrieFromRoot calls from using stale caches or
+// triggering Bucket load mismatches.
+func UpdateBucketCacheFromBatch(db FlatStateDB, batch [][2][]byte) {
+	if db == nil || len(batch) == 0 {
+		return
+	}
+
+	baseCacheKey := dbCacheKey(db)
+
+	// Group the batch updates by their specific cache key.
+	// For example, some updates might belong directly to the database cacheKey (e.g. "fb:X"),
+	// and some might belong to specific smart contracts (e.g. "<address>fb:X").
+	updates := make(map[string][][2][]byte)
+
+	for _, kv := range batch {
+		key := kv[0]
+		// Case 1: Direct bucket key (len == 4, e.g. "fb:X")
+		if len(key) == 4 && key[0] == 'f' && key[1] == 'b' && key[2] == ':' {
+			updates[baseCacheKey] = append(updates[baseCacheKey], kv)
+		}
+		// Case 2: Contract-prefixed bucket key (len == 24, e.g. "<address>fb:X")
+		if len(key) == 24 && key[20] == 'f' && key[21] == 'b' && key[22] == ':' {
+			contractAddress := key[:20]
+			specificCacheKey := baseCacheKey + ":" + string(contractAddress)
+			strippedKey := key[20:]
+			updates[specificCacheKey] = append(updates[specificCacheKey], [2][]byte{strippedKey, kv[1]})
+		}
+	}
+
+	for cacheKey, kvs := range updates {
+		// Try to load existing cached buckets or initialize fresh ones
+		var buckets *[256]e_common.Hash
+		if cached, ok := globalBucketCache.Load(cacheKey); ok {
+			oldBuckets := cached.(*[256]e_common.Hash)
+			buckets = new([256]e_common.Hash)
+			*buckets = *oldBuckets
+		} else {
+			buckets = new([256]e_common.Hash)
+			
+			// Resolve prefix if cacheKey corresponds to a prefixed contract database
+			var prefix []byte
+			if len(cacheKey) > len(baseCacheKey)+1 && cacheKey[len(baseCacheKey)] == ':' {
+				prefix = []byte(cacheKey[len(baseCacheKey)+1:])
+			}
+			
+			// Read current buckets from DB to initialize
+			for i := 0; i < 256; i++ {
+				bucketKey := makeBucketKey(byte(i))
+				if len(prefix) > 0 {
+					prefixedKey := make([]byte, len(prefix)+len(bucketKey))
+					copy(prefixedKey, prefix)
+					copy(prefixedKey[len(prefix):], bucketKey)
+					bucketKey = prefixedKey
+				}
+				data, err := db.Get(bucketKey)
+				if err == nil && len(data) == 32 {
+					copy(buckets[i][:], data)
+				}
+			}
+		}
+
+		// Apply batch updates to buckets
+		for _, kv := range kvs {
+			key := kv[0]
+			if len(key) == 4 && key[0] == 'f' && key[1] == 'b' && key[2] == ':' {
+				bucketIdx := key[3]
+				if len(kv[1]) == 32 {
+					copy(buckets[bucketIdx][:], kv[1])
+				}
+			}
+		}
+
+		globalBucketCache.Store(cacheKey, buckets)
+	}
+}
+

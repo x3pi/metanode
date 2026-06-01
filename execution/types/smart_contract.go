@@ -26,6 +26,8 @@ type ExecuteSCResult interface {
 	MarshalJSON() ([]byte, error)
 	MapStorageAddressTouchedAddresses() map[common.Address][]common.Address
 	MapNativeSmartContractUpdateStorage() map[common.Address][][2][]byte
+	MapFullDbLogs() map[string][]byte
+	SetMapFullDbLogs(map[string][]byte)
 	ReceiptStatus() pb.RECEIPT_STATUS
 	Exception() pb.EXCEPTION
 	Return() []byte

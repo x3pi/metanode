@@ -95,6 +95,7 @@ pub trait Store: Send + Sync {
 pub struct WriteBatch {
     pub blocks: Vec<VerifiedBlock>,
     pub commits: Vec<TrustedCommit>,
+    pub commits_to_delete: Vec<(CommitIndex, CommitDigest)>,
     pub commit_info: Vec<(CommitRef, CommitInfo)>,
     pub finalized_commits: Vec<(CommitRef, BTreeMap<BlockRef, Vec<TransactionIndex>>)>,
 }
@@ -103,12 +104,14 @@ impl WriteBatch {
     pub fn new(
         blocks: Vec<VerifiedBlock>,
         commits: Vec<TrustedCommit>,
+        commits_to_delete: Vec<(CommitIndex, CommitDigest)>,
         commit_info: Vec<(CommitRef, CommitInfo)>,
         finalized_commits: Vec<(CommitRef, BTreeMap<BlockRef, Vec<TransactionIndex>>)>,
     ) -> Self {
         WriteBatch {
             blocks,
             commits,
+            commits_to_delete,
             commit_info,
             finalized_commits,
         }

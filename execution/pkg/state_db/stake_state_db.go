@@ -78,6 +78,11 @@ func (db *StakeStateDB) SetOriginRootHash(hash common.Hash) {
 	db.originRootHash = hash
 }
 
+// GetOriginRootHash returns the current origin root hash.
+func (db *StakeStateDB) GetOriginRootHash() common.Hash {
+	return db.originRootHash
+}
+
 // Trie returns the underlying StateTrie instance.
 func (db *StakeStateDB) Trie() p_trie.StateTrie {
 	return db.trie

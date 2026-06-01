@@ -94,6 +94,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 			break
 		}
 	}
+	defer mvm.ClearMVMApi(mvmIdDebug)
 	
 	if span != nil { // GUARD
 		span.SetAttribute("debugMvmId", mvmIdDebug.Hex())
@@ -110,7 +111,6 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 	}
 	// logger.Error("ClearMVM: 4", mvmIdDebug)
 
-	mvm.ClearMVMApi(mvmIdDebug) // Luôn clear
 	if span != nil {            // GUARD
 		span.AddEvent("ClearedDebugMVMApi", map[string]interface{}{"mvmIdCleared": mvmIdDebug.Hex()})
 	}
@@ -263,6 +263,9 @@ func (vmP *VmProcessor) mvmResultToExecuteResultDebug(
 		transactionHash, mvmRs.Status, mvmRs.Exception, mvmRs.Return, mvmRs.GasUsed,
 		logsHash, nil, nil, nil, nil, nil, nil, nil, nil, nil, eventLogs,
 	)
+	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
 
 	if span != nil { // GUARD
 		span.SetAttribute("finalDebugResultStatus", rs.ReceiptStatus().String())
@@ -383,6 +386,9 @@ func (vmP *VmProcessor) onlyCall(
 	// ✅ Đưa exception message vào Return field nếu Return empty và có exception
 	returnData := prepareReturnDataWithExceptionMessage(mvmResult.Return, mvmResult.Exmsg, mvmResult.Status, mvmResult.Exception)
 	rs := smart_contract.NewExecuteSCResult(tx.Hash(), mvmResult.Status, mvmResult.Exception, returnData, mvmResult.GasUsed, common.Hash{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if mvmResult != nil && mvmResult.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmResult.MapFullDbLogs)
+	}
 	if span != nil { // GUARD
 		span.SetAttribute("resultStatus", rs.ReceiptStatus().String())
 		span.SetAttribute("resultException", rs.Exception().String())
@@ -578,6 +584,9 @@ func (vmP *VmProcessor) onlyDeploy(
 	// ✅ Đưa exception message vào Return field nếu Return empty và có exception
 	returnData := prepareReturnDataWithExceptionMessage(mvmResult.Return, mvmResult.Exmsg, mvmResult.Status, mvmResult.Exception)
 	rs := smart_contract.NewExecuteSCResult(tx.Hash(), mvmResult.Status, mvmResult.Exception, returnData, mvmResult.GasUsed, common.Hash{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if mvmResult != nil && mvmResult.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmResult.MapFullDbLogs)
+	}
 	if span != nil { // GUARD
 		span.SetAttribute("resultStatus", rs.ReceiptStatus().String())
 		span.SetAttribute("resultException", rs.Exception().String())
@@ -621,6 +630,11 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
+	defer func() {
+		if !isCache {
+			mvm.ClearMVMApi(vmP.mvmId)
+		}
+	}()
 
 	if isCache {
 		mvm.ProtectMVMApi(vmP.mvmId)
@@ -669,7 +683,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	// Cập nhật trạng thái DB dựa trên kết quả từ MVM
-	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, vmP.mvmId, isFreeSender)
+	_, err := vmP.updateStateDB(execCtx, tx, mvmResult, vmP.mvmId, isFreeSender, isCache)
 	if err != nil {
 		wrappedErr := fmt.Errorf("failed to update state DB after NoncePlusOne: %w", err)
 		if span != nil {
@@ -701,8 +715,5 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		span.AddEvent("ClearingMVMApiAfterNonceOnly", map[string]interface{}{"mvmIdToClear": vmP.mvmId.Hex()})
 	}
 	
-	if !isCache {
-		mvm.ClearMVMApi(vmP.mvmId)
-	}
 	return rs, nil
 }

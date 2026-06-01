@@ -4,6 +4,7 @@ package processor
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -62,6 +63,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		if poolSizeBefore == 0 {
 			time.Sleep(1 * time.Millisecond)
 			continue
+		}
+
+		if f, errFile := os.OpenFile("/tmp/my_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
+			f.WriteString(fmt.Sprintf("TxsProcessor2: poolSizeBefore=%d\n", poolSizeBefore))
+			f.Close()
 		}
 
 		// BATCH ACCUMULATION: Throughput-Based Adaptive Batching (TBAB)
@@ -168,7 +174,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			// FFI Path (forward directly to embedded Rust process)
 			shouldLogSend := batchNum == 1 || batchNum == totalBatches
 			if shouldLogSend {
-				logger.Info("📤 [TX FLOW] Sending batch [%d/%d]: %d transactions to Rust (size=%d bytes)",
+				fmt.Printf("📤 [TX FLOW] Sending batch\n [%d/%d]: %d transactions to Rust (size=%d bytes)",
 					batchNum, totalBatches, len(batchTxs), len(bTransaction))
 				logger.Info("🔥 [PROFILING] GoSub: Sent batch of %d TXs to Rust FFI at UnixMilli: %d (batch %d/%d)",
 					len(batchTxs), time.Now().UnixMilli(), batchNum, totalBatches)
@@ -190,7 +196,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				break // Break out of the batch loop to wait for the next tick
 			} else {
 				if shouldLogSend {
-					logger.Info("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
+					fmt.Printf("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 						batchNum, totalBatches, len(batchTxs))
 				}
 				// Pipeline stats: track TXs forwarded to Rust
