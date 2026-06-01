@@ -108,12 +108,16 @@ metanode/
 │  └──────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────┐   │
 │  │  meta-consensus/core/src/  ← BFT ENGINE │   │
-│  │  ├── authority_node.rs    ← Authority    │   │
+│  │  ├── authority_node/      ← Authority node module │   │
+│  │  │   ├── mod.rs          ← Authority node orchestration │   │
+│  │  │   └── tests.rs        ← Authority node unit tests │   │
 │  │  ├── authority_service/   ← Authority service module │   │
 │  │  │   ├── mod.rs          ← Lifecycle coordinator │   │
 │  │  │   ├── handlers.rs     ← RPC server handlers │   │
 │  │  │   └── broadcast.rs    ← Block broadcast stream │   │
-│  │  ├── linearizer.rs       ← DAG→linear   │   │
+│  │  ├── linearizer/          ← DAG→linear commit ordering │   │
+│  │  │   ├── mod.rs          ← Deterministic commit ordering │   │
+│  │  │   └── tests.rs        ← Linearizer unit tests │   │
 │  │  ├── commit_syncer/      ← Commit sync module │   │
 │  │  │   ├── mod.rs          ← Coord loop         │   │
 │  │  │   ├── fetcher.rs      ← P2P network fetch  │   │
@@ -425,7 +429,6 @@ metanode/
 | File | Lines | Role | Risk |
 |------|-------|------|------|
 | `commit_syncer/mod.rs` | **2,812** | Commit synchronization main coordination loop | 🔴 CRITICAL |
-| `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
 | `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
 | `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
 | `dag_state/tests.rs` | 1,376 | DAG state unit test suite | 🟢 TEST |
@@ -433,8 +436,12 @@ metanode/
 | `authority_service/handlers.rs` | 907 | RPC handlers for block subscription and fetching | 🔴 HIGH |
 | `commit_finalizer/mod.rs` | 900 | Commit finalization coordination loop | 🔴 HIGH |
 | `block_manager/mod.rs` | 672 | Suspended/missing blocks tracking and acceptance | 🔴 HIGH |
-| `authority_node.rs` | 1,193 | Authority node orchestration | 🔴 HIGH |
-| `linearizer.rs` | 1,169 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
+| `authority_node/mod.rs` | 724 | Authority node orchestration | 🔴 HIGH |
+| `linearizer/mod.rs` | 571 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
+| `linearizer/tests.rs` | 600 | Linearizer unit tests | 🟢 TEST |
+| `core_tests/commits.rs` | 955 | Core commit and scheduler tests | 🟢 TEST |
+| `core_tests/proposal.rs` | 809 | Core proposal and timeout tests | 🟢 TEST |
+| `core_tests/ancestors.rs` | 512 | Core ancestors and round signals tests | 🟢 TEST |
 | `metrics.rs` | 1,104 | Prometheus metrics definitions | 🟢 LOW |
 | `leader_schedule.rs` | 1,072 | Leader election scheduling (stake-weighted) | 🔴 HIGH |
 | `commit.rs` | 1,051 | Commit types + verification | 🔴 HIGH |
@@ -449,6 +456,9 @@ metanode/
 ### Supporting Files (<500 lines)
 | File | Lines | Role |
 |------|-------|------|
+| `authority_node/tests.rs` | 471 | Authority node unit tests |
+| `core_tests/recovery.rs` | 295 | Core consensus crash recovery tests |
+| `core_tests/mod.rs` | 190 | Core tests common helpers and setup |
 | `coordination_hub.rs` | 593 | **Peer attestation hub** — ZERO-TIMEOUT peer commit verification |
 | `core/commit_manager.rs` | 569 | Commit decision management |
 | `subscriber.rs` | 446 | Block subscription |
