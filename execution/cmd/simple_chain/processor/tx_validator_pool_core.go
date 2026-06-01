@@ -114,6 +114,11 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.InvalidTransaction.Code, fmt.Errorf("tx nil")
 	}
 
+	// Limit pool size to prevent GC stall / OOM
+	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+		return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d)", MaxMempoolSize)
+	}
+
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {
 		return transaction.NodeSyncingError.Code, fmt.Errorf(transaction.NodeSyncingError.Description)
 	}
@@ -228,6 +233,16 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 
 	if len(txs) == 0 {
 		return nil
+	}
+
+	// Limit pool size to prevent GC stall / OOM
+	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+		err := fmt.Errorf("transaction pool is full (limit=%d)", MaxMempoolSize)
+		errs := make([]error, len(txs))
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
 	}
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {

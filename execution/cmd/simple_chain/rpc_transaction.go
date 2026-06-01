@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -316,6 +317,16 @@ func (api *MetaAPI) startProcessingLogger() {
 	}
 }
 func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input []byte, inputEth []byte, pubKeyBlsL []byte) (common.Hash, error) {
+	var isExistOverloaded bool
+	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
+	if exists {
+		var ok bool
+		isExistOverloaded, ok = value.(bool)
+		if ok && isExistOverloaded {
+			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
+		}
+	}
+
 	txD := &mt_proto.TransactionWithDeviceKey{}
 	err := proto.Unmarshal(input, txD)
 	if err != nil {
@@ -459,6 +470,16 @@ func (api *MetaAPI) GetSendRawTransaction(ctx context.Context, input hexutil.Byt
 //
 // Falls back to synchronous processing if the async queue is not available.
 func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	var isExistOverloaded bool
+	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
+	if exists {
+		var ok bool
+		isExistOverloaded, ok = value.(bool)
+		if ok && isExistOverloaded {
+			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
+		}
+	}
+
 	// Async path: enqueue and return immediately
 	if api.App.txAsyncQueue != nil {
 		return api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
