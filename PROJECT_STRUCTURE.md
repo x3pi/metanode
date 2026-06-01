@@ -130,11 +130,11 @@ metanode/
 
 | Layer | Files | Lines of Code |
 |-------|-------|---------------|
-| Go Execution (`execution/`) | ~700+ | ~122K |
-| Rust Consensus (`consensus/metanode/src/`) | ~65 | ~29K |
-| Rust Core Engine (`meta-consensus/core/src/`) | ~55 | ~45K |
-| Shared Crates (`crates/`) | ~200+ | ~140K |
-| **Total** | **~1,100** | **~337K** |
+| Go Execution (`execution/`) | ~835 | ~237K |
+| Rust Consensus (`consensus/metanode/src/`) | ~86 | ~28K |
+| Rust Core Engine (`meta-consensus/core/src/`) | ~76 | ~45K |
+| Shared Crates (`crates/`) | ~81 | ~23K |
+| **Total** | **~1078** | **~333K** |
 
 ---
 
@@ -143,80 +143,94 @@ metanode/
 ### `cmd/simple_chain/` — Main Node Process
 | File | Lines | Role |
 |------|-------|------|
-| `main.go` | 823 | CLI entrypoint, node startup |
-| `app.go` | 691 | Application bootstrap, service wiring |
-| `app_blockchain.go` | 1,036 | Blockchain app logic |
+| `main.go` | 94 | CLI entrypoint, node startup |
+| `app.go` | 484 | Application bootstrap, service wiring |
+| `app_blockchain.go` | 1,054 | Blockchain app logic |
 | `app_network.go` | 125 | Network app logic |
 | `backend.go` | 660 | Chain backend (EVM state, DB) |
-| `mtn_api.go` | 658 | MTN-specific JSON-RPC API |
-| `rpc_block.go` | 634 | Block-related RPC handlers |
-| `rpc_transaction.go` | 733 | Tx-related RPC handlers |
-| `rpc_state.go` | 320 | State RPC handlers |
-| `tx_async_queue.go` | 280 | Async tx submission queue |
-| `debug_api.go` | 690 | Debug/admin endpoints |
-| `startup_integrity_check.go` | 430 | Post-crash integrity verification |
+| `mtn_api.go` | 671 | MTN-specific JSON-RPC API |
+| `rpc_block.go` | 744 | Block-related RPC handlers |
+| `rpc_transaction.go` | 780 | Tx-related RPC handlers |
+| `rpc_state.go` | 334 | State RPC handlers |
+| `tx_async_queue.go` | 338 | Async tx submission queue |
+| `debug_api.go` | 870 | Debug/admin endpoints |
+| `startup_integrity_check.go` | 272 | Post-crash integrity verification |
 
 ### `cmd/simple_chain/processor/` — Core Block Processing
 | File | Lines | Role |
 |------|-------|------|
-| `block_processor_core.go` | 1,007 | Main block processor loop |
-| `block_processor_sync.go` | **1,252** | **Peer sync / state recovery** ⚠️ |
-| `explorer_history_sync.go`| 146 | Explorer historical data healing sync |
-| `block_processor_commit.go` | 642 | Block commit pipeline |
-| `block_processor_processing.go` | 764 | Tx execution pipeline |
-| `block_processor_network.go` | 1,089 | Network message handling |
-| `block_processor_batch.go` | 394 | Batch tx processing |
+| `block_processor_core.go` | 1,014 | Main block processor loop |
+| `block_processor_sync.go` | **1,284** | **Peer sync / state recovery** ⚠️ |
+| `explorer_history_sync.go`| [DELETED] | ❌ OBSOLETE  Explorer historical data healing sync |
+| `block_processor_commit.go` | 681 | Block commit pipeline |
+| `block_processor_processing.go` | 780 | Tx execution pipeline |
+| `block_processor_network.go` | 1,123 | Network message handling |
+| `block_processor_batch.go` | 401 | Batch tx processing |
 | `block_processor_attestation.go` | 488 | BLS attestation logic |
-| `block_processor_epoch.go` | 170 | Epoch transition handling |
-| `block_processor_state.go` | 152 | State root verification |
+| `block_processor_epoch.go` | 182 | Epoch transition handling |
+| `block_processor_state.go` | 173 | State root verification |
 | `block_processor_broadcast.go` | 410 | Block broadcasting |
 | `block_processor_receipt.go` | 347 | Receipt processing |
-| `block_processor_indexing.go` | 153 | Block indexing |
-| `block_processor_monitoring.go` | 175 | Health monitoring |
-| `block_processor_logs.go` | 222 | Log handling |
-| `tx_batch_forwarder_core.go` | 352 | Tx batch → consensus forwarding |
-| `tx_validator_pool_core.go` | 729 | Tx validation pool |
-| `tx_virtual_executor_core.go` | 209 | Virtual/offchain tx execution |
-| `transaction_processor.go` | 609 | Core tx processing |
-| `transaction_virtual_processor.go` | 432 | Virtual tx processing |
-| `state_processor.go` | 596 | State transition processor |
-| `vote_recovery.go` | 240 | Vote/quorum recovery |
-| `gei_authority.go` | 250 | Go-authoritative GEI singleton |
+| `block_processor_indexing.go` | 166 | Block indexing |
+| `block_processor_monitoring.go` | 158 | Health monitoring |
+| `block_processor_logs.go` | 279 | Log handling |
+| `tx_batch_forwarder_core.go` | 211 | Tx batch → consensus forwarding |
+| `tx_validator_pool_core.go` | 845 | Tx validation pool |
+| `tx_virtual_executor_core.go` | 237 | Virtual/offchain tx execution |
+| `transaction_processor.go` | 651 | Core tx processing |
+| `transaction_virtual_processor.go` | 457 | Virtual tx processing |
+| `state_processor.go` | 630 | State transition processor |
+| `vote_recovery.go` | 257 | Vote/quorum recovery |
+| `gei_authority.go` | 234 | Go-authoritative GEI singleton |
 
 ### `execution/executor/` — FFI/IPC Boundary ⚠️ CRITICAL
 | File | Lines | Role |
 |------|-------|------|
-| `unix_socket_handler_epoch.go` | **2,301** | Epoch-related IPC handlers (block processing, GEI, commit) |
-| `snapshot_manager.go` | 1,152 | State snapshot management |
+| `unix_socket_handler_epoch.go` | **2,364** | Epoch-related IPC handlers (block processing, GEI, commit) |
+| `snapshot_manager.go` | 1,206 | State snapshot management |
 | `go_rust_integration_test.go` | 645 | Go↔Rust integration tests |
 | `epoch_transition_integration_test.go` | 615 | Epoch transition tests |
 | `snapshot_server.go` | 604 | Snapshot HTTP server |
-| `ffi_bridge.go` | 356 | FFI bridge to Rust (C-ABI) |
+| `ffi_bridge.go` | 389 | FFI bridge to Rust (C-ABI) |
 | `unix_socket_handler_router.go` | 322 | UDS request routing |
 | `no_fork_invariant_test.go` | 329 | Fork-safety invariant tests |
 | `listener.go` | 259 | Block commit reception from Rust |
 | `unix_socket.go` | 201 | UDS server setup |
 | `unix_socket_handler.go` | 190 | Base UDS handler |
-| `snapshot_init.go` | 201 | Snapshot initialization |
+| `snapshot_init.go` | 223 | Snapshot initialization |
 | `committee_notifier.go` | 188 | Committee change notifications |
-| `socket_abstraction.go` | 106 | Socket abstraction layer |
+| `socket_abstraction.go` | 142 | Socket abstraction layer |
 
 ### `execution/pkg/blockchain/tx_processor/` — Transaction Executor Layer
 | File | Lines | Role |
 |------|-------|------|
-| `tx_processor.go` | 1,071 | **Concurrent Executor Engine** using Actor Model (Channel-based routing) by Smart Contract address to eliminate data races. |
-| `validation.go` | ~200 | Core transaction verification and sanity checks. |
+| `tx_processor.go` | 1,172 | **Concurrent Executor Engine** using Actor Model (Channel-based routing) by Smart Contract address to eliminate data races. |
+| `validation.go` | ~323 | Core transaction verification and sanity checks. |
 
 ### `execution/pkg/account_state_db/` — Account State Management
 | File | Lines | Role |
 |------|-------|------|
-| `account_state_db_commit.go` | 1,084 | **CommitPipeline** — parallel state root calculation, trie swap |
-| `account_state_db.go` | 1,079 | Account state CRUD operations |
+| `account_state_db_commit.go` | 1,034 | **CommitPipeline** — parallel state root calculation, trie swap |
+| `account_state_db.go` | 1,072 | Account state CRUD operations |
 
 ### `execution/pkg/blockchain/vm_processor/` — VM Execution Layer
 | File | Lines | Role |
 |------|-------|------|
-| `vm_processor_state.go` | 984 | EVM state transition processing |
+| `vm_processor_state.go` | 1,153 | EVM state transition processing |
+
+### `execution/pkg/mvm/` — Meta Virtual Machine
+| File | Lines | Role |
+|------|-------|------|
+| `mvm_api.go` | 1,331 | Meta VM API layer and C-FFI wrapper |
+| `extension.go` | 880 | MVM custom extension precompiles |
+| `helpers.go` | 646 | MVM execution helpers |
+
+### `execution/pkg/storage/` — Storage & DB Engines
+| File | Lines | Role |
+|------|-------|------|
+| `pebble_db.go` | 681 | High I/O PebbleDB wrapper with WAL sync |
+| `batchstore.go` | 649 | DB batch operations and backups |
+| `simpledb.go` | 600 | Simple local KV storage interface |
 
 ### `cmd/rpc/` — RPC API Gateway
 | Module | Role |
@@ -251,23 +265,23 @@ metanode/
 
 | Crate | Role |
 |-------|------|
-| `meta-protocol-config` | Protocol configuration types and versioning |
+| `meta-protocol-config` | [DELETED] | ❌ OBSOLETE 
 | `meta-protocol-config-macros` | Procedural macros for protocol config |
-| `meta-macros` | General utility macros |
+| `meta-macros` | [DELETED] | ❌ OBSOLETE 
 | `meta-proc-macros` | Procedural macros |
-| `meta-http` | HTTP utilities |
+| `meta-http` | [DELETED] | ❌ OBSOLETE 
 | `meta-tls` | TLS configuration |
-| `meta-enum-compat-util` | Enum compatibility utilities |
+| `meta-enum-compat-util` | [DELETED] | ❌ OBSOLETE 
 | `mysten-common` | Common utilities (origin: Sui/Mysten Labs) |
-| `mysten-metrics` | Prometheus metrics (origin: Sui/Mysten Labs) |
+| `mysten-metrics` | [DELETED] | ❌ OBSOLETE 
 | `mysten-network` | Network types (origin: Sui/Mysten Labs) |
-| `shared-crypto` | Cryptographic primitives |
+| `shared-crypto` | [DELETED] | ❌ OBSOLETE 
 | `typed-store` | Type-safe RocksDB wrapper |
-| `typed-store-derive` | Derive macros for typed-store |
+| `typed-store-derive` | [DELETED] | ❌ OBSOLETE 
 | `typed-store-error` | Error types for typed-store |
-| `typed-store-workspace-hack` | Workspace dependency hack |
+| `typed-store-workspace-hack` | [DELETED] | ❌ OBSOLETE 
 | `telemetry-subscribers` | Tracing/telemetry subscribers |
-| `prometheus-closure-metric` | Prometheus metric helpers |
+| `prometheus-closure-metric` | [DELETED] | ❌ OBSOLETE 
 | `metanode-keytool` | **Library & CLI tool** — generate BLS12-381/Ed25519/ETH keys for validators. Also integrated as a subcommand under the main `metanode` CLI. |
 
 ---
@@ -277,108 +291,108 @@ metanode/
 ### Root: `consensus/metanode/src/`
 | File | Lines | Role |
 |------|-------|------|
-| `main.rs` | 65 | Binary entrypoint, runtime init |
-| `ffi.rs` | 403 | **C-ABI exports callable from Go** via `nomt_ffi/` — state commits, trie updates, root queries |
-| `config.rs` | 478 | Node configuration parsing |
-| `lib.rs` | 10 | Library root |
+| `main.rs` | 86 | Binary entrypoint, runtime init |
+| `ffi.rs` | 428 | **C-ABI exports callable from Go** via `nomt_ffi/` — state commits, trie updates, root queries |
+| `config.rs` | 117 | Node configuration parsing |
+| `lib.rs` | 706 | Library root |
 
 ### `src/consensus/commit_processor/` — BFT Commit Engine ⚠️ CRITICAL
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `processor.rs` | **1,893** | **Main ordered commit loop** — drives all execution, DIGEST-GATE, ZERO-TIMEOUT peer attestation | 🔴 CRITICAL |
-| `executor.rs` | 470 | Calls Go FFI to execute committed blocks | 🔴 HIGH |
-| `gei_validator.rs` | 380 | Validates GEI (Go Execution Interface) responses | 🔴 HIGH |
-| `epoch.rs` | 80 | Epoch boundary detection within commit loop | 🔴 HIGH |
-| `lag_monitor.rs` | 150 | Commit lag monitoring / backpressure | 🟡 MED |
-| `wal.rs` | 105 | Write-ahead log for crash recovery | 🟡 MED |
+| `processor.rs` | **1,813** | **Main ordered commit loop** — drives all execution, DIGEST-GATE, ZERO-TIMEOUT peer attestation | 🔴 CRITICAL |
+| `executor.rs` | 303 | Calls Go FFI to execute committed blocks | 🔴 HIGH |
+| `gei_validator.rs` | 382 | Validates GEI (Go Execution Interface) responses | 🔴 HIGH |
+| `epoch.rs` | 66 | Epoch boundary detection within commit loop | 🔴 HIGH |
+| `lag_monitor.rs` | 157 | Commit lag monitoring / backpressure | 🟡 MED |
+| `wal.rs` | 124 | Write-ahead log for crash recovery | 🟡 MED |
 
 ### `src/consensus/` — Epoch & State Management
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `epoch_transition.rs` | 200 | Epoch boundary trigger + tx drainage | 🔴 HIGH |
-| `tx_recycler.rs` | 360 | Recycles uncommitted txs post-epoch | 🟡 MED |
-| `checkpoint.rs` | 90 | Checkpoint save/restore | 🟡 MED |
-| `clock_sync.rs` | 210 | BFT clock synchronization | 🟡 MED |
-| `commit_callbacks.rs` | 70 | **Rust→Go** commit notifications | 🔴 HIGH |
-| `state_attestation.rs` | 160 | State root attestation pre-commit | 🔴 HIGH |
+| `epoch_transition.rs` | 759 | Epoch boundary trigger + tx drainage | 🔴 HIGH |
+| `tx_recycler.rs` | 363 | Recycles uncommitted txs post-epoch | 🟡 MED |
+| `checkpoint.rs` | 71 | Checkpoint save/restore | 🟡 MED |
+| `clock_sync.rs` | 225 | BFT clock synchronization | 🟡 MED |
+| `commit_callbacks.rs` | 65 | **Rust→Go** commit notifications | 🔴 HIGH |
+| `state_attestation.rs` | 144 | State root attestation pre-commit | 🔴 HIGH |
 
 ### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (33 files)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `consensus_node.rs` | **300** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
-| `setup_storage.rs` | **960** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
-| `setup_consensus.rs` | **2,400** | **Phase 2: Consensus setup** — startup state sync, runtime fork guard | 🔴 CRITICAL |
-| `epoch_monitor.rs` | 576 | Epoch health monitoring + alerts | 🔴 HIGH |
+| `consensus_node.rs` | **236** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
+| `setup_storage.rs` | **940** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
+| `setup_consensus.rs` | **2,017** | **Phase 2: Consensus setup** — startup state sync, runtime fork guard | 🔴 CRITICAL |
+| `epoch_monitor.rs` | 675 | Epoch health monitoring + alerts | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
-| `epoch_checkpoint.rs` | 270 | Epoch state persistence at boundaries | 🔴 HIGH |
-| `epoch_store.rs` | 190 | Epoch metadata storage | 🟡 MED |
-| `committee.rs` | 270 | Validator committee management | 🔴 HIGH |
+| `epoch_checkpoint.rs` | 321 | Epoch state persistence at boundaries | 🔴 HIGH |
+| `epoch_store.rs` | 206 | Epoch metadata storage | 🟡 MED |
+| `committee.rs` | 271 | Validator committee management | 🔴 HIGH |
 | `committee_source.rs` | 554 | Committee selection logic + hash verification | 🔴 HIGH |
 | `node_methods.rs` | 442 | Node API implementation (shutdown, mode switch) | 🟡 MED |
-| `startup.rs` | 370 | Boot sequence | 🟡 MED |
-| `sync.rs` | 230 | Sync state machine | 🔴 HIGH |
-| `sync_controller.rs` | 270 | Sync session controller | 🔴 HIGH |
-| `sync_metrics.rs` | 250 | Sync performance metrics | 🟢 LOW |
-| `recovery.rs` | 210 | Crash/fork recovery | 🔴 HIGH |
+| `startup.rs` | 323 | Boot sequence | 🟡 MED |
+| `sync.rs` | 206 | Sync state machine | 🔴 HIGH |
+| `sync_controller.rs` | 317 | Sync session controller | 🔴 HIGH |
+| `sync_metrics.rs` | 221 | Sync performance metrics | 🟢 LOW |
+| `recovery.rs` | 184 | Crash/fork recovery | 🔴 HIGH |
 | `rpc_circuit_breaker.rs` | 447 | Circuit breaker for Go RPC | 🟡 MED |
-| `peer_go_client.rs` | 290 | RPC client to Go execution layer | 🔴 HIGH |
-| `peer_health.rs` | 130 | Peer liveness monitoring | 🟡 MED |
-| `health_check.rs` | 220 | Node health endpoint | 🟢 LOW |
-| `queue.rs` | 260 | Internal task queue | 🟡 MED |
-| `coordinator.rs` | 80 | Cross-module coordinator | 🟡 MED |
-| `block_delivery.rs` | 82 | Block delivery to consumers | 🟡 MED |
-| `notification_server.rs` | 145 | Push notification server | 🟢 LOW |
-| `tx_submitter.rs` | 140 | Submit txs to consensus | 🟡 MED |
+| `peer_go_client.rs` | 297 | RPC client to Go execution layer | 🔴 HIGH |
+| `peer_health.rs` | 158 | Peer liveness monitoring | 🟡 MED |
+| `health_check.rs` | 175 | Node health endpoint | 🟢 LOW |
+| `queue.rs` | 283 | Internal task queue | 🟡 MED |
+| `coordinator.rs` | 89 | Cross-module coordinator | 🟡 MED |
+| `block_delivery.rs` | 85 | Block delivery to consumers | 🟡 MED |
+| `notification_server.rs` | 142 | Push notification server | 🟢 LOW |
+| `tx_submitter.rs` | 176 | Submit txs to consensus | 🟡 MED |
 | `epoch_transition_tests.rs` | 942 | Epoch transition test suite | 🟢 TEST |
 
 ### `src/node/executor_client/` — Go Execution Client ⚠️ FFI/RPC BOUNDARY
 | File | Lines | Role |
 |------|-------|------|
-| `mod.rs` | 706 | Main client logic — call routing to Go |
-| `block_sending.rs` | 962 | Send committed blocks to Go execution layer |
-| `block_store.rs` | 130 | Local block cache |
-| `block_sync.rs` | 150 | Block sync coordination with Go |
+| `mod.rs` | 139 | Main client logic — call routing to Go |
+| `block_sending.rs` | 971 | Send committed blocks to Go execution layer |
+| `block_store.rs` | 158 | Local block cache |
+| `block_sync.rs` | 151 | Block sync coordination with Go |
 | `rpc_queries.rs` | 462 | Query Go execution state via RPC |
-| `rpc_queries_epoch.rs` | 380 | Epoch-specific RPC queries |
-| `connection_pool.rs` | 230 | Connection pool to Go execution |
+| `rpc_queries_epoch.rs` | 352 | Epoch-specific RPC queries |
+| `connection_pool.rs` | 251 | Connection pool to Go execution |
 | `persistence.rs` | 487 | Persist execution results |
-| `socket_stream.rs` | 250 | Socket stream handling |
-| `traits.rs` | 195 | Abstract executor traits |
-| `transition_handoff.rs` | 275 | Epoch transition handoff to Go |
+| `socket_stream.rs` | 259 | Socket stream handling |
+| `traits.rs` | 233 | Abstract executor traits |
+| `transition_handoff.rs` | 272 | Epoch transition handoff to Go |
 
 ### `src/node/rust_sync_node/` — Sync-Only Node Mode
 | File | Lines | Role |
 |------|-------|------|
 | `sync_loop.rs` | 767 | Main sync loop — drives block catch-up |
 | `fetch.rs` | 824 | Block fetch logic from peers |
-| `epoch_recovery.rs` | 425 | Epoch crash recovery during sync |
+| `epoch_recovery.rs` | 349 | Epoch crash recovery during sync |
 | `block_queue.rs` | 427 | Incoming block queue |
-| `start.rs` | 110 | Sync node startup sequence |
-| `mod.rs` | 200 | Module root + RustSyncHandle |
-| `sync_loop_tests.rs` | 190 | Sync loop test suite |
-| `fetch_tests.rs` | 155 | Fetch test suite |
-| `epoch_recovery_tests.rs` | 130 | Epoch recovery test suite |
+| `start.rs` | 112 | Sync node startup sequence |
+| `mod.rs` | 139 | Module root + RustSyncHandle |
+| `sync_loop_tests.rs` | 203 | Sync loop test suite |
+| `fetch_tests.rs` | 174 | Fetch test suite |
+| `epoch_recovery_tests.rs` | 149 | Epoch recovery test suite |
 
 ### `src/node/transition/` — Mode Transition Logic
 | File | Lines | Role |
 |------|-------|------|
-| `epoch_transition.rs` | 741 | Full epoch transition orchestration |
+| `epoch_transition.rs` | 759 | Full epoch transition orchestration |
 | `mode_transition.rs` | 503 | Node mode changes (validator ↔ observer) |
 | `consensus_setup.rs` | 397 | Consensus re-setup post-transition |
-| `demotion.rs` | 290 | Node demotion logic |
-| `tx_recovery.rs` | 235 | Tx recovery during transition |
-| `verification.rs` | 230 | Post-transition state verification |
+| `demotion.rs` | 306 | Node demotion logic |
+| `tx_recovery.rs` | 278 | Tx recovery during transition |
+| `verification.rs` | 239 | Post-transition state verification |
 
 ### `src/network/` — P2P Consensus Networking
 | File | Lines | Role | Risk |
 |------|-------|------|------|
 | `rpc.rs` | 641 | Main RPC server | 🔴 HIGH |
-| `tx_socket_server.rs` | 480 | Tx reception socket | 🟡 MED |
+| `tx_socket_server.rs` | 382 | Tx reception socket | 🟡 MED |
 | `peer_discovery.rs` | 427 | Peer discovery | 🟡 MED |
-| `codec.rs` | 48 | Message encoding | 🟢 LOW |
-| `peer_rpc/server.rs` | 815 | Peer RPC server | 🔴 HIGH |
-| `peer_rpc/client.rs` | 649 | Peer RPC client | 🔴 HIGH |
-| `peer_rpc/types.rs` | 80 | RPC types | 🟢 LOW |
+| `codec.rs` | 51 | Message encoding | 🟢 LOW |
+| `peer_rpc/server.rs` | 819 | Peer RPC server | 🔴 HIGH |
+| `peer_rpc/client.rs` | 674 | Peer RPC client | 🔴 HIGH |
+| `peer_rpc/types.rs` | 22 | RPC types | 🟢 LOW |
 
 ### `src/types/`
 | File | Role |
@@ -395,51 +409,51 @@ metanode/
 ### Key Files (>500 lines)
 | File | Lines | Role | Risk |
 |------|-------|------|------|
-| `commit_syncer.rs` | **3,370** | Commit synchronization + peer fetching + cold-start | 🔴 CRITICAL |
+| `commit_syncer.rs` | **3,506** | Commit synchronization + peer fetching + cold-start | 🔴 CRITICAL |
 | `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
 | `synchronizer.rs` | 2,175 | DAG block synchronization | 🔴 HIGH |
-| `dag_state/dag_state_impl.rs` | 1,867 | DAG state machine implementation | 🔴 HIGH |
-| `authority_service.rs` | 1,828 | Authority lifecycle service | 🔴 HIGH |
+| `dag_state/dag_state_impl.rs` | 1,873 | DAG state machine implementation | 🔴 HIGH |
+| `authority_service.rs` | 1,745 | Authority lifecycle service | 🔴 HIGH |
 | `commit_finalizer.rs` | 1,605 | Commit finalization logic | 🔴 HIGH |
 | `network/tonic_network.rs` | 1,433 | tonic gRPC network layer | 🟡 MED |
 | `block_manager.rs` | 1,300 | Block validation + storage | 🔴 HIGH |
 | `authority_node.rs` | 1,193 | Authority node orchestration | 🔴 HIGH |
-| `linearizer.rs` | 1,154 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
+| `linearizer.rs` | 1,169 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
 | `metrics.rs` | 1,104 | Prometheus metrics definitions | 🟢 LOW |
 | `leader_schedule.rs` | 1,072 | Leader election scheduling (stake-weighted) | 🔴 HIGH |
 | `commit.rs` | 1,051 | Commit types + verification | 🔴 HIGH |
-| `transaction.rs` | 1,000 | Transaction types and batching | 🟡 MED |
+| `transaction.rs` | 312 | Transaction types and batching | 🟡 MED |
 | `transaction_certifier.rs` | 962 | TX certification pipeline | 🟡 MED |
 | `commit_observer.rs` | 937 | Commit observation + notification | 🟡 MED |
 | `block.rs` | 840 | Block types + serialization | 🟡 MED |
 | `core/proposer.rs` | 826 | Block proposal logic | 🔴 HIGH |
-| `block_verifier.rs` | 802 | Block signature + content verification | 🔴 HIGH |
-| `tx_group_filter.rs` | 120 | Union-Find transaction grouping & limit check | 🟢 LOW |
+| `block_verifier.rs` | 811 | Block signature + content verification | 🔴 HIGH |
+| `tx_group_filter.rs` | 182 | Union-Find transaction grouping & limit check | 🟢 LOW |
 
 ### Supporting Files (<500 lines)
 | File | Lines | Role |
 |------|-------|------|
 | `coordination_hub.rs` | 593 | **Peer attestation hub** — ZERO-TIMEOUT peer commit verification |
-| `core/commit_manager.rs` | 530 | Commit decision management |
-| `subscriber.rs` | 470 | Block subscription |
-| `round_tracker.rs` | 430 | Round advancement tracking |
-| `round_prober.rs` | 410 | Peer round probing |
-| `recovery_barrier.rs` | 400 | Recovery synchronization barrier |
-| `dag_state/write.rs` | 625 | DAG state write operations |
-| `dag_state/read.rs` | 450 | DAG state read operations |
-| `core_thread.rs` | 550 | Core consensus thread |
+| `core/commit_manager.rs` | 569 | Commit decision management |
+| `subscriber.rs` | 446 | Block subscription |
+| `round_tracker.rs` | 512 | Round advancement tracking |
+| `round_prober.rs` | 471 | Peer round probing |
+| `recovery_barrier.rs` | 411 | Recovery synchronization barrier |
+| `dag_state/write.rs` | 650 | DAG state write operations |
+| `dag_state/read.rs` | 449 | DAG state read operations |
+| `core_thread.rs` | 584 | Core consensus thread |
 | `commit_vote_monitor.rs` | 303 | **Digest vote tracking** — commit hash quorum verification |
-| `commit_consumer.rs` | 175 | Commit consumption interface |
-| `system_transaction_provider.rs` | 650 | System TX (epoch change) provider |
-| `adaptive_delay.rs` | 200 | Adaptive round delay |
-| `leader_scoring.rs` | 340 | Leader reputation scoring |
-| `leader_timeout.rs` | 290 | Leader timeout handling |
-| `stake_aggregator.rs` | 140 | Stake aggregation |
-| `threshold_clock.rs` | 210 | Threshold clock |
-| `context.rs` | 170 | Consensus context |
-| `error.rs` | 200 | Error types |
-| `storage/rocksdb_store.rs` | 450 | RocksDB persistent store |
-| `storage/mem_store.rs` | 220 | In-memory store (testing) |
+| `commit_consumer.rs` | 159 | Commit consumption interface |
+| `system_transaction_provider.rs` | 545 | System TX (epoch change) provider |
+| `adaptive_delay.rs` | 201 | Adaptive round delay |
+| `leader_scoring.rs` | 336 | Leader reputation scoring |
+| `leader_timeout.rs` | 301 | Leader timeout handling |
+| `stake_aggregator.rs` | 154 | Stake aggregation |
+| `threshold_clock.rs` | 215 | Threshold clock |
+| `context.rs` | 187 | Consensus context |
+| `error.rs` | 254 | Error types |
+| `storage/rocksdb_store.rs` | 472 | RocksDB persistent store |
+| `storage/mem_store.rs` | 275 | In-memory store (testing) |
 
 ---
 
