@@ -68,6 +68,7 @@ fn generate_cert(keypair: &KeyPair, server_name: &str) -> rcgen::Certificate {
         )
 }
 
+#[allow(dead_code)]
 pub(crate) fn public_key_from_certificate(
     certificate: &CertificateDer,
 ) -> Result<Ed25519PublicKey, anyhow::Error> {
