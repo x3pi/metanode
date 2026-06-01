@@ -97,13 +97,14 @@ impl CommitFinalizer {
         dag_state: Arc<RwLock<DagState>>,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
+        last_processed_commit: Option<CommitIndex>,
     ) -> Self {
         Self {
             context,
             dag_state,
             transaction_certifier,
             commit_sender,
-            last_processed_commit: None,
+            last_processed_commit,
             pending_commits: VecDeque::new(),
             blocks: Arc::new(RwLock::new(BTreeMap::new())),
             internal_sender_keeper: None,
@@ -115,8 +116,9 @@ impl CommitFinalizer {
         dag_state: Arc<RwLock<DagState>>,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
+        last_processed_commit: Option<CommitIndex>,
     ) -> CommitFinalizerHandle {
-        let mut processor = Self::new(context, dag_state, transaction_certifier, commit_sender);
+        let mut processor = Self::new(context, dag_state, transaction_certifier, commit_sender, last_processed_commit);
         let (sender, receiver) = unbounded_channel("consensus_commit_finalizer");
         // Clone the sender and store it in the processor to prevent race condition.
         // This ensures the internal channel stays open until the task starts running.

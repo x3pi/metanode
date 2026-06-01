@@ -48,6 +48,7 @@ impl BenchFixture {
             dag_state.clone(),
             transaction_certifier.clone(),
             commit_sender.clone(),
+            None,
         );
         BenchFixture {
             context,
