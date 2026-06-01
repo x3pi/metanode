@@ -141,7 +141,7 @@ pub fn get_ffi_tx_queue_depth() -> usize {
 
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
 #[no_mangle]
-pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {
+pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {
     if payload.is_null() || len == 0 {
         return true; // Ignore empty payload safely
     }
@@ -238,7 +238,7 @@ pub extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usi
 
 /// Start the Rust consensus engine in a background thread.
 #[no_mangle]
-pub extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_dir_ptr: *const c_char) {
+pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_dir_ptr: *const c_char) {
     let config_path_str = unsafe {
         if config_path_ptr.is_null() {
             eprintln!("Error: config_path_ptr is null");
@@ -389,7 +389,7 @@ fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Pat
 /// Restore Rust consensus state from a snapshot directory.
 /// Purges data_dir/consensus/rust_consensus and copies snapshot_dir/consensus/rust_consensus into it safely.
 #[no_mangle]
-pub extern "C" fn metanode_restore_from_snapshot(data_dir_ptr: *const c_char, snapshot_dir_ptr: *const c_char) -> bool {
+pub unsafe extern "C" fn metanode_restore_from_snapshot(data_dir_ptr: *const c_char, snapshot_dir_ptr: *const c_char) -> bool {
     let data_dir_str = unsafe {
         if data_dir_ptr.is_null() { return false; }
         CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()

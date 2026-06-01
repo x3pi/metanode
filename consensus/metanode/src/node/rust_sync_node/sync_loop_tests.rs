@@ -14,7 +14,7 @@ fn make_test_sync_node(
     initial_epoch: u64,
     initial_global_exec_index: u32,
     epoch_base_index: u64,
-) -> (RustSyncNode, mpsc::UnboundedReceiver<(u64, u64, u64)>) {
+) -> (RustSyncNode, mpsc::Receiver<(u64, u64, u64, u64)>) {
     let executor_client = Arc::new(ExecutorClient::new(
         false,
         false,
@@ -22,7 +22,7 @@ fn make_test_sync_node(
         "/dev/null".to_string(),
         None,
     ));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(100);
     let node = RustSyncNode::new(
         executor_client,
         tx,
