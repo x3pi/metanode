@@ -221,18 +221,19 @@ func GroupAndLimitTransactionsOptimized(items []Item, maxGroupGas uint64, maxTot
 		}
 	}
 
-	// Sắp xếp từng nhóm con trong relativeGroups
+	// Sắp xếp từng nhóm con trong relativeGroups ưu tiên theo FromAddress và Nonce
 	for i := range relativeGroups {
 		sort.Slice(relativeGroups[i].Items, func(a, b int) bool {
-			gasCmp := utils.CompareUint64(relativeGroups[i].Items[a].Tx.MaxGas(), relativeGroups[i].Items[b].Tx.MaxGas())
-			if gasCmp != 0 {
-				return gasCmp == -1 // Giảm dần theo MaxGas
+			cmp := relativeGroups[i].Items[a].Tx.FromAddress().Cmp(relativeGroups[i].Items[b].Tx.FromAddress())
+			if cmp != 0 {
+				return cmp < 0
 			}
-			nonceCmp := utils.CompareUint64(relativeGroups[i].Items[a].Tx.GetNonce(), relativeGroups[i].Items[b].Tx.GetNonce())
-			if nonceCmp != 0 {
-				return nonceCmp == 1 // Tăng dần theo Nonce
+			nonceA := relativeGroups[i].Items[a].Tx.GetNonce()
+			nonceB := relativeGroups[i].Items[b].Tx.GetNonce()
+			if nonceA != nonceB {
+				return nonceA < nonceB
 			}
-			return relativeGroups[i].Items[a].Tx.Hash().Cmp(relativeGroups[i].Items[b].Tx.Hash()) == -1 // Tăng dần theo Hash
+			return relativeGroups[i].Items[a].ID < relativeGroups[i].Items[b].ID
 		})
 	}
 
@@ -292,11 +293,20 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 4: DETERMINISTIC SORT within each group
-	// Sort by ID (original block index) ascending.
+	// Sort by FromAddress and Nonce ascending.
 	// This guarantees replay matches proposer execution order.
 	// ═══════════════════════════════════════════════════════════════
 	for i := range groups {
 		sort.Slice(groups[i].Items, func(a, b int) bool {
+			cmp := groups[i].Items[a].Tx.FromAddress().Cmp(groups[i].Items[b].Tx.FromAddress())
+			if cmp != 0 {
+				return cmp < 0
+			}
+			nonceA := groups[i].Items[a].Tx.GetNonce()
+			nonceB := groups[i].Items[b].Tx.GetNonce()
+			if nonceA != nonceB {
+				return nonceA < nonceB
+			}
 			return groups[i].Items[a].ID < groups[i].Items[b].ID
 		})
 	}
