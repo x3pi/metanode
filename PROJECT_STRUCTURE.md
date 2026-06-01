@@ -109,23 +109,32 @@ metanode/
 │  ┌──────────────────────────────────────────┐   │
 │  │  meta-consensus/core/src/  ← BFT ENGINE │   │
 │  │  ├── authority_node.rs    ← Authority    │   │
-│  │  ├── authority_service.rs ← Lifecycle    │   │
+│  │  ├── authority_service/   ← Authority service module │   │
+│  │  │   ├── mod.rs          ← Lifecycle coordinator │   │
+│  │  │   ├── handlers.rs     ← RPC server handlers │   │
+│  │  │   └── broadcast.rs    ← Block broadcast stream │   │
 │  │  ├── linearizer.rs       ← DAG→linear   │   │
 │  │  ├── commit_syncer/      ← Commit sync module │   │
 │  │  │   ├── mod.rs          ← Coord loop         │   │
 │  │  │   ├── fetcher.rs      ← P2P network fetch  │   │
 │  │  │   └── cold_start.rs   ← Sync transition    │   │
-│  │  ├── commit_finalizer.rs ← Finalization  │   │
+│  │  ├── commit_finalizer/   ← Commit finalization module │   │
+│  │  │   ├── mod.rs          ← Finalizer loop     │   │
+│  │  │   └── types.rs        ← Finalization state structs │   │
 │  │  ├── coordination_hub.rs ← Peer attest   │   │
 │  │  ├── commit_vote_monitor.rs← Digest vote │   │
 │  │  ├── synchronizer/      ← Block sync module  │   │
 │  │  │   ├── mod.rs          ← Event loop         │   │
 │  │  │   ├── fetcher.rs      ← Fetch blocks P2P   │   │
 │  │  │   └── scheduler.rs    ← Scheduled fetches  │   │
+│  │  ├── block_manager/      ← Block manager module │   │
+│  │  │   ├── mod.rs          ← Block validation/acceptance │   │
+│  │  │   └── types.rs        ← Suspended blocks state │   │
 │  │  ├── dag_state/           ← DAG state    │   │
 │  │  ├── core/                ← Proposer     │   │
 │  │  ├── storage/             ← RocksDB      │   │
 │  │  └── network/             ← tonic gRPC   │   │
+│  │  └── ...                  │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
 ```
@@ -138,9 +147,9 @@ metanode/
 |-------|-------|---------------|
 | Go Execution (`execution/`) | ~835 | ~237K |
 | Rust Consensus (`consensus/metanode/src/`) | ~86 | ~28K |
-| Rust Core Engine (`meta-consensus/core/src/`) | ~76 | ~45K |
+| Rust Core Engine (`meta-consensus/core/src/`) | ~83 | ~45K |
 | Shared Crates (`crates/`) | ~81 | ~23K |
-| **Total** | **~1078** | **~333K** |
+| **Total** | **~1085** | **~333K** |
 
 ---
 
@@ -420,10 +429,10 @@ metanode/
 | `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
 | `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
 | `dag_state/tests.rs` | 1,376 | DAG state unit test suite | 🟢 TEST |
-| `authority_service.rs` | 1,745 | Authority lifecycle service | 🔴 HIGH |
-| `commit_finalizer.rs` | 1,605 | Commit finalization logic | 🔴 HIGH |
 | `network/tonic_network.rs` | 1,433 | tonic gRPC network layer | 🟡 MED |
-| `block_manager.rs` | 1,300 | Block validation + storage | 🔴 HIGH |
+| `authority_service/handlers.rs` | 907 | RPC handlers for block subscription and fetching | 🔴 HIGH |
+| `commit_finalizer/mod.rs` | 900 | Commit finalization coordination loop | 🔴 HIGH |
+| `block_manager/mod.rs` | 672 | Suspended/missing blocks tracking and acceptance | 🔴 HIGH |
 | `authority_node.rs` | 1,193 | Authority node orchestration | 🔴 HIGH |
 | `linearizer.rs` | 1,169 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
 | `metrics.rs` | 1,104 | Prometheus metrics definitions | 🟢 LOW |
@@ -465,6 +474,10 @@ metanode/
 | `commit_syncer/cold_start.rs` | 233 | Sync status transition decisions |
 | `synchronizer/fetcher.rs` | 275 | P2P block fetch worker and verifier |
 | `storage/mem_store.rs` | 275 | In-memory store (testing) |
+| `authority_service/mod.rs` | 182 | Authority lifecycle service coordinator |
+| `authority_service/broadcast.rs` | 203 | Block broadcast stream and counters |
+| `commit_finalizer/types.rs` | 88 | State structs for commit finalization |
+| `block_manager/types.rs` | 40 | State structs for block manager |
 
 ---
 
