@@ -118,7 +118,10 @@ metanode/
 │  │  ├── commit_finalizer.rs ← Finalization  │   │
 │  │  ├── coordination_hub.rs ← Peer attest   │   │
 │  │  ├── commit_vote_monitor.rs← Digest vote │   │
-│  │  ├── synchronizer.rs     ← Block sync    │   │
+│  │  ├── synchronizer/      ← Block sync module  │   │
+│  │  │   ├── mod.rs          ← Event loop         │   │
+│  │  │   ├── fetcher.rs      ← Fetch blocks P2P   │   │
+│  │  │   └── scheduler.rs    ← Scheduled fetches  │   │
 │  │  ├── dag_state/           ← DAG state    │   │
 │  │  ├── core/                ← Proposer     │   │
 │  │  ├── storage/             ← RocksDB      │   │
@@ -414,7 +417,8 @@ metanode/
 |------|-------|------|------|
 | `commit_syncer/mod.rs` | **2,812** | Commit synchronization main coordination loop | 🔴 CRITICAL |
 | `core_tests.rs` | 2,738 | Comprehensive consensus tests | 🟢 TEST |
-| `synchronizer.rs` | 2,175 | DAG block synchronization | 🔴 HIGH |
+| `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
+| `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
 | `dag_state/dag_state_impl.rs` | 1,873 | DAG state machine implementation | 🔴 HIGH |
 | `authority_service.rs` | 1,745 | Authority lifecycle service | 🔴 HIGH |
 | `commit_finalizer.rs` | 1,605 | Commit finalization logic | 🔴 HIGH |
@@ -458,6 +462,7 @@ metanode/
 | `storage/rocksdb_store.rs` | 472 | RocksDB persistent store |
 | `commit_syncer/fetcher.rs` | 495 | P2P block and commit fetch loop |
 | `commit_syncer/cold_start.rs` | 233 | Sync status transition decisions |
+| `synchronizer/fetcher.rs` | 275 | P2P block fetch worker and verifier |
 | `storage/mem_store.rs` | 275 | In-memory store (testing) |
 
 ---
