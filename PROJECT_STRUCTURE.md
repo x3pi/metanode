@@ -345,7 +345,10 @@ metanode/
 | `setup_consensus/startup_sync.rs` | 651 | Startup block sync loop implementation | 🔴 HIGH |
 | `setup_consensus/verification.rs` | 231 | Post-gate and background block hash verification | 🔴 HIGH |
 | `setup_consensus/fork_guard.rs` | 149 | Runtime Fork Guard background hash verification | 🔴 HIGH |
-| `epoch_monitor.rs` | 675 | Epoch health monitoring + alerts | 🔴 HIGH |
+| `epoch_monitor/mod.rs` | **221** | **Unified epoch monitor** — coordinates health checks and delegates transitions | 🔴 HIGH |
+| `epoch_monitor/stall_recovery.rs` | 134 | Validator block stall recovery via active P2P sync | 🔴 HIGH |
+| `epoch_monitor/sync_only_advance.rs` | 113 | SyncOnly sequential epoch advancement | 🔴 HIGH |
+| `epoch_monitor/validator_transition.rs` | 268 | Validator multi-epoch catchup transition | 🔴 HIGH |
 | `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
 | `epoch_checkpoint.rs` | 321 | Epoch state persistence at boundaries | 🔴 HIGH |
 | `epoch_store.rs` | 206 | Epoch metadata storage | 🟡 MED |
