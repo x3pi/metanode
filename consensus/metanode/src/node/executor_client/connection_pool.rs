@@ -216,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::modulo_one)]
     fn test_pool_size_one() {
         let addr = SocketAddress::Unix("/tmp/test_pool1.sock".to_string());
         let pool = ConnectionPool::new(addr, 1, 30);

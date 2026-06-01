@@ -3,8 +3,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    pin::Pin,
-    sync::Arc,
     time::Duration,
 };
 
@@ -12,33 +10,19 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockRef, Round};
-use futures::{ready, stream, task, Stream, StreamExt};
+use futures::{stream, StreamExt};
 use meta_macros::fail_point_async;
 use mysten_metrics::spawn_monitored_task;
-use parking_lot::RwLock;
 use rand::seq::SliceRandom as _;
 use tap::TapFallible;
-use tokio::sync::broadcast;
-use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, info, warn};
 
 use crate::{
-    block::{BlockAPI as _, ExtendedBlock, SignedBlock, VerifiedBlock, GENESIS_ROUND},
-    block_verifier::BlockVerifier,
+    block::{ExtendedBlock, SignedBlock, VerifiedBlock, GENESIS_ROUND},
     commit::{CommitAPI as _, CommitRange, TrustedCommit},
-    commit_vote_monitor::CommitVoteMonitor,
-    context::Context,
-    core_thread::CoreThreadDispatcher,
-    dag_state::DagState,
     epoch_change::{EpochChangeProposal, EpochChangeVote},
-    epoch_change_provider::EpochChangeProcessor,
     error::{ConsensusError, ConsensusResult},
-    legacy_store::LegacyEpochStoreManager,
     network::{BlockStream, ExtendedSerializedBlock, NetworkService},
-    round_tracker::PeerRoundTracker,
-    storage::Store,
-    synchronizer::SynchronizerHandle,
-    transaction_certifier::TransactionCertifier,
     CommitIndex,
 };
 
@@ -512,13 +496,12 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
 
         let mut certifier_block_refs = vec![];
 
-        'commit: while let Some(c) = commits.last() {
+        if let Some(c) = commits.last() {
             let index = c.index();
             let votes = self.store.read_commit_votes(index, c.digest())?;
             
             // Bypass quorum validation for FETCH-COMMITS to fix deadlock
             certifier_block_refs = votes;
-            break 'commit;
         }
 
         // Log final commits being returned

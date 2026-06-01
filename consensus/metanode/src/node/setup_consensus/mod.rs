@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
-
 mod fork_guard;
 mod startup_sync;
 mod verification;
@@ -38,63 +37,14 @@ impl ConsensusNode {
     ) -> Result<ConsensusSetup> {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
-        // ═══════════════════════════════════════════════════════════════
-        // FORK-SAFETY FIX v5: Use persisted commit_index, NOT GEI-derived value.
-        // GEI includes fragment_offset, so (GEI - epoch_base) is HIGHER than actual commit_index.
-        // Using inflated value causes CommitSyncer to PREVENT legitimate commits.
-        //
-        // CRITICAL: When DAG is wiped (snapshot restore), persistence files are also
-        // gone. In that case we MUST set go_replay_after=0 to let the new DAG start
-        // from commit 1. The CommitProcessor's AUTO-JUMP and executor's GEI guard
-        // will handle skipping already-executed commits in Go.
-        // ═══════════════════════════════════════════════════════════════
-        // Detect empty DAG (snapshot restore) FIRST - needed for go_replay_after decision
-        let dag_has_history = {
-            let epoch_db = config
-                .storage_path
-                .join("epochs")
-                .join(format!("epoch_{}", storage.current_epoch))
-                .join("consensus_db");
-            epoch_db.exists()
-                && std::fs::read_dir(&epoch_db)
-                    .map(|mut entries| entries.next().is_some())
-                    .unwrap_or(false)
-        };
+        
+        let dag_has_history = Self::check_dag_history(config, storage);
 
-        // ═══════════════════════════════════════════════════════════════
-        // UNIFIED RECOVERY BARRIER (May 2026 — Architectural Fix)
-        //
-        // EPOCH-AGNOSTIC SNAPSHOT DETECTION:
-        // If the DAG is empty but Go has blocks, this is a snapshot recovery
-        // regardless of epoch number or commit count.
-        //
-        // OLD BUG: The previous check `handled_commits >= 300` failed on epoch 2+
-        // because epoch-scoped commit indices reset to 0, always failing the threshold.
-        // This caused the schedule_recovery_pending guard to never activate,
-        // allowing premature Healthy transitions with stale LeaderSwapTables.
-        //
-        // NEW: Detect snapshot recovery by checking if Go has already executed blocks
-        // (go_replay_after > 0 OR go_block > 0) while the DAG is empty. This works
-        // across all epochs.
-        // ═══════════════════════════════════════════════════════════════
-        // CRITICAL FIX (May 2026): The old check `!dag_has_history` was WRONG.
-        // After snapshot restore, the consensus_db from the previous epoch is
-        // PRESERVED as part of the snapshot data — so dag_has_history=true even
-        // though the node needs full recovery. This caused the recovery barrier
-        // to NEVER activate after snapshot restore, allowing premature Healthy
-        // transitions → fork.
-        //
-        // NEW: Activate the barrier whenever Go has prior execution state,
-        // REGARDLESS of whether the consensus_db exists. The barrier is harmless
-        // on normal restart (it will quickly reach Ready via existing DAG commits)
-        // but critical on snapshot restore.
+        // Recovery barrier activation logic
         {
             let go_has_state = storage.latest_block_number > 0 || storage.last_handled_commit_index.map_or(false, |c| c > 0);
             if go_has_state {
                 coordination_hub.activate_recovery_barrier();
-                // CRITICAL FIX: We MUST set schedule_recovery_pending=true so the node enters ScheduleVerifying
-                // and naturally rebuilds its LeaderSchedule from the network instead of bypassing it.
-                // This applies to BOTH snapshot restores and normal restarts to ensure identical strictness.
                 coordination_hub.set_schedule_recovery_pending(true);
                 
                 info!(
@@ -111,84 +61,29 @@ impl ConsensusNode {
             }
         }
 
-        let go_replay_after = if config.executor_read_enabled {
-            if let Some(commit_index) = storage.last_handled_commit_index {
-                info!(
-                    "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
-                    commit_index
-                );
-                commit_index
-            } else {
-                warn!(
-                    "⚠️ [GO-AUTH GEI] LastHandledCommitIndex not available from StorageSetup. \
-                     Falling back to wipe_safe persistence."
-                );
-                // Fall back to persistence if Go RPC failed (e.g. timeout / rare startup race)
-                let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
-                match wipe_safe {
-                    Some((_gei, commit_index)) if commit_index > 0 => {
-                        info!(
-                            "📊 [FORK-SAFETY] Recovered commit_index={} from wipe-safe persistence (fallback)",
-                            commit_index
-                        );
-                        commit_index
-                    }
-                    _ => {
-                        if !dag_has_history {
-                            info!(
-                                "📊 [FORK-SAFETY] DAG empty + no persistence = first start or full reset. \
-                                 Setting go_replay_after=0"
-                            );
-                            0
-                        } else if storage.last_global_exec_index > storage.epoch_base_exec_index {
-                            (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
-                        } else {
-                            0
-                        }
-                    }
-                }
-            }
-        } else {
-            0
-        };
+        let go_replay_after = Self::get_go_replay_after(config, storage, dag_has_history);
+
         info!(
             "📊 [STARTUP] CommitConsumerArgs: go_replay_after={} (from authoritative Go/fallback)",
             go_replay_after
         );
-        // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
         info!(
             "🤝 [HANDSHAKE] Passing last_executed_commit_hash from Go to Rust DAG: {:?}",
             hex::encode(storage.last_executed_commit_hash)
         );
 
-        let (mut commit_consumer, commit_receiver, mut block_receiver) =
-            CommitConsumerArgs::new(go_replay_after, go_replay_after, storage.last_executed_commit_hash, storage.last_block_timestamp_ms);
+        let (mut commit_consumer, commit_receiver, block_receiver) =
+            CommitConsumerArgs::new(
+                go_replay_after,
+                go_replay_after,
+                storage.last_executed_commit_hash,
+                storage.last_block_timestamp_ms,
+            );
         let current_commit_index = Arc::new(AtomicU32::new(0));
         let is_transitioning = coordination_hub.get_is_transitioning_ref();
 
-        // Load persisted transaction queue
-        let persisted_queue = crate::node::queue::load_transaction_queue_static(&storage.storage_path)
-            .await
-            .unwrap_or_default();
-        if !persisted_queue.is_empty() {
-            info!("💾 Loaded {} persisted transactions", persisted_queue.len());
-        }
-        let pending_transactions_queue = Arc::new(tokio::sync::Mutex::new(persisted_queue));
-
-        // Load committed transaction hashes from current epoch for duplicate prevention
-        let committed_hashes = crate::node::transition::load_committed_transaction_hashes(
-            &storage.storage_path,
-            storage.current_epoch,
-        )
-        .await;
-        if !committed_hashes.is_empty() {
-            info!(
-                "💾 Loaded {} committed transaction hashes from epoch {}",
-                committed_hashes.len(),
-                storage.current_epoch
-            );
-        }
-        let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
+        let (pending_transactions_queue, committed_transaction_hashes) =
+            Self::load_startup_state(storage).await;
 
         let (epoch_tx_sender, epoch_tx_receiver) =
             tokio::sync::mpsc::channel::<(u64, u64, u64, u64)>(1000);
@@ -215,7 +110,7 @@ impl ConsensusNode {
             );
         }
 
-        // Stage 4 Conveyor Belt Buffer: BACKPRESSURE-TUNED buffer size.
+        // Stage 4 Conveyor Belt Buffer
         let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(100);
 
         let next_expected_commit_index = if config.executor_read_enabled && go_replay_after > 0 {
@@ -268,38 +163,30 @@ impl ConsensusNode {
             if let Some(verifier) = digest_verifier_hub.get_digest_verifier() {
                 verifier(index)
             } else {
-                None // Monitor not yet initialized
+                None
             }
         });
 
-        // COLD-START-FIX (May 2026): Wire digest data checker to CommitVoteMonitor.
-        // This callback returns true ONLY when CommitVoteMonitor has received actual
-        // digest votes from P2P blocks, NOT when CommitSyncer has merely set QCI > 0.
         let digest_checker_hub = coordination_hub.clone();
         commit_processor = commit_processor.with_digest_data_checker(move || {
             digest_checker_hub.has_digest_data()
         });
 
-        // ZERO-TIMEOUT (May 2026): Wire peer commit attestation callback.
-        // Replaces COLD-START-BYPASS (10s) and SUSTAINED-LOAD-BYPASS (5s).
         let peer_attest_hub = coordination_hub.clone();
         commit_processor = commit_processor.with_peer_commit_attestation(move |index: u32, digest: [u8; 32]| {
             if let Some(attestor) = peer_attest_hub.get_peer_commit_attestation() {
                 attestor(index, digest)
             } else {
-                consensus_core::coordination_hub::PeerAttestResult::Insufficient // Not yet initialized
+                consensus_core::coordination_hub::PeerAttestResult::Insufficient
             }
         });
 
-        // ExecutorClient for commit processing
         let initial_next_expected = if config.executor_read_enabled {
             storage.last_global_exec_index + 1
         } else {
             1
         };
 
-        // MOVED UP: Create system_transaction_provider BEFORE executor_client_for_proc
-        // so we can wire the go_lag_handle for backpressure
         let epoch_duration_seconds = storage.epoch_duration_from_go;
         let system_transaction_provider = Arc::new(DefaultSystemTransactionProvider::new(
             storage.current_epoch,
@@ -340,6 +227,309 @@ impl ConsensusNode {
             go_replay_after,
         ).await?;
 
+        Self::run_post_sync_consistency_checks(
+            config,
+            storage,
+            go_replay_after,
+            next_expected_commit_index,
+            &executor_client_for_proc,
+            &mut commit_processor,
+            &shared_last_global_exec_index,
+        ).await;
+
+        let is_terminally_failed = Arc::new(AtomicBool::new(false));
+
+        let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc().clone();
+
+        Self::crosscheck_epoch_and_resolve_committee(
+            config,
+            storage,
+            &executor_client_for_proc,
+            &epoch_eth_addresses_arc,
+        ).await?;
+
+        coordination_hub.set_startup_go_sync_completed(true);
+
+        Self::perform_post_gate_verification(
+            config,
+            &coordination_hub,
+            &executor_client_for_proc,
+        ).await;
+
+        let is_designated_validator = storage.is_in_committee;
+        let start_as_validator = is_designated_validator;
+
+        if storage.current_epoch > 0 {
+            system_transaction_provider.update_epoch(
+                storage.current_epoch,
+                storage.epoch_timestamp_ms,
+            ).await;
+            tracing::info!(
+                "🔄 [STARTUP] SystemTransactionProvider re-synced: epoch={}, epoch_timestamp_ms={}",
+                storage.current_epoch, storage.epoch_timestamp_ms
+            );
+        }
+
+        if start_as_validator {
+            coordination_hub.set_phase(
+                consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
+            );
+        } else {
+            coordination_hub.set_startup_sync_active(false);
+        }
+
+        let commit_consumer_monitor = commit_consumer.monitor();
+
+        let (lag_alert_sender, lag_alert_receiver) = tokio::sync::mpsc::channel::<
+            crate::consensus::commit_processor::lag_monitor::LagAlert,
+        >(1000);
+
+        commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
+
+        let parameters = Self::build_consensus_parameters(config, storage)?;
+        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
+
+        let (authority, commit_consumer_holder) = if start_as_validator {
+            info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
+            (
+                Some(
+                    ConsensusAuthority::start(
+                        NetworkType::Tonic,
+                        storage.epoch_timestamp_ms,
+                        storage.epoch_base_exec_index,
+                        storage.own_index,
+                        storage.committee.clone(),
+                        parameters.clone(),
+                        protocol_config.clone(),
+                        storage.protocol_keypair.clone(),
+                        storage.network_keypair.clone(),
+                        clock.clone(),
+                        transaction_verifier.clone(),
+                        commit_consumer,
+                        registry.clone(),
+                        0,
+                        Some(system_transaction_provider.clone()
+                            as Arc<dyn SystemTransactionProvider>),
+                        None,
+                        coordination_hub.clone(),
+                    )
+                    .await,
+                ),
+                None,
+            )
+        } else {
+            info!("🔄 Starting as sync-only node (not in committee)");
+            info!("📡 Keeping commit_consumer alive for SyncOnly mode to prevent channel close");
+            (None, Some(commit_consumer))
+        };
+
+        if let Some(ref auth) = authority {
+            if config.executor_read_enabled && storage.last_global_exec_index > 0 {
+                let recovery_store = auth.take_store();
+                info!("🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...");
+                if let Err(e) = crate::node::recovery::perform_block_recovery_check(
+                    &executor_client_for_proc,
+                    storage.last_global_exec_index,
+                    storage.epoch_base_exec_index,
+                    storage.current_epoch,
+                    &recovery_store,
+                    config.node_id as u32,
+                )
+                .await {
+                    warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
+                }
+            }
+        }
+
+        let transaction_client_proxy = authority
+            .as_ref()
+            .map(|auth| Arc::new(TransactionClientProxy::new(auth.transaction_client())));
+
+        let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());
+        info!("♻️ [TX RECYCLER] Created shared TxRecycler instance");
+
+        commit_processor = commit_processor
+            .with_executor_client(executor_client_for_proc.clone())
+            .with_tx_recycler(tx_recycler.clone())
+            .with_committed_transaction_hashes(committed_transaction_hashes.clone());
+
+        Self::spawn_background_tasks(
+            config,
+            storage,
+            &coordination_hub,
+            executor_client_for_proc.clone(),
+            delivery_rx,
+            lag_alert_receiver,
+            is_terminally_failed.clone(),
+            commit_processor,
+            block_receiver,
+            startup_total_synced_blocks,
+            startup_local_block,
+            start_as_validator,
+            system_transaction_provider.clone(),
+        );
+
+        Ok(ConsensusSetup {
+            authority,
+            dag_has_history,
+            commit_consumer_holder,
+            transaction_client_proxy,
+            executor_client_for_proc,
+            current_commit_index,
+            pending_transactions_queue,
+            committed_transaction_hashes,
+            epoch_tx_sender,
+            epoch_tx_receiver,
+            system_transaction_provider,
+            protocol_config,
+            parameters,
+            clock,
+            transaction_verifier,
+            tx_recycler,
+            is_terminally_failed,
+            epoch_eth_addresses_arc,
+            commit_consumer_monitor,
+        })
+    }
+
+    /// Check if database has history.
+    fn check_dag_history(config: &NodeConfig, storage: &StorageSetup) -> bool {
+        let epoch_db = config
+            .storage_path
+            .join("epochs")
+            .join(format!("epoch_{}", storage.current_epoch))
+            .join("consensus_db");
+        epoch_db.exists()
+            && std::fs::read_dir(&epoch_db)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false)
+    }
+
+    /// Load persisted tx queue and committed transaction hashes.
+    async fn load_startup_state(
+        storage: &StorageSetup,
+    ) -> (
+        Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
+        Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    ) {
+        let persisted_queue = crate::node::queue::load_transaction_queue_static(&storage.storage_path)
+            .await
+            .unwrap_or_default();
+        if !persisted_queue.is_empty() {
+            info!("💾 Loaded {} persisted transactions", persisted_queue.len());
+        }
+        let pending_transactions_queue = Arc::new(tokio::sync::Mutex::new(persisted_queue));
+
+        let committed_hashes = crate::node::transition::load_committed_transaction_hashes(
+            &storage.storage_path,
+            storage.current_epoch,
+        )
+        .await;
+        if !committed_hashes.is_empty() {
+            info!(
+                "💾 Loaded {} committed transaction hashes from epoch {}",
+                committed_hashes.len(),
+                storage.current_epoch
+            );
+        }
+        let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
+
+        (pending_transactions_queue, committed_transaction_hashes)
+    }
+
+    /// Determine go_replay_after index from Go state or backup db
+    fn get_go_replay_after(
+        config: &NodeConfig,
+        storage: &StorageSetup,
+        dag_has_history: bool,
+    ) -> u32 {
+        if config.executor_read_enabled {
+            if let Some(commit_index) = storage.last_handled_commit_index {
+                info!(
+                    "🔑 [GO-AUTH GEI] Setting go_replay_after={} based on Go Authoritative LastHandledCommitIndex.",
+                    commit_index
+                );
+                commit_index
+            } else {
+                warn!(
+                    "⚠️ [GO-AUTH GEI] LastHandledCommitIndex not available from StorageSetup. \
+                     Falling back to wipe_safe persistence."
+                );
+                // Fall back to persistence if Go RPC failed (e.g. timeout / rare startup race)
+                let wipe_safe = crate::node::executor_client::persistence::load_persisted_last_index_wipe_safe(&config.storage_path);
+                match wipe_safe {
+                    Some((_gei, commit_index)) if commit_index > 0 => {
+                        info!(
+                            "📊 [FORK-SAFETY] Recovered commit_index={} from wipe-safe persistence (fallback)",
+                            commit_index
+                        );
+                        commit_index
+                    }
+                    _ => {
+                        if !dag_has_history {
+                            info!(
+                                "📊 [FORK-SAFETY] DAG empty + no persistence = first start or full reset. \
+                                 Setting go_replay_after=0"
+                            );
+                            0
+                        } else if storage.last_global_exec_index > storage.epoch_base_exec_index {
+                            (storage.last_global_exec_index - storage.epoch_base_exec_index) as u32
+                        } else {
+                            0
+                        }
+                    }
+                }
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Configure consensus parameters and database path.
+    fn build_consensus_parameters(
+        config: &NodeConfig,
+        storage: &StorageSetup,
+    ) -> Result<consensus_config::Parameters> {
+        let mut parameters = consensus_config::Parameters::default();
+        parameters.commit_sync_batch_size = config.commit_sync_batch_size;
+        parameters.commit_sync_parallel_fetches = config.commit_sync_parallel_fetches;
+        parameters.commit_sync_batches_ahead = config.commit_sync_batches_ahead;
+
+        if let Some(ms) = config.min_round_delay_ms {
+            parameters.min_round_delay = Duration::from_millis(ms);
+        }
+
+        parameters.adaptive_delay_enabled = config.adaptive_delay_enabled;
+
+        if let Some(ms) = config.leader_timeout_ms {
+            parameters.leader_timeout = Duration::from_millis(ms);
+        } else if config.speed_multiplier != 1.0 {
+            info!("Applying speed multiplier: {}x", config.speed_multiplier);
+            parameters.leader_timeout =
+                Duration::from_millis((200.0 / config.speed_multiplier) as u64);
+        }
+
+        let db_path = config
+            .storage_path
+            .join("epochs")
+            .join(format!("epoch_{}", storage.current_epoch))
+            .join("consensus_db");
+        std::fs::create_dir_all(&db_path)?;
+        parameters.db_path = db_path;
+
+        Ok(parameters)
+    }
+
+    /// Consistency validation between Rust and Go, correcting expected indices.
+    async fn run_post_sync_consistency_checks(
+        config: &NodeConfig,
+        storage: &StorageSetup,
+        go_replay_after: u32,
+        next_expected_commit_index: u32,
+        executor_client_for_proc: &ExecutorClient,
+        commit_processor: &mut crate::consensus::commit_processor::CommitProcessor,
+        shared_last_global_exec_index: &Arc<tokio::sync::Mutex<u64>>,
+    ) {
         if config.executor_read_enabled {
             match executor_client_for_proc.get_last_handled_commit_index().await {
                 Ok((commit_idx, gei, block_num, go_epoch, _auth, _ts, _state_root)) => {
@@ -402,8 +592,6 @@ impl ConsensusNode {
                 }
             }
         }
-
-        let is_terminally_failed = Arc::new(AtomicBool::new(false));
 
         executor_client_for_proc.initialize_from_go().await;
         tracing::info!(
@@ -516,161 +704,15 @@ impl ConsensusNode {
                 _ => {}
             }
         }
+    }
 
-        coordination_hub.set_startup_go_sync_completed(true);
-
-        Self::perform_post_gate_verification(
-            config,
-            &coordination_hub,
-            &executor_client_for_proc,
-        ).await;
-
-        if startup_total_synced_blocks > 0 && !config.peer_rpc_addresses.is_empty() {
-            let guard_client = executor_client_for_proc.clone();
-            let guard_peers = config.peer_rpc_addresses.clone();
-            let guard_start_block = startup_local_block;
-            let guard_terminally_failed = is_terminally_failed.clone();
-            tokio::spawn(async move {
-                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block, guard_terminally_failed).await;
-            });
-        }
-
-        let peer_addrs = config.peer_rpc_addresses.clone();
-        let executor_client_for_manager = executor_client_for_proc.clone();
-        tokio::spawn(async move {
-            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
-                executor_client_for_manager,
-                delivery_rx,
-                peer_addrs,
-            );
-            manager.run().await;
-            tracing::info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager gracefully exited (expected on Epoch Transition).");
-        });
-
-        let health_client = executor_client_for_proc.clone();
-        let health_peers = config.peer_rpc_addresses.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            
-            const MAX_HEALTH_RETRIES: u32 = 3;
-            let mut passed = false;
-            for attempt in 1..=MAX_HEALTH_RETRIES {
-                let checker = crate::node::health_check::PostRecoveryHealthCheck::new(
-                    health_client.clone(), health_peers.clone()
-                );
-                let result = checker.run().await;
-                if result.is_healthy() {
-                    tracing::info!("✅ [HEALTH] Post-recovery health check PASSED (attempt {}/{}): {:?}", attempt, MAX_HEALTH_RETRIES, result);
-                    passed = true;
-                    break;
-                } else if attempt < MAX_HEALTH_RETRIES {
-                    tracing::warn!(
-                        "⚠️ [HEALTH] Post-recovery health check FAILED (attempt {}/{}): {:?}. \
-                         Retrying in 30s — node may still be in schedule recovery...",
-                        attempt, MAX_HEALTH_RETRIES, result
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                } else {
-                    tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED after {} attempts: {:?}", MAX_HEALTH_RETRIES, result);
-                }
-            }
-            if !passed {
-                tracing::error!("🚨 [HEALTH] Node did NOT recover within the health check window. Manual investigation required.");
-            }
-        });
-
-        let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());
-        info!("♻️ [TX RECYCLER] Created shared TxRecycler instance");
-
-        commit_processor = commit_processor
-            .with_executor_client(executor_client_for_proc.clone())
-            .with_tx_recycler(tx_recycler.clone())
-            .with_committed_transaction_hashes(committed_transaction_hashes.clone());
-
-        let (lag_alert_sender, mut lag_alert_receiver) = tokio::sync::mpsc::channel::<
-            crate::consensus::commit_processor::lag_monitor::LagAlert,
-        >(1000);
-
-        commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
-
-        tokio::spawn(async move {
-            while let Some(alert) = lag_alert_receiver.recv().await {
-                match alert {
-                    crate::consensus::commit_processor::lag_monitor::LagAlert::ModerateLag {
-                        gap,
-                        go_rate,
-                        go_block_number,
-                        ..
-                    } => {
-                        tracing::warn!("⚠️ [LAG-MONITOR] Go is {} blocks behind Rust (rate: {:.1} blk/s), go_block_number={}. Monitoring...", gap, go_rate, go_block_number);
-                    }
-                    crate::consensus::commit_processor::lag_monitor::LagAlert::SevereLag {
-                        rust_gei,
-                        go_gei,
-                        go_block_number,
-                        gap,
-                        go_rate,
-                    } => {
-                        tracing::error!("🚨 [LAG-MONITOR] SEVERE: Go is {} blocks behind Rust! (rust={}, go_gei={}, go_block={}, rate={:.1} blk/s).",
-                            gap, rust_gei, go_gei, go_block_number, go_rate);
-
-                        tracing::warn!("⚠️ [LAG-RECOVERY] P2P block import is DISABLED for Master nodes. Allowing Go to catch up naturally via BATCH-DRAIN to maintain consensus parity.");
-                    }
-                    crate::consensus::commit_processor::lag_monitor::LagAlert::Recovered {
-                        ..
-                    } => {
-                        tracing::info!("✅ [LAG-MONITOR] Go has caught up with Rust. Normal operations resumed.");
-                    }
-                }
-            }
-        });
-
-        let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc().clone();
-
-        let failed_processor = is_terminally_failed.clone();
-        tokio::spawn(async move {
-            if let Err(e) = commit_processor.run().await {
-                tracing::error!("❌ [STATION 3: PROCESSOR] Fatal Error: {}", e);
-                failed_processor.store(true, Ordering::SeqCst);
-            } else {
-                tracing::info!("🛑 [STATION 3: PROCESSOR] Gracefully Exited (Expected upon EndOfEpoch).");
-            }
-        });
-
-        tokio::spawn(async move {
-            while let Some(output) = block_receiver.recv().await {
-                tracing::debug!("Received {} certified blocks", output.blocks.len());
-            }
-        });
-
-        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
-        let mut parameters = consensus_config::Parameters::default();
-        parameters.commit_sync_batch_size = config.commit_sync_batch_size;
-        parameters.commit_sync_parallel_fetches = config.commit_sync_parallel_fetches;
-        parameters.commit_sync_batches_ahead = config.commit_sync_batches_ahead;
-
-        if let Some(ms) = config.min_round_delay_ms {
-            parameters.min_round_delay = Duration::from_millis(ms);
-        }
-
-        parameters.adaptive_delay_enabled = config.adaptive_delay_enabled;
-
-        if let Some(ms) = config.leader_timeout_ms {
-            parameters.leader_timeout = Duration::from_millis(ms);
-        } else if config.speed_multiplier != 1.0 {
-            info!("Applying speed multiplier: {}x", config.speed_multiplier);
-            parameters.leader_timeout =
-                Duration::from_millis((200.0 / config.speed_multiplier) as u64);
-        }
-
-        let db_path = config
-            .storage_path
-            .join("epochs")
-            .join(format!("epoch_{}", storage.current_epoch))
-            .join("consensus_db");
-        std::fs::create_dir_all(&db_path)?;
-        parameters.db_path = db_path;
-
+    /// Cross-check epoch metadata with peers and resolve committee validators.
+    async fn crosscheck_epoch_and_resolve_committee(
+        config: &NodeConfig,
+        storage: &mut StorageSetup,
+        executor_client_for_proc: &ExecutorClient,
+        epoch_eth_addresses_arc: &Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    ) -> Result<()> {
         if !config.peer_rpc_addresses.is_empty() && storage.current_epoch > 0 {
             let mut peer_epoch_counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
             let mut max_peer_epoch = storage.current_epoch;
@@ -808,7 +850,7 @@ impl ConsensusNode {
                                 tracing::warn!(
                                     "⏳ [EPOCH-CROSSCHECK] Go reports epoch {} (attempt {}/{}), \
                                      peers at {}. Waiting for Go to catch up...",
-                                    go_epoch, correction_attempt, max_correction_retries, max_peer_epoch
+                                     go_epoch, correction_attempt, max_correction_retries, max_peer_epoch
                                 );
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }
@@ -944,28 +986,131 @@ impl ConsensusNode {
                 storage.is_in_committee = false;
             }
         }
+        Ok(())
+    }
 
-        let is_designated_validator = storage.is_in_committee;
-        let start_as_validator = is_designated_validator;
+    /// Spawn background managers, check loops, and tasks.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_background_tasks(
+        config: &NodeConfig,
+        _storage: &StorageSetup,
+        coordination_hub: &consensus_core::coordination_hub::ConsensusCoordinationHub,
+        executor_client_for_proc: Arc<ExecutorClient>,
+        delivery_rx: tokio::sync::mpsc::Receiver<crate::node::block_delivery::ValidatedCommit>,
+        lag_alert_receiver: tokio::sync::mpsc::Receiver<crate::consensus::commit_processor::lag_monitor::LagAlert>,
+        is_terminally_failed: Arc<AtomicBool>,
+        commit_processor: crate::consensus::commit_processor::CommitProcessor,
+        block_receiver: mysten_metrics::monitored_mpsc::UnboundedReceiver<consensus_core::CertifiedBlocksOutput>,
+        startup_total_synced_blocks: u64,
+        startup_local_block: u64,
+        start_as_validator: bool,
+        system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
+    ) {
+        // Spawn Lag Monitor Receiver
+        let mut lag_rx = lag_alert_receiver;
+        tokio::spawn(async move {
+            while let Some(alert) = lag_rx.recv().await {
+                match alert {
+                    crate::consensus::commit_processor::lag_monitor::LagAlert::ModerateLag {
+                        gap,
+                        go_rate,
+                        go_block_number,
+                        ..
+                    } => {
+                        tracing::warn!("⚠️ [LAG-MONITOR] Go is {} blocks behind Rust (rate: {:.1} blk/s), go_block_number={}. Monitoring...", gap, go_rate, go_block_number);
+                    }
+                    crate::consensus::commit_processor::lag_monitor::LagAlert::SevereLag {
+                        rust_gei,
+                        go_gei,
+                        go_block_number,
+                        gap,
+                        go_rate,
+                    } => {
+                        tracing::error!("🚨 [LAG-MONITOR] SEVERE: Go is {} blocks behind Rust! (rust={}, go_gei={}, go_block={}, rate={:.1} blk/s).",
+                            gap, rust_gei, go_gei, go_block_number, go_rate);
 
-        if storage.current_epoch > 0 {
-            system_transaction_provider.update_epoch(
-                storage.current_epoch,
-                storage.epoch_timestamp_ms,
-            ).await;
-            tracing::info!(
-                "🔄 [STARTUP] SystemTransactionProvider re-synced: epoch={}, epoch_timestamp_ms={}",
-                storage.current_epoch, storage.epoch_timestamp_ms
+                        tracing::warn!("⚠️ [LAG-RECOVERY] P2P block import is DISABLED for Master nodes. Allowing Go to catch up naturally via BATCH-DRAIN to maintain consensus parity.");
+                    }
+                    crate::consensus::commit_processor::lag_monitor::LagAlert::Recovered {
+                        ..
+                    } => {
+                        tracing::info!("✅ [LAG-MONITOR] Go has caught up with Rust. Normal operations resumed.");
+                    }
+                }
+            }
+        });
+
+        // Spawn Commit Processor Run loop
+        let failed_processor = is_terminally_failed.clone();
+        let cp = commit_processor;
+        tokio::spawn(async move {
+            if let Err(e) = cp.run().await {
+                tracing::error!("❌ [STATION 3: PROCESSOR] Fatal Error: {}", e);
+                failed_processor.store(true, Ordering::SeqCst);
+            } else {
+                tracing::info!("🛑 [STATION 3: PROCESSOR] Gracefully Exited (Expected upon EndOfEpoch).");
+            }
+        });
+
+        // Spawn Block Receiver loop
+        let mut br = block_receiver;
+        tokio::spawn(async move {
+            while let Some(output) = br.recv().await {
+                tracing::debug!("Received {} certified blocks", output.blocks.len());
+            }
+        });
+
+        // Spawn Block Delivery Manager
+        let peer_addrs = config.peer_rpc_addresses.clone();
+        let executor_client_for_manager = executor_client_for_proc.clone();
+        let del_rx = delivery_rx;
+        tokio::spawn(async move {
+            let manager = crate::node::block_delivery::BlockDeliveryManager::new(
+                executor_client_for_manager,
+                del_rx,
+                peer_addrs,
             );
-        }
+            manager.run().await;
+            tracing::info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager gracefully exited (expected on Epoch Transition).");
+        });
 
+        // Spawn Health Check
+        let health_client = executor_client_for_proc.clone();
+        let health_peers = config.peer_rpc_addresses.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            
+            const MAX_HEALTH_RETRIES: u32 = 3;
+            let mut passed = false;
+            for attempt in 1..=MAX_HEALTH_RETRIES {
+                let checker = crate::node::health_check::PostRecoveryHealthCheck::new(
+                    health_client.clone(), health_peers.clone()
+                );
+                let result = checker.run().await;
+                if result.is_healthy() {
+                    tracing::info!("✅ [HEALTH] Post-recovery health check PASSED (attempt {}/{}): {:?}", attempt, MAX_HEALTH_RETRIES, result);
+                    passed = true;
+                    break;
+                } else if attempt < MAX_HEALTH_RETRIES {
+                    tracing::warn!(
+                        "⚠️ [HEALTH] Post-recovery health check FAILED (attempt {}/{}): {:?}. \
+                         Retrying in 30s — node may still be in schedule recovery...",
+                        attempt, MAX_HEALTH_RETRIES, result
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                } else {
+                    tracing::error!("🚨 [HEALTH] Post-recovery health check FAILED after {} attempts: {:?}", MAX_HEALTH_RETRIES, result);
+                }
+            }
+            if !passed {
+                tracing::error!("🚨 [HEALTH] Node did NOT recover within the health check window. Manual investigation required.");
+            }
+        });
+
+        // Spawn DAG-GATE Validator Sync Monitor
         if start_as_validator {
-            coordination_hub.set_phase(
-                consensus_core::coordination_hub::NodeConsensusPhase::Bootstrapping,
-            );
-
             let guard_hub = coordination_hub.clone();
-            let guard_stp = system_transaction_provider.clone();
+            let guard_stp = system_transaction_provider;
             tokio::spawn(async move {
                 tracing::info!("🛡️ [DAG-GATE] Waiting for CommitSyncer to explicitly complete historical sync...");
                 loop {
@@ -977,89 +1122,17 @@ impl ConsensusNode {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
             });
-        } else {
-            coordination_hub.set_startup_sync_active(false);
         }
 
-        let commit_consumer_monitor = commit_consumer.monitor();
-
-        let (authority, commit_consumer_holder) = if start_as_validator {
-            info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
-
-            (
-                Some(
-                    ConsensusAuthority::start(
-                        NetworkType::Tonic,
-                        storage.epoch_timestamp_ms,
-                        storage.epoch_base_exec_index,
-                        storage.own_index,
-                        storage.committee.clone(),
-                        parameters.clone(),
-                        protocol_config.clone(),
-                        storage.protocol_keypair.clone(),
-                        storage.network_keypair.clone(),
-                        clock.clone(),
-                        transaction_verifier.clone(),
-                        commit_consumer,
-                        registry.clone(),
-                        0,
-                        Some(system_transaction_provider.clone()
-                            as Arc<dyn SystemTransactionProvider>),
-                        None,
-                        coordination_hub,
-                    )
-                    .await,
-                ),
-                None,
-            )
-        } else {
-            info!("🔄 Starting as sync-only node (not in committee)");
-            info!("📡 Keeping commit_consumer alive for SyncOnly mode to prevent channel close");
-            (None, Some(commit_consumer))
-        };
-
-        if let Some(ref auth) = authority {
-            if config.executor_read_enabled && storage.last_global_exec_index > 0 {
-                let recovery_store = auth.take_store();
-                info!("🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...");
-                if let Err(e) = crate::node::recovery::perform_block_recovery_check(
-                    &executor_client_for_proc,
-                    storage.last_global_exec_index,
-                    storage.epoch_base_exec_index,
-                    storage.current_epoch,
-                    &recovery_store,
-                    config.node_id as u32,
-                )
-                .await {
-                    warn!("⚠️ [STARTUP MINOR] Block recovery check paused (this is normal during cold-start or snapshot restore): {}", e);
-                }
-            }
+        // Spawn permanent background network fork guard
+        if startup_total_synced_blocks > 0 && !config.peer_rpc_addresses.is_empty() {
+            let guard_client = executor_client_for_proc.clone();
+            let guard_peers = config.peer_rpc_addresses.clone();
+            let guard_start_block = startup_local_block;
+            let guard_terminally_failed = is_terminally_failed.clone();
+            tokio::spawn(async move {
+                Self::runtime_fork_guard(guard_client, guard_peers, guard_start_block, guard_terminally_failed).await;
+            });
         }
-
-        let transaction_client_proxy = authority
-            .as_ref()
-            .map(|auth| Arc::new(TransactionClientProxy::new(auth.transaction_client())));
-
-        Ok(ConsensusSetup {
-            authority,
-            dag_has_history,
-            commit_consumer_holder,
-            transaction_client_proxy,
-            executor_client_for_proc,
-            current_commit_index,
-            pending_transactions_queue,
-            committed_transaction_hashes,
-            epoch_tx_sender,
-            epoch_tx_receiver,
-            system_transaction_provider,
-            protocol_config,
-            parameters,
-            clock,
-            transaction_verifier,
-            tx_recycler,
-            is_terminally_failed,
-            epoch_eth_addresses_arc,
-            commit_consumer_monitor,
-        })
     }
 }

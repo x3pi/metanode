@@ -2,44 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
     pin::Pin,
     sync::Arc,
-    time::Duration,
 };
 
-use async_trait::async_trait;
-use bytes::Bytes;
 use consensus_config::AuthorityIndex;
-use consensus_types::block::{BlockRef, Round};
-use futures::{ready, stream, task, Stream, StreamExt};
-use meta_macros::fail_point_async;
-use mysten_metrics::spawn_monitored_task;
-use parking_lot::RwLock;
-use rand::seq::SliceRandom as _;
-use tap::TapFallible;
+use futures::{ready, task, Stream};
 use tokio::sync::broadcast;
 use tokio_util::sync::ReusableBoxFuture;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
-    block::{BlockAPI as _, ExtendedBlock, SignedBlock, VerifiedBlock, GENESIS_ROUND},
-    block_verifier::BlockVerifier,
-    commit::{CommitAPI as _, CommitRange, TrustedCommit},
-    commit_vote_monitor::CommitVoteMonitor,
+    block::ExtendedBlock,
     context::Context,
-    core_thread::CoreThreadDispatcher,
-    dag_state::DagState,
-    epoch_change::{EpochChangeProposal, EpochChangeVote},
-    epoch_change_provider::EpochChangeProcessor,
-    error::{ConsensusError, ConsensusResult},
-    legacy_store::LegacyEpochStoreManager,
-    network::{BlockStream, ExtendedSerializedBlock, NetworkService},
-    round_tracker::PeerRoundTracker,
-    storage::Store,
-    synchronizer::SynchronizerHandle,
-    transaction_certifier::TransactionCertifier,
-    CommitIndex,
+    error::ConsensusError,
 };
 
 struct Counter {

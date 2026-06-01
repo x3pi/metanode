@@ -22,7 +22,7 @@ use crate::{
     error::{ConsensusError, ConsensusResult},
     stake_aggregator::{QuorumThreshold, StakeAggregator},
     transaction_certifier::TransactionCertifier,
-    BlockAPI, CommitIndex, CommittedSubDag, VerifiedBlock,
+    BlockAPI, CommitIndex, CommittedSubDag,
 };
 
 /// For transaction T committed at leader round R, when a new leader at round >= R + INDIRECT_REJECT_DEPTH
