@@ -15,19 +15,19 @@ import (
 )
 
 type RequestHandler struct {
-	storageManager      *storage.StorageManager
-	chainState          *blockchain.ChainState
-	genesisPath         string
-	snapshotManager     *SnapshotManager                                                       // Automatic snapshot management
-	connectionsManager  network.ConnectionsManager
-	messageSender       network.MessageSender
-	forceCommitCallback func()                                                                 // Callback to trigger ForceCommit in BlockProcessor
-	updateLastBlockCallback func(blk types.Block)                                              // Callback to let Rust explicitly update Go memory state
-	broadcastCallback   func(blk *block.Block, backupData []byte, blockNum uint64, txCount int) // Callback to broadcast synced blocks to network
-	pushAsyncGEIUpdateCallback func(gei uint64, hash []byte, commitIndex uint32, epoch uint64)                                   // Callback to advance GEI asynchronously
-	resetCommitIndexCallback func(newEpoch uint64)                                                  // Callback to reset commit index on epoch advancement
-	lockExecutionCallback   func()                                                                 // Callback to acquire BlockProcessor's ExecutionMutex lock
-	unlockExecutionCallback func()                                                                 // Callback to release BlockProcessor's ExecutionMutex lock
+	storageManager                     *storage.StorageManager
+	chainState                         *blockchain.ChainState
+	genesisPath                        string
+	snapshotManager                    *SnapshotManager // Automatic snapshot management
+	connectionsManager                 network.ConnectionsManager
+	messageSender                      network.MessageSender
+	forceCommitCallback                func()                                                                      // Callback to trigger ForceCommit in BlockProcessor
+	updateLastBlockCallback            func(blk types.Block)                                                       // Callback to let Rust explicitly update Go memory state
+	broadcastCallback                  func(blk *block.Block, backupData []byte, blockNum uint64, txCount int)     // Callback to broadcast synced blocks to network
+	pushAsyncGEIUpdateCallback         func(gei uint64, hash []byte, commitIndex uint32, epoch uint64)             // Callback to advance GEI asynchronously
+	resetCommitIndexCallback           func(newEpoch uint64)                                                       // Callback to reset commit index on epoch advancement
+	lockExecutionCallback              func()                                                                      // Callback to acquire BlockProcessor's ExecutionMutex lock
+	unlockExecutionCallback            func()                                                                      // Callback to release BlockProcessor's ExecutionMutex lock
 	broadcastEventsAndReceiptsCallback func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) // Callback to broadcast transaction receipts on synced blocks
 }
 
@@ -85,8 +85,6 @@ func (rh *RequestHandler) SetExecutionLockCallbacks(lock, unlock func()) {
 func (rh *RequestHandler) SetBroadcastEventsAndReceiptsCallback(cb func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog)) {
 	rh.broadcastEventsAndReceiptsCallback = cb
 }
-
-
 
 // NOTE (Sync Architecture Redesign, Apr 2026):
 // broadcastBackupToSub was REMOVED. Sub nodes now exclusively receive blocks

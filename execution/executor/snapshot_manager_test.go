@@ -14,7 +14,7 @@ func TestSnapshotManager_DetectEpochChange(t *testing.T) {
 	tmpDir := t.TempDir()
 	dataDir := filepath.Join(tmpDir, "data")
 	snapDir := filepath.Join(tmpDir, "snaps")
-	
+
 	err := os.MkdirAll(dataDir, 0755)
 	require.NoError(t, err)
 
@@ -33,7 +33,7 @@ func TestSnapshotManager_Callbacks(t *testing.T) {
 	os.MkdirAll(dataDir, 0755)
 
 	sm := NewSnapshotManager(dataDir, snapDir, 3, 0)
-	
+
 	sm.SetCheckpointCallback(func(destPath string) error {
 		return nil
 	})

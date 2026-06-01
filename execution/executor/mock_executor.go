@@ -52,9 +52,9 @@ type MockEpochQueryService struct {
 	AdvanceEpochErr    error
 
 	// Call recording
-	GetLastBlockNumberCalls    int
-	GetEpochBoundaryDataCalls  []uint64 // epoch numbers requested
-	AdvanceEpochCalls          []AdvanceEpochCall
+	GetLastBlockNumberCalls   int
+	GetEpochBoundaryDataCalls []uint64 // epoch numbers requested
+	AdvanceEpochCalls         []AdvanceEpochCall
 }
 
 // AdvanceEpochCall records the arguments of an AdvanceEpoch call.
