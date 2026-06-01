@@ -79,11 +79,14 @@ const (
 // ─── Backpressure ───────────────────────────────────────────────────────────
 
 const (
+	// MaxMempoolSize is the hard limit on the transaction pool size to prevent GC stalls and high RAM usage.
+	MaxMempoolSize = 20000
+
 	// HighWatermark is the transaction-pool size at which backpressure kicks in.
-	HighWatermark = 8_000_000
+	HighWatermark = 15000
 
 	// LowWatermark is the transaction-pool size at which normal flow resumes.
-	LowWatermark = 5_000_000
+	LowWatermark = 10000
 )
 
 // ─── Network & Retry ────────────────────────────────────────────────────────

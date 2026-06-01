@@ -7,8 +7,6 @@ members = [
     "consensus/metanode/meta-consensus/core",
     "consensus/metanode/meta-consensus/types",
     "consensus/metanode/meta-consensus/config",
-    "consensus/metanode/meta-consensus/meta-http",
-    "consensus/metanode/meta-consensus/meta-tls",
     # Shared crates (must be in workspace to share build cache)
     "crates/meta-enum-compat-util",
     "crates/meta-http",
