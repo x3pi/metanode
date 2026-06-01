@@ -313,6 +313,7 @@ fn prepare_for_self_signed<'a>(
     Ok((cert, intermediates, vec![root]))
 }
 
+#[allow(deprecated)]
 fn pki_error(error: webpki::Error) -> rustls::Error {
     use webpki::Error::*;
     match error {

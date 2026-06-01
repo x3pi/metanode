@@ -288,7 +288,7 @@ metanode/
 | `meta-protocol-config-macros` | Procedural macros for protocol config |
 | `meta-macros` | [DELETED] | ❌ OBSOLETE 
 | `meta-proc-macros` | Procedural macros |
-| `meta-http` | [DELETED] | ❌ OBSOLETE 
+| `meta-http` | Shared HTTP client/server utilities |
 | `meta-tls` | TLS configuration |
 | `meta-enum-compat-util` | [DELETED] | ❌ OBSOLETE 
 | `mysten-common` | Common utilities (origin: Sui/Mysten Labs) |
