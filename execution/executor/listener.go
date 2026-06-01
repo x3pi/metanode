@@ -215,7 +215,7 @@ func (l *Listener) handleConnection(conn net.Conn) {
 		if len(epochData.Transactions) > 0 || epochData.GetGlobalExecIndex()%100 == 0 {
 			log.Printf("[batch_id=%s] 📥 [LISTENER] Received block: txs=%d, size=%d bytes",
 				batchID, len(epochData.Transactions), msgLen)
-			log.Printf("🔥 [PROFILING] GoMaster: Received block from Rust UDS at UnixMilli: %d (txs=%d, G=%d)", 
+			log.Printf("🔥 [PROFILING] GoMaster: Received block from Rust UDS at UnixMilli: %d (txs=%d, G=%d)",
 				time.Now().UnixMilli(), len(epochData.Transactions), epochData.GetGlobalExecIndex())
 		}
 

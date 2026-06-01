@@ -21,9 +21,9 @@ var globalSnapshotManager *SnapshotManager
 // Gọi 1 lần duy nhất khi khởi động node
 // chainState dùng để tự phát hiện epoch transition (cho cả SUB-WRITE node)
 func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.ChainState) *SnapshotManager {
-        // Start background worker for Xapian commit (runs every 10 seconds)
-        // We start this unconditionally to ensure Xapian data is flushed to disk periodically even if Snapshot is disabled.
-        mvm.StartXapianBackgroundWorker(10 * time.Second)
+	// Start background worker for Xapian commit (runs every 10 seconds)
+	// We start this unconditionally to ensure Xapian data is flushed to disk periodically even if Snapshot is disabled.
+	mvm.StartXapianBackgroundWorker(10 * time.Second)
 	if !cfg.SnapshotEnabled {
 		logger.Info("📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered")
 
@@ -134,7 +134,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 				return chainState.CheckpointChangelogs(destPath)
 			})
 			logger.Info("📸 [SNAPSHOT] Registered PebbleDB checkpoint callback")
-			
+
 			// Register NOMT snapshot callback for native atomic snapshots
 			sm.SetNomtSnapshotCallback(func(destPath string, useReflink bool) error {
 				return mt_trie.SnapshotAllNomtDBs(destPath, useReflink)
@@ -201,7 +201,6 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 
 	// USE CONFIG VALUE STRICTLY
 	// Dynamic port offset logic has been removed to respect snapshot_server_port exactly as configured
-
 
 	// Khởi động HTTP server phục vụ tải snapshot
 	StartSnapshotServer(snapshotDir, serverPort, sm)
