@@ -142,6 +142,12 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     last_local_commit_change_at: tokio::time::Instant,
     last_known_local_commit: CommitIndex,
 
+    // --- execution stall detection ---
+    /// Tracks the last time highest_handled_commit changed.
+    /// Used to detect execution stalls where Go execution stops advancing.
+    last_highest_handled_change_at: tokio::time::Instant,
+    last_known_highest_handled: CommitIndex,
+
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
 
@@ -316,6 +322,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_known_quorum: 0,
             last_local_commit_change_at: tokio::time::Instant::now(),
             last_known_local_commit: synced_commit_index,
+            last_highest_handled_change_at: tokio::time::Instant::now(),
+            last_known_highest_handled: synced_commit_index,
             adaptive_delay_state,
             active_sync_retry_count: 0,
             schedule_recovery_fetch_pending: false,
@@ -491,13 +499,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
     //   3. TransitionDecision describes WHAT, apply_transition() does HOW
     // ═══════════════════════════════════════════════════════════════════════
 
+    fn get_effective_quorum_commit(&self) -> CommitIndex {
+        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+        std::cmp::max(
+            std::cmp::max(
+                self.inner.commit_vote_monitor.quorum_commit_index(),
+                self.coordination_hub.get_quorum_commit_index(),
+            ),
+            highest_handled,
+        )
+    }
+
     /// All inputs needed for phase determination — gathered once, used immutably.
     fn gather_state_input(&self) -> PhaseStateInput {
         let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
-        let quorum_commit = std::cmp::max(
-            self.inner.commit_vote_monitor.quorum_commit_index(),
-            self.coordination_hub.get_quorum_commit_index(),
-        );
+        let quorum_commit = self.get_effective_quorum_commit();
         let current_phase = self.coordination_hub.get_phase();
         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
 
@@ -922,7 +938,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let new_state = self.coordination_hub.get_phase();
                         
                         let local_commit = self.inner.dag_state.read().last_commit_index();
-                        let quorum_commit = self.inner.commit_vote_monitor.quorum_commit_index();
+                        let quorum_commit = self.get_effective_quorum_commit();
                         let lag = quorum_commit.saturating_sub(local_commit);
 
                         // ════════════════════════════════════════════════════════
@@ -1036,6 +1052,42 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 }
                             });
                             self.last_local_commit_change_at = now; // prevent rapid re-triggers
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 4: Go execution / gap detector.
+                        //
+                        // Detects when the Go execution layer (highest_handled)
+                        // has stopped advancing, while we are aware of a higher quorum
+                        // commit index. This indicates that the node is stuck expecting
+                        // a specific commit index (e.g. 263) due to a divergence or missing
+                        // commit, while the network has already processed past it (e.g. 264).
+                        //
+                        // Recovery: Reset synced_commit_index to highest_handled, clear
+                        // pending fetches and fetched ranges, forcing CommitSyncer to
+                        // refetch the missing range starting from highest_handled + 1.
+                        // ════════════════════════════════════════════════════════
+                        if highest_handled != self.last_known_highest_handled {
+                            self.last_highest_handled_change_at = now;
+                            self.last_known_highest_handled = highest_handled;
+                        }
+                        let execution_stall_duration = now.duration_since(self.last_highest_handled_change_at);
+                        if execution_stall_duration >= Duration::from_secs(20)
+                            && highest_handled < quorum_commit
+                        {
+                            tracing::error!(
+                                "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
+                                 Resetting synced_commit_index to {} to fetch missing range.",
+                                highest_handled,
+                                execution_stall_duration.as_secs_f64(),
+                                quorum_commit,
+                                highest_handled
+                            );
+                            self.synced_commit_index = highest_handled;
+                            self.highest_scheduled_index = Some(highest_handled);
+                            self.pending_fetches.clear();
+                            self.fetched_ranges.clear();
+                            self.last_highest_handled_change_at = now; // Prevent rapid re-triggers
                         }
 
                         // ════════════════════════════════════════════════════════
@@ -1623,10 +1675,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
-        let quorum_commit_index = std::cmp::max(
-            self.inner.commit_vote_monitor.quorum_commit_index(),
-            self.coordination_hub.get_quorum_commit_index(),
-        );
+        let quorum_commit_index = self.get_effective_quorum_commit();
         let local_commit_index = self.inner.dag_state.read().last_commit_index();
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -2543,10 +2592,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // If so, advance the barrier from DagCatchingUp → ScheduleVerifying.
             // This is safe to call repeatedly — compare_exchange ensures only
             // the DagCatchingUp → ScheduleVerifying transition happens.
-            let quorum_commit = std::cmp::max(
-                self.inner.commit_vote_monitor.quorum_commit_index(),
-                self.coordination_hub.get_quorum_commit_index(),
-            );
+            let quorum_commit = self.get_effective_quorum_commit();
             if self.synced_commit_index >= quorum_commit && quorum_commit > 0 {
                 self.coordination_hub.recovery_barrier().dag_caught_up();
             }

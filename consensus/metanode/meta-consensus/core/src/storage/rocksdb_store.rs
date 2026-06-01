@@ -197,6 +197,25 @@ impl Store for RocksDBStore {
             }
         }
 
+        for (index, digest) in write_batch.commits_to_delete {
+            batch
+                .delete_batch(&self.commits, [(index, digest)])
+                .map_err(ConsensusError::RocksDBFailure)?;
+            batch
+                .delete_batch(&self.commit_info, [(index, digest)])
+                .map_err(ConsensusError::RocksDBFailure)?;
+            batch
+                .delete_batch(&self.finalized_commits, [(index, digest)])
+                .map_err(ConsensusError::RocksDBFailure)?;
+            batch
+                .schedule_delete_range(
+                    &self.commit_votes,
+                    &(index, digest, BlockRef::MIN),
+                    &(index, digest, BlockRef::MAX),
+                )
+                .map_err(ConsensusError::RocksDBFailure)?;
+        }
+
         for commit in write_batch.commits {
             batch
                 .insert_batch(

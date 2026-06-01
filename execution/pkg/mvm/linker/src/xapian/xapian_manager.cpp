@@ -273,7 +273,7 @@ Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blo
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -344,7 +344,7 @@ bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber, co
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -415,7 +415,7 @@ Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, 
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -546,7 +546,7 @@ Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -644,7 +644,7 @@ Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &te
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -747,7 +747,7 @@ Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_
         bool just_started = false;
         if (!this->has_started)
         {
-            db.begin_transaction();
+            db.begin_transaction(false);
             this->has_started = true;
             just_started = true;
         }
@@ -1011,6 +1011,24 @@ bool XapianManager::commit_changes() {
     return false; // Commit thất bại
   } catch (const std::exception &) {
     return false; // Commit thất bại
+  }
+}
+
+void XapianManager::commitAllInstances() {
+  std::shared_lock<std::shared_mutex> lock(instances_mutex);
+  for (auto &pair : instances) {
+    auto manager = pair.second;
+    if (manager) {
+      std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
+      if (!manager->has_started) {
+        try {
+          manager->db.commit();
+          manager->comprehensive_log.xapian_doc_logs.clear();
+        } catch (...) {
+          // Ignore errors during background flush
+        }
+      }
+    }
   }
 }
 
@@ -1341,11 +1359,13 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
     return false; // Không tìm thấy instance để hủy
 }
 
-// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
-XapianLog::ComprehensiveLog XapianManager::getComprehensiveChangeLogs() const
+// Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER
+XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 {
     std::lock_guard<std::shared_mutex> lock(changes_mutex);
-    return comprehensive_log;
+    XapianLog::ComprehensiveLog log_copy = std::move(comprehensive_log);
+    comprehensive_log.xapian_doc_logs.clear();
+    return log_copy;
 }
 
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged

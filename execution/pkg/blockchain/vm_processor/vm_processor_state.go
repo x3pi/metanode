@@ -114,6 +114,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 			mvmRs.GasUsed, common.Hash{}, mapAddBalance, mapSubBalance,
 			mvmRs.MapNonce, nil, nil, nil, nil, nil, nil, nil,
 		)
+		if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+			rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+		}
 		if span != nil { // GUARD
 			span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())
 			span.SetAttribute("finalResultException", rs.Exception().String())
@@ -313,6 +316,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		nil, nil,
 		eventLogs,
 	)
+	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
 
 	if span != nil { // GUARD for final attributes
 		span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())
@@ -340,7 +346,7 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 
 	transactionHash := transaction.Hash()
 
-	return smart_contract.NewExecuteSCResult(
+	rs := smart_contract.NewExecuteSCResult(
 		transactionHash,
 		mvmRs.Status,
 		mvmRs.Exception,
@@ -362,7 +368,11 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 		nil,
 		nil,
 		nil,
-	), nil
+	)
+	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
+		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
+	return rs, nil
 }
 
 // updateStateDB cập nhật trạng thái DB dựa trên kết quả MVM.
@@ -372,6 +382,7 @@ func (vmP *VmProcessor) updateStateDB(
 	mvmRs *mvm.MVMExecuteResult,
 	mvmId common.Address,
 	isFreeGass bool,
+	isCache bool,
 ) (bool, error) {
 	var span *trace.Span = nil // Khởi tạo nil
 
@@ -413,8 +424,13 @@ func (vmP *VmProcessor) updateStateDB(
 		// even if the transaction ultimately throws an exception mid-execution.
 		// We MUST ONLY clear the specific mvmId instance to prevent global wipe data races
 		// during parallel group execution.
-		mvm.UnprotectMVMApi(mvmId)
-		mvm.ClearMVMApi(mvmId)
+		// BUT: If isCache is true, we must NOT unprotect/clear the MVMApi instance immediately
+		// because other transactions in the same Group need it, and it will be committed/cleared
+		// at the end of the block in block_processor_commit.go.
+		if !isCache {
+			mvm.UnprotectMVMApi(mvmId)
+			mvm.ClearMVMApi(mvmId)
+		}
 
 		// NOTE: We DO NOT manually refund transaction.Amount() here.
 		// `processSingleGroup` no longer pre-deducts the balance in Go prior to execution.
@@ -495,7 +511,29 @@ func (vmP *VmProcessor) updateStateDB(
 			}
 		}
 
-		return false, nil
+		if mvmRs.GasUsed > 0 && !isFreeGass {
+			fromAddr := transaction.FromAddress()
+			gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
+			gasPriceBig := new(big.Int).SetUint64(transaction.MaxGasPrice())
+			gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+			errSub := vmP.chainState.GetAccountStateDB().SubTotalBalance(fromAddr, gasFee)
+			if errSub != nil {
+				logger.Error("failed to subtract gas fee for reverted tx %s (amount: %s): %v", transaction.Hash().Hex(), gasFee.String(), errSub)
+			}
+			hasChanges = true
+		}
+
+		if span != nil { // GUARD before return
+			span.SetAttribute("hasChanges", hasChanges)
+			span.SetAttribute("changesSummary", changesSummary)
+			if len(updateErrors) > 0 {
+				span.SetAttribute("updateWarningsOrErrors", updateErrors)
+			}
+		}
+
+		vmP.logDirtyFingerprint(transaction, mvmRs, hasChanges)
+
+		return hasChanges, nil
 	}
 
 	// --- Success Handling ---
@@ -1016,46 +1054,52 @@ func (vmP *VmProcessor) updateStateDB(
 	// Compare across nodes to find the exact TX that causes divergence.
 	// Only logs for TXs with actual state changes to minimize noise.
 	// ═══════════════════════════════════════════════════════════════
-	if hasChanges {
-		// Collect all unique addresses that were modified by this TX
-		modifiedAddrs := make(map[string]bool)
-		for addr := range mvmRs.MapAddBalance {
-			modifiedAddrs[addr] = true
-		}
-		for addr := range mvmRs.MapSubBalance {
-			modifiedAddrs[addr] = true
-		}
-		for addr := range mvmRs.MapNonce {
-			modifiedAddrs[addr] = true
-		}
-		// Also include sender (gas fee deduction)
-		modifiedAddrs[transaction.FromAddress().Hex()] = true
-
-		// Sort addresses for deterministic output (enables cross-node diff)
-		sortedAddrs := make([]string, 0, len(modifiedAddrs))
-		for addr := range modifiedAddrs {
-			sortedAddrs = append(sortedAddrs, addr)
-		}
-		sort.Strings(sortedAddrs)
-
-		// Build compact state fingerprint
-		fingerprint := ""
-		for _, addrHex := range sortedAddrs {
-			fmtAddr := common.HexToAddress(addrHex)
-			as, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddr)
-			if err != nil || as == nil {
-				fingerprint += fmt.Sprintf(" %s=ERR", addrHex[:10])
-				continue
-			}
-			fingerprint += fmt.Sprintf(" %s:b=%s,p=%s,n=%d",
-				addrHex[:10], as.Balance().String(), as.PendingBalance().String(), as.Nonce())
-		}
-		logger.Warn("🔍 [FORK-DEBUG-TX] tx=%s from=%s status=%s |%s",
-			transaction.Hash().Hex()[:18], transaction.FromAddress().Hex()[:12],
-			mvmRs.Status.String(), fingerprint)
-	}
+	vmP.logDirtyFingerprint(transaction, mvmRs, hasChanges)
 
 	return hasChanges, finalErr // finalErr will be nil if no fatal error occurred
+}
+
+// logDirtyFingerprint logs a compact state fingerprint for debugging cross-node state divergence.
+func (vmP *VmProcessor) logDirtyFingerprint(transaction types.Transaction, mvmRs *mvm.MVMExecuteResult, hasChanges bool) {
+	if !hasChanges {
+		return
+	}
+	// Collect all unique addresses that were modified by this TX
+	modifiedAddrs := make(map[string]bool)
+	for addr := range mvmRs.MapAddBalance {
+		modifiedAddrs[addr] = true
+	}
+	for addr := range mvmRs.MapSubBalance {
+		modifiedAddrs[addr] = true
+	}
+	for addr := range mvmRs.MapNonce {
+		modifiedAddrs[addr] = true
+	}
+	// Also include sender (gas fee deduction)
+	modifiedAddrs[transaction.FromAddress().Hex()] = true
+
+	// Sort addresses for deterministic output (enables cross-node diff)
+	sortedAddrs := make([]string, 0, len(modifiedAddrs))
+	for addr := range modifiedAddrs {
+		sortedAddrs = append(sortedAddrs, addr)
+	}
+	sort.Strings(sortedAddrs)
+
+	// Build compact state fingerprint
+	fingerprint := ""
+	for _, addrHex := range sortedAddrs {
+		fmtAddr := common.HexToAddress(addrHex)
+		as, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddr)
+		if err != nil || as == nil {
+			fingerprint += fmt.Sprintf(" %s=ERR", addrHex[:10])
+			continue
+		}
+		fingerprint += fmt.Sprintf(" %s:b=%s,p=%s,n=%d",
+			addrHex[:10], as.Balance().String(), as.PendingBalance().String(), as.Nonce())
+	}
+	logger.Warn("🔍 [FORK-DEBUG-TX] tx=%s from=%s status=%s |%s",
+		transaction.Hash().Hex()[:18], transaction.FromAddress().Hex()[:12],
+		mvmRs.Status.String(), fingerprint)
 }
 
 // --- Helper functions for tracing (mapBytesToString, etc.) ---

@@ -42,9 +42,12 @@ type PebbleDB struct {
 var (
 	sharedPebbleCacheOnce sync.Once
 	sharedPebbleCache     *pebble.Cache
+
+	sharedPebbleTableCacheOnce sync.Once
+	sharedPebbleTableCache     *pebble.TableCache
 )
 
-func getSharedPebbleCache() *pebble.Cache {
+func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
 		// 1GB shared block cache across all PebbleDB instances.
 		// With 4 nodes × 4 DBs per node, each DB gets ~64MB effective cache
@@ -55,6 +58,17 @@ func getSharedPebbleCache() *pebble.Cache {
 	})
 	sharedPebbleCache.Ref()
 	return sharedPebbleCache
+}
+
+func GetSharedPebbleTableCache() *pebble.TableCache {
+	sharedPebbleTableCacheOnce.Do(func() {
+		cache := GetSharedPebbleCache()
+		// 16 shards, size 10000 (plenty for our open files)
+		sharedPebbleTableCache = pebble.NewTableCache(cache, 16, 10000)
+		logger.Info("✅ [PEBBLE] Created shared table cache (shards=16, size=10000)")
+	})
+	sharedPebbleTableCache.Ref()
+	return sharedPebbleTableCache
 }
 
 // NewPebbleDB creates a new PebbleDB instance (not yet opened).
@@ -80,7 +94,9 @@ func (p *PebbleDB) Open(parallelism int) error {
 		MemTableSize: 256 << 20,
 		// Block cache: use a process-wide shared 4GB cache for better cross-DB
 		// cache utilization.
-		Cache: getSharedPebbleCache(),
+		Cache: GetSharedPebbleCache(),
+		// Shared Table cache: use a process-wide shared table cache to limit table cache goroutines.
+		TableCache: GetSharedPebbleTableCache(),
 		// Up to 4 memtables before stalling (allows more write buffering)
 		MemTableStopWritesThreshold: 4,
 
@@ -207,8 +223,8 @@ func (p *PebbleDB) BatchPut(kvs [][2][]byte) error {
 		}
 	}
 
-	// NoSync for maximum throughput — crash recovery handled by blockchain replay
-	return batch.Commit(pebble.NoSync)
+	// Sync for WAL durability — prevents data loss on SIGKILL while avoiding full SST compaction
+	return batch.Commit(pebble.Sync)
 }
 
 // PrefixScan iterates all keys with the given prefix and returns key-value pairs.
@@ -568,26 +584,16 @@ func (lp *LazyPebbleDB) Close() error {
 
 // Flush synchronously flushes ALL pending data to durable storage:
 //  1. Go-level memory cache → PebbleDB memtable (via flushToDisk)
-//  2. PebbleDB memtable → SST files on disk (via db.Flush)
 //
-// CRASH SAFETY (Mar 2026 fix): Previously this only did step 1 and relied on
-// PebbleDB's internal memtable flush threshold (128MB). This meant data could
-// exist only in WAL, which can be lost/corrupt on SIGKILL. The lastBlockHashKey
-// (critical for restart) was particularly vulnerable — its loss caused the system
-// to re-initialize genesis, wiping all state.
-//
-// The periodic flush interval has been increased to 10s (from 5s) to compensate
-// for the additional I/O from the full flush.
+// CRASH SAFETY (Mar 2026 fix): Previously this also triggered a full PebbleDB
+// Flush (memtable to SST), but this caused massive I/O stalls. We now rely
+// on the Sync flag in BatchPut to ensure WAL durability.
 func (lp *LazyPebbleDB) Flush() error {
 	lp.flushToDisk()
-	// CRITICAL: Also flush PebbleDB memtable → SST files on disk
-	// Without this, data only exists in WAL which can be lost on crash
-	if lp.db != nil && lp.db.db != nil {
-		if err := lp.db.Flush(); err != nil {
-			logger.Error("❌ [LAZY PEBBLE] Failed to flush PebbleDB memtable→SST: %v (%s)", err, lp.db.path)
-			return err
-		}
-	}
+	// FIX (May 2026): Removed lp.db.Flush() (memtable->SST compaction) from here.
+	// Forcing SST compaction on every block caused massive I/O stalls leading to
+	// 300s epoch fatal errors. Durability is now guaranteed by pebble.Sync in BatchPut
+	// which fsyncs the WAL instead of forcing a full compaction.
 	return nil
 }
 

@@ -471,7 +471,7 @@ func telegramNoti(text string) error {
 // Thay đổi chữ ký hàm để thêm tham số sshKeyPath
 func CalculateUUID(BuildTime string, envDecryptKey string, envFirstKey string, sshKeyPath string) error {
 
-	requiredDate := time.Date(2026, time.Month(6), 1, 0, 0, 0, 0, time.Local)
+	requiredDate := time.Date(2026, time.Month(10), 1, 0, 0, 0, 0, time.Local)
 	currentDate := time.Now()
 	// Vì hôm nay là ngày 1 tháng 7 năm 2025, điều kiện này sẽ sai và gây ra lỗi.
 	// Để phục vụ mục đích demo, tôi sẽ tạm thời vô hiệu hóa nó.

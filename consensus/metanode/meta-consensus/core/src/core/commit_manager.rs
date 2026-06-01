@@ -142,7 +142,11 @@ impl Core {
             // The take operation goes through DagStateWriter (channel → DagStateActor thread)
             // instead of calling dag_state.write() directly. This eliminates the RwLock
             // deadlock that occurred when the write-guard lifetime leaked into the if-let body.
-            let baseline_scores = self.dag_state_writer.take_baseline_scores();
+            let baseline_scores = if self.dag_state.read().has_baseline_reputation_scores() {
+                self.dag_state_writer.take_baseline_scores()
+            } else {
+                None
+            };
             if let Some(scores) = baseline_scores {
                 tracing::info!("🔄 [SYNC] Core restoring LeaderSchedule scores from DagState baseline. Index={}", self.dag_state.read().last_commit_index());
                 self.leader_schedule.update_from_baseline_scores(
@@ -494,19 +498,35 @@ impl Core {
             .filter(|commit| {
                 if commit.index() > last_commit_index {
                     true
-                } else if is_schedule_recovery && commit.index() >= min_scoring_index {
-                    tracing::debug!(
-                        "🔄 [SCHEDULE-RECOVERY] Allowing historical commit {} (within scoring window {}..={}) for LeaderSwapTable rebuild",
-                        commit.index(), min_scoring_index, last_commit_index
-                    );
-                    true
                 } else {
-                    tracing::debug!(
-                        "Skip commit for index {} as it is already committed with last commit index {}",
-                        commit.index(),
-                        last_commit_index
-                    );
-                    false
+                    let local_commits = self.dag_state.read().store().scan_commits((commit.index()..=commit.index()).into())
+                        .unwrap_or_default();
+                    let local_commit_opt = local_commits.into_iter().next();
+                    
+                    if let Some(local_commit) = local_commit_opt {
+                        if local_commit.digest() != commit.digest() {
+                            tracing::warn!(
+                                "🚨 [DIVERGENCE-DETECTED] Local commit {} digest {:?} differs from certified commit digest {:?}. Allowing certified commit to replace local.",
+                                commit.index(), local_commit.digest(), commit.digest()
+                            );
+                            true
+                        } else if is_schedule_recovery && commit.index() >= min_scoring_index {
+                            tracing::debug!(
+                                "🔄 [SCHEDULE-RECOVERY] Allowing historical commit {} (within scoring window {}..={}) for LeaderSwapTable rebuild",
+                                commit.index(), min_scoring_index, last_commit_index
+                            );
+                            true
+                        } else {
+                            tracing::debug!(
+                                "Skip commit for index {} as it is already committed with last commit index {}",
+                                commit.index(),
+                                last_commit_index
+                            );
+                            false
+                        }
+                    } else {
+                        true
+                    }
                 }
             })
             .cloned()

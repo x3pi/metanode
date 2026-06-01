@@ -370,8 +370,8 @@ XapianRegistry::getGroupChangeLogsForMvmId(unsigned char *mvmId) const
         {
             if (manager_ptr)
             {
-                // Lấy ComprehensiveLog từ manager (chỉ chứa log của manager đó)
-                XapianLog::ComprehensiveLog manager_log = manager_ptr->getComprehensiveChangeLogs();
+                // Lấy ComprehensiveLog từ manager (và xóa log cũ khỏi manager)
+                XapianLog::ComprehensiveLog manager_log = manager_ptr->extractComprehensiveChangeLogs();
 
                 // Di chuyển (move) các bản ghi log từ manager_log vào log tổng hợp của nhóm
                 // để tránh sao chép không cần thiết, tăng hiệu quả.
@@ -429,18 +429,13 @@ bool XapianRegistry::commitChangesForMvmId(unsigned char *mvmId)
                     manager_ptr->tx_cond.notify_all();
                 }
             }
-
-            // Gọi saveAllAndCommit (hiện tại tương đương commit_changes)
-            if (!manager_ptr->saveAllAndCommit())
-            {
-                all_succeeded = false; // Đánh dấu thất bại nếu một commit không thành công
-                                       // Có thể dừng lại ngay hoặc tiếp tục commit các manager khác (hiện tại là tiếp tục)
-            }
+            // XÓA: Không gọi saveAllAndCommit() (db.commit()) ở đây để tránh fsync I/O blocking.
+            // Xapian sẽ tự động lưu memory-mapped và OS sẽ flush xuống disk.
+            // Nếu có crash, STARTUP-SYNC của Metanode sẽ tự động replay trạng thái.
         }
         else
         {
             // Bỏ qua con trỏ null (lỗi logic nếu xảy ra)
-            // all_succeeded = false; // Nếu muốn coi đây là lỗi
         }
     }
 

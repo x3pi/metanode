@@ -12,8 +12,10 @@
 package blockchain
 
 import (
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -191,13 +193,37 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// and DB/cache records are fully queryable and resolved without returning null.
 	storage.UpdateLastBlockNumber(blockNum)
 
-	// ─── 7. Rebuild state tries from header roots (optional) ─────────────
-	if cfg.rebuildTries {
-		if err := cs.UpdateStateForNewHeader(header); err != nil {
-			logger.Error("❌ [COMMIT STATE] Failed to rebuild tries for block #%d: %v", blockNum, err)
-			return blockNum, err
+	// ─── 7. Rebuild or realign state tries from header roots if out of sync ───
+	activeAccountRoot := cs.GetAccountStateDB().GetOriginRootHash()
+	activeStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+	headerAccountRoot := header.AccountStatesRoot()
+	headerStakeRoot := common.Hash(header.StakeStatesRoot())
+
+	if cfg.rebuildTries || activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			// NOMT: Lightweight root re-alignment
+			if asDB := cs.GetAccountStateDB(); asDB != nil {
+				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(headerAccountRoot)
+					asDB.SetOriginRootHash(headerAccountRoot)
+				}
+			}
+			if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(headerStakeRoot)
+					stakeDB.SetOriginRootHash(headerStakeRoot)
+				}
+			}
+			logger.Info("🔧 [COMMIT STATE] Auto-realigned NOMT roots for block #%d (account=%s, stake=%s)",
+				blockNum, headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+		} else {
+			// non-NOMT: Full rebuild via UpdateStateForNewHeader
+			if err := cs.UpdateStateForNewHeader(header); err != nil {
+				logger.Error("❌ [COMMIT STATE] Failed to rebuild tries for block #%d: %v", blockNum, err)
+				return blockNum, err
+			}
+			logger.Info("🔄 [COMMIT STATE] Rebuilt tries from block #%d header roots", blockNum)
 		}
-		logger.Info("🔄 [COMMIT STATE] Rebuilt tries from block #%d header roots", blockNum)
 	}
 
 	// ─── 8. Commit mappings to LevelDB (optional) ────────────────────────

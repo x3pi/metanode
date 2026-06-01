@@ -1,15 +1,15 @@
 package main
 import (
 	"fmt"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 func main() {
-	addr := common.HexToAddress("0x824fef8A3cE4b93C546209CC254D97E5Fee804e0")
-	for i := uint64(0); i < 300; i++ {
-		created := crypto.CreateAddress(addr, i)
-		if created.Hex() == "0xa7B6b3C927f4c0a632Ea54942DA756e55c3fC98b" {
-			fmt.Println("Found at nonce:", i)
-		}
+	privateKeyHex := "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
 	}
+	addr := crypto.PubkeyToAddress(privateKey.PublicKey)
+	fmt.Println("Private key address:", addr.Hex())
 }

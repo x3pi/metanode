@@ -83,7 +83,7 @@ type cachedUint64 struct {
 	addedAt time.Time
 }
 
-func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block) ([]byte, error) {
+func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn_types.Transaction) ([]byte, error) {
 	var mappingBatchKVs [][2][]byte
 
 	// 1. Block number -> hash
@@ -97,6 +97,18 @@ func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block) ([]byte, 
 	for _, txHash := range bl.Transactions() {
 		txKey := fmt.Sprintf("%s%s", txHashPrefix, txHash.Hex())
 		mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(txKey), blockNumberBytes})
+	}
+
+	// 3. Eth hash -> Bls hash
+	for _, tx := range txs {
+		ethTx := tx.ToEthTransaction()
+		if ethTx != nil {
+			ethHash := ethTx.Hash()
+			if ethHash != (common.Hash{}) {
+				ethKey := fmt.Sprintf("%s%s", ethHashMapBlsHashPrefix, ethHash.Hex())
+				mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(ethKey), tx.Hash().Bytes()})
+			}
+		}
 	}
 
 	serializedMappingBatch, err := storage.SerializeBatch(mappingBatchKVs)

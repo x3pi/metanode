@@ -157,7 +157,7 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
     let max_retries = 5u64;
     let max_delay_ms: u64 = 5000; // Cap per-retry delay at 5s
 
-    let chunk_size = 10000;
+    let chunk_size = 500;
     let mut chunks = transactions.chunks(chunk_size).peekable();
 
     while let Some(chunk) = chunks.next() {

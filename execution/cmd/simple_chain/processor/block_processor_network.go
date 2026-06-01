@@ -366,16 +366,52 @@ PROCESS_LOOP:
 					}
 					nextGEI := next.GetGlobalExecIndex()
 					if bp.isEmptyCommit(next) && nextGEI == highestGEI+1 {
-						// Consecutive empty commit — absorb into batch
+						// ═══════════════════════════════════════════════════════════════
+						// FORK-SAFETY FIX (May 2026): Epoch-boundary commits MUST NOT
+						// be absorbed into the batch! The 5ms drain timer is non-
+						// deterministic: different nodes batch different numbers of
+						// commits depending on CPU/network timing. If an epoch-boundary
+						// commit is absorbed by one node but not another, they produce
+						// blocks with different epoch/GEI/leader at the same block
+						// number → FORK. (Root cause of Block #530 fork in spam_xapian)
+						//
+						// FIX: Check epoch BEFORE absorbing. If epoch changes, treat
+						// the commit as "non-empty" to force it through the full
+						// processSingleEpochData path (boundary block, commitIndex
+						// reset, etc.).
+						// ═══════════════════════════════════════════════════════════════
+						nextEpoch := next.GetEpoch()
+						if nextEpoch > lastEpochNum {
+							logger.Info("ð¡ï¸ [BATCH-DRAIN] Epoch boundary detected in batch! epoch %d→%d at GEI=%d. "+
+								"Breaking drain to process epoch transition through full path.",
+								lastEpochNum, nextEpoch, nextGEI)
+							// Stop draining — treat this as a non-empty commit
+							draining = false
+							// Persist the batch up to this point (BEFORE the epoch boundary)
+							bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
+							nextExpectedGlobalExecIndex = highestGEI + 1
+							if batchCount > 1 {
+								logger.Info("⚡ [BATCH-DRAIN] Processed %d consecutive empty commits in 1 batch (GEI %d→%d) before epoch boundary",
+									batchCount, highestGEI-batchCount+1, highestGEI)
+							}
+							// Process the epoch-boundary commit through full path
+							blockStart := time.Now()
+							bp.ExecutionMutex.RLock()
+							if err := bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger); err != nil {
+								logger.Error("❌ [PROCESSOR] processSingleEpochData failed for epoch boundary block: %v", err)
+							}
+							bp.ExecutionMutex.RUnlock()
+							lastProcessedTime = time.Now()
+							if blockDur := time.Since(blockStart); blockDur > 500*time.Millisecond {
+								logger.Warn("ð [SLOW-BLOCK] Epoch boundary block processing took %v (GEI=%d)", blockDur, nextGEI)
+							}
+							drainTimeout.Stop()
+							goto BATCH_DONE
+						}
+						// Same-epoch empty commit — safe to absorb into batch
 						highestGEI = nextGEI
 						highestCommitIndex = next.GetCommitIndex()
 						batchCount++
-						// Track epoch from latest commit
-						nextEpoch := next.GetEpoch()
-						if nextEpoch > lastEpochNum {
-							lastEpochNum = nextEpoch
-							lastCommitTimestampMs = next.GetCommitTimestampMs()
-						}
 						// Reset drain timer — more data might follow
 						if !drainTimeout.Stop() {
 							select {

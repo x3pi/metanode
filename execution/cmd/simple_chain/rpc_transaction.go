@@ -138,6 +138,15 @@ PROCESS_COMMITTED:
 		return nil, nil
 	}
 
+	ethHash := tx.Hash()
+	if ethTx := tx.ToEthTransaction(); ethTx != nil {
+		if h := ethTx.Hash(); h != (common.Hash{}) {
+			ethHash = h
+		}
+	} else if hashEth != (common.Hash{}) && hashEth != tx.Hash() {
+		ethHash = hashEth
+	}
+
 	// Nếu tìm thấy giao dịch có hash khớp, trả về nó
 	return &RPCTransaction{
 		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
@@ -148,7 +157,7 @@ PROCESS_COMMITTED:
 		GasFeeCap:           nil,
 		GasTipCap:           nil,
 		MaxFeePerBlobGas:    nil,
-		Hash:                tx.Hash(),
+		Hash:                ethHash,
 		Input:               tx.CallData().Input(),
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
 		To:                  (*common.Address)(address.Bytes()),
@@ -163,7 +172,6 @@ PROCESS_COMMITTED:
 		S:                   (*hexutil.Big)(s),
 		YParity:             nil,
 	}, nil
-
 }
 
 func (api *MetaAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
