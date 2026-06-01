@@ -22,6 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+
+mod fork_guard;
+
 impl ConsensusNode {
     /// Builds the commit processor, consensus parameters, starts authority (or SyncOnly holder),
     /// and wires up all the shared state.
@@ -162,7 +165,7 @@ impl ConsensusNode {
         let is_transitioning = coordination_hub.get_is_transitioning_ref();
 
         // Load persisted transaction queue
-        let persisted_queue = super::queue::load_transaction_queue_static(&storage.storage_path)
+        let persisted_queue = crate::node::queue::load_transaction_queue_static(&storage.storage_path)
             .await
             .unwrap_or_default();
         if !persisted_queue.is_empty() {
@@ -1540,7 +1543,7 @@ impl ConsensusNode {
                                                 validators, go_epoch
                                             ) 
                                         {
-                                            let transition_hash = super::committee_source::calculate_committee_hash(&new_committee);
+                                            let transition_hash = crate::node::committee_source::calculate_committee_hash(&new_committee);
                                             let transition_hash_hex = hex::encode(&transition_hash[..8]);
                                             let mut epoch_match = 0u32;
                                             let mut epoch_mismatch = 0u32;
@@ -1563,7 +1566,7 @@ impl ConsensusNode {
                                                             }
                                                         }).collect();
                                                         if let Ok((peer_comm, _)) = crate::node::committee::build_committee_with_eth_addresses(peer_validators, go_epoch) {
-                                                            let peer_hash = super::committee_source::calculate_committee_hash(&peer_comm);
+                                                            let peer_hash = crate::node::committee_source::calculate_committee_hash(&peer_comm);
                                                             if transition_hash == peer_hash {
                                                                 epoch_match += 1;
                                                             } else {
@@ -1835,7 +1838,7 @@ impl ConsensusNode {
             if config.executor_read_enabled && storage.last_global_exec_index > 0 {
                 let recovery_store = auth.take_store();
                 info!("🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...");
-                if let Err(e) = super::recovery::perform_block_recovery_check(
+                if let Err(e) = crate::node::recovery::perform_block_recovery_check(
                     &executor_client_for_proc,
                     storage.last_global_exec_index,
                     storage.epoch_base_exec_index,
@@ -1874,144 +1877,5 @@ impl ConsensusNode {
             epoch_eth_addresses_arc,
             commit_consumer_monitor,
         })
-    }
-
-    /// Runtime Fork Guard — PERMANENT background block hash verification (Layer 6).
-    async fn runtime_fork_guard(
-        client: Arc<ExecutorClient>,
-        peers: Vec<String>,
-        start_block: u64,
-        is_terminally_failed: Arc<AtomicBool>,
-    ) {
-        const CHECK_INTERVAL: u64 = 10;
-        let mut next_check_block = start_block + CHECK_INTERVAL;
-        let mut consecutive_failures: u32 = 0;
-        const MAX_CONSECUTIVE_FAILURES: u32 = 10;
-
-        tracing::info!(
-            "🛡️ [LAYER-6] Runtime Fork Guard started — PERMANENT monitoring from block {} (every {} blocks)",
-            start_block, CHECK_INTERVAL
-        );
-
-        loop {
-            loop {
-                match client.get_last_block_number().await {
-                    Ok((current, _, true, _, _)) if current >= next_check_block => break,
-                    _ => {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-            }
-
-            match crate::network::peer_rpc::fetch_blocks_from_peer(
-                &peers, next_check_block, next_check_block,
-            ).await {
-                Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                    match client.get_blocks_range(next_check_block, next_check_block).await {
-                        Ok(local_blocks) if !local_blocks.is_empty() => {
-                            let local_raw = &local_blocks[0].raw_block_bytes;
-                            let peer_raw = &peer_blocks[0].raw_block_bytes;
-                            if local_raw == peer_raw {
-                                if next_check_block % 100 == 0 {
-                                    tracing::info!(
-                                        "✅ [LAYER-6] Block #{} verified ({} bytes match)",
-                                        next_check_block, local_raw.len()
-                                    );
-                                }
-                                consecutive_failures = 0;
-                            } else {
-                                tracing::error!(
-                                    "🚨 [LAYER-6] Block #{} MISMATCH DETECTED! \
-                                     local_bytes={} peer_bytes={}. \
-                                     ENTERING PENDING MODE — will re-verify 3 times before action.",
-                                    next_check_block,
-                                    local_raw.len(), peer_raw.len()
-                                );
-
-                                let mut confirmed_mismatch = true;
-                                for retry in 1..=3 {
-                                    tracing::warn!(
-                                        "⏳ [LAYER-6] Re-verify attempt {}/3 for block #{} in 5s...",
-                                        retry, next_check_block
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                                        &peers, next_check_block, next_check_block,
-                                    ).await {
-                                        Ok(retry_peer_blocks) if !retry_peer_blocks.is_empty() => {
-                                            match client.get_blocks_range(next_check_block, next_check_block).await {
-                                                Ok(retry_local) if !retry_local.is_empty() => {
-                                                    if retry_local[0].raw_block_bytes == retry_peer_blocks[0].raw_block_bytes {
-                                                        tracing::info!(
-                                                            "✅ [LAYER-6] Re-verify {}/3: Block #{} NOW MATCHES! \
-                                                             Was transient pipeline lag. Resuming.",
-                                                            retry, next_check_block
-                                                        );
-                                                        confirmed_mismatch = false;
-                                                        break;
-                                                    } else {
-                                                        tracing::error!(
-                                                            "🚨 [LAYER-6] Re-verify {}/3: Block #{} STILL MISMATCHES!",
-                                                            retry, next_check_block
-                                                        );
-                                                    }
-                                                }
-                                                _ => {
-                                                    tracing::warn!(
-                                                        "⚠️ [LAYER-6] Re-verify {}/3: Could not fetch local block #{}",
-                                                        retry, next_check_block
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            tracing::warn!(
-                                                "⚠️ [LAYER-6] Re-verify {}/3: Could not reach peer for block #{}",
-                                                retry, next_check_block
-                                            );
-                                        }
-                                    }
-                                }
-
-                                if confirmed_mismatch {
-                                    tracing::error!(
-                                        "🚨🚨🚨 [LAYER-6] CONFIRMED FORK at block #{}! \
-                                         3/3 re-verifications failed. \
-                                         Setting is_terminally_failed and halting process.",
-                                        next_check_block
-                                    );
-                                    is_terminally_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    tracing::error!(
-                                        "🛑 [LAYER-6] Calling std::process::exit(1) to halt node. \
-                                         FFI restart loop will trigger STARTUP-SYNC resync."
-                                    );
-                                    std::process::exit(1);
-                                } else {
-                                    consecutive_failures = 0;
-                                }
-                            }
-                        }
-                        _ => {
-                            consecutive_failures += 1;
-                        }
-                    }
-                }
-                _ => {
-                    consecutive_failures += 1;
-                }
-            }
-
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                tracing::warn!(
-                    "⚠️ [LAYER-6] {} consecutive peer failures. Backing off to 60s interval.",
-                    consecutive_failures
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                consecutive_failures = 0;
-            }
-
-            next_check_block += CHECK_INTERVAL;
-        }
     }
 }
