@@ -457,7 +457,7 @@ func (a *MVMApi) Call(
 		ProtectMVMApi(randomizedMvmId)
 		defer func() {
 			UnprotectMVMApi(randomizedMvmId)
-			apiInstances.Delete(randomizedMvmId)
+			ClearMVMApi(randomizedMvmId)
 		}()
 	} else {
 		randomizedMvmId = mvmId
@@ -920,7 +920,7 @@ func (a *MVMApi) Deploy(
 		ProtectMVMApi(randomizedMvmId)
 		defer func() {
 			UnprotectMVMApi(randomizedMvmId)
-			apiInstances.Delete(randomizedMvmId)
+			ClearMVMApi(randomizedMvmId)
 		}()
 	} else {
 		randomizedMvmId = mvmId
