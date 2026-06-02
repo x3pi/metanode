@@ -256,7 +256,17 @@ func RemoveOldApiInstances() {
 	// Lớp bảo vệ 1: Fast-path check với atomic counter
 	// Nếu tổng số instance (bao gồm cả protected) còn nhỏ hơn targetSize,
 	// thì chắc chắn số unprotected cũng nhỏ hơn, không cần quét map.
-	if int(apiInstanceCount.Load()) < targetSize {
+	count := int(apiInstanceCount.Load())
+	if count < 0 {
+		actualCount := 0
+		apiInstances.Range(func(key, value interface{}) bool {
+			actualCount++
+			return true
+		})
+		apiInstanceCount.Store(int32(actualCount))
+		count = actualCount
+	}
+	if count < targetSize {
 		return
 	}
 
@@ -454,6 +464,7 @@ func (a *MVMApi) Call(
 
 		randomizedMvmId = common.BytesToAddress(bBmvmIdBytes)
 		apiInstances.Store(randomizedMvmId, a)
+		apiInstanceCount.Add(1)
 		ProtectMVMApi(randomizedMvmId)
 		defer func() {
 			UnprotectMVMApi(randomizedMvmId)
@@ -917,6 +928,7 @@ func (a *MVMApi) Deploy(
 
 		randomizedMvmId = common.BytesToAddress(bBmvmIdBytes)
 		apiInstances.Store(randomizedMvmId, a)
+		apiInstanceCount.Add(1)
 		ProtectMVMApi(randomizedMvmId)
 		defer func() {
 			UnprotectMVMApi(randomizedMvmId)
