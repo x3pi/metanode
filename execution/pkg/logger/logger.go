@@ -45,6 +45,7 @@ type LoggerConfig struct {
 	TelegramChatId   int
 	TelegramThreadId uint
 	Outputs          []*os.File
+	Format           string // "text" hoặc "json"
 }
 
 type Logger struct {
@@ -57,6 +58,7 @@ var config = &LoggerConfig{
 	TelegramChatId:   0,
 	TelegramToken:    "",
 	TelegramThreadId: 0, // Default
+	Format:           "text",
 	// TelegramThreadId: 6010, // Devnet
 	// TelegramThreadId: 6759, // Testnet
 	// TelegramThreadId: 1, // worknet
@@ -87,6 +89,7 @@ func SetConfig(newConfig *LoggerConfig) {
 	logger.Config.TelegramChatId = config.TelegramChatId
 	logger.Config.TelegramToken = config.TelegramToken
 	logger.Config.TelegramThreadId = config.TelegramThreadId
+	logger.Config.Format = config.Format
 
 	fileLoggerMu.Lock()
 	defer fileLoggerMu.Unlock()
@@ -132,6 +135,12 @@ func SetIdentifier(identifier string) {
 func SetConsoleOutputEnabled(enabled bool) {
 	consoleOutputEnabled = enabled
 	setOutputsUnsafe(config.Outputs)
+}
+
+// SetFormat thiết lập định dạng log ("text" hoặc "json").
+func SetFormat(format string) {
+	config.Format = format
+	logger.Config.Format = format
 }
 
 func DebugP(message interface{}, a ...interface{}) {
@@ -285,6 +294,36 @@ func getLogBuffers(color string, prefix string, message interface{}, a []interfa
 
 // buildLogLine tạo một dòng log hoàn chỉnh
 func buildLogLine(color string, prefix string, message interface{}, a []interface{}) []byte {
+	if config.Format == "json" {
+		var msg string
+		if formatStr, ok := message.(string); ok && len(a) > 0 {
+			msg = fmt.Sprintf(formatStr, a...)
+		} else {
+			msg = fmt.Sprintf("%v", message)
+			for _, v_item := range a {
+				msg += "\n" + fmt.Sprintf("%v", v_item)
+			}
+		}
+
+		logObj := struct {
+			Time       string `json:"time"`
+			Level      string `json:"level"`
+			Identifier string `json:"identifier,omitempty"`
+			Msg        string `json:"msg"`
+		}{
+			Time:       time.Now().Format(time.RFC3339Nano),
+			Level:      prefix,
+			Identifier: config.Identifier,
+			Msg:        msg,
+		}
+
+		data, err := json.Marshal(logObj)
+		if err == nil {
+			data = append(data, '\n')
+			return data
+		}
+	}
+
 	var buffer bytes.Buffer
 	var contentBuffer bytes.Buffer
 

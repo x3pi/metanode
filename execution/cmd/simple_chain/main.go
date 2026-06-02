@@ -192,13 +192,32 @@ signal.Ignore(syscall.SIGPIPE)
 	logDir := app.config.LogPath
 	loggerfile.SetGlobalLogDir(logDir)
 
-	initializeLogCleaner(logDir, app.config.EpochsToKeep)
-	if _, err := logger.EnableFileLog("App.log"); err != nil {
-		logger.Error("enable file log failed: %v", err)
-		fatal.Exit("Fatal exit from main.go")
+	// Configure logger level and format from config file
+	logLevelFlag := logger.FLAG_INFO
+	switch strings.ToLower(app.config.Log.Level) {
+	case "debug":
+		logLevelFlag = logger.FLAG_DEBUG
+	case "trace":
+		logLevelFlag = logger.FLAG_TRACE
+	case "warn":
+		logLevelFlag = logger.FLAG_WARN
+	case "error":
+		logLevelFlag = logger.FLAG_ERROR
 	}
-	// Tắt console — chỉ ghi vào epoch file log (tránh trùng lặp với shell redirect)
-	logger.SetConsoleOutputEnabled(false)
+	logger.SetFlag(logLevelFlag)
+	logger.SetFormat(app.config.Log.Format)
+
+	if app.config.Log.FileOutput {
+		initializeLogCleaner(logDir, app.config.EpochsToKeep)
+		if _, err := logger.EnableFileLog("App.log"); err != nil {
+			logger.Error("enable file log failed: %v", err)
+			fatal.Exit("Fatal exit from main.go")
+		}
+	} else {
+		logger.CloseFileLog()
+	}
+
+	logger.SetConsoleOutputEnabled(app.config.Log.ConsoleOutput)
 
 	// Redirect C++ cout/cerr sang file riêng, tách theo process
 	// Derive tên process từ config file, ví dụ:

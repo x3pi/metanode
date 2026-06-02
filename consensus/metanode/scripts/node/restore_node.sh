@@ -174,8 +174,8 @@ for sess in "go-master-${NODE_ID}" "go-sub-${NODE_ID}"; do
         tmux kill-session -t "$sess" 2>/dev/null || true
     fi
 done
-pkill -f "config-master-node${NODE_ID}.json" 2>/dev/null || true
-pkill -f "config/node_${NODE_ID}.toml" 2>/dev/null || true
+pkill -9 -f "config-master-node${NODE_ID}.json" 2>/dev/null || true
+pkill -9 -f "config/node_${NODE_ID}.toml" 2>/dev/null || true
 
 sleep 2
 echo -e "${GREEN}  ✅ Node $NODE_ID đã dừng hoàn toàn${NC}"

@@ -21,3 +21,9 @@ commit_sync_batches_ahead = 64
 adaptive_catchup_enabled = true
 adaptive_delay_enabled = true
 adaptive_delay_ms = 50
+
+[log]
+level = "warn"
+format = "text"
+console_output = true
+file_output = false
