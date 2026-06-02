@@ -72,6 +72,14 @@ type PruningConfig struct {
 	PruneIntervalBlocks int    `json:"prune_interval_blocks"` // Blocks between pruning ticks
 }
 
+// RpcRateLimitConfig configures IP-based rate limiting for RPC
+type RpcRateLimitConfig struct {
+	Enabled           bool `json:"enabled"`             // Turn on/off IP rate limiting
+	GlobalRate        int  `json:"global_rate"`         // Max requests per second (across all IPs)
+	PerIpRate         int  `json:"per_ip_rate"`         // Max requests per second per IP
+	BlockDurationSecs int  `json:"block_duration_secs"` // Time in seconds to ban an IP if it exceeds limit
+}
+
 // LogConfig định nghĩa cấu hình cho logger (level, format, outputs).
 type LogConfig struct {
 	Level         string `json:"level"`          // "debug", "info", "warn", "error"
@@ -164,6 +172,7 @@ type SimpleChainConfig struct {
 	SkipSignatureVerification bool `json:"skip_signature_verification,omitempty"`
 
 	Pruning       PruningConfig   `json:"pruning,omitempty"`
+	RpcRateLimit  RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
 	TraceEnabled  bool            `json:"trace_enabled,omitempty"`
 	TraceEndpoint string          `json:"trace_endpoint,omitempty"`
 	TlsCert       string          `json:"tls_cert,omitempty"`
@@ -209,6 +218,14 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if ConfigApp.MaxCachedEpochs == 0 {
 			ConfigApp.MaxCachedEpochs = 10 // Default: keep 10 epochs of boundary data
+		}
+
+		// RPC Rate Limit default configuration if not fully specified
+		if ConfigApp.RpcRateLimit.GlobalRate == 0 {
+			ConfigApp.RpcRateLimit.Enabled = true
+			ConfigApp.RpcRateLimit.GlobalRate = 10000
+			ConfigApp.RpcRateLimit.PerIpRate = 50
+			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block
 		}
 
 		// Default log configuration if not specified

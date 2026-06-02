@@ -54,11 +54,11 @@ func (as *AccountState) Proto() *pb.AccountState {
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
 	pbAs := &pb.AccountState{
-		Address:        as.address.Bytes(),
-		LastHash:       as.lastHash.Bytes(),
+		Address:        as.address[:],
+		LastHash:       as.lastHash[:],
 		Balance:        as.balance.Bytes(),
 		PendingBalance: as.pendingBalance.Bytes(),
-		DeviceKey:      as.deviceKey.Bytes(),
+		DeviceKey:      as.deviceKey[:],
 		Nonce:          nonceBytes,
 		PublicKeyBls:   as.publicKeyBls,
 		AccountType:    as.accountType,

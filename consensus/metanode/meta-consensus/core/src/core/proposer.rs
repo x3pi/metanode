@@ -133,6 +133,35 @@ impl Core {
                     .set(adaptive_delay_state.quorum_rate());
             }
 
+            // BACKPRESSURE THROTTLING: If Go execution lag is high, throttle block proposal rate.
+            let go_lag = self
+                .system_transaction_provider
+                .as_ref()
+                .map(|p| p.get_go_lag())
+                .unwrap_or(0);
+
+            if go_lag >= 100 { // Start throttling at moderate_lag_threshold (100)
+                let extra_delay = if go_lag >= 200 { // severe_lag_threshold (200)
+                    // Severe throttling: starting at 1000ms, scaling up to 5000ms
+                    Duration::from_millis(1000 + (go_lag.saturating_sub(200) * 50).min(4000))
+                } else {
+                    // Moderate throttling: scaling up to 1000ms
+                    Duration::from_millis((go_lag.saturating_sub(100) * 10).min(1000))
+                };
+
+                effective_delay += extra_delay;
+
+                // Log periodically (approx. once every 5 seconds) to avoid spamming
+                if self.context.clock.timestamp_utc_ms() % 5000 < 500 {
+                    warn!(
+                        "⏳ [BACKPRESSURE] Go is lagging by {} blocks. Adding {}ms throttling delay to block proposal. Effective delay is {}ms.",
+                        go_lag,
+                        extra_delay.as_millis(),
+                        effective_delay.as_millis()
+                    );
+                }
+            }
+
             if Duration::from_millis(
                 self.context
                     .clock
@@ -141,11 +170,12 @@ impl Core {
             ) < effective_delay
             {
                 debug!(
-                    "Skipping block proposal for round {} as it is too soon after the last proposed block timestamp {}; effective delay is {}ms (base: {}ms)",
+                    "Skipping block proposal for round {} as it is too soon after the last proposed block timestamp {}; effective delay is {}ms (base: {}ms, go_lag: {})",
                     clock_round,
                     self.last_proposed_timestamp_ms(),
                     effective_delay.as_millis(),
                     self.context.parameters.min_round_delay.as_millis(),
+                    go_lag,
                 );
                 return None;
             }

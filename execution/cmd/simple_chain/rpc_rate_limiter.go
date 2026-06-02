@@ -5,26 +5,20 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"golang.org/x/time/rate"
 )
 
 const (
-	// Global RPC rate limit
-	rpcGlobalRate  = 300000 // requests per second
-	rpcGlobalBurst = 50000  // burst size
-
-	// Per-IP rate limit (must be < global to provide meaningful protection)
-	rpcPerIPRate  = 100000 // requests per second per IP
-	rpcPerIPBurst = 20000  // burst per IP
-
 	// Per-IP limiter cache
 	maxIPEntries   = 10000
 	ipCleanupEvery = 5 * time.Minute
@@ -32,14 +26,16 @@ const (
 
 // ipEntry holds a rate limiter and the last time it was used.
 type ipEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	limiter      *rate.Limiter
+	lastSeen     time.Time
+	blockedUntil time.Time // If set > Now(), all requests are instantly rejected
 }
 
 // RPCRateLimiter provides global and per-IP rate limiting for the RPC server.
 type RPCRateLimiter struct {
-	global *rate.Limiter
-
+	config  *config.RpcRateLimitConfig
+	global  *rate.Limiter
+	
 	// PERFORMANCE: use sync.Map for lock-free reads on the hot path
 	// Only cleanup needs a full scan via Range()
 	perIP   sync.Map // map[string]*ipEntry
@@ -50,13 +46,27 @@ type RPCRateLimiter struct {
 	totalRejected atomic.Int64
 }
 
-// NewRPCRateLimiter creates a new rate limiter with default settings.
-func NewRPCRateLimiter() *RPCRateLimiter {
+// NewRPCRateLimiter creates a new rate limiter with settings from config.
+func NewRPCRateLimiter(cfg *config.RpcRateLimitConfig) *RPCRateLimiter {
+	if cfg == nil {
+		cfg = &config.RpcRateLimitConfig{Enabled: false}
+	}
+	
+	// Allow burst to be slightly larger than rate
+	globalBurst := cfg.GlobalRate * 2
+	if globalBurst < 100 {
+		globalBurst = 100
+	}
+	
 	rl := &RPCRateLimiter{
-		global:  rate.NewLimiter(rate.Limit(rpcGlobalRate), rpcGlobalBurst),
+		config:  cfg,
+		global:  rate.NewLimiter(rate.Limit(cfg.GlobalRate), globalBurst),
 		closeCh: make(chan struct{}),
 	}
-	go rl.cleanupLoop()
+	
+	if cfg.Enabled {
+		go rl.cleanupLoop()
+	}
 	return rl
 }
 
@@ -71,7 +81,8 @@ func (rl *RPCRateLimiter) cleanupLoop() {
 			cutoff := time.Now().Add(-ipCleanupEvery)
 			rl.perIP.Range(func(key, value any) bool {
 				entry := value.(*ipEntry)
-				if entry.lastSeen.Before(cutoff) {
+				// Clean up only if it hasn't been seen recently AND it's not currently blocked
+				if entry.lastSeen.Before(cutoff) && time.Now().After(entry.blockedUntil) {
 					rl.perIP.Delete(key)
 				}
 				return true
@@ -87,22 +98,27 @@ func (rl *RPCRateLimiter) Close() {
 	close(rl.closeCh)
 }
 
-// getIPLimiter returns the per-IP limiter, creating one if needed.
+// getIPEntry returns the per-IP entry, creating one if needed.
 // PERFORMANCE: Uses sync.Map for lock-free reads (hot path).
-func (rl *RPCRateLimiter) getIPLimiter(ip string) *rate.Limiter {
+func (rl *RPCRateLimiter) getIPEntry(ip string) *ipEntry {
 	if val, ok := rl.perIP.Load(ip); ok {
 		entry := val.(*ipEntry)
 		entry.lastSeen = time.Now()
-		return entry.limiter
+		return entry
+	}
+
+	burst := rl.config.PerIpRate * 2
+	if burst < 20 {
+		burst = 20
 	}
 
 	// Create new limiter — Store-or-Load pattern avoids duplicates
 	newEntry := &ipEntry{
-		limiter:  rate.NewLimiter(rate.Limit(rpcPerIPRate), rpcPerIPBurst),
+		limiter:  rate.NewLimiter(rate.Limit(rl.config.PerIpRate), burst),
 		lastSeen: time.Now(),
 	}
 	actual, _ := rl.perIP.LoadOrStore(ip, newEntry)
-	return actual.(*ipEntry).limiter
+	return actual.(*ipEntry)
 }
 
 // extractIP returns just the IP portion of a remote address.
@@ -117,9 +133,26 @@ func extractIP(remoteAddr string) string {
 // Middleware wraps an http.Handler with rate limiting checks.
 func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip entirely if disabled
+		if !rl.config.Enabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Skip rate limiting for metrics/health endpoints
 		if r.URL.Path == "/metrics" || r.URL.Path == "/metrics/json" || r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Per-IP rate check
+		ip := extractIP(r.RemoteAddr)
+		entry := rl.getIPEntry(ip)
+
+		// Check if IP is currently blocked
+		if time.Now().Before(entry.blockedUntil) {
+			rl.totalRejected.Add(1)
+			writeIPBlockedResponse(w, entry.blockedUntil)
 			return
 		}
 
@@ -130,12 +163,15 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Per-IP rate check
-		ip := extractIP(r.RemoteAddr)
-		if !rl.getIPLimiter(ip).Allow() {
+		// Check per-IP limiter
+		if !entry.limiter.Allow() {
 			rl.totalRejected.Add(1)
-			logger.Warn("[RPC_RATE_LIMIT] Per-IP limit exceeded for %s", ip)
-			writeRateLimitResponse(w)
+			
+			// IP exceeds rate, BAN it
+			entry.blockedUntil = time.Now().Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
+			logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
+			
+			writeIPBlockedResponse(w, entry.blockedUntil)
 			return
 		}
 
@@ -161,8 +197,8 @@ func (rl *RPCRateLimiter) GetStats() map[string]interface{} {
 		"total_allowed":  rl.totalAllowed.Load(),
 		"total_rejected": rl.totalRejected.Load(),
 		"tracked_ips":    trackedIPs,
-		"global_rate":    rpcGlobalRate,
-		"per_ip_rate":    rpcPerIPRate,
+		"global_rate":    rl.config.GlobalRate,
+		"per_ip_rate":    rl.config.PerIpRate,
 	}
 }
 
@@ -174,7 +210,27 @@ func writeRateLimitResponse(w http.ResponseWriter) {
 		"jsonrpc": "2.0",
 		"error": map[string]interface{}{
 			"code":    -32005,
-			"message": "Rate limit exceeded. Please retry after 1 second.",
+			"message": "Global rate limit exceeded. Please retry after 1 second.",
+		},
+		"id": nil,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func writeIPBlockedResponse(w http.ResponseWriter, blockedUntil time.Time) {
+	w.Header().Set("Content-Type", "application/json")
+	retryAfter := int(time.Until(blockedUntil).Seconds())
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+	w.WriteHeader(http.StatusTooManyRequests)
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"error": map[string]interface{}{
+			"code":    -32005,
+			"message": fmt.Sprintf("Rate limit exceeded. IP Blocked. Please retry after %d seconds.", retryAfter),
 		},
 		"id": nil,
 	}

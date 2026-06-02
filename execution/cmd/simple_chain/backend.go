@@ -343,7 +343,7 @@ func NewServer(app *App) *http.ServeMux {
 	}
 
 	// Rate limiter middleware (global + per-IP)
-	rateLimiter := NewRPCRateLimiter()
+	rateLimiter := NewRPCRateLimiter(&app.config.RpcRateLimit)
 
 	// Metrics collector
 	metricsCollector := NewMetricsCollector(app)
