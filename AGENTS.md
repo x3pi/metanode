@@ -144,6 +144,16 @@ while strictly avoiding over-engineering.
 grep -rn "<SymbolName>" ./execution ./consensus --include="*.go" --include="*.rs"
 ```
 
+### CodeGraph Synchronization (after modifying code)
+
+To save tokens and execution time, do NOT run `codegraph sync` for minor logic tweaks or bug fixes.
+ONLY run `codegraph sync` if you have made SIGNIFICANT structural code changes (e.g., creating new files, modifying core structs, renaming public functions) AND you need to perform further impact analysis.
+Use the `run_command` tool to execute:
+```bash
+codegraph sync
+```
+Do NOT use `codegraph init -i` unless explicitly requested.
+
 ### Build Verification (after modifying code)
 
 **Primary verification method:**
