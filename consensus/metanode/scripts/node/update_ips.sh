@@ -401,7 +401,6 @@ sudo ufw allow ${GENESIS_WORKER_PORTS[$N]:-4012}/tcp
 sudo ufw allow ${GENESIS_P2P_PORTS[$N]:-9000}/tcp
 
 echo -e "\n\e[1;32m✅ Setup hệ thống hoàn tất cho Máy Node $N.\e[0m"
-echo -e "\e[1;33mTiếp theo:\e[0m Bạn hãy copy file binary và config sang máy này rồi chạy."
 EOF
         chmod +x "$SETUP_SCRIPT"
         echo -e "  ${GREEN}✅ Đã tạo file setup_node_${N}.sh${NC}"
