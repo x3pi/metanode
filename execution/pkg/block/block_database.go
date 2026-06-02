@@ -201,6 +201,11 @@ func (blockDatabase *BlockDatabase) SaveBlockByHash(block types.Block) error {
 	return blockDatabase.db.Put(block.Header().Hash().Bytes(), blockBytes)
 }
 
+// DeleteBlockByHash removes a block from the database completely.
+func (blockDatabase *BlockDatabase) DeleteBlockByHash(blockHash common.Hash) error {
+	return blockDatabase.db.Delete(blockHash.Bytes())
+}
+
 func (blockDatabase *BlockDatabase) GetBlockByHash(blockHash common.Hash) (types.Block, error) {
 	// Try to load the block from the database
 	blockBytes, err := blockDatabase.db.Get(blockHash.Bytes())
@@ -295,4 +300,10 @@ func (blockDatabase *BlockDatabase) GetSystemTransactions(blockNumber uint64) ([
 		return nil, err
 	}
 	return txs, nil
+}
+
+// DeleteSystemTransactions deletes the system transactions for a given block number.
+func (blockDatabase *BlockDatabase) DeleteSystemTransactions(blockNumber uint64) error {
+	key := fmt.Sprintf("system_txs_%d", blockNumber)
+	return blockDatabase.db.Delete([]byte(key))
 }

@@ -165,11 +165,23 @@ func (app *App) runStartupIntegrityCheck(checkDepth int) *IntegrityCheckResult {
 func (app *App) verifyBlockChain(blockDB interface{ GetBlockByHash(common.Hash) (types.Block, error) }, startBlock types.Block, maxBlocks int, result *IntegrityCheckResult) uint64 {
 	current := startBlock
 	checked := 0
+	
+	lastPrunedBlock := uint64(0)
+	if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		lastPrunedBlock = bc.GetLastPrunedBlockNumber()
+	}
 
 	for i := 0; i < maxBlocks; i++ {
 		blockNum := current.Header().BlockNumber()
 		if blockNum == 0 {
 			// Reached genesis — chain is complete
+			checked++
+			break
+		}
+
+		if blockNum <= lastPrunedBlock + 1 && lastPrunedBlock > 0 {
+			// Reached pruning boundary - chain before this is already pruned
+			logger.Info("✅ [INTEGRITY] Reached pruned boundary at block #%d (lastPruned=%d). Chain walk complete.", blockNum, lastPrunedBlock)
 			checked++
 			break
 		}

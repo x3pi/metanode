@@ -15,7 +15,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	mtn_types "github.com/meta-node-blockchain/meta-node/types"
+	"errors"
 )
+
+var ErrDataPruned = errors.New("data has been pruned")
 
 const (
 	blockNumberPrefix       = "blockNumber_"
@@ -60,6 +63,10 @@ type BlockChain struct {
 	// Worker control
 	stopCleanup chan struct{}
 	wg          sync.WaitGroup
+	
+	// Pruning tracking
+	lastPrunedBlockNumber uint64
+	pruneLock             sync.RWMutex
 }
 
 // Structs lưu trong cache kèm thời gian để dọn dẹp
@@ -688,4 +695,38 @@ func (bc *BlockChain) DiscardBlockMappings(blockNumber uint64) {
 	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber)
 	bc.removeFromDirty(key)
 	bc.blockNumberToHashCache.Delete(blockNumber)
+}
+
+// DeleteBlockHashMapping permanently removes the mapping from the database for pruning
+func (bc *BlockChain) DeleteBlockHashMapping(blockNumber uint64) error {
+	key := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber))
+	bc.blockNumberToHashCache.Delete(blockNumber)
+	return bc.storageManager.GetStorageMapping().Delete(key)
+}
+
+func (bc *BlockChain) SetLastPrunedBlockNumber(blockNumber uint64) error {
+	bc.pruneLock.Lock()
+	defer bc.pruneLock.Unlock()
+	bc.lastPrunedBlockNumber = blockNumber
+	
+	// Persist to DB so it survives restarts
+	key := []byte("last_pruned_block_number")
+	blockNumberBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
+	return bc.storageManager.GetStorageMapping().Put(key, blockNumberBytes)
+}
+
+func (bc *BlockChain) GetLastPrunedBlockNumber() uint64 {
+	bc.pruneLock.RLock()
+	defer bc.pruneLock.RUnlock()
+	
+	// Lazy load from DB on first access if it's 0 (assuming node restart)
+	if bc.lastPrunedBlockNumber == 0 {
+		key := []byte("last_pruned_block_number")
+		data, err := bc.storageManager.GetStorageMapping().Get(key)
+		if err == nil && len(data) == 8 {
+			bc.lastPrunedBlockNumber = binary.BigEndian.Uint64(data)
+		}
+	}
+	return bc.lastPrunedBlockNumber
 }
