@@ -45,6 +45,8 @@ type TxValidatorPool struct {
 	pendingTxManager  *PendingTransactionManager
 	excludedItems     []grouptxns.Item
 
+	futureTxTimeMap   map[common.Hash]time.Time
+
 	// FORK-SAFETY: Shared lock — Lock() during real block execution blocks
 	// all virtual execution goroutines that hold RLock().
 	blockProcessingLock *sync.RWMutex
@@ -69,6 +71,7 @@ func NewTxValidatorPool(
 		transactionPool:     transactionPool,
 		pendingTxManager:    pendingTxManager,
 		excludedItems:       make([]grouptxns.Item, 0),
+		futureTxTimeMap:     make(map[common.Hash]time.Time),
 		blockProcessingLock: blockProcessingLock,
 	}
 }
@@ -751,13 +754,29 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 
 			if actual > expected {
 				// Future nonce, missing predecessors -> defer to next cycle
+				logger.Info("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				// TTL Logic: Xóa nếu đã chờ quá thời gian FutureTxTimeout
+				if insertTime, exists := vp.futureTxTimeMap[tx.Hash()]; exists {
+					if time.Since(insertTime) > FutureTxTimeout {
+						logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
+						delete(vp.futureTxTimeMap, tx.Hash())
+						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
+					}
+				} else {
+					vp.futureTxTimeMap[tx.Hash()] = time.Now()
+				}
+				
 				futureTxs = append(futureTxs, tx)
 			} else if actual == expected {
 				// Valid contiguous nonce
+				logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
 				validTxs = append(validTxs, tx)
 				nonceMap[from]++
+				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
+				logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			}
 		}
 
