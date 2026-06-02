@@ -1099,6 +1099,17 @@ func processSingleGroup(
 			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
 			// So we can just use as.Nonce() + 1
 			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce() + 1)
+			
+			// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
+			asSender, _ := chainState.GetAccountStateDB().AccountState(tx.FromAddress())
+			if asSender != nil {
+				mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
+			}
+			
+			asReceiver, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
+			if asReceiver != nil {
+				mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())
+			}
 
 			// Generate fake MVM result
 			exRs = smart_contract.NewExecuteSCResult(
