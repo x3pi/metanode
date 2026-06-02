@@ -1399,6 +1399,15 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce) {
     State::getInstance(address)->setNonce(uint256_t(nonce));
   }
 }
+
+// 🔒 BALANCE-FIX: Update C++ State cache balance from Go side.
+void updateStateBalance(unsigned char *b_address, unsigned char *b_balance) {
+  uint256_t address = mvm::from_big_endian((uint8_t *)b_address, 20u);
+  if (State::instanceExists(address)) {
+    uint256_t balance = mvm::from_big_endian((uint8_t *)b_balance, 32u);
+    State::getInstance(address)->setBalance(balance);
+  }
+}
 void MVM_cancelTransaction(unsigned char *mvmId) {
   registry.cancelTransaction(mvmId);
   registry.unregisterAllManagersForMvmId(mvmId);

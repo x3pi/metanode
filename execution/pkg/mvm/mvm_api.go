@@ -182,6 +182,16 @@ func CallUpdateStateNonce(address common.Address, nonce uint64) {
 	C.updateStateNonce((*C.uchar)(unsafe.Pointer(&addrBytes[0])), C.ulonglong(nonce))
 }
 
+// CallUpdateStateBalance updates the C++ State::instances cache balance for a specific address.
+// This MUST be called when Go changes balance directly (e.g., Native Transfer)
+// to keep C++ cache in sync with Go state.
+func CallUpdateStateBalance(address common.Address, balance *big.Int) {
+	addrBytes := address.Bytes()
+	var balanceBytes [32]byte
+	balance.FillBytes(balanceBytes[:])
+	C.updateStateBalance((*C.uchar)(unsafe.Pointer(&addrBytes[0])), (*C.uchar)(unsafe.Pointer(&balanceBytes[0])))
+}
+
 // ConfigureXapianBasePath sets XAPIAN_BASE_PATH env var so that C++ createFullPath()
 // picks it up via getenv(). Must be called before any MVM/Xapian operation.
 // CGo-direct approach (SetXapianBasePath) requires C++ rebuild; this is equivalent
