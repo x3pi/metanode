@@ -1112,7 +1112,12 @@ func processSingleGroup(
 			// This prevents cross-block C++ EVM dirty state leaks and concurrency corruption.
 			gRs.MvmIdMap[tx.Hash()] = usedMvmId
 			// logger.Debug("1.ExecuteSmartContract MVMId:")
+			startMVM := time.Now()
 			exRs, err = vmP.ExecuteTransactionWithMvmId(txCtx, tx, false, isCache)
+			mvmElapsed := time.Since(startMVM)
+			if mvmElapsed.Milliseconds() > 50 {
+				logger.Warn("🐌 [PERF-WARN] ExecuteTransactionWithMvmId (C++ EVM) took %v for tx %s (From: %s). EVM Execution is lagging!", mvmElapsed, tx.Hash().Hex(), tx.FromAddress().Hex())
+			}
 			if err != nil {
 				rcp = createErrorReceipt(tx, toAddress, err)
 				if exRs != nil {

@@ -47,6 +47,7 @@ impl BlockDeliveryManager {
         while let Some(msg) = self.receiver.recv().await {
             let commit_index = msg.subdag.commit_ref.index;
 
+            let start_delivery = std::time::Instant::now();
             let result = self
                 .executor_client
                 .send_committed_subdag(
@@ -56,6 +57,16 @@ impl BlockDeliveryManager {
                     msg.leader_address,
                 )
                 .await;
+            let elapsed = start_delivery.elapsed();
+
+            if elapsed.as_millis() > 50 {
+                tracing::warn!(
+                    "🐌 [PERF-WARN] send_committed_subdag took {:?} for commit {} (GEI={}). Go Execution is lagging!",
+                    elapsed,
+                    commit_index,
+                    msg.global_exec_index
+                );
+            }
 
             match result {
                 Ok(geis_consumed) => {
