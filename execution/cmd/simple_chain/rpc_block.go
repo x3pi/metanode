@@ -183,6 +183,9 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		if number.Int64() >= 0 && uint64(number.Int64()) > storage.GetLastBlockNumber() {
 			return nil, nil
 		}
+		if number.Int64() >= 0 && uint64(number.Int64()) <= blockchain.GetBlockChainInstance().GetLastPrunedBlockNumber() && uint64(number.Int64()) > 0 {
+			return nil, blockchain.ErrDataPruned
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(number.Int64()))
 		if !ok {
 			return nil, nil
@@ -380,6 +383,9 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
 			return nil, nil
 		}
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) <= blockchain.GetBlockChainInstance().GetLastPrunedBlockNumber() && uint64(blockNr.Int64()) > 0 {
+			return nil, blockchain.ErrDataPruned
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
 			return nil, nil
@@ -532,6 +538,9 @@ func (api *MetaAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockN
 		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
 			return nil
 		}
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) <= blockchain.GetBlockChainInstance().GetLastPrunedBlockNumber() && uint64(blockNr.Int64()) > 0 {
+			return nil // Return nil since RPC signature doesn't support error
+		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))
 		if !ok {
 			return nil
@@ -582,6 +591,9 @@ func (api *MetaAPI) GetRawTransactionByBlockNumberAndIndex(ctx context.Context, 
 		}
 	} else {
 		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) > storage.GetLastBlockNumber() {
+			return nil
+		}
+		if blockNr.Int64() >= 0 && uint64(blockNr.Int64()) <= blockchain.GetBlockChainInstance().GetLastPrunedBlockNumber() && uint64(blockNr.Int64()) > 0 {
 			return nil
 		}
 		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(uint64(blockNr.Int64()))

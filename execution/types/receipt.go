@@ -74,6 +74,7 @@ type Receipts interface {
 	) error
 	CommitPipeline() (*ReceiptPipelineResult, error)
 	PersistAsync(*ReceiptPipelineResult) error
+	BatchDeleteReceipts(txHashes []e_common.Hash) error
 }
 
 type ReceiptPipelineResult struct {

@@ -546,3 +546,16 @@ func UnmarshalReceipts(data []byte) ([]types.Receipt, error) {
 	}
 	return receipts, nil
 }
+
+// BatchDeleteReceipts permanently removes multiple receipts from the database to reclaim disk space.
+// It uses PebbleDB's BatchDelete for high performance.
+func (r *Receipts) BatchDeleteReceipts(txHashes []common.Hash) error {
+	if len(txHashes) == 0 {
+		return nil
+	}
+	keys := make([][]byte, len(txHashes))
+	for i, hash := range txHashes {
+		keys[i] = hash.Bytes()
+	}
+	return r.db.BatchDelete(keys)
+}
