@@ -128,27 +128,17 @@ while strictly avoiding over-engineering.
 
 ### Impact Analysis (before modifying core structs)
 
-**Primary method — AI uses built-in tools directly:**
+**Primary method — AI MUST use MCP Codegraph tools:**
 ```
-1. Read PROJECT_STRUCTURE.md to understand module map
-2. Use grep_search to find all callers of the target symbol
-3. Use view_file to trace logic and confirm blast radius
-4. Report all affected files before making changes
+1. Read PROJECT_STRUCTURE.md to understand module map.
+2. Use `call_mcp_tool` with `codegraph` tools (e.g., `codegraph_impact`, `codegraph_callers`, `codegraph_explore`) to trace the symbol's blast radius deeply.
+3. Use `view_file` on affected files to confirm the logic.
+4. Report all affected files and downstream dependencies before making changes.
 ```
 
-**Optional — user can run from their own terminal:**
-```bash
-# Index/analyze the repo (run once or after large changes)
-npx gitnexus analyze
+> ⚠️ Note: Always prioritize `codegraph` over `grep_search`. `codegraph` understands the abstract syntax tree (AST) and cross-references, making it far superior and safer for impact analysis.
 
-# Query a specific symbol's impact
-npx gitnexus query --symbol <SymbolName>
-```
-> ⚠️ Note: Antigravity's sandbox cannot execute `npx`. These commands must be
-> run by the user in their local terminal. Paste the output into the chat
-> for AI analysis.
-
-**Standard grep fallback (always available):**
+**Fallback method (only if codegraph fails):**
 ```bash
 # Find all usages of a symbol
 grep -rn "<SymbolName>" ./execution ./consensus --include="*.go" --include="*.rs"
