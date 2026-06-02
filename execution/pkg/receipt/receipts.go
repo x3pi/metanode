@@ -155,6 +155,11 @@ func (r *Receipts) Discard() error {
 	if err != nil {
 		return err
 	}
+	if r.trie != nil && r.trie != trie {
+		if closer, ok := r.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	r.trie = trie
 	return nil
 }
@@ -289,6 +294,11 @@ func (r *Receipts) Commit() (common.Hash, error) {
 	}
 
 	// Giai đoạn 5: Cập nhật trie và dọn dẹp.
+	if r.trie != nil && r.trie != newTrie {
+		if closer, ok := r.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	r.trie = newTrie
 	r.originRootHash = finalHash
 
@@ -413,6 +423,11 @@ func (r *Receipts) PersistAsync(result *types.ReceiptPipelineResult) error {
 		newTrie = t
 	}
 
+	if r.trie != nil && r.trie != newTrie {
+		if closer, ok := r.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	r.trie = newTrie
 	r.originRootHash = result.FinalHash
 	return nil

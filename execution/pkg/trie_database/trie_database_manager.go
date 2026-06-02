@@ -88,6 +88,14 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 				if err != nil {
 					return err
 				}
+				if nomtTrie, isNomt := snapshot.TrieCopy.(*p_trie.NomtStateTrie); isNomt {
+					if err := nomtTrie.CommitPayload(); err != nil {
+						return err
+					}
+				}
+				if closer, ok := snapshot.TrieCopy.(interface{ Close() }); ok {
+					closer.Close()
+				}
 				if nodeSet != nil && len(nodeSet.Nodes) > 0 {
 					batch := make([][2][]byte, 0, len(nodeSet.Nodes))
 					for _, node := range nodeSet.Nodes {
@@ -113,6 +121,11 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 				}
 				// Safely bind the new trie. Pending dirty data in dirtyData is NOT lost
 				// because dirtyData is separate from trieR.
+				if trieDB.trieR != nil && trieDB.trieR != newTrie {
+					if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
+						closer.Close()
+					}
+				}
 				trieDB.trieR = newTrie
 			}
 		}
@@ -285,6 +298,14 @@ func (manager *TrieDatabaseManager) DiscardAllTrieDatabases() {
 
 // ClearAllTrieDatabases xóa sạch bộ nhớ cache của TrieDatabases (dùng cho Sub-node khi nhận block mới)
 func (manager *TrieDatabaseManager) ClearAllTrieDatabases() {
+	for id, trieDB := range manager.trieDatabases {
+		if trieDB.trieR != nil {
+			if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
+		logger.Debug("Cleared TrieDatabase", "id", id)
+	}
 	manager.trieDatabases = make(map[common.Hash]*TrieDatabase)
 	logger.Info("✅ [TRIE MANAGER] Cleared all TrieDatabase caches from memory")
 }
@@ -306,6 +327,11 @@ func (manager *TrieDatabaseManager) DeleteTrieDatabase(id common.Hash) error {
 	trieDB, exists := manager.trieDatabases[id]
 	if !exists {
 		return nil // Không có gì để xóa nếu không tồn tại
+	}
+	if trieDB.trieR != nil {
+		if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
+			closer.Close()
+		}
 	}
 
 	// Xóa tất cả các keys thuộc prefix này (tương đương xóa folder cũ)
@@ -345,6 +371,13 @@ func (manager *TrieDatabaseManager) GetOrCrateTrieDatabase(id common.Hash, hash 
 
 // RemoveTrieDatabase xóa một TrieDatabase khỏi danh sách quản lý
 func (manager *TrieDatabaseManager) RemoveTrieDatabase(id common.Hash) {
+	if trieDB, exists := manager.trieDatabases[id]; exists {
+		if trieDB.trieR != nil {
+			if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
+	}
 	delete(manager.trieDatabases, id)
 }
 

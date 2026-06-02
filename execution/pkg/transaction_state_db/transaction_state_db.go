@@ -131,6 +131,11 @@ func (db *TransactionStateDB) ReloadLastRoot(rootHash common.Hash) error {
 		return err
 	}
 
+	if db.trie != nil && db.trie != newTrie {
+		if closer, ok := db.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	db.trie = newTrie
 	db.originRootHash = rootHash
 	db.dirtyTransactions = make(map[common.Hash]types.Transaction) // Reset dirty transactions
@@ -329,10 +334,16 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 	// Giai đoạn 4: Dọn dẹp và Reset
 	// Reset trie về trạng thái rỗng để chuẩn bị cho block tiếp theo, giống logic của hàm gốc.
 	cleanupTimeStart := time.Now()
-	db.trie, err = p_trie.NewStateTrie(trie.EmptyRootHash, db.db, true)
+	newTrie, err := p_trie.NewStateTrie(trie.EmptyRootHash, db.db, true)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to reset trie to empty state: %w", err)
 	}
+	if db.trie != nil && db.trie != newTrie {
+		if closer, ok := db.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+	db.trie = newTrie
 	db.originRootHash = trie.EmptyRootHash
 	
 	// Reset dirtyTransactions AFTER they have been successfully written to the DB
@@ -428,6 +439,15 @@ func (db *TransactionStateDB) setDirtyTransaction(tx types.Transaction) {
 
 func (db *TransactionStateDB) Discard() (err error) {
 	db.dirtyTransactions = make(map[common.Hash]types.Transaction)
-	db.trie, err = p_trie.NewStateTrie(db.originRootHash, db.db, true)
-	return err
+	newTrie, err := p_trie.NewStateTrie(db.originRootHash, db.db, true)
+	if err != nil {
+		return err
+	}
+	if db.trie != nil && db.trie != newTrie {
+		if closer, ok := db.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+	db.trie = newTrie
+	return nil
 }

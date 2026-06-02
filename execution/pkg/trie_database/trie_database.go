@@ -116,6 +116,15 @@ func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
+	if nomtTrie, isNomt := trieCopy.(*p_trie.NomtStateTrie); isNomt {
+		if err := nomtTrie.CommitPayload(); err != nil {
+			return common.Hash{}, fmt.Errorf("failed to commit NOMT payload: %w", err)
+		}
+	}
+	if closer, ok := trieCopy.(interface{ Close() }); ok {
+		closer.Close()
+	}
+
 	if nodeSet != nil && len(nodeSet.Nodes) > 0 {
 		batch := make([][2][]byte, 0, len(nodeSet.Nodes))
 		for _, node := range nodeSet.Nodes {
@@ -138,6 +147,11 @@ func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
+	if trieDatabae.trieR != nil && trieDatabae.trieR != newTrie {
+		if closer, ok := trieDatabae.trieR.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	trieDatabae.trieR = newTrie
 	trieDatabae.originRootHash = root
 
@@ -277,6 +291,11 @@ func (trieDatabae *TrieDatabase) Discard() error {
 		return err
 	}
 
+	if trieDatabae.trieR != nil && trieDatabae.trieR != newTrie {
+		if closer, ok := trieDatabae.trieR.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	trieDatabae.trieR = newTrie
 	trieDatabae.dirtyData.Clear()
 	return nil
