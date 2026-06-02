@@ -50,6 +50,10 @@ for sess in "$GO_SESSION" "$RUST_SESSION"; do
     fi
 done
 
+# Force kill remaining orphan processes
+pkill -9 -f "config-master-node${NODE_ID}.json" 2>/dev/null || true
+pkill -9 -f "config/node_${NODE_ID}.toml" 2>/dev/null || true
+
 # ─── Step 3: Clean sockets ───────────────────────────────────
 rm -f "$GO_SOCKET" "$EXECUTOR_SOCKET" "$TX_SOCKET" 2>/dev/null || true
 

@@ -72,6 +72,14 @@ type PruningConfig struct {
 	PruneIntervalBlocks int    `json:"prune_interval_blocks"` // Blocks between pruning ticks
 }
 
+// LogConfig định nghĩa cấu hình cho logger (level, format, outputs).
+type LogConfig struct {
+	Level         string `json:"level"`          // "debug", "info", "warn", "error"
+	Format        string `json:"format"`         // "text", "json"
+	ConsoleOutput bool   `json:"console_output"` // output to stdout/stderr
+	FileOutput    bool   `json:"file_output"`    // output to file
+}
+
 // SimpleChainConfig là struct chính, đại diện cho toàn bộ file config JSON.
 type SimpleChainConfig struct {
 	Debug                   bool   `json:"debug"`
@@ -162,6 +170,7 @@ type SimpleChainConfig struct {
 	TlsKey        string          `json:"tls_key,omitempty"`
 	Databases     DatabasesConfig `json:"Databases"`
 	Nodes     NodesConfig     `json:"nodes"`
+	Log           LogConfig       `json:"log"`
 }
 
 // joinPathIfNotURL nối path với base path chỉ khi path không phải là URL.
@@ -200,6 +209,14 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if ConfigApp.MaxCachedEpochs == 0 {
 			ConfigApp.MaxCachedEpochs = 10 // Default: keep 10 epochs of boundary data
+		}
+
+		// Default log configuration if not specified
+		if ConfigApp.Log.Level == "" {
+			ConfigApp.Log.Level = "info"
+			ConfigApp.Log.Format = "text"
+			ConfigApp.Log.ConsoleOutput = true
+			ConfigApp.Log.FileOutput = true
 		}
 
 		// Environment variable overrides for sensitive fields.

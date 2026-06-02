@@ -174,6 +174,9 @@ pub struct NodeConfig {
     /// Unix Domain Socket path for transaction submission (overrides default /tmp/metanode-tx-{node_id}.sock)
     #[serde(default)]
     pub rust_tx_socket_path: Option<String>,
+    /// Logger configuration
+    #[serde(default)]
+    pub log: Option<LogConfig>,
 }
 
 fn default_max_clock_drift_seconds() -> u64 {
@@ -340,6 +343,7 @@ impl NodeConfig {
                 epochs_to_keep: default_epochs_to_keep(),
                 peer_discovery_refresh_secs: default_peer_discovery_refresh_secs(),
                 rust_tx_socket_path: Some(format!("/tmp/metanode-tx-{}.sock", idx)),
+                log: Some(LogConfig::default()),
             };
 
             // Save keys - use private_key_bytes and public key bytes
@@ -475,4 +479,42 @@ impl NodeConfig {
             Ok(NetworkKeyPair::generate(&mut rand::thread_rng()))
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    #[serde(default = "default_true")]
+    pub console_output: bool,
+    #[serde(default)]
+    pub file_output: bool,
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            format: default_log_format(),
+            console_output: default_true(),
+            file_output: false,
+            file_path: None,
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_format() -> String {
+    "text".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }

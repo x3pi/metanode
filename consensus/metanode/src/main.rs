@@ -41,22 +41,28 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "metanode=info,consensus_core=info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Start { config } => {
+            let node_config = NodeConfig::load(&config)?;
+
+            // Initialize tracing from config file
+            let log_config = node_config.log.clone().unwrap_or_default();
+            let level = log_config.level.as_str();
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| format!("metanode={},consensus_core={}", level, level).into());
+
+            let builder = tracing_subscriber::fmt().with_env_filter(env_filter);
+
+            if log_config.format == "json" {
+                builder.json().init();
+            } else {
+                builder.init();
+            }
+
             info!("Starting MetaNode Consensus Engine...");
             info!("Loading configuration from: {:?}", config);
-
-            let node_config = NodeConfig::load(&config)?;
             info!("Node ID: {}", node_config.node_id);
             info!("Network address: {}", node_config.network_address);
 
@@ -71,11 +77,27 @@ async fn main() -> Result<()> {
             initialized_node.run_main_loop().await?;
         }
         Commands::Generate { nodes, output } => {
+            // Default logger for CLI commands
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "metanode=info".into()),
+                )
+                .init();
+
             info!("Generating configuration for {} nodes...", nodes);
             NodeConfig::generate_multiple(nodes, &output).await?;
             info!("Configuration files generated in: {:?}", output);
         }
         Commands::Keytool(cmd) => {
+            // Default logger for CLI commands
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "metanode=info".into()),
+                )
+                .init();
+
             metanode_keytool::run_keytool(cmd)?;
         }
     }
