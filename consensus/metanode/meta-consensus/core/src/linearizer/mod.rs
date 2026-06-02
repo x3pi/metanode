@@ -126,7 +126,7 @@ impl Linearizer {
         let last_commit_digest = dag_state.last_commit_digest();
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
-        // Now linearize the sub-dag starting from the leader block
+        let start_linearize = std::time::Instant::now();
         let (to_commit_blocks, timestamp_ms, final_commit) = if let Some(certified_commit) = precomputed_commit.as_ref() {
             let mut blocks = certified_commit.blocks().to_vec();
             crate::commit::sort_sub_dag_blocks(&mut blocks);
@@ -192,6 +192,15 @@ impl Linearizer {
 
             (blocks, ts, None)
         };
+
+        let linearize_elapsed = start_linearize.elapsed();
+        if linearize_elapsed.as_millis() > 50 {
+            tracing::warn!(
+                "🐌 [PERF-WARN] linearize_sub_dag took {:?} for leader {:?}",
+                linearize_elapsed,
+                leader_block.reference()
+            );
+        }
 
         let to_commit = match to_commit_blocks {
             Some(blocks) => blocks,
