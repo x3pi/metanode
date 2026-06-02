@@ -857,6 +857,11 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			changelogDB = nomtTrie.GetChangelogDB()
 		}
+		if db.trie != newTrie {
+			if closer, ok := db.trie.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
 	}
 	if changelogDB != nil {
 		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
@@ -1058,6 +1063,11 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			changelogDB = nomtTrie.GetChangelogDB()
 		}
+		if db.trie != newTrieToSet {
+			if closer, ok := db.trie.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
 	}
 	if changelogDB != nil {
 		if newNomt, ok := newTrieToSet.(*p_trie.NomtStateTrie); ok {
@@ -1086,6 +1096,11 @@ func (db *StakeStateDB) Discard() error {
 	if db.trie != nil {
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			changelogDB = nomtTrie.GetChangelogDB()
+		}
+		if db.trie != newTrie {
+			if closer, ok := db.trie.(interface{ Close() }); ok {
+				closer.Close()
+			}
 		}
 	}
 	if changelogDB != nil {
