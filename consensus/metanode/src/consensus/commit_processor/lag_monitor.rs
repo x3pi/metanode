@@ -103,6 +103,12 @@ impl LagMonitor {
 
             // 3. Calculate metrics
             let gap = rust_gei.saturating_sub(go_gei);
+
+            // Update the Go lag atomic in executor client for proposer backpressure throttling
+            if let Some(ref handle) = self.executor_client.go_lag_handle {
+                handle.store(gap, std::sync::atomic::Ordering::Relaxed);
+            }
+
             let now = tokio::time::Instant::now();
             let elapsed_secs = now.duration_since(last_check_time).as_secs_f64();
 

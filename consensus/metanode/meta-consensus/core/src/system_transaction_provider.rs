@@ -17,6 +17,11 @@ pub trait SystemTransactionProvider: Send + Sync {
         current_epoch: Epoch,
         current_commit_index: u32,
     ) -> Option<Vec<SystemTransaction>>;
+
+    /// Get current Go lag in blocks
+    fn get_go_lag(&self) -> u64 {
+        0
+    }
 }
 
 /// Default implementation that checks if epoch transition is needed
@@ -452,6 +457,10 @@ impl DefaultSystemTransactionProvider {
 }
 
 impl SystemTransactionProvider for DefaultSystemTransactionProvider {
+    fn get_go_lag(&self) -> u64 {
+        self.go_lag.load(Ordering::Relaxed)
+    }
+
     fn get_system_transactions(
         &self,
         current_epoch: Epoch,
