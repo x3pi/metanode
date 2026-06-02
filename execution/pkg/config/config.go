@@ -222,7 +222,7 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 
 		// RPC Rate Limit default configuration if not fully specified
 		if ConfigApp.RpcRateLimit.GlobalRate == 0 {
-			ConfigApp.RpcRateLimit.Enabled = true
+			ConfigApp.RpcRateLimit.Enabled = false // TEMPORARILY DISABLED FOR TESTING
 			ConfigApp.RpcRateLimit.GlobalRate = 10000
 			ConfigApp.RpcRateLimit.PerIpRate = 50
 			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block
