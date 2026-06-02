@@ -30,11 +30,11 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["number"] = hexutil.EncodeUint64(block.Header().BlockNumber())
 	blockMap["sha3Uncles"] = common.Hash{}
 	blockMap["miner"] = block.Header().LeaderAddress()
-	blockMap["parentHash"] = block.Header().LastBlockHash()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      // Hash của khối cha
-	blockMap["stateRoot"] = block.Header().AccountStatesRoot()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   // Root của Merkle Patricia Trie chứa trạng thái tài khoản
-	blockMap["receiptsRoot"] = block.Header().ReceiptRoot()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      // Root của Merkle Patricia Trie chứa receipts của các giao dịch
-	blockMap["transactionsRoot"] = block.Header().TransactionsRoot()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             // Root của Merkle Patricia Trie chứa các giao dịch
-	blockMap["logsBloom"] = eth_types.Bloom{} // Bloom filter chứa thông tin về logs
+	blockMap["parentHash"] = block.Header().LastBlockHash()          // Hash của khối cha
+	blockMap["stateRoot"] = block.Header().AccountStatesRoot()       // Root của Merkle Patricia Trie chứa trạng thái tài khoản
+	blockMap["receiptsRoot"] = block.Header().ReceiptRoot()          // Root của Merkle Patricia Trie chứa receipts của các giao dịch
+	blockMap["transactionsRoot"] = block.Header().TransactionsRoot() // Root của Merkle Patricia Trie chứa các giao dịch
+	blockMap["logsBloom"] = eth_types.Bloom{}                        // Bloom filter chứa thông tin về logs
 	blockMap["difficulty"] = hexutil.EncodeUint64(0)
 	blockMap["gasLimit"] = hexutil.EncodeUint64(0)                           // Giới hạn gas của khối
 	blockMap["gasUsed"] = hexutil.EncodeUint64(0)                            // Gas đã sử dụng trong khối
@@ -115,8 +115,8 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 			transactionIndex: rcp.TransactionIndex(),
 		}
 		// 🔍 DIAGNOSTIC: Log GroupIndex/TransactionIndex from receipt trie (helps debug m4 mismatch)
-		logger.Info("📋 [RPC-RECEIPT-IDX] Block #%d tx=%s...→ groupId=%d, txIndex=%d",
-			block.Header().BlockNumber(), txHash.Hex()[:18], rcp.GroupIndex(), rcp.TransactionIndex())
+		// logger.Info("📋 [RPC-RECEIPT-IDX] Block #%d tx=%s...→ groupId=%d, txIndex=%d",
+		// 	block.Header().BlockNumber(), txHash.Hex()[:18], rcp.GroupIndex(), rcp.TransactionIndex())
 	}
 
 	for _, txHash := range txHashes {
@@ -126,7 +126,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 		}
 		txMap := make(map[string]interface{})
 		v, r, s := tx.RawSignatureValues()
-		
+
 		ethHash := tx.Hash()
 		if ethTx := tx.ToEthTransaction(); ethTx != nil {
 			if h := ethTx.Hash(); h != (common.Hash{}) {

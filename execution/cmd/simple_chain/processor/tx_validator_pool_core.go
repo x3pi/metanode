@@ -3,11 +3,11 @@
 package processor
 
 import (
-	"os"
 	"bytes"
 	"context"
 	"fmt"
 	"math/big"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -45,7 +45,7 @@ type TxValidatorPool struct {
 	pendingTxManager  *PendingTransactionManager
 	excludedItems     []grouptxns.Item
 
-	futureTxTimeMap   map[common.Hash]time.Time
+	futureTxTimeMap map[common.Hash]time.Time
 
 	// FORK-SAFETY: Shared lock — Lock() during real block execution blocks
 	// all virtual execution goroutines that hold RLock().
@@ -350,12 +350,16 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	for i, tx := range txs {
 		if tx == nil {
 			errorsList[i] = fmt.Errorf("tx nil")
-			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - tx nil\n", i)) }
+			if logFile != nil {
+				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - tx nil\n", i))
+			}
 			continue
 		}
 
 		if errorsList[i] != nil {
-			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - parallel verification failed: %v\n", i, errorsList[i])) }
+			if logFile != nil {
+				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - parallel verification failed: %v\n", i, errorsList[i]))
+			}
 			continue // Failed in parallel verification Phase
 		}
 
@@ -363,14 +367,18 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			// File uploads not supported in batch optimized path for simplicity; log error
 			logger.Error("HandleFileTransactionNoReceipt not supported in AddTransactionsToPool yet")
 			errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
-			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - upload chunk error\n", i)) }
+			if logFile != nil {
+				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - upload chunk error\n", i))
+			}
 			continue
 		}
 
 		conflict := vp.pendingTxManager.HasNonceConflict(tx)
 		if conflict {
 			errorsList[i] = fmt.Errorf(transaction.NonceConflictError.Description)
-			if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - nonce conflict\n", i)) }
+			if logFile != nil {
+				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - nonce conflict\n", i))
+			}
 			continue
 		}
 
@@ -378,8 +386,10 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	}
 
 	if len(validTxs) > 0 {
-		if logFile != nil { logFile.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal: vp.transactionPool.AddTransactions called with %d txs\n", len(validTxs))) }
-		
+		if logFile != nil {
+			logFile.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal: vp.transactionPool.AddTransactions called with %d txs\n", len(validTxs)))
+		}
+
 		// Bulk insert to pool (acquires lock ONCE)
 		vp.transactionPool.AddTransactions(validTxs)
 
@@ -720,7 +730,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 		txs = make([]types.Transaction, 0)
 	} else {
 		allTxs, _ := vp.transactionPool.TransactionsWithAggSign()
-		
+
 		if len(allTxs) == 0 {
 			return allTxs
 		}
@@ -754,33 +764,31 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 
 			if actual > expected {
 				// Future nonce, missing predecessors -> defer to next cycle
-				logger.Info("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				// logger.Info("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				// TTL Logic: Xóa nếu đã chờ quá thời gian FutureTxTimeout
 				if insertTime, exists := vp.futureTxTimeMap[tx.Hash()]; exists {
 					if time.Since(insertTime) > FutureTxTimeout {
-						logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
+						// logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
 						delete(vp.futureTxTimeMap, tx.Hash())
 						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
 					}
 				} else {
 					vp.futureTxTimeMap[tx.Hash()] = time.Now()
 				}
-				
+
 				futureTxs = append(futureTxs, tx)
 			} else if actual == expected {
 				// Valid contiguous nonce
-				logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
+				// logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
 				validTxs = append(validTxs, tx)
 				nonceMap[from]++
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
-				logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				// logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			}
 		}
-
-
 
 		// Re-add future transactions back to the pool
 		if len(futureTxs) > 0 {
@@ -876,4 +884,3 @@ func (vp *TxValidatorPool) ProcessAndPartitionTransactions(n int) ([][]grouptxns
 
 	return partitionedGroups, nil
 }
-
