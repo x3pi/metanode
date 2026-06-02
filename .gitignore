@@ -180,11 +180,9 @@ ehthumbs.db
 **/.env.staging
 # Deploy environment files (may contain SSH passwords / credentials)
 consensus/metanode/scripts/node/deploy.env
-consensus/metanode/scripts/node/deploy-3machines.env
 consensus/deploy/prod_deploy.env
-**/deploy-*.env
-**/deploy.env
 **/prod_deploy.env
+consensus/metanode/scripts/node/setup_node_*.sh
 # Error/debug output files
 **/*.exe
 /exec_node
@@ -451,3 +449,5 @@ execution/cmd/simple_chain/heaptrack.simple_chain.*.zst
 compile_commands.json
 execution/cmd/rpc/cmd/rpc-client/rpc-client-bin
 .codegraph/codegraph.lock
+consensus/metanode/rpc-proxy
+consensus/metanode/rpc-proxy/rpc-client-bin

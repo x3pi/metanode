@@ -190,21 +190,17 @@ if $DO_STOP; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t metanode-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
                 pkill -f 'simple_chain' 2>/dev/null || true
-                pkill -f 'metanode start' 2>/dev/null || true
                 sleep 3
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t metanode-\$id 2>/dev/null || true
                 done
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
-                pkill -9 -f 'metanode start' 2>/dev/null || true
                 rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
@@ -230,13 +226,15 @@ if $DO_BUILD; then
         ) || exit 1
     fi
 
-    # Build Rust metanode
+    # Build Rust metanode library (unified)
     log_info "Building Rust metanode..."
     (
         cd "${LOCAL_METANODE}"
-        cargo build --release --bin metanode 2>&1 | tail -3
+        cargo build --release 2>&1 | tail -3
     )
-    log_ok "Rust binary: ${LOCAL_METANODE}/target/release/metanode"
+
+    log_info "Touching FFI bridge files to ensure Go relinks..."
+    touch "${LOCAL_GO_SIMPLE}/../../executor/ffi_bridge.go" "${LOCAL_GO_SIMPLE}/../../pkg/nomt_ffi/bridge.go" 2>/dev/null || true
 
     # Build Go simple_chain
     log_info "Building Go simple_chain..."
@@ -252,18 +250,25 @@ if $DO_BUILD; then
         go build -p $NUM_PROCS -o simple_chain . 2>&1
     )
     log_ok "Go binary: ${LOCAL_GO_SIMPLE}/simple_chain"
+
+    # Build RPC Proxy
+    log_info "Building RPC Proxy..."
+    (
+        cd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client"
+        rm -f rpc-client-bin
+        go build -o rpc-client-bin . 2>&1
+        if [ ! -f certificate.pem ]; then
+            openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
+        fi
+    )
+    log_ok "RPC Proxy binary: ${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/rpc-client-bin"
 else
     log_info "Phase 1: Skipped (use --build to enable)"
 fi
 
 # Verify binaries exist
-RUST_BINARY="${LOCAL_METANODE}/target/release/metanode"
 GO_BINARY="${LOCAL_GO_SIMPLE}/simple_chain"
 
-if ($DO_PUSH || $DO_START) && [ ! -f "$RUST_BINARY" ]; then
-    log_err "Rust binary not found: $RUST_BINARY (run with --build first)"
-    exit 1
-fi
 if ($DO_PUSH || $DO_START) && [ ! -f "$GO_BINARY" ]; then
     log_err "Go binary not found: $GO_BINARY (run with --build first)"
     exit 1
@@ -283,21 +288,17 @@ if $DO_PUSH || $DO_START; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t metanode-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
                 pkill -f 'simple_chain' 2>/dev/null || true
-                pkill -f 'metanode start' 2>/dev/null || true
                 sleep 3
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
-                    tmux kill-session -t metanode-\$id 2>/dev/null || true
                 done
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
-                pkill -9 -f 'metanode start' 2>/dev/null || true
                 rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
@@ -322,17 +323,20 @@ if $DO_PUSH; then
         # Create directory structure on remote
         ssh_cmd "$server" "
             mkdir -p '${REMOTE_GO_SIMPLE}'
-            mkdir -p '${REMOTE_METANODE}/target/release'
             mkdir -p '${REMOTE_METANODE}/config'
             mkdir -p '${REMOTE_METANODE}/logs'
             mkdir -p '${REMOTE_SCRIPTS}'
+            mkdir -p '${REMOTE_METANODE}/rpc-proxy'
         "
 
         # Push binaries
         echo -e "    📦 Pushing Go binary..."
         rsync_cmd "$GO_BINARY" "$server" "${REMOTE_GO_SIMPLE}/simple_chain"
-        echo -e "    📦 Pushing Rust binary..."
-        rsync_cmd "$RUST_BINARY" "$server" "${REMOTE_METANODE}/target/release/metanode"
+
+        echo -e "    📦 Pushing RPC Proxy binary & TLS certs..."
+        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/rpc-client-bin" "$server" "${REMOTE_METANODE}/rpc-proxy/rpc-client-bin"
+        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/certificate.pem" "$server" "${REMOTE_METANODE}/rpc-proxy/certificate.pem"
+        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/private.key" "$server" "${REMOTE_METANODE}/rpc-proxy/private.key"
 
         # Push genesis.json
         echo -e "    📄 Pushing genesis.json..."
@@ -367,6 +371,10 @@ if $DO_PUSH; then
             rsync_cmd "${LOCAL_METANODE}/${RUST_CONFIGS[$id]}" "$server" "${REMOTE_METANODE}/${RUST_CONFIGS[$id]}"
             rsync_cmd "${LOCAL_METANODE}/config/node_${id}_network_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_network_key.json"
             rsync_cmd "${LOCAL_METANODE}/config/node_${id}_protocol_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_protocol_key.json"
+
+            # RPC Proxy configs
+            rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/config-rpc-node${id}.json" "$server" "${REMOTE_METANODE}/rpc-proxy/config-rpc-node${id}.json"
+            rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/config-client-tcp-node${id}.json" "$server" "${REMOTE_METANODE}/rpc-proxy/config-client-tcp-node${id}.json"
         done
 
         log_ok "Deployed to $server"
@@ -381,11 +389,11 @@ fi
 if $DO_IPS; then
     log_step "Phase 4: Updating IP addresses in configs"
 
-    IP_ARGS="${NODE_SERVER[0]} ${NODE_SERVER[1]} ${NODE_SERVER[2]} ${NODE_SERVER[3]}"
+    IP_ARGS="${NODE_SERVER[0]:-127.0.0.1} ${NODE_SERVER[1]:-127.0.0.1} ${NODE_SERVER[2]:-127.0.0.1} ${NODE_SERVER[3]:-127.0.0.1}"
     if [ -n "${NODE_SERVER[4]:-}" ]; then
         IP_ARGS="$IP_ARGS ${NODE_SERVER[4]}"
     else
-        IP_ARGS="$IP_ARGS ${NODE_SERVER[3]}"
+        IP_ARGS="$IP_ARGS ${NODE_SERVER[3]:-127.0.0.1}"
     fi
 
     for server in $SERVERS; do
@@ -489,55 +497,28 @@ if $DO_START; then
                 cd '${REMOTE_GO_SIMPLE}'
                 LOG_DIR='${REMOTE_METANODE}/logs'
                 tmux new-session -d -s 'go-master-${id}' -c '${REMOTE_GO_SIMPLE}' \
-                    \"ulimit -n 100000; export GOTOOLCHAIN=${GO_TOOLCHAIN} && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='${XAPIAN}' && export MVM_LOG_DIR=\\\"\${LOG_DIR}/node_${id}\\\" && ./simple_chain -config=${GO_MASTER_CONFIGS[$id]} ${PPROF_ARG} >> \\\"\${LOG_DIR}/node_${id}/go-master-stdout.log\\\" 2>&1\"
+                    \"ulimit -n 100000; ulimit -c unlimited; export RUST_BACKTRACE=full && export GOTRACEBACK=crash && export GOTOOLCHAIN=${GO_TOOLCHAIN} && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='${XAPIAN}' && export MVM_LOG_DIR=\\\"\${LOG_DIR}/node_${id}\\\" && ./simple_chain -config=${GO_MASTER_CONFIGS[$id]} ${PPROF_ARG} >> \\\"\${LOG_DIR}/node_${id}/go-master-stdout.log\\\" 2>&1\"
             "
             log_ok "Go Master $id started"
         done
     done
 
-    sleep 3
+    echo -e "  ⏳ Waiting 15 seconds for Go Masters to initialize their LevelDB and open TCP ports..."
+    sleep 15
 
-    # ─── Wait for UDS sockets ───────────────────────────────────────
-    log_step "Phase 5b: Waiting for Go Master sockets"
-
-    for server in $SERVERS; do
-        nodes=$(get_nodes_for_server "$server")
-        for id in $nodes; do
-            SOCKET="/tmp/rust-go-node${id}-master.sock"
-            log_info "Waiting for socket $SOCKET on $server..."
-            for attempt in $(seq 1 60); do
-                if ssh_cmd "$server" "test -S $SOCKET" 2>/dev/null; then
-                    log_ok "Go Master $id ready (${attempt}s)"
-                    break
-                fi
-                if [ "$attempt" -eq 60 ]; then
-                    log_warn "Timeout waiting for Go Master $id socket"
-                fi
-                sleep 1
-            done
-        done
-    done
-
-
-
-    sleep 5
-
-    # ─── Start Rust Metanodes ───────────────────────────────────────
-    log_step "Phase 5d: Starting Rust Metanodes"
-
-    RUST_CONFIGS=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
+    # ─── Start RPC Proxies ───────────────────────────────────────
+    log_step "Phase 5b: Starting RPC Proxies"
 
     for server in $SERVERS; do
         nodes=$(get_nodes_for_server "$server")
         for id in $nodes; do
-            log_info "Starting Rust Node $id on $server..."
-
-            RUST_BIN="${REMOTE_METANODE}/target/release/metanode"
-            RUST_LOG_FILE="${REMOTE_METANODE}/logs/node_${id}/rust.log"
-            RUST_CFG="${RUST_CONFIGS[$id]}"
-            ssh_cmd "$server" "tmux new-session -d -s metanode-${id} -c ${REMOTE_METANODE} '${RUST_BIN} start --config ${RUST_CFG} >> ${RUST_LOG_FILE} 2>&1'"
-            log_ok "Rust Node $id started"
-            sleep 1
+            log_info "Starting RPC Proxy $id on $server..."
+            ssh_cmd "$server" "
+                cd '${REMOTE_METANODE}/rpc-proxy'
+                tmux new-session -d -s 'rpc-proxy-${id}' -c '${REMOTE_METANODE}/rpc-proxy' \
+                    \"./rpc-client-bin --config config-rpc-node${id}.json --tcp-config config-client-tcp-node${id}.json\"
+            "
+            log_ok "RPC Proxy $id started"
         done
     done
 
@@ -560,7 +541,7 @@ for server in $SERVERS; do
     nodes=$(get_nodes_for_server "$server")
     echo -e "${CYAN}  📍 $server — Nodes: [$nodes]${NC}"
     for id in $nodes; do
-        echo -e "     tmux: metanode-$id | go-master-$id"
+        echo -e "     tmux: go-master-$id"
     done
 done
 
