@@ -46,6 +46,9 @@ var (
 	batchValuesPool = sync.Pool{
 		New: func() interface{} { return make([][]byte, 0, 5000) },
 	}
+	writeBatchPool = sync.Pool{
+		New: func() interface{} { return make([][2][]byte, 0, 5000) },
+	}
 )
 
 // Commit persists all dirty account states to the trie and the underlying database.
@@ -158,13 +161,20 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	// Wait, we can safely update it. We need the marshaled bytes of `dirtyAccounts`.
 
 	if nodeSet != nil && len(nodeSet.Nodes) > 0 {
-		batch := make([][2][]byte, 0, len(nodeSet.Nodes))
+		batch := writeBatchPool.Get().([][2][]byte)[:0]
+		defer func() {
+			for i := range batch {
+				batch[i][0] = nil
+				batch[i][1] = nil
+			}
+			writeBatchPool.Put(batch)
+		}()
 		for _, node := range nodeSet.Nodes {
 			if node.Hash == (common.Hash{}) {
 				logger.Error("Commit: Trying to save node with empty hash, skipping.")
 				continue
 			}
-			batch = append(batch, [2][]byte{node.Hash.Bytes(), node.Blob})
+			batch = append(batch, [2][]byte{node.Hash[:], node.Blob})
 		}
 
 		if len(batch) > 0 {
@@ -337,7 +347,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	// FIX: Handle both MPT (nodeSet) and Flat (commitBatch) structures
 	// ═══════════════════════════════════════════════════════════════
 	if nodeSet != nil && len(nodeSet.Nodes) > 0 {
-		batch = make([][2][]byte, 0, len(nodeSet.Nodes))
+		batch = writeBatchPool.Get().([][2][]byte)[:0]
 		hasRoot := false
 		for _, n := range nodeSet.Nodes {
 			if n.Hash == (common.Hash{}) {
@@ -346,7 +356,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 			if n.Hash == committedHash {
 				hasRoot = true
 			}
-			batch = append(batch, [2][]byte{n.Hash.Bytes(), n.Blob})
+			batch = append(batch, [2][]byte{n.Hash[:], n.Blob})
 		}
 		if hasRoot {
 			logger.Debug("✅ [TRIE] CommitPipeline: Batch INCLUDES root hash %s!", committedHash.Hex())
@@ -448,6 +458,13 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	// preventing permanent deadlocks in the consensus pipeline.
 	// ═══════════════════════════════════════════════════════════════
 	defer func() {
+		if result.Batch != nil {
+			for i := range result.Batch {
+				result.Batch[i][0] = nil
+				result.Batch[i][1] = nil
+			}
+			writeBatchPool.Put(result.Batch)
+		}
 		if result.PersistChannel != nil {
 			close(result.PersistChannel)
 		} else {
