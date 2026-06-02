@@ -109,6 +109,9 @@ const (
 	// With high TX volume (10K+), processing can take 2+ minutes.
 	PendingTimeout = 10 * time.Minute
 
+	// FutureTxTimeout is the timeout for future transactions waiting for their predecessors.
+	FutureTxTimeout = 2 * time.Minute
+
 	// CommitMaxRetries is the number of retries for commit operations.
 	CommitMaxRetries = 3
 
