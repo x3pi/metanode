@@ -31,6 +31,7 @@ Mặc định đọc cấu hình server tại `deploy.env`. Có thể đổi san
 ``` bash
 ./update_ips.sh 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1
 ./fetch_logs.sh --env deploy-3machines.env
+./fetch_logs.sh --env deploy-3nodes.env
 
 ./deploy_cluster.sh --env deploy-3machines.env --all
 ./deploy_cluster.sh --env deploy-3nodes.env --all
