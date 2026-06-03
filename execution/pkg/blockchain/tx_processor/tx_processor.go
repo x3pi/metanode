@@ -22,13 +22,13 @@ import (
 
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -633,13 +633,13 @@ func processSingleGroup(
 	// Acquire slices from memory pools to eliminate GC pressure
 	txPtr := txSlicePool.Get().(*[]types.Transaction)
 	txs := (*txPtr)[:0]
-	
+
 	rcpPtr := receiptSlicePool.Get().(*[]types.Receipt)
 	rcps := (*rcpPtr)[:0]
-	
+
 	exPtr := scResultSlicePool.Get().(*[]types.ExecuteSCResult)
 	exs := (*exPtr)[:0]
-	
+
 	mvmMapPtr := mvmIdMapPool.Get().(*map[common.Hash]common.Address)
 	mvmMap := *mvmMapPtr
 	clear(mvmMap) // Go 1.21+ fast clear
@@ -705,16 +705,16 @@ func processSingleGroup(
 		if as == nil {
 			as = state.NewAccountState(tx.FromAddress())
 		}
-		
-		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...) 
+
+		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...)
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
 		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
-			
+
 			if errVerify.Code != transaction.InvalidNonce.Code {
 				failedSenders[tx.FromAddress()] = true
 			}
-			
+
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -733,7 +733,7 @@ func processSingleGroup(
 				if tx.GetNonce() > as.Nonce() {
 					failedSenders[tx.FromAddress()] = true // Ngừng parse các TX tiếp theo của sender này (giữ đúng thứ tự nonce)
 				}
-				
+
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}
@@ -753,7 +753,6 @@ func processSingleGroup(
 				gRs.Transactions = append(gRs.Transactions, tx)
 				failedSenders[tx.FromAddress()] = true
 
-	
 				if enableTrace && txSpan != nil {
 					txSpan.End()
 				}
@@ -826,7 +825,6 @@ func processSingleGroup(
 			// ── ReadOnly=false: virtual đã đủ 2/3 vote (EXECUTE) ────────────
 			// Master gọi HandleTransaction → phân loại EventKind trong batchSubmit.
 			// Các call khác (lockAndBridge, sendMessage) cũng đi vào đây (ReadOnly mặc định false).
-			logger.Info("[CC EXECUTE]__ TX %s readOnly=%v → HandleTransaction", tx.Hash().Hex(), tx.GetReadOnly())
 			ccHandler, err := cross_chain_handler.GetCrossChainHandler()
 			if err != nil {
 				logger.Error("Lỗi khi tạo CrossChainHandler: %v", err)
@@ -841,7 +839,6 @@ func processSingleGroup(
 				continue
 			}
 			rcp, exRs, txFailed := ccHandler.HandleTransaction(txCtx, chainState, tx, mvmId, enableTrace, blockTime)
-			logger.Info("[CC EXECUTE] TX %s type=%d → HandleTransaction result: %v", tx.Hash().Hex(), tx.GetType(), rcp)
 			gRs.MvmIdMap[tx.Hash()] = mvmId
 			gRs.Receipts = append(gRs.Receipts, rcp)
 			gRs.Transactions = append(gRs.Transactions, tx)
@@ -1055,7 +1052,7 @@ func processSingleGroup(
 		var exRs types.ExecuteSCResult
 		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
 		usedMvmId := mvmId
-		
+
 		if tx.IsRegularTransaction() {
 			// ═══════════════════════════════════════════════════════════════
 			// BATCH MUTATIONS for Native TX: Use DB locks to prevent data races
@@ -1098,14 +1095,14 @@ func processSingleGroup(
 			// However, since FromAddress is grouped, no other native TX is modifying it,
 			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
 			// So we can just use as.Nonce() + 1
-			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce() + 1)
-			
+			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce()+1)
+
 			// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
 			asSender, _ := chainState.GetAccountStateDB().AccountState(tx.FromAddress())
 			if asSender != nil {
 				mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
 			}
-			
+
 			asReceiver, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
 			if asReceiver != nil {
 				mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())

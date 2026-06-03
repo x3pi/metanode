@@ -826,6 +826,7 @@ impl ConsensusNode {
 
                                             let mut map = epoch_eth_addresses_arc.write().await;
                                             map.insert(go_epoch, new_eth_addrs);
+                                            tracing::info!("🔍 [LEAK TRACKING] epoch_eth_addresses hiện đang cache: {} epochs", map.len());
                                             storage.epoch_timestamp_ms = timestamp_ms;
                                             storage.epoch_base_exec_index = boundary_gei;
                                             tracing::info!(
@@ -973,8 +974,11 @@ impl ConsensusNode {
                         } else {
                             tracing::info!("ℹ️ [IDENTITY] Not in committee for epoch {}", storage.current_epoch);
                         }
-                        
-                        epoch_eth_addresses_arc.write().await.insert(storage.current_epoch, new_eth_addrs);
+                        {
+                            let mut map = epoch_eth_addresses_arc.write().await;
+                            map.insert(storage.current_epoch, new_eth_addrs);
+                            tracing::info!("🔍 [LEAK TRACKING] epoch_eth_addresses hiện đang cache: {} epochs", map.len());
+                        }
                     } else {
                         tracing::error!("🚨 [STARTUP] Committee for epoch {} has 0 authorities! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
                         storage.is_in_committee = false;

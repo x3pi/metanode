@@ -63,6 +63,17 @@ impl AttestationMonitor {
             }
         }
 
+        // Theo dõi rò rỉ bộ nhớ (Leak tracking) cho peer_attestations
+        {
+            let att_map = self.peer_attestations.read().await;
+            let current_len = att_map.len();
+            
+            // Log định kỳ mỗi 100 block để bạn dễ theo dõi lượng block đang bị lưu trữ vô hạn
+            if block_number > 0 && block_number % 100 == 0 {
+                tracing::info!("🔍 [LEAK TRACKING] peer_attestations hiện đang cache: {} blocks", current_len);
+            }
+        }
+
         // Only broadcast every N blocks
         if block_number > 0 && block_number % ATTESTATION_BLOCK_INTERVAL == 0 {
             let msg = StateAttestationMessage {

@@ -139,7 +139,7 @@
   "explorer_read_only_db_path": "./sample/node1/data/other/explorer-read-only",
   "is_rpc_node": true,
   "log": {
-    "level": "warn",
+    "level": "info",
     "format": "text",
     "console_output": true,
     "file_output": false
