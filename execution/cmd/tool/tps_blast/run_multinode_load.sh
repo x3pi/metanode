@@ -177,7 +177,7 @@ for (( b=BLOCK_START; b<=BLOCK_END; b++ )); do
     BLOCK_HEX=$(printf "0x%x" "$b")
     RESPONSE=""
     for rpc in "${RPCS[@]}"; do
-        local res=$(curl -s --max-time 2 "http://$rpc" -X POST -H "Content-Type: application/json" \
+        res=$(curl -s --max-time 2 "http://$rpc" -X POST -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["'$BLOCK_HEX'",false],"id":1}' 2>/dev/null)
         if [ -n "$res" ] && echo "$res" | grep -q "result" && ! echo "$res" | grep -q '"result":null'; then
             RESPONSE="$res"
