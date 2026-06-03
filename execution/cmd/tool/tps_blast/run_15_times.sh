@@ -55,9 +55,9 @@ for ((i=1; i<=RUNS; i++)); do
     FORK_SAFE=$(grep "HỆ THỐNG KHÔNG FORK" "run_output_${i}.log" | wc -l)
     
     # Detailed stage timings and TPS
-    REAL_TPS=$(grep "TPS Thực Thi (Real Exec TPS):" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
+    REAL_TPS=$(grep "TPS Thực Thi (Real Exec):" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
     GO_TPS=$(grep "TPS Xử Lý Go (Virtual + Real):" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
-    E2E_TPS=$(grep "TPS Toàn Trình (Consensus Included):" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
+    PIPELINE_TPS=$(grep "TPS Pipeline (V+C+R toàn bộ):" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
     
     V_EXEC=$(grep "Bước Chạy Giả (Virtual Exec):" "run_output_${i}.log" | cut -d':' -f2- | xargs)
     CONSENSUS=$(grep "Bước Đồng Thuận (Consensus):" "run_output_${i}.log" | cut -d':' -f2- | xargs)
@@ -73,7 +73,7 @@ for ((i=1; i<=RUNS; i++)); do
     echo "  - TPS (Classic/Block TS): $TPS" >> $OUTPUT_REPORT
     echo "  - TPS (Real Exec Only):  $REAL_TPS" >> $OUTPUT_REPORT
     echo "  - TPS (Virtual+Real Go): $GO_TPS" >> $OUTPUT_REPORT
-    echo "  - TPS (End-to-End BFT):  $E2E_TPS" >> $OUTPUT_REPORT
+    echo "  - TPS (Pipeline V+C+R):  $PIPELINE_TPS" >> $OUTPUT_REPORT
     echo "  - Virtual Exec Duration: $V_EXEC" >> $OUTPUT_REPORT
     echo "  - Consensus Duration:    $CONSENSUS" >> $OUTPUT_REPORT
     echo "  - Real Exec Duration:     $R_EXEC" >> $OUTPUT_REPORT
@@ -81,13 +81,13 @@ for ((i=1; i<=RUNS; i++)); do
     echo "  - TXs in Blocks: $TOTAL_IN_BLOCKS" >> $OUTPUT_REPORT
     echo "  - Max TXs/block: $MAX_TX" >> $OUTPUT_REPORT
     echo "  - Success Rate: $SUCCESS_RATE" >> $OUTPUT_REPORT
-    echo "  - Time (Block TS delta): $TIME" >> $OUTPUT_REPORT
+    echo "  - Time (Wall Clock): $TIME" >> $OUTPUT_REPORT
     echo "  - Fork Status: $FORK_STATUS" >> $OUTPUT_REPORT
     echo "  - Detailed Block Commits:" >> $OUTPUT_REPORT
     sed -n '/CHI TIẾT TỪNG BLOCK/,/TỔNG KẾT/p' "run_output_${i}.log" | grep -v -E 'CHI TIẾT TỪNG BLOCK|TỔNG KẾT|╠════|║' | sed 's/^/    /' >> $OUTPUT_REPORT
     echo "--------------------------" >> $OUTPUT_REPORT
     
-    echo "Finished Run $i/$RUNS -> TPS (Real Exec): $REAL_TPS | TPS (BFT): $E2E_TPS"
+    echo "Finished Run $i/$RUNS -> TPS (Real Exec): $REAL_TPS | TPS (Pipeline): $PIPELINE_TPS | TPS (Wall): $TPS"
     
     # Optional: small sleep between runs
     sleep 5
