@@ -49,13 +49,14 @@ var (
 
 func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
-		// 2GB shared block cache across all PebbleDB instances.
-		// TUNED (June 2026): Reduced from 4GB to 2GB to save 10GB RSS across 5 nodes.
+		// 512MB shared block cache across all PebbleDB instances.
+		// TUNED (June 2026): Reduced from 2GB to 512MB to prevent OOM under sustained load.
+		// Each node creates ~48 PebbleDB shards. With 5 nodes, 2GB cache consumed 10GB total.
 		// Pebble's 10-bit bloom filters handle cold reads efficiently, so the
 		// smaller cache doesn't significantly impact point lookup performance.
-		// With 5 nodes × 2GB = 10GB total (vs previous 20GB).
-		sharedPebbleCache = pebble.NewCache(2 << 30) // 2GB
-		logger.Info("✅ [PEBBLE] Created 2GB shared block cache")
+		// With 5 nodes × 512MB = 2.5GB total (vs previous 10GB).
+		sharedPebbleCache = pebble.NewCache(512 << 20) // 512MB
+		logger.Info("✅ [PEBBLE] Created 512MB shared block cache")
 	})
 	sharedPebbleCache.Ref()
 	return sharedPebbleCache
@@ -91,15 +92,18 @@ func (p *PebbleDB) Open(parallelism int) error {
 	dbPath := p.path
 	opts := &pebble.Options{
 		// ── Memory & Cache ──────────────────────────────────────────
-		// 256MB memtable — fewer flushes under sustained write load
-		MemTableSize: 256 << 20,
-		// Block cache: use a process-wide shared 4GB cache for better cross-DB
+		// 64MB memtable — reduced from 256MB to prevent OOM under sustained load.
+		// With ~48 shards/node × 256MB × 2 active memtables = 24GB/node was excessive.
+		// 48 shards × 64MB × 2 = 6GB/node — much more sustainable.
+		MemTableSize: 64 << 20,
+		// Block cache: use a process-wide shared 512MB cache for better cross-DB
 		// cache utilization.
 		Cache: GetSharedPebbleCache(),
 		// Shared Table cache: use a process-wide shared table cache to limit table cache goroutines.
 		TableCache: GetSharedPebbleTableCache(),
-		// Up to 4 memtables before stalling (allows more write buffering)
-		MemTableStopWritesThreshold: 4,
+		// Up to 2 memtables before stalling (reduced from 4 to save memory).
+		// With smaller 64MB memtables, flushes complete faster so 2 is sufficient.
+		MemTableStopWritesThreshold: 2,
 
 		// Compaction ─────────────────────────────────────────────
 		// Min 4 concurrent compactions — keep compactions fast even with low parallelism
@@ -136,10 +140,10 @@ func (p *PebbleDB) Open(parallelism int) error {
 		// ── Background Error Handler ────────────────────────────────
 		// ── Table Cache ─────────────────────────────────────────────
 		// Limit max open files per database to control table cache goroutines.
-		// With 44+ PebbleDB instances (sharded), the default (unlimited) creates
-		// 4000+ goroutines in tableCacheShard.releaseLoop, causing scheduling overhead.
-		// 500 per DB × 44 DBs = 22K max open files (well within OS ulimit 100K).
-		MaxOpenFiles: 500,
+		// With 48+ PebbleDB instances (sharded), the default (unlimited) creates
+		// thousands of goroutines in tableCacheShard.releaseLoop.
+		// 200 per DB × 48 DBs = 9.6K max open files (well within OS ulimit 100K).
+		MaxOpenFiles: 200,
 
 		EventListener: &pebble.EventListener{
 			BackgroundError: func(err error) {
