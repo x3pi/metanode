@@ -29,13 +29,16 @@ GO_DIR="$(cd "$METANODE_DIR/../../mtn-simple-2025-xapian" && pwd)"
 Mặc định đọc cấu hình server tại `deploy.env`. Có thể đổi sang file sinh cho cụm test net khác bằng flag `--env`.
 
 ``` bash
-./update_ips.sh 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1
+./deploy_systemd_cluster.sh --env deploy-3nodes.env --all
+
+
+
 ./fetch_logs.sh --env deploy-3machines.env
 ./fetch_logs.sh --env deploy-3nodes.env
 
 ./deploy_cluster.sh --env deploy-3machines.env --all
 ./deploy_cluster.sh --env deploy-3nodes.env --all
-
+./deploy_cluster.sh --env deploy-3nodes.env --stop
 
 
 ```bash

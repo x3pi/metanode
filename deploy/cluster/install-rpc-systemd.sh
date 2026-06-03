@@ -13,7 +13,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RPC_DIR="$(realpath "$SCRIPT_DIR/../../execution/cmd/rpc/cmd/rpc-client")"
+if [ -d "/opt/metanode/rpc-proxy" ] && [ -f "/opt/metanode/rpc-proxy/rpc-client-bin" ]; then
+    RPC_DIR="/opt/metanode/rpc-proxy"
+else
+    RPC_DIR="$(realpath "$SCRIPT_DIR/../../execution/cmd/rpc/cmd/rpc-client")"
+fi
+
 
 # ─── Màu sắc ─────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -104,10 +109,10 @@ if ! $NO_BUILD; then
     log_step "BƯỚC 1: Build mã nguồn rpc-client"
     cd "$RPC_DIR"
     export PATH="/usr/local/go/bin:/home/abc/go/bin:/usr/local/go1.24.3/bin:/home/abc/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-    rm -f rpc-client
-    go build -o rpc-client main.go
-    chmod +x rpc-client
-    log_ok "Build thành công: $RPC_DIR/rpc-client"
+    rm -f rpc-client-bin
+    go build -o rpc-client-bin main.go
+    chmod +x rpc-client-bin
+    log_ok "Build thành công: $RPC_DIR/rpc-client-bin"
 else
     log_warn "Bỏ qua bước build (--no-build). Dùng binary hiện có."
 fi
@@ -129,37 +134,37 @@ for idx in "${!NODE_IDS[@]}"; do
     log_info "Cấu hình RPC Node ${i} (${NODE_TYPE})..."
 
     # Kiểm tra file .env tồn tại
+    SKIP_JSON_UPDATE=false
     if [ ! -f "$ENV_FILE" ]; then
-        log_err "Không tìm thấy: $ENV_FILE"
-        log_err "Hãy chạy gen_validator_entry.py cho node ${i} trước."
-        continue
-    fi
+        log_warn "Không tìm thấy: $ENV_FILE. Sẽ bỏ qua cập nhật JSON (giả định config đã được setup sẵn)."
+        SKIP_JSON_UPDATE=true
+    else
+        # ─── Đọc port từ .env ─────────────────────────────────────────
+        # RPC_PORT trong .env là port Execution lắng nghe (dạng :10746)
+        EXECUTION_RPC_PORT=$(grep "^RPC_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ':' | tr -d '"')
+        # P2P port để tcp-client kết nối vào
+        P2P_PORT=$(grep "^P2P_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"')
 
-    # ─── Đọc port từ .env ─────────────────────────────────────────
-    # RPC_PORT trong .env là port Execution lắng nghe (dạng :10746)
-    EXECUTION_RPC_PORT=$(grep "^RPC_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ':' | tr -d '"')
-    # P2P port để tcp-client kết nối vào
-    P2P_PORT=$(grep "^P2P_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"')
+        if [ -z "$EXECUTION_RPC_PORT" ]; then
+            log_warn "Không đọc được RPC_PORT từ $ENV_FILE, dùng port mặc định: $((10750 + i))"
+            EXECUTION_RPC_PORT=$((10750 + i))
+        fi
+        if [ -z "$P2P_PORT" ]; then
+            log_warn "Không đọc được P2P_PORT từ $ENV_FILE, dùng port mặc định: $((6200 + i))"
+            P2P_PORT=$((6200 + i))
+        fi
 
-    if [ -z "$EXECUTION_RPC_PORT" ]; then
-        log_warn "Không đọc được RPC_PORT từ $ENV_FILE, dùng port mặc định: $((10750 + i))"
-        EXECUTION_RPC_PORT=$((10750 + i))
+        # Port mở cho người dùng bên ngoài (MetaMask, dApp...)
+        SERVER_PORT=$((8545 + i))
+        HTTPS_PORT=$((8666 + i))
+        TCP_SERVER_PORT=$((9545 + i))
     fi
-    if [ -z "$P2P_PORT" ]; then
-        log_warn "Không đọc được P2P_PORT từ $ENV_FILE, dùng port mặc định: $((6200 + i))"
-        P2P_PORT=$((6200 + i))
-    fi
-
-    # Port mở cho người dùng bên ngoài (MetaMask, dApp...)
-    SERVER_PORT=$((8545 + i))
-    HTTPS_PORT=$((8666 + i))
-    TCP_SERVER_PORT=$((9545 + i))
 
     CONFIG_RPC="$RPC_DIR/config-rpc-node${i}.json"
     CONFIG_TCP="$RPC_DIR/config-client-tcp-node${i}.json"
 
     # ─── Cập nhật config-rpc-nodeN.json ───────────────────────────
-    if [ -f "$CONFIG_RPC" ]; then
+    if ! $SKIP_JSON_UPDATE && [ -f "$CONFIG_RPC" ]; then
         jq ".rpc_server_url = \"http://127.0.0.1:${EXECUTION_RPC_PORT}\" |
             .wss_server_url = \"ws://127.0.0.1:${EXECUTION_RPC_PORT}/ws\" |
             .server_port = \":${SERVER_PORT}\" |
@@ -167,15 +172,19 @@ for idx in "${!NODE_IDS[@]}"; do
             .tcp_server_port = \":${TCP_SERVER_PORT}\"" \
         "$CONFIG_RPC" > "${CONFIG_RPC}.tmp" && mv -f "${CONFIG_RPC}.tmp" "$CONFIG_RPC"
         log_ok "config-rpc-node${i}.json → Execution RPC: ${EXECUTION_RPC_PORT} | HTTP: ${SERVER_PORT}"
+    elif $SKIP_JSON_UPDATE; then
+        log_info "Bỏ qua cập nhật $CONFIG_RPC vì thiếu .env"
     else
         log_warn "Không tìm thấy $CONFIG_RPC, bỏ qua cập nhật"
     fi
 
     # ─── Cập nhật config-client-tcp-nodeN.json ────────────────────
-    if [ -f "$CONFIG_TCP" ]; then
+    if ! $SKIP_JSON_UPDATE && [ -f "$CONFIG_TCP" ]; then
         jq ".parent_connection_address = \"127.0.0.1:${P2P_PORT}\"" \
         "$CONFIG_TCP" > "${CONFIG_TCP}.tmp" && mv -f "${CONFIG_TCP}.tmp" "$CONFIG_TCP"
         log_ok "config-client-tcp-node${i}.json → P2P: ${P2P_PORT}"
+    elif $SKIP_JSON_UPDATE; then
+        log_info "Bỏ qua cập nhật $CONFIG_TCP vì thiếu .env"
     else
         log_warn "Không tìm thấy $CONFIG_TCP, bỏ qua cập nhật"
     fi
@@ -197,11 +206,11 @@ User=$(whoami)
 Group=$(id -gn)
 WorkingDirectory=$RPC_DIR
 
-ExecStart=$RPC_DIR/rpc-client --config config-rpc-node${i}.json --tcp-config config-client-tcp-node${i}.json
+ExecStart=$RPC_DIR/rpc-client-bin --config config-rpc-node${i}.json --tcp-config config-client-tcp-node${i}.json
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 
-Restart=on-failure
-RestartSec=5s
+# Restart=on-failure
+# RestartSec=5s
 LimitNOFILE=100000
 
 StandardOutput=append:$RPC_DIR/node${i}_data/logs/systemd.log

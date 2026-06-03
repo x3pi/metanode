@@ -37,7 +37,10 @@ python3 gen_validator_entry.py --hostname node-3 --node-type validator --ip 127.
 python3 gen_validator_entry.py --hostname node-4 --node-type synconly --ip 127.0.0.1 --node-id 4
 ```
 
-Script tự động tạo `genesis.json` và copy vào `execution/cmd/simple_chain/`.
+> **Lưu ý mới (Tái sử dụng cấu hình cũ):** 
+> Nếu bạn đã có sẵn các file cấu hình cũ (`config-master-nodeX.json` và `node_X.toml`) nằm trong thư mục `execution/cmd/simple_chain/` và `consensus/metanode/config/`, script `systemd-cluster.sh` sẽ **tự động phát hiện (Auto-detect) và sử dụng trực tiếp** các file này mà không cần bạn phải sinh lại file `.env` qua script python nữa. 
+> 
+> **Cách sử dụng:** Bỏ qua hoàn toàn Bước 1 (không cần chạy script python), bạn chuyển thẳng sang **Bước 2** và chạy bình thường lệnh `setup` hoặc `install`. Script sẽ tự động lấy các file cũ của bạn đưa vào hệ thống!
 
 ### Bước 2 — Setup & Cài đặt
 

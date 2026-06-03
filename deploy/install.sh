@@ -39,7 +39,14 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ─── Parse arguments ───────────────────────────────────────────────────────
-CONFIG_ENV=""
+JSON_CONFIG=""
+TOML_CONFIG=""
+PROTOCOL_KEY=""
+NETWORK_KEY=""
+SKIP_BUILD="false"
+EXPLICIT_NODE_ID=""
+EXPLICIT_NODE_TYPE="validator"
+
 ARGS=("$@")
 for i in "${!ARGS[@]}"; do
     case "${ARGS[$i]}" in
@@ -48,49 +55,84 @@ for i in "${!ARGS[@]}"; do
             next=$((i+1))
             [ "$next" -lt "${#ARGS[@]}" ] && CONFIG_ENV="${ARGS[$next]}"
             ;;
+        --json-config=*) JSON_CONFIG="${ARGS[$i]#--json-config=}" ;;
+        --json-config)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && JSON_CONFIG="${ARGS[$next]}"
+            ;;
+        --toml-config=*) TOML_CONFIG="${ARGS[$i]#--toml-config=}" ;;
+        --toml-config)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && TOML_CONFIG="${ARGS[$next]}"
+            ;;
+        --protocol-key=*) PROTOCOL_KEY="${ARGS[$i]#--protocol-key=}" ;;
+        --protocol-key)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && PROTOCOL_KEY="${ARGS[$next]}"
+            ;;
+        --network-key=*) NETWORK_KEY="${ARGS[$i]#--network-key=}" ;;
+        --network-key)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && NETWORK_KEY="${ARGS[$next]}"
+            ;;
+        --node-id=*) EXPLICIT_NODE_ID="${ARGS[$i]#--node-id=}" ;;
+        --node-id)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && EXPLICIT_NODE_ID="${ARGS[$next]}"
+            ;;
+        --skip-build) SKIP_BUILD="true" ;;
         --yes|-y) AUTO_YES="true" ;;
     esac
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "$CONFIG_ENV" ]; then
-    # Default config file
-    CONFIG_ENV="$SCRIPT_DIR/validator.env"
-fi
-
-# Resolve relative path
-[[ "$CONFIG_ENV" != /* ]] && CONFIG_ENV="$SCRIPT_DIR/$CONFIG_ENV"
-
-if [ ! -f "$CONFIG_ENV" ]; then
-    log_err "Config file not found: $CONFIG_ENV"
-    log_err "Please create a config file (see single-node/templates/validator.env.example)"
-    exit 1
-fi
-
-log_info "Loading config from: $CONFIG_ENV"
-source "$CONFIG_ENV"
-
-# ─── Validate required config ──────────────────────────────────────────────
-required_vars=(
-    NODE_TYPE        # "validator" or "synconly"
-    NODE_ID          # e.g. 0
-    BLS_PRIVATE_KEY  # hex string for Databases.BLSPrivateKey
-    ETH_PRIVATE_KEY  # hex string
-    ETH_ADDRESS      # hex address without 0x
-    RPC_PORT         # e.g. :8757
-    P2P_PORT         # e.g. 4000
-    PEER_RPC_PORT    # e.g. 19200
-    REPO_URL         # e.g. https://github.com/x3pi/metanode.git
-)
-
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        log_err "Required config variable not set: $var"
-        log_err "Check your config file: $CONFIG_ENV"
+if [ -n "$JSON_CONFIG" ] && [ -n "$TOML_CONFIG" ]; then
+    log_info "Using existing JSON/TOML configurations. Skipping .env loading."
+    if [ -z "$EXPLICIT_NODE_ID" ]; then
+        log_err "--node-id is required when using --json-config"
         exit 1
     fi
-done
+    NODE_ID="$EXPLICIT_NODE_ID"
+    NODE_TYPE="$EXPLICIT_NODE_TYPE"
+else
+    if [ -z "$CONFIG_ENV" ]; then
+        CONFIG_ENV="$SCRIPT_DIR/validator.env"
+    fi
+
+    [[ "$CONFIG_ENV" != /* ]] && CONFIG_ENV="$SCRIPT_DIR/$CONFIG_ENV"
+
+    if [ ! -f "$CONFIG_ENV" ]; then
+        log_err "Config file not found: $CONFIG_ENV"
+        exit 1
+    fi
+
+    log_info "Loading config from: $CONFIG_ENV"
+    source "$CONFIG_ENV"
+fi
+
+# ─── Validate required config ──────────────────────────────────────────────
+if [ -z "$JSON_CONFIG" ]; then
+    required_vars=(
+        NODE_TYPE        # "validator" or "synconly"
+        NODE_ID          # e.g. 0
+        BLS_PRIVATE_KEY  # hex string for Databases.BLSPrivateKey
+        ETH_PRIVATE_KEY  # hex string
+        ETH_ADDRESS      # hex address without 0x
+        RPC_PORT         # e.g. :8757
+        P2P_PORT         # e.g. 4000
+        PEER_RPC_PORT    # e.g. 19200
+        REPO_URL         # e.g. https://github.com/x3pi/metanode.git
+    )
+
+    for var in "${required_vars[@]}"; do
+        if [ -z "${!var:-}" ]; then
+            log_err "Required config variable not set: $var"
+            log_err "Check your config file: $CONFIG_ENV"
+            exit 1
+        fi
+    done
+fi
 
 # Optional with defaults
 METANODE_USER="${METANODE_USER:-metanode}"
@@ -192,21 +234,30 @@ log_info "Using genesis file: $GENESIS_FILE"
 
 
 # Build Rust consensus engine
-log_info "Building Rust consensus engine (this may take ~10 minutes)..."
-EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/consensus/metanode' && cargo build --release --bin metanode" 2>&1 | \
-    grep -E "^(error|warning: unused|Compiling|Finished|error\[)" || true
+if [ "$SKIP_BUILD" != "true" ] && [ -f "$SRC_DIR/consensus/metanode/Cargo.toml" ]; then
+    log_info "Building Rust consensus engine (this may take ~10 minutes)..."
+    EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/consensus/metanode' && cargo build --release --bin metanode" 2>&1 | \
+        grep -E "^(error|warning: unused|Compiling|Finished|error\[)" || true
+else
+    log_info "Skipping Rust build (either --skip-build or source code not found, using prebuilt binary)"
+fi
 RUST_BIN="$SRC_DIR/target/release/metanode"
 [ -f "$RUST_BIN" ] || RUST_BIN="$SRC_DIR/consensus/metanode/target/release/metanode"
 [ -f "$RUST_BIN" ] || { log_err "Rust build failed — binary not found"; exit 1; }
-log_ok "Rust binary built: $RUST_BIN"
+log_ok "Rust binary verified: $RUST_BIN"
 
 # Build Go execution engine
-log_info "Building Go execution engine..."
-sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/execution/cmd/simple_chain' && CGO_ENABLED=1 go build -o simple_chain ."
+if [ "$SKIP_BUILD" != "true" ] && [ -f "$SRC_DIR/execution/cmd/simple_chain/go.mod" ]; then
+    log_info "Building Go execution engine..."
+    EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/execution/cmd/simple_chain' && CGO_ENABLED=1 go build -o simple_chain ."
+else
+    log_info "Skipping Go build (either --skip-build or source code not found, using prebuilt binary)"
+fi
 GO_BIN="$SRC_DIR/execution/cmd/simple_chain/simple_chain"
 [ -f "$GO_BIN" ] || { log_err "Go build failed — binary not found"; exit 1; }
-log_ok "Go binary built: $GO_BIN"
+log_ok "Go binary verified: $GO_BIN"
 
 # Copy binaries
 cp "$RUST_BIN" "$INSTALL_DIR/bin/metanode"
@@ -216,11 +267,44 @@ chown "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR/bin/metanode" "$INSTALL_DIR/
 log_ok "Binaries installed to $INSTALL_DIR/bin/"
 
 # ──────────────────────────────────────────────────────────────────────────
-# STEP 3: Generate and install configs
+# STEP 3: Generate or Copy configs
 # ──────────────────────────────────────────────────────────────────────────
-log_step "Step 3: Installing configuration files"
+log_step "Step 3: Preparing configuration files"
 
-# Generate Go execution config from template
+if [ -n "$JSON_CONFIG" ] && [ -n "$TOML_CONFIG" ]; then
+    log_info "Copying existing JSON config: $JSON_CONFIG"
+    cp "$JSON_CONFIG" "$INSTALL_DIR/config/execution.json"
+    
+    # Đảm bảo ghi đè các đường dẫn runtime để khớp với cấu trúc thư mục của node
+    if command -v jq &>/dev/null; then
+        jq ".log_path = \"${INSTALL_DIR}/logs/execution/go-master\" |
+            .backup_path = \"${INSTALL_DIR}/data/execution/backup\" |
+            .Databases.RootPath = \"${INSTALL_DIR}/data/execution/db\" |
+            .Databases.SnapshotPath = \"${INSTALL_DIR}/data/execution/snapshot\" |
+            .explorer_db_path = \"${INSTALL_DIR}/data/execution/explorer\" |
+            .explorer_read_only_db_path = \"${INSTALL_DIR}/data/execution/explorer-read-only\" |
+            .snapshot_source_dir = \"${INSTALL_DIR}/data/execution\" |
+            .rust_config_path = \"${INSTALL_DIR}/config/consensus.toml\"" \
+            "$INSTALL_DIR/config/execution.json" > "$INSTALL_DIR/config/execution.json.tmp"
+        mv "$INSTALL_DIR/config/execution.json.tmp" "$INSTALL_DIR/config/execution.json"
+        log_info "Patched runtime paths in execution.json using jq"
+    else
+        log_warn "jq not found! Cannot patch runtime paths in execution.json"
+    fi
+    
+    log_info "Copying existing TOML config: $TOML_CONFIG"
+    cp "$TOML_CONFIG" "$INSTALL_DIR/config/consensus.toml"
+    
+    # Đảm bảo ghi đè các đường dẫn runtime cho Rust (TOML) để khớp với cấu trúc thư mục
+    sed -i "s|protocol_key_path = .*|protocol_key_path = \"$INSTALL_DIR/keys/protocol_key.json\"|" "$INSTALL_DIR/config/consensus.toml"
+    sed -i "s|network_key_path = .*|network_key_path = \"$INSTALL_DIR/keys/network_key.json\"|" "$INSTALL_DIR/config/consensus.toml"
+    sed -i "s|db_path = .*|db_path = \"$INSTALL_DIR/data/consensus\"|" "$INSTALL_DIR/config/consensus.toml"
+    sed -i "s|committee_path = .*|committee_path = \"$INSTALL_DIR/config/committee.json\"|" "$INSTALL_DIR/config/consensus.toml"
+    log_info "Patched runtime paths in consensus.toml using sed"
+    
+    log_ok "Copied existing configs to $INSTALL_DIR/config/"
+else
+    # Generate Go execution config from template
 cat > "$INSTALL_DIR/config/execution.json" <<EOF
 {
     "debug": false,
@@ -416,6 +500,7 @@ console_output = ${LOG_CONSOLE_OUTPUT:-true}
 file_output = ${LOG_FILE_OUTPUT:-false}
 EOF
 log_ok "Generated: $INSTALL_DIR/config/consensus.toml"
+fi
 
 # Copy genesis.json to config and bin (supporting relative path "genesis.json" starting working directory)
 cp "$GENESIS_FILE" "$INSTALL_DIR/config/genesis.json"
@@ -428,19 +513,32 @@ log_ok "Copied genesis.json → $INSTALL_DIR/config/ & $INSTALL_DIR/bin/"
 # ──────────────────────────────────────────────────────────────────────────
 log_step "Step 4: Installing keys"
 
-if [ -z "$PROTOCOL_KEY_FILE" ] || [ -z "$NETWORK_KEY_FILE" ]; then
-    log_err "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are required for all nodes"
-    log_err "Generate keys first: ./metanode keytool generate validator --out-dir ./keys"
-    exit 1
+if [ -n "$PROTOCOL_KEY" ] && [ -n "$NETWORK_KEY" ]; then
+    log_info "Copying existing network keys..."
+    cp "$PROTOCOL_KEY" "$INSTALL_DIR/keys/protocol_key.json"
+    cp "$NETWORK_KEY"  "$INSTALL_DIR/keys/network_key.json"
+else
+    if [ -z "$PROTOCOL_KEY_FILE" ] || [ -z "$NETWORK_KEY_FILE" ]; then
+        if [ -n "$JSON_CONFIG" ]; then
+            log_warn "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are empty, but --json-config was passed."
+            log_warn "Assuming keys are handled internally or not needed."
+        else
+            log_err "PROTOCOL_KEY_FILE and NETWORK_KEY_FILE are required for all nodes"
+            log_err "Generate keys first: ./metanode keytool generate validator --out-dir ./keys"
+            exit 1
+        fi
+    else
+        if [ ! -f "$PROTOCOL_KEY_FILE" ] || [ ! -f "$NETWORK_KEY_FILE" ]; then
+            log_err "Key file not found: $PROTOCOL_KEY_FILE or $NETWORK_KEY_FILE"
+            exit 1
+        fi
+        cp "$PROTOCOL_KEY_FILE" "$INSTALL_DIR/keys/protocol_key.json"
+        cp "$NETWORK_KEY_FILE"  "$INSTALL_DIR/keys/network_key.json"
+    fi
 fi
-if [ ! -f "$PROTOCOL_KEY_FILE" ] || [ ! -f "$NETWORK_KEY_FILE" ]; then
-    log_err "Key file not found: $PROTOCOL_KEY_FILE or $NETWORK_KEY_FILE"
-    exit 1
-fi
-cp "$PROTOCOL_KEY_FILE" "$INSTALL_DIR/keys/protocol_key.json"
-cp "$NETWORK_KEY_FILE"  "$INSTALL_DIR/keys/network_key.json"
-chmod 600 "$INSTALL_DIR/keys/"*.json
-chown "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR/keys/"*.json
+
+chmod 600 "$INSTALL_DIR/keys/"*.json 2>/dev/null || true
+chown "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR/keys/"*.json 2>/dev/null || true
 log_ok "Network keys installed to $INSTALL_DIR/keys/"
 
 chown -R "$METANODE_USER:$METANODE_USER" "$INSTALL_DIR"
