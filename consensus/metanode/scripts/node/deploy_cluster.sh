@@ -190,17 +190,18 @@ if $DO_STOP; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
+                    tmux kill-session -t rpc-proxy-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
+                tmux kill-server 2>/dev/null || true
                 pkill -f 'simple_chain' 2>/dev/null || true
-                sleep 3
-                for id in $nodes; do
-                    tmux kill-session -t go-master-\$id 2>/dev/null || true
-                done
+                pkill -f 'rpc-client-bin' 2>/dev/null || true
+                sleep 2
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
+                pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
                 rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
@@ -288,17 +289,18 @@ if $DO_PUSH || $DO_START; then
             ssh_cmd "$server" "
                 for id in $nodes; do
                     tmux kill-session -t go-master-\$id 2>/dev/null || true
+                    tmux kill-session -t rpc-proxy-\$id 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
+                tmux kill-server 2>/dev/null || true
                 pkill -f 'simple_chain' 2>/dev/null || true
-                sleep 3
-                for id in $nodes; do
-                    tmux kill-session -t go-master-\$id 2>/dev/null || true
-                done
+                pkill -f 'rpc-client-bin' 2>/dev/null || true
+                sleep 2
                 pkill -9 -f 'simple_chain' 2>/dev/null || true
+                pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
                 rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
@@ -524,6 +526,33 @@ if $DO_START; then
 
     sleep 5
 fi
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE 6: Generate rpc_nodes.json for auto_test.sh
+# ═══════════════════════════════════════════════════════════════════
+log_step "Phase 6: Generating rpc_nodes.json for Health Checking"
+RPC_JSON_PATH="/tmp/rpc_nodes.json"
+
+declare -A RPC_PORTS=( [0]=8757 [1]=10747 [2]=10749 [3]=10750 [4]=10748 )
+JSON_NODES=()
+
+for id in "${!NODE_SERVER[@]}"; do
+    ip="${NODE_SERVER[$id]}"
+    port="${RPC_PORTS[$id]}"
+    JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
+done
+
+# Nối các string lại bằng dấu phẩy
+JOINED=$(IFS=, ; echo "${JSON_NODES[*]}")
+
+cat > "$RPC_JSON_PATH" <<EOF
+{
+  "nodes": {
+    $JOINED
+  }
+}
+EOF
+log_ok "Generated $RPC_JSON_PATH"
 
 # ═══════════════════════════════════════════════════════════════════
 # SUMMARY

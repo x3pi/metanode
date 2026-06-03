@@ -43,12 +43,12 @@ const (
 // DatabasesConfig định nghĩa cấu trúc cho đối tượng "Databases" trong file JSON.
 // Hiện tại chỉ cần cấu hình thư mục gốc (RootPath), các đường dẫn con được hardcode qua các hằng số.
 type DatabasesConfig struct {
-	RootPath        string   `json:"RootPath"`
-	Version         string   `json:"Version"`
-	BLSPrivateKey   string   `json:"BLSPrivateKey"`
-	SnapshotPath    string   `json:"SnapshotPath"`
-	MaxPartSizeMB   int      `json:"MaxPartSizeMB"`
-	ArchiveBaseName string   `json:"ArchiveBaseName"`
+	RootPath        string `json:"RootPath"`
+	Version         string `json:"Version"`
+	BLSPrivateKey   string `json:"BLSPrivateKey"`
+	SnapshotPath    string `json:"SnapshotPath"`
+	MaxPartSizeMB   int    `json:"MaxPartSizeMB"`
+	ArchiveBaseName string `json:"ArchiveBaseName"`
 }
 
 // NodesConfig khớp với cấu trúc của đối tượng "nodes" trong JSON.
@@ -105,26 +105,26 @@ type SimpleChainConfig struct {
 	RewardSenderPrivateKey string `json:"reward_sender_private_key"`
 	RewardSenderAddress    string `json:"reward_sender_address"`
 
-	ChainId                            *big.Int           `json:"chainId"`
-	PrivateKey                         string             `json:"private_key"`
-	Address                            string             `json:"address"`
-	LogPath                            string             `json:"log_path"`
-	EpochsToKeep                       *int               `json:"epochs_to_keep"`    // Số epoch giữ lại: 0=giữ tất cả (archive), nil/không set=mặc định 3, N=giữ N epoch gần nhất
-	MaxCachedEpochs                    uint64             `json:"max_cached_epochs"` // Epoch boundary cache size: 0=unlimited, default 10
-	BackupPath                         string             `json:"backup_path"`
-	LastBlockSavePath                  string             `json:"last_block_save_path"`
-	TransactionBlockNumberLastHashPath string             `json:"transaction_block_number_last_hash_path"`
-	BlockHashToNumberDBRootPath        string             `json:"block_hash_to_number_db_root_path"`
-	FreeFeeAddresses                   []string           `json:"free_fee_addresses"`
-	ConnectionAddress                  string             `json:"connection_address"`
-	DNSServerAddress                   string             `json:"dns_server_address"`
-	Version                            string             `json:"version"`
-	ListTypeService                    string             `json:"list_type_service"`
-	ServiceType                        string             `json:"service_type"`
-	RpcPort                            string             `json:"rpc_port"`
-	DBType                             storage.DBType     `json:"db_type"`
-	GenesisFilePath                    string             `json:"genesis_file_path"`
-	Securepassword                     string             `json:"securepassword"`
+	ChainId                            *big.Int       `json:"chainId"`
+	PrivateKey                         string         `json:"private_key"`
+	Address                            string         `json:"address"`
+	LogPath                            string         `json:"log_path"`
+	EpochsToKeep                       *int           `json:"epochs_to_keep"`    // Số epoch giữ lại: 0=giữ tất cả (archive), nil/không set=mặc định 3, N=giữ N epoch gần nhất
+	MaxCachedEpochs                    uint64         `json:"max_cached_epochs"` // Epoch boundary cache size: 0=unlimited, default 10
+	BackupPath                         string         `json:"backup_path"`
+	LastBlockSavePath                  string         `json:"last_block_save_path"`
+	TransactionBlockNumberLastHashPath string         `json:"transaction_block_number_last_hash_path"`
+	BlockHashToNumberDBRootPath        string         `json:"block_hash_to_number_db_root_path"`
+	FreeFeeAddresses                   []string       `json:"free_fee_addresses"`
+	ConnectionAddress                  string         `json:"connection_address"`
+	DNSServerAddress                   string         `json:"dns_server_address"`
+	Version                            string         `json:"version"`
+	ListTypeService                    string         `json:"list_type_service"`
+	ServiceType                        string         `json:"service_type"`
+	RpcPort                            string         `json:"rpc_port"`
+	DBType                             storage.DBType `json:"db_type"`
+	GenesisFilePath                    string         `json:"genesis_file_path"`
+	Securepassword                     string         `json:"securepassword"`
 	//
 	PkAdminFileStorage string `json:"pk_admin_file_storage"`
 	// Unix Domain Socket paths for communication with Rust MetaNode
@@ -155,15 +155,14 @@ type SimpleChainConfig struct {
 	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
 	SnapshotBlockOffset     int    `json:"snapshot_block_offset,omitempty"`     // Offset per-node để stagger snapshot (vd: node0=0, node1=100, node2=200). Đảm bảo không tất cả nodes snapshot cùng lúc
 
-
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.
 	StateBackend string `json:"state_backend,omitempty"`
 
 	// NOMT (Nearly Optimal Merkle Trie) configuration — only used when state_backend = "nomt"
 	NomtCommitConcurrency int `json:"nomt_commit_concurrency,omitempty"` // Number of concurrent commit workers (default: 4)
-	NomtPageCacheMB       int `json:"nomt_page_cache_mb,omitempty"`       // Page cache in MiB (default: 512)
-	NomtLeafCacheMB       int `json:"nomt_leaf_cache_mb,omitempty"`       // Leaf cache in MiB (default: 512)
+	NomtPageCacheMB       int `json:"nomt_page_cache_mb,omitempty"`      // Page cache in MiB (default: 512)
+	NomtLeafCacheMB       int `json:"nomt_leaf_cache_mb,omitempty"`      // Leaf cache in MiB (default: 512)
 
 	// BLS Block Signing: Master signs blocks, Sub verifies before accepting.
 	// MasterBLSPubKey: hex-encoded BLS public key of the Master node (for Sub nodes to verify signatures)
@@ -171,15 +170,15 @@ type SimpleChainConfig struct {
 	// SkipSignatureVerification: if true, Sub node accepts blocks without verifying signature (backward compatibility)
 	SkipSignatureVerification bool `json:"skip_signature_verification,omitempty"`
 
-	Pruning       PruningConfig   `json:"pruning,omitempty"`
+	Pruning       PruningConfig      `json:"pruning,omitempty"`
 	RpcRateLimit  RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
-	TraceEnabled  bool            `json:"trace_enabled,omitempty"`
-	TraceEndpoint string          `json:"trace_endpoint,omitempty"`
-	TlsCert       string          `json:"tls_cert,omitempty"`
-	TlsKey        string          `json:"tls_key,omitempty"`
-	Databases     DatabasesConfig `json:"Databases"`
-	Nodes     NodesConfig     `json:"nodes"`
-	Log           LogConfig       `json:"log"`
+	TraceEnabled  bool               `json:"trace_enabled,omitempty"`
+	TraceEndpoint string             `json:"trace_endpoint,omitempty"`
+	TlsCert       string             `json:"tls_cert,omitempty"`
+	TlsKey        string             `json:"tls_key,omitempty"`
+	Databases     DatabasesConfig    `json:"Databases"`
+	Nodes         NodesConfig        `json:"nodes"`
+	Log           LogConfig          `json:"log"`
 }
 
 // joinPathIfNotURL nối path với base path chỉ khi path không phải là URL.
@@ -222,7 +221,7 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 
 		// RPC Rate Limit default configuration if not fully specified
 		if ConfigApp.RpcRateLimit.GlobalRate == 0 {
-			ConfigApp.RpcRateLimit.Enabled = false // TEMPORARILY DISABLED FOR TESTING
+			ConfigApp.RpcRateLimit.Enabled = false
 			ConfigApp.RpcRateLimit.GlobalRate = 10000
 			ConfigApp.RpcRateLimit.PerIpRate = 50
 			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block

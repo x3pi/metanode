@@ -21,7 +21,6 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -646,7 +645,6 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						mvm.ClearAllMVMApi()
 						mvm.ClearAllProtectedMVMApi()
 						mvm.CallClearAllStateInstances()
-						trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 					} else {
 						logger.Error("❌ [TRANSITION SYNC] Failed to load fresh block #%d from DB: %v", actualLastBlockDB, err)
 					}

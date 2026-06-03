@@ -467,7 +467,6 @@ PROCESS_BLOCK:
 					mvm.ClearAllMVMApi()
 					mvm.ClearAllProtectedMVMApi()
 					mvm.CallClearAllStateInstances()
-					trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 				} else {
 					logger.Error("❌ [NOMT-GUARD] Failed to load historic block #%d from DB by hash %s: %v", nextBlockToCreate, blockHash.Hex(), err)
 				}
