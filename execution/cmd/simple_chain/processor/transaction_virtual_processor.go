@@ -36,7 +36,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		return nil, fmt.Errorf("transaction cannot be nil"), nil
 	}
 	// tx.SetIsDebug(true)
-	logger.Info("_virtual_ %v", tx)
+	logger.Info("_virtual_ %v", tx.Hash())
 	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
 		updatedTx := tx
 		updatedTx.AddRelatedAddress(tx.FromAddress())
