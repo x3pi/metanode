@@ -224,7 +224,7 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
 	if blockNr, ok := blockNrOrHash.Number(); ok {
-		if blockNr == rpc.PendingBlockNumber {
+		if blockNr == rpc.PendingBlockNumber || blockNr == rpc.LatestBlockNumber {
 			as, err := api.App.chainState.GetAccountStateDB().AccountStateReadOnly(address)
 			if err != nil {
 				return nil, err
@@ -249,23 +249,23 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 		if errGetBlock != nil {
 			return nil, fmt.Errorf("failed to get block by hash: %w", errGetBlock)
 		}
-		if blockMap != nil {
-			if numStr, okStr := blockMap["number"].(string); okStr {
-				if num, err := hexutil.DecodeUint64(numStr); err == nil {
-					targetBlockNumber = num
-					foundBlockNumber = true
-				}
-			}
-		}
 	}
 
 	if blockMap == nil {
 		return nil, fmt.Errorf("block not found")
 	}
 
+	if numStr, okStr := blockMap["number"].(string); okStr {
+		if num, err := hexutil.DecodeUint64(numStr); err == nil {
+			targetBlockNumber = num
+			foundBlockNumber = true
+		}
+	}
+
 	// Phase 2.4: Try to get historical state from StateChangelogDB
 	changelogDB := api.App.chainState.GetChangelogDB()
-	if changelogDB != nil && foundBlockNumber {
+	isHistorical := foundBlockNumber && targetBlockNumber < storage.GetLastBlockNumber()
+	if changelogDB != nil && isHistorical {
 		logger.Info("🔍 [DEBUG-RPC] Resolving historical state for %x at block %d using StateChangelogDB", address.Bytes(), targetBlockNumber)
 		stateBytes, err := changelogDB.GetStateAt(address.Bytes(), targetBlockNumber)
 		if err == nil {
@@ -431,17 +431,16 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 		blockMap, errGetBlock = api.GetBlockByNumber(ctx, api.convertBlockNumber(blockNr.Int64()), false)
 	} else if hash, ok := blockNrOrHash.Hash(); ok {
 		blockMap, errGetBlock = api.GetBlockByHash(ctx, hash, false)
-		if blockMap != nil {
-			if numStr, okStr := blockMap["number"].(string); okStr {
-				if num, err := hexutil.DecodeUint64(numStr); err == nil {
-					targetBlockNumber = num
-				}
-			}
-		}
 	}
 
 	if errGetBlock != nil || blockMap == nil {
 		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to get block: %w", errGetBlock)
+	}
+
+	if numStr, okStr := blockMap["number"].(string); okStr {
+		if num, err := hexutil.DecodeUint64(numStr); err == nil {
+			targetBlockNumber = num
+		}
 	}
 
 	stateRootInterface := blockMap["stateRoot"]

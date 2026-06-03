@@ -11,6 +11,7 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+tracing-appender = "0.2"
 # Meta Consensus dependencies - using local copies
 consensus-core = { path = "meta-consensus/core" }
 consensus-config = { path = "meta-consensus/config" }
