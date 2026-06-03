@@ -40,9 +40,10 @@ var (
 	GlobalTxProcessCounter uint64
 
 	// FlushThresholdTxs defines how many TXs are allowed to accumulate in RAM before auto-flushing.
-	// Increased to 500,000 to prevent L0 compaction stalls during 50k+ TPS burst tests.
-	// The 157GB server RAM easily sustains this cache size before asynchronous background flush.
-	FlushThresholdTxs uint64 = 500000
+	// TUNED (June 2026): Reduced from 500K to 100K to prevent OOM under sustained stress tests.
+	// With 64MB PebbleDB memtables (down from 256MB), smaller batches flush faster without
+	// L0 compaction stalls. Keeps LazyPebbleDB memoryCache bounded during long-running tests.
+	FlushThresholdTxs uint64 = 100000
 
 	// Memory Pools for zero-allocation parallel processing
 	txSlicePool = sync.Pool{

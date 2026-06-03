@@ -22,7 +22,7 @@ func (app *App) createDatabase(subPath string, listenAddress string, backupPath 
 	logger.Info("Initializing local ShardelDB at: %s", subPath)
 	db, err := storage.NewShardelDB(
 		config.JoinPathIfNotURL(app.config.Databases.RootPath, subPath),
-		4,
+		1,
 		2,
 		dbType,
 		backupPath,

@@ -25,10 +25,10 @@ type LazyLevelDB struct {
 
 const (
 	// FlushInterval defines how often the memory cache is written to disk.
-	// 10s balances crash-safety with I/O pressure. LazyPebbleDB now does full
-	// memtable→SST flush (not just Go cache→memtable), so longer interval
-	// reduces compaction pressure while still ensuring data reaches disk promptly.
-	FlushInterval = 10 * time.Second
+	// TUNED (June 2026): Reduced from 10s to 5s to keep memory cache bounded
+	// under sustained load. With 64MB PebbleDB memtables (down from 256MB),
+	// each flush completes faster so 5s won't cause compaction pressure.
+	FlushInterval = 5 * time.Second
 )
 
 // stringToBytes handles zero allocation string to byte slice conversion safely here

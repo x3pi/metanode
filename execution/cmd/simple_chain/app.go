@@ -140,14 +140,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 		pageCacheMB := app.config.NomtPageCacheMB
 		if pageCacheMB <= 0 {
-			// TUNED (June 2026): Reduced from 512 to 256 MB.
-			// Saves ~1 GB per node for 2 primary NOMT handles.
-			pageCacheMB = 256
+			// TUNED (June 2026): Reduced from 256 to 128 MB.
+			// Saves 640 MB across 5 nodes. NOMT relies on mmap for cold reads.
+			pageCacheMB = 128
 		}
 		leafCacheMB := app.config.NomtLeafCacheMB
 		if leafCacheMB <= 0 {
-			// TUNED (June 2026): Reduced from 512 to 256 MB.
-			leafCacheMB = 256
+			// TUNED (June 2026): Reduced from 256 to 128 MB.
+			leafCacheMB = 128
 		}
 		if err := mt_trie.InitNomtDB(nomtPath, commitConcurrency, pageCacheMB, leafCacheMB); err != nil {
 			return nil, fmt.Errorf("failed to initialize NOMT database: %v", err)
@@ -159,7 +159,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// Backup database
 	backupDB, err := storage.NewShardelDB(
 		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
-		4, 2,
+		1, 2,
 		app.config.DBType,
 		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
 	)

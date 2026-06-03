@@ -147,6 +147,12 @@ END_SEC=$(date +%s)
 
 # ── SNAPSHOT BLOCK HEIGHT AFTER TEST ──────────────────────────────
 BLOCK_AFTER=$(get_block_number "${RPCS[0]}")
+
+# If blocks were produced during wait, the stagnant loop timed out early.
+# Update ACTUAL_END_MS to the current timestamp to cover the full duration.
+if [ "$BLOCK_AFTER" -gt "$LAST_BLOCK" ]; then
+    ACTUAL_END_MS=$(date +%s%3N)
+fi
 echo -e "${GREEN}✅ Chain idle (10s no new blocks). Block height after test: ${BOLD}#${BLOCK_AFTER}${NC}"
 
 

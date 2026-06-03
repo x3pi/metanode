@@ -258,6 +258,7 @@ start_go_master() {
     cmd+="export RUST_BACKTRACE=full && "
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
+    cmd+="export GOMEMLIMIT=12GiB && "
     cmd+="export RUST_LOG=warn && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
