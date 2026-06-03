@@ -309,7 +309,7 @@ impl NodeConfig {
                 metrics_port: 9100 + idx as u16,
                 speed_multiplier: 1.0, // Default: normal speed
                 leader_timeout_ms: None,
-                min_round_delay_ms: Some(200), // TPS OPTIMIZATION: 200ms balances throughput vs latency. 50ms caused commit fragmentation (100 TX/commit → 200 commits for 20K TX). 200ms → ~400 TX/commit → 50 commits → 4x less per-commit overhead.
+                min_round_delay_ms: Some(100), // TPS OPTIMIZATION: 100ms proposer delay to reduce consensus block duration.
                 time_based_epoch_change: true, // Enabled by default
                 epoch_duration_seconds: None, // DEPRECATED: loaded from Go via protobuf now
                 max_clock_drift_seconds: 5,

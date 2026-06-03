@@ -70,7 +70,7 @@ func NewShardelDB(baseDir string, numShards int, parallelism int, dbType DBType,
 		case TypeLevelDB:
 			shard = NewLazyLevelDB(primaryPath)
 		case TypePebbleDB:
-			shard = NewPebbleDB(primaryPath)
+			shard = NewLazyPebbleDB(primaryPath)
 		default:
 			return nil, fmt.Errorf("unsupported db type: %d", dbType)
 		}

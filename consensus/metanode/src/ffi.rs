@@ -6,7 +6,7 @@ use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::{Mutex, Condvar, OnceLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // The global callbacks registry configured from Go
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
                 );
             }
             
-            info!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
+            debug!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
             true
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {

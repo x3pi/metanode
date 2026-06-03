@@ -666,6 +666,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			// No caching. No race conditions. This ensures that NOMT is strictly
 			// a lock-free structure that derives correctly from its own C++ state,
 			// preventing `0x0` root hashes.
+			nomtTrie.WaitCommitPayload()
 			if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
@@ -1037,11 +1038,14 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	// ═══════════════════════════════════════════════════════════════
 
 	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		if err := nomtTrie.CommitPayload(); err != nil {
-			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
-			return fmt.Errorf("PersistAsync (StakeStateDB): NOMT CommitPayload failed: %w", err)
-		}
+		go func() {
+			if err := nomtTrie.CommitPayload(); err != nil {
+				logger.Error("PersistAsync background (StakeStateDB): NOMT CommitPayload failed: %v", err)
+			}
+		}()
 	}
+
+
 
 	db.muCommit.Lock()
 	var newTrieToSet p_trie.StateTrie

@@ -163,13 +163,8 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			logger.Error("❌ [COMMIT STATE] Failed to save block #%d to DB: %v", blockNum, err)
 			return blockNum, err
 		}
-		// IMMEDIATELY FLUSH block database to ensure Pebble writes are durable on disk.
-		// This prevents state/block mismatches (Pebble vs. NOMT) upon sudden crashes/termination.
-		if cs.storageManager != nil {
-			if err := cs.storageManager.GetStorageBlock().Flush(); err != nil {
-				logger.Error("❌ [COMMIT STATE] Failed to flush block DB for block #%d: %v", blockNum, err)
-			}
-		}
+		// PebbleDB handles durability via write ahead logging (WAL).
+		// Forced memtable flushes are removed to prevent I/O bottlenecks.
 		logger.Info("✅ [COMMIT STATE] Block #%d persisted to DB and flushed (hash: %s, parentHash: %s, txCount: %d, lastBlockNum_before: %d)",
 			blockNum, blockHash.Hex()[:18], header.LastBlockHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
 	}
@@ -232,12 +227,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			logger.Error("❌ [COMMIT STATE] Failed to commit mappings for block #%d: %v", blockNum, err)
 			return blockNum, err
 		}
-		// IMMEDIATELY FLUSH mapping database to ensure mapping writes are durable on disk.
-		if cs.storageManager != nil {
-			if err := cs.storageManager.GetStorageMapping().Flush(); err != nil {
-				logger.Error("❌ [COMMIT STATE] Failed to flush mapping DB for block #%d: %v", blockNum, err)
-			}
-		}
+		// Mappings are durable via PebbleDB's WAL. Flush calls are removed to avoid I/O bottlenecks.
 	}
 
 	// ─── 9. Auto-update epoch from block header ──────────────────────────

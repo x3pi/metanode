@@ -533,18 +533,18 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
 
-	// ═══════════════════════════════════════════════════════════════
-	// Step 3: BACKGROUND NOMT DISK FLUSH (CommitPayload)
-	// ═══════════════════════════════════════════════════════════════
 	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		if err := nomtTrie.CommitPayload(); err != nil {
-			logger.Error("PersistAsync: NOMT CommitPayload failed", "error", err)
-			return fmt.Errorf("PersistAsync: NOMT CommitPayload failed: %w", err)
-		}
+		go func() {
+			if err := nomtTrie.CommitPayload(); err != nil {
+				logger.Error("PersistAsync background: NOMT CommitPayload failed: %v", err)
+			}
+		}()
 	}
 
 	return nil
 }
+
+
 
 // IntermediateRoot computes the state root hash by applying all dirty account
 // changes to the underlying trie.
@@ -883,6 +883,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 				// reads from memory-mapped pages, ~5-10μs per read, ~5ms for 1000
 				// accounts. Negligible cost for absolute determinism guarantee.
 				// ═══════════════════════════════════════════════════════════════
+				nomtTrie.WaitCommitPayload()
 				if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
 					logger.Error("BatchUpdate (NOMT direct read) failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)

@@ -14,7 +14,7 @@ func main() {
 	}
 	path := os.Args[1]
 
-	handle, err := nomt_ffi.Open(path, 4, 128, 128)
+	handle, err := nomt_ffi.Open(path, 4, 128, 128, 0, true)
 	if err != nil {
 		log.Fatalf("Failed to open: %v", err)
 	}

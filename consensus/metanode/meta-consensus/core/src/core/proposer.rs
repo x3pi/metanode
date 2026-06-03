@@ -133,20 +133,35 @@ impl Core {
                     .set(adaptive_delay_state.quorum_rate());
             }
 
-            // BACKPRESSURE THROTTLING: If Go execution lag is high, throttle block proposal rate.
+            // BACKPRESSURE THROTTLING (June 2026 — RELAXED):
+            // Throttle block proposal rate when Go execution falls behind Rust commits.
+            //
+            // HISTORY: Previous thresholds (100/200) with max 5000ms throttle created a
+            // feedback loop that degraded TPS from 10K to 3K over 25 sustained runs:
+            //   go_lag grows → throttle adds delay → Consensus Duration spikes →
+            //   wall-clock time increases → TPS drops → more lag
+            //
+            // With pipeline mode (doneChan removed, June 2026):
+            //   - commitChannel buffer=8 → max queued memory ~40MB (safe)
+            //   - authQueue buffer=1000 → structural limit on go_lag
+            //   - Go processes blocks faster (non-blocking commit dispatch)
+            //
+            // RELAXED thresholds break the feedback loop while still preventing OOM:
+            //   - Moderate: 500 blocks (was 100) — light throttle, max 500ms
+            //   - Severe: 1000 blocks (was 200) — matches authQueue capacity
             let go_lag = self
                 .system_transaction_provider
                 .as_ref()
                 .map(|p| p.get_go_lag())
                 .unwrap_or(0);
 
-            if go_lag >= 100 { // Start throttling at moderate_lag_threshold (100)
-                let extra_delay = if go_lag >= 200 { // severe_lag_threshold (200)
-                    // Severe throttling: starting at 1000ms, scaling up to 5000ms
-                    Duration::from_millis(1000 + (go_lag.saturating_sub(200) * 50).min(4000))
+            if go_lag >= 500 { // Start throttling at moderate_lag_threshold (500, was 100)
+                let extra_delay = if go_lag >= 1000 { // severe_lag_threshold (1000, was 200)
+                    // Severe throttling: 500ms base, scaling up to 2000ms max (was 5000ms)
+                    Duration::from_millis(500 + (go_lag.saturating_sub(1000) * 10).min(1500))
                 } else {
-                    // Moderate throttling: scaling up to 1000ms
-                    Duration::from_millis((go_lag.saturating_sub(100) * 10).min(1000))
+                    // Moderate throttling: scaling up to 500ms (was 1000ms)
+                    Duration::from_millis((go_lag.saturating_sub(500) * 1).min(500))
                 };
 
                 effective_delay += extra_delay;
@@ -182,8 +197,10 @@ impl Core {
         }
 
         // Determine the ancestors to be included in proposal.
+        let ancestors_start = std::time::Instant::now();
         let (ancestors, excluded_and_equivocating_ancestors) =
             self.smart_ancestors_to_propose(clock_round, !force);
+        let ancestors_elapsed = ancestors_start.elapsed();
 
         // If we did not find enough good ancestors to propose, continue to wait before proposing.
         if ancestors.is_empty() {
@@ -193,6 +210,8 @@ impl Core {
             );
             return None;
         }
+
+        let prop_start = std::time::Instant::now();
 
         let excluded_ancestors_limit = self.context.committee.size() * 2;
         if excluded_and_equivocating_ancestors.len() > excluded_ancestors_limit {
@@ -264,6 +283,7 @@ impl Core {
 
         // Consume the next transactions to be included. Do not drop the guards yet as this would acknowledge
         // the inclusion of transactions. Just let this be done in the end of the method.
+        let tx_pack_start = std::time::Instant::now();
         let (mut transactions, ack_transactions, _limit_reached) = self.transaction_consumer.next();
 
         // Inject system transactions (e.g., EndOfEpoch) if provider is available
@@ -319,6 +339,7 @@ impl Core {
                 );
             }
         }
+        let tx_pack_elapsed = tx_pack_start.elapsed();
 
         self.context
             .metrics
@@ -381,11 +402,14 @@ impl Core {
         block.set_epoch_change_proposal(epoch_change_proposal);
         block.set_epoch_change_votes(epoch_change_votes);
 
+        let sign_start = std::time::Instant::now();
         let signed_block =
             SignedBlock::new(block, &self.block_signer).expect("Block signing failed.");
         let serialized = signed_block
             .serialize()
             .expect("Block serialization failed.");
+        let sign_elapsed = sign_start.elapsed();
+
         self.context
             .metrics
             .node_metrics
@@ -411,12 +435,14 @@ impl Core {
                 );
         }
 
+        let accept_start = std::time::Instant::now();
         // Accept the block into BlockManager and DagState.
         let (accepted_blocks, missing) = self
             .block_manager
             .try_accept_blocks(vec![verified_block.clone()]);
         assert_eq!(accepted_blocks.len(), 1);
         assert!(missing.is_empty());
+        let accept_elapsed = accept_start.elapsed();
 
         // The block must be added to transaction certifier before it is broadcasted or added to DagState.
         // Update proposed state of blocks in local DAG.
@@ -446,7 +472,7 @@ impl Core {
             .inc();
 
         let extended_block = ExtendedBlock {
-            block: verified_block,
+            block: verified_block.clone(),
             excluded_ancestors,
         };
 
@@ -454,6 +480,18 @@ impl Core {
         self.round_tracker
             .write()
             .update_from_verified_block(&extended_block);
+
+        let prop_total = prop_start.elapsed() + ancestors_elapsed;
+        tracing::warn!(
+            "⏱️ [PERF-RUST] try_new_block proposal for round {} (txs: {}): total={:?}, ancestors={:?}, tx_pack={:?}, sign={:?}, accept={:?}",
+            clock_round,
+            verified_block.transactions().len(),
+            prop_total,
+            ancestors_elapsed,
+            tx_pack_elapsed,
+            sign_elapsed,
+            accept_elapsed
+        );
 
         Some((extended_block, flush_ticket))
     }

@@ -170,7 +170,7 @@ impl TxSocketServer {
             return;
         }
 
-        info!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
+        debug!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
             individual_txs.len(), data_len);
         let transactions_to_submit = individual_txs;
 
@@ -305,7 +305,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 500;
+            const MAX_BUNDLE_SIZE: usize = 15000;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
@@ -340,7 +340,7 @@ impl TxSocketServer {
                 let chunk_len = chunk_vec.len();
                 match current_client.submit_no_wait(chunk_vec).await {
                     Ok(included_in_block_rx) => {
-                        info!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);
+                        debug!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);
                         // total_submitted += chunk_len;
                         tokio::spawn(async move {
                             if let Ok((_block_ref, _indices, status_receiver)) = included_in_block_rx.await {
@@ -367,7 +367,7 @@ impl TxSocketServer {
             }
 
             if all_succeeded {
-                info!("✅ [TX-FLOW-TRACE] ▶ PHASE 1.5 DONE: All {} TXs submitted to consensus DAG core", total_tx_count);
+                debug!("✅ [TX-FLOW-TRACE] ▶ PHASE 1.5 DONE: All {} TXs submitted to consensus DAG core", total_tx_count);
                 return; // Everything submitted cleanly
             }
 

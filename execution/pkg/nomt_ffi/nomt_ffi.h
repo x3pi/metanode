@@ -19,7 +19,7 @@ typedef struct SessionHandle SessionHandle;
 typedef struct FinishedSessionHandle FinishedSessionHandle;
 
 /* Database lifecycle */
-NomtHandle* nomt_open(const char* path, int commit_concurrency, int page_cache_mb, int leaf_cache_mb);
+NomtHandle* nomt_open(const char* path, int commit_concurrency, int page_cache_mb, int leaf_cache_mb, int hashtable_buckets, int preallocate_ht);
 void nomt_close(NomtHandle* handle);
 int nomt_root(const NomtHandle* handle, uint8_t* root_out);
 
@@ -30,6 +30,7 @@ int nomt_read(const NomtHandle* handle, const uint8_t* key, uint8_t* val_out, si
 SessionHandle* nomt_session_begin(NomtHandle* handle);
 int nomt_session_warm_up(SessionHandle* session, const uint8_t* key);
 int nomt_session_record_read(SessionHandle* session, const uint8_t* key, const uint8_t* val, size_t val_len);
+int nomt_session_batch_record_read(SessionHandle* session, const uint8_t* keys, const uint8_t* vals, const size_t* val_lens, size_t count);
 int nomt_session_write(SessionHandle* session, const uint8_t* key, const uint8_t* val, size_t val_len);
 int nomt_session_batch_write(SessionHandle* session, const uint8_t* keys, const uint8_t* vals, const size_t* val_lens, size_t count);
 int nomt_session_commit(NomtHandle* handle, SessionHandle* session, uint8_t* new_root_out);

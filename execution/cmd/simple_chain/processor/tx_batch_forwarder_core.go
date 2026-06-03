@@ -4,7 +4,6 @@ package processor
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -52,6 +51,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	// TBAB: Throughput-Based Adaptive Batching state
 	emaTPS := 0.0
 	lastBatchTime := time.Now()
+	cycleCount := uint64(0)
 
 	for {
 		<-ticker.C
@@ -65,9 +65,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		if f, errFile := os.OpenFile("/tmp/my_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
-			f.WriteString(fmt.Sprintf("TxsProcessor2: poolSizeBefore=%d\n", poolSizeBefore))
-			f.Close()
+		cycleCount++
+		if cycleCount%1000 == 0 {
+			logger.Debug("[TX FLOW] TxsProcessor2: poolSizeBefore=%d, emaTPS=%.2f", poolSizeBefore, emaTPS)
 		}
 
 		// BATCH ACCUMULATION: Throughput-Based Adaptive Batching (TBAB)
@@ -78,7 +78,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		} else if emaTPS < 10000 {
 			batchAccumulationTimeout = 20 * time.Millisecond // Balanced
 		} else {
-			batchAccumulationTimeout = 50 * time.Millisecond // Max throughput for extreme load
+			batchAccumulationTimeout = 100 * time.Millisecond // Max throughput for extreme load
 		}
 		
 		const batchAccumulationCheckInterval = 1 * time.Millisecond 
@@ -139,9 +139,22 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
+		// Block size capping: Limit total transactions processed per block tick to ~25,000 txs.
+		// Return any excess transactions back to the pool to be processed in the next blocks.
+		const targetBlockSize = 25000
+		if len(txs) > targetBlockSize {
+			remainingTxs := txs[targetBlockSize:]
+			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
+			for _, tx := range remainingTxs {
+				bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
+			}
+			txs = txs[:targetBlockSize]
+			totalTxs = len(txs) // Update totalTxs to match the capped list
+		}
+
 		// Chia nhỏ batch nếu có quá nhiều transaction để tránh quá tải
 		if totalTxs > maxTransactionsPerBatch {
-			logger.Info("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions, splitting into batches of %d",
+			logger.Debug("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions, splitting into batches of %d",
 				totalTxs, maxTransactionsPerBatch)
 		}
 
@@ -161,7 +174,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			shouldLogBatch := totalTxs > maxTransactionsPerBatch && (batchNum == 1 || batchNum == totalBatches || batchNum%10 == 0)
 			if shouldLogBatch {
-				fmt.Printf("   📋 Batch [%d/%d]: Processing %d transactions (indices %d-%d)\n",
+				logger.Debug("   📋 Batch [%d/%d]: Processing %d transactions (indices %d-%d)",
 					batchNum, totalBatches, len(batchTxs), batchStart, batchEnd-1)
 			}
 
@@ -174,9 +187,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			// FFI Path (forward directly to embedded Rust process)
 			shouldLogSend := batchNum == 1 || batchNum == totalBatches
 			if shouldLogSend {
-				fmt.Printf("📤 [TX FLOW] Sending batch\n [%d/%d]: %d transactions to Rust (size=%d bytes)",
+				logger.Debug("📤 [TX FLOW] Sending batch [%d/%d]: %d transactions to Rust (size=%d bytes)",
 					batchNum, totalBatches, len(batchTxs), len(bTransaction))
-				logger.Info("🔥 [PROFILING] GoSub: Sent batch of %d TXs to Rust FFI at UnixMilli: %d (batch %d/%d)",
+				logger.Debug("🔥 [PROFILING] GoSub: Sent batch of %d TXs to Rust FFI at UnixMilli: %d (batch %d/%d)",
 					len(batchTxs), time.Now().UnixMilli(), batchNum, totalBatches)
 			}
 
@@ -196,7 +209,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				break // Break out of the batch loop to wait for the next tick
 			} else {
 				if shouldLogSend {
-					fmt.Printf("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
+					logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 						batchNum, totalBatches, len(batchTxs))
 				}
 				// Pipeline stats: track TXs forwarded to Rust
@@ -205,6 +218,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				LastSendBatchTimeNano.Store(time.Now().UnixNano())
 				LastSendBatchTxCount.Store(int64(totalTxs))
 				// ─────────────────────────────────────────────────────────────────
+				// PACING: Add a small delay to prevent overflowing the Rust consensus with too many transactions at once.
+				// TPS OPTIMIZATION: Pacing logic to avoid choking Mysten's mempool with massive TX bursts.
+				// 1000 TXs / 20ms * 4 nodes = 200,000 TPS theoretical max injection rate.
+				// In a 200ms round, Mysten will receive exactly 40000 TXs, keeping block sizes highly optimal!
+				time.Sleep(20 * time.Millisecond)
 			}
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -64,7 +65,7 @@ func (bp *BlockProcessor) GenerateBlocksInBatch() {
 func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult, totalTxs int, blockCount int, batchID string) {
 	// Only log when batch has many transactions
 	if totalTxs > 5000 {
-		logger.Info("TPS_BATCH_START: BatchID=%s, TotalTxs=%d", batchID, totalTxs)
+		logger.Debug("TPS_BATCH_START: BatchID=%s, TotalTxs=%d", batchID, totalTxs)
 	}
 	batchStartTime := time.Now()
 	bp.ProcessedVirtualTxCount.Add(uint64(totalTxs))
@@ -83,13 +84,10 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 		}
 	}
 
-	txsPerBlock := (totalTxs + blockCount - 1) / blockCount
+	txsPerBlock := 25000
 	actualBlocksToCreate := 0
-	for i := 0; i < blockCount; i++ {
-		if i*txsPerBlock >= totalTxs {
-			break
-		}
-		actualBlocksToCreate++
+	if totalTxs > 0 {
+		actualBlocksToCreate = (totalTxs + txsPerBlock - 1) / txsPerBlock
 	}
 
 	if actualBlocksToCreate == 0 {
@@ -103,7 +101,7 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 	wg.Add(actualBlocksToCreate)
 
 	// Log number of goroutines to be created
-	logger.Info("createBlockBatch: Creating %d goroutines to create blocks (batchID: %s)", actualBlocksToCreate, batchID)
+	logger.Debug("createBlockBatch: Creating %d goroutines to create blocks (batchID: %s)", actualBlocksToCreate, batchID)
 
 	// Check channel capacity
 	channelLen := len(bp.createdBlocksChan)
@@ -160,10 +158,11 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 	// goroutine to get the trie nodes; all others got nil → go-sub missing account state.
 	bp.chainState.GetAccountStateDB().ClearAccountBatch()
 	mvm.CallClearAllStateInstances()
-	logger.Info("createBlockBatch: Completed, all %d goroutines finished (batchID: %s)", actualBlocksToCreate, batchID)
+	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+	logger.Debug("createBlockBatch: Completed, all %d goroutines finished (batchID: %s)", actualBlocksToCreate, batchID)
 	// Only log when batch has many transactions
 	if totalTxs > 5000 {
-		logger.Info("TPS_BATCH_END: BatchID=%s, Duration=%s", batchID, time.Since(batchStartTime))
+		logger.Debug("TPS_BATCH_END: BatchID=%s, Duration=%s", batchID, time.Since(batchStartTime))
 	}
 }
 
@@ -234,7 +233,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 			}
 		}
 	}
-	logger.Info("🔧 [Batch] ApplyNomtReplicationBatches block-by-block completed for %d blocks in %v", len(blockBatch), time.Since(nomtStart))
+	logger.Debug("🔧 [Batch] ApplyNomtReplicationBatches block-by-block completed for %d blocks in %v", len(blockBatch), time.Since(nomtStart))
 
 	storages := map[string]storage.Storage{
 		"Block":         bp.storageManager.GetStorageBlock(),
@@ -314,6 +313,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	mvm.ClearAllMVMApi()
 	mvm.ClearAllProtectedMVMApi()
 	mvm.CallClearAllStateInstances()
+	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 
 	// FORK-SAFETY (Apr 2026): Clear Go-side AccountStateDB and StakeStateDB read caches.
 	// applyBlockBatch writes directly to NOMT/PebbleDB, bypassing AccountStateDB.

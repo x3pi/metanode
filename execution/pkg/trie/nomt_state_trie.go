@@ -1116,19 +1116,25 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	}
 
 	// CRITICAL FORK-SAFETY FIX: Record old values BEFORE writing.
+	// We optimize this by batching all record reads to minimize FFI boundary crossing overhead.
+	nomtReadKeys := make([][32]byte, 0, dirtyCount)
+	nomtReadVals := make([][]byte, 0, dirtyCount)
 	var insertCount, updateCount int
 	for _, hexKey := range sortedDirtyKeys {
 		entry := committingSnapshot[hexKey]
+		nomtReadKeys = append(nomtReadKeys, entry.keyPath)
 		if oldVal, ok := oldValuesSnapshot[hexKey]; ok && len(oldVal) > 0 {
-			if err := session.RecordRead(entry.keyPath, oldVal); err != nil {
-				logger.Warn("[NomtStateTrie] RecordRead failed for key %s: %v", hexKey[:8], err)
-			}
+			nomtReadVals = append(nomtReadVals, oldVal)
 			updateCount++
 		} else {
-			if err := session.RecordRead(entry.keyPath, nil); err != nil {
-				logger.Warn("[NomtStateTrie] RecordRead(nil) failed for key %s: %v", hexKey[:8], err)
-			}
+			nomtReadVals = append(nomtReadVals, nil)
 			insertCount++
+		}
+	}
+
+	if len(nomtReadKeys) > 0 {
+		if err := session.BatchRecordRead(nomtReadKeys, nomtReadVals); err != nil {
+			logger.Warn("[NomtStateTrie] BatchRecordRead failed: %v", err)
 		}
 	}
 
@@ -1307,6 +1313,9 @@ func (n *NomtStateTrie) Copy() StateTrie {
 }
 
 func (n *NomtStateTrie) CommitPayload() error {
+	n.handle.LockCommitPayload()
+	defer n.handle.UnlockCommitPayload()
+
 	n.sessionMu.Lock()
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
@@ -1357,6 +1366,11 @@ func (n *NomtStateTrie) CommitPayload() error {
 	n.writerMu.Unlock()
 
 	return nil
+}
+
+func (n *NomtStateTrie) WaitCommitPayload() {
+	n.handle.LockCommitPayload()
+	n.handle.UnlockCommitPayload()
 }
 
 // GetCommitBatch returns the entries from the last Commit for network replication.
