@@ -238,33 +238,29 @@ func (tp *TransactionProcessor) backupDeviceKey(s storage.Storage, t types.Trans
 		},
 	}
 
-	// Sử dụng worker pool và timeout để tránh rò rỉ bộ nhớ
-	// Tạo context với timeout 5 giây cho mỗi goroutine
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Gửi đến master connections với worker pool (không đồng bộ)
+	tp.sendDeviceKeyWithPool(mt_common.MASTER_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
 
-	// Gửi đến master connections với worker pool và timeout
-	tp.sendDeviceKeyWithPool(ctx, mt_common.MASTER_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
-
-	// Gửi đến child node connections với worker pool và timeout
-	tp.sendDeviceKeyWithPool(ctx, mt_common.CHILD_NODE_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
+	// Gửi đến child node connections với worker pool (không đồng bộ)
+	tp.sendDeviceKeyWithPool(mt_common.CHILD_NODE_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
 
 	return nil
 }
 
-// sendDeviceKeyWithPool gửi device key với worker pool và timeout để tránh rò rỉ bộ nhớ
+// sendDeviceKeyWithPool gửi device key không đồng bộ sử dụng worker pool và timeout
 func (tp *TransactionProcessor) sendDeviceKeyWithPool(
-	ctx context.Context,
 	connectionTypeName string,
 	command string,
 	pbMessage proto.Message,
 ) {
-	// Cố gắng lấy slot từ worker pool
 	select {
 	case tp.deviceKeySendPool <- struct{}{}:
-		// Có slot, tạo goroutine với timeout
 		atomic.AddInt64(&tp.deviceKeyGoroutineCount, 1)
+		// Chạy không đồng bộ sau khi đã lấy được slot trong worker pool
 		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
 			defer func() {
 				<-tp.deviceKeySendPool // Trả lại slot
 				atomic.AddInt64(&tp.deviceKeyGoroutineCount, -1)
@@ -277,7 +273,6 @@ func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 				atomic.AddInt64(&tp.deviceKeyGoroutineCompleted, 1)
 			}()
 
-			// Gửi với context timeout
 			_ = sendToAllConnectionsOfTypeWithContext(
 				ctx,
 				tp.env,
@@ -287,12 +282,8 @@ func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 				pbMessage,
 			)
 		}()
-	case <-ctx.Done():
-		// Timeout hoặc context bị cancel trước khi có slot
-		// MEMORY-SAFETY: Removed redundant time.After(100ms) case — ctx already
-		// has a 5s timeout from the caller, so ctx.Done() is sufficient.
-		// time.After in select creates a new Timer per call that leaks until expiry.
-		logger.Warn("Device key send pool full or timeout, dropping request for %s", connectionTypeName)
+	default:
+		logger.Warn("Device key send pool full, dropping sync request for %s", connectionTypeName)
 	}
 }
 

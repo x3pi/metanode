@@ -951,6 +951,11 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 
 	// --- Apply changes to destination DB ---
 	db.muTrie.Lock()
+	if db.trie != nil && db.trie != sourceTrie {
+		if closer, ok := db.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	db.trie = sourceTrie
 	db.originRootHash = sourceOriginHash
 	db.db = sourceDb

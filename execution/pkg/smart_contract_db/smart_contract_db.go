@@ -344,6 +344,9 @@ func (db *SmartContractDB) CommitAllStorage() error {
 			}
 		}
 
+		if closer, ok := t.(interface{ Close() }); ok {
+			closer.Close()
+		}
 		db.smartContractStorageTries.Delete(address)
 	}
 
@@ -671,7 +674,12 @@ func (db *SmartContractDB) Discard() {
 		db.pendingCode.Delete(key)
 		return true
 	})
-	db.smartContractStorageTries.Range(func(key, _ interface{}) bool {
+	db.smartContractStorageTries.Range(func(key, value interface{}) bool {
+		if t, ok := value.(trie.StateTrie); ok && t != nil {
+			if closer, ok := t.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
 		db.smartContractStorageTries.Delete(key)
 		return true
 	})

@@ -1263,6 +1263,9 @@ func (cs *ChainState) Close() {
 			closer.Close()
 		}
 	}
+	if scDB := cs.GetSmartContractDB(); scDB != nil {
+		scDB.Discard()
+	}
 	if cs.changelogDB != nil {
 		cs.changelogDB.Close()
 	}

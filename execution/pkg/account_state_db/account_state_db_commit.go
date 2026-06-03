@@ -243,6 +243,11 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	}
 
 	// 6. Update the live trie reference and origin hash
+	if db.trie != nil && db.trie != newTrie {
+		if closer, ok := db.trie.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
 	db.trie = newTrie
 	db.originRootHash = finalHash
 
@@ -509,6 +514,11 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	if db.trie != nil {
 		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
 			changelogDB = nomtTrie.GetChangelogDB()
+		}
+		if db.trie != newTrieToSet {
+			if closer, ok := db.trie.(interface{ Close() }); ok {
+				closer.Close()
+			}
 		}
 	}
 	if changelogDB != nil {
