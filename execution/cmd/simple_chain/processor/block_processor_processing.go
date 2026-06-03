@@ -249,7 +249,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			for _, rcp := range processResults.Receipts {
 				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), rcp.TransactionHash().Bytes(), []byte{byte(rcp.Status())})
 			}
-			logger.Info("🔍 [FORENSIC] Block %d: Input %d receipts to calculateReceiptsRoot. Combined Input Hash: %s", currentBlockNumber, len(processResults.Receipts), combinedHash.Hex())
+			logger.Debug("🔍 [FORENSIC] Block %d: Input %d receipts to calculateReceiptsRoot. Combined Input Hash: %s", currentBlockNumber, len(processResults.Receipts), combinedHash.Hex())
 		}
 
 		receipts, receiptsRoot = bp.calculateReceiptsRoot(processResults.Receipts)
@@ -266,7 +266,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			for _, tx := range processResults.Transactions {
 				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), tx.Hash().Bytes())
 			}
-			logger.Info("🔍 [FORENSIC] Block %d: Input %d txs to txDB. Combined Input Hash: %s", currentBlockNumber, len(processResults.Transactions), combinedHash.Hex())
+			logger.Debug("🔍 [FORENSIC] Block %d: Input %d txs to txDB. Combined Input Hash: %s", currentBlockNumber, len(processResults.Transactions), combinedHash.Hex())
 		}
 
 		txDB.AddTransactions(processResults.Transactions)
@@ -498,13 +498,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// the next block's read → different IntermediateRoot() → different
 	// AccountStatesRoot → different block hash → FORK.
 	// ═══════════════════════════════════════════════════════════════════════════
-	// TPS PIPELINE (May 2026): Non-blocking commit dispatch.
+	// TPS PIPELINE (June 2026): Non-blocking commit dispatch.
 	//
-	// PREVIOUSLY: doneChan blocked until commitWorker finished PebbleDB persist.
-	// This serialized execution: Block N committed → Block N+1 starts processing.
-	//
-	// NOW: doneChan is nil (no blocking). Block N+1's EVM starts immediately
-	// after commitToMemoryParallel completes (trie is fully updated).
+	// DoneChan is nil — Block N+1's EVM starts immediately after
+	// commitToMemoryParallel completes (trie is fully updated in memory).
+	// commitWorker runs PebbleDB persist in parallel with next block's EVM.
 	//
 	// SAFETY PROOF:
 	//   1. PersistAsync runs INLINE in commitToMemoryParallel (not async).
@@ -515,21 +513,21 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	//      - CommitBlockState (PebbleDB persist — disk only)
 	//      - updateAndPersistConsensusState (GEI to disk)
 	//      - BLS signing (header field only)
-	//   3. commitChannel serializes commitWorker — ordering guaranteed.
+	//   3. commitChannel serializes commitWorker — ordering guaranteed (FIFO).
 	//   4. blockWriteMutex serializes createBlockFromResults — no concurrent writes.
+	//   5. WaitForPersistence (snapshot) sends FENCE to commitChannel and waits —
+	//      guarantees all prior blocks are fully persisted before snapshot.
 	//
 	// RESULT: EVM(N+1) overlaps with PebbleDB persist(N).
 	//   Effective per-block time = max(EVM, Commit) instead of sum(EVM + Commit).
-	//   Expected throughput improvement: 2-3x.
 	// ═══════════════════════════════════════════════════════════════════════════
-	doneChan := make(chan struct{}, 1)
 
 	job := CommitJob{
 		Block:                     bl,
 		ProcessResults:            &processResults,
 		Receipts:                  receipts,
 		TxDB:                      txDB,
-		DoneChan:                  doneChan, // Signal when database commit is complete
+		DoneChan:                  nil, // Non-blocking: no wait for PebbleDB persist
 		MappingWg:                 &mappingWg,
 		TrieBatchSnapshot:         trieBatchSnapshot,
 		AccountBatch:              accountBatch,
@@ -562,25 +560,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	}
 
 	// Send job to commitWorker.
-	// Block until commitChannel has space (natural backpressure)
+	// Block until commitChannel has space (natural backpressure when commitWorker falls behind)
 	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
 		logger.Warn("🔥 [SATURATION] commitChannel is %d/%d full (Pipeline stalled)!", len(bp.commitChannel), cap(bp.commitChannel))
 	}
-	
-	// Acquire PebbleDB commit lock to prevent overlapping executions
-	storage.SetCommitLock(true)
 	bp.commitChannel <- job
-
-	// ═══════════════════════════════════════════════════════════════
-	// SYNCHRONOUS COMMIT: Wait for commitWorker to finish PebbleDB persist.
-	// This prevents Block N+1 from executing/committing before Block N
-	// has completed writing to disk, eliminating the out-of-order tip race.
-	// ═══════════════════════════════════════════════════════════════
-	logger.Debug("⚡ [SYNCHRONOUS] Block #%d commit dispatched (blocking, GEI=%d)",
+	LastBlockProcessedTimeNano.Store(time.Now().UnixNano())
+	logger.Debug("⚡ [PIPELINE] Block #%d dispatched to commitWorker (non-blocking, GEI=%d)",
 		currentBlockNumber, globalExecIndex)
-
-	// Block until block commit is fully complete to PebbleDB
-	<-doneChan
 
 	phase4Elapsed := time.Since(phase4Start)
 	overallElapsed := time.Since(overallStart)
@@ -597,7 +584,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		loadedSize := bp.chainState.GetAccountStateDB().LoadedAccountCount()
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		logger.Info("📊 [DEGRADATION MONITOR] Block #%d: loadedAccounts=%d, HeapAlloc=%dMB, GC_pause_total=%v, GC_num=%d, goroutines=%d",
+		logger.Debug("📊 [DEGRADATION MONITOR] Block #%d: loadedAccounts=%d, HeapAlloc=%dMB, GC_pause_total=%v, GC_num=%d, goroutines=%d",
 			currentBlockNumber, loadedSize, m.HeapAlloc/(1024*1024),
 			gcStats.PauseTotal, gcStats.NumGC, runtime.NumGoroutine())
 	}
@@ -609,7 +596,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	metrics.TxsProcessedTotal.Add(float64(len(processResults.Transactions)))
 
 	if len(processResults.Transactions) > 1000 {
-		logger.Info("📦 [batch_id=%s] === Block Creation Time %d (In Memory) [%d txs] === 📦\n   - Phase 1 (Root Calc):      %v\n   - Phase 2 (Block Data):     %v\n   - Phase 3.1 (Mapping):      %v\n   - Phase 3.2 (Trie Commit):  %v\n   - Phase 4 (Job Prep & Snap):%v\n   - 🚀 TOTAL (IN-MEMORY):     %v",
+		logger.Debug("📦 [batch_id=%s] === Block Creation Time %d (In Memory) [%d txs] === 📦\n   - Phase 1 (Root Calc):      %v\n   - Phase 2 (Block Data):     %v\n   - Phase 3.1 (Mapping):      %v\n   - Phase 3.2 (Trie Commit):  %v\n   - Phase 4 (Job Prep & Snap):%v\n   - 🚀 TOTAL (IN-MEMORY):     %v",
 			batchID, bl.Header().BlockNumber(), len(processResults.Transactions),
 			phase1Elapsed, phase2Elapsed, phase31Elapsed, phase32Elapsed, phase4Elapsed, overallElapsed)
 	}
@@ -631,7 +618,7 @@ func (bp *BlockProcessor) ProcessorPoolReadOnly() {
 
 func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []common.Hash) {
 	blockNumber := lastBlock.Header().BlockNumber()
-	logger.Info("🔄 [PENDING POOL] postProcessBlock called for block #%d, transactions=%d",
+	logger.Debug("🔄 [PENDING POOL] postProcessBlock called for block #%d, transactions=%d",
 		blockNumber, len(lastBlock.Transactions()))
 
 	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(lastBlock.Header().TransactionsRoot(), bp.storageManager.GetStorageTransaction())
@@ -681,7 +668,7 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 		logger.Warn("⚠️ [PENDING POOL] postProcessBlock for block #%d: skipped %d/%d transactions due to lookup failures",
 			blockNumber, skippedCount, len(txHashes))
 	}
-	logger.Info("✅ [PENDING POOL] postProcessBlock completed for block #%d: removed %d/%d transactions from pending pool",
+	logger.Debug("✅ [PENDING POOL] postProcessBlock completed for block #%d: removed %d/%d transactions from pending pool",
 		blockNumber, removedCount, len(txHashes))
 	if bp.storageManager.IsExplorer() {
 		bp.storageManager.GetExplorerSearchService().Commit()

@@ -56,12 +56,46 @@ pub struct FinishedSessionHandle {
 /// - `commit_concurrency`: number of concurrent commit workers (1-64)
 /// - `page_cache_mb`: page cache size in MiB (default: 256)
 /// - `leaf_cache_mb`: leaf cache size in MiB (default: 256)
+fn get_num_pages_from_total_pages(total_pages: u64) -> Option<u32> {
+    if total_pages == 0 {
+        return None;
+    }
+    let mut num_pages = (total_pages * 4096 / 4097) as u32;
+    for _ in 0..5 {
+        let meta_pages = (num_pages + 4095) / 4096;
+        let got_total = num_pages as u64 + meta_pages as u64;
+        if got_total == total_pages {
+            return Some(num_pages);
+        } else if got_total < total_pages {
+            num_pages += 1;
+        } else {
+            if num_pages == 0 {
+                break;
+            }
+            num_pages -= 1;
+        }
+    }
+    None
+}
+
+/// Open a NOMT database at the given path.
+///
+/// Returns a pointer to NomtHandle on success, null on failure.
+/// The caller must eventually call `nomt_close` to free resources.
+///
+/// # Parameters
+/// - `path`: null-terminated C string for the database directory path
+/// - `commit_concurrency`: number of concurrent commit workers (1-64)
+/// - `page_cache_mb`: page cache size in MiB (default: 256)
+/// - `leaf_cache_mb`: leaf cache size in MiB (default: 256)
 #[no_mangle]
 pub extern "C" fn nomt_open(
     path: *const c_char,
     commit_concurrency: c_int,
     page_cache_mb: c_int,
     leaf_cache_mb: c_int,
+    hashtable_buckets: c_int,
+    preallocate_ht: c_int,
 ) -> *mut NomtHandle {
     if path.is_null() {
         eprintln!("[nomt_ffi] nomt_open: null path");
@@ -76,6 +110,24 @@ pub extern "C" fn nomt_open(
             return ptr::null_mut();
         }
     };
+
+    let mut resolved_buckets = hashtable_buckets;
+    let ht_path = Path::new(path_str).join("ht");
+    if ht_path.exists() {
+        if let Ok(metadata) = fs::metadata(&ht_path) {
+            let file_size = metadata.len();
+            if file_size > 0 && file_size % 4096 == 0 {
+                let total_pages = file_size / 4096;
+                if let Some(num_pages) = get_num_pages_from_total_pages(total_pages) {
+                    eprintln!(
+                        "[nomt_ffi] Detected existing HT file for path '{}' with {} pages (requested {}). Overriding.",
+                        path_str, num_pages, hashtable_buckets
+                    );
+                    resolved_buckets = num_pages as c_int;
+                }
+            }
+        }
+    }
 
     let mut opts = Options::new();
     opts.path(path_str);
@@ -93,6 +145,12 @@ pub extern "C" fn nomt_open(
     if leaf_cache_mb > 0 {
         opts.leaf_cache_size(leaf_cache_mb as usize);
     }
+
+    if resolved_buckets > 0 {
+        opts.hashtable_buckets(resolved_buckets as u32);
+    }
+
+    opts.preallocate_ht(preallocate_ht != 0);
 
     // Enable page cache prepopulation for predictable worst-case performance
     opts.prepopulate_page_cache(true);
@@ -392,6 +450,58 @@ pub extern "C" fn nomt_session_batch_write(
     }
     0
 }
+
+/// Batch-add multiple read records to the session (for ReadThenWrite tracking).
+///
+/// # Parameters
+/// - `session`: session handle
+/// - `keys`: pointer to N × 32-byte keys (contiguous)
+/// - `vals`: pointer to flattened values
+/// - `val_lens`: pointer to array of N value lengths (0 if key didn't exist)
+/// - `count`: number of key-value pairs
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn nomt_session_batch_record_read(
+    session: *mut SessionHandle,
+    keys: *const u8,
+    vals: *const u8,
+    val_lens: *const size_t,
+    count: size_t,
+) -> c_int {
+    if session.is_null() || keys.is_null() || val_lens.is_null() {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    let session = unsafe { &mut *session };
+    session.reads.reserve(count);
+
+    unsafe {
+        let mut val_offset = 0;
+        for i in 0..count {
+            let mut kp = [0u8; 32];
+            ptr::copy_nonoverlapping(keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+            let val_len = *val_lens.add(i);
+
+            let value = if vals.is_null() || val_len == 0 {
+                None
+            } else {
+                let v = Some(slice::from_raw_parts(vals.add(val_offset), val_len).to_vec());
+                val_offset += val_len;
+                v
+            };
+
+            session.reads.push((kp, value));
+        }
+    }
+    0
+}
+
 
 /// Commit the session: apply all accumulated writes to the database
 /// and compute the new Merkle root.

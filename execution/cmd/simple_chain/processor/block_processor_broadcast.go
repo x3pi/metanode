@@ -179,46 +179,52 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 		// ═══════════════════════════════════════════════════════════════
 		txHash := v.TransactionHash()
 		var txHashConn network.Connection
+		var txHashEntry TxHashConnEntry
+		hasTxHashConn := false
 
 		if connVal, ok := bp.txHashConnectionMap.LoadAndDelete(txHash); ok {
 			if entry, castOk := connVal.(TxHashConnEntry); castOk && entry.Conn != nil && entry.Conn.IsConnect() {
 				txHashConn = entry.Conn
-				b, err := v.Marshal()
-				if err == nil {
-					txHashDeliveredCount++
-					processedCount++
-					_txHash := txHash.Hex()
-					go func(_conn network.Connection, _marshaledReceipt []byte, _msgID string, _txHash string) {
-						respMsg := p_network.NewMessage(&pb.Message{
-							Header: &pb.Header{
-								Command: command.Receipt,
-								ID:      _msgID,
-							},
-							Body: _marshaledReceipt,
-						})
-						sendErr := _conn.SendMessage(respMsg)
-						if sendErr != nil {
-							logger.Error("❌ [RECEIPT BROADCAST] txHash delivery failed: txHash=%s, err=%v",
-								_txHash, sendErr)
-						} else {
-							logger.Info("📬 [RECEIPT BROADCAST] Delivered via txHash: %s (msgID=%s)", safePrefix(_txHash, 16), safePrefix(_msgID, 8))
-						}
-					}(entry.Conn, b, entry.MsgID, _txHash)
-				}
+				txHashEntry = entry
+				hasTxHashConn = true
 			}
 		}
 
 		// ═══════════════════════════════════════════════════════════════
-		// PRIORITY 2: toAddress-based delivery
+		// PRIORITY 2: toAddress-based delivery (Optimized connection check first)
 		// ═══════════════════════════════════════════════════════════════
-		asTo, errTo := bp.chainState.GetAccountStateDB().AccountState(v.ToAddress())
-		if errTo != nil || asTo == nil {
-			toErrCount++
+		toAddr := v.ToAddress()
+		var connTo network.Connection
+		var connBls network.Connection
+
+		if toAddr != (common.Address{}) {
+			conn := bp.connectionsManager.ConnectionByTypeAndAddress(p_common.CLIENT_CONNECTION_IDX, toAddr)
+			if conn != nil && conn.IsConnect() && conn.RemoteAddrSafe() != "" {
+				connTo = conn
+			}
+		}
+
+		// If no direct ToAddress connection, check if there is a BLS address connection.
+		// We only query AccountState (ReadOnly) to check for a BLS connection if connTo is nil.
+		if connTo == nil && toAddr != (common.Address{}) {
+			asTo, errTo := bp.chainState.GetAccountStateDB().AccountStateReadOnly(toAddr)
+			if errTo == nil && asTo != nil && len(asTo.PublicKeyBls()) > 0 {
+				blsAddr := bls.GetAddressFromPublicKey(asTo.PublicKeyBls())
+				if blsAddr != toAddr {
+					conn := bp.connectionsManager.ConnectionByTypeAndAddress(p_common.CLIENT_CONNECTION_IDX, blsAddr)
+					if conn != nil && conn.IsConnect() && conn.RemoteAddrSafe() != "" {
+						connBls = conn
+					}
+				}
+			}
+		}
+
+		// FAST PATH: If no one is connected and listening to this receipt, skip all marshalling and db overhead!
+		if !hasTxHashConn && connTo == nil && connBls == nil {
 			continue
 		}
 
-		processedCount++
-
+		// Marshal once only if we have at least one destination
 		b, err := v.Marshal()
 		if err != nil {
 			logger.Error(
@@ -229,16 +235,35 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 			continue
 		}
 
-		// Hàm helper để gửi receipt cho một địa chỉ, tránh trùng lặp
-		sendToAddress := func(addr common.Address) {
-			conn := bp.connectionsManager.ConnectionByTypeAndAddress(p_common.CLIENT_CONNECTION_IDX, addr)
-			if conn != nil && conn.IsConnect() && conn.RemoteAddrSafe() != "" {
-				// Nếu kết nối này chính là kết nối đã gửi theo txHash ở trên, ta skip để không bị nhận đúp
-				if txHashConn != nil && conn.RemoteAddrSafe() == txHashConn.RemoteAddrSafe() {
-					return
+		// Deliver via txHash
+		if hasTxHashConn {
+			txHashDeliveredCount++
+			processedCount++
+			_txHash := txHash.Hex()
+			go func(_conn network.Connection, _marshaledReceipt []byte, _msgID string, _txHash string) {
+				respMsg := p_network.NewMessage(&pb.Message{
+					Header: &pb.Header{
+						Command: command.Receipt,
+						ID:      _msgID,
+					},
+					Body: _marshaledReceipt,
+				})
+				sendErr := _conn.SendMessage(respMsg)
+				if sendErr != nil {
+					logger.Error("❌ [RECEIPT BROADCAST] txHash delivery failed: txHash=%s, err=%v",
+						_txHash, sendErr)
+				} else {
+					logger.Info("📬 [RECEIPT BROADCAST] Delivered via txHash: %s (msgID=%s)", safePrefix(_txHash, 16), safePrefix(_msgID, 8))
 				}
+			}(txHashConn, b, txHashEntry.MsgID, _txHash)
+		}
 
-				_txHash := v.TransactionHash().Hex()
+		// Deliver via toAddress connection
+		if connTo != nil {
+			// Skip if it is the same connection as txHash to avoid double delivery
+			if txHashConn == nil || connTo.RemoteAddrSafe() != txHashConn.RemoteAddrSafe() {
+				processedCount++
+				_txHash := txHash.Hex()
 				go func(_conn network.Connection, _marshaledReceipt []byte, _txHash string, _targetAddr common.Address) {
 					sendErr := bp.messageSender.SendBytes(_conn, command.Receipt, _marshaledReceipt)
 					if sendErr != nil {
@@ -247,20 +272,25 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 					} else {
 						logger.Info("📬 [RECEIPT BROADCAST] Delivered via toAddress: %s (target=%s)", safePrefix(_txHash, 16), _targetAddr.Hex())
 					}
-				}(conn, b, _txHash, addr)
+				}(connTo, b, _txHash, toAddr)
 			}
 		}
 
-		// Gửi cho địa chỉ account (thường là ETH address)
-		addrTo := asTo.Address()
-		sendToAddress(addrTo)
-
-		// Gửi cho địa chỉ BLS (nếu có và khác biệt)
-		pubKeyTo := asTo.PublicKeyBls()
-		if pubKeyTo != nil {
-			blsAddr := bls.GetAddressFromPublicKey(pubKeyTo)
-			if blsAddr != addrTo {
-				sendToAddress(blsAddr)
+		// Deliver via BLS address connection
+		if connBls != nil {
+			if txHashConn == nil || connBls.RemoteAddrSafe() != txHashConn.RemoteAddrSafe() {
+				processedCount++
+				_txHash := txHash.Hex()
+				blsAddr := bls.GetAddressFromPublicKey(v.ToAddress().Bytes()) // target log
+				go func(_conn network.Connection, _marshaledReceipt []byte, _txHash string, _targetAddr common.Address) {
+					sendErr := bp.messageSender.SendBytes(_conn, command.Receipt, _marshaledReceipt)
+					if sendErr != nil {
+						logger.Error("❌ [RECEIPT BROADCAST] Failed to send receipt: txHash=%s, target=%s, error=%v",
+							_txHash, _targetAddr.Hex(), sendErr)
+					} else {
+						logger.Info("📬 [RECEIPT BROADCAST] Delivered via BLS toAddress: %s (target=%s)", safePrefix(_txHash, 16), _targetAddr.Hex())
+					}
+				}(connBls, b, _txHash, blsAddr)
 			}
 		}
 	}

@@ -491,6 +491,7 @@ impl ConsensusNode {
         storage: &StorageSetup,
     ) -> Result<consensus_config::Parameters> {
         let mut parameters = consensus_config::Parameters::default();
+        parameters.propagation_delay_stop_proposal_threshold = 100;
         parameters.commit_sync_batch_size = config.commit_sync_batch_size;
         parameters.commit_sync_parallel_fetches = config.commit_sync_parallel_fetches;
         parameters.commit_sync_batches_ahead = config.commit_sync_batches_ahead;

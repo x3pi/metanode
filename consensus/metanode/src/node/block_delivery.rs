@@ -11,7 +11,7 @@ use crate::node::executor_client::ExecutorClient;
 use consensus_core::CommittedSubDag;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// A sanitized commit that has been verified, has the proper GEI assigned,
 /// and has the leader address resolved.
@@ -70,7 +70,7 @@ impl BlockDeliveryManager {
 
             match result {
                 Ok(geis_consumed) => {
-                    info!(
+                    debug!(
                         "✅ [TX-FLOW-TRACE] ▶ PHASE 3.3→3.4 DONE: send_committed_subdag completed | \
                          commit_index={}, gei={}, geis_consumed={}",
                         commit_index, msg.global_exec_index, geis_consumed

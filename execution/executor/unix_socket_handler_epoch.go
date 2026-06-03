@@ -1096,10 +1096,7 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 		logger.Error("❌ [EXECUTE SYNC] Failed to persist backup for block #%d: %v", blockNum, putErr)
 	}
 	legacyKey := []byte(fmt.Sprintf("backup_%d", blockNum))
-	backupStorage.Put(legacyKey, backupBytes)
-	if err := backupStorage.Flush(); err != nil {
-		logger.Error("❌ [EXECUTE SYNC] Failed to flush backup for block #%d: %v", blockNum, err)
-	}
+	_ = backupStorage.Put(legacyKey, backupBytes)
 }
 
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.

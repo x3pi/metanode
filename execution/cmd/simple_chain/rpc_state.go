@@ -535,7 +535,7 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to create temp dir: %w", err)
 	}
 
-	tempHandle, err := nomt_ffi.Open(tempDir, 1, 64, 64)
+	tempHandle, err := nomt_ffi.Open(tempDir, 1, 64, 64, 0, true)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to init temp nomt handle: %w", err)

@@ -226,13 +226,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // It verifies them individually but adds them to the pool and pending manager in bulk
 // to minimize lock contention.
 func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction, skipVerification bool) []error {
-	if f, err := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		f.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal called with %d txs\n", len(txs)))
-		for i, tx := range txs {
-			f.WriteString(fmt.Sprintf("  tx[%d]: From=%v, Nonce=%d, Hash=%v\n", i, tx.FromAddress().String(), tx.GetNonce(), tx.Hash().Hex()))
-		}
-		f.Close()
-	}
+	// Disabled vp_debug.log writing in hot-path for performance
 
 	if len(txs) == 0 {
 		return nil
@@ -340,12 +334,8 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		wg.Wait()
 	}
 
-	// Create file logger
+	// Create file logger - Disabled for performance
 	var logFile *os.File
-	var err error
-	if logFile, err = os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		defer logFile.Close()
-	}
 
 	for i, tx := range txs {
 		if tx == nil {
@@ -416,12 +406,25 @@ func (vp *TxValidatorPool) StartPreloadAccounts(txs []types.Transaction) <-chan 
 	return preloadDone
 }
 
+var LastBlockProcessedTimeNano atomic.Int64
+
 // ProcessTransactions processes a batch of transactions through grouping and execution.
 // blockTime is the deterministic timestamp (in seconds) from Rust consensus for EVM block.timestamp.
 func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTime uint64, leaderAddr common.Address, externalPreload <-chan struct{}, blockNum uint64) (
 	tx_processor.ProcessResult,
 	error,
 ) {
+
+	consensusStartNano := LastSendBatchTimeNano.Load()
+	var consensusDuration time.Duration
+	if consensusStartNano > 0 && len(txs) > 0 {
+		lastProcessed := LastBlockProcessedTimeNano.Load()
+		if consensusStartNano > lastProcessed {
+			LastBlockProcessedTimeNano.Store(consensusStartNano)
+			lastProcessed = consensusStartNano
+		}
+		consensusDuration = time.Since(time.Unix(0, lastProcessed))
+	}
 
 	if len(txs) > 0 {
 		storage.SetCommitLock(true)
@@ -476,6 +479,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 	ve, isVe := vp.offChainProcessor.(virtualExecutor)
 
+	startVirtual := time.Now()
 	for i, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
@@ -488,6 +492,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 			}
 		}
 	}
+	virtualDuration := time.Since(startVirtual)
 
 	// OPTIMIZATION: Wait for PreloadAccounts concurrently (deterministic — safe for fork-safety)
 	var preloadDone <-chan struct{}
@@ -580,6 +585,11 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
+
+	if len(txs) > 0 {
+		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | RealExec=%v",
+			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
+	}
 
 	if execDuration.Milliseconds() > 100 {
 		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v", len(txs), execDuration)
@@ -725,6 +735,19 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 			return allTxs
 		}
 
+		// Preload accounts in batch to warm cache and avoid synchronous DB I/O inside loop
+		preloadSet := make(map[common.Address]struct{}, len(allTxs))
+		for _, tx := range allTxs {
+			preloadSet[tx.FromAddress()] = struct{}{}
+		}
+		if len(preloadSet) > 0 {
+			preloadAddrs := make([]common.Address, 0, len(preloadSet))
+			for addr := range preloadSet {
+				preloadAddrs = append(preloadAddrs, addr)
+			}
+			vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
+		}
+
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
 		sort.Slice(allTxs, func(i, j int) bool {
 			cmp := allTxs[i].FromAddress().Cmp(allTxs[j].FromAddress())
@@ -754,11 +777,11 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 
 			if actual > expected {
 				// Future nonce, missing predecessors -> defer to next cycle
-				logger.Info("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				logger.Debug("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				// TTL Logic: Xóa nếu đã chờ quá thời gian FutureTxTimeout
 				if insertTime, exists := vp.futureTxTimeMap[tx.Hash()]; exists {
 					if time.Since(insertTime) > FutureTxTimeout {
-						logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
+						logger.Debug("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
 						delete(vp.futureTxTimeMap, tx.Hash())
 						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
 					}
@@ -769,13 +792,13 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				futureTxs = append(futureTxs, tx)
 			} else if actual == expected {
 				// Valid contiguous nonce
-				logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
+				logger.Debug("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
 				validTxs = append(validTxs, tx)
 				nonceMap[from]++
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
-				logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				logger.Debug("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			}
 		}

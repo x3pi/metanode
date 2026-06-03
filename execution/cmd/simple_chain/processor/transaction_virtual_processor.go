@@ -36,7 +36,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		return nil, fmt.Errorf("transaction cannot be nil"), nil
 	}
 	// tx.SetIsDebug(true)
-	logger.Info("_virtual_ %v", tx)
+	logger.Debug("_virtual_ %v", tx)
 	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
 		updatedTx := tx
 		updatedTx.AddRelatedAddress(tx.FromAddress())
@@ -71,28 +71,29 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 	var statusUpdate bool
 
 	// ─── OPTIMIZATION: Use shared state for quick account check ──────────
-	// This avoids expensive NewChainState (trie creation) for simple TXs
-	startAS := time.Now()
-	as, err := v.chainState.GetAccountStateDB().AccountState(tx.FromAddress())
-	asDuration := time.Since(startAS)
-	logger.Info("[PERF-VIRTUAL] AccountState lookup: %v, hash: %v", asDuration, tx.Hash().Hex())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get sender account state: %w", err), nil
-	}
+	// This avoids expensive NewChainState (trie creation) for simple TXs.
+	// ONLY perform lookup if nonce check is actually required (nonce is 0 and destination is not account setting).
+	if tx.GetNonce() == 0 && tx.ToAddress() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+		startAS := time.Now()
+		as, err := v.chainState.GetAccountStateDB().AccountState(tx.FromAddress())
+		asDuration := time.Since(startAS)
+		logger.Debug("[PERF-VIRTUAL] AccountState lookup: %v, hash: %v", asDuration, tx.Hash().Hex())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get sender account state: %w", err), nil
+		}
 
-	// ─── 1. Nonce 0 Check ──────────────────────────────────────────────────
-	// First transaction (nonce 0) MUST be to AccountSetting.
-	// If tx.GetNonce() > 0, it may be a valid transaction with a lagging local AccountState (due to async state sync on Sub Nodes),
-	// so we allow it to pass virtual validation and let the Master Node handle strict validation during execution.
-	if as.Nonce() == 0 && tx.GetNonce() == 0 && tx.ToAddress() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		return nil, fmt.Errorf("tx0: invalid or missing contract address"), nil
+		// ─── 1. Nonce 0 Check ──────────────────────────────────────────────────
+		// First transaction (nonce 0) MUST be to AccountSetting.
+		if as.Nonce() == 0 {
+			return nil, fmt.Errorf("tx0: invalid or missing contract address"), nil
+		}
 	}
 
 	// ─── 2. Determine if EVM execution is needed ──────────────────────────
 	// We skip EVM for AccountSetting or non-contract calls
 	isAccountSetting := tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	needsEVM := (tx.IsCallContract() || tx.IsDeployContract()) && !isAccountSetting
-	logger.Info("[DEBUG VIRTUAL] hash=%s, call=%v, deploy=%v, accSetting=%v, needsEVM=%v",
+	logger.Debug("[DEBUG VIRTUAL] hash=%s, call=%v, deploy=%v, accSetting=%v, needsEVM=%v",
 		tx.Hash().Hex(), tx.IsCallContract(), tx.IsDeployContract(), isAccountSetting, needsEVM)
 
 	if needsEVM {
@@ -100,6 +101,10 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 		// This prevents concurrent execution with real block processing (which holds exclusive Lock).
 		v.blockProcessingLock.RLock()
 		defer v.blockProcessingLock.RUnlock()
+
+		// SERIALIZATION: Prevent concurrent EVM executions from corrupting C++ caches
+		v.virtualEvmMutex.Lock()
+		defer v.virtualEvmMutex.Unlock()
 
 		headerPtr := v.chainState.GetcurrentBlockHeader()
 		if headerPtr == nil {
@@ -135,7 +140,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 			startEVM := time.Now()
 			exRs, statusUpdate, err = vmP.ExecuteTransactionWithMvmIdSub(ctx, tx, true)
 			evmDuration := time.Since(startEVM)
-			logger.Info("[PERF-VIRTUAL] EVM execution (Call): %v, hash: %v, block#%d",
+			logger.Debug("[PERF-VIRTUAL] EVM execution (Call): %v, hash: %v, block#%d",
 				evmDuration, tx.Hash().Hex(), blHeader.BlockNumber())
 		} else if tx.IsDeployContract() {
 			if !tx.ValidDeployData() {
@@ -145,7 +150,7 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 			startEVM := time.Now()
 			exRs, statusUpdate, err = vmP.ExecuteTransactionWithMvmIdSubDeploy(ctx, tx, mvmId, true)
 			evmDuration := time.Since(startEVM)
-			logger.Info("[PERF-VIRTUAL] EVM execution (Deploy): %v, hash: %v, block#%d", evmDuration, tx.Hash().Hex(), blHeader.BlockNumber())
+			logger.Debug("[PERF-VIRTUAL] EVM execution (Deploy): %v, hash: %v, block#%d", evmDuration, tx.Hash().Hex(), blHeader.BlockNumber())
 		}
 
 		// Kiểm tra trạng thái biên lai sau khi thực thi (chung cho cả call và deploy)
