@@ -16,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -161,7 +160,6 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 	// goroutine to get the trie nodes; all others got nil → go-sub missing account state.
 	bp.chainState.GetAccountStateDB().ClearAccountBatch()
 	mvm.CallClearAllStateInstances()
-	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 	logger.Info("createBlockBatch: Completed, all %d goroutines finished (batchID: %s)", actualBlocksToCreate, batchID)
 	// Only log when batch has many transactions
 	if totalTxs > 5000 {
@@ -316,7 +314,6 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	mvm.ClearAllMVMApi()
 	mvm.ClearAllProtectedMVMApi()
 	mvm.CallClearAllStateInstances()
-	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 
 	// FORK-SAFETY (Apr 2026): Clear Go-side AccountStateDB and StakeStateDB read caches.
 	// applyBlockBatch writes directly to NOMT/PebbleDB, bypassing AccountStateDB.

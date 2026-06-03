@@ -39,7 +39,7 @@ peer_rpc_addresses = ["127.0.0.1:19201", "127.0.0.1:19202", "127.0.0.1:19203", "
 epochs_to_keep = 5
 
 [log]
-level = "warn"
+level = "info"
 format = "text"
 console_output = true
 file_output = false

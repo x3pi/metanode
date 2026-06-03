@@ -481,6 +481,10 @@ cmd_start() {
         log_info "🛠  Đang build Rust (metanode - Dùng $RUST_JOBS/$NUM_CORES cores)..."
         (cd "$RUST_DIR" && cargo build --release -j $RUST_JOBS) || exit 1
         
+        # FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
+        mkdir -p "$RUST_DIR/target/release"
+        cp "$BASE_DIR/target/release/libmetanode.a" "$RUST_DIR/target/release/libmetanode.a" 2>/dev/null || true
+
         # CRITICAL FIX: Touch source files that import "C" to force Go to relink the new libmetanode.a,
         # avoiding cache invalidation of Go standard libraries via `go clean -cache`.
         log_info "🧹  Đang ép Go nhận diện FFI bridge mới bằng cách touch bridge files..."
