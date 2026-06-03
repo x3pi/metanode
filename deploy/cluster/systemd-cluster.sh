@@ -82,6 +82,11 @@ cmd_status() {
         local se=$(svc_exec $nid)
         local sc=$(svc_consensus $nid)
 
+        # Bỏ qua nếu service chưa được cài đặt trên máy này
+        if ! systemctl list-unit-files | grep -q "^${se}.service"; then
+            continue
+        fi
+
         local exec_status=$(systemctl is-active "$se" 2>/dev/null || echo "inactive")
         local cons_status=$(systemctl is-active "$sc" 2>/dev/null || echo "inactive")
 
@@ -274,7 +279,7 @@ cmd_setup() {
         local nid="${NODE_IDS[$i]}"
         [ "$only_node" != "all" ] && [ "$only_node" != "$nid" ] && continue
 
-        local node_dir="/opt/metanode/node-${nid}"
+        local node_dir="/opt/metanode-${nid}"
         if [ -d "$node_dir" ]; then
             log_warn "Đang xóa data Node ${nid}: ${node_dir}/data/ và ${node_dir}/logs/..."
             # Xóa execution data
@@ -322,14 +327,33 @@ cmd_install() {
         local cfg="${NODE_CONFIGS[$i]}"
         local ntype="${NODE_TYPES[$i]}"
 
-        if [ ! -f "$cfg" ]; then
-            log_err "Config không tồn tại: $cfg"
-            log_err "Tạo keys trước: python3 gen_validator_entry.py --node-id $nid ..."
-            continue
+        # Absolute paths for existing configurations
+        local json_cfg="$DEPLOY_DIR/../execution/cmd/simple_chain/config-master-node${nid}.json"
+        local toml_cfg="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}.toml"
+        local proto_key="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}_protocol_key.json"
+        local net_key="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}_network_key.json"
+
+        local extra_args=""
+        if [ -f "$json_cfg" ] && [ -f "$toml_cfg" ]; then
+            log_info "Tìm thấy cấu hình JSON/TOML có sẵn. Tái sử dụng trực tiếp..."
+            extra_args="--json-config $json_cfg --toml-config $toml_cfg --node-id $nid"
+            if [ -f "$proto_key" ]; then
+                extra_args="$extra_args --protocol-key $proto_key"
+            fi
+            if [ -f "$net_key" ]; then
+                extra_args="$extra_args --network-key $net_key"
+            fi
+        else
+            if [ ! -f "$cfg" ]; then
+                log_err "Config không tồn tại: $cfg (và không tìm thấy config JSON/TOML cũ)"
+                log_err "Tạo keys trước: python3 gen_validator_entry.py --node-id $nid ..."
+                continue
+            fi
+            extra_args="--config $cfg"
         fi
 
         log_info "Đang cài đặt Node ${nid} (${ntype})..."
-        bash "$DEPLOY_DIR/install.sh" --config "$cfg" $auto_yes
+        bash "$DEPLOY_DIR/install.sh" $extra_args $auto_yes
         log_ok "Node ${nid} đã cài xong"
 
         if [ "$only_node" = "all" ] && [ "$i" -lt $(( ${#NODE_IDS[@]} - 1 )) ]; then
@@ -361,6 +385,12 @@ cmd_check() {
         local rpc_port=""
         if [ -f "$cfg" ]; then
             rpc_port=$(grep "^RPC_PORT=" "$cfg" 2>/dev/null | cut -d'=' -f2 | tr -d ':' | tr -d '"' || true)
+        fi
+
+        local se=$(svc_exec $nid)
+        # Bỏ qua nếu service chưa được cài đặt trên máy này
+        if ! systemctl list-unit-files | grep -q "^${se}.service"; then
+            continue
         fi
 
         if [ -z "$rpc_port" ]; then

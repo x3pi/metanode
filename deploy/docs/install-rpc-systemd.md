@@ -92,7 +92,10 @@ sudo bash install-rpc-systemd.sh --no-build
 Sau khi cài xong, bạn có thể dùng `systemctl` bình thường:
 
 ```bash
-# Xem trạng thái
+# Liệt kê tất cả các tiến trình RPC Proxy đang chạy trên máy
+sudo systemctl | grep metanode-rpc
+
+# Xem trạng thái chi tiết của Node 0 (RAM, CPU, Port đang chạy)
 sudo systemctl status metanode-rpc-0
 sudo systemctl status metanode-rpc-4
 
