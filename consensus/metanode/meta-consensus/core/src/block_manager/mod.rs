@@ -107,6 +107,8 @@ impl BlockManager {
         committed: bool,
     ) -> (Vec<VerifiedBlock>, BTreeSet<BlockRef>) {
         let _s = monitored_scope("BlockManager::try_accept_blocks_internal");
+        let start = std::time::Instant::now();
+        let mut db_total = std::time::Duration::ZERO;
 
         blocks.sort_by_key(|b| b.round());
         if !blocks.is_empty() {
@@ -119,7 +121,7 @@ impl BlockManager {
         let mut accepted_blocks = vec![];
         let mut missing_blocks = BTreeSet::new();
 
-        for block in blocks {
+        for block in blocks.clone() {
             self.update_block_received_metrics(&block);
 
             // Try to accept the input block.
@@ -162,13 +164,28 @@ impl BlockManager {
 
             // Insert the accepted blocks into DAG state so future blocks including them as
             // ancestors do not get suspended.
+            let db_start = std::time::Instant::now();
             self.dag_state_writer
                 .accept_blocks(blocks_to_accept.clone());
+            db_total += db_start.elapsed();
 
             accepted_blocks.extend(blocks_to_accept);
         }
 
         self.update_stats(missing_blocks.len() as u64);
+
+        let elapsed = start.elapsed();
+        if !blocks.is_empty() && (elapsed.as_micros() > 500 || blocks.iter().any(|b| !b.transactions().is_empty())) {
+            let refs = blocks.iter().map(|b| format!("r{}/a{}", b.round(), b.author())).collect::<Vec<_>>().join(",");
+            tracing::warn!(
+                "⏱️ [PERF-RUST] try_accept_blocks_internal (committed: {}, blocks: [{}], accepted: {}): total={:?}, db_write={:?}",
+                committed,
+                refs,
+                accepted_blocks.len(),
+                elapsed,
+                db_total
+            );
+        }
 
         // Figure out the new missing blocks
         (accepted_blocks, missing_blocks)

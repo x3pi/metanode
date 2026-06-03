@@ -14,6 +14,19 @@
 
 set -euo pipefail
 
+# ─── CLEANUP CONCURRENT RUNS ──────────────────────────────────────────
+echo "🧹 Cleaning up any conflicting load test processes..."
+pkill -f "run_multinode_load.sh" 2>/dev/null || true
+pkill -f "tps_blast" 2>/dev/null || true
+pkill -f "block_hash_checker" 2>/dev/null || true
+for pid in $(pgrep -f "run_20x_stress_test.sh" 2>/dev/null || true); do
+    if [ -n "$pid" ] && [ "$pid" -ne "$$" ]; then
+        echo "Killing conflicting run_20x_stress_test.sh process: $pid"
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+done
+# ──────────────────────────────────────────────────────────────────────
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_PROJECT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 

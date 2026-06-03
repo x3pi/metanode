@@ -33,7 +33,6 @@ func (bp *BlockProcessor) commitWorker() {
 				// FENCE jobs have no block — use job.Epoch from async update
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Epoch)
 			}
-			storage.SetCommitLock(false) // Release commit lock on FENCE job
 			if job.DoneChan != nil {
 				close(job.DoneChan)
 				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
@@ -142,7 +141,7 @@ func (bp *BlockProcessor) commitWorker() {
 		// By adding WithCommitMappings(), we ensure dirtyStorage is flushed to LevelDB immediately
 		// AFTER it is populated, rather than asynchronously via commitToMemoryParallel.
 		lastBlockBeforeCommit := storage.GetLastBlockNumber()
-		logger.Info("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
+		logger.Debug("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
 			blockNum, txCount, lastBlockBeforeCommit, len(bp.commitChannel), cap(bp.commitChannel))
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
@@ -242,7 +241,6 @@ func (bp *BlockProcessor) commitWorker() {
 		// Sub-nodes will fetch the block from Master's primary BlockDatabase
 		// via the existing network sync mechanism (HandleSyncBlocksRequest).
 		// ══════════════════════════════════════════════════════════════════
-		storage.SetCommitLock(false) // Release PebbleDB commit lock after block is fully committed
 		if job.DoneChan != nil {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
@@ -668,12 +666,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		if errPut != nil {
 			logger.Error("❌ [BACKUP] Failed to persist BackupDb for block #%d: %v", blockNum, errPut)
 		} else {
-			if bp.storageManager != nil {
-				if errFlush := bp.storageManager.GetStorageBackupDb().Flush(); errFlush != nil {
-					logger.Error("❌ [BACKUP] Failed to flush BackupDb for block #%d: %v", blockNum, errFlush)
-				}
-			}
-			logger.Info("✅ [BACKUP] Persisted and flushed BackUpDb for block #%d, key=%s, len=%d bytes (took %v)", blockNum, string(primaryKey), len(backupBytes), time.Since(startBackup))
+			logger.Debug("✅ [BACKUP] Persisted BackUpDb for block #%d, key=%s, len=%d bytes (took %v)", blockNum, string(primaryKey), len(backupBytes), time.Since(startBackup))
 		}
 	} else {
 		logger.Error("❌ [BACKUP] Failed to serialize BackupDb for block #%d: %v", blockNum, err)

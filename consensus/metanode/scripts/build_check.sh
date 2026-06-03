@@ -99,6 +99,10 @@ if [ "$BUILD_RUST" = true ]; then
     # Consensus (metanode binary)
     run_step "Consensus metanode (cargo build --release --locked)" \
         bash -c "cd '$RUST_ROOT' && cargo build --release --locked -j $RUST_JOBS"
+
+    # Rust NOMT FFI
+    run_step "Rust NOMT FFI (cargo build --release -p mtn-nomt-ffi)" \
+        bash -c "cd '$REPO_ROOT' && cargo build --release -p mtn-nomt-ffi -j $RUST_JOBS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════

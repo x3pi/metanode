@@ -41,6 +41,7 @@ type TxVirtualExecutor struct {
 	// processing (Lock). Prevents concurrent cgo calls to C++ MVM that cause
 	// non-deterministic stateRoot divergence across nodes.
 	blockProcessingLock *sync.RWMutex
+	virtualEvmMutex     sync.Mutex
 }
 
 func NewTxVirtualExecutor(

@@ -16,7 +16,7 @@ func main() {
 
 func checkDb(path string) {
 	fmt.Println("Opening:", path)
-	handle, _ := nomt_ffi.Open(path, 1, 1, 1)
+	handle, _ := nomt_ffi.Open(path, 1, 1, 1, 0, true)
 	if handle == nil {
 		fmt.Println("Wait, handle is nil")
 		return

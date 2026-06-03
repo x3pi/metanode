@@ -268,6 +268,14 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 		}
 	}
 
+	// Determine hashtable buckets (bitbox pages) based on namespace to prevent bucket exhaustion.
+	hashtableBuckets := 64000
+	preallocate := true
+	if namespace == "account_state" || namespace == "smart_contract_storage" {
+		hashtableBuckets = 10000000 // 10 million buckets for large tries (was 1,000,000)
+		preallocate = false        // Disable preallocation (use sparse files) to avoid 40GB disk usage per node
+	}
+
 	// Ensure the database directory exists before calling FFI.
 	// This prevents "os error 2" (No such file or directory) during snapshot restore
 	// if wget failed to download empty NOMT directories.
@@ -275,9 +283,7 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 		return nil, fmt.Errorf("failed to create NOMT database directory at %s: %w", dbPath, err)
 	}
 
-
-
-	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
+	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache, hashtableBuckets, preallocate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize independent NOMT database at %s: %w", dbPath, err)
 	}

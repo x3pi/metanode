@@ -25,8 +25,8 @@ const (
 	MaxTimeForAccumulatedResults = 5 * time.Second
 
 	// TxBatchSize is the number of transactions per batch in GenerateBlocksInBatch.
-	// TPS OPTIMIZATION: 200K → 500K to match MaxTxsInAccumulatedResults.
-	TxBatchSize = 500000
+	// TPS OPTIMIZATION: 500K -> 4000 to limit massive blocks.
+	TxBatchSize = 1000
 
 	// BlockInBatch is the number of blocks to create from a single batch.
 	BlockInBatch = 10
@@ -51,9 +51,9 @@ const (
 	MaxConcurrentSends = 200
 
 	// MaxTransactionsPerBatch is the maximum number of transactions sent in a single batch over UDS.
-	// TPS OPTIMIZATION: 50K → 100K to reduce UDS send overhead (fewer calls, larger payloads).
+	// TPS OPTIMIZATION: 60K -> 4000 to prevent DAG over-batching and DIGEST-GATE starvation.
 	// FORK-SAFETY: Does not affect block content — Rust consensus groups TXs independently.
-	MaxTransactionsPerBatch = 60000
+	MaxTransactionsPerBatch = 25000
 
 	// MaxConcurrentReadTx limits parallel read-transaction goroutines.
 	MaxConcurrentReadTx = 10000
@@ -80,13 +80,13 @@ const (
 
 const (
 	// MaxMempoolSize is the hard limit on the transaction pool size to prevent GC stalls and high RAM usage.
-	MaxMempoolSize = 20000
+	MaxMempoolSize = 200000
 
 	// HighWatermark is the transaction-pool size at which backpressure kicks in.
-	HighWatermark = 15000
+	HighWatermark = 150000
 
 	// LowWatermark is the transaction-pool size at which normal flow resumes.
-	LowWatermark = 10000
+	LowWatermark = 100000
 )
 
 // ─── Network & Retry ────────────────────────────────────────────────────────

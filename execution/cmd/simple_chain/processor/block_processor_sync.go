@@ -227,7 +227,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		if lastBlock != nil {
 			lastBlockGEIDiag = lastBlock.Header().GlobalExecIndex()
 		}
-		logger.Info("🔍 [SYNC-PARITY-DIAG] epoch=%d commitIndex=%d incomingGEI=%d lastBlockGEI=%d lastPersistedGEI=%d nextExpectedGEI=%d — "+
+		logger.Debug("🔍 [SYNC-PARITY-DIAG] epoch=%d commitIndex=%d incomingGEI=%d lastBlockGEI=%d lastPersistedGEI=%d nextExpectedGEI=%d — "+
 			"GEI-REGRESSION guard will %s this commit",
 			epochNum, commitIndex, globalExecIndex, lastBlockGEIDiag, lastPersistedGEI, *nextExpectedGlobalExecIndex,
 			func() string {
@@ -526,7 +526,7 @@ PROCESS_BLOCK:
 	isEpochBoundary := false
 	if lastBlock != nil && epochNum > lastBlock.Header().Epoch() {
 		isEpochBoundary = true
-		logger.Info("🔄 [EPOCH-BOUNDARY] Processing empty commit at GEI=%d as boundary block for epoch %d→%d",
+		logger.Debug("🔄 [EPOCH-BOUNDARY] Processing empty commit at GEI=%d as boundary block for epoch %d→%d",
 			globalExecIndex, lastBlock.Header().Epoch(), epochNum)
 	}
 
@@ -708,7 +708,7 @@ PROCESS_BLOCK:
 		return nil
 	}
 
-	fileLogger.Info("block: --------------------------------%v txs=%d", *currentBlockNumber, len(allTransactions))
+	logger.Debug("block: --------------------------------%v txs=%d", *currentBlockNumber, len(allTransactions))
 
 	// 🚀 SPEEDUP: Trigger background I/O preloading IMMEDIATELY after assembling TX slice.
 	// This allows LevelDB reads to overlap with CPU-bound guards (GEI regression, anti-inflation)
@@ -731,7 +731,7 @@ PROCESS_BLOCK:
 		}
 		*currentBlockNumber = lastCommittedBlockNumber + 1
 		storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
-		logger.Info("📊 [BLOCK-NUM] Rust assigned block_number=0. Assigned sequential block #%d for global_exec_index=%d (txs=%d)",
+		logger.Debug("📊 [BLOCK-NUM] Rust assigned block_number=0. Assigned sequential block #%d for global_exec_index=%d (txs=%d)",
 			*currentBlockNumber, globalExecIndex, len(allTransactions))
 	}
 	
@@ -760,7 +760,7 @@ PROCESS_BLOCK:
 				digestHex = fmt.Sprintf("0x%x", commitDigest)
 			}
 		}
-		logger.Info("🔍 [COMMIT-FINGERPRINT] block=#%d GEI=%d epoch=%d commitIdx=%d leader=%s digest=%s txs=%d",
+		logger.Debug("🔍 [COMMIT-FINGERPRINT] block=#%d GEI=%d epoch=%d commitIdx=%d leader=%s digest=%s txs=%d",
 			*currentBlockNumber, globalExecIndex, epochNum, commitIndex,
 			leaderHex, digestHex, len(allTransactions))
 	}
