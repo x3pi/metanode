@@ -49,12 +49,13 @@ var (
 
 func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
-		// 1GB shared block cache across all PebbleDB instances.
-		// With 4 nodes × 4 DBs per node, each DB gets ~64MB effective cache
-		// but reads that warm one DB benefit all others via the shared LRU.
-		// The server has 157GB RAM so 1GB is a negligible overhead.
-		sharedPebbleCache = pebble.NewCache(4 << 30) // 4GB
-		logger.Info("✅ [PEBBLE] Created 4GB shared block cache")
+		// 2GB shared block cache across all PebbleDB instances.
+		// TUNED (June 2026): Reduced from 4GB to 2GB to save 10GB RSS across 5 nodes.
+		// Pebble's 10-bit bloom filters handle cold reads efficiently, so the
+		// smaller cache doesn't significantly impact point lookup performance.
+		// With 5 nodes × 2GB = 10GB total (vs previous 20GB).
+		sharedPebbleCache = pebble.NewCache(2 << 30) // 2GB
+		logger.Info("✅ [PEBBLE] Created 2GB shared block cache")
 	})
 	sharedPebbleCache.Ref()
 	return sharedPebbleCache

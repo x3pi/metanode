@@ -114,7 +114,9 @@ impl SignedBlockVerifier {
         }
 
         // Verify the block's signature.
+        let sig_start = std::time::Instant::now();
         block.verify_signature(&self.context)?;
+        let sig_elapsed = sig_start.elapsed();
 
         // Verify the block's ancestor refs are consistent with the block's round,
         // and total parent stakes reach quorum.
@@ -187,13 +189,26 @@ impl SignedBlockVerifier {
 
         let batch: Vec<_> = block.transactions().iter().map(|t| t.data()).collect();
 
+        let tx_start = std::time::Instant::now();
         self.check_transactions(&batch)?;
+        let tx_elapsed = tx_start.elapsed();
 
         // Enforce group size limit per block/commit
         if !crate::tx_group_filter::verify_group_limit(block.transactions(), crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
             return Err(ConsensusError::InvalidTransaction(
                 "Block contains transactions exceeding group size limit".to_string(),
             ));
+        }
+
+        if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || block.transactions().len() > 0 {
+            tracing::warn!(
+                "⏱️ [PERF-RUST] verify_block_inner detail for author {} round {} (txs: {}): sig_verify={:?}, tx_check={:?}",
+                block.author(),
+                block.round(),
+                block.transactions().len(),
+                sig_elapsed,
+                tx_elapsed
+            );
         }
 
         Ok(())
@@ -243,8 +258,11 @@ impl BlockVerifier for SignedBlockVerifier {
         block: SignedBlock,
         serialized_block: Bytes,
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
+        let start = std::time::Instant::now();
         self.verify_block(&block)?;
+        let verify_elapsed = start.elapsed();
 
+        let vote_start = std::time::Instant::now();
         // If the block verification passed then we can produce the verified block, but we should only return it if the transaction verification passed as well.
         let verified_block = VerifiedBlock::new_verified(block, serialized_block);
 
@@ -256,6 +274,19 @@ impl BlockVerifier for SignedBlockVerifier {
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
+        let vote_elapsed = vote_start.elapsed();
+        let total_elapsed = start.elapsed();
+
+        if total_elapsed.as_micros() > 500 || verified_block.transactions().len() > 0 {
+            tracing::warn!(
+                "⏱️ [PERF-RUST] verify_and_vote block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
+                verified_block.reference(),
+                verified_block.transactions().len(),
+                total_elapsed,
+                verify_elapsed,
+                vote_elapsed
+            );
+        }
         Ok((verified_block, rejected_transactions))
     }
 
@@ -264,8 +295,11 @@ impl BlockVerifier for SignedBlockVerifier {
         block: SignedBlock,
         serialized_block: Bytes,
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
+        let start = std::time::Instant::now();
         self.verify_block_for_sync(&block)?;
+        let verify_elapsed = start.elapsed();
 
+        let vote_start = std::time::Instant::now();
         let verified_block = VerifiedBlock::new_verified(block, serialized_block);
 
         let rejected_transactions = if self.context.protocol_config.mysticeti_fastpath() {
@@ -276,6 +310,19 @@ impl BlockVerifier for SignedBlockVerifier {
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
+        let vote_elapsed = vote_start.elapsed();
+        let total_elapsed = start.elapsed();
+
+        if total_elapsed.as_micros() > 500 || verified_block.transactions().len() > 0 {
+            tracing::warn!(
+                "⏱️ [PERF-RUST] verify_for_commit_sync block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
+                verified_block.reference(),
+                verified_block.transactions().len(),
+                total_elapsed,
+                verify_elapsed,
+                vote_elapsed
+            );
+        }
         Ok((verified_block, rejected_transactions))
     }
 

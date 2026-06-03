@@ -5,7 +5,7 @@ use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
 
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
 /// Prevents unbounded tokio::spawn accumulation under extreme commit rates
@@ -157,7 +157,7 @@ pub async fn dispatch_commit(
                         }
                     });
 
-                    info!(
+                    debug!(
                         "📤 [TX-FLOW-TRACE] ▶ PHASE 3.2→3.3: Commit sent to BlockDeliveryManager | \
                          batch_id={}, commit_index={}, gei={}, txs={}, fragments={}, \
                          leader_addr_len={}, has_system_tx={}",

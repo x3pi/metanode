@@ -14,7 +14,7 @@ use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag, SystemTransaction};
 use prost::Message;
 
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::persistence::persist_last_sent_index;
 use super::proto::{ExecutableBlock, TransactionExe};
@@ -28,7 +28,7 @@ use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};
 /// vs IntermediateRoot overhead). Splitting at 50000 reduces per-block overhead
 /// while keeping GC pressure and EVM contention manageable.
 /// FORK-SAFETY: All nodes use the same threshold → deterministic split.
-pub const MAX_TXS_PER_GO_BLOCK: usize = 50000;
+pub const MAX_TXS_PER_GO_BLOCK: usize = 65000;
 
 impl ExecutorClient {
     /// Send committed sub-DAG to executor, with automatic fragmentation for large commits.
@@ -337,7 +337,15 @@ impl ExecutorClient {
             }
 
             if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+                let ffi_start = std::time::Instant::now();
                 let success = c_fn(epoch_data_bytes.as_ptr(), epoch_data_bytes.len());
+                let ffi_elapsed = ffi_start.elapsed();
+                tracing::warn!(
+                    "⏱️ [PERF-RUST] FFI direct execute_block for commit_index {} (size={} bytes): {:?}",
+                    commit_index,
+                    epoch_data_bytes.len(),
+                    ffi_elapsed
+                );
                 if success {
                     self.record_send_success().await;
                     trace!(
@@ -579,18 +587,26 @@ impl ExecutorClient {
             let mut sent_count = 0usize;
             if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
                 for (idx, data, _, _) in &batch {
-                    info!(
+                    debug!(
                         "🚀 [TX-FLOW-TRACE] ▶ PHASE 4 FFI: cgo_execute_block() called | gei={}, payload_size={} bytes",
                         idx, data.len()
                     );
+                    let ffi_start = std::time::Instant::now();
                     let data_clone = data.clone();
                     let success = tokio::task::spawn_blocking(move || {
                         c_fn(data_clone.as_ptr(), data_clone.len())
                     })
                     .await
                     .unwrap_or(false);
+                    let ffi_elapsed = ffi_start.elapsed();
+                    tracing::warn!(
+                        "⏱️ [PERF-RUST] FFI execute_block for gei {} (size={} bytes): {:?}",
+                        idx,
+                        data.len(),
+                        ffi_elapsed
+                    );
                     if success {
-                        info!(
+                        debug!(
                             "✅ [TX-FLOW-TRACE] ▶ PHASE 4 FFI DONE: Go accepted block | gei={}",
                             idx
                         );
@@ -866,12 +882,20 @@ impl ExecutorClient {
 
         // FFI INTEGRATION: Send directly to Go via CGo callback
         if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+            let ffi_start = std::time::Instant::now();
             let data_vec = epoch_data_bytes.to_vec();
             let success = tokio::task::spawn_blocking(move || {
                 c_fn(data_vec.as_ptr(), data_vec.len())
             })
             .await
             .unwrap_or(false);
+            let ffi_elapsed = ffi_start.elapsed();
+            tracing::warn!(
+                "⏱️ [PERF-RUST] FFI direct send_block_data for gei {} (size={} bytes): {:?}",
+                global_exec_index,
+                epoch_data_bytes.len(),
+                ffi_elapsed
+            );
             if success {
                 trace!("📤 [TX FLOW] Sent committed sub-DAG to Go executor via FFI: global_exec_index={}, commit_index={}, epoch={}, data_size={} bytes", 
                     global_exec_index, commit_index, epoch, epoch_data_bytes.len());

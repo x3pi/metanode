@@ -8,7 +8,7 @@ use mysten_metrics::monitored_mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::consensus::tx_recycler::TxRecycler;
 
@@ -1128,7 +1128,7 @@ impl CommitProcessor {
                     let commit_index: u32 = subdag.commit_ref.index;
                     let total_txs: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
                     let is_local = subdag.decided_with_local_blocks;
-                    info!(
+                    debug!(
                         "📥 [TX-FLOW-TRACE] ▶ PHASE 3 ENTRY: CommitProcessor received CommittedSubDag | \
                          commit_index={}, leader={:?}, blocks={}, total_txs={}, \
                          decided_local={}, digest={}, epoch={}",
@@ -1306,7 +1306,7 @@ impl CommitProcessor {
                             if digest_match {
                                 dispatch_subdag = Some(subdag);
                             } else {
-                                info!(
+                                debug!(
                                     "🛡️ [TX-FLOW-TRACE DIGEST-GATE] ▶ PHASE 3 DIGEST-GATE: Local commit BUFFERED | \
                                      commit_index={}, leader={:?}, digest={}, buffered_count={}",
                                     commit_index, subdag.leader, hex::encode(&local_digest[..4]),
@@ -1412,7 +1412,7 @@ impl CommitProcessor {
                                     );
                                 }
                             } else {
-                                info!(
+                                debug!(
                                     "📥 [TX-FLOW-TRACE DISPATCH:CERTIFIED-COMMIT] ▶ PHASE 3 CERTIFIED: CertifiedCommit received directly | \
                                      commit_index={}, dispatching immediately",
                                     commit_index

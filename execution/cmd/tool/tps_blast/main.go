@@ -647,11 +647,46 @@ func main() {
 		fmt.Printf("  🏁 Ending block:   %d\n", endBlock)
 	}
 
+	// Fetch block statistics
+	blockCount := 0
+	emptyBlocks := 0
+	maxTxInBlock := 0
+	totalTxInBlocks := 0
+
+	for b := startBlock; b <= endBlock; b++ {
+		blkInfo, err := rpcClient.GetBlockByNumber(b)
+		if err == nil && blkInfo != nil {
+			blockCount++
+			txCount := len(blkInfo.Transactions)
+			totalTxInBlocks += txCount
+			if txCount == 0 {
+				emptyBlocks++
+			}
+			if txCount > maxTxInBlock {
+				maxTxInBlock = txCount
+			}
+		}
+	}
+
+	if *skipVerify {
+		if totalTxInBlocks > len(toSend) {
+			totalConfirmed = int32(len(toSend))
+		} else {
+			totalConfirmed = int32(totalTxInBlocks)
+		}
+		totalFailed = int32(len(toSend)) - totalConfirmed
+		totalErrors = 0
+	}
+
 	// ─── Processing TPS from actual measured time ────────────
 	finalConfirmed := int(0)
-	for _, acc := range toSend {
-		if acc.Registered {
-			finalConfirmed++
+	if *skipVerify {
+		finalConfirmed = int(totalConfirmed)
+	} else {
+		for _, acc := range toSend {
+			if acc.Registered {
+				finalConfirmed++
+			}
 		}
 	}
 	successRate := float64(finalConfirmed) / float64(len(toSend)) * 100
@@ -674,27 +709,6 @@ func main() {
 	fmt.Printf("  ⏱️  Network confirmation: %s\n", processingDuration.Round(time.Millisecond))
 	fmt.Printf("  🕛 Total real time:      %.3fs (inject + confirm)\n", totalRealSec)
 	fmt.Printf("  ─────────────────────────────────────────────────\n")
-
-	// Fetch block statistics
-	blockCount := 0
-	emptyBlocks := 0
-	maxTxInBlock := 0
-	totalTxInBlocks := 0
-
-	for b := startBlock; b <= endBlock; b++ {
-		blkInfo, err := rpcClient.GetBlockByNumber(b)
-		if err == nil && blkInfo != nil {
-			blockCount++
-			txCount := len(blkInfo.Transactions)
-			totalTxInBlocks += txCount
-			if txCount == 0 {
-				emptyBlocks++
-			}
-			if txCount > maxTxInBlock {
-				maxTxInBlock = txCount
-			}
-		}
-	}
 
 	fmt.Printf("  📦 BLOCK STATISTICS (Blocks %d to %d)\n", startBlock, endBlock)
 	fmt.Printf("  🧊 Total Blocks:         %d\n", blockCount)

@@ -140,11 +140,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 		pageCacheMB := app.config.NomtPageCacheMB
 		if pageCacheMB <= 0 {
-			pageCacheMB = 512
+			// TUNED (June 2026): Reduced from 512 to 256 MB.
+			// Saves ~1 GB per node for 2 primary NOMT handles.
+			pageCacheMB = 256
 		}
 		leafCacheMB := app.config.NomtLeafCacheMB
 		if leafCacheMB <= 0 {
-			leafCacheMB = 512
+			// TUNED (June 2026): Reduced from 512 to 256 MB.
+			leafCacheMB = 256
 		}
 		if err := mt_trie.InitNomtDB(nomtPath, commitConcurrency, pageCacheMB, leafCacheMB); err != nil {
 			return nil, fmt.Errorf("failed to initialize NOMT database: %v", err)

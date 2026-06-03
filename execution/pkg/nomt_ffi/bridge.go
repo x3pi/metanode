@@ -28,6 +28,8 @@ type Handle struct {
 	commitConcurrency int
 	pageCacheMB       int
 	leafCacheMB       int
+	hashtableBuckets  int
+	preallocate       bool
 
 	sessionsMu      sync.Mutex
 	pendingSessions []*FinishedSession
@@ -35,7 +37,18 @@ type Handle struct {
 	closing         bool
 	activeCount     int
 	activeCond      *sync.Cond
+
+	commitPayloadMu sync.Mutex
 }
+
+func (h *Handle) LockCommitPayload() {
+	h.commitPayloadMu.Lock()
+}
+
+func (h *Handle) UnlockCommitPayload() {
+	h.commitPayloadMu.Unlock()
+}
+
 
 // Session wraps the opaque NOMT write session pointer.
 type Session struct {
@@ -56,11 +69,16 @@ type FinishedSession struct {
 //   - commitConcurrency: number of concurrent commit workers (1-64)
 //   - pageCacheMB: page cache size in MiB (0 = default 256)
 //   - leafCacheMB: leaf cache size in MiB (0 = default 256)
-func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB int) (*Handle, error) {
+func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB, hashtableBuckets int, preallocate bool) (*Handle, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	ptr := C.nomt_open(cPath, C.int(commitConcurrency), C.int(pageCacheMB), C.int(leafCacheMB))
+	preallocVal := 0
+	if preallocate {
+		preallocVal = 1
+	}
+
+	ptr := C.nomt_open(cPath, C.int(commitConcurrency), C.int(pageCacheMB), C.int(leafCacheMB), C.int(hashtableBuckets), C.int(preallocVal))
 	if ptr == nil {
 		return nil, fmt.Errorf("nomt_ffi: failed to open database at %s", path)
 	}
@@ -71,6 +89,8 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB int) (*Handle
 		commitConcurrency: commitConcurrency,
 		pageCacheMB:       pageCacheMB,
 		leafCacheMB:       leafCacheMB,
+		hashtableBuckets:  hashtableBuckets,
+		preallocate:       preallocate,
 	}
 	h.activeCond = sync.NewCond(&h.sessionsMu)
 
@@ -174,9 +194,13 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	_ = os.Remove(lockFile)
 
 	var ptr *C.NomtHandle
+	preallocVal := 0
+	if h.preallocate {
+		preallocVal = 1
+	}
 	// Retry a few times as a safety net (filesystem flush delay, etc.)
 	for i := 0; i < 10; i++ {
-		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB))
+		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB), C.int(h.hashtableBuckets), C.int(preallocVal))
 		if ptr != nil {
 			if i > 0 {
 				fmt.Printf("nomt_ffi: successfully reopened database at %s after %d retries\n", h.path, i)
@@ -339,7 +363,7 @@ func BeginSession(h *Handle) *Session {
 	}
 
 	h.sessionsMu.Lock()
-	for h.closing {
+	for h.closing || h.activeCount > 0 {
 		h.activeCond.Wait()
 	}
 	h.activeCount++
@@ -416,6 +440,71 @@ func (s *Session) RecordRead(key [32]byte, oldValue []byte) error {
 	)
 	if ret != 0 {
 		return fmt.Errorf("nomt_ffi: record_read error")
+	}
+	return nil
+}
+
+// BatchRecordRead records multiple read records to the session in a single FFI call.
+// This is the high-performance path.
+func (s *Session) BatchRecordRead(keys [][32]byte, values [][]byte) error {
+	if s.ptr == nil || s.handle == nil {
+		return fmt.Errorf("nomt_ffi: invalid session")
+	}
+	if len(keys) != len(values) {
+		return fmt.Errorf("nomt_ffi: BatchRecordRead keys/values length mismatch (%d vs %d)", len(keys), len(values))
+	}
+	n := len(keys)
+	if n == 0 {
+		return nil
+	}
+
+	s.handle.mu.RLock()
+	defer s.handle.mu.RUnlock()
+	if s.handle.ptr == nil {
+		return fmt.Errorf("nomt_ffi: handle closed")
+	}
+
+	// Flatten keys into contiguous byte array (N × 32 bytes)
+	flatKeys := make([]byte, n*32)
+	for i, k := range keys {
+		copy(flatKeys[i*32:], k[:])
+	}
+
+	// Calculate total values size
+	totalValsLen := 0
+	for _, v := range values {
+		totalValsLen += len(v)
+	}
+
+	// Flatten values and collect lengths
+	var flatValsPtr *C.uint8_t
+	var flatValues []byte
+
+	if totalValsLen > 0 {
+		flatValues = make([]byte, totalValsLen)
+		flatValsPtr = (*C.uint8_t)(&flatValues[0])
+	}
+
+	valLens := make([]C.size_t, n)
+	offset := 0
+	for i, v := range values {
+		l := len(v)
+		if l > 0 {
+			copy(flatValues[offset:], v)
+			offset += l
+		}
+		valLens[i] = C.size_t(l)
+	}
+
+	ret := C.nomt_session_batch_record_read(
+		s.ptr,
+		(*C.uint8_t)(&flatKeys[0]),
+		flatValsPtr,
+		(*C.size_t)(&valLens[0]),
+		C.size_t(n),
+	)
+	if ret != 0 {
+		return fmt.Errorf("nomt_ffi: batch_record_read error for %d entries", n)
 	}
 	return nil
 }
