@@ -114,17 +114,15 @@ signal.Ignore(syscall.SIGPIPE)
 	oldMaxProcs := runtime.GOMAXPROCS(maxProcs)
 	logger.Info("[PERF] Increased GOMAXPROCS from %d to %d (NumCPU: %d)", oldMaxProcs, maxProcs, numCPU)
 
-	// PERFORMANCE OPTIMIZATION: Optimize GC settings for high-throughput applications
-	// Increase GC target percentage to reduce GC frequency (default is 100)
-	oldGCPercent := runtime_debug.SetGCPercent(800) // 800% more headroom before GC
-	logger.Info("[PERF] Adjusted GC target from %d%% to 800%% heap growth", oldGCPercent)
+	// PERFORMANCE OPTIMIZATION: Set default GC/memory limits.
+	// These defaults may be overridden by config after NewApp() loads JSON config.
+	defaultGCPercent := 800
+	defaultMemLimitGB := 8
+	oldGCPercent := runtime_debug.SetGCPercent(defaultGCPercent)
+	logger.Info("[PERF] Adjusted GC target from %d%% to %d%% heap growth (default, may be overridden by config)", oldGCPercent, defaultGCPercent)
 
-	// TPS OPT: Set soft memory limit to prevent OOM and bound GC pause time.
-	// Without this, GOGC=800 can let heap grow to 50+ GB before GC triggers,
-	// causing multi-second GC pauses that stall block processing.
-	// 8GB is ~5% of 157GB server RAM — ample for blockchain state + caches.
-	runtime_debug.SetMemoryLimit(8 << 30) // 8GB soft limit
-	logger.Info("[PERF] Set GOMEMLIMIT=8GB (soft memory limit for GC pacing)")
+	runtime_debug.SetMemoryLimit(int64(defaultMemLimitGB) << 30)
+	logger.Info("[PERF] Set GOMEMLIMIT=%dGB (default, may be overridden by config)", defaultMemLimitGB)
 
 	// Log resource limits
 	logResourceLimits()
@@ -163,6 +161,42 @@ signal.Ignore(syscall.SIGPIPE)
 		logger.Error("[FATAL] Failed to create app: %v", err)
 		logger.SyncFileLog()
 		fatal.Exit("Fatal exit from main.go")
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// OOM PREVENTION: Re-apply GOMEMLIMIT and GOGC from per-node config.
+	//
+	// Problem: When running 5 nodes on the same 156GB server, the hardcoded
+	// 8GB limit per node is too high — total Sys memory (Go heap + CGo/mmap)
+	// can exceed physical RAM, causing OOM kills.
+	//
+	// Solution: Allow each node's JSON config to specify its own limits.
+	// Also check META_GOMEMLIMIT env var for operator override without rebuild.
+	// ═══════════════════════════════════════════════════════════════════════════
+	actualMemLimitGB := defaultMemLimitGB
+	actualGCPercent := defaultGCPercent
+
+	// Priority: env var > config > default
+	if envLimit := os.Getenv("META_GOMEMLIMIT"); envLimit != "" {
+		if parsed, parseErr := strconv.Atoi(envLimit); parseErr == nil && parsed > 0 {
+			actualMemLimitGB = parsed
+		}
+	} else if app.config.GoMemLimitGB > 0 {
+		actualMemLimitGB = app.config.GoMemLimitGB
+	}
+
+	if app.config.GoGCPercent > 0 {
+		actualGCPercent = app.config.GoGCPercent
+	}
+
+	if actualMemLimitGB != defaultMemLimitGB {
+		runtime_debug.SetMemoryLimit(int64(actualMemLimitGB) << 30)
+		logger.Info("[PERF] ✅ GOMEMLIMIT overridden: %dGB → %dGB (from config/env)", defaultMemLimitGB, actualMemLimitGB)
+	}
+	if actualGCPercent != defaultGCPercent {
+		runtime_debug.SetGCPercent(actualGCPercent)
+		logger.Info("[PERF] ✅ GOGC overridden: %d%% → %d%% (from config)", defaultGCPercent, actualGCPercent)
+
 	}
 
 	// Thêm panic recovery cho goroutine app.Run
@@ -247,6 +281,11 @@ signal.Ignore(syscall.SIGPIPE)
 
 	// Khởi động goroutine leak monitoring
 	// go startGoroutineLeakMonitoring()
+
+	// OOM PREVENTION: Proactive memory pressure relief goroutine.
+	// Monitors Sys memory and forces GC when approaching limits.
+	go memoryPressureRelief(int64(actualMemLimitGB) << 30)
+
 	startRPCServer(app)
 	handleExitSignals(app)
 
@@ -399,6 +438,38 @@ func startRPCServer(app *App) {
 			}
 		}
 	}()
+}
+
+// memoryPressureRelief monitors system memory usage and proactively triggers GC
+// when memory approaches the configured limit. This prevents OOM kills by the kernel.
+//
+// IMPORTANT: This does NOT affect consensus or block processing logic.
+// It only controls Go GC pacing — a purely local optimization.
+func memoryPressureRelief(memLimitBytes int64) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	warnThreshold := uint64(float64(memLimitBytes) * 0.80)  // 80% → force GC
+	critThreshold := uint64(float64(memLimitBytes) * 0.90)  // 90% → force GC + FreeOSMemory
+
+	logger.Info("🛡️ [OOM-GUARD] Memory pressure relief started: limit=%dGB, warn=%dMB, crit=%dMB",
+		memLimitBytes>>30, warnThreshold>>20, critThreshold>>20)
+
+	for range ticker.C {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+
+		if m.Sys >= critThreshold {
+			logger.Warn("🚨 [OOM-GUARD] CRITICAL memory pressure: Sys=%dMB (limit=%dMB). Forcing GC + FreeOSMemory.",
+				m.Sys>>20, uint64(memLimitBytes)>>20)
+			runtime.GC()
+			runtime_debug.FreeOSMemory()
+		} else if m.Sys >= warnThreshold {
+			logger.Warn("⚠️ [OOM-GUARD] High memory pressure: Sys=%dMB (limit=%dMB). Forcing GC.",
+				m.Sys>>20, uint64(memLimitBytes)>>20)
+			runtime.GC()
+		}
+	}
 }
 
 // startMemoryMonitoring bắt đầu monitoring memory định kỳ

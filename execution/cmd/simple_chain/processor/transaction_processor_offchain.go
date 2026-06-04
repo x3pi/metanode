@@ -391,7 +391,9 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 
 	if explorerService := v.storageManager.GetExplorerSearchServiceReadOnly(); explorerService != nil {
 		if err := explorerService.IndexTransaction(executeTransaction, rcp, lastBlockHeader); err != nil {
-			logger.Fatal("Cannot index off-chain transaction %s in block #%d: %v", executeTransaction.Hash().Hex(), lastBlockHeader.BlockNumber(), err)
+			// NOTE: With non-blocking drop policy, this error is expected when queue is full.
+			// Off-chain (read-only) TX indexing is best-effort — do NOT Fatal.
+			logger.Error("Cannot index off-chain transaction %s in block #%d: %v", executeTransaction.Hash().Hex(), lastBlockHeader.BlockNumber(), err)
 		}
 	}
 	logger.Info("Off-chain transaction %v  processed and indexed successfully", executeTransaction)

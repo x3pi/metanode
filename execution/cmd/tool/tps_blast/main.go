@@ -229,8 +229,10 @@ func main() {
 	type rawTx struct {
 		bytes []byte
 		addr  string
+		hash  string
 	}
 	var allTxs []rawTx
+	sentHashes := make(map[string]bool, len(toSend))
 	var buildErrors int
 
 	for _, acc := range toSend {
@@ -260,7 +262,10 @@ func main() {
 			continue
 		}
 
-		allTxs = append(allTxs, rawTx{bytes: bTx, addr: acc.Address})
+		txHash := strings.ToLower(ethTx.Hash().Hex())
+		sentHashes[txHash] = false
+
+		allTxs = append(allTxs, rawTx{bytes: bTx, addr: acc.Address, hash: txHash})
 	}
 
 	buildDuration := time.Since(buildStart)
@@ -466,7 +471,7 @@ func main() {
 	rpcErrorStreak := 0
 	lastBlockNum := startBlock
 	totalTxsInBlocks := uint64(0)
-	requiredEmptyStreak := 8 // Wait for 8 consecutive polls (16s) with no new blocks → chain truly idle
+	requiredEmptyStreak := 10 // Wait for 10 consecutive polls (20s) with no new blocks → chain truly idle
 	maxRpcErrorStreak := 5   // Exit after 5 consecutive RPC errors (10s) — node is likely down
 
 	for time.Since(processStart) < maxWait {
@@ -496,6 +501,13 @@ func main() {
 				blk, err := rpcClient.GetBlockByNumber(bn)
 				if err == nil && blk != nil {
 					newBlockTxs = len(blk.Transactions)
+					// Mark our transactions as confirmed
+					for _, txHash := range blk.Transactions {
+						lowerHash := strings.ToLower(txHash)
+						if _, exists := sentHashes[lowerHash]; exists {
+							sentHashes[lowerHash] = true
+						}
+					}
 					fetchErr = nil
 					break
 				}
@@ -517,14 +529,21 @@ func main() {
 		totalTxsInBlocks += newTxs
 		lastBlockNum = nextLastBlockNum
 
-		pct := float64(totalTxsInBlocks) / float64(len(allTxs)) * 100
+		thisClientConfirmed := 0
+		for _, confirmed := range sentHashes {
+			if confirmed {
+				thisClientConfirmed++
+			}
+		}
+
+		pct := float64(thisClientConfirmed) / float64(len(allTxs)) * 100
 		if pct > 100 {
 			pct = 100
 		}
 
 		fmt.Printf("\r  📡 [%s] Block: %d | TXs in blocks: %d (this client: %d/%d %.0f%%) | +%d new   ",
 			time.Since(processStart).Round(time.Millisecond),
-			currentBlockNum, totalTxsInBlocks, totalTxsInBlocks, len(allTxs), pct, newTxs)
+			currentBlockNum, totalTxsInBlocks, thisClientConfirmed, len(allTxs), pct, newTxs)
 		os.Stdout.Sync()
 
 		// NOTE: Do NOT exit based on totalTxsInBlocks >= len(allTxs).
@@ -669,10 +688,11 @@ func main() {
 	}
 
 	if *skipVerify {
-		if totalTxInBlocks > len(toSend) {
-			totalConfirmed = int32(len(toSend))
-		} else {
-			totalConfirmed = int32(totalTxInBlocks)
+		totalConfirmed = 0
+		for _, confirmed := range sentHashes {
+			if confirmed {
+				totalConfirmed++
+			}
 		}
 		totalFailed = int32(len(toSend)) - totalConfirmed
 		totalErrors = 0

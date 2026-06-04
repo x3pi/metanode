@@ -636,6 +636,7 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 
 	removedCount := 0
 	skippedCount := 0
+	indexDroppedCount := 0
 	for _, txHash := range txHashes {
 		tx, err := txDB.GetTransaction(txHash)
 		if err != nil {
@@ -654,6 +655,7 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 		if bp.storageManager.IsExplorer() {
 			if err := bp.storageManager.GetExplorerSearchService().IndexTransaction(tx, rpc, lastBlock.Header()); err != nil {
 				logger.Error("Error indexing transaction with hash %s: %v", txHash.Hex(), err)
+				indexDroppedCount++
 			}
 		}
 
@@ -672,7 +674,15 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 		blockNumber, removedCount, len(txHashes))
 	if bp.storageManager.IsExplorer() {
 		bp.storageManager.GetExplorerSearchService().Commit()
-		bp.storageManager.GetExplorerSearchService().AddBlockToIndexRanges(lastBlock.Header().BlockNumber())
+		// OOM PREVENTION: Only mark block as fully indexed if ALL transactions were indexed.
+		// If any TX was dropped (queue full), do NOT add to ranges — the periodic re-indexer
+		// (every 5 minutes) will detect this block as missing and re-index it completely.
+		if indexDroppedCount == 0 {
+			bp.storageManager.GetExplorerSearchService().AddBlockToIndexRanges(lastBlock.Header().BlockNumber())
+		} else {
+			logger.Warn("⚠️ [EXPLORER] Block #%d had %d/%d index drops — NOT marking as indexed. Periodic re-indexer will retry.",
+				blockNumber, indexDroppedCount, len(txHashes))
+		}
 	}
 }
 

@@ -30,31 +30,19 @@ NUM_NODES=${#NODES[@]}
 
 # Helper: get current block number from RPC
 get_block_number() {
-    local rpc_url="$1"
-    if [ -n "$rpc_url" ]; then
-        local hex=$(curl -s --max-time 1 "http://$rpc_url" -X POST -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
-            | grep -oP '"result":"0x[0-9a-fA-F]+"' | grep -oP '0x[0-9a-fA-F]+')
-        local dec=$(printf "%d" "$hex" 2>/dev/null)
-        if [ -n "$dec" ] && [ "$dec" -gt 0 ]; then
-            echo "$dec"
-            return
-        fi
-    fi
-    # Fallback: Query all nodes in RPCS in case the primary is busy
+    local max_block=0
     for rpc in "${RPCS[@]}"; do
         local hex=$(curl -s --max-time 1 "http://$rpc" -X POST -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
-            | grep -oP '"result":"0x[0-9a-fA-F]+"' | grep -oP '0x[0-9a-fA-F]+')
-        if [ -n "$hex" ]; then
+            | jq -r '.result' 2>/dev/null)
+        if [ -n "$hex" ] && [ "$hex" != "null" ]; then
             local dec=$(printf "%d" "$hex" 2>/dev/null)
-            if [ -n "$dec" ] && [ "$dec" -gt 0 ]; then
-                echo "$dec"
-                return
+            if [ -n "$dec" ] && [ "$dec" -gt "$max_block" ]; then
+                max_block=$dec
             fi
         fi
     done
-    echo "0"
+    echo "$max_block"
 }
 
 echo ""
@@ -118,6 +106,7 @@ while true; do
 done
 
 echo -e "${GREEN}🚀 All clients are fully synced! Broadcasting START signal...${NC}"
+BLOCK_BEFORE=$(get_block_number)
 START_MS=$(date +%s%3N)
 START_SEC=$((START_MS / 1000))
 touch /tmp/blast_start_signal
@@ -125,11 +114,13 @@ touch /tmp/blast_start_signal
 echo -e "${YELLOW}⏳ Delaying slightly to allow injection to start...${NC}"
 sleep 0.1
 
-echo -e "${YELLOW}⏳ Chain is processing... Waiting until idle (no new blocks for 10s)...${NC}"
+echo -e "${YELLOW}⏳ Chain is processing... Waiting until idle (no new blocks for 20s)...${NC}"
 LAST_BLOCK=$BLOCK_BEFORE
 STAGNANT=0
 ACTUAL_END_MS=$START_MS
-while [ $STAGNANT -lt 100 ]; do
+# Stagnant detection: 20s (200 × 0.1s) to tolerate epoch transition freezes
+# while accurately tracking host wall clock end time at the last block height increase.
+while [ $STAGNANT -lt 200 ]; do
     sleep 0.1
     CURRENT_BLOCK=$(get_block_number "${RPCS[0]}")
     if [ "$CURRENT_BLOCK" -gt "$LAST_BLOCK" ]; then
@@ -184,13 +175,23 @@ echo    "  ────────  ───────  ──────�
 
 for (( b=BLOCK_START; b<=BLOCK_END; b++ )); do
     BLOCK_HEX=$(printf "0x%x" "$b")
-    RESPONSE=$(curl -s "http://${RPCS[0]}" -X POST -H "Content-Type: application/json" \
-        -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["'$BLOCK_HEX'",false],"id":1}' 2>/dev/null)
+    RESPONSE=""
+    for rpc in "${RPCS[@]}"; do
+        res=$(curl -s --max-time 2 "http://$rpc" -X POST -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["'$BLOCK_HEX'",false],"id":1}' 2>/dev/null)
+        if [ -n "$res" ] && echo "$res" | grep -q "result" && ! echo "$res" | grep -q '"result":null'; then
+            RESPONSE="$res"
+            break
+        fi
+    done
     
-    if [ -n "$RESPONSE" ] && echo "$RESPONSE" | grep -q "result"; then
-        TXCNT=$(echo "$RESPONSE" | grep -oP '"transactions":\[.*?\]' | grep -o '"0x[0-9a-fA-F]*"' | wc -l)
+    if [ -n "$RESPONSE" ]; then
+        TXCNT=$(echo "$RESPONSE" | jq '.result.transactions | length' 2>/dev/null)
+        if [ -z "$TXCNT" ] || [ "$TXCNT" = "null" ]; then
+            TXCNT=0
+        fi
         
-        TS_HEX=$(echo "$RESPONSE" | grep -oP '"timestamp":"0x[0-9a-fA-F]+"' | grep -oP '0x[0-9a-fA-F]+')
+        TS_HEX=$(echo "$RESPONSE" | jq -r '.result.timestamp' 2>/dev/null)
         TS_DEC=$(printf "%d" "$TS_HEX" 2>/dev/null || echo "0")
         
         TS_SEC=$((TS_DEC / 1000))
@@ -248,9 +249,9 @@ else
 fi
 
 # Parse the performance accumulation logs if they exist
-TOTAL_V_MS=0; TOTAL_C_MS=0; TOTAL_R_MS=0; AVG_V_MS=0; AVG_C_MS=0; AVG_R_MS=0; REAL_TPS=0; GO_TPS=0; E2E_TPS=0; COUNT_BLOCKS=0
+TOTAL_V_MS=0; TOTAL_C_MS=0; TOTAL_R_MS=0; AVG_V_MS=0; AVG_C_MS=0; AVG_R_MS=0; REAL_TPS=0; GO_TPS=0; PIPELINE_TPS=0; COUNT_BLOCKS=0
 if [ -f /tmp/perf_accumulation.log ]; then
-    read TOTAL_V_MS TOTAL_C_MS TOTAL_R_MS AVG_V_MS AVG_C_MS AVG_R_MS REAL_TPS GO_TPS E2E_TPS COUNT_BLOCKS < <(awk -v wall_secs="$PROC_SEC" '
+    read TOTAL_V_MS TOTAL_C_MS TOTAL_R_MS AVG_V_MS AVG_C_MS AVG_R_MS REAL_TPS GO_TPS PIPELINE_TPS COUNT_BLOCKS < <(awk '
     function to_ms(str) {
         if (str ~ /µs/) { sub(/µs/, "", str); return str / 1000; }
         if (str ~ /us/) { sub(/us/, "", str); return str / 1000; }
@@ -282,10 +283,12 @@ if [ -f /tmp/perf_accumulation.log ]; then
             
             real_tps = (sum_r > 0) ? (total_txs / (sum_r / 1000)) : 0;
             go_tps = ((sum_v + sum_r) > 0) ? (total_txs / ((sum_v + sum_r) / 1000)) : 0;
-            e2e_tps = (wall_secs > 0) ? (total_txs / wall_secs) : 0;
+            # Pipeline TPS: total_txs / sum(V+C+R) — full block processing time
+            pipeline_total_ms = sum_v + sum_c + sum_r;
+            pipeline_tps = (pipeline_total_ms > 0) ? (total_txs / (pipeline_total_ms / 1000)) : 0;
             
             printf "%.2f %.2f %.2f %.2f %.2f %.2f %.0f %.0f %.0f %d", 
-                sum_v, sum_c, sum_r, avg_v, avg_c, avg_r, real_tps, go_tps, e2e_tps, count;
+                sum_v, sum_c, sum_r, avg_v, avg_c, avg_r, real_tps, go_tps, pipeline_tps, count;
         } else {
             printf "0 0 0 0 0 0 0 0 0 0";
         }
@@ -318,10 +321,10 @@ if [ "$COUNT_BLOCKS" -gt 0 ]; then
     echo -e "    - Bước Đồng Thuận (Consensus):   ${BOLD}$(printf "%.2f" $TOTAL_C_MS) ms${NC} (Avg: $(printf "%.2f" $AVG_C_MS) ms/block)"
     echo -e "    - Bước Thực Thi (Real Exec):     ${BOLD}$(printf "%.2f" $TOTAL_R_MS) ms${NC} (Avg: $(printf "%.2f" $AVG_R_MS) ms/block)"
     echo ""
-    echo -e "  🚀 TPS thực sự theo từng giai đoạn:"
-    echo -e "    - ${GREEN}${BOLD}TPS Thực Thi (Real Exec TPS):       ~${REAL_TPS} tx/s${NC}"
-    echo -e "    - ${CYAN}${BOLD}TPS Xử Lý Go (Virtual + Real):      ~${GO_TPS} tx/s${NC}"
-    echo -e "    - ${YELLOW}${BOLD}TPS Toàn Trình (Consensus Included): ~${E2E_TPS} tx/s${NC}"
+    echo -e "  🚀 TPS theo từng giai đoạn:"
+    echo -e "    - ${GREEN}${BOLD}TPS Thực Thi (Real Exec):            ~${REAL_TPS} tx/s${NC}"
+    echo -e "    - ${CYAN}${BOLD}TPS Xử Lý Go (Virtual + Real):       ~${GO_TPS} tx/s${NC}"
+    echo -e "    - ${YELLOW}${BOLD}TPS Pipeline (V+C+R toàn bộ):        ~${PIPELINE_TPS} tx/s${NC}"
     echo ""
 fi
 

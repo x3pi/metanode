@@ -78,8 +78,13 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 		serverPort = 8700
 	}
 
+	maxSnapshots := cfg.SnapshotMaxSnapshots
+	if maxSnapshots <= 0 {
+		maxSnapshots = 5 // Default
+	}
+
 	// Tạo SnapshotManager
-	sm := NewSnapshotManager(dataDir, snapshotDir, 5, blocksDelay)
+	sm := NewSnapshotManager(dataDir, snapshotDir, maxSnapshots, blocksDelay)
 	sm.SetSnapshotFrequency(cfg.SnapshotFrequencyBlocks)
 	sm.SetSnapshotBlockOffset(cfg.SnapshotBlockOffset)
 	globalSnapshotManager = sm
