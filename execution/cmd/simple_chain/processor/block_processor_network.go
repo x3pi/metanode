@@ -21,6 +21,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -98,13 +99,13 @@ func (bp *BlockProcessor) runUnixSocket() {
 	fmt.Printf("✅ [READY] Go Master executor initialized via FFI: block=%d\n", lastBlock)
 
 	logger.Info("Main program waiting for data from FFI Module...")
-	
+
 	// 5. Start block processing loop asynchronously using the channel
 	go bp.processRustEpochData(blockQueue)
-	
+
 	// The runUnixSocket caller expects this function to block/run in background
 	// We can simply return here, or keep it alive like it did. It's normally run as a goroutine.
-	// Since the previous function had a block wait, we can mimic it or just let it exit. 
+	// Since the previous function had a block wait, we can mimic it or just let it exit.
 	// The processRustEpochData is backgrounded now.
 	for {
 		time.Sleep(30 * time.Second)
@@ -264,7 +265,7 @@ PROCESS_LOOP:
 			if elapsed > 10*time.Second {
 				rate := float64(bp.processedBlockCount-bp.lastRateCheckCount) / elapsed.Seconds()
 				queueLen := len(dataChan)
-				
+
 				if queueLen > 40000 { // 80% of 50K dataChan
 					logger.Error("🚨 [SELF-MONITOR] Processing rate=%.1f blk/s, queue=%d/50000 (%.0f%% full). Go is falling behind!",
 						rate, queueLen, float64(queueLen)/50000*100)
@@ -272,7 +273,7 @@ PROCESS_LOOP:
 					logger.Warn("⚠️ [SELF-MONITOR] Processing rate=%.1f blk/s, queue=%d/50000 (%.0f%% full). Monitor closely.",
 						rate, queueLen, float64(queueLen)/50000*100)
 				}
-				
+
 				bp.lastRateCheckTime = time.Now()
 				bp.lastRateCheckCount = bp.processedBlockCount
 			}
@@ -293,7 +294,7 @@ PROCESS_LOOP:
 					if len(hashStr) > 16 {
 						hashStr = hashStr[:16] + "..."
 					}
-					logger.Info("  |_ [RUST-TX-ORDER] GEI=%d, pos[%d/%d]: hash=%s, worker=%d", 
+					logger.Info("  |_ [RUST-TX-ORDER] GEI=%d, pos[%d/%d]: hash=%s, worker=%d",
 						incomingGEI, i, incomingTxCount-1, hashStr, txData.GetWorkerId())
 				}
 			}
@@ -325,7 +326,6 @@ PROCESS_LOOP:
 					incomingGEI, nextExpectedGlobalExecIndex, geiBackwardGap, incomingTxCount)
 			}
 		}
-
 
 		// ═══════════════════════════════════════════════════════════════════
 		// BATCH-DRAIN OPTIMIZATION: Process consecutive empty commits in bulk
@@ -439,7 +439,7 @@ PROCESS_LOOP:
 						}
 						// Now process the non-empty/non-consecutive commit
 						logger.Info("📥 [PROCESSOR] Read block from dataChan: global_exec_index=%d", nextGEI)
-						
+
 						blockStart := time.Now()
 						bp.ExecutionMutex.RLock()
 						if err := bp.processSingleEpochData(next, &nextExpectedGlobalExecIndex, &currentBlockNumber, pendingBlocks, skippedCommitsWithTxs, epochFileLogger); err != nil {
@@ -451,7 +451,7 @@ PROCESS_LOOP:
 							logger.Warn("🐌 [SLOW-BLOCK] Block processing took %v (GEI=%d, txs=%d)",
 								blockDur, nextGEI, len(next.Transactions))
 						}
-						
+
 						drainTimeout.Stop()
 						goto BATCH_DONE
 					}
@@ -603,7 +603,7 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 	if actualLastGEI > 0 && actualLastGEI >= *nextExpectedGlobalExecIndex {
 		oldNextExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = actualLastGEI + 1
-		
+
 		// WE MUST ALSO ADVANCE currentBlockNumber !!!
 		actualLastBlockDB := storage.GetLastBlockNumber()
 		if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
@@ -632,7 +632,7 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						// block's header before processing the next consensus block.
 						// ═══════════════════════════════════════════════════════════
 						if trie.GetStateBackend() == trie.BackendNOMT {
-							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)", 
+							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)",
 								actualLastBlockDB, actualLastGEI)
 							if err := bp.chainState.UpdateStateForNewHeader(freshBlock.Header()); err != nil {
 								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
@@ -645,6 +645,7 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						mvm.ClearAllMVMApi()
 						mvm.ClearAllProtectedMVMApi()
 						mvm.CallClearAllStateInstances()
+						trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 					} else {
 						logger.Error("❌ [TRANSITION SYNC] Failed to load fresh block #%d from DB: %v", actualLastBlockDB, err)
 					}
@@ -690,7 +691,6 @@ func (bp *BlockProcessor) ProcessBlockData(request network.Request) error {
 			request.Connection().Type(), request.Connection().RemoteAddr())
 		return nil
 	}
-
 
 	// Decompress zstd before deserializing
 	var decoder, _ = zstd.NewReader(nil)

@@ -100,7 +100,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		}
 	}()
 
-	if incomingBlockNum > 0 && incomingBlockNum > localTipBlockNum + 1 {
+	if incomingBlockNum > 0 && incomingBlockNum > localTipBlockNum+1 {
 		logger.Error("🚨 [BLOCK-GAP-GUARD] REJECT: Consensus block height gap detected! Incoming block #%d, but Go local tip is #%d. Rejecting block execution to let P2P sync complete.",
 			incomingBlockNum, localTipBlockNum)
 		return fmt.Errorf("consensus block height gap detected: incoming %d, local tip %d", incomingBlockNum, localTipBlockNum)
@@ -409,12 +409,10 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		return nil
 	}
 
-
-
 	// Case 2: Future block (out-of-order)
 	// ═══════════════════════════════════════════════════════════════════════════
 	// CRITICAL FIX: Since Go P2P sync is disabled and ALL blocks are delivered
-	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex 
+	// strictly sequentially via Rust FFI (ExecuteBlock), ANY gap in globalExecIndex
 	// means Rust intentionally fast-skipped empty commits during catch-up.
 	// We MUST NOT buffer it. We just adopt the new GEI and process it immediately.
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -424,13 +422,13 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 		*nextExpectedGlobalExecIndex = globalExecIndex
 
 		if len(epochData.Transactions) > 0 {
-			logger.Error("🚨 [CRITICAL-DIVERGENCE] GEI jumped from %d to %d (gap=%d). We missed blocks with transactions! This will cause a state root mismatch. Immediate debug required. Block epoch=%d", 
+			logger.Error("🚨 [CRITICAL-DIVERGENCE] GEI jumped from %d to %d (gap=%d). We missed blocks with transactions! This will cause a state root mismatch. Immediate debug required. Block epoch=%d",
 				oldExpected, globalExecIndex, gapSize, epochNum)
 		} else {
 			logger.Info("📡 [TELEMETRY] [RUST-FAST-SKIP] GEI jumped from %d to %d (gap=%d). Adopting new GEI due to empty-commit fast-skip in Rust.",
 				oldExpected, globalExecIndex, gapSize)
 		}
-			
+
 		// Fall through to process the block sequentially
 	}
 
@@ -467,6 +465,7 @@ PROCESS_BLOCK:
 					mvm.ClearAllMVMApi()
 					mvm.ClearAllProtectedMVMApi()
 					mvm.CallClearAllStateInstances()
+					trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 				} else {
 					logger.Error("❌ [NOMT-GUARD] Failed to load historic block #%d from DB by hash %s: %v", nextBlockToCreate, blockHash.Hex(), err)
 				}
@@ -645,9 +644,9 @@ PROCESS_BLOCK:
 			bNum = lastCommittedBlockNumber + 1
 		}
 
-		logger.Info("🛡️ [GHOST-BLOCK-GUARD] len(allTransactions) is 0 after unmarshal, creating empty block to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d", 
+		logger.Info("🛡️ [GHOST-BLOCK-GUARD] len(allTransactions) is 0 after unmarshal, creating empty block to prevent gap. Rust_block_number=%d, assigned_block_number=%d, GEI=%d",
 			epochData.GetBlockNumber(), bNum, globalExecIndex)
-		
+
 		emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 		lastB := bp.GetLastBlock()
 		if lastB != nil {
@@ -660,7 +659,7 @@ PROCESS_BLOCK:
 			leader = common.BytesToAddress(leaderBytes)
 		}
 		batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
-		
+
 		*currentBlockNumber = bNum
 		storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
 
@@ -734,7 +733,7 @@ PROCESS_BLOCK:
 		logger.Debug("📊 [BLOCK-NUM] Rust assigned block_number=0. Assigned sequential block #%d for global_exec_index=%d (txs=%d)",
 			*currentBlockNumber, globalExecIndex, len(allTransactions))
 	}
-	
+
 	logger.Debug("📊 [BLOCK-NUM] Using Rust's authoritative block #%d for global_exec_index=%d (txs=%d)",
 		*currentBlockNumber, globalExecIndex, len(allTransactions))
 
@@ -765,7 +764,6 @@ PROCESS_BLOCK:
 			leaderHex, digestHex, len(allTransactions))
 	}
 
-
 	// ═══════════════════════════════════════════════════════════════════════════
 	// GEI REGRESSION GUARD: Prevent creating blocks from stale DAG replay.
 	//
@@ -793,7 +791,6 @@ PROCESS_BLOCK:
 			return nil
 		}
 	}
-
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// ANTI-INFLATION GUARD: Prevent block inflation after snapshot restore.
@@ -908,7 +905,7 @@ PROCESS_BLOCK:
 				logger.Warn("⚠️ [TIMESTAMP-REGRESSION] WARNING: block #%d timestamp=%d is %ds BEHIND parent #%d timestamp=%d. "+
 					"Proceeding with execution to maintain consensus alignment. (leader=%s, GEI=%d, epoch=%d, txs=%d)",
 					*currentBlockNumber, blockTimeSec, regression,
-					lastBlock.Header().BlockNumber(), parentTsMs / 1000,
+					lastBlock.Header().BlockNumber(), parentTsMs/1000,
 					leaderAddr.Hex(), globalExecIndex, epochNum, len(allTransactions))
 			}
 		}
@@ -1049,7 +1046,7 @@ PROCESS_BLOCK:
 			bNum = lastCommittedBlockNumber + 1
 		}
 
-		logger.Warn("🛡️ [GHOST-BLOCK-GUARD] LATE DROP (relaxed Guard 3): 0 valid txs out of %d (all duplicates). Creating empty block #%d to prevent gap and deadlock. GEI=%d", 
+		logger.Warn("🛡️ [GHOST-BLOCK-GUARD] LATE DROP (relaxed Guard 3): 0 valid txs out of %d (all duplicates). Creating empty block #%d to prevent gap and deadlock. GEI=%d",
 			len(allTransactions), bNum, globalExecIndex)
 		emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 		lastB := bp.GetLastBlock()
