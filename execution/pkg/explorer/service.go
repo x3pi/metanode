@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/goxapian"
@@ -55,6 +56,10 @@ type ExplorerSearchService struct {
 	indexQueue chan indexJob
 	// Dùng để quản lý vòng đời của các worker
 	wg sync.WaitGroup
+
+	// OOM PREVENTION: Track dropped jobs when queue is full.
+	// Explorer indexing is non-critical — dropping is better than blocking pipeline.
+	droppedJobs atomic.Int64
 
 	// Mutex để bảo vệ file block_ranges.json và biến indexedBlockRanges
 	rangesMu           sync.RWMutex
@@ -155,8 +160,9 @@ func (s *ExplorerSearchService) monitorQueue() {
 	defer ticker.Stop()
 	for range ticker.C {
 		length := len(s.indexQueue)
-		if length > 0 {
-			log.Printf("📊 **[DEBUG] Index Queue Depth: %d / %d (%.2f%% full)**", length, s.queueCapacity, float64(length)*100.0/float64(s.queueCapacity))
+		droppedTotal := s.droppedJobs.Load()
+		if length > 0 || droppedTotal > 0 {
+			log.Printf("📊 **[DEBUG] Index Queue Depth: %d / %d (%.2f%% full) | Dropped: %d**", length, s.queueCapacity, float64(length)*100.0/float64(s.queueCapacity), droppedTotal)
 		}
 	}
 }
@@ -189,20 +195,32 @@ func (s *ExplorerSearchService) Close() error {
 	return firstErr
 }
 
-// SỬA ĐỔI: Hàm này giờ sẽ bị chặn (block) nếu hàng đợi đầy, thay vì báo lỗi.
-// Điều này tạo ra cơ chế điều tiết tự nhiên (backpressure).
+// OOM PREVENTION: Non-blocking IndexTransaction with drop policy.
+// When queue is full, jobs are DROPPED instead of blocking the block processing pipeline.
+// Explorer indexing is non-critical (doesn't affect consensus/execution).
+// Dropped transactions can be re-indexed offline via the missing block ranges mechanism.
 func (s *ExplorerSearchService) IndexTransaction(tx types.Transaction, rcpt types.Receipt, blockHeader types.BlockHeader) error {
 	job := indexJob{
 		Tx:          tx,
 		Rcpt:        rcpt,
-		BlockHeader: blockHeader, // TỐI ƯU HÓA: Truyền vào block.Header()
+		BlockHeader: blockHeader,
 	}
 
-	// Gửi job vào hàng đợi. Nếu hàng đợi đầy, goroutine gọi hàm này
-	// sẽ tạm dừng tại đây cho đến khi có chỗ trống. Điều này là an toàn và mong muốn.
-	s.indexQueue <- job
-
-	return nil
+	// Non-blocking send: drop job if queue is full rather than blocking pipeline.
+	select {
+	case s.indexQueue <- job:
+		// Sent successfully
+		return nil
+	default:
+		// Queue full — drop job to prevent backpressure on block processing.
+		dropped := s.droppedJobs.Add(1)
+		// Log every 100th drop to avoid log spam
+		if dropped%100 == 1 {
+			logger.Warn("⚠️ [EXPLORER] Index queue full (%d/%d). Dropped %d index jobs total. TX %s will not be searchable until re-indexed.",
+				len(s.indexQueue), s.queueCapacity, dropped, tx.Hash().Hex())
+		}
+		return fmt.Errorf("explorer index queue full, job dropped (total dropped: %d)", dropped)
+	}
 }
 
 // getShardIndex chọn shard cho một key (ví dụ: transaction hash).
