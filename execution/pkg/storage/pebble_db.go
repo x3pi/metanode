@@ -42,21 +42,22 @@ type PebbleDB struct {
 var (
 	sharedPebbleCacheOnce sync.Once
 	sharedPebbleCache     *pebble.Cache
+	sharedCacheSizeMB     int = 512
 
 	sharedPebbleTableCacheOnce sync.Once
 	sharedPebbleTableCache     *pebble.TableCache
 )
 
+func SetSharedPebbleCacheSize(sizeMB int) {
+	if sizeMB > 0 {
+		sharedCacheSizeMB = sizeMB
+	}
+}
+
 func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
-		// 512MB shared block cache across all PebbleDB instances.
-		// TUNED (June 2026): Reduced from 2GB to 512MB to prevent OOM under sustained load.
-		// Each node creates ~48 PebbleDB shards. With 5 nodes, 2GB cache consumed 10GB total.
-		// Pebble's 10-bit bloom filters handle cold reads efficiently, so the
-		// smaller cache doesn't significantly impact point lookup performance.
-		// With 5 nodes × 512MB = 2.5GB total (vs previous 10GB).
-		sharedPebbleCache = pebble.NewCache(512 << 20) // 512MB
-		logger.Info("✅ [PEBBLE] Created 512MB shared block cache")
+		sharedPebbleCache = pebble.NewCache(int64(sharedCacheSizeMB) << 20)
+		logger.Info("✅ [PEBBLE] Created %dMB shared block cache", sharedCacheSizeMB)
 	})
 	sharedPebbleCache.Ref()
 	return sharedPebbleCache
