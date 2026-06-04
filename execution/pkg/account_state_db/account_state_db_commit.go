@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	// Assume these paths are correct for your project structure
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -691,18 +690,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	if totalDirty > 0 {
 		hasChanges = true
-		if lockProcess {
-			// FORENSIC LOGGING: Print DirtyContentHash for deterministic diffing
-			hasher := crypto.NewKeccakState()
-			for _, entry := range keysToProcess {
-				hasher.Write(entry.addr.Bytes())
-				b, _ := entry.state.Marshal()
-				hasher.Write(b)
-			}
-			var h common.Hash
-			hasher.Read(h[:])
-			logger.Info("🔍 [FORENSIC] AccountStateDB DirtyContentHash: %s (totalDirty=%d)", h.Hex(), totalDirty)
-		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════

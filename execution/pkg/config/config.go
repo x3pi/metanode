@@ -154,6 +154,7 @@ type SimpleChainConfig struct {
 	SnapshotSourceDir       string `json:"snapshot_source_dir"`                 // Thư mục cần snapshot (mặc định = RootPath parent)
 	SnapshotFrequencyBlocks int    `json:"snapshot_frequency_blocks,omitempty"` // Số blocks cố định để tạo snapshot (0 = chỉ tạo khi qua epoch mới)
 	SnapshotBlockOffset     int    `json:"snapshot_block_offset,omitempty"`     // Offset per-node để stagger snapshot (vd: node0=0, node1=100, node2=200). Đảm bảo không tất cả nodes snapshot cùng lúc
+	SnapshotMaxSnapshots    int    `json:"snapshot_max_snapshots,omitempty"`    // Số snapshot tối đa giữ lại (mặc định 5 hoặc 2 tùy config)
 
 	// State trie backend: "nomt" (default, Rust NOMT), "mpt" (Merkle Patricia Trie) or "flat" (FlatStateTrie)
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.
@@ -169,6 +170,10 @@ type SimpleChainConfig struct {
 	MasterBLSPubKey string `json:"master_bls_pubkey,omitempty"`
 	// SkipSignatureVerification: if true, Sub node accepts blocks without verifying signature (backward compatibility)
 	SkipSignatureVerification bool `json:"skip_signature_verification,omitempty"`
+
+	// Runtime memory tuning (per-node configurable, prevents OOM kill)
+	GoMemLimitGB int `json:"go_mem_limit_gb,omitempty"` // Go soft memory limit in GB (default: 8). Set per-node to prevent OOM when running multiple nodes on same server.
+	GoGCPercent  int `json:"go_gc_percent,omitempty"`   // GC target percentage (default: 800). Lower = more frequent GC = less memory but more CPU.
 
 	Pruning       PruningConfig      `json:"pruning,omitempty"`
 	RpcRateLimit  RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
@@ -221,7 +226,7 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 
 		// RPC Rate Limit default configuration if not fully specified
 		if ConfigApp.RpcRateLimit.GlobalRate == 0 {
-			ConfigApp.RpcRateLimit.Enabled = false
+			ConfigApp.RpcRateLimit.Enabled = false // TEMPORARILY DISABLED FOR TESTING
 			ConfigApp.RpcRateLimit.GlobalRate = 10000
 			ConfigApp.RpcRateLimit.PerIpRate = 50
 			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block

@@ -489,11 +489,18 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 	ve, isVe := vp.offChainProcessor.(virtualExecutor)
 
+	accountSettingAddrV := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+
 	startVirtual := time.Now()
 	for i, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
-		if isVe && (tx.IsCallContract() || tx.IsDeployContract()) {
+		// OPTIMIZATION: Skip full VirtualExec for TXs that don't need EVM.
+		// AccountSetting TXs (BLS registration) only need from+to addresses (already set above).
+		// Non-contract TXs (simple transfers) also skip.
+		// Only invoke ProcessSingleTransactionVirtual for actual smart contract calls
+		// to non-native addresses where EVM is needed to discover RelatedAddresses.
+		if isVe && (tx.IsCallContract() || tx.IsDeployContract()) && tx.ToAddress() != accountSettingAddrV {
 			updatedTx, err, _ := ve.ProcessSingleTransactionVirtual(tx)
 			if err == nil && updatedTx != nil {
 				txs[i] = updatedTx
