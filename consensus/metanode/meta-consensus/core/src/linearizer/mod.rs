@@ -218,11 +218,13 @@ impl Linearizer {
         // ACTOR WRITE: Now that we don't hold the read lock, we can set them as committed!
         if !is_historical {
             for block in &to_commit {
-                assert!(
-                    self.dag_state_writer.set_committed(block.reference()),
-                    "Block with reference {:?} attempted to be committed twice",
-                    block.reference()
-                );
+                if !self.dag_state_writer.set_committed(block.reference()) {
+                    tracing::warn!(
+                        "⚠️ [LINEARIZER] Block with reference {:?} was already marked as committed. \
+                         This can happen during catch-up syncing or amnesia recovery. Proceeding.",
+                        block.reference()
+                    );
+                }
             }
         } else {
             tracing::debug!(

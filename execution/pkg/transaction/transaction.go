@@ -103,8 +103,19 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 
 // Hàm tổng quát để chuyển đổi pb.Transaction sang types.Transaction của go-ethereum
 // Sửa: Kiểu trả về là *types.Transaction (con trỏ) và không dereference NewTx
-func (t *Transaction) ToEthTransaction() *e_types.Transaction { // SỬA: Kiểu trả về là con trỏ
+func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA: Kiểu trả về là con trỏ
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Panic in ToEthTransaction: %v", r)
+			ethTx = nil
+		}
+	}()
+
 	tx := t.proto
+	if tx == nil {
+		return nil
+	}
+
 	data := []byte{}
 	if t.IsCallContract() {
 		data = t.CallData().Input()
@@ -396,11 +407,23 @@ func (t *Transaction) IsRegularTransaction() bool {
 	return t.ToAddress() != (common.Address{}) && len(t.Data()) == 0
 }
 
-func (t *Transaction) Marshal() ([]byte, error) {
+func (t *Transaction) Marshal() (b []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Panic in Marshal: %v", r)
+			b = nil
+			err = fmt.Errorf("panic in Marshal: %v", r)
+		}
+	}()
+
+	if t.proto == nil {
+		return nil, fmt.Errorf("cannot marshal nil proto")
+	}
+
 	if cached := t.cachedBytes.Load(); cached != nil {
 		return *cached, nil
 	}
-	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(t.proto)
+	b, err = proto.MarshalOptions{Deterministic: true}.Marshal(t.proto)
 	if err == nil {
 		t.cachedBytes.Store(&b)
 	}
@@ -577,8 +600,18 @@ func (t *Transaction) ClearCacheHash() {
 }
 
 // getter
-func (t *Transaction) Hash() common.Hash {
-	// Kiểm tra cache có giá trị hay chưa
+func (t *Transaction) Hash() (hash common.Hash) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Panic in Hash: %v", r)
+			hash = common.Hash{}
+		}
+	}()
+
+	if t.proto == nil {
+		return common.Hash{}
+	}
+
 	if cached := t.cachedHash.Load(); cached != nil {
 		return *cached // Trả về giá trị đã cache nếu có
 	}
@@ -622,7 +655,7 @@ func (t *Transaction) Hash() common.Hash {
 	}
 
 	// Tính giá trị băm
-	hash := crypto.Keccak256Hash(bHashPb)
+	hash = crypto.Keccak256Hash(bHashPb)
 
 	// Lưu vào cache (atomic)
 	t.cachedHash.Store(&hash)
@@ -711,12 +744,28 @@ func (t *Transaction) LastDeviceKey() common.Hash {
 	return common.BytesToHash(t.proto.LastDeviceKey)
 }
 
+// Safe helper to convert bytes to address, preventing panics from corrupted slice headers (e.g., from concurrency or CGo)
+func safeBytesToAddress(b []byte) (addr common.Address) {
+	defer func() {
+		if r := recover(); r != nil {
+			addr = common.Address{}
+		}
+	}()
+	return common.BytesToAddress(b)
+}
+
 func (t *Transaction) FromAddress() common.Address {
-	return common.BytesToAddress(t.proto.FromAddress)
+	if t.proto == nil {
+		return common.Address{}
+	}
+	return safeBytesToAddress(t.proto.FromAddress)
 }
 
 func (t *Transaction) ToAddress() common.Address {
-	return common.BytesToAddress(t.proto.ToAddress)
+	if t.proto == nil {
+		return common.Address{}
+	}
+	return safeBytesToAddress(t.proto.ToAddress)
 }
 
 func (t *Transaction) Sign() p_common.Sign {
