@@ -104,6 +104,9 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 // Hàm tổng quát để chuyển đổi pb.Transaction sang types.Transaction của go-ethereum
 // Sửa: Kiểu trả về là *types.Transaction (con trỏ) và không dereference NewTx
 func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA: Kiểu trả về là con trỏ
+	if t == nil {
+		return nil
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic in ToEthTransaction: %v", r)
@@ -131,7 +134,8 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 		var toAddress *common.Address
 		if len(tx.ToAddress) > 0 {
 			addr := common.BytesToAddress(tx.ToAddress)
-			toAddress = &addr
+			toAddress = new(common.Address)
+			*toAddress = addr
 		}
 		amount := new(big.Int).SetBytes(tx.Amount)
 		gasLimit := tx.MaxGas
@@ -162,7 +166,8 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 		var toAddress *common.Address
 		if len(tx.ToAddress) > 0 {
 			addr := common.BytesToAddress(tx.ToAddress)
-			toAddress = &addr
+			toAddress = new(common.Address)
+			*toAddress = addr
 		}
 		if tx.ChainID == 0 {
 			return nil
@@ -204,7 +209,8 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 		var toAddress *common.Address
 		if len(tx.ToAddress) > 0 {
 			addr := common.BytesToAddress(tx.ToAddress)
-			toAddress = &addr
+			toAddress = new(common.Address)
+			*toAddress = addr
 		}
 		if tx.ChainID == 0 {
 			return nil
@@ -408,6 +414,9 @@ func (t *Transaction) IsRegularTransaction() bool {
 }
 
 func (t *Transaction) Marshal() (b []byte, err error) {
+	if t == nil {
+		return nil, fmt.Errorf("cannot marshal nil transaction")
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic in Marshal: %v", r)

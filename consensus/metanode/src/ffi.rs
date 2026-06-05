@@ -5,7 +5,7 @@ use crate::config::NodeConfig;
 use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::sync::{Mutex, Condvar, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use tracing::{debug, error, info, warn};
 
 // The global callbacks registry configured from Go
@@ -67,7 +67,9 @@ pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
 /// never calls metanode_resume_consensus (e.g., crash during epoch transition).
 #[no_mangle]
 pub extern "C" fn metanode_pause_consensus() {
-    info!("⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK...");
+    info!(
+        "⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK..."
+    );
     let guard = match consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write() {
         Ok(g) => g,
         Err(poisoned) => {
@@ -80,12 +82,17 @@ pub extern "C" fn metanode_pause_consensus() {
     }
     PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     let session_id = PAUSE_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    info!("⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED. Session={}", session_id);
+    info!(
+        "⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED. Session={}",
+        session_id
+    );
 
     // Spawn watchdog thread: auto-resume after PAUSE_TIMEOUT_SECS if Go never calls resume
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(PAUSE_TIMEOUT_SECS));
-        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) && PAUSE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst) == session_id {
+        if PAUSE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+            && PAUSE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst) == session_id
+        {
             error!(
                 "🚨 [FFI] PAUSE TIMEOUT! metanode_resume_consensus was NOT called within {}s for Session={}. \
                  Auto-resuming to prevent permanent deadlock!",
@@ -154,7 +161,7 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        
+
         let timeout = std::time::Duration::from_secs(5);
         while guard.is_none() {
             info!("⏳ [FFI TX FLOW] Waiting for FFI_TX_SENDER to be initialized...");
@@ -182,7 +189,10 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
     // Instrumentation: Queue Saturation metrics
     let remaining_capacity = sender.capacity();
     if remaining_capacity < 1000 {
-        tracing::warn!("⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000", remaining_capacity);
+        tracing::warn!(
+            "⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000",
+            remaining_capacity
+        );
     }
 
     // try_send is non-blocking and synchronous
@@ -191,7 +201,7 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
         Ok(_) => {
             FFI_TX_SUBMIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
             FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
-            
+
             // DIAGNOSTIC: Periodic summary every 5s
             let should_log = {
                 let mut last_log = FFI_TX_LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
@@ -213,20 +223,22 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
                     total_batches, total_bytes, full_count, remaining_capacity
                 );
             }
-            
+
             debug!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
             true
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Channel is full. Go side will see `false` and automatically sleep/retry.
             FFI_TX_FULL_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-            warn!("⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}", 
-                FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed));
+            warn!(
+                "⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}",
+                FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed)
+            );
             false
         }
         Err(_) => {
             error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed due to restart)");
-            
+
             // Channel closed. Reset sender to None so the next call blocks on the Condvar until a new channel is registered.
             if let Ok(mut guard) = FFI_TX_SENDER.lock() {
                 *guard = None;
@@ -238,7 +250,10 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
 
 /// Start the Rust consensus engine in a background thread.
 #[no_mangle]
-pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char, data_dir_ptr: *const c_char) {
+pub unsafe extern "C" fn metanode_start_consensus(
+    config_path_ptr: *const c_char,
+    data_dir_ptr: *const c_char,
+) {
     let config_path_str = unsafe {
         if config_path_ptr.is_null() {
             eprintln!("Error: config_path_ptr is null");
@@ -253,9 +268,7 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
         if data_dir_ptr.is_null() {
             "".to_string()
         } else {
-            CStr::from_ptr(data_dir_ptr)
-                .to_string_lossy()
-                .into_owned()
+            CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
         }
     };
 
@@ -269,41 +282,19 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
         // Install panic hook for diagnostic output BEFORE any Rust code runs
         std::panic::set_hook(Box::new(|info| {
             eprintln!("🚨 [RUST PANIC] {}", info);
-            eprintln!("Backtrace:\n{:?}", std::backtrace::Backtrace::force_capture());
+            eprintln!(
+                "Backtrace:\n{:?}",
+                std::backtrace::Backtrace::force_capture()
+            );
         }));
 
         // Initialize tracing
-        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "metanode=info,consensus_core=info".into());
-
-        if !config_path_str.is_empty() {
-            // config_path_str is like /opt/metanode/node-0/config/consensus.toml
-            // We want to write logs to /opt/metanode/node-0/logs/consensus/rust_consensus.log
-            let base_dir = std::path::PathBuf::from(&config_path_str)
-                .parent()
-                .and_then(|p| p.parent())
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf();
-            let log_dir = base_dir.join("logs").join("consensus");
-            let _ = std::fs::create_dir_all(&log_dir);
-            
-            // Write logs to <base_dir>/logs/consensus/rust_consensus.log
-            let file_appender = tracing_appender::rolling::never(log_dir, "rust_consensus.log");
-            let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-            
-            // Leak the guard so the non-blocking writer thread stays alive
-            Box::leak(Box::new(_guard));
-
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .with_writer(non_blocking)
-                .with_ansi(false) // Disable ANSI colors for file output
-                .init();
-        } else {
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .init();
-        }
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "metanode=info,consensus_core=info".into()),
+            )
+            .init();
 
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 
@@ -340,8 +331,13 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
                     // Override storage path to live inside Go's data directory if provided
                     if !data_dir_str.is_empty() {
                         // Override storage path for MystiCeti DAG storage
-                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str).join("consensus").join("rust_consensus");
-                        info!("Storage path unified to Go data dir: {:?}", node_config.storage_path);
+                        node_config.storage_path = std::path::PathBuf::from(&data_dir_str)
+                            .join("consensus")
+                            .join("rust_consensus");
+                        info!(
+                            "Storage path unified to Go data dir: {:?}",
+                            node_config.storage_path
+                        );
                     }
 
                     info!("Node ID: {}", node_config.node_id);
@@ -359,9 +355,7 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
                         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     }
 
-                    let startup_config = StartupConfig::new(
-                        node_config, registry, None
-                    );
+                    let startup_config = StartupConfig::new(node_config, registry, None);
 
                     let initialized_node = match InitializedNode::initialize(startup_config).await {
                         Ok(node) => node,
@@ -397,7 +391,10 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
     });
 }
 
-fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+fn copy_dir_all(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(&dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -414,37 +411,62 @@ fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Pat
 /// Restore Rust consensus state from a snapshot directory.
 /// Purges data_dir/consensus/rust_consensus and copies snapshot_dir/consensus/rust_consensus into it safely.
 #[no_mangle]
-pub unsafe extern "C" fn metanode_restore_from_snapshot(data_dir_ptr: *const c_char, snapshot_dir_ptr: *const c_char) -> bool {
+pub unsafe extern "C" fn metanode_restore_from_snapshot(
+    data_dir_ptr: *const c_char,
+    snapshot_dir_ptr: *const c_char,
+) -> bool {
     let data_dir_str = unsafe {
-        if data_dir_ptr.is_null() { return false; }
+        if data_dir_ptr.is_null() {
+            return false;
+        }
         CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
     };
-    
+
     let snapshot_dir_str = unsafe {
-        if snapshot_dir_ptr.is_null() { return false; }
-        CStr::from_ptr(snapshot_dir_ptr).to_string_lossy().into_owned()
+        if snapshot_dir_ptr.is_null() {
+            return false;
+        }
+        CStr::from_ptr(snapshot_dir_ptr)
+            .to_string_lossy()
+            .into_owned()
     };
 
     // Target directory (the working consensus directory that needs to be replaced)
-    let target_dir = std::path::PathBuf::from(&data_dir_str).join("consensus").join("rust_consensus");
-    let source_dir = std::path::PathBuf::from(&snapshot_dir_str).join("consensus").join("rust_consensus");
+    let target_dir = std::path::PathBuf::from(&data_dir_str)
+        .join("consensus")
+        .join("rust_consensus");
+    let source_dir = std::path::PathBuf::from(&snapshot_dir_str)
+        .join("consensus")
+        .join("rust_consensus");
 
     if !source_dir.exists() {
-        error!("[FFI Restore] Snapshot source dir not found: {:?}", source_dir);
+        error!(
+            "[FFI Restore] Snapshot source dir not found: {:?}",
+            source_dir
+        );
         return false;
     }
 
-    info!("[FFI Restore] Restoring DAG from snapshot: {:?} -> {:?}", source_dir, target_dir);
+    info!(
+        "[FFI Restore] Restoring DAG from snapshot: {:?} -> {:?}",
+        source_dir, target_dir
+    );
 
     if target_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&target_dir) {
-            error!("[FFI Restore] Failed to remove old target dir {:?}: {}", target_dir, e);
+            error!(
+                "[FFI Restore] Failed to remove old target dir {:?}: {}",
+                target_dir, e
+            );
             return false;
         }
     }
 
     if let Err(e) = copy_dir_all(&source_dir, &target_dir) {
-        error!("[FFI Restore] Failed to copy snapshot files to target: {}", e);
+        error!(
+            "[FFI Restore] Failed to copy snapshot files to target: {}",
+            e
+        );
         return false;
     }
 

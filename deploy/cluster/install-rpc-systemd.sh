@@ -189,8 +189,13 @@ for idx in "${!NODE_IDS[@]}"; do
         log_warn "Không tìm thấy $CONFIG_TCP, bỏ qua cập nhật"
     fi
 
+    # Determine actual user/group if run under sudo
+    ACTUAL_USER="${SUDO_USER:-$(whoami)}"
+    ACTUAL_GROUP="$(id -gn "$ACTUAL_USER" 2>/dev/null || echo "$ACTUAL_USER")"
+
     # ─── Tạo thư mục log ──────────────────────────────────────────
     mkdir -p "$RPC_DIR/node${i}_data/logs"
+    chown -R "$ACTUAL_USER:$ACTUAL_GROUP" "$RPC_DIR/node${i}_data"
 
     # ─── Tạo Systemd Service ──────────────────────────────────────
     SERVICE_FILE="/etc/systemd/system/metanode-rpc-${i}.service"
@@ -202,8 +207,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(whoami)
-Group=$(id -gn)
+User=$ACTUAL_USER
+Group=$ACTUAL_GROUP
 WorkingDirectory=$RPC_DIR
 
 ExecStart=$RPC_DIR/rpc-client-bin --config config-rpc-node${i}.json --tcp-config config-client-tcp-node${i}.json
