@@ -26,13 +26,18 @@ for ((i=1; i<=RUNS; i++)); do
     
     if [ "$i" -eq 1 ]; then
         BUILD_OPTION="--build-all"
+        RAMDISK_OPTION=""
         if [[ "${2:-}" == "--no-rebuild" || "${2:-}" == "no-build" || "${2:-}" == "no-rebuild" ]]; then
             echo "▶️ Run 1: Restarting nodes without rebuilding..."
             BUILD_OPTION=""
         else
             echo "▶️ Run 1: Rebuilding and fresh restarting nodes..."
         fi
-        "$MTN_CONSENSUS_ROOT/metanode/scripts/mtn-orchestrator.sh" restart --fresh $BUILD_OPTION
+        if [[ "${3:-}" == "--ramdisk" || "${2:-}" == "--ramdisk" ]]; then
+            echo "▶️ Sử dụng RAM Disk cho Database để chống Disk I/O bottleneck..."
+            RAMDISK_OPTION="--ramdisk"
+        fi
+        "$MTN_CONSENSUS_ROOT/metanode/scripts/mtn-orchestrator.sh" restart --fresh $BUILD_OPTION $RAMDISK_OPTION
         echo "⏳ Waiting 10s for nodes to stabilize..."
         sleep 10
     else
