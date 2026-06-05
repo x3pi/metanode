@@ -273,12 +273,37 @@ pub unsafe extern "C" fn metanode_start_consensus(config_path_ptr: *const c_char
         }));
 
         // Initialize tracing
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "metanode=info,consensus_core=info".into()),
-            )
-            .init();
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "metanode=info,consensus_core=info".into());
+
+        if !config_path_str.is_empty() {
+            // config_path_str is like /opt/metanode/node-0/config/consensus.toml
+            // We want to write logs to /opt/metanode/node-0/logs/consensus/rust_consensus.log
+            let base_dir = std::path::PathBuf::from(&config_path_str)
+                .parent()
+                .and_then(|p| p.parent())
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            let log_dir = base_dir.join("logs").join("consensus");
+            let _ = std::fs::create_dir_all(&log_dir);
+            
+            // Write logs to <base_dir>/logs/consensus/rust_consensus.log
+            let file_appender = tracing_appender::rolling::never(log_dir, "rust_consensus.log");
+            let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+            
+            // Leak the guard so the non-blocking writer thread stays alive
+            Box::leak(Box::new(_guard));
+
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(non_blocking)
+                .with_ansi(false) // Disable ANSI colors for file output
+                .init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+        }
 
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 

@@ -90,53 +90,22 @@ for server in $SERVERS; do
     for id in $nodes; do
         echo "   ▶ Node $id"
         
-        # 1. Fetch file log vật lý của Execution
-        EXEC_LOG="/opt/metanode/node-${id}/logs/execution/execution.log"
-        scp_cmd "$server" "$EXEC_LOG" "$RUN_LOGS_DIR/node_${id}_file_execution.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_file_execution.log" ]; then
-            echo "     - execution file: Đã lấy"
+        # Kéo toàn bộ thư mục logs vật lý của Node
+        NODE_LOGS_DIR="/opt/metanode/node-${id}/logs"
+        TARGET_DIR="$RUN_LOGS_DIR/node_${id}_logs"
+        
+        if [ "${SSH_AUTH:-key}" == "password" ]; then
+            sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
+        elif [ -n "${SSH_KEY:-}" ]; then
+            scp $SSH_OPTS -r -i "$SSH_KEY" "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
         else
-            rm -f "$RUN_LOGS_DIR/node_${id}_file_execution.log"
+            scp $SSH_OPTS -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
         fi
 
-        # 2. Fetch file log vật lý của Consensus
-        CONS_LOG="/opt/metanode/node-${id}/logs/consensus/consensus.log"
-        scp_cmd "$server" "$CONS_LOG" "$RUN_LOGS_DIR/node_${id}_file_consensus.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_file_consensus.log" ]; then
-            echo "     - consensus file: Đã lấy"
+        if [ -d "$TARGET_DIR" ]; then
+            echo "     - Folder logs: Đã lấy thành công"
         else
-            rm -f "$RUN_LOGS_DIR/node_${id}_file_consensus.log"
-        fi
-
-        # 3. Fetch file log vật lý của RPC
-        RPC_LOG="/opt/metanode/rpc-proxy/node${id}_data/logs/systemd.log"
-        scp_cmd "$server" "$RPC_LOG" "$RUN_LOGS_DIR/node_${id}_file_rpc.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_file_rpc.log" ]; then
-            echo "     - rpc file: Đã lấy"
-        else
-            rm -f "$RUN_LOGS_DIR/node_${id}_file_rpc.log"
-        fi
-
-        # 4. Backup: Lấy thẳng từ journalctl (phòng khi không ghi ra file) - lấy 10,000 dòng cuối
-        ssh_cmd "$server" "sudo journalctl -u metanode-execution-$id -n 10000 --no-pager" > "$RUN_LOGS_DIR/node_${id}_journal_execution.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_journal_execution.log" ]; then
-            echo "     - journal execution: Đã lấy"
-        else
-            rm -f "$RUN_LOGS_DIR/node_${id}_journal_execution.log"
-        fi
-
-        ssh_cmd "$server" "sudo journalctl -u metanode-consensus-$id -n 10000 --no-pager" > "$RUN_LOGS_DIR/node_${id}_journal_consensus.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_journal_consensus.log" ]; then
-            echo "     - journal consensus: Đã lấy"
-        else
-            rm -f "$RUN_LOGS_DIR/node_${id}_journal_consensus.log"
-        fi
-
-        ssh_cmd "$server" "sudo journalctl -u metanode-rpc-$id -n 10000 --no-pager" > "$RUN_LOGS_DIR/node_${id}_journal_rpc.log" 2>/dev/null
-        if [ -s "$RUN_LOGS_DIR/node_${id}_journal_rpc.log" ]; then
-            echo "     - journal rpc: Đã lấy"
-        else
-            rm -f "$RUN_LOGS_DIR/node_${id}_journal_rpc.log"
+            echo "     - Folder logs: Không tìm thấy hoặc trống"
         fi
 
     done
