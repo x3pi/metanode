@@ -10,7 +10,7 @@
   "rust_send_socket_path": "/tmp/executor0.sock",
   "rust_receive_socket_path": "/tmp/rust-go-node0-master.sock",
   "rust_tx_socket_path": "/tmp/metanode-tx-0.sock",
-  "meta_node_rpc_address": "192.168.1.234:10100",
+  "meta_node_rpc_address": "127.0.0.1:10100",
   "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
   "block_hash_to_number_db_root_path": "/block_hash_to_number_db_root_path",
   "free_fee_addresses": [

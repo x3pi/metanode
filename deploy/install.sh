@@ -626,7 +626,7 @@ TimeoutStopSec=90
 
 # Environment
 Environment=GOTRACEBACK=all
-Environment=GOMEMLIMIT=4GiB
+# Removed GOMEMLIMIT=4GiB to let Go use all available physical RAM
 LimitNOFILE=100000
 
 # Logging

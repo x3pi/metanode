@@ -464,14 +464,25 @@ if $DO_PUSH; then
             echo -e "    📄 Node $id configs..."
 
             # Create node data directories
+            # Create node data directories using sudo to bypass root ownership from systemd
             ssh_cmd "$server" "
                 set -euo pipefail;
-                mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data/data/xapian_node'
-                mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data-write/data/xapian_node'
-                mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up'
-                mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up_write'
-                mkdir -p '${REMOTE_METANODE}/config/storage/node_${id}'
-                mkdir -p '${REMOTE_METANODE}/logs/node_${id}'
+                export SSH_AUTH='${SSH_AUTH:-}'
+                export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                _sudo() {
+                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                    else
+                        sudo \"\$@\"
+                    fi
+                }
+                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data/data/xapian_node'
+                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data-write/data/xapian_node'
+                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up'
+                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up_write'
+                _sudo mkdir -p '${REMOTE_METANODE}/config/storage/node_${id}'
+                _sudo mkdir -p '${REMOTE_METANODE}/logs/node_${id}'
+                _sudo chown -R ${SSH_USER:-abc}:${SSH_USER:-abc} '${REMOTE_GO_SIMPLE}/sample' '${REMOTE_METANODE}/config/storage' '${REMOTE_METANODE}/logs' 2>/dev/null || true
             "
 
             # Go configs (master)
@@ -564,22 +575,43 @@ if $DO_START; then
 
         log_info "Deploying and starting nodes [$nodes] on $server..."
         
-        # Build the sequence of commands to run for each node on this server
+        # Check if any node on this server needs BTRFS
+        NEEDS_BTRFS=false
+        for id in $nodes; do
+            for btrfs_id in ${BTRFS_NODES:-}; do
+                if [ "$id" == "$btrfs_id" ]; then
+                    NEEDS_BTRFS=true
+                    break 2
+                fi
+            done
+        done
+
         CMD_SEQ=""
+        if $NEEDS_BTRFS; then
+            CMD_SEQ="
+            echo '  ▶ Cấu hình ổ đĩa BTRFS (định dạng ổ cứng tạm thời) cho server do có node cần...'
+            if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
+                echo \"\${SSH_PASSWORD}\" | sudo -S bash setup-cluster-btrfs.sh || true
+            else
+                sudo bash setup-cluster-btrfs.sh || true
+            fi
+            "
+        fi
+
         for id in $nodes; do
             if $KEEP_DATA; then
                 CMD_SEQ="${CMD_SEQ}
                 echo '  ▶ Installing Node $id (keeping data)...'
-                if [ \"${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"${SSH_PASSWORD:-}\" ]; then
-                    echo \"${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh install --node $id -y
+                if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
+                    echo \"\${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh install --node $id -y
                 else
                     sudo bash systemd-cluster.sh install --node $id -y
                 fi"
             else
                 CMD_SEQ="${CMD_SEQ}
                 echo '  ▶ Setup Node $id (cleaning data)...'
-                if [ \"${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"${SSH_PASSWORD:-}\" ]; then
-                    echo \"${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh setup --node $id -y
+                if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
+                    echo \"\${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh setup --node $id -y
                 else
                     sudo bash systemd-cluster.sh setup --node $id -y
                 fi"

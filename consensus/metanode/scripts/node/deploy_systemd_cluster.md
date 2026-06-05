@@ -19,7 +19,7 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 **Lệnh quan trọng nhất (Cài đặt toàn bộ từ A-Z):**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --all
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --all
 ```
 *Lệnh này sẽ tự động Build -> Đẩy file qua mạng -> Tắt các node cũ -> Xóa Data -> Khởi động lại mạng lưới mới hoàn toàn.*
 
@@ -42,31 +42,31 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 **Khởi động lại toàn mạng lưới nhưng KHÔNG mất dữ liệu:**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --start --keep-data
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --keep-data
 ```
 
 **Chỉ build và khởi động lại duy nhất Node 2:**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --all --only-node 2
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --all --only-node 2
 ```
 
 **Dừng toàn bộ mạng lưới:**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --stop
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --stop
 ```
 
 **Khởi động chỉ 1 Node (ví dụ Node 2):**
 ```bash
 # Sẽ khởi động và xóa data cũ của Node 2
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --start --only-node 2
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --only-node 2
 
 # Nếu muốn giữ lại data cũ của Node 2
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --start --keep-data --only-node 2
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --keep-data --only-node 2
 ```
 
 **Dừng chỉ 1 Node (ví dụ Node 2):**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-3nodes.env --stop --only-node 2
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --stop --only-node 2
 ```
 
 ---
@@ -94,7 +94,7 @@ Nếu bạn gặp lỗi hoặc cần kiểm tra log của các node đang chạy
 
 **Cách sử dụng:**
 ```bash
-./fetch_systemd_logs.sh --env deploy-3nodes.env
+./fetch_systemd_logs.sh --env deploy-muti-node.env
 ```
 
 **Hoạt động của script:**

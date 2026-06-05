@@ -367,6 +367,11 @@ fi
 # ─── Generate Setup Scripts ──────────────────────────────────────────────────
 echo -e "\n${BOLD}═══ Generate Setup Scripts (setup_node_{0..4}.sh) ═══${NC}"
 
+# Proxy RPC ports per node
+PROXY_RPC_PORTS=(8545 8547 8548 8549 8550)
+# Go Master Connection TCP ports per node
+GO_MASTER_CONN_PORTS=(4201 6201 6211 6221 6241)
+
 for N in $(seq 0 $((NODE_COUNT - 1))); do
     SETUP_SCRIPT="$SCRIPT_DIR/setup_node_${N}.sh"
     if $DRY_RUN; then
@@ -393,8 +398,12 @@ echo -e "\n\e[1;36m[2/3] Cấu hình Firewall (UFW)...\e[0m"
 sudo ufw allow ${CONSENSUS_PORTS[$N]}/tcp
 # Peer Discovery Go Master
 sudo ufw allow ${PEER_RPC_PORTS[$N]}/tcp
-# Go User RPC
+# Go User RPC (Internal)
 sudo ufw allow ${GO_RPC_PORTS[$N]}/tcp
+# Go Master TCP Connection
+sudo ufw allow ${GO_MASTER_CONN_PORTS[$N]}/tcp
+# Proxy RPC (External)
+sudo ufw allow ${PROXY_RPC_PORTS[$N]}/tcp
 # Go Internal P2P (Primary, Worker)
 sudo ufw allow ${GENESIS_PRIMARY_PORTS[$N]:-4000}/tcp
 sudo ufw allow ${GENESIS_WORKER_PORTS[$N]:-4012}/tcp
