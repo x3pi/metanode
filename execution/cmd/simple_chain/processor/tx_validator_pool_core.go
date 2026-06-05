@@ -26,7 +26,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -251,12 +250,13 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		return errs
 	}
 
+	t0 := time.Now()
 	var validTxs []types.Transaction
 	var errorsList = make([]error, len(txs))
 
 	// Phase 1.5 (TPS Optimization): Batch Cache Warming
 	// Collect unique addresses to fetch in parallel without blocking muTrie.Lock
-	preloadSet := make(map[common.Address]struct{}, len(txs)*2)
+	preloadSet := make(map[common.Address]struct{}, len(txs))
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -264,9 +264,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
 		preloadSet[tx.FromAddress()] = struct{}{}
-		if !tx.IsDeployContract() {
-			preloadSet[tx.ToAddress()] = struct{}{}
-		}
 	}
 	if len(preloadSet) > 0 {
 		preloadAddrs := make([]common.Address, 0, len(preloadSet))
@@ -275,24 +272,15 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		}
 		vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
 	}
+	cacheWarmingDuration := time.Since(t0)
 
-	// Phase 1.6 (TPS Optimization): Pre-load AccountStates into local slice
-	// PreloadAccounts above warmed the loadedAccounts sync.Map cache.
-	// Now we read states SEQUENTIALLY into a plain []AccountState slice.
-	// Subsequent parallel verification uses slice indexing (zero contention)
-	// instead of each goroutine calling AccountStateReadOnly via sync.Map.
-	preloadedStates := make([]types.AccountState, len(txs))
-	for i, tx := range txs {
-		if tx == nil {
-			continue
-		}
-		as, asErr := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
-		if asErr != nil || as == nil {
-			as = state.NewAccountState(tx.FromAddress())
-		}
-		preloadedStates[i] = as
-	}
+	t1 := time.Now()
+	// Phase 1.6 (TPS Optimization): Bypassed redundant slice preload
+	// Accounts are already fully warmed in loadedAccounts by PreloadAccounts above.
+	// We pass nil as preloadedState to VerifyTransaction, which queries the lock-free loadedAccounts cache.
+	statePreloadDuration := time.Since(t1)
 
+	t2 := time.Now()
 	// Phase 2 (TPS Optimization): Parallel VerifyTransactionWithState
 	// BLS verification is CPU heavy (~1ms per tx). 2000 txs = 2 seconds if sequential.
 	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
@@ -322,10 +310,10 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			go func(s, e int) {
 				defer wg.Done()
 				for i := s; i < e; i++ {
-					if txs[i] == nil || preloadedStates[i] == nil {
+					if txs[i] == nil {
 						continue
 					}
-					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, preloadedStates[i]); err != nil {
+					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, nil); err != nil {
 						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
 					}
 				}
@@ -333,48 +321,66 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		}
 		wg.Wait()
 	}
+	verificationDuration := time.Since(t2)
 
-	// Create file logger - Disabled for performance
+	t3 := time.Now()
 	var logFile *os.File
-
-	for i, tx := range txs {
-		if tx == nil {
-			errorsList[i] = fmt.Errorf("tx nil")
-			if logFile != nil {
-				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - tx nil\n", i))
-			}
-			continue
-		}
-
-		if errorsList[i] != nil {
-			if logFile != nil {
-				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - parallel verification failed: %v\n", i, errorsList[i]))
-			}
-			continue // Failed in parallel verification Phase
-		}
-
-		if tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(vp.chainState.GetConfig().OwnerFileStorageAddress)) {
-			// File uploads not supported in batch optimized path for simplicity; log error
-			logger.Error("HandleFileTransactionNoReceipt not supported in AddTransactionsToPool yet")
-			errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
-			if logFile != nil {
-				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - upload chunk error\n", i))
-			}
-			continue
-		}
-
-		conflict := vp.pendingTxManager.HasNonceConflict(tx)
-		if conflict {
-			errorsList[i] = fmt.Errorf(transaction.NonceConflictError.Description)
-			if logFile != nil {
-				logFile.WriteString(fmt.Sprintf("TxValidatorPool: tx %d failed - nonce conflict\n", i))
-			}
-			continue
-		}
-
-		validTxs = append(validTxs, tx)
+	// Phase 3 (TPS Optimization): Parallel HasNonceConflict Checks
+	numWorkersConflict := runtime.NumCPU() / 2
+	if numWorkersConflict < 4 {
+		numWorkersConflict = 4
+	}
+	if numWorkersConflict > 48 {
+		numWorkersConflict = 48
+	}
+	if len(txs) < numWorkersConflict {
+		numWorkersConflict = len(txs)
 	}
 
+	var wgConflict sync.WaitGroup
+	wgConflict.Add(numWorkersConflict)
+	chunkSizeConflict := (len(txs) + numWorkersConflict - 1) / numWorkersConflict
+
+	for w := 0; w < numWorkersConflict; w++ {
+		start := w * chunkSizeConflict
+		end := start + chunkSizeConflict
+		if end > len(txs) {
+			end = len(txs)
+		}
+		go func(s, e int) {
+			defer wgConflict.Done()
+			for i := s; i < e; i++ {
+				tx := txs[i]
+				if tx == nil {
+					errorsList[i] = fmt.Errorf("tx nil")
+					continue
+				}
+				if errorsList[i] != nil {
+					continue
+				}
+
+				if tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(vp.chainState.GetConfig().OwnerFileStorageAddress)) {
+					errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
+					continue
+				}
+
+				if vp.pendingTxManager.HasNonceConflict(tx) {
+					errorsList[i] = fmt.Errorf(transaction.NonceConflictError.Description)
+				}
+			}
+		}(start, end)
+	}
+	wgConflict.Wait()
+
+	// Sequentially gather the valid transactions (extremely fast, zero contention)
+	for i, tx := range txs {
+		if tx != nil && errorsList[i] == nil {
+			validTxs = append(validTxs, tx)
+		}
+	}
+	conflictChecksDuration := time.Since(t3)
+
+	t4 := time.Now()
 	if len(validTxs) > 0 {
 		if logFile != nil {
 			logFile.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal: vp.transactionPool.AddTransactions called with %d txs\n", len(validTxs)))
@@ -387,6 +393,13 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		vp.pendingTxManager.AddBatch(validTxs, StatusInPool)
 
 		GlobalPipelineStats.IncrTxsReceived(int64(len(validTxs)))
+	}
+	poolInsertionDuration := time.Since(t4)
+
+	totalDuration := time.Since(t0)
+	if totalDuration > 10*time.Millisecond {
+		logger.Warn("⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took %v (cache_warm=%v, state_preload=%v, verify=%v, conflicts=%v, insert=%v) for %d txs (valid=%d)",
+			totalDuration, cacheWarmingDuration, statePreloadDuration, verificationDuration, conflictChecksDuration, poolInsertionDuration, len(txs), len(validTxs))
 	}
 
 	return errorsList

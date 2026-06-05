@@ -177,8 +177,9 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	// ─── 5. Save tx hash → block number mappings (optional) ──────────────
 	if cfg.saveTxMapping {
-		for _, txHash := range blk.Transactions() {
-			bc.SetTxHashMapBlockNumber(txHash, blockNum)
+		txs := blk.Transactions()
+		if len(txs) > 0 {
+			bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
 		}
 	}
 

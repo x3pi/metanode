@@ -19,8 +19,47 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+type shardedSignatureCache struct {
+	shards [256]sync.Map
+}
+
+func (s *shardedSignatureCache) getShard(key interface{}) *sync.Map {
+	var hash byte
+	switch k := key.(type) {
+	case string:
+		if len(k) >= 4 {
+			hash = k[0] ^ k[1] ^ k[2] ^ k[3]
+		} else if len(k) >= 2 {
+			hash = k[0] ^ k[1]
+		} else if len(k) == 1 {
+			hash = k[0]
+		}
+	case int64:
+		hash = byte(k)
+	case int:
+		hash = byte(k)
+	default:
+		// Fallback hash
+	}
+	return &s.shards[hash]
+}
+
+func (s *shardedSignatureCache) Load(key interface{}) (value interface{}, ok bool) {
+	return s.getShard(key).Load(key)
+}
+
+func (s *shardedSignatureCache) Store(key, value interface{}) {
+	s.getShard(key).Store(key, value)
+}
+
+func (s *shardedSignatureCache) Clear() {
+	for i := range s.shards {
+		s.shards[i].Clear()
+	}
+}
+
 var (
-	verifiedSignaturesCache      sync.Map
+	verifiedSignaturesCache      shardedSignatureCache
 	verifiedSignaturesCacheCount int64 // atomic counter for cache size
 )
 
