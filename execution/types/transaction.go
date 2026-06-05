@@ -45,6 +45,7 @@ type Transaction interface {
 	GetChainID() uint64
 	ClearCacheHash()
 	ToEthTransaction() *e_types.Transaction
+	EthHash() e_common.Hash
 
 	ValidEthSign() bool
 	GetIsDebug() bool

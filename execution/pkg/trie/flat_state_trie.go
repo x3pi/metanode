@@ -63,6 +63,13 @@ var flatBucketPrefix = []byte("fb:")
 // Key: fmt.Sprintf("%p", db) (pointer address of the db), Value: *[256]e_common.Hash
 var globalBucketCache sync.Map
 
+var emptyFlatRootHash e_common.Hash
+
+func init() {
+	var emptyBuckets [256]e_common.Hash
+	emptyFlatRootHash = computeRootFromBuckets(emptyBuckets)
+}
+
 // hashBufPool reuses keccak256 input buffers to reduce allocations in hot path.
 var hashBufPool = sync.Pool{
 	New: func() interface{} {
@@ -316,9 +323,11 @@ func (f *FlatStateTrie) Update(key, value []byte) error {
 
 	// Load old value for bucket hash computation (only once per key per block)
 	if !f.oldLoaded[hexKey] {
-		oldVal, err := f.db.Get(makeFlatKey(key))
-		if err == nil && len(oldVal) > 0 {
-			f.oldValues[hexKey] = oldVal
+		if f.rootHash != emptyFlatRootHash && f.rootHash != EmptyRootHash && f.rootHash != (e_common.Hash{}) {
+			oldVal, err := f.db.Get(makeFlatKey(key))
+			if err == nil && len(oldVal) > 0 {
+				f.oldValues[hexKey] = oldVal
+			}
 		}
 		f.oldLoaded[hexKey] = true
 	}
@@ -357,6 +366,10 @@ func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
 	}
 
 	n := len(keys)
+
+	f.mu.RLock()
+	isEmptyTrie := f.rootHash == emptyFlatRootHash || f.rootHash == EmptyRootHash || f.rootHash == (e_common.Hash{})
+	f.mu.RUnlock()
 
 	// ═══════════════════════════════════════════════════════════════
 	// Phase 1: PARALLEL — Pre-compute hex keys + read old values from DB
@@ -402,15 +415,18 @@ func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
 				}
 
 				// Read old value from DB for bucket computation
-				// (We read blindly here to avoid locking; redundant reads on cache hit are cheap)
 				var oldVal []byte
 				var loaded bool
-				dbVal, err := f.db.Get(makeFlatKey(keyCopy))
-				if err == nil {
-					loaded = true
-					if len(dbVal) > 0 {
-						oldVal = dbVal
+				if !isEmptyTrie {
+					dbVal, err := f.db.Get(makeFlatKey(keyCopy))
+					if err == nil {
+						loaded = true
+						if len(dbVal) > 0 {
+							oldVal = dbVal
+						}
 					}
+				} else {
+					loaded = true
 				}
 
 				entries[i] = batchEntry{
@@ -481,6 +497,10 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 
 	n := len(keys)
 
+	f.mu.RLock()
+	isEmptyTrie := f.rootHash == emptyFlatRootHash || f.rootHash == EmptyRootHash || f.rootHash == (e_common.Hash{})
+	f.mu.RUnlock()
+
 	// ═══════════════════════════════════════════════════════════════
 	// Phase 1: PARALLEL — Pre-compute hex keys + bucket indices.
 	// DB Fallback: If old values are missing from cache (nil or empty),
@@ -533,7 +553,7 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 				if oldValues != nil && i < len(oldValues) && len(oldValues[i]) > 0 {
 					oldValue = oldValues[i]
 					loaded = true
-				} else {
+				} else if !isEmptyTrie {
 					dbVal, err := f.db.Get(makeFlatKey(keyCopy))
 					if err == nil {
 						loaded = true
@@ -541,6 +561,8 @@ func (f *FlatStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 							oldValue = dbVal
 						}
 					}
+				} else {
+					loaded = true
 				}
 
 				entries[i] = batchEntry{
@@ -713,18 +735,67 @@ func (f *FlatStateTrie) applyDirtyToBuckets(buckets *[256]e_common.Hash) [256]bo
 	}
 	wg.Wait()
 
-	// Sequential apply: mod-prime operations per-bucket (not parallelizable)
+	// ═══════════════════════════════════════════════════════════════
+	// PARALLEL BUCKET APPLY: Group contributions by bucket index
+	// using Counting Sort (O(K)), then process 256 buckets in parallel
+	// across worker goroutines. This scales big.Int mod-prime logic.
+	// ═══════════════════════════════════════════════════════════════
+	var counts [257]int
 	for i := range contribs {
-		pc := &contribs[i]
-		if pc.hasOld {
-			divModPrime(&buckets[pc.bucket], pc.oldContrib)
-			modified[pc.bucket] = true
-		}
-		if pc.hasNew {
-			mulModPrime(&buckets[pc.bucket], pc.newContrib)
-			modified[pc.bucket] = true
-		}
+		counts[int(contribs[i].bucket)+1]++
 	}
+	// Prefix sum to get offsets
+	for i := 0; i < 256; i++ {
+		counts[i+1] += counts[i]
+	}
+
+	// Create offsets for bucket ranges
+	var bucketOffsets [257]int
+	copy(bucketOffsets[:], counts[:])
+
+	sortedContribs := make([]precomputedContrib, len(contribs))
+	var insertPos [256]int
+	copy(insertPos[:], bucketOffsets[:256])
+	for i := range contribs {
+		b := contribs[i].bucket
+		pos := insertPos[b]
+		sortedContribs[pos] = contribs[i]
+		insertPos[b]++
+	}
+
+	// Parallelize the 256 buckets across 8 goroutines
+	numApplyWorkers := 8
+	var applyWg sync.WaitGroup
+	applyWg.Add(numApplyWorkers)
+
+	bucketsPerWorker := 256 / numApplyWorkers // 32 buckets per worker
+
+	for w := 0; w < numApplyWorkers; w++ {
+		startBucket := w * bucketsPerWorker
+		endBucket := startBucket + bucketsPerWorker
+		go func(startB, endB int) {
+			defer applyWg.Done()
+			for b := startB; b < endB; b++ {
+				startIdx := bucketOffsets[b]
+				endIdx := bucketOffsets[b+1]
+				if startIdx == endIdx {
+					continue
+				}
+
+				for idx := startIdx; idx < endIdx; idx++ {
+					pc := &sortedContribs[idx]
+					if pc.hasOld {
+						divModPrime(&buckets[b], pc.oldContrib)
+					}
+					if pc.hasNew {
+						mulModPrime(&buckets[b], pc.newContrib)
+					}
+				}
+				modified[b] = true
+			}
+		}(startBucket, endBucket)
+	}
+	applyWg.Wait()
 
 	return modified
 }

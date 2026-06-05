@@ -332,18 +332,6 @@ func (bp *BlockProcessor) commitWorker() {
 func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) error {
 	overallStart := time.Now()
 
-	// ═══════════════════════════════════════════════════════════════
-	// TPS OPTIMIZATION: Run ALL commit tasks in parallel, including
-	// CommitPipeline for AccountStateDB and StakeStateDB.
-	// Previously CommitPipeline ran sequentially BEFORE the other tasks,
-	// adding ~600-900ms of sequential serialization time.
-	// Now everything overlaps → wall-clock time = max(all tasks).
-	//
-	// FORK-SAFETY: CommitPipeline releases muTrie after nodeSet generation,
-	// which is safe to run concurrently with SmartContractDB/TrieDB/BlockChain
-	// commits because they operate on independent data structures.
-	// ═══════════════════════════════════════════════════════════════
-
 	// Will hold the pipeline results for async persistence
 	var accountPipelineResult *account_state_db.PipelineCommitResult
 	var stakePipelineResult *stake_state_db.StakePipelineCommitResult
@@ -354,6 +342,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		err      error
 		duration time.Duration
 	}
+
+	var scDuration time.Duration
 
 	// Count total tasks: txDB + Receipts + (if stateChanging: AccountPipeline + StakePipeline + TrieDB)
 	totalTasks := 2
@@ -378,7 +368,8 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 				logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
 				return fmt.Errorf("SmartContractDB commit failed: %w", err)
 			}
-			logger.Debug("[PERF] SmartContractDB (Sequential): %v", time.Since(scStart))
+			scDuration = time.Since(scStart)
+			logger.Debug("[PERF] SmartContractDB (Sequential): %v", scDuration)
 
 			totalTasks += 3
 		}
@@ -451,14 +442,6 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	var commitErrors []string
 	for result := range resultsChan {
 		if result.err != nil {
-			// ═══════════════════════════════════════════════════════════════
-			// AVAILABILITY FIX: Do NOT Fatal/os.Exit on commit errors.
-			// Transient errors (e.g., NOMT trie re-alignment race causing
-			// lockedFlag mismatch) should not kill the entire node.
-			// Instead, log the error and nil out the failed pipeline result
-			// so PersistAsync is skipped for that component. The next block
-			// will re-read the correct state from the trie.
-			// ═══════════════════════════════════════════════════════════════
 			logger.Error("🚨 [COMMIT] Parallel commit error (%s): %v — skipping persist for this component", result.name, result.err)
 			commitErrors = append(commitErrors, fmt.Sprintf("%s: %v", result.name, result.err))
 			if result.name == "AccountPipeline" {
@@ -475,9 +458,6 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 	}
 	if len(commitErrors) > 0 {
-		// Check if ANY critical task failed (AccountPipeline or StakePipeline).
-		// These are the trie-state producers — if they fail, the block's
-		// stateRoot/stakeRoot will be wrong on the NEXT block → FORK.
 		for _, errStr := range commitErrors {
 			if len(errStr) > 15 && (errStr[:15] == "AccountPipeline" || errStr[:13] == "StakePipeline") {
 				logger.Error("🚨 [COMMIT] CRITICAL pipeline task failed: %s — block MUST be reverted to prevent fork", errStr)
@@ -488,51 +468,17 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			len(commitErrors), commitErrors)
 	}
 
-	// Log per-task timing for diagnostics (only for blocks that take noticeable time)
-	overallDuration := time.Since(overallStart)
-	if overallDuration > 50*time.Millisecond {
-		logger.Debug("[PERF] commitToMemoryParallel: %v (bottleneck: %s=%v)",
-			overallDuration, maxTask, maxDuration)
-	}
+	var accountPersistDuration, stakePersistDuration, receiptPersistDuration time.Duration
 
-	// ═══════════════════════════════════════════════════════════════
-	// CRITICAL FORK FIX (May 2026): Persist ALL state DBs synchronously inline.
-	//
-	// ROOT CAUSE OF FORK AT BLOCK 10136:
-	// The previous non-blocking select/default dispatch to persistChannel
-	// allowed PersistAsync (trie swap + CommitPayload) to complete at a
-	// non-deterministic time across nodes. If persistWorker on node X was
-	// slower than on node Y, the next block's IntermediateRoot(true) would
-	// read from different trie states:
-	//   - Node X: old trie (PersistAsync not yet complete → stale data)
-	//   - Node Y: new trie (PersistAsync complete → fresh data)
-	// → Different stateRoot → Different receiptsRoot → FORK
-	//
-	// The persistReady gate in IntermediateRoot SHOULD prevent this, but
-	// it only works if PersistAsync is actually RUNNING (channel picked up).
-	// With the non-blocking select/default, the job could sit in the
-	// persistChannel buffer while the next block already starts processing.
-	//
-	// FIX: Run PersistAsync inline in commitToMemoryParallel. This guarantees:
-	//   1. Trie swap is complete before this function returns
-	//   2. persistReady channel is closed before DoneChan signals
-	//   3. Next block's IntermediateRoot sees the fully committed trie
-	//   4. All nodes have identical state before processing the next block
-	//
-	// PERFORMANCE: PersistAsync for NOMT takes ~5-10ms (memory-mapped trie swap
-	// + CommitPayload). This is negligible compared to block execution time
-	// (~50-500ms) and eliminates the fork entirely. The previous "optimization"
-	// of overlapping persist with next block's execution was unsafe.
-	// ═══════════════════════════════════════════════════════════════
 	if accountPipelineResult != nil {
 		startPersist := time.Now()
 		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
 			return fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
-		persistDuration := time.Since(startPersist)
-		if persistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", persistDuration)
+		accountPersistDuration = time.Since(startPersist)
+		if accountPersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", accountPersistDuration)
 		}
 	}
 	if stakePipelineResult != nil {
@@ -541,9 +487,9 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
 			return fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
-		persistDuration := time.Since(startPersist)
-		if persistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", persistDuration)
+		stakePersistDuration = time.Since(startPersist)
+		if stakePersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", stakePersistDuration)
 		}
 	}
 	if receiptPipelineResult != nil {
@@ -552,11 +498,18 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
 			return fmt.Errorf("Receipts PersistAsync failed: %w", err)
 		}
-		persistDuration := time.Since(startPersist)
-		if persistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", persistDuration)
+		receiptPersistDuration = time.Since(startPersist)
+		if receiptPersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", receiptPersistDuration)
 		}
 	}
+
+	overallDuration := time.Since(overallStart)
+	if overallDuration > 10*time.Millisecond {
+		logger.Info("[PERF] Block #%d commitToMemoryParallel Breakdown:\n   - SmartContractDB (Seq):    %v\n   - Tasks (Parallel Max):     %v (task: %s)\n   - Persist Account DB:       %v\n   - Persist Stake DB:         %v\n   - Persist Receipts DB:      %v\n   - 🚀 TOTAL COMMIT MEMORY:    %v",
+			blockNumber, scDuration, maxDuration, maxTask, accountPersistDuration, stakePersistDuration, receiptPersistDuration, overallDuration)
+	}
+
 	return nil
 }
 

@@ -449,6 +449,39 @@ func (n *NomtStateTrie) Get(key []byte) ([]byte, error) {
 	return val, nil
 }
 
+// GetLockFree retrieves the value for a key from NOMT without taking any lock.
+// This is safe to call concurrently even during Commit() because it bypasses writerMu.
+func (n *NomtStateTrie) GetLockFree(key []byte) ([]byte, error) {
+	hexKey := hex.EncodeToString(key)
+
+	// Atomic load — ZERO contention, ~1ns, NEVER blocks
+	view := n.loadReadView()
+
+	// Check dirty first (current block's uncommitted changes)
+	if view.dirty != nil {
+		if entry, ok := view.dirty[hexKey]; ok {
+			return entry.value, nil
+		}
+	}
+	// Check committing (previous block's changes being flushed to disk)
+	if view.committing != nil {
+		if entry, ok := view.committing[hexKey]; ok {
+			return entry.value, nil
+		}
+	}
+
+	// Read from NOMT (thread-safe, no lock needed)
+	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
+	val, found, err := n.handle.Read(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("nomt read error for key %x: %w", key, err)
+	}
+	if !found {
+		return nil, nil // key not found is not an error
+	}
+	return val, nil
+}
+
 // getNoLock retrieves a value without acquiring writerMu.RLock().
 // MUST only be called when holding n.writerMu.Lock() or in single-threaded context.
 func (n *NomtStateTrie) getNoLock(key []byte, hexKey string) ([]byte, error) {

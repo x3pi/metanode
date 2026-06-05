@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync" // Keep sync package
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -19,6 +20,10 @@ import (
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 )
+
+type lockFreeReader interface {
+	GetLockFree(key []byte) ([]byte, error)
+}
 
 var byteSlicePool = sync.Pool{
 	New: func() interface{} {
@@ -337,7 +342,11 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 	// TPS OPT: FlatStateTrie.Get() is fully thread-safe (internal RWMutex).
 	// Skip muTrie.Lock to eliminate serialization bottleneck on cache miss.
 	if db.isFlatTrie {
-		bData, err = db.trie.Get(address.Bytes())
+		if lf, ok := db.trie.(lockFreeReader); ok {
+			bData, err = lf.GetLockFree(address.Bytes())
+		} else {
+			bData, err = db.trie.Get(address.Bytes())
+		}
 	} else {
 		// MPT trie: requires exclusive lock because Get() mutates internal cache
 		db.muTrie.Lock()
@@ -356,7 +365,9 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 	if len(bData) == 0 {
 		// New account: return fresh state WITHOUT storing in dirty cache
 		logger.Debug("🔍 [DEBUG-ASRO] AccountStateReadOnly(%s): ALL sources empty (dirty=miss, loaded=miss, lru=miss, trie=empty) → new account, no BLS key expected", address.Hex())
-		return state.NewAccountState(address), nil
+		newState := state.NewAccountState(address)
+		db.loadedAccounts.Store(address, newState)
+		return newState, nil
 	}
 	loadedAs := &state.AccountState{}
 	if err = loadedAs.Unmarshal(bData); err != nil {
@@ -370,6 +381,7 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 		byteSlicePool.Put(pooledSlice)
 	}
 
+	db.loadedAccounts.Store(address, loadedAs)
 	return loadedAs, nil
 }
 
@@ -704,6 +716,7 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 	if db == nil {
 		return
 	}
+	startAll := time.Now()
 
 	// Phase 1: Filter — skip addresses already in dirty or loaded cache
 	// OPTIMIZATION #1: Also skip loadedAccounts (previously only skipped dirtyAccounts).
@@ -722,140 +735,117 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 	if len(toLoad) == 0 {
 		return // All addresses already cached
 	}
+	filterDuration := time.Since(startAll)
 
-	type trieResult struct {
-		addr        common.Address
-		bData       []byte
-		pooledSlice *[]byte
-		err         error
-	}
-	results := make([]trieResult, 0, len(toLoad))
-	addressesToReadFromTrie := toLoad
-
-	// Phase 2: Batch trie read for misses (Parallelized using safe Trie copies avoiding lock starvation)
-	if len(addressesToReadFromTrie) > 0 {
-		db.muTrie.RLock()
-		if db.trie == nil {
-			db.muTrie.RUnlock()
-			logger.Error("PreloadAccounts: Trie is nil")
-			return
-		}
-
-		// PERFORMANCE OPTIMIZATION (Thread-safe Tries):
-		// Geth's MPT Get() mutates the trie cache, requiring a full map clone (db.trie.Copy())
-		// to avoid concurrent map read/write panics.
-		// FlatStateTrie and NomtStateTrie Get() are completely thread-safe.
-		// Skipping Copy() eliminates massive GC stalls during high-concurrency TPS bursts.
-		var baseCopy p_trie.StateTrie
-		isFlatTrie := false
-		if _, ok := db.trie.(*p_trie.FlatStateTrie); ok {
-			baseCopy = db.trie
-			isFlatTrie = true
-		} else if _, ok := db.trie.(*p_trie.NomtStateTrie); ok {
-			baseCopy = db.trie
-			isFlatTrie = true
-		} else {
-			baseCopy = db.trie.Copy()
-		}
+	// Phase 2: Batch trie read and unmarshal in parallel
+	db.muTrie.RLock()
+	if db.trie == nil {
 		db.muTrie.RUnlock()
-
-		// ASYNCHRONOUS MERKLE PREFETCHING (NOMT)
-		// Dispatch prefetch tasks to the backend immediately so they can overlap with EVM execution.
-		if isFlatTrie { // Only NomtStateTrie implements PreWarm to actually do anything, FlatStateTrie is no-op.
-			keysToWarm := make([][]byte, len(addressesToReadFromTrie))
-			for i, addr := range addressesToReadFromTrie {
-				keysToWarm[i] = addr.Bytes()
-			}
-			baseCopy.PreWarm(keysToWarm)
-		}
-
-		numWorkers := 32
-		if len(addressesToReadFromTrie) < numWorkers {
-			numWorkers = len(addressesToReadFromTrie)
-		}
-
-		resultsChan := make(chan trieResult, len(addressesToReadFromTrie))
-		var wg sync.WaitGroup
-
-		chunkSize := (len(addressesToReadFromTrie) + numWorkers - 1) / numWorkers
-		for i := 0; i < numWorkers; i++ {
-			start := i * chunkSize
-			end := start + chunkSize
-			if start >= len(addressesToReadFromTrie) {
-				break
-			}
-			if end > len(addressesToReadFromTrie) {
-				end = len(addressesToReadFromTrie)
-			}
-
-			wg.Add(1)
-			go func(addrs []common.Address) {
-				defer wg.Done()
-				// CRITICAL FORK-SAFETY AND PERFORMANCE:
-				// MPT's Trie.Get() mutates its internal unhasher map cache, so sharing
-				// a single trie object across goroutines causes panic:"concurrent map write".
-				// FlatStateTrie's Get() is completely thread-safe and holds its own RLock.
-				var localTrie p_trie.StateTrie
-				if isFlatTrie {
-					localTrie = baseCopy
-				} else {
-					localTrie = baseCopy.Copy()
-				}
-				for _, addr := range addrs {
-					bData, getErr := localTrie.Get(addr.Bytes())
-
-					resultsChan <- trieResult{addr: addr, bData: bData, err: getErr}
-				}
-			}(addressesToReadFromTrie[start:end])
-		}
-
-		wg.Wait()
-		close(resultsChan)
-
-		// Accumulate results
-		for res := range resultsChan {
-			results = append(results, res)
-		}
+		logger.Error("PreloadAccounts: Trie is nil")
+		return
 	}
 
-	// Phase 3: PARALLEL Unmarshal and store in loaded cache (OPTIMIZATION #2)
-	// Unmarshaling protobuf is CPU-bound. Parallelizing eliminates ~50ms for 30K results.
-	// sync.Map.LoadOrStore is concurrent-safe, so no additional locking needed.
-	var wgUnmarshal sync.WaitGroup
-	for _, r := range results {
-		if r.err != nil {
-			logger.Debug("PreloadAccounts: Error getting %s from Trie: %v", r.addr.Hex(), r.err)
-			continue
+	// PERFORMANCE OPTIMIZATION (Thread-safe Tries):
+	// Geth's MPT Get() mutates the trie cache, requiring a full map clone (db.trie.Copy())
+	// to avoid concurrent map read/write panics.
+	// FlatStateTrie and NomtStateTrie Get() are completely thread-safe.
+	// Skipping Copy() eliminates massive GC stalls during high-concurrency TPS bursts.
+	var baseCopy p_trie.StateTrie
+	isFlatTrie := false
+	if _, ok := db.trie.(*p_trie.FlatStateTrie); ok {
+		baseCopy = db.trie
+		isFlatTrie = true
+	} else if _, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+		baseCopy = db.trie
+		isFlatTrie = true
+	} else {
+		baseCopy = db.trie.Copy()
+	}
+	db.muTrie.RUnlock()
+
+	// ASYNCHRONOUS MERKLE PREFETCHING (NOMT)
+	// Dispatch prefetch tasks to the backend immediately so they can overlap with EVM execution.
+	startPrewarm := time.Now()
+	if isFlatTrie { // Only NomtStateTrie implements PreWarm to actually do anything, FlatStateTrie is no-op.
+		keysToWarm := make([][]byte, len(toLoad))
+		for i, addr := range toLoad {
+			keysToWarm[i] = addr.Bytes()
+		}
+		baseCopy.PreWarm(keysToWarm)
+	}
+	prewarmDuration := time.Since(startPrewarm)
+
+	numWorkers := 32
+	if len(toLoad) < numWorkers {
+		numWorkers = len(toLoad)
+	}
+
+	startWorkers := time.Now()
+	var wg sync.WaitGroup
+	chunkSize := (len(toLoad) + numWorkers - 1) / numWorkers
+	for i := 0; i < numWorkers; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if start >= len(toLoad) {
+			break
+		}
+		if end > len(toLoad) {
+			end = len(toLoad)
 		}
 
-		wgUnmarshal.Add(1)
-		go func(r trieResult) {
-			defer wgUnmarshal.Done()
-
-			var accountState types.AccountState
-			if len(r.bData) == 0 {
-				// New account — create fresh state
-				accountState = state.NewAccountState(r.addr)
+		wg.Add(1)
+		go func(addrs []common.Address) {
+			defer wg.Done()
+			// CRITICAL FORK-SAFETY AND PERFORMANCE:
+			// MPT's Trie.Get() mutates its internal unhasher map cache, so sharing
+			// a single trie object across goroutines causes panic:"concurrent map write".
+			// FlatStateTrie's Get() is completely thread-safe and holds its own RLock.
+			var localTrie p_trie.StateTrie
+			if isFlatTrie {
+				localTrie = baseCopy
 			} else {
-				// Existing account — unmarshal from trie data
-				loaded := &state.AccountState{}
-				if err := loaded.Unmarshal(r.bData); err != nil {
-					logger.Error("PreloadAccounts: Unmarshal error for %s: %v", r.addr.Hex(), err)
-					return
+				localTrie = baseCopy.Copy()
+			}
+			for _, addr := range addrs {
+				var bData []byte
+				var getErr error
+				if lf, ok := localTrie.(lockFreeReader); ok {
+					bData, getErr = lf.GetLockFree(addr.Bytes())
+				} else {
+					bData, getErr = localTrie.Get(addr.Bytes())
 				}
-				accountState = loaded
-			}
 
-			// Return the pooled slice back to the pool if we used one
-			if r.pooledSlice != nil {
-				byteSlicePool.Put(r.pooledSlice)
-			}
+				if getErr != nil {
+					logger.Debug("PreloadAccounts: Error getting %s from Trie: %v", addr.Hex(), getErr)
+					continue
+				}
 
-			// Store into loadedAccounts (not dirtyAccounts) — preloaded accounts are read-only.
-			db.loadedAccounts.LoadOrStore(r.addr, accountState)
-		}(r)
+				var accountState types.AccountState
+				if len(bData) == 0 {
+					// New account — create fresh state
+					accountState = state.NewAccountState(addr)
+				} else {
+					// Existing account — unmarshal from trie data
+					loaded := &state.AccountState{}
+					if err := loaded.Unmarshal(bData); err != nil {
+						logger.Error("PreloadAccounts: Unmarshal error for %s: %v", addr.Hex(), err)
+						continue
+					}
+					accountState = loaded
+				}
+
+				// Store into loadedAccounts (not dirtyAccounts) — preloaded accounts are read-only.
+				db.loadedAccounts.LoadOrStore(addr, accountState)
+			}
+		}(toLoad[start:end])
 	}
-	wgUnmarshal.Wait()
+	wg.Wait()
+	workersDuration := time.Since(startWorkers)
+	totalDuration := time.Since(startAll)
+
+	logger.Info("⏱️  [PRELOAD-PERF] Loaded %d/%d accounts in %v (filter=%v, prewarm=%v, workers=%v)",
+		len(toLoad), len(addresses), totalDuration.Round(time.Microsecond),
+		filterDuration.Round(time.Microsecond), prewarmDuration.Round(time.Microsecond), workersDuration.Round(time.Microsecond))
 }
 
 // Storage returns the underlying storage instance.

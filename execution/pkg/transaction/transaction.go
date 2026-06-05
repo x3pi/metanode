@@ -42,10 +42,12 @@ var (
 )
 
 type Transaction struct {
-	proto       *pb.Transaction
-	cachedHash  atomic.Pointer[common.Hash]
-	cachedRHash atomic.Pointer[common.Hash]
-	cachedBytes atomic.Pointer[[]byte]
+	proto         *pb.Transaction
+	cachedHash    atomic.Pointer[common.Hash]
+	cachedRHash   atomic.Pointer[common.Hash]
+	cachedBytes   atomic.Pointer[[]byte]
+	cachedEthTx   atomic.Pointer[e_types.Transaction]
+	cachedEthHash atomic.Pointer[common.Hash]
 
 	isDebug bool
 }
@@ -107,6 +109,9 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 	if t == nil {
 		return nil
 	}
+	if cached := t.cachedEthTx.Load(); cached != nil {
+		return cached
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic in ToEthTransaction: %v", r)
@@ -129,6 +134,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 		}
 	}
 	// logger.Debug("tx.Type 2: ", tx.Type)
+	var res *e_types.Transaction
 	switch tx.Type {
 	case e_types.LegacyTxType:
 		var toAddress *common.Address
@@ -160,7 +166,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerLegacyTx.S = s
 		}
 		// Return pointer directly from NewTx
-		return e_types.NewTx(innerLegacyTx)
+		res = e_types.NewTx(innerLegacyTx)
 
 	case e_types.AccessListTxType: // EIP-2930
 		var toAddress *common.Address
@@ -203,7 +209,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerAccessListTx.S = s
 		}
 		// SỬA: Trả về con trỏ trực tiếp từ NewTx
-		return e_types.NewTx(innerAccessListTx)
+		res = e_types.NewTx(innerAccessListTx)
 
 	case e_types.DynamicFeeTxType: // EIP-1559
 		var toAddress *common.Address
@@ -249,10 +255,17 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerDynamicFeeTx.R = r
 			innerDynamicFeeTx.S = s
 		}
-		return e_types.NewTx(innerDynamicFeeTx)
+		res = e_types.NewTx(innerDynamicFeeTx)
 	default:
 		return nil
 	}
+
+	if res != nil {
+		t.cachedEthTx.Store(res)
+		ethHash := res.Hash()
+		t.cachedEthHash.Store(&ethHash)
+	}
+	return res
 }
 
 func NewTransaction(
@@ -606,6 +619,24 @@ func (t *Transaction) ClearCacheHash() {
 	t.cachedHash.Store(nil)
 	t.cachedRHash.Store(nil)
 	t.cachedBytes.Store(nil)
+	t.cachedEthTx.Store(nil)
+	t.cachedEthHash.Store(nil)
+}
+
+func (t *Transaction) EthHash() common.Hash {
+	if t == nil {
+		return common.Hash{}
+	}
+	if cached := t.cachedEthHash.Load(); cached != nil {
+		return *cached
+	}
+	ethTx := t.ToEthTransaction()
+	if ethTx == nil {
+		return common.Hash{}
+	}
+	h := ethTx.Hash()
+	t.cachedEthHash.Store(&h)
+	return h
 }
 
 // getter
