@@ -85,3 +85,21 @@ sudo systemctl status metanode-consensus-0
 # Xem RPC Proxy (EVM)
 sudo systemctl status metanode-rpc-0
 ```
+
+---
+
+## 5. Thu thập Logs tự động từ các máy con (Systemd Logs)
+
+Nếu bạn gặp lỗi hoặc cần kiểm tra log của các node đang chạy trên systemd qua nhiều server, bạn có thể dùng script `fetch_systemd_logs.sh` để tải toàn bộ log về máy tính hiện tại.
+
+**Cách sử dụng:**
+```bash
+./fetch_systemd_logs.sh --env deploy-3nodes.env
+```
+
+**Hoạt động của script:**
+- Đọc file cấu hình `.env` để biết danh sách các server.
+- Tự động SSH vào từng server và tải về:
+  - File log vật lý của Execution và Consensus (`/opt/metanode-<id>/logs/`).
+  - Log từ `journalctl` của cả 3 services: `metanode-execution-<id>`, `metanode-consensus-<id>`, và `metanode-rpc-<id>`.
+- Toàn bộ log sẽ được gom gọn lại trong thư mục nội bộ `logs_systemd/run_YYYYMMDD_HHMMSS/` tại máy hiện tại để bạn dễ dàng mở và debug.

@@ -205,7 +205,7 @@ cmd_logs() {
         exit 1
     fi
 
-    local install_dir="/opt/metanode-${node_id}"
+    local install_dir="/opt/metanode/node-${node_id}"
     local exec_log="${install_dir}/logs/execution/execution.log"
     local cons_log="${install_dir}/logs/consensus/consensus.log"
 
@@ -279,7 +279,7 @@ cmd_setup() {
         local nid="${NODE_IDS[$i]}"
         [ "$only_node" != "all" ] && [ "$only_node" != "$nid" ] && continue
 
-        local node_dir="/opt/metanode-${nid}"
+        local node_dir="/opt/metanode/node-${nid}"
         if [ -d "$node_dir" ]; then
             log_warn "Đang xóa data Node ${nid}: ${node_dir}/data/ và ${node_dir}/logs/..."
             # Xóa execution data

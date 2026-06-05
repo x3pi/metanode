@@ -188,32 +188,67 @@ if $DO_STOP; then
         
         if [ -n "$ONLY_NODE" ]; then
             ssh_cmd "$server" "
+                export SSH_AUTH='${SSH_AUTH:-}'
+                export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                _sudo() {
+                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                    else
+                        sudo \"\$@\"
+                    fi
+                }
+                
                 for id in $nodes; do
-                    if sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
-                        sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                    if _sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
+                        _sudo systemctl stop metanode-go-\$id 2>/dev/null || true
                     fi
-                    if sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
-                        sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                    if _sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
+                        _sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
                     fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-execution-\$id; then
+                        _sudo systemctl stop metanode-execution-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-consensus-\$id; then
+                        _sudo systemctl stop metanode-consensus-\$id 2>/dev/null || true
+                    fi
+                    _sudo pkill -f "metanode.*--node-id \$id" 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
-                for id in 0 1 2 3 4; do
-                    if sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
-                        sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                export SSH_AUTH='${SSH_AUTH:-}'
+                export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                _sudo() {
+                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                    else
+                        sudo \"\$@\"
                     fi
-                    if sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
-                        sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                }
+                
+                for id in 0 1 2 3 4; do
+                    if _sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
+                        _sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
+                        _sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-execution-\$id; then
+                        _sudo systemctl stop metanode-execution-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-consensus-\$id; then
+                        _sudo systemctl stop metanode-consensus-\$id 2>/dev/null || true
                     fi
                 done
-                pkill -f 'simple_chain' 2>/dev/null || true
-                pkill -f 'rpc-client-bin' 2>/dev/null || true
+                _sudo pkill -f 'simple_chain' 2>/dev/null || true
+                _sudo pkill -f 'metanode' 2>/dev/null || true
+                _sudo pkill -f 'rpc-client-bin' 2>/dev/null || true
                 sleep 2
-                pkill -9 -f 'simple_chain' 2>/dev/null || true
-                pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
-                rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
+                _sudo pkill -9 -f 'simple_chain' 2>/dev/null || true
+                _sudo pkill -9 -f 'metanode' 2>/dev/null || true
+                _sudo pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
+                _sudo rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
         log_ok "$server stopped"
@@ -244,6 +279,12 @@ if $DO_BUILD; then
         cd "${LOCAL_METANODE}"
         cargo build --release 2>&1 | tail -3
     )
+
+    log_info "Building NOMT FFI (Rust)..."
+    (
+        cd "${LOCAL_GO_SIMPLE}/../../pkg/nomt_ffi/rust_lib"
+        cargo build --release 2>&1 | tail -3
+    ) || exit 1
 
     log_info "Touching FFI bridge files to ensure Go relinks..."
     touch "${LOCAL_GO_SIMPLE}/../../executor/ffi_bridge.go" "${LOCAL_GO_SIMPLE}/../../pkg/nomt_ffi/bridge.go" 2>/dev/null || true
@@ -298,32 +339,67 @@ if $DO_PUSH || $DO_START; then
         
         if [ -n "$ONLY_NODE" ]; then
             ssh_cmd "$server" "
+                export SSH_AUTH='${SSH_AUTH:-}'
+                export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                _sudo() {
+                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                    else
+                        sudo \"\$@\"
+                    fi
+                }
+                
                 for id in $nodes; do
-                    if sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
-                        sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                    if _sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
+                        _sudo systemctl stop metanode-go-\$id 2>/dev/null || true
                     fi
-                    if sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
-                        sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                    if _sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
+                        _sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
                     fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-execution-\$id; then
+                        _sudo systemctl stop metanode-execution-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-consensus-\$id; then
+                        _sudo systemctl stop metanode-consensus-\$id 2>/dev/null || true
+                    fi
+                    _sudo pkill -f "metanode.*--node-id \$id" 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
         else
             ssh_cmd "$server" "
-                for id in 0 1 2 3 4; do
-                    if sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
-                        sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                export SSH_AUTH='${SSH_AUTH:-}'
+                export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                _sudo() {
+                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                    else
+                        sudo \"\$@\"
                     fi
-                    if sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
-                        sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                }
+                
+                for id in 0 1 2 3 4; do
+                    if _sudo systemctl list-unit-files | grep -q metanode-go-\$id; then
+                        _sudo systemctl stop metanode-go-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-rpc-\$id; then
+                        _sudo systemctl stop metanode-rpc-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-execution-\$id; then
+                        _sudo systemctl stop metanode-execution-\$id 2>/dev/null || true
+                    fi
+                    if _sudo systemctl list-unit-files | grep -q metanode-consensus-\$id; then
+                        _sudo systemctl stop metanode-consensus-\$id 2>/dev/null || true
                     fi
                 done
-                pkill -f 'simple_chain' 2>/dev/null || true
-                pkill -f 'rpc-client-bin' 2>/dev/null || true
+                _sudo pkill -f 'simple_chain' 2>/dev/null || true
+                _sudo pkill -f 'metanode' 2>/dev/null || true
+                _sudo pkill -f 'rpc-client-bin' 2>/dev/null || true
                 sleep 2
-                pkill -9 -f 'simple_chain' 2>/dev/null || true
-                pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
-                rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
+                _sudo pkill -9 -f 'simple_chain' 2>/dev/null || true
+                _sudo pkill -9 -f 'metanode' 2>/dev/null || true
+                _sudo pkill -9 -f 'rpc-client-bin' 2>/dev/null || true
+                _sudo rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
             " 2>/dev/null || true
         fi
         log_ok "$server stopped"
@@ -346,6 +422,7 @@ if $DO_PUSH; then
 
         # Create directory structure on remote
         ssh_cmd "$server" "
+            set -euo pipefail;
             mkdir -p '${REMOTE_GO_SIMPLE}'
             mkdir -p '${REMOTE_METANODE}/config'
             mkdir -p '${REMOTE_METANODE}/logs'
@@ -388,6 +465,7 @@ if $DO_PUSH; then
 
             # Create node data directories
             ssh_cmd "$server" "
+                set -euo pipefail;
                 mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data/data/xapian_node'
                 mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data-write/data/xapian_node'
                 mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up'
@@ -449,6 +527,7 @@ if $DO_IPS; then
         done
 
         ssh_cmd "$server" "
+            set -euo pipefail;
             cd '${REMOTE_SCRIPTS}'
             if [ -f update_ips.sh ]; then
                 # Sinh ra file setup_node_{0..4}.sh
@@ -508,6 +587,7 @@ if $DO_START; then
         done
 
         ssh_cmd "$server" "
+            set -euo pipefail;
             cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
             # Pass SSH vars down to the remote shell for sudo -S
             SSH_AUTH='${SSH_AUTH:-}'
@@ -559,6 +639,7 @@ if $DO_START; then
             echo -e "  ▶ Installing & Starting RPC Proxy for Node $id on $server..."
             
             CMD_RPC="
+                set -euo pipefail;
                 cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
                 if [ \"${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"${SSH_PASSWORD:-}\" ]; then
                     echo \"${SSH_PASSWORD}\" | sudo -S bash install-rpc-systemd.sh --node ${id} --no-build
