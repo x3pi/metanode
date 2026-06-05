@@ -299,6 +299,10 @@ impl InitializedNode {
             handle.abort();
             let _ = handle.await;
         }
+        if let Some(handle) = self.peer_rpc_server_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
 
         // 2. Lock node and perform shutdown sequence
         // We use lock() instead of try_unwrap() because the node is shared (e.g. global registry)

@@ -164,6 +164,20 @@ cd ./consensus/metanode/scripts
 ./build_check.sh
 ```
 
+### 🔍 Debugging Nil Pointers & Slice Faults (Debugging Guide)
+
+When debugging nil pointer dereferences, protobuf nil struct fields, or slice panics in Go:
+- Refer to the standalone test examples in [execution/debug_nil/](file:///home/abc/nhat/con-chain-v2/metanode/execution/debug_nil) to understand different nil/panic patterns and how to reproduce/fix them.
+- Common issues covered in [execution/debug_nil/](file:///home/abc/nhat/con-chain-v2/metanode/execution/debug_nil):
+  - `test_nil.go` & `test_nil2.go`: Standard nil pointer dereference issues.
+  - `test_nil_outer.go`, `test_nil_inner.go`, `test_nil_inner2.go`: Nested struct/interface nil checks.
+  - `test_nil_getnonce.go` & `test_nil_t_getnonce.go`: Method receiver nil dereferences.
+  - `test_bad_slice.go` & `test_bad_slice2.go`: Out-of-bounds slice access or slice nil issues.
+  - `test_proto.go` & `test_t_proto_nil.go`: Protobuf message pointer nil verification.
+  - `test_nomt.go` & `test_db.go`: Database/Trie management nil issues.
+  - `test_cgo.go` & `test_debug.go`: FFI/CGO-related memory/pointer verification.
+- Always check parameters and receivers for `nil` explicitly before accessing fields, especially when fetching data from DB/trie or mapping pointers between Go and Rust via FFI.
+
 ---
 
 ## 🇻🇳 PART 5: POST-PROCESS SUMMARY (BẮT BUỘC)
