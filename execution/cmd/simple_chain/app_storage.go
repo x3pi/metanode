@@ -10,6 +10,9 @@ import (
 
 // initStorage initializes all storage-related components
 func (app *App) initStorage() error {
+	// Set pebble global cache size
+	storage.SetSharedPebbleCacheSize(app.config.Databases.PebbleCacheSizeMB)
+
 	// Initialize storage databases
 	if err := app.initStorageDatabases(); err != nil {
 		return err
@@ -18,12 +21,12 @@ func (app *App) initStorage() error {
 }
 
 // createDatabase initializes and opens a local database.
-func (app *App) createDatabase(subPath string, listenAddress string, backupPath string, dbType storage.DBType) (storage.Storage, error) {
-	logger.Info("Initializing local ShardelDB at: %s", subPath)
+func (app *App) createDatabase(subPath string, listenAddress string, backupPath string, dbType storage.DBType, numShards int, parallelism int) (storage.Storage, error) {
+	logger.Info("Initializing local ShardelDB at: %s with %d shards", subPath, numShards)
 	db, err := storage.NewShardelDB(
 		config.JoinPathIfNotURL(app.config.Databases.RootPath, subPath),
-		1,
-		2,
+		numShards,
+		parallelism,
 		dbType,
 		backupPath,
 	)
@@ -42,7 +45,7 @@ func (app *App) initStorageDatabases() error {
 	logger.Info("Start initStorageDatabases")
 
 	// Helper function for creating and adding storage
-	createAndAdd := func(storageName string, subPath string, dbType storage.DBType, addFunc func(storage.Storage) error) error {
+	createAndAdd := func(storageName string, subPath string, dbType storage.DBType, numShards int, addFunc func(storage.Storage) error) error {
 		fullBackupPath := app.config.BackupPath + subPath
 
 		var db storage.Storage
@@ -52,7 +55,7 @@ func (app *App) initStorageDatabases() error {
 			logger.Info("Using DummyStorage for %s because state_backend is nomt", storageName)
 			db = storage.NewDummyStorage(fullBackupPath)
 		} else {
-			db, err = app.createDatabase(subPath, "", fullBackupPath, dbType)
+			db, err = app.createDatabase(subPath, "", fullBackupPath, dbType, numShards, app.config.Databases.Parallelism)
 			if err != nil {
 				return fmt.Errorf("failed to create %s DB: %w", storageName, err)
 			}
@@ -62,52 +65,52 @@ func (app *App) initStorageDatabases() error {
 	}
 
 	// Account state database
-	if err := createAndAdd("account", config.PathAccountState, app.config.DBType, app.storageManager.AddStorageAccount); err != nil {
+	if err := createAndAdd("account", config.PathAccountState, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageAccount); err != nil {
 		return err
 	}
 
 	// Receipts database
-	if err := createAndAdd("receipts", config.PathReceipts, app.config.DBType, app.storageManager.AddStorageReceipt); err != nil {
+	if err := createAndAdd("receipts", config.PathReceipts, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageReceipt); err != nil {
 		return err
 	}
 
 	// Transaction state database
-	if err := createAndAdd("transaction state", config.PathTransactionState, app.config.DBType, app.storageManager.AddStorageTransaction); err != nil {
+	if err := createAndAdd("transaction state", config.PathTransactionState, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageTransaction); err != nil {
 		return err
 	}
 
 	// Device key storage
-	if err := createAndAdd("device key", config.PathBackupDeviceKey, app.config.DBType, app.storageManager.AddStorageBackupDeviceKey); err != nil {
+	if err := createAndAdd("device key", config.PathBackupDeviceKey, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageBackupDeviceKey); err != nil {
 		return err
 	}
 
 	// Smart contract database
-	if err := createAndAdd("smart contract", config.PathSmartContractStorage, app.config.DBType, app.storageManager.AddStorageSmartContract); err != nil {
+	if err := createAndAdd("smart contract", config.PathSmartContractStorage, app.config.DBType, app.config.Databases.NumShardsSmartContract, app.storageManager.AddStorageSmartContract); err != nil {
 		return err
 	}
 
 	// Code database
-	if err := createAndAdd("code", config.PathSmartContractCode, app.config.DBType, app.storageManager.AddStorageCode); err != nil {
+	if err := createAndAdd("code", config.PathSmartContractCode, app.config.DBType, app.config.Databases.NumShardsCode, app.storageManager.AddStorageCode); err != nil {
 		return err
 	}
 
 	// Trie database
-	if err := createAndAdd("trie", config.PathTrie, app.config.DBType, app.storageManager.AddStorageDatabaseTrie); err != nil {
+	if err := createAndAdd("trie", config.PathTrie, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageDatabaseTrie); err != nil {
 		return err
 	}
 
 	// Block database
-	if err := createAndAdd("block", config.PathBlocks, app.config.DBType, app.storageManager.AddStorageBlock); err != nil {
+	if err := createAndAdd("block", config.PathBlocks, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageBlock); err != nil {
 		return err
 	}
 
 	// Mapping database
-	if err := createAndAdd("mapping", config.PathMapping, app.config.DBType, app.storageManager.AddStorageMapping); err != nil {
+	if err := createAndAdd("mapping", config.PathMapping, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageMapping); err != nil {
 		return err
 	}
 
 	// Stake database
-	if err := createAndAdd("stake", config.PathStake, app.config.DBType, app.storageManager.AddStorageStake); err != nil {
+	if err := createAndAdd("stake", config.PathStake, app.config.DBType, app.config.Databases.NumShardsDefault, app.storageManager.AddStorageStake); err != nil {
 		return err
 	}
 
