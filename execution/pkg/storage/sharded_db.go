@@ -2,10 +2,10 @@ package storage
 
 import (
 	"bytes"
-	"crypto/md5"
-	"encoding/binary"
 	"fmt"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
 
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -46,9 +46,8 @@ type ShardelDB struct {
 
 // getShardIndex returns the shard index for a given key.
 func (s *ShardelDB) getShardIndex(key []byte) uint32 {
-	hash := md5.Sum(key)
-	index := binary.BigEndian.Uint32(hash[:4]) % uint32(s.numShards)
-	return index
+	hash := xxhash.Sum64(key)
+	return uint32(hash % uint64(s.numShards))
 }
 func (s *ShardelDB) GetBackupPath() string {
 	return s.backupPath
@@ -136,8 +135,7 @@ func (s *ShardelDB) Checkpoint(destBaseDir string) error {
 
 // Băm key để quyết định lưu vào shard nào
 func (s *ShardelDB) getShard(key []byte) ShardDBInterface {
-	hash := md5.Sum(key)
-	index := binary.BigEndian.Uint32(hash[:4]) % uint32(s.numShards)
+	index := s.getShardIndex(key)
 	return s.shards[index]
 }
 

@@ -43,12 +43,17 @@ const (
 // DatabasesConfig định nghĩa cấu trúc cho đối tượng "Databases" trong file JSON.
 // Hiện tại chỉ cần cấu hình thư mục gốc (RootPath), các đường dẫn con được hardcode qua các hằng số.
 type DatabasesConfig struct {
-	RootPath        string `json:"RootPath"`
-	Version         string `json:"Version"`
-	BLSPrivateKey   string `json:"BLSPrivateKey"`
-	SnapshotPath    string `json:"SnapshotPath"`
-	MaxPartSizeMB   int    `json:"MaxPartSizeMB"`
-	ArchiveBaseName string `json:"ArchiveBaseName"`
+	RootPath               string `json:"RootPath"`
+	Version                string `json:"Version"`
+	BLSPrivateKey          string `json:"BLSPrivateKey"`
+	SnapshotPath           string `json:"SnapshotPath"`
+	MaxPartSizeMB          int    `json:"MaxPartSizeMB"`
+	ArchiveBaseName        string `json:"ArchiveBaseName"`
+	NumShardsDefault       int    `json:"num_shards_default,omitempty"`
+	NumShardsSmartContract int    `json:"num_shards_smart_contract,omitempty"`
+	NumShardsCode          int    `json:"num_shards_code,omitempty"`
+	Parallelism            int    `json:"parallelism,omitempty"`
+	PebbleCacheSizeMB      int    `json:"pebble_cache_size_mb,omitempty"`
 }
 
 // NodesConfig khớp với cấu trúc của đối tượng "nodes" trong JSON.
@@ -230,6 +235,23 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			ConfigApp.RpcRateLimit.GlobalRate = 10000
 			ConfigApp.RpcRateLimit.PerIpRate = 50
 			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block
+		}
+
+		// Databases sharding defaults
+		if ConfigApp.Databases.NumShardsDefault == 0 {
+			ConfigApp.Databases.NumShardsDefault = 1 // TUNED: Restore to 1 to prevent massive OOM
+		}
+		if ConfigApp.Databases.NumShardsSmartContract == 0 {
+			ConfigApp.Databases.NumShardsSmartContract = 1 // TUNED: Restore to 1 to prevent massive OOM
+		}
+		if ConfigApp.Databases.NumShardsCode == 0 {
+			ConfigApp.Databases.NumShardsCode = 1 // TUNED: Restore to 1 to prevent massive OOM
+		}
+		if ConfigApp.Databases.Parallelism == 0 {
+			ConfigApp.Databases.Parallelism = 2 // TUNED: Restore to 2 to match previous behavior
+		}
+		if ConfigApp.Databases.PebbleCacheSizeMB == 0 {
+			ConfigApp.Databases.PebbleCacheSizeMB = 512
 		}
 
 		// Default log configuration if not specified
