@@ -427,12 +427,14 @@ cmd_start() {
     local build_rust=false
     local build_evm=false
     local build_nomt=false
+    local ramdisk=false
     local exclude_node="-1"
     local epoch_length=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --fresh) fresh=true; shift ;;
+            --ramdisk) ramdisk=true; shift ;;
             --build) build_go=true; build_rust=true; shift ;;
             --build-all) build_go=true; build_rust=true; build_evm=true; build_nomt=true; shift ;;
             --exclude-node) exclude_node="$2"; shift 2 ;;
@@ -536,17 +538,39 @@ cmd_start() {
         log_phase "DỌN SẠCH DỮ LIỆU (--fresh)"
         log_step "Xóa Rust storage..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
-            rm -rf "$RUST_DIR/config/storage/node_${i}"
+            if [ -L "$RUST_DIR/config/storage/node_${i}" ]; then
+                rm -rf $(readlink "$RUST_DIR/config/storage/node_${i}")
+                rm -f "$RUST_DIR/config/storage/node_${i}"
+            else
+                rm -rf "$RUST_DIR/config/storage/node_${i}"
+            fi
             rm -rf "$RUST_DIR/config/storage/wipe_safe_node_${i}"
+            
+            if $ramdisk; then
+                mkdir -p "/dev/shm/metanode_rust_${i}"
+                ln -s "/dev/shm/metanode_rust_${i}" "$RUST_DIR/config/storage/node_${i}"
+                log_step "  → Node $i Rust storage trỏ vào /dev/shm"
+            fi
         done
         log_step "Xóa Go data và snapshots..."
         for i in $(seq 0 $((NUM_NODES - 1))); do
-            rm -rf "$GO_DIR/sample/node${i}/data"
+            if [ -L "$GO_DIR/sample/node${i}/data" ]; then
+                rm -rf $(readlink "$GO_DIR/sample/node${i}/data")
+                rm -f "$GO_DIR/sample/node${i}/data"
+            else
+                rm -rf "$GO_DIR/sample/node${i}/data"
+            fi
             rm -rf "$GO_DIR/sample/node${i}/back_up"
             rm -rf "$GO_DIR/sample/node${i}/data/data/history/changelog_db_account"
             rm -rf "$GO_DIR/sample/node${i}/data/data/history/changelog_db_stake"
             rm -rf "$GO_DIR/snapshot_data_node${i}"
             rm -rf "$GO_DIR"/snapshot_*node${i}* 2>/dev/null || true
+            
+            if $ramdisk; then
+                mkdir -p "/dev/shm/metanode_go_${i}"
+                ln -s "/dev/shm/metanode_go_${i}" "$GO_DIR/sample/node${i}/data"
+                log_step "  → Node $i Go data trỏ vào /dev/shm"
+            fi
         done
         rm -rf "$GO_DIR"/snapshot_data* 2>/dev/null || true
         log_step "Xóa Xapian DB data (đảm bảo đồng bộ sạch giữa các node)..."
