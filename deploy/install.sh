@@ -137,9 +137,9 @@ fi
 # Optional with defaults
 METANODE_USER="${METANODE_USER:-metanode}"
 # Each node gets its own install dir and service names — supports multi-node on same machine
-INSTALL_DIR="${INSTALL_DIR:-/opt/metanode-${NODE_ID}}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/metanode/node-${NODE_ID}}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-BUILD_DIR="${BUILD_DIR:-/opt/metanode-${NODE_ID}/src}"
+BUILD_DIR="${BUILD_DIR:-/opt/metanode/node-${NODE_ID}/src}"
 PROTOCOL_KEY_FILE="${PROTOCOL_KEY_FILE:-}"
 NETWORK_KEY_FILE="${NETWORK_KEY_FILE:-}"
 
