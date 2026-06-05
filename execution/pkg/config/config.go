@@ -241,16 +241,16 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 
 		// Databases sharding defaults
 		if ConfigApp.Databases.NumShardsDefault == 0 {
-			ConfigApp.Databases.NumShardsDefault = 16
+			ConfigApp.Databases.NumShardsDefault = 1 // TUNED: Restore to 1 to prevent massive OOM
 		}
 		if ConfigApp.Databases.NumShardsSmartContract == 0 {
-			ConfigApp.Databases.NumShardsSmartContract = 64
+			ConfigApp.Databases.NumShardsSmartContract = 1 // TUNED: Restore to 1 to prevent massive OOM
 		}
 		if ConfigApp.Databases.NumShardsCode == 0 {
-			ConfigApp.Databases.NumShardsCode = 64
+			ConfigApp.Databases.NumShardsCode = 1 // TUNED: Restore to 1 to prevent massive OOM
 		}
 		if ConfigApp.Databases.Parallelism == 0 {
-			ConfigApp.Databases.Parallelism = 4
+			ConfigApp.Databases.Parallelism = 2 // TUNED: Restore to 2 to match previous behavior
 		}
 		if ConfigApp.Databases.PebbleCacheSizeMB == 0 {
 			ConfigApp.Databases.PebbleCacheSizeMB = 512
