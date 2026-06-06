@@ -13,6 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -87,6 +88,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 
 	// 4. Initialize FFI Bridge
 	dataDir := bp.config.Databases.RootPath
+	executor.RegisterTraceCallback(tx_processor.GlobalTxTraceStore.UpdateTrace)
 	if err := executor.InitFFIBridge(rustConfigPath, dataDir, reqHandler, blockQueue); err != nil {
 		logger.Error("❌ [FFI BRIDGE] Error starting FFI Bridge: %v", err)
 		fatal.Exit("Fatal exit from block_processor_network.go")

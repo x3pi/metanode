@@ -137,5 +137,6 @@
     "format": "text",
     "console_output": true,
     "file_output": false
-  }
+  },
+  "tx_trace_enabled": true
 }

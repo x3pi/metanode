@@ -172,6 +172,10 @@ impl TxSocketServer {
 
         debug!("📦 [TX-FLOW-TRACE] ▶ PHASE 1.5: Rust TxSocketServer decoded batch | tx_count={} | raw_batch_size={} bytes",
             individual_txs.len(), data_len);
+        for tx_bytes in &individual_txs {
+            let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_bytes);
+            crate::ffi::update_go_tx_trace(&tx_hash, "RUST_RECEIVED", "Transaction received and decoded by Rust consensus socket server");
+        }
         let transactions_to_submit = individual_txs;
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
@@ -338,6 +342,10 @@ impl TxSocketServer {
                 }
 
                 let chunk_len = chunk_vec.len();
+                for tx_bytes in &chunk_vec {
+                    let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_bytes);
+                    crate::ffi::update_go_tx_trace(&tx_hash, "RUST_SUBMITTED", "Transaction submitted to Rust consensus DAG proposer");
+                }
                 match current_client.submit_no_wait(chunk_vec).await {
                     Ok(included_in_block_rx) => {
                         debug!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);

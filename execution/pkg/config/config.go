@@ -184,6 +184,7 @@ type SimpleChainConfig struct {
 	RpcRateLimit  RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
 	TraceEnabled  bool               `json:"trace_enabled,omitempty"`
 	TraceEndpoint string             `json:"trace_endpoint,omitempty"`
+	TxTraceEnabled bool               `json:"tx_trace_enabled,omitempty"`
 	TlsCert       string             `json:"tls_cert,omitempty"`
 	TlsKey        string             `json:"tls_key,omitempty"`
 	Databases     DatabasesConfig    `json:"Databases"`
