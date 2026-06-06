@@ -1448,9 +1448,19 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	}
 }
 
+// WriteChangelog writes the changes to the StateChangelogDB synchronously.
+func (p *NomtPayload) WriteChangelog() {
+	if p == nil || len(p.changes) == 0 || p.trie.changelogDB == nil {
+		return
+	}
+	if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
+		logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB: %v", err)
+	}
+}
+
 // CommitAsync flushes the extracted payload to disk asynchronously in a background goroutine.
 func (p *NomtPayload) CommitAsync() {
-	if p == nil || (p.fs == nil && len(p.changes) == 0) {
+	if p == nil || (p.fs == nil && p.committingMap == nil) {
 		return
 	}
 
@@ -1461,12 +1471,6 @@ func (p *NomtPayload) CommitAsync() {
 		if p.fs != nil {
 			if err := p.fs.CommitPayload(p.trie.handle); err != nil {
 				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
-			}
-		}
-
-		if p.trie.changelogDB != nil && len(p.changes) > 0 {
-			if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
-				logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB asynchronously: %v", err)
 			}
 		}
 
@@ -1490,6 +1494,7 @@ func (p *NomtPayload) CommitAsync() {
 func (n *NomtStateTrie) CommitPayloadAsync() {
 	payload := n.ExtractPendingPayload()
 	if payload != nil {
+		payload.WriteChangelog()
 		payload.CommitAsync()
 	}
 }
