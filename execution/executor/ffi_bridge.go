@@ -224,7 +224,8 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	}
 
 	// Sanity check length to prevent overflow or out-of-memory allocations
-	if reqLen == 0 || reqLen > 100*1024*1024 {
+	// Raise limit to 1GB to support large SyncBlocksRequest payloads safely
+	if reqLen == 0 || reqLen > 1024*1024*1024 {
 		logger.Error("[FFI Bridge] Invalid rpc request length from Rust: %d", reqLen)
 		return C.bool(false)
 	}
