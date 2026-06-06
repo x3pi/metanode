@@ -339,15 +339,31 @@ func (app *App) initBlockchain() error {
 		}
 
 		if trie.GetStateBackend() == trie.BackendNOMT {
-			if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+			// Pre-init stake_db NOMT handle so we can read both roots.
+			stakeStorage := app.storageManager.GetStorageStake()
+			if _, initErr := trie.NewStateTrie(e_common.Hash{}, stakeStorage, true); initErr != nil {
+				logger.Warn("⚠️ [STARTUP] Failed to pre-init stake_db NOMT handle: %v", initErr)
+			}
+
+			nomtAccountRoot, okAccount := trie.GetNomtHandleRoot("account_state")
+			nomtStakeRoot, okStake := trie.GetNomtHandleRoot("stake_db")
+
+			if okAccount && okStake {
 				headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
-				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s",
-					nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+				headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+
+				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s | stake_db NOMT root=%s, header StakeStatesRoot=%s",
+					nomtAccountRoot.Hex(), headerAccountRoot.Hex(), nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 
 				if nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
 					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0) but header expects %s. "+
 						"STARTUP-SYNC will fetch missing blocks and reconcile.",
 						headerAccountRoot.Hex()[:18]+"...")
+				}
+				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
+					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						headerStakeRoot.Hex()[:18]+"...")
 				}
 
 				EmptyNomtRoot := e_common.HexToHash("0x59244d688eccda45a938566777f742597e2a84ea7bb048c209a52ac89b3fcf0e")
@@ -380,9 +396,9 @@ func (app *App) initBlockchain() error {
 					} else {
 						logger.Error("❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: %v", err)
 					}
-				} else if nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{}) {
-					logger.Warn("🛡️ [STARTUP] AccountStatesRoot MISMATCH: nomt=%s header=%s. Searching for correct matching block in LevelDB...",
-						nomtAccountRoot.Hex(), headerAccountRoot.Hex())
+				} else if (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
+					logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
+						nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 					found := false
 					for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
 						key := []byte(fmt.Sprintf("blockNumber_%d", bn))
@@ -395,10 +411,11 @@ func (app *App) initBlockchain() error {
 						if err != nil || blk == nil {
 							continue
 						}
-						if blk.Header().AccountStatesRoot() == nomtAccountRoot {
+						// BOTH roots must match!
+						if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
 							correctedGEI := blk.Header().GlobalExecIndex()
-							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (stateRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
-								bn, nomtAccountRoot.Hex()[:18]+"...", correctedGEI)
+							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
+								bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
 							app.startLastBlock = blk
 							storage.ForceSetLastBlockNumber(bn)
 							storage.ForceSetLastGlobalExecIndex(correctedGEI)
@@ -409,43 +426,9 @@ func (app *App) initBlockchain() error {
 						}
 					}
 					if !found {
-						logger.Warn("⚠️ [STARTUP] NOMT root %s does not match any block in LevelDB. Falling back to patching header.",
-							nomtAccountRoot.Hex()[:18]+"...")
-						app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
-						futureNomtRoot = nomtAccountRoot
+						logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
+							nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
 					}
-				}
-			}
-		}
-
-		// ═══════════════════════════════════════════════════════════════
-		// CRITICAL FIX (May 2026): Pre-init stake_db NOMT handle and verify root
-		// BEFORE NewChainStateWithGenesis. NOMT backend ignores the root parameter
-		// passed to NewStateTrie() — it reads root from handle.Root() on disk.
-		// If stake_db was not correctly restored, handle.Root() = 0x0, causing
-		// all subsequent blocks to have stakeStatesRoot=0x0 → consensus fork.
-		// ═══════════════════════════════════════════════════════════════
-		if trie.GetStateBackend() == trie.BackendNOMT {
-			stakeStorage := app.storageManager.GetStorageStake()
-			if _, initErr := trie.NewStateTrie(e_common.Hash{}, stakeStorage, true); initErr != nil {
-				logger.Warn("⚠️ [STARTUP] Failed to pre-init stake_db NOMT handle: %v", initErr)
-			}
-
-			if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
-				headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
-				logger.Info("🔍 [STARTUP] stake_db NOMT root=%s, header StakeStatesRoot=%s",
-					nomtStakeRoot.Hex(), headerStakeRoot.Hex())
-
-				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0) but header expects %s. "+
-						"STARTUP-SYNC will fetch missing blocks and reconcile.",
-						headerStakeRoot.Hex()[:18]+"...")
-				}
-
-				if nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] StakeStatesRoot MISMATCH: nomt=%s header=%s → patching header to use NOMT authoritative root",
-						nomtStakeRoot.Hex(), headerStakeRoot.Hex())
-					app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
 				}
 			}
 		}

@@ -268,6 +268,7 @@ type PipelineCommitResult struct {
 	OldKeys        [][]byte         // old trie keys for potential pruning
 	Trie           p_trie.StateTrie // The trie instance after Commit, to be re-used
 	PersistChannel chan struct{}    // Channel created for THIS block's persist async
+	NomtPayload    interface{}      // Extracted NOMT payload for asynchronous block commit
 }
 
 // CommitPipeline performs the fast, synchronous phase of commit:
@@ -533,7 +534,7 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
 
 	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		nomtTrie.CommitPayloadAsync()
+		result.NomtPayload = nomtTrie.ExtractPendingPayload()
 	}
 
 	return nil

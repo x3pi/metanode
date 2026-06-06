@@ -888,6 +888,7 @@ type StakePipelineCommitResult struct {
 	StakeBatch []byte      // serialized batch for network transfer to sub-nodes
 	Trie       p_trie.StateTrie // The trie instance after Commit, to be re-used
 	PersistChannel chan struct{}  // Channel created for THIS block's persist async
+	NomtPayload    interface{}    // Extracted NOMT payload for asynchronous block commit
 }
 
 // CommitPipeline performs the fast, synchronous phase of commit:
@@ -1037,10 +1038,6 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	// Step 2: Create new trie and swap reference
 	// ═══════════════════════════════════════════════════════════════
 
-	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		nomtTrie.CommitPayloadAsync()
-	}
-
 
 
 	db.muCommit.Lock()
@@ -1080,6 +1077,11 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	db.muCommit.Unlock()
 
 	logger.Debug("PersistAsync (StakeStateDB): trie swapped to new root %s, persistReady signaled", result.FinalHash)
+
+	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
+		result.NomtPayload = nomtTrie.ExtractPendingPayload()
+	}
+
 	return nil
 }
 
