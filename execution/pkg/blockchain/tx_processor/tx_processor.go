@@ -103,6 +103,10 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	ProcessResult,
 	error,
 ) {
+	if cfg := chainState.GetConfig(); cfg != nil && cfg.MVMCacheEnabled != nil {
+		isCache = *cfg.MVMCacheEnabled
+	}
+
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
 	mvm.CallClearAllStateInstances()
 
@@ -235,6 +239,10 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	ProcessResult,
 	error,
 ) {
+	if cfg := chainState.GetConfig(); cfg != nil && cfg.MVMCacheEnabled != nil {
+		isCache = *cfg.MVMCacheEnabled
+	}
+
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
 	mvm.CallClearAllStateInstances()
 
