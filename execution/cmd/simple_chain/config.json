@@ -1,5 +1,6 @@
 {
   "debug": true,
+  "mvm_cache_enabled": true,
   "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
   "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
   "log_path": "./sample/simple/data-write/logs",

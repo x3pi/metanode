@@ -1,5 +1,6 @@
 {
   "debug": true,
+  "mvm_cache_enabled": true,
   "chainId": 991,
   "private_key": "27c8f505bcae593cc0e3ac8ae9ed1b1d4493eabd11736aabda176d4d3255fa69",
   "address": "9065e2caaa4bf6533ded0b2a763e4ee81cd31bd2",
