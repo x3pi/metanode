@@ -354,6 +354,10 @@ impl RpcServer {
             "📤 [TX FLOW] Preparing to submit {} transaction(s) via RPC",
             transactions_to_submit.len()
         );
+        for tx_data in &transactions_to_submit {
+            let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
+            crate::ffi::update_go_tx_trace(&tx_hash, "RUST_RPC_RECEIVED", "Transaction received and decoded by Rust consensus RPC server");
+        }
         for (i, tx_data) in transactions_to_submit.iter().enumerate() {
             let tx_hash = calculate_transaction_hash_single_hex(tx_data);
             // Try to decode transaction to get from/to/nonce
@@ -481,6 +485,11 @@ impl RpcServer {
 
                 // NOTE: Hash tracking moved to commit processor to ensure only truly committed transactions are tracked
                 // This prevents false positives where submitted-but-not-committed transactions get tracked
+
+                for tx_data in &transactions_to_submit {
+                    let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
+                    crate::ffi::update_go_tx_trace(&tx_hash, "RUST_RPC_SUBMITTED", "Transaction submitted to Rust consensus DAG proposer via RPC");
+                }
 
                 // Log chi tiết từng transaction đã được submit
                 for (i, tx_data) in transactions_to_submit.iter().enumerate() {

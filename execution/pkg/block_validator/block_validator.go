@@ -98,6 +98,8 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
 	}
 	for i, tx := range txs {
+		tx.AddRelatedAddress(tx.FromAddress())
+		tx.AddRelatedAddress(tx.ToAddress())
 		// Build grouping addresses: filter out native dispatch addresses
 		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
 		for _, addr := range tx.RelatedAddresses() {
