@@ -189,6 +189,9 @@ type SimpleChainConfig struct {
 	Databases     DatabasesConfig    `json:"Databases"`
 	Nodes         NodesConfig        `json:"nodes"`
 	Log           LogConfig          `json:"log"`
+
+	// C++ MVM State cache control
+	MVMCacheEnabled *bool `json:"mvm_cache_enabled,omitempty"`
 }
 
 // joinPathIfNotURL nối path với base path chỉ khi path không phải là URL.
@@ -280,6 +283,11 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			} else if v == "false" || v == "0" {
 				ConfigApp.IsRPCNode = false
 			}
+		}
+
+		if ConfigApp.MVMCacheEnabled == nil {
+			defaultVal := true
+			ConfigApp.MVMCacheEnabled = &defaultVal
 		}
 
 	})
