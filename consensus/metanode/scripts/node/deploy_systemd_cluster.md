@@ -63,6 +63,7 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 # Nếu muốn giữ lại data cũ của Node 2
 ./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --keep-data --only-node 2
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --keep-data --only-node 0
 ```
 
 **Khôi phục CHỈ DUY NHẤT một Node từ Snapshot (ví dụ khôi phục Node 3):**
