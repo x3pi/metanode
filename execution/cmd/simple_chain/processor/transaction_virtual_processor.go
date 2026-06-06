@@ -121,9 +121,13 @@ func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction
 
 		vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, blockTime, common.Address{})
 		mvm.ProtectMVMApi(mvmId)
+		// Clear C++ EVM cache before execution to ensure a clean starting state
+		mvm.CallClearAllStateInstances()
 		defer func() {
 			mvm.UnprotectMVMApi(mvmId)
 			mvm.ClearMVMApi(mvmId)
+			// Clear C++ EVM cache after execution to prevent speculative state leaks
+			mvm.CallClearAllStateInstances()
 		}()
 		if tx.IsCallContract() {
 			// Validate smart contract call using live chainState (reliable after UpdateStateForNewHeader)
@@ -445,6 +449,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			// touch đúng storage slots → relatedAddresses sẽ khớp với lúc execute thật.
 			fakeCallTx := proxy_tx.New(updatedTx, updatedTx.FromAddress(), item.Target,
 				updatedTx.Amount(), uint64(mt_common.MAX_GASS_FEE), 0, item.Payload)
+			mvm.CallClearAllStateInstances()
 			_, _, _ = vmP.ExecuteTransactionWithMvmIdSub(ctx, fakeCallTx, true)
 			mvmApi := mvm.GetMVMApi(itemMvmId)
 			if mvmApi != nil {
@@ -453,6 +458,7 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 				}
 			}
 			mvm.ClearMVMApi(itemMvmId)
+			mvm.CallClearAllStateInstances()
 			logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
 				item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 		}
