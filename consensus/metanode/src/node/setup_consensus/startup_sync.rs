@@ -164,51 +164,54 @@ impl ConsensusNode {
                             let peer_b = &peer_blocks[0];
         
                             if local_b.raw_block_bytes != peer_b.raw_block_bytes {
-                                let mut err_msg = format!(
-                                    "🚨 [ANTI-FORK] FATAL: Block #{} hash MISMATCH between Go and peer!\nGo has stale/corrupt data.",
+                                let mut warn_msg = format!(
+                                    "⚠️ [ANTI-FORK] Block #{} hash MISMATCH between Go and peer! Go has stale/corrupt data.",
                                     local_block
                                 );
         
-                                err_msg.push_str(&format!(
+                                warn_msg.push_str(&format!(
                                     "\n- Block Hash: local={}, peer={}",
                                     hex::encode(&local_b.block_hash),
                                     hex::encode(&peer_b.block_hash)
                                 ));
         
                                 if local_b.timestamp_ms != peer_b.timestamp_ms {
-                                    err_msg.push_str(&format!(
+                                    warn_msg.push_str(&format!(
                                         "\n- Timestamp Mismatch: local={}, peer={}",
                                         local_b.timestamp_ms, peer_b.timestamp_ms
                                     ));
                                 }
                                 if local_b.transactions_root != peer_b.transactions_root {
-                                    err_msg.push_str(&format!(
+                                    warn_msg.push_str(&format!(
                                         "\n- TxRoot Mismatch: local={}, peer={}",
                                         hex::encode(&local_b.transactions_root),
                                         hex::encode(&peer_b.transactions_root)
                                     ));
                                 }
                                 if local_b.receipts_root != peer_b.receipts_root {
-                                    err_msg.push_str(&format!(
+                                    warn_msg.push_str(&format!(
                                         "\n- ReceiptsRoot Mismatch: local={}, peer={}",
                                         hex::encode(&local_b.receipts_root),
                                         hex::encode(&peer_b.receipts_root)
                                     ));
                                 }
                                 if local_b.state_root != peer_b.state_root {
-                                    err_msg.push_str(&format!(
+                                    warn_msg.push_str(&format!(
                                         "\n- StateRoot Mismatch: local={}, peer={}",
                                         hex::encode(&local_b.state_root),
                                         hex::encode(&peer_b.state_root)
                                     ));
                                 }
                                 if local_b.extra_data != peer_b.extra_data {
-                                    err_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
+                                    warn_msg.push_str("\n- ExtraData (LeaderAddress/Committee) Mismatch");
                                 }
         
-                                err_msg.push_str("\n\nHALTING NODE to prevent fork. Operator MUST wipe the database and restart from scratch.");
-                                tracing::error!("{}", err_msg);
-                                panic!("{}", err_msg);
+                                warn_msg.push_str("\n\nResetting local block cursor to 0 to trigger automatic state realignment from peers (will execute & overwrite).");
+                                tracing::warn!("{}", warn_msg);
+
+                                local_block = 0;
+                                anti_fork_verified = false;
+                                break;
                             } else {
                                 tracing::info!(
                                     "✅ [ANTI-FORK] Block #{} verified: Go matches peer. State integrity confirmed.",
