@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"runtime"
 	"strings"
@@ -274,10 +275,20 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 	if scs := as.SmartContractState(); scs != nil {
 		smartContractState = scs.String()
 	}
+	bal := as.Balance()
+	if bal == nil {
+		bal = big.NewInt(0)
+	}
+	pBal := as.PendingBalance()
+	if pBal == nil {
+		pBal = big.NewInt(0)
+	}
+	totalBalance := big.NewInt(0).Add(bal, pBal)
+
 	account := map[string]interface{}{
 		"address":            as.Address(),
-		"balance":            as.Balance().String(),
-		"pendingBalance":     as.PendingBalance().String(),
+		"balance":            totalBalance.String(),
+		"pendingBalance":     "0",
 		"deviceKey":          as.DeviceKey(),
 		"lastHash":           as.LastHash(),
 		"publicKeyBls":       hex.EncodeToString(as.PublicKeyBls()),

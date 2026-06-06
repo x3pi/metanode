@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -963,6 +964,8 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 		if fs != nil {
 			if err := fs.CommitPayload(n.handle); err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+			} else if string(n.namespace) == "account_state" && blockNum > 0 {
+				storage.UpdateLastNomtCommittedBlock(blockNum)
 			}
 		}
 		
@@ -1374,6 +1377,9 @@ func (n *NomtStateTrie) CommitPayload() error {
 		if err := fs.CommitPayload(n.handle); err != nil {
 			return fmt.Errorf("NomtStateTrie CommitPayload failed: %w", err)
 		}
+		if string(n.namespace) == "account_state" && blockNum > 0 {
+			storage.UpdateLastNomtCommittedBlock(blockNum)
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -1471,6 +1477,9 @@ func (p *NomtPayload) CommitAsync() {
 		if p.fs != nil {
 			if err := p.fs.CommitPayload(p.trie.handle); err != nil {
 				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
+			}
+			if string(p.trie.namespace) == "account_state" && p.blockNum > 0 {
+				storage.UpdateLastNomtCommittedBlock(p.blockNum)
 			}
 		}
 
