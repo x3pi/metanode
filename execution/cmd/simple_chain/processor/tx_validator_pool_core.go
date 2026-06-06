@@ -607,12 +607,8 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startExecution := time.Now()
-	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution.
-	// This blocks ALL virtual execution goroutines (which hold shared RLock)
-	// from making concurrent cgo calls to C++ MVM during committed block processing.
-	// Virtual executions will resume after real block processing completes.
 	vp.blockProcessingLock.Lock()
-	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
@@ -748,7 +744,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	}
 	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution (pool path).
 	vp.blockProcessingLock.Lock()
-	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, false, blockTime, leaderAddr, blockNum)
+	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
 	vp.blockProcessingLock.Unlock()
 	return result, err
 }
