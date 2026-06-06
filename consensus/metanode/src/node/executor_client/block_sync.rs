@@ -98,8 +98,9 @@ impl ExecutorClient {
 
         // Chunking to prevent hitting 32MB max message length limits on large block payloads
         // Each chunk opens a new FFI call so larger chunks = fewer round trips = faster sync
-        // Execute mode: 250 blocks/chunk for maximum throughput (matched with store-only mode)
-        let chunk_size: usize = if execute_mode { 250 } else { 250 };
+        // Execute mode: 10 blocks/chunk to limit maximum payload size below 30MB during high TPS blasts,
+        // which prevents Go FFI size limit errors and reduces transient memory allocations.
+        let chunk_size: usize = 10;
         let mut total_synced_count = 0u64;
         let mut final_synced_block = 0u64;
         let mut final_executed_gei = 0u64;
