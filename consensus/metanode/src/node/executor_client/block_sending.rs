@@ -221,6 +221,11 @@ impl ExecutorClient {
                     commit_digest: vec![],
                 };
 
+                for tx_exe in &epoch_data.transactions {
+                    let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_exe.digest);
+                    crate::ffi::update_go_tx_trace(&tx_hash, "RUST_CONSENSUS_COMMITTED", &format!("Transaction packaged in fragmented ExecutableBlock sent to Go. GEI={}, Block={}", fragment_gei, block_number));
+                }
+
                 let tx_count = epoch_data.transactions.len();
                 let mut buf = Vec::new();
                 epoch_data.encode(&mut buf)?;
@@ -298,6 +303,11 @@ impl ExecutorClient {
             authority_key: vec![],
             commit_digest: vec![],
         };
+
+        for tx_exe in &epoch_data.transactions {
+            let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_exe.digest);
+            crate::ffi::update_go_tx_trace(&tx_hash, "RUST_CONSENSUS_COMMITTED", &format!("Transaction packaged in ExecutableBlock sent to Go. GEI={}, Block={}", global_exec_index, block_number));
+        }
         let mut epoch_data_bytes = Vec::new();
         epoch_data.encode(&mut epoch_data_bytes)?;
 

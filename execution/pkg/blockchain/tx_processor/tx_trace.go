@@ -8,12 +8,20 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 )
 
-// TxTrace represents a single transaction trace event.
-type TxTrace struct {
-	Hash      string `json:"hash"`
+// TxTraceStep represents a single step in the transaction lifecycle.
+type TxTraceStep struct {
 	Step      string `json:"step"`
 	Timestamp int64  `json:"timestamp"`
 	Details   string `json:"details,omitempty"`
+}
+
+// TxTrace represents the collection of steps for a transaction.
+type TxTrace struct {
+	Hash      string        `json:"hash"`
+	Step      string        `json:"step"`
+	Timestamp int64         `json:"timestamp"`
+	Details   string        `json:"details,omitempty"`
+	Steps     []TxTraceStep `json:"steps"`
 }
 
 // TxTraceStore keeps track of the last N transaction traces in memory.
@@ -57,13 +65,19 @@ func (s *TxTraceStore) UpdateTrace(hash common.Hash, step string, details string
 		s.hashes[s.head] = hash
 		s.head = (s.head + 1) % s.maxSize
 		t = &TxTrace{
-			Hash: hash.Hex(),
+			Hash:  hash.Hex(),
+			Steps: make([]TxTraceStep, 0, 4),
 		}
 		s.traces[hash] = t
 	}
 	t.Step = step
 	t.Timestamp = time.Now().UnixMilli()
 	t.Details = details
+	t.Steps = append(t.Steps, TxTraceStep{
+		Step:      step,
+		Timestamp: t.Timestamp,
+		Details:   details,
+	})
 }
 
 // GetTrace retrieves a copy of the transaction trace for the given hash.
@@ -74,10 +88,13 @@ func (s *TxTraceStore) GetTrace(hash common.Hash) (*TxTrace, bool) {
 	if !exists {
 		return nil, false
 	}
+	stepsCopy := make([]TxTraceStep, len(t.Steps))
+	copy(stepsCopy, t.Steps)
 	return &TxTrace{
 		Hash:      t.Hash,
 		Step:      t.Step,
 		Timestamp: t.Timestamp,
 		Details:   t.Details,
+		Steps:     stepsCopy,
 	}, true
 }
