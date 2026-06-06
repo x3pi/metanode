@@ -608,6 +608,12 @@ if $DO_START; then
         fi
 
         for id in $nodes; do
+            if [ "$id" == "${SNAPSHOT_SOURCE_NODE:-}" ] && [ -n "${SNAPSHOT_SERVER_PORT:-}" ]; then
+                CMD_SEQ="${CMD_SEQ}
+                echo '  ▶ Mở cổng tường lửa ufw cho Snapshot API trên Node $id (Port: ${SNAPSHOT_SERVER_PORT})...'
+                _sudo ufw allow ${SNAPSHOT_SERVER_PORT}/tcp >/dev/null 2>&1 || true"
+            fi
+
             if $KEEP_DATA; then
                 CMD_SEQ="${CMD_SEQ}
                 echo '  ▶ Installing Node $id (keeping data)...'

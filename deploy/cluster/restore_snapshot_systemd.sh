@@ -72,23 +72,14 @@ if [ "${EUID:-0}" -ne 0 ]; then
 fi
 
 # ─── Đọc cấu hình Node đích ──────────────────────────────────────
-ENV_FILE=""
-if [ "$NODE_ID" -eq 4 ]; then
-    ENV_FILE="$DEPLOY_DIR/node-4_keys/synconly.env"
-else
-    ENV_FILE="$DEPLOY_DIR/node-${NODE_ID}_keys/validator.env"
-fi
+INSTALL_DIR="/opt/metanode/node-${NODE_ID}"
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${RED}❌ Không tìm thấy file cấu hình: $ENV_FILE${NC}"
+if [ ! -d "$INSTALL_DIR" ]; then
+    echo -e "${RED}❌ Không tìm thấy thư mục cài đặt Node $NODE_ID: $INSTALL_DIR${NC}"
     exit 1
 fi
 
-INSTALL_DIR=$(grep "^INSTALL_DIR=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' || echo "")
-[ -z "$INSTALL_DIR" ] && INSTALL_DIR="/opt/metanode/node-${NODE_ID}"
-
-METANODE_USER=$(grep "^METANODE_USER=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' || echo "")
-[ -z "$METANODE_USER" ] && METANODE_USER="metanode"
+METANODE_USER=$(stat -c '%U' "$INSTALL_DIR" 2>/dev/null || echo "abc")
 
 # ─── Cấu hình URL Tải Snapshot ─────────────────────────────────
 SNAP_API="${SNAPSHOT_URL}/api/snapshots"
@@ -102,19 +93,16 @@ svc_rpc="metanode-rpc-${NODE_ID}"
 # Helper get rpc port
 get_node_rpc_port() {
     local nid="$1"
-    local cfg=""
-    if [ "$nid" -eq 4 ]; then
-        cfg="$DEPLOY_DIR/node-4_keys/synconly.env"
-    else
-        cfg="$DEPLOY_DIR/node-${nid}_keys/validator.env"
-    fi
+    local cfg="/opt/metanode/node-${nid}/config/execution.json"
     if [ -f "$cfg" ]; then
-        local port=$(grep "^RPC_PORT=" "$cfg" 2>/dev/null | cut -d'=' -f2 | tr -d ':' | tr -d '"' || true)
+        local port=$(jq -r '.rpc_port // empty' "$cfg" 2>/dev/null | tr -d ':')
         if [ -n "$port" ]; then
             echo "$port"
             return 0
         fi
     fi
+    # Default fallback
+    if [ "$nid" -eq 0 ]; then echo "8757"; return 0; fi
     echo "$((10746 + nid))"
 }
 
