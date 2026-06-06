@@ -127,7 +127,11 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
-	defer mvm.ClearMVMApi(mvmId)
+	defer func() {
+		mvm.ClearMVMApi(mvmId)
+		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
+		mvm.CallClearAllStateInstances()
+	}()
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
@@ -293,7 +297,11 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
-	defer mvm.ClearMVMApi(mvmId)
+	defer func() {
+		mvm.ClearMVMApi(mvmId)
+		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
+		mvm.CallClearAllStateInstances()
+	}()
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
