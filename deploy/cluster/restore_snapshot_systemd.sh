@@ -1,18 +1,56 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  RESTORE NODE SYSTEMD — SNAPSHOT RESTORE FOR SYSTEMD SERVICES
+#  RESTORE SNAPSHOT SYSTEMD — SNAPSHOT RESTORE FOR SYSTEMD SERVICES
 #  Chạy dưới quyền root (sudo) để quản lý các systemd service.
-#  Usage: sudo bash restore_node_systemd.sh <node_id> [snapshot_name] [source_node_id]
 # ═══════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-NODE_ID="${1:?❌ Usage: sudo bash $0 <node_id> [snapshot_name] [source_node_id]}"
+NODE_ID=""
+SNAPSHOT_URL=""
+SNAP_NAME=""
+
+usage() {
+    echo "Usage: sudo bash $0 --node <node_id> --snapshot-url <url> [--snapshot-name <name>]"
+    echo "Ví dụ: sudo bash $0 --node 2 --snapshot-url http://192.168.1.100:8604"
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --node|-n)
+      NODE_ID="$2"
+      shift 2
+      ;;
+    --snapshot-url|-u)
+      SNAPSHOT_URL="$2"
+      shift 2
+      ;;
+    --snapshot-name|-s)
+      SNAP_NAME="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "❌ Cờ không hợp lệ: $1"
+      usage
+      ;;
+  esac
+done
+
+if [ -z "$NODE_ID" ] || [ -z "$SNAPSHOT_URL" ]; then
+    usage
+fi
 
 if [[ ! "$NODE_ID" =~ ^[0-4]$ ]]; then
     echo "❌ node_id phải từ 0-4, nhận được: $NODE_ID"
     exit 1
 fi
+
+# Loại bỏ dấu / ở cuối URL nếu có
+SNAPSHOT_URL="${SNAPSHOT_URL%/}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -29,7 +67,7 @@ DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Quyền Root
 if [ "${EUID:-0}" -ne 0 ]; then
     echo -e "${RED}❌ Lệnh này cần chạy dưới quyền root (sudo). Chạy lại bằng:${NC}"
-    echo "sudo bash $0 $*"
+    echo "sudo bash $0 --node $NODE_ID --snapshot-url $SNAPSHOT_URL"
     exit 1
 fi
 
@@ -52,30 +90,9 @@ INSTALL_DIR=$(grep "^INSTALL_DIR=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' || ec
 METANODE_USER=$(grep "^METANODE_USER=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' || echo "")
 [ -z "$METANODE_USER" ] && METANODE_USER="metanode"
 
-# ─── Cấu hình Node nguồn snapshot ─────────────────────────────────
-SOURCE_NODE="${3:-0}"
-if [[ ! "$SOURCE_NODE" =~ ^[0-4]$ ]]; then
-    echo "❌ source_node_id phải từ 0-4, nhận được: $SOURCE_NODE"
-    exit 1
-fi
-
-SRC_ENV_FILE=""
-if [ "$SOURCE_NODE" -eq 4 ]; then
-    SRC_ENV_FILE="$DEPLOY_DIR/node-4_keys/synconly.env"
-else
-    SRC_ENV_FILE="$DEPLOY_DIR/node-${SOURCE_NODE}_keys/validator.env"
-fi
-
-# Đọc SNAPSHOT_SERVER_PORT từ node nguồn
-SNAP_PORT=""
-if [ -f "$SRC_ENV_FILE" ]; then
-    SNAP_PORT=$(grep "^SNAPSHOT_SERVER_PORT=" "$SRC_ENV_FILE" | cut -d'=' -f2 | tr -d '"' || echo "")
-fi
-[ -z "$SNAP_PORT" ] && SNAP_PORT=$((8600 + SOURCE_NODE))
-
-SNAP_SERVER="http://localhost:${SNAP_PORT}"
-SNAP_API="${SNAP_SERVER}/api/snapshots"
-SNAP_FILES_URL="${SNAP_SERVER}/files"
+# ─── Cấu hình URL Tải Snapshot ─────────────────────────────────
+SNAP_API="${SNAPSHOT_URL}/api/snapshots"
+SNAP_FILES_URL="${SNAPSHOT_URL}/files"
 
 # Service names
 svc_exec="metanode-execution-${NODE_ID}"
@@ -105,7 +122,7 @@ find_reference_node() {
     for i in 0 1 2 3 4; do
         [ "$i" -eq "$NODE_ID" ] && continue
         local port=$(get_node_rpc_port "$i")
-        local resp=$(curl -sf -X POST -H "Content-Type: application/json" \
+        local resp=$(curl -sf -m 1 -X POST -H "Content-Type: application/json" \
             --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
             "http://127.0.0.1:$port" 2>/dev/null || echo "")
         if [ -n "$resp" ]; then
@@ -126,17 +143,15 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}  📸 RESTORE Node $NODE_ID từ Snapshot (Systemd Mode)${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
-echo -e "${BLUE}📡 Snapshot Server:${NC} $SNAP_SERVER"
+echo -e "${BLUE}📡 Nguồn Snapshot:${NC} $SNAPSHOT_URL"
 
 # 1. Tìm snapshot
-if [ -n "${2:-}" ]; then
-    SNAP_NAME="$2"
+if [ -n "$SNAP_NAME" ]; then
     echo -e "${BLUE}📸 Sử dụng snapshot chỉ định:${NC} $SNAP_NAME"
 else
-    echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất (đợi tối đa 120s)...${NC}"
-    SNAP_NAME=""
+    echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất qua API (đợi tối đa 120s)...${NC}"
     for ((attempt=1; attempt<=30; attempt++)); do
-        SNAP_JSON=$(curl -sf "$SNAP_API" 2>/dev/null || echo "")
+        SNAP_JSON=$(curl -sf -m 5 "$SNAP_API" 2>/dev/null || echo "")
         if [ -n "$SNAP_JSON" ] && [ "$SNAP_JSON" != "[]" ]; then
             SNAP_NAME=$(echo "$SNAP_JSON" | jq -r 'max_by(.block_number) | .snapshot_name' 2>/dev/null || echo "")
             if [ -n "$SNAP_NAME" ] && [ "$SNAP_NAME" != "null" ]; then
@@ -148,15 +163,15 @@ else
     done
     
     if [ -z "$SNAP_NAME" ] || [ "$SNAP_NAME" = "null" ]; then
-        echo -e "${RED}❌ Không lấy được snapshot từ API sau 120s!${NC}"
-        echo "   Vui lòng kiểm tra xem node nguồn $SOURCE_NODE đang chạy và đã tạo snapshot chưa."
+        echo -e "${RED}❌ Không lấy được danh sách snapshot từ API sau 120s!${NC}"
+        echo "   Vui lòng kiểm tra lại URL: $SNAP_API"
         exit 1
     fi
     echo -e "${GREEN}  ✅ Tìm thấy snapshot mới nhất:${NC} $SNAP_NAME"
 fi
 
 DOWNLOAD_URL="${SNAP_FILES_URL}/${SNAP_NAME}/"
-echo -e "${BLUE}  📥 Tải từ:${NC} $DOWNLOAD_URL"
+echo -e "${BLUE}  📥 Sẽ tải dữ liệu từ:${NC} $DOWNLOAD_URL"
 
 # Xác nhận người dùng
 echo ""
@@ -214,12 +229,14 @@ wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
     --reject="index.html*" \
     "$DOWNLOAD_URL" \
     -P "$TEMP_SNAP" || {
-    echo -e "${RED}❌ Tải snapshot thất bại!${NC}"
+    echo -e "${RED}❌ Tải snapshot thất bại! Vui lòng kiểm tra lại đường dẫn: $DOWNLOAD_URL${NC}"
     rm -rf "$TEMP_SNAP"
     exit 1
 }
 
 # Xác định thư mục snapshot thực tế tải về
+# Do wget --cut-dirs=2, nếu url là http://ip:port/files/snap_name/
+# thì thư mục tải về có thể là snap_name nằm trong TEMP_SNAP
 SNAP_SRC_DIR="$TEMP_SNAP/$SNAP_NAME"
 if [ ! -d "$SNAP_SRC_DIR" ]; then
     SNAP_SRC_DIR="$TEMP_SNAP"
@@ -305,7 +322,7 @@ echo -e "${GREEN}  ✅ Các service đã được khởi động tuần tự${NC
 
 # Step 7: Giám sát Block Sync
 echo ""
-echo -e "${BLUE}[6/7] 📊 Giám sát trạng thái sync (so sánh với node tham chiếu, tối đa 120s)...${NC}"
+echo -e "${BLUE}[6/7] 📊 Giám sát trạng thái sync (tối đa 120s)...${NC}"
 PREV_BLOCK=""
 SYNCED=false
 MY_PORT=$(get_node_rpc_port "$NODE_ID")
@@ -347,7 +364,7 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120; do
         continue
     fi
     
-    # Lấy thông tin từ node tham chiếu đang chạy ổn định
+    # Lấy thông tin từ node tham chiếu đang chạy ổn định (nếu có trên cùng một máy)
     REF_NODE=$(find_reference_node)
     REF_BLOCK=""
     REF_GEI=""
@@ -366,7 +383,11 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120; do
         break
     elif [ -n "$PREV_BLOCK" ] && [ "$MY_BLOCK" -gt "$PREV_BLOCK" ] 2>/dev/null; then
         JUMP=$((MY_BLOCK - PREV_BLOCK))
-        echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Tăng +$JUMP blocks (Node tham chiếu: ${REF_BLOCK:-?})${NC}"
+        if [ -n "$REF_BLOCK" ]; then
+             echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Tăng +$JUMP blocks (Node tham chiếu: ${REF_BLOCK:-?})${NC}"
+        else
+             echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Tăng +$JUMP blocks${NC}"
+        fi
     elif [ -n "$PREV_BLOCK" ] && [ "$MY_BLOCK" -eq "$PREV_BLOCK" ] 2>/dev/null; then
         if [ -n "$REF_BLOCK" ] && [ "$MY_BLOCK" -lt "$REF_BLOCK" ] 2>/dev/null; then
             BEHIND=$((REF_BLOCK - MY_BLOCK))
@@ -398,12 +419,12 @@ if [ "${MY_BLOCK:-0}" -gt 0 ]; then
     if [ -n "$REF_NODE" ]; then
         REF_PORT=$(get_node_rpc_port "$REF_NODE")
         
-        HASH_MY=$(curl -sf -X POST -H "Content-Type: application/json" \
+        HASH_MY=$(curl -sf -m 2 -X POST -H "Content-Type: application/json" \
             --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$MY_BLOCK_HEX\",false],\"id\":1}" \
             "http://127.0.0.1:$MY_PORT" 2>/dev/null \
             | jq -r '.result.hash // empty' 2>/dev/null || echo "")
             
-        HASH_REF=$(curl -sf -X POST -H "Content-Type: application/json" \
+        HASH_REF=$(curl -sf -m 2 -X POST -H "Content-Type: application/json" \
             --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$MY_BLOCK_HEX\",false],\"id\":1}" \
             "http://127.0.0.1:$REF_PORT" 2>/dev/null \
             | jq -r '.result.hash // empty' 2>/dev/null || echo "")
@@ -420,6 +441,8 @@ if [ "${MY_BLOCK:-0}" -gt 0 ]; then
         else
             echo -e "${YELLOW}  ⚠️ Không thể lấy băm block để so sánh.${NC}"
         fi
+    else
+        echo -e "${YELLOW}  ⚠️ Không có Node tham chiếu nào khác đang chạy trên cùng máy để kiểm tra Hash Divergence.${NC}"
     fi
 fi
 
