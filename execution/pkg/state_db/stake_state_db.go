@@ -1038,11 +1038,7 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	// ═══════════════════════════════════════════════════════════════
 
 	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		go func() {
-			if err := nomtTrie.CommitPayload(); err != nil {
-				logger.Error("PersistAsync background (StakeStateDB): NOMT CommitPayload failed: %v", err)
-			}
-		}()
+		nomtTrie.CommitPayloadAsync()
 	}
 
 
