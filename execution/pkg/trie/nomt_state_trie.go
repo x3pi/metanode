@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -110,6 +111,7 @@ type NomtStateTrie struct {
 	// to be asynchronously flushed to disk during CommitPayload
 	pendingChangelog      []state_changelog.StateChange
 	pendingChangelogBlock uint64
+	pendingCommittingMap   map[string]*nomtDirtyEntry
 
 	// lastCommitBatch for network replication (protected by writerMu)
 	lastCommitBatch [][2][]byte
@@ -1219,6 +1221,7 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		n.pendingChangelog = changes
 		n.pendingChangelogBlock = n.currentCommitBlock
 	}
+	n.pendingCommittingMap = committingSnapshot
 	n.sessionMu.Unlock()
 
 	n.lastCommitBatch = replicationBatch
@@ -1270,6 +1273,9 @@ func (n *NomtStateTrie) Close() {
 		n.pendingFinishedSession.Abort()
 		n.pendingFinishedSession = nil
 	}
+
+	n.pendingChangelog = nil
+	n.pendingCommittingMap = nil
 }
 
 // HasUncommittedChanges returns true if there are dirty changes pending commit.
@@ -1356,6 +1362,8 @@ func (n *NomtStateTrie) CommitPayload() error {
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
 	n.pendingChangelogBlock = 0
+	committingMap := n.pendingCommittingMap
+	n.pendingCommittingMap = nil
 	n.sessionMu.Unlock()
 
 	if fs == nil && len(changes) == 0 {
@@ -1384,21 +1392,72 @@ func (n *NomtStateTrie) CommitPayload() error {
 	//    a newer commit's readView that may have been published during disk flush
 	n.writerMu.Lock()
 	view := n.loadReadView()
-	// Only clear committing — preserve dirty and rootHash from the latest view.
-	// Even if a new Commit() has published a newer readView during our disk flush,
-	// we still just clear committing. The new Commit()'s Phase 1 would have already
-	// set a new committing snapshot, and its entries are served from the new dirty.
-	// NOTE: If a new commit already published (committing = new data), we should NOT
-	// clear it. But since Commit Phase 1 replaces the readView entirely, our stale
-	// reference from loadReadView() IS the latest — writerMu ensures serialization.
-	n.publishReadView(
-		view.dirty,    // preserve current dirty (already immutable)
-		nil,           // committing cleared — data is on disk
-		view.rootHash, // rootHash unchanged
-	)
+	if view.committing != nil && committingMap != nil &&
+		reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(committingMap).Pointer() {
+		n.publishReadView(
+			view.dirty,    // preserve current dirty (already immutable)
+			nil,           // committing cleared — data is on disk
+			view.rootHash, // rootHash unchanged
+		)
+	} else if committingMap == nil {
+		n.publishReadView(
+			view.dirty,
+			nil,
+			view.rootHash,
+		)
+	}
 	n.writerMu.Unlock()
 
 	return nil
+}
+
+// CommitPayloadAsync extracts pending finished session and changelogs synchronously
+// to prevent subsequent block commits from overwriting them, and then flushes
+// the payload to disk asynchronously in a background goroutine.
+func (n *NomtStateTrie) CommitPayloadAsync() {
+	n.sessionMu.Lock()
+	fs := n.pendingFinishedSession
+	n.pendingFinishedSession = nil
+	changes := n.pendingChangelog
+	blockNum := n.pendingChangelogBlock
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
+	committingMap := n.pendingCommittingMap
+	n.pendingCommittingMap = nil
+	n.sessionMu.Unlock()
+
+	if fs == nil && len(changes) == 0 {
+		return // Nothing to commit to disk
+	}
+
+	go func() {
+		n.handle.LockCommitPayload()
+		defer n.handle.UnlockCommitPayload()
+
+		if fs != nil {
+			if err := fs.CommitPayload(n.handle); err != nil {
+				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
+			}
+		}
+
+		if n.changelogDB != nil && len(changes) > 0 {
+			if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
+				logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB asynchronously: %v", err)
+			}
+		}
+
+		n.writerMu.Lock()
+		view := n.loadReadView()
+		if view.committing != nil && committingMap != nil &&
+			reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(committingMap).Pointer() {
+			n.publishReadView(
+				view.dirty,
+				nil,
+				view.rootHash,
+			)
+		}
+		n.writerMu.Unlock()
+	}()
 }
 
 func (n *NomtStateTrie) WaitCommitPayload() {

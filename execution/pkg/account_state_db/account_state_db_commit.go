@@ -533,11 +533,7 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
 
 	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		go func() {
-			if err := nomtTrie.CommitPayload(); err != nil {
-				logger.Error("PersistAsync background: NOMT CommitPayload failed: %v", err)
-			}
-		}()
+		nomtTrie.CommitPayloadAsync()
 	}
 
 	return nil
