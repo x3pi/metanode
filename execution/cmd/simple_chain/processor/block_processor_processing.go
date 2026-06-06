@@ -235,6 +235,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	var receiptsRoot common.Hash
 	var txsRoot common.Hash
 	var txsRootErr error
+	var receiptsRootDuration time.Duration
+	var txsRootDuration time.Duration
 
 	var rootsWg sync.WaitGroup
 	rootsWg.Add(2)
@@ -253,7 +255,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		}
 
 		receipts, receiptsRoot = bp.calculateReceiptsRoot(processResults.Receipts)
-		logger.Debug("[PERF] Phase1.receiptsRoot: %v (%d receipts)", time.Since(startReceipts), len(processResults.Receipts))
+		receiptsRootDuration = time.Since(startReceipts)
+		logger.Debug("[PERF] Phase1.receiptsRoot: %v (%d receipts)", receiptsRootDuration, len(processResults.Receipts))
 	}()
 
 	// Goroutine 2: txsRoot (must AddTransactions first)
@@ -271,7 +274,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 		txDB.AddTransactions(processResults.Transactions)
 		txsRoot, txsRootErr = txDB.IntermediateRoot()
-		logger.Debug("[PERF] Phase1.txsRoot: %v (%d txs)", time.Since(startTxRoot), len(processResults.Transactions))
+		txsRootDuration = time.Since(startTxRoot)
+		logger.Debug("[PERF] Phase1.txsRoot: %v (%d txs)", txsRootDuration, len(processResults.Transactions))
 	}()
 
 	rootsWg.Wait()
@@ -283,8 +287,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	}
 
 	if len(processResults.Transactions) > 0 {
-		logger.Debug("[PERF] createBlock #%d Roots (txCount=%d) computed in parallel",
-			currentBlockNumber, len(processResults.Transactions))
+		logger.Info("[PERF] Block #%d Phase 1 Root Calc Breakdown:\n   - receiptsRoot:             %v (%d receipts)\n   - txsRoot:                  %v (%d txs)",
+			currentBlockNumber, receiptsRootDuration, len(processResults.Receipts), txsRootDuration, len(processResults.Transactions))
 	}
 
 	// Record phase times
@@ -429,9 +433,24 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	phase3Start := time.Now()
 	blockchain.GetBlockChainInstance().AddBlockToCache(bl)
-	var mappingWg sync.WaitGroup // Keep this as dummy to satisfy Job signature if needed
-
 	phase31Elapsed := time.Since(phase3Start)
+
+	var mappingBatch []byte
+	var mappingWg sync.WaitGroup
+	var mappingErr error
+	var tMapping time.Duration
+
+	mappingWg.Add(1)
+	go func() {
+		defer mappingWg.Done()
+		startMapping := time.Now()
+		var err error
+		mappingBatch, err = blockchain.GetBlockChainInstance().GenerateMappingBatchForBlock(bl, processResults.Transactions)
+		if err != nil {
+			mappingErr = err
+		}
+		tMapping = time.Since(startMapping)
+	}()
 
 	phase32Start := time.Now()
 	var trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot
@@ -457,34 +476,36 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	var smartContractBatch []byte
 	var smartContractStorageBatch []byte
 	var codeBatchPut []byte
-	var mappingBatch []byte
 	var stakeBatch []byte
 
+	var tTrie, tAccount, tContract, tStake, tDispatch time.Duration
+
 	if isStateChanging {
+		startTrie := time.Now()
 		trieBatchSnapshot = trie_database.GetTrieDatabaseManager().GetCollectedBatches()
 		trie_database.GetTrieDatabaseManager().ResetCollectedBatches()
+		tTrie = time.Since(startTrie)
 
 		// Phase 6 FIX: Synchronously snapshot all other generated Database Batches BEFORE the async dispatch
+		startAccount := time.Now()
 		accountBatch = bp.chainState.GetAccountStateDB().GetAccountBatch()
+		tAccount = time.Since(startAccount)
+
+		startContract := time.Now()
 		smartContractBatch = bp.chainState.GetSmartContractDB().GetSmartContractBatch()
 		smartContractStorageBatch = bp.chainState.GetSmartContractDB().GetSmartContractStorageBatch()
 		codeBatchPut = bp.chainState.GetSmartContractDB().GetCodeBatchPut()
+		tContract = time.Since(startContract)
+
+		startStake := time.Now()
 		stakeBatch = bp.chainState.GetStakeStateDB().GetStakeBatch()
+		tStake = time.Since(startStake)
 	}
 
-	mappingBatch, _ = blockchain.GetBlockChainInstance().GenerateMappingBatchForBlock(bl, processResults.Transactions)
-
-	// Index Ethereum transaction hashes to Meta transaction hashes in memory/DB
-	if len(processResults.Transactions) > 0 {
-		for _, tx := range processResults.Transactions {
-			ethTx := tx.ToEthTransaction()
-			if ethTx != nil {
-				ethHash := ethTx.Hash()
-				if ethHash != (common.Hash{}) {
-					blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethHash, tx.Hash())
-				}
-			}
-		}
+	// Wait for mapping generation to complete before constructing CommitJob
+	mappingWg.Wait()
+	if mappingErr != nil {
+		logger.Error("🚨 [COMMIT-MEMORY] mapping generation error for block #%d: %v", currentBlockNumber, mappingErr)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -564,10 +585,17 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	if cap(bp.commitChannel) > 0 && len(bp.commitChannel) >= cap(bp.commitChannel)*9/10 {
 		logger.Warn("🔥 [SATURATION] commitChannel is %d/%d full (Pipeline stalled)!", len(bp.commitChannel), cap(bp.commitChannel))
 	}
+	startDispatch := time.Now()
 	bp.commitChannel <- job
+	tDispatch = time.Since(startDispatch)
 	LastBlockProcessedTimeNano.Store(time.Now().UnixNano())
 	logger.Debug("⚡ [PIPELINE] Block #%d dispatched to commitWorker (non-blocking, GEI=%d)",
 		currentBlockNumber, globalExecIndex)
+
+	if len(processResults.Transactions) > 0 {
+		logger.Info("[PERF] Block #%d Phase 4 Job Prep & Snap Breakdown:\n   - Trie Snap:                %v\n   - Account Snap:             %v\n   - SC Snap:                  %v\n   - Stake Snap:               %v\n   - Mapping Gen:              %v\n   - commitChannel Push:       %v",
+			bl.Header().BlockNumber(), tTrie, tAccount, tContract, tStake, tMapping, tDispatch)
+	}
 
 	phase4Elapsed := time.Since(phase4Start)
 	overallElapsed := time.Since(overallStart)
@@ -595,8 +623,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	metrics.CurrentBlock.Set(float64(bl.Header().BlockNumber()))
 	metrics.TxsProcessedTotal.Add(float64(len(processResults.Transactions)))
 
-	if len(processResults.Transactions) > 1000 {
-		logger.Debug("📦 [batch_id=%s] === Block Creation Time %d (In Memory) [%d txs] === 📦\n   - Phase 1 (Root Calc):      %v\n   - Phase 2 (Block Data):     %v\n   - Phase 3.1 (Mapping):      %v\n   - Phase 3.2 (Trie Commit):  %v\n   - Phase 4 (Job Prep & Snap):%v\n   - 🚀 TOTAL (IN-MEMORY):     %v",
+	if len(processResults.Transactions) > 0 {
+		logger.Info("📦 [batch_id=%s] === Block Creation Time %d (In Memory) [%d txs] === 📦\n   - Phase 1 (Root Calc):      %v\n   - Phase 2 (Block Data):     %v\n   - Phase 3.1 (Mapping):      %v\n   - Phase 3.2 (Trie Commit):  %v\n   - Phase 4 (Job Prep & Snap):%v\n   - 🚀 TOTAL (IN-MEMORY):     %v",
 			batchID, bl.Header().BlockNumber(), len(processResults.Transactions),
 			phase1Elapsed, phase2Elapsed, phase31Elapsed, phase32Elapsed, phase4Elapsed, overallElapsed)
 	}

@@ -459,14 +459,18 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpcWithDeviceKey(
 func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Request) error {
 	startTime := time.Now()
 	logger.Info("🔥 ProcessTransactionsFromClient CALLED, cmd_length=%d, body_length=%d", len(request.Message().Command()), len(request.Message().Body()))
+	
+	t0 := time.Now()
 	transactions, err := transaction.UnmarshalTransactions(request.Message().Body())
 	if err != nil {
 		logger.Error("❌ ProcessTransactionsFromClient: UnmarshalTransactions failed: %v", err)
 		return err
 	}
+	unmarshalDuration := time.Since(t0)
 
 	logger.Info("🔥 ProcessTransactionsFromClient: Received batch of %d transactions", len(transactions))
 
+	t1 := time.Now()
 	// ═══════════════════════════════════════════════════════════════════════
 	// OPTIMIZED PARALLEL VIRTUAL EXECUTION WITH EVM SERIALIZATION:
 	//
@@ -548,9 +552,11 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 			processedTxs = append(processedTxs, pTx)
 		}
 	}
+	virtualExecDuration := time.Since(t1)
 
 	queueFullErrs := 0
 
+	t2 := time.Now()
 	// FORK-SAFETY AND PERFORMANCE: Bypass the injectionQueue worker pool entirely
 	// for batched transactions from the TPS blast tool.
 	// The `AddTransactionsToPool` method internally takes the lock ONCE and validates in bulk.
@@ -576,13 +582,14 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 			}
 		}
 	}
+	addToPoolDuration := time.Since(t2)
 
 	// Disabled my_debug.log writing
 	logger.Info("🔥 ProcessTransactionsFromClient: Added batch to pool. Total errors: %d", queueFullErrs)
 
 	elapsed := time.Since(startTime)
 	if elapsed > 10*time.Millisecond {
-		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v for %d txs (virtual exec + add to pool)", elapsed, len(transactions))
+		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual_exec=%v, add_to_pool=%v) for %d txs", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration, len(transactions))
 	}
 
 	if queueFullErrs > 0 {

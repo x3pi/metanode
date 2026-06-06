@@ -308,6 +308,7 @@ func (s *SocketServer) Listen(listenAddress string) error {
 				logger.Warn("Listen: Max connections reached (%d), rejecting %s",
 					cap(s.connSem), tcpConn.RemoteAddr())
 				_ = tcpConn.Close()
+				_ = conn.Disconnect() // Crucial to prevent goroutine leak!
 			}
 		}
 	}

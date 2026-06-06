@@ -583,6 +583,16 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// ═══════════════════════════════════════════════════════════════
 	// FULL PROCESSING PATH: IntermediateRoot(true)
 	// ═══════════════════════════════════════════════════════════════
+	startAll := time.Now()
+	var (
+		collectDuration time.Duration
+		sortDuration    time.Duration
+		marshalDuration time.Duration
+		persistDuration time.Duration
+		batchDuration   time.Duration
+		clearDuration   time.Duration
+		hashDuration    time.Duration
+	)
 
 	// FORK-SAFETY FIX: Use cacheEpoch as a SeqLock to prevent concurrent mempool
 	// validators (AccountStateReadOnly) from poisoning the lruCache with stale
@@ -654,6 +664,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	}()
 
 	// Bước 1: Thu thập keys (vì sync.Map.Range không cho biết trước số lượng)
+	collectStart := time.Now()
 	db.dirtyAccounts.Range(func(key, value interface{}) bool {
 		address, ok1 := key.(common.Address)
 		state, ok2 := value.(types.AccountState)
@@ -675,15 +686,18 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		})
 		return true
 	})
+	collectDuration = time.Since(collectStart)
 
 	// CRITICAL FORK-SAFETY: Sort the keys before updating the trie.
 	// sync.Map.Range iterates in random order. Updating the Merkle Patricia Trie
 	// with the same keys but in different orders causes structural differences
 	// (different branches, splits) which completely changes the final AccountStatesRoot
 	// and causes forks between nodes. Sorting guarantees deterministic trie updates.
+	sortStart := time.Now()
 	slices.SortFunc(keysToProcess, func(a, b dirtyAccountEntry) int {
 		return bytes.Compare(a.addr[:], b.addr[:])
 	})
+	sortDuration = time.Since(sortStart)
 
 	totalDirty := len(keysToProcess)
 	logger.Debug("Starting update from dirtyAccounts", "count", totalDirty)
@@ -756,10 +770,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			}(start, end)
 		}
 		wg.Wait()
-		marshalDuration := time.Since(startMarshal)
-		if marshalDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot ParallelMarshal: %v (%d keys)", marshalDuration, totalDirty)
-		}
+		marshalDuration = time.Since(startMarshal)
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -826,10 +837,9 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// so waiting on persistReady was sufficient.
 		waitStart := time.Now()
 		<-db.persistReady
-		if d := time.Since(waitStart); d > 50*time.Millisecond {
-			logger.Warn("🔥 [SATURATION] AccountStateDB: IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", d)
-		} else {
-			logger.Debug("[PERF] IntermediateRoot persistReady wait: %v", d)
+		persistDuration = time.Since(waitStart)
+		if persistDuration > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB: IntermediateRoot waited %v for persistReady gate (Pipeline stalled)!", persistDuration)
 		}
 
 		if updateErr == nil && len(batchKeys) > 0 {
@@ -882,7 +892,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 					updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 				}
 			}
-			logger.Debug("[PERF] IntermediateRoot BatchUpdate (thread-safe, lock-free, cached-old): %v (%d keys)", time.Since(startBatch), len(batchKeys))
+			batchDuration = time.Since(startBatch)
 		}
 
 		if updateErr != nil {
@@ -900,10 +910,9 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// CRITICAL FORK FIX: ALL trie types must wait (see comment above).
 		waitStart := time.Now()
 		<-db.persistReady
-		if d := time.Since(waitStart); d > 50*time.Millisecond {
-			logger.Warn("🔥 [SATURATION] AccountStateDB (MPT): IntermediateRoot DEFERRED persistReady wait took %v (Pipeline stalled)!", d)
-		} else {
-			logger.Debug("[PERF] IntermediateRoot DEFERRED persistReady wait (MPT): %v", d)
+		persistDuration = time.Since(waitStart)
+		if persistDuration > 50*time.Millisecond {
+			logger.Warn("🔥 [SATURATION] AccountStateDB (MPT): IntermediateRoot DEFERRED persistReady wait took %v (Pipeline stalled)!", persistDuration)
 		}
 
 		db.muTrie.Lock()
@@ -923,7 +932,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 				logger.Error("BatchUpdate failed: %v", err)
 				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
-			logger.Debug("[PERF] IntermediateRoot BatchUpdate: %v (%d keys)", time.Since(startBatch), len(batchKeys))
+			batchDuration = time.Since(startBatch)
 		}
 
 		if updateErr != nil {
@@ -936,20 +945,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	logger.Debug("Finished processing dirtyAccounts", "processedTotal", processedKeys)
 
 	// ═══════════════════════════════════════════════════════════════
-	// CRITICAL FORK-SAFETY: Clear dirtyAccounts IMMEDIATELY after
-	// applying to the trie, while we hold muTrie lock.
-	//
-	// TPS OPT PHASE 4: Keep loadedAccounts across blocks.
-	// loadedAccounts contains read-only accounts that were NOT modified.
-	// Their trie data hasn't changed, so they're still valid for the
-	// next block's reads. Keeping them saves re-reading from trie/LRU
-	// for hot accounts (~50-100ms per block with 20k+ accounts).
-	// Only dirtyAccounts must be cleared (they were applied to the trie).
-	// ═══════════════════════════════════════════════════════════════
 	// TPS OPT Phase 2: In-place clear instead of reassignment.
 	// `db.dirtyAccounts = sync.Map{}` creates a new map and drops the old one,
 	// causing GC to scan+collect 30K+ interface{} pointers per block.
 	// Range+Delete reuses the same map structure, avoiding the GC spike.
+	clearStart := time.Now()
 	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
 		db.dirtyAccounts.Delete(key)
 		// CRITICAL FIX: The account was modified and committed to the trie.
@@ -987,12 +987,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			logger.Debug("[TPS-OPT] Rotated lruCache (bounded eviction double-generation swap)")
 		}
 	}
+	clearDuration = time.Since(clearStart)
 
 	var newHash common.Hash
+	startHash := time.Now()
 	if hasChanges {
 		// CRITICAL FIX: Must compute the actual trie hash NOW so that
 		// ProcessTransactions returns the correct post-state root for the block header.
-		startHash := time.Now()
 
 		// ═══════════════════════════════════════════════════════════════
 		// NOMT STATEROOT FIX (May 2026):
@@ -1025,17 +1026,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		} else {
 			newHash = db.trie.Hash()
 		}
-
-		hashDuration := time.Since(startHash)
-		if hashDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] IntermediateRoot Hash: %v (%d dirty)", hashDuration, totalDirty)
-		}
-		logger.Debug("IntermediateRoot(true): computed new hash after applying %d dirty accounts: %s -> %s",
-			totalDirty, db.originRootHash.Hex(), newHash.Hex())
 	} else {
 		newHash = db.originRootHash
 		logger.Debug("No changes detected in dirtyAccounts, intermediate hash remains origin hash", "hash", newHash)
 	}
+	hashDuration = time.Since(startHash)
 
 	// ═══════════════════════════════════════════════════════════════
 	// DEADLOCK-FREE: Unlock muTrie before returning.
@@ -1044,6 +1039,14 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// caused permanent deadlocks when callers skipped commit.
 	// ═══════════════════════════════════════════════════════════════
 	db.muTrie.Unlock()
+
+	totalDuration := time.Since(startAll)
+	if totalDirty > 0 {
+		logger.Info("⏱️  [IR-PERF] AccountStateDB IntermediateRoot took %v (collect=%v, sort=%v, marshal=%v, persistWait=%v, batchUpdate=%v, clear=%v, hash=%v, dirtyCount=%d)",
+			totalDuration.Round(time.Microsecond), collectDuration.Round(time.Microsecond), sortDuration.Round(time.Microsecond),
+			marshalDuration.Round(time.Microsecond), persistDuration.Round(time.Microsecond), batchDuration.Round(time.Microsecond),
+			clearDuration.Round(time.Microsecond), hashDuration.Round(time.Microsecond), totalDirty)
+	}
 
 	return newHash, nil
 }
