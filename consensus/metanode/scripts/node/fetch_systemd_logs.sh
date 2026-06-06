@@ -35,12 +35,20 @@ fi
 source "$ENV_FILE"
 
 # Tạo thư mục chứa log
-LOCAL_SYSTEMD_LOGS_DIR="${LOCAL_METANODE:-$SCRIPT_DIR/../../../}/logs_systemd"
+# Luôn lưu log tương đối theo vị trí script hiện tại thay vì dùng LOCAL_METANODE bị hardcode
+LOCAL_SYSTEMD_LOGS_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)/logs_systemd"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 RUN_LOGS_DIR="$LOCAL_SYSTEMD_LOGS_DIR/run_$TIMESTAMP"
 mkdir -p "$RUN_LOGS_DIR"
 
 echo -e "${CYAN}📋 Using config: $ENV_FILE${NC}"
+
+if [ "${SSH_AUTH:-key}" == "password" ] && ! command -v sshpass &> /dev/null; then
+    echo -e "${YELLOW}❌ Lỗi: Bạn đang cấu hình SSH_AUTH=\"password\" nhưng chưa cài 'sshpass'.${NC}"
+    echo "Hãy chạy: sudo apt install sshpass"
+    exit 1
+fi
+
 echo -e "${GREEN}📥 Bắt đầu lấy systemd log từ các server về: $RUN_LOGS_DIR${NC}"
 
 get_unique_servers() {
