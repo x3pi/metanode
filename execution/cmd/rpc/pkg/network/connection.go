@@ -156,40 +156,7 @@ func (c *Connection) run() {
 		writeWg         sync.WaitGroup
 		readWg          sync.WaitGroup
 		quitChan        chan struct{}
-		shutdownTimer   *time.Timer
-		shutdownTimerCh <-chan time.Time
 	)
-
-	stopShutdownTimer := func() {
-		if shutdownTimer == nil {
-			return
-		}
-		if !shutdownTimer.Stop() {
-			select {
-			case <-shutdownTimerCh:
-			default:
-			}
-		}
-		shutdownTimer = nil
-		shutdownTimerCh = nil
-	}
-
-	startShutdownTimer := func() {
-		if shutdownTimer == nil {
-			shutdownTimer = time.NewTimer(postDisconnectGrace)
-			shutdownTimerCh = shutdownTimer.C
-			return
-		}
-		if !shutdownTimer.Stop() {
-			select {
-			case <-shutdownTimerCh:
-			default:
-			}
-		}
-		shutdownTimer.Reset(postDisconnectGrace)
-	}
-
-	defer stopShutdownTimer()
 
 	cleanup := func() {
 		if !connect {
@@ -253,135 +220,125 @@ func (c *Connection) run() {
 	}
 
 	for {
-		select {
-		case cmd, ok := <-c.cmdChan:
-			if !ok {
+		cmd, ok := <-c.cmdChan
+		if !ok {
+			return
+		}
+
+		switch v := cmd.(type) {
+		case cmdInit:
+			address = v.payload.address
+			cType = v.payload.cType
+			realConnAddr = v.payload.realConnAddr
+			// Update cache
+			c.metaMu.Lock()
+			c.cachedAddr = address
+			c.cachedType = cType
+			c.cachedAddrStr = realConnAddr
+			c.metaLastUpdate = time.Now()
+			c.metaMu.Unlock()
+
+		case cmdAccept:
+			if connect {
+				continue
+			}
+			tcpConn = v.tcpConn
+			realConnAddr = tcpConn.RemoteAddr().String()
+			connect = true
+			// Update cache (bao gồm TCP addresses)
+			c.metaMu.Lock()
+			c.cachedAddrStr = realConnAddr
+			c.cachedConnected = true
+			c.cachedTcpRemoteAddr = tcpConn.RemoteAddr()
+			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
+			c.metaLastUpdate = time.Now()
+			c.metaMu.Unlock()
+			startIO(tcpConn)
+			logger.Info("Connection manager: Accepted connection from %s", realConnAddr)
+
+		case cmdConnect:
+			if connect {
+				v.resp <- nil
+				continue
+			}
+			conn, err := net.DialTimeout("tcp", v.realConnAddr, c.config.DialTimeout)
+			if err != nil {
+				v.resp <- err
+				continue
+			}
+			tcpConn = conn
+			realConnAddr = v.realConnAddr
+			connect = true
+			// Update cache (bao gồm TCP addresses)
+			c.metaMu.Lock()
+			c.cachedAddrStr = realConnAddr
+			c.cachedConnected = true
+			c.cachedTcpRemoteAddr = tcpConn.RemoteAddr()
+			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
+			c.metaLastUpdate = time.Now()
+			c.metaMu.Unlock()
+			startIO(tcpConn)
+			logger.Info("Connection manager: Connected to %s", realConnAddr)
+			v.resp <- nil
+
+		case cmdSendMessage:
+			// cmdSendMessage không còn được dùng nữa
+			// SendMessage() giờ gửi trực tiếp vào sendChan
+			// Giữ lại case này để backward compatibility (nếu có code cũ vẫn dùng)
+			if !connect {
+				v.resp <- ErrDisconnected
+				continue
+			}
+			select {
+			case sendChan <- v.message:
+				v.resp <- nil
+			case <-time.After(c.config.WriteTimeout):
+				v.resp <- errors.New("timeout khi gửi vào sendChan nội bộ")
+				cleanup()
 				return
 			}
 
-			_, isDisconnect := cmd.(cmdDisconnect)
-			if !isDisconnect {
-				stopShutdownTimer()
-			}
+		case cmdDisconnect:
+			// Update cache ngay lập tức khi disconnect
+			// Đảm bảo IsConnect() sẽ return false ngay sau khi disconnect
+			c.metaMu.Lock()
+			c.cachedConnected = false
+			c.metaLastUpdate = time.Now() // Update timestamp để invalidate cache
+			c.metaMu.Unlock()
 
-			switch v := cmd.(type) {
-			case cmdInit:
-				address = v.payload.address
-				cType = v.payload.cType
-				realConnAddr = v.payload.realConnAddr
-				// Update cache
-				c.metaMu.Lock()
-				c.cachedAddr = address
-				c.cachedType = cType
-				c.cachedAddrStr = realConnAddr
-				c.metaLastUpdate = time.Now()
-				c.metaMu.Unlock()
+			// Clear sendChan reference TRƯỚC khi cleanup để SendMessage() không gửi vào channel đã close
+			c.sendChanMu.Lock()
+			c.sendChan = nil
+			c.sendChanMu.Unlock()
 
-			case cmdAccept:
-				if connect {
-					continue
-				}
-				tcpConn = v.tcpConn
-				realConnAddr = tcpConn.RemoteAddr().String()
-				connect = true
-				// Update cache (bao gồm TCP addresses)
-				c.metaMu.Lock()
-				c.cachedAddrStr = realConnAddr
-				c.cachedConnected = true
-				c.cachedTcpRemoteAddr = tcpConn.RemoteAddr()
-				c.cachedTcpLocalAddr = tcpConn.LocalAddr()
-				c.metaLastUpdate = time.Now()
-				c.metaMu.Unlock()
-				startIO(tcpConn)
-				logger.Info("Connection manager: Accepted connection from %s", realConnAddr)
+			cleanup()
+			return // Exit run() immediately!
 
-			case cmdConnect:
-				if connect {
-					v.resp <- nil
-					continue
-				}
-				conn, err := net.DialTimeout("tcp", v.realConnAddr, c.config.DialTimeout)
-				if err != nil {
-					v.resp <- err
-					continue
-				}
-				tcpConn = conn
-				realConnAddr = v.realConnAddr
-				connect = true
-				// Update cache (bao gồm TCP addresses)
-				c.metaMu.Lock()
-				c.cachedAddrStr = realConnAddr
-				c.cachedConnected = true
-				c.cachedTcpRemoteAddr = tcpConn.RemoteAddr()
-				c.cachedTcpLocalAddr = tcpConn.LocalAddr()
-				c.metaLastUpdate = time.Now()
-				c.metaMu.Unlock()
-				startIO(tcpConn)
-				logger.Info("Connection manager: Connected to %s", realConnAddr)
-				v.resp <- nil
+		case cmdClone:
+			newConn := NewConnection(address, cType, c.config)
+			newConn.SetRealConnAddr(realConnAddr)
+			v.resp <- newConn
 
-			case cmdSendMessage:
-				// cmdSendMessage không còn được dùng nữa
-				// SendMessage() giờ gửi trực tiếp vào sendChan
-				// Giữ lại case này để backward compatibility (nếu có code cũ vẫn dùng)
-				if !connect {
-					v.resp <- ErrDisconnected
-					continue
-				}
-				select {
-				case sendChan <- v.message:
-					v.resp <- nil
-				case <-time.After(c.config.WriteTimeout):
-					v.resp <- errors.New("timeout khi gửi vào sendChan nội bộ")
-					go func() { c.cmdChan <- cmdDisconnect{} }()
-				}
-
-			case cmdDisconnect:
-				// Update cache ngay lập tức khi disconnect
-				// Đảm bảo IsConnect() sẽ return false ngay sau khi disconnect
-				c.metaMu.Lock()
-				c.cachedConnected = false
-				c.metaLastUpdate = time.Now() // Update timestamp để invalidate cache
-				c.metaMu.Unlock()
-
-				// Clear sendChan reference TRƯỚC khi cleanup để SendMessage() không gửi vào channel đã close
-				c.sendChanMu.Lock()
-				c.sendChan = nil
-				c.sendChanMu.Unlock()
-
-				cleanup()
-				startShutdownTimer()
-				continue
-
-			case cmdClone:
-				newConn := NewConnection(address, cType, c.config)
-				newConn.SetRealConnAddr(realConnAddr)
-				v.resp <- newConn
-
-			case getIsConnectRequest:
-				v.resp <- connect
-			case getAddressRequest:
-				v.resp <- address
-			case getChannelsRequest:
-				v.resp <- getChannelsResponse{reqChan: requestChan, errChan: errorChan}
-			case getTypeRequest:
-				v.resp <- cType
-			case getRemoteAddrRequest:
-				v.resp <- realConnAddr
-			case getTCPAddrRequest:
-				if tcpConn != nil {
-					if v.isLocal {
-						v.resp <- tcpConn.LocalAddr()
-					} else {
-						v.resp <- tcpConn.RemoteAddr()
-					}
+		case getIsConnectRequest:
+			v.resp <- connect
+		case getAddressRequest:
+			v.resp <- address
+		case getChannelsRequest:
+			v.resp <- getChannelsResponse{reqChan: requestChan, errChan: errorChan}
+		case getTypeRequest:
+			v.resp <- cType
+		case getRemoteAddrRequest:
+			v.resp <- realConnAddr
+		case getTCPAddrRequest:
+			if tcpConn != nil {
+				if v.isLocal {
+					v.resp <- tcpConn.LocalAddr()
 				} else {
-					v.resp <- nil
+					v.resp <- tcpConn.RemoteAddr()
 				}
+			} else {
+				v.resp <- nil
 			}
-		case <-shutdownTimerCh:
-			logger.Debug("Connection manager: post-disconnect timeout reached, stopping goroutine for %s", realConnAddr)
-			return
 		}
 	}
 }
@@ -510,6 +467,10 @@ func (c *Connection) IsConnect() bool {
 	lastUpdate := c.metaLastUpdate
 	c.metaMu.RUnlock()
 
+	if !connected {
+		return false
+	}
+
 	// Refresh async nếu cache cũ (> 500ms)
 	// Lưu ý: Vẫn return giá trị cache ngay để không block
 	if time.Since(lastUpdate) > 500*time.Millisecond {
@@ -541,8 +502,13 @@ func (c *Connection) Address() common.Address {
 	// Đọc từ cache atomically (non-blocking)
 	c.metaMu.RLock()
 	addr := c.cachedAddr
+	connected := c.cachedConnected
 	lastUpdate := c.metaLastUpdate
 	c.metaMu.RUnlock()
+
+	if !connected {
+		return addr
+	}
 
 	// Nếu cache còn mới (< 100ms), return ngay
 	if time.Since(lastUpdate) < 100*time.Millisecond {
@@ -584,8 +550,9 @@ func (c *Connection) RemoteAddrSafe() string {
 	// Đọc từ cache (non-blocking)
 	c.metaMu.RLock()
 	addr := c.cachedAddrStr
+	connected := c.cachedConnected
 	c.metaMu.RUnlock()
-	if addr != "" {
+	if !connected || addr != "" {
 		return addr
 	}
 
@@ -611,8 +578,9 @@ func (c *Connection) Type() string {
 	// Đọc từ cache (non-blocking)
 	c.metaMu.RLock()
 	cType := c.cachedType
+	connected := c.cachedConnected
 	c.metaMu.RUnlock()
-	if cType != "" {
+	if !connected || cType != "" {
 		return cType
 	}
 
@@ -638,9 +606,10 @@ func (c *Connection) TcpLocalAddr() net.Addr {
 	// Đọc từ cache trước (non-blocking)
 	c.metaMu.RLock()
 	addr := c.cachedTcpLocalAddr
+	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if addr != nil {
+	if !connected || addr != nil {
 		return addr
 	}
 
@@ -669,9 +638,10 @@ func (c *Connection) TcpRemoteAddr() net.Addr {
 	// Đọc từ cache trước (non-blocking)
 	c.metaMu.RLock()
 	addr := c.cachedTcpRemoteAddr
+	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if addr != nil {
+	if !connected || addr != nil {
 		return addr
 	}
 
