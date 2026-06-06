@@ -108,11 +108,15 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	}
 
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
-	mvm.CallClearAllStateInstances()
+	if isCache {
+		mvm.CallClearAllStateInstances()
+	}
 
 	defer func() {
 		mvm.ClearAllMVMApi()
-		mvm.CallClearAllStateInstances()
+		if isCache {
+			mvm.CallClearAllStateInstances()
+		}
 	}()
 
 	lastBlockHeader := chainState.GetcurrentBlockHeader()
@@ -244,11 +248,15 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
-	mvm.CallClearAllStateInstances()
+	if isCache {
+		mvm.CallClearAllStateInstances()
+	}
 
 	defer func() {
 		mvm.ClearAllMVMApi()
-		mvm.CallClearAllStateInstances()
+		if isCache {
+			mvm.CallClearAllStateInstances()
+		}
 	}()
 
 	lastBlockHeader := chainState.GetcurrentBlockHeader()
