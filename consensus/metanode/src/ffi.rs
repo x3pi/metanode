@@ -52,7 +52,29 @@ pub struct GoCallbacks {
     pub free_go_buffer: Option<extern "C" fn(ptr: *mut u8)>,
     /// Get the current state root from Go AccountStateDB
     pub get_state_root: Option<extern "C" fn() -> *mut c_char>,
+    /// Update transaction trace in Go's memory
+    pub update_tx_trace: Option<
+        extern "C" fn(
+            hash_ptr: *const u8,
+            step_ptr: *const c_char,
+            details_ptr: *const c_char,
+        ),
+    >,
 }
+
+/// Call into Go to update transaction trace
+pub fn update_go_tx_trace(hash: &[u8], step: &str, details: &str) {
+    if let Some(callbacks) = GO_CALLBACKS.get() {
+        if let Some(func) = callbacks.update_tx_trace {
+            let step_c = std::ffi::CString::new(step).unwrap_or_default();
+            let details_c = std::ffi::CString::new(details).unwrap_or_default();
+            unsafe {
+                func(hash.as_ptr(), step_c.as_ptr(), details_c.as_ptr());
+            }
+        }
+    }
+}
+
 
 /// Register the CGo callbacks.
 #[no_mangle]

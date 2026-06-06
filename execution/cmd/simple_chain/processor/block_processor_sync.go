@@ -617,6 +617,7 @@ PROCESS_BLOCK:
 		if err == nil {
 			allTransactions = append(allTransactions, singleTx)
 			totalTxsFromRust++
+			tx_processor.GlobalTxTraceStore.UpdateTrace(singleTx.Hash(), "CONSENSUS_COMMITTED", fmt.Sprintf("Transaction ordered and committed in Rust block. GEI=%d, Epoch=%d", globalExecIndex, epochNum))
 			continue
 		}
 		logger.Warn("⚠️ [TX FLOW] UnmarshalTransaction FAILED for tx[%d]: %v", txIdx, err)
@@ -629,6 +630,9 @@ PROCESS_BLOCK:
 		}
 		allTransactions = append(allTransactions, transactions...)
 		totalTxsFromRust += len(transactions)
+		for _, tx := range transactions {
+			tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "CONSENSUS_COMMITTED", fmt.Sprintf("Transaction ordered and committed in Rust block. GEI=%d, Epoch=%d", globalExecIndex, epochNum))
+		}
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)

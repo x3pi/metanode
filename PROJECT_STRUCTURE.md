@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-05
+> **Last updated:** 2026-06-06
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -225,6 +225,7 @@ metanode/
 | File | Lines | Role |
 |------|-------|------|
 | `tx_processor.go` | 1,172 | **Concurrent Executor Engine** using Actor Model (Channel-based routing) by Smart Contract address to eliminate data races. |
+| `tx_trace.go` | 80 | Lightweight, in-memory ring-buffered transaction trace database (20,000 tx capacity) for debugging lifecycle steps. |
 | `validation.go` | ~323 | Core transaction verification and sanity checks. |
 
 ### `execution/pkg/account_state_db/` — Account State Management
