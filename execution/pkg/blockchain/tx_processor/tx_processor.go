@@ -667,6 +667,7 @@ func processSingleGroup(
 	// blockTime is now passed from Rust consensus for deterministic execution across all nodes
 	for _, item := range groupItems {
 		tx := item.Tx
+		GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_START", "Transaction retrieved from consensus block for execution")
 		var txCtx context.Context
 		var txSpan *trace.Span
 		if enableTrace {
@@ -692,6 +693,7 @@ func processSingleGroup(
 		// FORK-SAFETY & DATA INTEGRITY: Do NOT include skipped TXs in the block.
 		// Including them without incrementing their nonce violates blockchain invariants.
 		if failedSenders[tx.FromAddress()] {
+			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Skipped execution due to previous transaction failure from this sender")
 			if enableTrace && txSpan != nil {
 				txSpan.End()
 			}
@@ -718,6 +720,7 @@ func processSingleGroup(
 		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...)
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
 		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
+			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
 
 			if errVerify.Code != transaction.InvalidNonce.Code {
@@ -733,6 +736,7 @@ func processSingleGroup(
 		if tx.GetNonce() != as.Nonce() {
 			if !NomtAheadReplayMode.Load() {
 				err = fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
+				GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_NONCE_REJECTED", err.Error())
 				// CRITICAL FIX: Changed from Debug to Warn so you can see exactly when a duplicate is rejected
 				logger.Warn("❌ [NONCE-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", err, tx.Hash().Hex(), tx.FromAddress().Hex())
 
@@ -1063,6 +1067,7 @@ func processSingleGroup(
 		usedMvmId := mvmId
 
 		if tx.IsRegularTransaction() {
+			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_START", "Executing native value transfer")
 			// ═══════════════════════════════════════════════════════════════
 			// BATCH MUTATIONS for Native TX: Use DB locks to prevent data races
 			// with concurrent EVM groups modifying the same account.
@@ -1078,6 +1083,7 @@ func processSingleGroup(
 			// Mutate sender (thread-safe)
 			err = chainState.GetAccountStateDB().SubTotalBalance(tx.FromAddress(), totalCost)
 			if err != nil {
+				GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", "Insufficient balance for transfer")
 				// Thread-safe check: if err is returned, it means insufficient balance (or lock issue)
 				rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("insufficient balance for transfer"))
 				gRs.Receipts = append(gRs.Receipts, rcp)
@@ -1125,6 +1131,7 @@ func processSingleGroup(
 			)
 
 		} else {
+			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_START", "Executing EVM smart contract call")
 			// CRITICAL FORK FIX: We removed `tx.ToAddress()` as the cache key and ALWAYS use `mvmId` (Group ID).
 			// This prevents cross-block C++ EVM dirty state leaks and concurrency corruption.
 			gRs.MvmIdMap[tx.Hash()] = usedMvmId
@@ -1136,6 +1143,7 @@ func processSingleGroup(
 				logger.Warn("🐌 [PERF-WARN] ExecuteTransactionWithMvmId (C++ EVM) took %v for tx %s (From: %s). EVM Execution is lagging!", mvmElapsed, tx.Hash().Hex(), tx.FromAddress().Hex())
 			}
 			if err != nil {
+				GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", err.Error())
 				rcp = createErrorReceipt(tx, toAddress, err)
 				if exRs != nil {
 					rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
@@ -1151,6 +1159,7 @@ func processSingleGroup(
 				}
 				continue
 			}
+			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_SUCCESS", fmt.Sprintf("EVM contract execution completed, status: %d, gasUsed: %d", exRs.ReceiptStatus(), exRs.GasUsed()))
 			logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
 			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
@@ -1166,6 +1175,8 @@ func processSingleGroup(
 		if enableTrace && txSpan != nil {
 			txSpan.End()
 		}
+
+		GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_RECEIPT_CREATED", fmt.Sprintf("Receipt created and added to block. Status: %d", rcp.Status()))
 
 		gRs.Receipts = append(gRs.Receipts, rcp)
 		gRs.Transactions = append(gRs.Transactions, tx)

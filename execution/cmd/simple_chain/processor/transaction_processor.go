@@ -244,6 +244,8 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 		return
 	}
 
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_UNMARSHALED", "Transaction successfully unmarshaled from client request")
+
 	err := tp.processTransactionFromClient(req.conn, tx, req.msgID)
 	if err != nil {
 		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
@@ -366,6 +368,8 @@ func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
 	tx := &transaction.Transaction{}
 	tx.FromProto(transactionWithDeviceKey.Transaction)
 
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received with DeviceKey from connection: %s", request.Connection().RemoteAddrSafe()))
+
 	// DEBUG: Log TX details
 	logger.Debug("[TX-DK] TX parsed: txHash=%s, from=%s, to=%s, nonce=%d, connAddr=%s",
 		tx.Hash().Hex(), tx.FromAddress().Hex(), tx.ToAddress().Hex(), tx.GetNonce(), connAddr.Hex())
@@ -470,6 +474,10 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 
 	logger.Info("🔥 ProcessTransactionsFromClient: Received batch of %d transactions", len(transactions))
 
+	for _, tx := range transactions {
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BATCH_UNMARSHALED", "Transaction received in batch from client")
+	}
+
 	t1 := time.Now()
 	// ═══════════════════════════════════════════════════════════════════════
 	// OPTIMIZED PARALLEL VIRTUAL EXECUTION WITH EVM SERIALIZATION:
@@ -530,10 +538,13 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution in batch")
 			updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(t)
 			if err != nil {
+				tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
 				errorsList[idx] = err
 			} else {
+				tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution in batch")
 				processedTransactions[idx] = updatedTx
 			}
 		}(i, tx)
@@ -561,9 +572,13 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	// for batched transactions from the TPS blast tool.
 	// The `AddTransactionsToPool` method internally takes the lock ONCE and validates in bulk.
 	if len(processedTxs) > 0 {
+		for _, pTx := range processedTxs {
+			tx_processor.GlobalTxTraceStore.UpdateTrace(pTx.Hash(), "MEMPOOL_ADD_START", "Adding transaction batch to mempool")
+		}
 		errors := tp.AddTransactionsToPool(processedTxs)
 		for i, err := range errors {
 			if err != nil {
+				tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 				queueFullErrs++
 				errCode := int64(-1)
 				errMsg := err.Error()
@@ -579,6 +594,8 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 				logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: txHash=%s, code=%d, msg=%s",
 					processedTxs[i].Hash().Hex(), errCode, errMsg)
 				tp.sendTransactionError(request.Connection(), processedTxs[i].Hash(), errCode, errMsg, nil, "")
+			} else {
+				tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
 			}
 		}
 	}
@@ -621,6 +638,8 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 		})
 	}
 
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
+
 	// ═══════════════════════════════════════════════════════════════════
 	// FAST PATH: Skip expensive virtual EVM execution for simple TXs.
 	// ProcessSingleTransactionVirtual takes ~10ms per TX, which is the
@@ -656,26 +675,30 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	}
 
 	if needsVirtualExecution {
-		startVirtual := time.Now()
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution")
 		updatedTx, err, output := tp.ProcessSingleTransactionVirtual(tx)
-		_ = time.Since(startVirtual)
 		if err != nil {
+			tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
 			logger.Error("ProcessSingleTransactionVirtual failed: ", err)
 			tp.sendTransactionError(conn, tx.Hash(), -1, err.Error(), output, msgID)
 			return err
 		}
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution")
 		tx = updatedTx
 	} else {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
 	}
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
 	code, err := tp.AddTransactionToPool(tx)
 	if err != nil {
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
 		tp.sendTransactionError(conn, tx.Hash(), code, err.Error(), nil, msgID)
 		return err
 	}
 
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
 	// Gửi phản hồi thành công với txHash, code 0 và msgID
 	tp.sendTransactionResult(conn, tx.Hash(), msgID)
 	return nil

@@ -13,6 +13,7 @@ typedef struct {
     bool (*process_rpc_request)(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
     void (*free_go_buffer)(uint8_t* ptr);
     char* (*get_state_root)();
+    void (*update_tx_trace)(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
@@ -27,6 +28,7 @@ extern bool cgo_execute_block(uint8_t* payload, size_t len);
 extern bool cgo_process_rpc_request(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
 extern void cgo_free_go_buffer(uint8_t* ptr);
 extern char* cgo_get_state_root();
+extern void cgo_update_tx_trace(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
 
 static inline void register_callbacks_to_rust() {
     GoCallbacks cbs = {
@@ -34,6 +36,7 @@ static inline void register_callbacks_to_rust() {
         .process_rpc_request = cgo_process_rpc_request,
         .free_go_buffer = cgo_free_go_buffer,
         .get_state_root = cgo_get_state_root,
+        .update_tx_trace = cgo_update_tx_trace,
     };
     metanode_register_callbacks(cbs);
 }
@@ -44,6 +47,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
@@ -52,6 +56,12 @@ import (
 // Global reference for our handlers since CGo callbacks are global.
 var defaultRequestHandler *RequestHandler
 var defaultListenerBlockQueue chan *pb.ExecutableBlock
+var traceCallback func(hash common.Hash, step string, details string)
+
+// RegisterTraceCallback sets the callback function to update transaction traces in Go's memory
+func RegisterTraceCallback(cb func(hash common.Hash, step string, details string)) {
+	traceCallback = cb
+}
 
 // AuthoritativeBlockRequest wraps a block + response channel for synchronous GEI assignment.
 // When is_authoritative_gei=true, the block processor sends back the assigned GEI via ResponseCh.
@@ -348,6 +358,17 @@ func cgo_get_state_root() *C.char {
 		}
 	}
 	return nil
+}
+
+//export cgo_update_tx_trace
+func cgo_update_tx_trace(hashPtr *C.uint8_t, stepPtr *C.char, detailsPtr *C.char) {
+	if hashPtr == nil || traceCallback == nil {
+		return
+	}
+	hash := *(*common.Hash)(unsafe.Pointer(hashPtr))
+	step := C.GoString(stepPtr)
+	details := C.GoString(detailsPtr)
+	traceCallback(hash, step, details)
 }
 
 // SubmitTransactionBatch directly submits a transaction batch to the Rust consensus via zero-copy FFI
