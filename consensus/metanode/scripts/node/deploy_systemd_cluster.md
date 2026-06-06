@@ -35,6 +35,7 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 | `--start --keep-data` | Khởi động lại các node nhưng **giữ nguyên** data hiện tại. |
 | `--stop` | Dừng toàn bộ các tiến trình đang chạy trên toàn mạng lưới. |
 | `--only-node N` | Chỉ áp dụng thao tác cho 1 Node cụ thể (thay N bằng số). |
+| `--restore-node N` | Khôi phục dữ liệu từ Snapshot cho Node cụ thể (dùng `"1 2"` nếu nhiều node). Tự động tải snapshot dựa theo cấu hình `SNAPSHOT_SOURCE_NODE` trong file `.env`. Chỉ áp dụng khi tạo mới data. |
 
 ---
 
@@ -63,6 +64,19 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 # Nếu muốn giữ lại data cũ của Node 2
 ./deploy_systemd_cluster.sh --env deploy-muti-node.env --start --keep-data --only-node 2
 ```
+
+**Khôi phục CHỈ DUY NHẤT một Node từ Snapshot (ví dụ khôi phục Node 3):**
+*Lưu ý: Bạn cần phải cấu hình `SNAPSHOT_SOURCE_NODE` (ví dụ `4`) và `SNAPSHOT_SERVER_PORT` trong file `.env` trước.*
+```bash
+# Cờ --restore-node 3 giờ đây đã hoạt động độc lập (không cần --start hay --only-node)
+# Lệnh này sẽ tự SSH sang server chứa Node 3 và gọi script restore_snapshot_systemd.sh
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --restore-node 2
+```
+
+> **💡 Mẹo:** Nếu máy chưa có script restore mới nhất, bạn có thể kèm thêm `--push`:
+> `./deploy_systemd_cluster.sh --env deploy-muti-node.env --push --restore-node 3`
+> Hoặc nếu bạn đã ở sẵn bên trong máy chứa Node 3, bạn chạy trực tiếp luôn cho khỏe:
+> `sudo bash restore_snapshot_systemd.sh --node 3 --snapshot-url http://192.168.1.230:8604`
 
 **Dừng chỉ 1 Node (ví dụ Node 2):**
 ```bash

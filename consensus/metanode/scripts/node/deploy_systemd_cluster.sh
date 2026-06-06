@@ -54,6 +54,12 @@ for i in "${!ARGS[@]}"; do
             if [ "$next" -lt "${#ARGS[@]}" ]; then
                 ONLY_NODE="${ARGS[$next]}"
             fi ;;
+        --restore-node=*) RESTORE_NODE="${arg#--restore-node=}" ;;
+        --restore-node)
+            next=$((i+1))
+            if [ "$next" -lt "${#ARGS[@]}" ]; then
+                RESTORE_NODE="${ARGS[$next]}"
+            fi ;;
     esac
 done
 
@@ -67,6 +73,8 @@ elif [ -n "${ENV_FILE:-}" ] && [[ "${ENV_FILE}" != /* ]]; then
 else
     ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/deploy.env}"
 fi
+
+DO_RESTORE=false
 
 echo -e "${CYAN}  📋 Using config: $ENV_FILE${NC}"
 
@@ -88,6 +96,7 @@ fi
 [[ "$*" == *"--ips"* ]] && DO_IPS=true
 [[ "$*" == *"--start"* ]] && DO_START=true
 [[ "$*" == *"--stop"* ]] && DO_STOP=true
+[[ "$*" == *"--restore-node"* ]] && DO_RESTORE=true
 [[ "$*" == *"--keep-data"* ]] && KEEP_DATA=true
 
 # ─── Helper Functions ───────────────────────────────────────────────
@@ -602,28 +611,26 @@ if $DO_START; then
             if $KEEP_DATA; then
                 CMD_SEQ="${CMD_SEQ}
                 echo '  ▶ Installing Node $id (keeping data)...'
-                if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
-                    echo \"\${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh install --node $id -y
-                else
-                    sudo bash systemd-cluster.sh install --node $id -y
-                fi"
+                _sudo bash systemd-cluster.sh install --node $id -y"
             else
                 CMD_SEQ="${CMD_SEQ}
                 echo '  ▶ Setup Node $id (cleaning data)...'
-                if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
-                    echo \"\${SSH_PASSWORD}\" | sudo -S bash systemd-cluster.sh setup --node $id -y
-                else
-                    sudo bash systemd-cluster.sh setup --node $id -y
-                fi"
+                _sudo bash systemd-cluster.sh setup --node $id -y"
             fi
         done
 
         ssh_cmd "$server" "
             set -euo pipefail;
             cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
-            # Pass SSH vars down to the remote shell for sudo -S
-            SSH_AUTH='${SSH_AUTH:-}'
-            SSH_PASSWORD='${SSH_PASSWORD:-}'
+            export SSH_AUTH='${SSH_AUTH:-}'
+            export SSH_PASSWORD='${SSH_PASSWORD:-}'
+            _sudo() {
+                if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                    echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                else
+                    sudo \"\$@\"
+                fi
+            }
             $CMD_SEQ
         "
         log_ok "Nodes [$nodes] deployed and started on $server"
@@ -686,6 +693,49 @@ if $DO_START; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════
+# PHASE 8: Standalone Snapshot Restore
+# ═══════════════════════════════════════════════════════════════════
+if $DO_RESTORE; then
+    log_step "Phase 8: Restore Node(s) via Snapshot"
+    
+    if [ -n "${RESTORE_NODE:-}" ] && [ -n "${SNAPSHOT_SOURCE_NODE:-}" ]; then
+        source_ip="${NODE_SERVER[$SNAPSHOT_SOURCE_NODE]:-127.0.0.1}"
+        RESTORE_SNAPSHOT_URL="http://${source_ip}:${SNAPSHOT_SERVER_PORT:-8604}"
+        log_info "Snapshot source URL resolved to: ${RESTORE_SNAPSHOT_URL}"
+        
+        for r_node in $RESTORE_NODE; do
+            target_server="${NODE_SERVER[$r_node]:-}"
+            
+            if [ -n "$target_server" ]; then
+                log_info "Restoring Node $r_node on $target_server..."
+                CMD_SEQ="
+                    set -euo pipefail;
+                    cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
+                    export SSH_AUTH='${SSH_AUTH:-}'
+                    export SSH_PASSWORD='${SSH_PASSWORD:-}'
+                    _sudo() {
+                        if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                            echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                        else
+                            sudo \"\$@\"
+                        fi
+                    }
+                    _sudo bash restore_snapshot_systemd.sh --node $r_node --snapshot-url '${RESTORE_SNAPSHOT_URL}'
+                "
+                ssh_cmd "$target_server" "$CMD_SEQ"
+                log_ok "Restore complete for Node $r_node on $target_server"
+            else
+                log_warn "Node $r_node not found in any server configuration."
+            fi
+        done
+    else
+        log_warn "SNAPSHOT_SOURCE_NODE not defined or RESTORE_NODE empty, skipping restore."
+    fi
+else
+    log_info "Phase 8: Skipped (use --restore-node to enable)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════
 echo ""
@@ -714,5 +764,6 @@ echo -e "       Build only:    ${CYAN}./deploy_cluster.sh --build${NC}"
 echo -e "       Push only:     ${CYAN}./deploy_cluster.sh --push --ips${NC}"
 echo -e "       Start only:    ${CYAN}./deploy_cluster.sh --start${NC}"
 echo -e "       Stop cluster:  ${CYAN}./deploy_cluster.sh --stop${NC}"
+echo -e "       Restore node:  ${CYAN}./deploy_cluster.sh --restore-node 3${NC}"
 echo -e "       Check status:  ${CYAN}./deploy_status.sh${NC}"
 echo ""
