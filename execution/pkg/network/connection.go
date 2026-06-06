@@ -327,6 +327,14 @@ func (c *Connection) run() {
 			c.sendChan = nil
 			c.sendChanMu.Unlock()
 
+			// Chờ tối đa 5 giây để writeLoop gửi hết các message còn lại trong sendChan
+			if sendChan != nil {
+				start := time.Now()
+				for len(sendChan) > 0 && time.Since(start) < 5*time.Second {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+
 			cleanup()
 			return // Exit run() immediately!
 
