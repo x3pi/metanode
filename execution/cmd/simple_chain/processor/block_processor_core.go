@@ -75,6 +75,10 @@ type CommitJob struct {
 	// Crash-Safety Fix: Synchronously prepared backup data so it can be written to disk
 	// before we unblock Rust via DoneChan.
 	SerializedBackup []byte
+
+	// Extracted NOMT payloads for sequential async commit to disk
+	AccountNomtPayload interface{}
+	StakeNomtPayload   interface{}
 }
 
 // PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs
@@ -136,6 +140,9 @@ type BlockProcessor struct {
 	*BlockBuffers
 	*ReceiptTracker
 	*ConsensusContext
+
+	pendingAccountPayload interface{}
+	pendingStakePayload   interface{}
 
 	txClientMutex sync.RWMutex     // G-H4 FIX: Protects txClient and txSender from data races
 	txClient      *txsender.Client // Legacy TCP client (for backward compatibility)
