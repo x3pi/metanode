@@ -99,6 +99,18 @@ func (api *DebugApi) GetRCPTransactionError(ctx context.Context, hash common.Has
 	return receipt, nil
 }
 
+func (api *DebugApi) GetTransactionTrace(ctx context.Context, hash common.Hash) (*tx_processor.TxTrace, error) {
+	if api.App == nil || api.App.config == nil || !api.App.config.TxTraceEnabled {
+		return nil, fmt.Errorf("GetTransactionTrace: transaction tracing is disabled in configuration")
+	}
+	trace, exists := tx_processor.GlobalTxTraceStore.GetTrace(hash)
+	if !exists {
+		return nil, fmt.Errorf("GetTransactionTrace: trace not found for hash %s", hash.Hex())
+	}
+	return trace, nil
+}
+
+
 func (api *DebugApi) TraceTransaction(ctx context.Context, hashEth common.Hash) (types.ExecuteSCResult, error) {
 	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashEth)
 	hashTx := hashEth

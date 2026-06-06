@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	mt_config "github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
@@ -211,6 +212,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				if shouldLogSend {
 					logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 						batchNum, totalBatches, len(batchTxs))
+				}
+				for _, tx := range batchTxs {
+					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "FORWARDED_TO_RUST", "Transaction batch forwarded to Rust consensus engine via FFI")
 				}
 				// Pipeline stats: track TXs forwarded to Rust
 				GlobalPipelineStats.IncrTxsForwarded(int64(len(batchTxs)))
