@@ -146,6 +146,19 @@ func (bp *BlockProcessor) commitWorker() {
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
 		} else {
+			// Write changelog synchronously in commitWorker to guarantee sequential progression
+			// and visibility of historical states before unblocking the consensus layer.
+			if job.AccountNomtPayload != nil {
+				if payload, ok := job.AccountNomtPayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+			if job.StakeNomtPayload != nil {
+				if payload, ok := job.StakeNomtPayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+
 			// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
 			if job.AccountNomtPayload != nil {
 				if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {
