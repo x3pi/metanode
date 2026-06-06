@@ -2,7 +2,7 @@ package transaction_pool
 
 import (
 	"fmt"
-	"strconv"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -41,6 +41,7 @@ type TransactionPool struct {
 	getTxByHashCh chan getTxReq
 
 	NotifyChan chan struct{} // GO-2: Event channel to notify workers of new transactions
+	count      int64         // Atomic counter for lock-free count queries
 }
 
 func NewTransactionPool() *TransactionPool {
@@ -65,19 +66,24 @@ func (tp *TransactionPool) notifyWork() {
 	}
 }
 
+type txPoolKey struct {
+	addr  common.Address
+	nonce uint64
+}
+
 // loop runs in a background goroutine and processes all requests sequentially,
 // eliminating the need for any sync.Mutex locks and preventing contention.
 func (tp *TransactionPool) loop() {
 	transactions := make([]types.Transaction, 0)
-	transactionKeys := make(map[string]bool)
+	transactionKeys := make(map[txPoolKey]bool)
 	txHashMap := make(map[common.Hash]types.Transaction)
 
 	for {
 		select {
 		case req := <-tp.addTxCh:
-			key := req.tx.FromAddress().String() + "-" + strconv.FormatUint(req.tx.GetNonce(), 10)
+			key := txPoolKey{addr: req.tx.FromAddress(), nonce: req.tx.GetNonce()}
 			if transactionKeys[key] {
-				logger.Info("Transaction already exists in pool, skipping", "key", key)
+				logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
 				req.reply <- fmt.Errorf("transaction already exists in pool, skipping")
 				continue
 			}
@@ -96,13 +102,14 @@ func (tp *TransactionPool) loop() {
 				txHashMap[h] = req.tx
 			}
 
+			atomic.StoreInt64(&tp.count, int64(len(transactions)))
 			tp.notifyWork()
 			req.reply <- nil
 
 		case txs := <-tp.addTxsCh:
 			addedAny := false
 			for _, tx := range txs {
-				key := tx.FromAddress().String() + "-" + strconv.FormatUint(tx.GetNonce(), 10)
+				key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
 				if !transactionKeys[key] {
 					transactions = append(transactions, tx)
 					transactionKeys[key] = true
@@ -115,6 +122,7 @@ func (tp *TransactionPool) loop() {
 				}
 			}
 			if addedAny {
+				atomic.StoreInt64(&tp.count, int64(len(transactions)))
 				tp.notifyWork()
 			}
 
@@ -125,9 +133,10 @@ func (tp *TransactionPool) loop() {
 			
 			// Clear the internal state
 			transactions = make([]types.Transaction, 0)
-			transactionKeys = make(map[string]bool)
+			transactionKeys = make(map[txPoolKey]bool)
 			txHashMap = make(map[common.Hash]types.Transaction)
 			
+			atomic.StoreInt64(&tp.count, 0)
 			req.reply <- txCopy
 
 		case req := <-tp.countCh:
@@ -147,9 +156,7 @@ func (tp *TransactionPool) loop() {
 }
 
 func (tp *TransactionPool) CountTransactions() int {
-	reply := make(chan int, 1)
-	tp.countCh <- countReq{reply: reply}
-	return <-reply
+	return int(atomic.LoadInt64(&tp.count))
 }
 
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {

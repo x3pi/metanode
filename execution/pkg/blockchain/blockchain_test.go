@@ -18,9 +18,9 @@ func newTestBlockChain() *BlockChain {
 		receiptsCache:          new(sync.Map),
 		txsCache:               new(sync.Map),
 		blockNumberToHashCache: new(sync.Map),
-		txHashToBlockNumber:    new(sync.Map),
-		ethHashMapBlsHash:      new(sync.Map),
-		dirtyStorage:           new(sync.Map),
+		txHashToBlockNumber:    newTxHashToBlockNumberMap(),
+		ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
+		dirtyStorage:           newDirtyStorageMap(),
 		stopCleanup:            make(chan struct{}),
 	}
 }
@@ -238,19 +238,6 @@ func TestBlockChain_StoreToDirty_And_Discard(t *testing.T) {
 	_, ok2 = bc.dirtyStorage.Load("key2")
 	assert.False(t, ok1, "dirty entries should be discarded")
 	assert.False(t, ok2, "dirty entries should be discarded")
-}
-
-func TestBlockChain_MappingBatch(t *testing.T) {
-	bc := newTestBlockChain()
-
-	assert.Nil(t, bc.GetMappingBatch(), "should be nil initially")
-
-	bc.SetMappingBatch([]byte{0x01, 0x02})
-	got := bc.GetMappingBatch()
-	assert.Equal(t, []byte{0x01, 0x02}, got)
-
-	// Second call should return nil (one-shot)
-	assert.Nil(t, bc.GetMappingBatch())
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

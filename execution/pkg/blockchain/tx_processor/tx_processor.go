@@ -598,7 +598,7 @@ func processGroupsConcurrently(
 	if groupCount > 0 {
 		avgPerGroup = evmDuration / time.Duration(groupCount)
 	}
-	logger.Debug("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
+	logger.Info("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
 		groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
 	// ─────────────────────────────────────────────────────────────
 

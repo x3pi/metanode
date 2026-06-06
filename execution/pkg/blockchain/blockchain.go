@@ -2,8 +2,9 @@ package blockchain
 
 import (
 	"encoding/binary"
-	"fmt"
+	"encoding/hex"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -48,16 +49,16 @@ type BlockChain struct {
 	receiptsCache          *sync.Map
 	txsCache               *sync.Map
 	blockNumberToHashCache *sync.Map
-	txHashToBlockNumber    *sync.Map
-	ethHashMapBlsHash      *sync.Map
+	txHashToBlockNumber    *txHashToBlockNumberMap
+	ethHashMapBlsHash      *ethHashMapBlsHashMap
 
 	blockDatabase  *block.BlockDatabase
 	storageManager *storage.StorageManager
 	changelogDB    *state_changelog.StateChangelogDB // Reference to state changelog DB for historical lookups
 
 	// Dirty Storage (Write buffer)
-	// Sử dụng pointer *sync.Map để có thể swap nhanh khi commit
-	dirtyStorage *sync.Map
+	// Sử dụng pointer để có thể swap nhanh khi commit
+	dirtyStorage *dirtyStorageMap
 	dirtyLock    sync.RWMutex // Lock nhẹ để bảo vệ việc tráo đổi con trỏ dirtyStorage
 
 	// Worker control
@@ -91,31 +92,56 @@ type cachedUint64 struct {
 }
 
 func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn_types.Transaction) ([]byte, error) {
-	var mappingBatchKVs [][2][]byte
+	txsCount := len(bl.Transactions())
+	// Pre-allocate slice to avoid repeated growing
+	mappingBatchKVs := make([][2][]byte, 0, 1+txsCount+len(txs))
 
 	// 1. Block number -> hash
 	blockNum := bl.Header().BlockNumber()
-	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNum)
+	key := blockNumberPrefix + strconv.FormatUint(blockNum, 10)
 	mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(key), bl.Header().Hash().Bytes()})
 
 	// 2. Tx hash -> block number
 	blockNumberBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(blockNumberBytes, blockNum)
+
 	for _, txHash := range bl.Transactions() {
-		txKey := fmt.Sprintf("%s%s", txHashPrefix, txHash.Hex())
-		mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(txKey), blockNumberBytes})
+		// txHashPrefix is "txHashPrefix" (length 12) + "0x" (length 2) + hex (64) = 78
+		txKeyBytes := make([]byte, 78)
+		copy(txKeyBytes[0:12], "txHashPrefix")
+		copy(txKeyBytes[12:14], "0x")
+		hex.Encode(txKeyBytes[14:], txHash[:])
+		mappingBatchKVs = append(mappingBatchKVs, [2][]byte{txKeyBytes, blockNumberBytes})
 	}
 
 	// 3. Eth hash -> Bls hash
+	// Pre-allocate maps
+	dirtyKVs := make(map[string][]byte, len(txs))
+	ethKVs := make(map[common.Hash]cachedHash, len(txs))
+	now := time.Now()
 	for _, tx := range txs {
-		ethTx := tx.ToEthTransaction()
-		if ethTx != nil {
-			ethHash := ethTx.Hash()
-			if ethHash != (common.Hash{}) {
-				ethKey := fmt.Sprintf("%s%s", ethHashMapBlsHashPrefix, ethHash.Hex())
-				mappingBatchKVs = append(mappingBatchKVs, [2][]byte{[]byte(ethKey), tx.Hash().Bytes()})
+		ethHash := tx.EthHash()
+		if ethHash != (common.Hash{}) {
+			// ethHashMapBlsHashPrefix is "ethHashMapBlsHashPrefix" (length 23) + "0x" (length 2) + hex (64) = 89
+			ethKeyBytes := make([]byte, 89)
+			copy(ethKeyBytes[0:23], "ethHashMapBlsHashPrefix")
+			copy(ethKeyBytes[23:25], "0x")
+			hex.Encode(ethKeyBytes[25:], ethHash[:])
+			mappingBatchKVs = append(mappingBatchKVs, [2][]byte{ethKeyBytes, tx.Hash().Bytes()})
+
+			ethKey := string(ethKeyBytes)
+			dirtyKVs[ethKey] = tx.Hash().Bytes()
+			ethKVs[ethHash] = cachedHash{
+				hash:    tx.Hash(),
+				addedAt: now,
 			}
 		}
+	}
+	if len(dirtyKVs) > 0 {
+		bc.storeBatchToDirty(dirtyKVs)
+	}
+	if len(ethKVs) > 0 {
+		bc.ethHashMapBlsHash.StoreBatch(ethKVs)
 	}
 
 	serializedMappingBatch, err := storage.SerializeBatch(mappingBatchKVs)
@@ -134,10 +160,10 @@ func InitBlockChain(size int, blockDatabase *block.BlockDatabase, storageManager
 			receiptsCache:          new(sync.Map),
 			txsCache:               new(sync.Map),
 			blockNumberToHashCache: new(sync.Map),
-			txHashToBlockNumber:    new(sync.Map),
-			ethHashMapBlsHash:      new(sync.Map),
+			txHashToBlockNumber:    newTxHashToBlockNumberMap(),
+			ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
 
-			dirtyStorage: new(sync.Map), // Khởi tạo pointer
+			dirtyStorage: newDirtyStorageMap(), // Khởi tạo pointer
 
 			blockDatabase:  blockDatabase,
 			storageManager: storageManager,
@@ -284,29 +310,11 @@ func (bc *BlockChain) pruneBlockNumberCache(expireBefore time.Time) {
 }
 
 func (bc *BlockChain) pruneTxHashCache(expireBefore time.Time) {
-	bc.txHashToBlockNumber.Range(func(key, value any) bool {
-		if cached, ok := value.(cachedUint64); ok {
-			if cached.addedAt.Before(expireBefore) {
-				bc.txHashToBlockNumber.Delete(key)
-			}
-		} else {
-			bc.txHashToBlockNumber.Delete(key)
-		}
-		return true
-	})
+	bc.txHashToBlockNumber.Prune(expireBefore)
 }
 
 func (bc *BlockChain) pruneEthHashCache(expireBefore time.Time) {
-	bc.ethHashMapBlsHash.Range(func(key, value any) bool {
-		if cached, ok := value.(cachedHash); ok {
-			if cached.addedAt.Before(expireBefore) {
-				bc.ethHashMapBlsHash.Delete(key)
-			}
-		} else {
-			bc.ethHashMapBlsHash.Delete(key)
-		}
-		return true
-	})
+	bc.ethHashMapBlsHash.Prune(expireBefore)
 }
 
 // ============================================================================
@@ -400,8 +408,14 @@ func (bc *BlockChain) storeToDirty(key string, value []byte) {
 	bc.dirtyStorage.Store(key, value)
 }
 
+func (bc *BlockChain) storeBatchToDirty(kvs map[string][]byte) {
+	bc.dirtyLock.RLock()
+	defer bc.dirtyLock.RUnlock()
+	bc.dirtyStorage.StoreBatch(kvs)
+}
+
 func (bc *BlockChain) SetBlockNumberToHash(blockNumber uint64, blockHash common.Hash) error {
-	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber)
+	key := blockNumberPrefix + strconv.FormatUint(blockNumber, 10)
 
 	bc.storeToDirty(key, blockHash.Bytes())
 
@@ -422,7 +436,7 @@ func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, boo
 		}
 	}
 
-	key := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber))
+	key := []byte(blockNumberPrefix + strconv.FormatUint(blockNumber, 10))
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err == nil && data != nil && len(data) == common.HashLength {
 		blockHash := common.BytesToHash(data)
@@ -476,12 +490,12 @@ func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common
 		// Check if mapping already exists for this block
 		if _, exists := bc.blockNumberToHashCache.Load(bNum); !exists {
 			// Also check DB
-			dbKey := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, bNum))
+			dbKey := []byte(blockNumberPrefix + strconv.FormatUint(bNum, 10))
 			dbData, dbErr := bc.storageManager.GetStorageMapping().Get(dbKey)
 			if dbErr != nil || dbData == nil || len(dbData) != common.HashLength {
 				// Missing mapping — rebuild it
 				bHash := blk.Header().Hash()
-				bc.storeToDirty(fmt.Sprintf("%s%d", blockNumberPrefix, bNum), bHash.Bytes())
+				bc.storeToDirty(blockNumberPrefix + strconv.FormatUint(bNum, 10), bHash.Bytes())
 				bc.blockNumberToHashCache.Store(bNum, cachedHash{
 					hash:    bHash,
 					addedAt: time.Now(),
@@ -563,7 +577,7 @@ func (bc *BlockChain) SetTxHashMapBlockNumber(txHash common.Hash, blockNumber ui
 		defer func() { <-storeLimiter }()
 	}
 
-	key := fmt.Sprintf("%s%s", txHashPrefix, txHash.Hex())
+	key := txHashPrefix + txHash.Hex()
 	blockNumberBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
 
@@ -573,6 +587,28 @@ func (bc *BlockChain) SetTxHashMapBlockNumber(txHash common.Hash, blockNumber ui
 		value:   blockNumber,
 		addedAt: time.Now(),
 	})
+	return nil
+}
+
+func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, blockNumber uint64) error {
+	blockNumberBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
+
+	dirtyKVs := make(map[string][]byte)
+	cacheKVs := make(map[common.Hash]cachedUint64)
+	now := time.Now()
+
+	for _, txHash := range txHashes {
+		key := txHashPrefix + txHash.Hex()
+		dirtyKVs[key] = blockNumberBytes
+		cacheKVs[txHash] = cachedUint64{
+			value:   blockNumber,
+			addedAt: now,
+		}
+	}
+
+	bc.storeBatchToDirty(dirtyKVs)
+	bc.txHashToBlockNumber.StoreBatch(cacheKVs)
 	return nil
 }
 
@@ -586,7 +622,7 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 		}
 	}
 
-	key := []byte(fmt.Sprintf("%s%s", txHashPrefix, txHash.Hex()))
+	key := []byte(txHashPrefix + txHash.Hex())
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err != nil || data == nil || len(data) != 8 {
 		return 0, false
@@ -601,13 +637,8 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 }
 
 func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.Hash) error {
-	// Lưu ý: Hàm cũ ghi thẳng vào DB, hàm này giữ logic cũ hay chuyển sang dirty?
-	// Theo logic cũ: put thẳng vào DB.
-	key := fmt.Sprintf("%s%s", ethHashMapBlsHashPrefix, ethHash.Hex())
-	err := bc.storageManager.GetStorageMapping().Put([]byte(key), blsHash.Bytes())
-	if err != nil {
-		return err
-	}
+	key := ethHashMapBlsHashPrefix + ethHash.Hex()
+	bc.storeToDirty(key, blsHash.Bytes())
 
 	bc.ethHashMapBlsHash.Store(ethHash, cachedHash{
 		hash:    blsHash,
@@ -626,7 +657,7 @@ func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bo
 		}
 	}
 
-	key := []byte(fmt.Sprintf("%s%s", ethHashMapBlsHashPrefix, ethHash.Hex()))
+	key := []byte(ethHashMapBlsHashPrefix + ethHash.Hex())
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err != nil || data == nil || len(data) != common.HashLength {
 		return common.Hash{}, false
@@ -644,7 +675,7 @@ func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bo
 // Sử dụng Pointer Swap để đảm bảo Thread-Safety và Hiệu suất cao.
 func (bc *BlockChain) Commit() error {
 	// 1. Tạo một map mới sạch sẽ
-	newCleanMap := new(sync.Map)
+	newCleanMap := newDirtyStorageMap()
 
 	// 2. Lock và tráo con trỏ (Swap Pointer)
 	// Thao tác này cực nhanh, chỉ chặn các lệnh Set trong vài nano giây
@@ -656,7 +687,7 @@ func (bc *BlockChain) Commit() error {
 	// 3. Xử lý map cũ (mapToProcess) một cách bất đồng bộ với các luồng ghi mới
 	var batch [][2][]byte
 
-	mapToProcess.Range(func(key, value interface{}) bool {
+	mapToProcess.Range(func(key, value any) bool {
 		if k, ok := key.(string); ok {
 			if v, ok := value.([]byte); ok {
 				batch = append(batch, [2][]byte{[]byte(k), v})
@@ -681,7 +712,7 @@ func (bc *BlockChain) Commit() error {
 func (bc *BlockChain) Discard() {
 	bc.dirtyLock.Lock()
 	defer bc.dirtyLock.Unlock()
-	bc.dirtyStorage = new(sync.Map)
+	bc.dirtyStorage = newDirtyStorageMap()
 }
 
 func (bc *BlockChain) removeFromDirty(key string) {
@@ -692,14 +723,14 @@ func (bc *BlockChain) removeFromDirty(key string) {
 
 // DiscardBlockMappings safely removes only the mappings associated with a specific block number
 func (bc *BlockChain) DiscardBlockMappings(blockNumber uint64) {
-	key := fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber)
+	key := blockNumberPrefix + strconv.FormatUint(blockNumber, 10)
 	bc.removeFromDirty(key)
 	bc.blockNumberToHashCache.Delete(blockNumber)
 }
 
 // DeleteBlockHashMapping permanently removes the mapping from the database for pruning
 func (bc *BlockChain) DeleteBlockHashMapping(blockNumber uint64) error {
-	key := []byte(fmt.Sprintf("%s%d", blockNumberPrefix, blockNumber))
+	key := []byte(blockNumberPrefix + strconv.FormatUint(blockNumber, 10))
 	bc.blockNumberToHashCache.Delete(blockNumber)
 	return bc.storageManager.GetStorageMapping().Delete(key)
 }
@@ -729,4 +760,170 @@ func (bc *BlockChain) GetLastPrunedBlockNumber() uint64 {
 		}
 	}
 	return bc.lastPrunedBlockNumber
+}
+
+// ============================================================================
+// CUSTOM MUTEX-PROTECTED MAPS FOR HIGH WRITE PERFORMANCE
+// ============================================================================
+
+type dirtyStorageMap struct {
+	mu   sync.RWMutex
+	data map[string][]byte
+}
+
+func newDirtyStorageMap() *dirtyStorageMap {
+	return &dirtyStorageMap{
+		data: make(map[string][]byte),
+	}
+}
+
+func (m *dirtyStorageMap) Store(key, value any) {
+	m.mu.Lock()
+	k, ok1 := key.(string)
+	v, ok2 := value.([]byte)
+	if ok1 && ok2 {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *dirtyStorageMap) StoreBatch(kvs map[string][]byte) {
+	m.mu.Lock()
+	for k, v := range kvs {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *dirtyStorageMap) Load(key string) (any, bool) {
+	m.mu.RLock()
+	val, ok := m.data[key]
+	m.mu.RUnlock()
+	return val, ok
+}
+
+func (m *dirtyStorageMap) Delete(key any) {
+	m.mu.Lock()
+	if k, ok := key.(string); ok {
+		delete(m.data, k)
+	}
+	m.mu.Unlock()
+}
+
+func (m *dirtyStorageMap) Range(f func(key, value any) bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for k, v := range m.data {
+		if !f(k, v) {
+			break
+		}
+	}
+}
+
+type ethHashMapBlsHashMap struct {
+	mu   sync.RWMutex
+	data map[common.Hash]cachedHash
+}
+
+func newEthHashMapBlsHashMap() *ethHashMapBlsHashMap {
+	return &ethHashMapBlsHashMap{
+		data: make(map[common.Hash]cachedHash),
+	}
+}
+
+func (m *ethHashMapBlsHashMap) Store(key, value any) {
+	m.mu.Lock()
+	k, ok1 := key.(common.Hash)
+	v, ok2 := value.(cachedHash)
+	if ok1 && ok2 {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *ethHashMapBlsHashMap) StoreBatch(kvs map[common.Hash]cachedHash) {
+	m.mu.Lock()
+	for k, v := range kvs {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *ethHashMapBlsHashMap) Load(key common.Hash) (any, bool) {
+	m.mu.RLock()
+	val, ok := m.data[key]
+	m.mu.RUnlock()
+	return val, ok
+}
+
+func (m *ethHashMapBlsHashMap) Delete(key any) {
+	m.mu.Lock()
+	if k, ok := key.(common.Hash); ok {
+		delete(m.data, k)
+	}
+	m.mu.Unlock()
+}
+
+func (m *ethHashMapBlsHashMap) Prune(expireBefore time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, v := range m.data {
+		if v.addedAt.Before(expireBefore) {
+			delete(m.data, k)
+		}
+	}
+}
+
+type txHashToBlockNumberMap struct {
+	mu   sync.RWMutex
+	data map[common.Hash]cachedUint64
+}
+
+func newTxHashToBlockNumberMap() *txHashToBlockNumberMap {
+	return &txHashToBlockNumberMap{
+		data: make(map[common.Hash]cachedUint64),
+	}
+}
+
+func (m *txHashToBlockNumberMap) Store(key, value any) {
+	m.mu.Lock()
+	k, ok1 := key.(common.Hash)
+	v, ok2 := value.(cachedUint64)
+	if ok1 && ok2 {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *txHashToBlockNumberMap) StoreBatch(kvs map[common.Hash]cachedUint64) {
+	m.mu.Lock()
+	for k, v := range kvs {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
+}
+
+func (m *txHashToBlockNumberMap) Load(key common.Hash) (any, bool) {
+	m.mu.RLock()
+	val, ok := m.data[key]
+	m.mu.RUnlock()
+	return val, ok
+}
+
+func (m *txHashToBlockNumberMap) Delete(key any) {
+	m.mu.Lock()
+	if k, ok := key.(common.Hash); ok {
+		delete(m.data, k)
+	}
+	m.mu.Unlock()
+}
+
+func (m *txHashToBlockNumberMap) Prune(expireBefore time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, v := range m.data {
+		if v.addedAt.Before(expireBefore) {
+			delete(m.data, k)
+		}
+	}
 }

@@ -84,7 +84,7 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 		}
 	}
 
-	txsPerBlock := 25000
+	txsPerBlock := 50000
 	actualBlocksToCreate := 0
 	if totalTxs > 0 {
 		actualBlocksToCreate = (totalTxs + txsPerBlock - 1) / txsPerBlock

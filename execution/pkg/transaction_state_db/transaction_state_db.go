@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -207,56 +207,61 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 		type marshalResult struct {
 			hash common.Hash
 			data []byte
-			err  error
 		}
 
-		numJobs := len(db.dirtyTransactions)
-		jobs := make(chan types.Transaction, numJobs)
-		results := make(chan marshalResult, numJobs)
+		numDirty := len(db.dirtyTransactions)
+		txs := make([]types.Transaction, 0, numDirty)
+		for _, tx := range db.dirtyTransactions {
+			txs = append(txs, tx)
+		}
 
-		numWorkers := runtime.NumCPU()
+		resultsList := make([]marshalResult, numDirty)
 		var wg sync.WaitGroup
+		numWorkers := runtime.NumCPU()
+		if numWorkers > numDirty {
+			numWorkers = numDirty
+		}
+		chunkSize := (numDirty + numWorkers - 1) / numWorkers
+		errChan := make(chan error, numWorkers)
 
 		for w := 0; w < numWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for tx := range jobs {
-					b, err := tx.Marshal()
-					results <- marshalResult{hash: tx.Hash(), data: b, err: err}
-				}
-			}()
-		}
+			startIdx := w * chunkSize
+			endIdx := startIdx + chunkSize
+			if startIdx >= numDirty {
+				break
+			}
+			if endIdx > numDirty {
+				endIdx = numDirty
+			}
 
-		for _, tx := range db.dirtyTransactions {
-			jobs <- tx
+			wg.Add(1)
+			go func(s, e int) {
+				defer wg.Done()
+				for j := s; j < e; j++ {
+					tx := txs[j]
+					b, err := tx.Marshal()
+					if err != nil {
+						select {
+						case errChan <- err:
+						default:
+						}
+						return
+					}
+					resultsList[j] = marshalResult{hash: tx.Hash(), data: b}
+				}
+			}(startIdx, endIdx)
 		}
-		close(jobs)
 
 		wg.Wait()
-		close(results)
+		close(errChan)
 
-		var resultsList []marshalResult
-
-		for res := range results {
-			if res.err != nil {
-				return common.Hash{}, fmt.Errorf("failed to marshal transaction %s: %w", res.hash.Hex(), res.err)
-			}
-			resultsList = append(resultsList, res)
+		if err := <-errChan; err != nil {
+			return common.Hash{}, fmt.Errorf("failed to marshal transaction: %w", err)
 		}
 
 		// FORK-SAFETY: Sort by txHash for deterministic trie insertion order
-		sort.Slice(resultsList, func(i, j int) bool {
-			// Compare hashes directly byte by byte
-			for k := 0; k < len(resultsList[i].hash); k++ {
-				if resultsList[i].hash[k] < resultsList[j].hash[k] {
-					return true
-				}
-				if resultsList[i].hash[k] > resultsList[j].hash[k] {
-					return false
-				}
-			}
-			return false
+		slices.SortFunc(resultsList, func(a, b marshalResult) int {
+			return a.hash.Cmp(b.hash)
 		})
 
 		batchKeys := make([][]byte, len(resultsList))
@@ -361,6 +366,7 @@ func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 		return db.trie.Hash(), nil
 	}
 
+	start := time.Now()
 	// PERF OPTIMIZATION: Parallelize Marshal (CPU-intensive) then batch Update trie (sequential).
 	// For 60K TX this reduces IntermediateRoot from ~1.5s to ~0.3s.
 	// FORK-SAFETY: trie.Hash() is deterministic regardless of Update insertion order
@@ -368,53 +374,67 @@ func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 	type marshalResult struct {
 		hash common.Hash
 		data []byte
-		err  error
 	}
 
-	results := make([]marshalResult, 0, numDirty)
-	resultsChan := make(chan marshalResult, numDirty)
+	txs := make([]types.Transaction, 0, numDirty)
+	for _, tx := range db.dirtyTransactions {
+		txs = append(txs, tx)
+	}
 
-	// Use worker pool for parallel marshaling
+	results := make([]marshalResult, numDirty)
+	var wg sync.WaitGroup
 	numWorkers := runtime.NumCPU()
 	if numWorkers > numDirty {
 		numWorkers = numDirty
 	}
+	chunkSize := (numDirty + numWorkers - 1) / numWorkers
+	errChan := make(chan error, numWorkers)
 
-	jobs := make(chan types.Transaction, numDirty)
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
-
+	tMarshalStart := time.Now()
 	for w := 0; w < numWorkers; w++ {
-		go func() {
-			defer wg.Done()
-			for tx := range jobs {
-				b, err := tx.Marshal()
-				resultsChan <- marshalResult{hash: tx.Hash(), data: b, err: err}
-			}
-		}()
-	}
-
-	for _, tx := range db.dirtyTransactions {
-		jobs <- tx
-	}
-	close(jobs)
-
-	wg.Wait()
-	close(resultsChan)
-
-	for res := range resultsChan {
-		if res.err != nil {
-			return common.Hash{}, res.err
+		startIdx := w * chunkSize
+		endIdx := startIdx + chunkSize
+		if startIdx >= numDirty {
+			break
 		}
-		results = append(results, res)
+		if endIdx > numDirty {
+			endIdx = numDirty
+		}
+
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			for j := s; j < e; j++ {
+				tx := txs[j]
+				b, err := tx.Marshal()
+				if err != nil {
+					select {
+					case errChan <- err:
+					default:
+					}
+					return
+				}
+				results[j] = marshalResult{hash: tx.Hash(), data: b}
+			}
+		}(startIdx, endIdx)
 	}
+	wg.Wait()
+	close(errChan)
+
+	if err := <-errChan; err != nil {
+		return common.Hash{}, err
+	}
+	tMarshal := time.Since(tMarshalStart)
 
 	// FORK-SAFETY: Sort by txHash for deterministic trie insertion order
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].hash.Cmp(results[j].hash) < 0
+	tSortStart := time.Now()
+	slices.SortFunc(results, func(a, b marshalResult) int {
+		return a.hash.Cmp(b.hash)
 	})
+	tSort := time.Since(tSortStart)
 
 	// PARALLEL TRIE UPDATE: Use BatchUpdate for multi-core scaling
+	tUpdateStart := time.Now()
 	batchKeys := make([][]byte, len(results))
 	batchValues := make([][]byte, len(results))
 	for i, res := range results {
@@ -427,9 +447,17 @@ func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 			return common.Hash{}, err
 		}
 	}
+	tUpdate := time.Since(tUpdateStart)
+
+	tHashStart := time.Now()
+	h := db.trie.Hash()
+	tHash := time.Since(tHashStart)
+
+	logger.Info("⏱️ [txs.IntermediateRoot] total=%v marshal=%v sort=%v update=%v hash=%v for %d txs",
+		time.Since(start), tMarshal, tSort, tUpdate, tHash, len(results))
 
 	db.dirtyTransactions = make(map[common.Hash]types.Transaction)
-	return db.trie.Hash(), nil
+	return h, nil
 }
 
 func (db *TransactionStateDB) setDirtyTransaction(tx types.Transaction) {

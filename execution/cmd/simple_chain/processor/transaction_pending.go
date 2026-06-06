@@ -2,6 +2,7 @@ package processor
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,17 +36,78 @@ type nonceIndexKey struct {
 	nonce uint64
 }
 
-// PendingTransactionManager được tái cấu trúc.
-// Dùng hai index song song:
-//   - pendingTxs: sync.Map[txHash → TransactionPending]  (primary store)
-//   - nonceIndex: sync.Map[addr+nonce → txHash]          (O(1) conflict check)
-type PendingTransactionManager struct {
-	// Primary store: txHash → TransactionPending
-	pendingTxs sync.Map
-	count      atomic.Int64
+// Sharded storage structures to eliminate lock contention on single sync.Maps
+type shardedPendingTxs struct {
+	shards [256]sync.Map
+}
 
-	// Secondary index for O(1) nonce conflict detection: addr+nonce → txHash
-	nonceIndex sync.Map
+func (s *shardedPendingTxs) getShard(hash common.Hash) *sync.Map {
+	return &s.shards[hash[0]]
+}
+
+func (s *shardedPendingTxs) Load(hash common.Hash) (interface{}, bool) {
+	return s.getShard(hash).Load(hash)
+}
+
+func (s *shardedPendingTxs) Store(hash common.Hash, val interface{}) {
+	s.getShard(hash).Store(hash, val)
+}
+
+func (s *shardedPendingTxs) LoadOrStore(hash common.Hash, val interface{}) (interface{}, bool) {
+	return s.getShard(hash).LoadOrStore(hash, val)
+}
+
+func (s *shardedPendingTxs) LoadAndDelete(hash common.Hash) (interface{}, bool) {
+	return s.getShard(hash).LoadAndDelete(hash)
+}
+
+func (s *shardedPendingTxs) Delete(hash common.Hash) {
+	s.getShard(hash).Delete(hash)
+}
+
+func (s *shardedPendingTxs) Range(f func(key, value interface{}) bool) {
+	for i := range s.shards {
+		s.shards[i].Range(f)
+	}
+}
+
+func (s *shardedPendingTxs) Clear() {
+	for i := range s.shards {
+		s.shards[i].Clear()
+	}
+}
+
+type shardedNonceIndex struct {
+	shards [256]sync.Map
+}
+
+func (s *shardedNonceIndex) getShard(key nonceIndexKey) *sync.Map {
+	return &s.shards[key.addr[0]]
+}
+
+func (s *shardedNonceIndex) Load(key nonceIndexKey) (interface{}, bool) {
+	return s.getShard(key).Load(key)
+}
+
+func (s *shardedNonceIndex) Store(key nonceIndexKey, val interface{}) {
+	s.getShard(key).Store(key, val)
+}
+
+func (s *shardedNonceIndex) Delete(key nonceIndexKey) {
+	s.getShard(key).Delete(key)
+}
+
+func (s *shardedNonceIndex) Clear() {
+	for i := range s.shards {
+		s.shards[i].Clear()
+	}
+}
+
+// PendingTransactionManager được tái cấu trúc sử dụng sharding.
+type PendingTransactionManager struct {
+	pendingTxs shardedPendingTxs
+	count      atomic.Int64
+	nonceIndex shardedNonceIndex
 }
 
 // NewPendingTransactionManager tạo instance mới
@@ -78,32 +140,62 @@ func (ptm *PendingTransactionManager) Add(tx types.Transaction, initialStatus Tr
 	return nil
 }
 
-// AddBatch adds a slice of transactions to the pool at once
+// AddBatch adds a slice of transactions to the pool at once (Parallelized)
 func (ptm *PendingTransactionManager) AddBatch(txs []types.Transaction, initialStatus TransactionPendingStatus) error {
-	for _, tx := range txs {
-		if tx == nil {
-			continue // Skip nil to avoid panics
-		}
-
-		txHash := tx.Hash()
-		newItem := TransactionPending{
-			Tx:        tx,
-			Status:    initialStatus,
-			Timestamp: time.Now(),
-		}
-
-		_, loaded := ptm.pendingTxs.LoadOrStore(txHash, newItem)
-		if !loaded {
-			// New entry — register in nonceIndex too
-			key := nonceIndexKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
-			ptm.nonceIndex.Store(key, txHash)
-			ptm.count.Add(1)
-		}
+	if len(txs) == 0 {
+		return nil
 	}
+	numWorkers := runtime.NumCPU() / 2
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+	if numWorkers > 48 {
+		numWorkers = 48
+	}
+	if len(txs) < numWorkers {
+		numWorkers = len(txs)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	chunkSize := (len(txs) + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(txs) {
+			end = len(txs)
+		}
+		go func(s, e int) {
+			defer wg.Done()
+			for i := s; i < e; i++ {
+				tx := txs[i]
+				if tx == nil {
+					continue // Skip nil to avoid panics
+				}
+
+				txHash := tx.Hash()
+				newItem := TransactionPending{
+					Tx:        tx,
+					Status:    initialStatus,
+					Timestamp: time.Now(),
+				}
+
+				_, loaded := ptm.pendingTxs.LoadOrStore(txHash, newItem)
+				if !loaded {
+					// New entry — register in nonceIndex too
+					key := nonceIndexKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
+					ptm.nonceIndex.Store(key, txHash)
+					ptm.count.Add(1)
+				}
+			}
+		}(start, end)
+	}
+	wg.Wait()
 	return nil
 }
 
-// Get sử dụng Load của sync.Map
+// Get sử dụng Load của sharded map
 func (ptm *PendingTransactionManager) Get(txHash common.Hash) (TransactionPending, bool) {
 	value, exists := ptm.pendingTxs.Load(txHash)
 	if !exists {
@@ -155,7 +247,7 @@ func (ptm *PendingTransactionManager) Count() int {
 	return int(ptm.count.Load())
 }
 
-// GetAll sử dụng Range của sync.Map
+// GetAll sử dụng Range của sharded map
 func (ptm *PendingTransactionManager) GetAll() []TransactionPending {
 	var allTxs []TransactionPending
 	ptm.pendingTxs.Range(func(key, value interface{}) bool {
@@ -165,10 +257,10 @@ func (ptm *PendingTransactionManager) GetAll() []TransactionPending {
 	return allTxs
 }
 
-// RemoveAll reset lại sync.Map và biến đếm
+// RemoveAll reset lại sharded maps và biến đếm
 func (ptm *PendingTransactionManager) RemoveAll() {
-	ptm.pendingTxs = sync.Map{}
-	ptm.nonceIndex = sync.Map{}
+	ptm.pendingTxs.Clear()
+	ptm.nonceIndex.Clear()
 	ptm.count.Store(0)
 }
 
@@ -277,3 +369,4 @@ func (ptm *PendingTransactionManager) GetOldTransactionsForRemoval(duration time
 
 	return oldTxs
 }
+

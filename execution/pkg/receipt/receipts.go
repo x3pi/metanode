@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -438,10 +438,12 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 		return r.trie.Hash(), nil
 	}
 
+	start := time.Now()
 	// FORK-SAFETY: Sort receipts by txHash for deterministic trie insertion order
 	type receiptEntry struct {
 		txHash common.Hash
 		data   []byte
+		index  uint64
 	}
 	entries := make([]receiptEntry, len(r.dirtyReceipts))
 	keys := make([]common.Hash, 0, len(r.dirtyReceipts))
@@ -451,6 +453,7 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 
 	// Phase 1: Parallel Marshalling
 	// Marshalling 65K receipts is CPU bound.
+	tMarshalStart := time.Now()
 	var wg sync.WaitGroup
 	numWorkers := runtime.NumCPU()
 	if numWorkers > 32 {
@@ -481,7 +484,7 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 					errChan <- err
 					return
 				}
-				entries[j] = receiptEntry{txHash: hash, data: b}
+				entries[j] = receiptEntry{txHash: hash, data: b, index: rcp.TransactionIndex()}
 			}
 		}(start, end)
 	}
@@ -490,18 +493,23 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 	if err := <-errChan; err != nil {
 		return common.Hash{}, err
 	}
+	tMarshal := time.Since(tMarshalStart)
 
 	// Phase 2: Sort by TransactionIndex for deterministic block-order insertion.
-	// TransactionIndex is stamped in processGroupsConcurrently (GroupID order → sequential).
-	// All nodes produce the same TransactionIndex for the same block TX list.
-	sort.Slice(entries, func(i, j int) bool {
-		ti := r.dirtyReceipts[entries[i].txHash].TransactionIndex()
-		tj := r.dirtyReceipts[entries[j].txHash].TransactionIndex()
-		return ti < tj
+	tSortStart := time.Now()
+	slices.SortFunc(entries, func(a, b receiptEntry) int {
+		if a.index < b.index {
+			return -1
+		}
+		if a.index > b.index {
+			return 1
+		}
+		return 0
 	})
+	tSort := time.Since(tSortStart)
 
 	// Phase 3: Update trie
-	// BatchUpdate partitioning by first nibble is already optimized for parallelism.
+	tUpdateStart := time.Now()
 	batchKeys := make([][]byte, len(entries))
 	batchValues := make([][]byte, len(entries))
 	for i, entry := range entries {
@@ -512,9 +520,17 @@ func (r *Receipts) IntermediateRoot() (common.Hash, error) {
 	if err := r.trie.BatchUpdate(batchKeys, batchValues); err != nil {
 		return common.Hash{}, err
 	}
+	tUpdate := time.Since(tUpdateStart)
+
+	tHashStart := time.Now()
+	h := r.trie.Hash()
+	tHash := time.Since(tHashStart)
+
+	logger.Info("⏱️ [receipts.IntermediateRoot] total=%v marshal=%v sort=%v update=%v hash=%v for %d receipts",
+		time.Since(start), tMarshal, tSort, tUpdate, tHash, len(entries))
 
 	r.dirtyReceipts = make(map[common.Hash]types.Receipt)
-	return r.trie.Hash(), nil
+	return h, nil
 }
 
 func (r *Receipts) setDirtyReceipt(receipt types.Receipt) {
