@@ -126,6 +126,7 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
+	defer chainState.Close()
 
 	// Use the block's stored timestamp for deterministic replay during validation
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
