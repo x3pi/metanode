@@ -146,6 +146,31 @@ func (bp *BlockProcessor) commitWorker() {
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
 		} else {
+			// Write changelog synchronously in commitWorker to guarantee sequential progression
+			// and visibility of historical states before unblocking the consensus layer.
+			if job.AccountNomtPayload != nil {
+				if payload, ok := job.AccountNomtPayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+			if job.StakeNomtPayload != nil {
+				if payload, ok := job.StakeNomtPayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+
+			// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
+			if job.AccountNomtPayload != nil {
+				if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {
+					payload.CommitAsync()
+				}
+			}
+			if job.StakeNomtPayload != nil {
+				if payload, ok := job.StakeNomtPayload.(interface{ CommitAsync() }); ok {
+					payload.CommitAsync()
+				}
+			}
+
 			// Remove from pending store now that it is fully committed
 			bp.RemovePendingCommitBlock(blockNum)
 			lastBlockAfterCommit := storage.GetLastBlockNumber()
@@ -476,6 +501,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
 			return fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
+		bp.pendingAccountPayload = accountPipelineResult.NomtPayload
 		accountPersistDuration = time.Since(startPersist)
 		if accountPersistDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", accountPersistDuration)
@@ -487,6 +513,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
 			return fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
+		bp.pendingStakePayload = stakePipelineResult.NomtPayload
 		stakePersistDuration = time.Since(startPersist)
 		if stakePersistDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", stakePersistDuration)

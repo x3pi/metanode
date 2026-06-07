@@ -559,7 +559,11 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		StakeBatch:                stakeBatch,
 		GlobalExecIndex:           globalExecIndex,
 		CommitIndex:               commitIndex,
+		AccountNomtPayload:        bp.pendingAccountPayload,
+		StakeNomtPayload:          bp.pendingStakePayload,
 	}
+	bp.pendingAccountPayload = nil
+	bp.pendingStakePayload = nil
 
 	// ═══════════════════════════════════════════════════════════════
 	// PIPELINE EPOCH-SAFETY: Update in-memory GEI BEFORE dispatch.

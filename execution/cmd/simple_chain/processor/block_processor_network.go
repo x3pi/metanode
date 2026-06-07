@@ -581,6 +581,31 @@ PROCESS_LOOP:
 			); err != nil {
 				logger.Error("🔄 [TRANSITION GUARD] Failed to commit block #%d: %v", lastBlockNum, err)
 			} else {
+				// Write changelog synchronously
+				if bp.pendingAccountPayload != nil {
+					if payload, ok := bp.pendingAccountPayload.(interface{ WriteChangelog() }); ok {
+						payload.WriteChangelog()
+					}
+				}
+				if bp.pendingStakePayload != nil {
+					if payload, ok := bp.pendingStakePayload.(interface{ WriteChangelog() }); ok {
+						payload.WriteChangelog()
+					}
+				}
+
+				// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
+				if bp.pendingAccountPayload != nil {
+					if payload, ok := bp.pendingAccountPayload.(interface{ CommitAsync() }); ok {
+						payload.CommitAsync()
+					}
+					bp.pendingAccountPayload = nil
+				}
+				if bp.pendingStakePayload != nil {
+					if payload, ok := bp.pendingStakePayload.(interface{ CommitAsync() }); ok {
+						payload.CommitAsync()
+					}
+					bp.pendingStakePayload = nil
+				}
 				logger.Info("✅ [TRANSITION GUARD] Flushed block #%d to DB", lastBlockNum)
 			}
 		} else {

@@ -83,12 +83,25 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			if lastBlock != nil {
 				parentStatesRoot := lastBlock.Header().AccountStatesRoot()
 				if nomtRoot != parentStatesRoot {
-					nomtAheadReplay = true
-					capturedAccountRoot = nomtRoot
-					capturedStakeRoot, _ = trie.GetNomtHandleRoot("stake_db")
-					tx_processor.NomtAheadReplayMode.Store(true)
-					logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-DETECT] NOMT trie state is ahead of PebbleDB. nomtRoot=%s, parentStatesRoot=%s. Enabling Trie-Ahead Replay Recovery mode for block #%d.",
-						nomtRoot.Hex()[:18]+"...", parentStatesRoot.Hex()[:18]+"...", incomingBlockNum)
+					lastNomtCommitted := storage.GetLastNomtCommittedBlock()
+					if lastNomtCommitted == incomingBlockNum {
+						nomtAheadReplay = true
+						capturedAccountRoot = nomtRoot
+						capturedStakeRoot, _ = trie.GetNomtHandleRoot("stake_db")
+						tx_processor.NomtAheadReplayMode.Store(true)
+						logger.Warn("🛡️ [NOMT-AHEAD-REPLAY-DETECT] NOMT trie state is ahead of PebbleDB. nomtRoot=%s, parentStatesRoot=%s. Enabling Trie-Ahead Replay Recovery mode for block #%d.",
+							nomtRoot.Hex()[:18]+"...", parentStatesRoot.Hex()[:18]+"...", incomingBlockNum)
+					} else {
+						logger.Warn("🛡️ [NOMT-MISMATCH-ALIGN] NOMT root mismatch but not ahead (lastNomtCommitted=%d, incoming=%d). Realigning NOMT roots to parent block #%d (account=%s, stake=%s)",
+							lastNomtCommitted, incomingBlockNum, localTipBlockNum, parentStatesRoot.Hex()[:18]+"...", lastBlock.Header().StakeStatesRoot().Hex()[:18]+"...")
+						
+						if nomtTrie, ok := bp.chainState.GetAccountStateDB().Trie().(*trie.NomtStateTrie); ok {
+							nomtTrie.RealignRoot(parentStatesRoot)
+						}
+						if nomtTrie, ok := bp.chainState.GetStakeStateDB().Trie().(*trie.NomtStateTrie); ok {
+							nomtTrie.RealignRoot(common.Hash(lastBlock.Header().StakeStatesRoot()))
+						}
+					}
 				}
 			}
 		}

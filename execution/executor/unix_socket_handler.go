@@ -111,6 +111,7 @@ func (rh *RequestHandler) HandleBlockRequest(request *pb.BlockRequest) (*pb.Vali
 	if err != nil {
 		return nil, fmt.Errorf("could not create new chain state: %w", err)
 	}
+	defer chainStateNew.Close()
 
 	validators, err := chainStateNew.GetStakeStateDB().GetAllValidators()
 	if err != nil {

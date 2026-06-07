@@ -76,6 +76,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		if err != nil {
 			return nil, err
 		}
+		defer chainStateNew.Close()
 
 		if stakeDB := chainStateNew.GetStakeStateDB(); stakeDB != nil && v.chainState.GetConfig().IsRPCNode {
 			changelogDB := v.chainState.GetStakeChangelogDB()
@@ -97,6 +98,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		if err != nil {
 			return nil, err
 		}
+		defer chainStateNew.Close()
 		ccHandler, err := cross_chain_handler.GetCrossChainHandler()
 		if err != nil {
 			return nil, err
@@ -124,6 +126,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	if err != nil {
 		return nil, err
 	}
+	defer chainStateNew.Close()
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
@@ -223,6 +226,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		if err != nil {
 			return nil, err
 		}
+		defer chainStateNew.Close()
 		validatorHandler, err := tx_processor.GetValidatorHandler()
 		if err != nil {
 			return nil, err
@@ -243,6 +247,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		if err != nil {
 			return nil, err
 		}
+		defer chainStateNew.Close()
 		ccHandler, err := cross_chain_handler.GetCrossChainHandler()
 		if err != nil {
 			return nil, err
@@ -258,6 +263,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		if err != nil {
 			return nil, err
 		}
+		defer chainStateNew.Close()
 		validatorHandler, err := tx_processor.GetValidatorHandler()
 		if err != nil {
 			return nil, err
@@ -294,6 +300,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 	if err != nil {
 		return nil, err
 	}
+	defer chainStateNew.Close()
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
@@ -417,6 +424,7 @@ func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, blockV
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temporary chain state for debug execution: %w", err)
 		}
+		defer chainStateNew.Close()
 		vmP := vm_processor.NewVmProcessor(chainStateNew, tx.ToAddress(), false, blockVal.Header().TimeStamp(), common.Address{})
 		exRs, err := vmP.ExecuteTransactionWithMvmIdDebug(ctx, tx, false)
 		if err != nil {

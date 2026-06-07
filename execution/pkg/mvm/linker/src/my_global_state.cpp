@@ -396,9 +396,7 @@ MyGlobalState::get_add_balance_change(bool apply_to_cache) {
   if (this->isCache && apply_to_cache) {
     iterate_add_balance_changes(
         [](const mvm::Address &addr, const uint256_t &value) {
-          auto state = State::getInstance(addr);
-          auto balance_after = state->getBalance() + value;
-          state->setBalance(balance_after);
+          State::getInstance(addr)->addBalance(value);
         });
   }
   return result;
@@ -420,9 +418,7 @@ MyGlobalState::get_sub_balance_change(bool apply_to_cache) {
   if (this->isCache && apply_to_cache) {
     iterate_sub_balance_changes(
         [](const mvm::Address &addr, const uint256_t &value) {
-          auto state = State::getInstance(addr);
-          auto balance_after = state->getBalance() - value;
-          state->setBalance(balance_after);
+          State::getInstance(addr)->subBalance(value);
         });
   }
   return result;

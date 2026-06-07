@@ -1,6 +1,6 @@
 {
   "debug": true,
-  "mvm_cache_enabled": true,
+  "mvm_cache_enabled": false,
   "chainId": 991,
   "private_key": "6c8489f6f86fea58b26e34c8c37e13e5993651f09f5f96739d9febf65aded718",
   "address": "a87c6FD018Da82a52158B0328D61BAc29b556e86",
@@ -98,7 +98,7 @@
   ],
   "connection_address": "0.0.0.0:6241",
   "dns_server_address": "0.0.0.0:9084",
-  "meta_node_rpc_address": "192.168.1.230:10104",
+  "meta_node_rpc_address": "127.0.0.1:10104",
   "peer_rpc_port": 19204,
   "version": "0.0.1.0",
   "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
