@@ -27,6 +27,11 @@ pub async fn queue_transactions(
         return Ok(());
     }
 
+    for tx_data in &tx_data_list {
+        let hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_data);
+        crate::ffi::update_go_tx_trace(&hash, "RUST_QUEUED", "Transaction queued in Rust pending queue (mempool)");
+    }
+
     let mut queue = pending_queue.lock().await;
     let added_len = tx_data_list.len();
     queue.extend(tx_data_list);
@@ -136,6 +141,10 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
     txs_with_hash.dedup_by(|a, b| a.1 == b.1);
 
     let transactions: Vec<Vec<u8>> = txs_with_hash.into_iter().map(|(tx, _)| tx).collect();
+    for tx in &transactions {
+        let hash = crate::types::tx_hash::calculate_transaction_hash_single(tx);
+        crate::ffi::update_go_tx_trace(&hash, "RUST_QUEUED_SUBMITTED", "Queued transaction submitted to Rust consensus");
+    }
     queue.clear();
     drop(queue); // Release lock
 

@@ -14,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	mtn_types "github.com/meta-node-blockchain/meta-node/types"
 	"errors"
@@ -624,17 +625,106 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 
 	key := []byte(txHashPrefix + txHash.Hex())
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
-	if err != nil || data == nil || len(data) != 8 {
+	if err == nil && data != nil && len(data) == 8 {
+		blockNumber := binary.BigEndian.Uint64(data)
+		bc.txHashToBlockNumber.Store(txHash, cachedUint64{
+			value:   blockNumber,
+			addedAt: time.Now(),
+		})
+		return blockNumber, true
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// LAZY FALLBACK (June 2026): Rebuild transaction mapping from block DB.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if bc.blockDatabase != nil {
+		logger.Info("⚠️ [LAZY-FALLBACK] Starting transaction walkback search for %s", txHash.Hex())
+		blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
+		if ok {
+			logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
+			return blockNumber, true
+		}
+		logger.Info("❌ [LAZY-FALLBACK] Walkback search finished, transaction %s NOT found", txHash.Hex())
+	}
+
+	return 0, false
+}
+
+func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint64, bool) {
+	lastBlock, err := bc.blockDatabase.GetLastBlock()
+	if err != nil || lastBlock == nil {
+		logger.Error("❌ [LAZY-TX-REBUILD] GetLastBlock failed: %v", err)
 		return 0, false
 	}
-	blockNumber := binary.BigEndian.Uint64(data)
 
-	bc.txHashToBlockNumber.Store(txHash, cachedUint64{
-		value:   blockNumber,
-		addedAt: time.Now(),
-	})
-	return blockNumber, true
+	// Walk backwards from lastBlock
+	blk := lastBlock
+	const maxDepth = 2000 // Safely scan up to 2000 blocks to prevent RPC hang
+	var depth int
+
+	for blk != nil && depth < maxDepth {
+		bNum := blk.Header().BlockNumber()
+
+		txHashes := blk.Transactions()
+		if len(txHashes) > 0 {
+			txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blk.Header().TransactionsRoot(), bc.storageManager.GetStorageTransaction())
+			if err == nil && txDB != nil {
+				found := false
+				var txList []mtn_types.Transaction
+				for _, tHash := range txHashes {
+					tx, err := txDB.GetTransaction(tHash)
+					if err == nil && tx != nil {
+						txList = append(txList, tx)
+						if tx.Hash() == targetTxHash || tx.EthHash() == targetTxHash {
+							found = true
+						}
+					}
+				}
+
+				if found {
+					logger.Info("🔄 [LAZY-TX-REBUILD] Found tx %s in block #%d. Rebuilding block tx mappings...", targetTxHash.Hex()[:18], bNum)
+
+					// Rebuild mappings for all transactions in this block
+					var hashes []common.Hash
+					for _, t := range txList {
+						hashes = append(hashes, t.Hash())
+						hashes = append(hashes, t.EthHash())
+						bc.SetEthHashMapblsHash(t.EthHash(), t.Hash())
+					}
+					bc.SetTxHashMapBlockNumberBatch(hashes, bNum)
+
+					// Commit to DB so mappings persist
+					if commitErr := bc.Commit(); commitErr != nil {
+						logger.Error("❌ [LAZY-TX-REBUILD] Failed to commit rebuilt tx mappings: %v", commitErr)
+					} else if bc.storageManager != nil {
+						if flushErr := bc.storageManager.GetStorageMapping().Flush(); flushErr != nil {
+							logger.Error("❌ [LAZY-TX-REBUILD] Failed to flush mapping DB: %v", flushErr)
+						}
+					}
+					return bNum, true
+				}
+			}
+		}
+
+		if bNum == 0 {
+			break
+		}
+
+		parentHash := blk.Header().LastBlockHash()
+		if parentHash == (common.Hash{}) {
+			break
+		}
+		parentBlk, pErr := bc.blockDatabase.GetBlockByHash(parentHash)
+		if pErr != nil || parentBlk == nil {
+			break
+		}
+		blk = parentBlk
+		depth++
+	}
+
+	return 0, false
 }
+
 
 func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.Hash) error {
 	key := ethHashMapBlsHashPrefix + ethHash.Hex()

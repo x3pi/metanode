@@ -426,6 +426,9 @@ func (app *App) Stop() {
 	}
 
 	// Close databases
+	if app.chainState != nil {
+		app.chainState.Close()
+	}
 	if trie_database.GetTrieDatabaseManager() != nil {
 		trie_database.GetTrieDatabaseManager().CloseAllTrieDatabases()
 	}

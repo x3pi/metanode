@@ -230,6 +230,8 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
 	}
 	for i, tx := range txs {
+		tx.AddRelatedAddress(tx.FromAddress())
+		tx.AddRelatedAddress(tx.ToAddress())
 		// Build grouping addresses: filter out native dispatch addresses
 		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
 		for _, addr := range tx.RelatedAddresses() {
@@ -263,6 +265,7 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
+	defer chainState.Close()
 	processResult, err := tx_processor.ProcessTransactions(tracedCtx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress(), blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)

@@ -23,9 +23,9 @@ NC='\033[0m'
 TOTAL_TX=$((CLIENTS * TX_PER_CLIENT))
 
 # Sub-node TCP ports for TX injection
-NODES=("192.168.1.234:4201" "192.168.1.233:6201" "127.0.0.1:6211" "192.168.1.231:6221")
+NODES=("127.0.0.1:4201" "127.0.0.1:6201" "127.0.0.1:6211" "127.0.0.1:6221")
 # Use MASTER node RPC ports for verification (must use real IPs for remote nodes)
-RPCS=("127.0.0.1:8757" "192.168.1.233:10747" "127.0.0.1:10749" "192.168.1.231:10750")
+RPCS=("127.0.0.1:8757" "127.0.0.1:10747" "127.0.0.1:10749" "127.0.0.1:10750")
 NUM_NODES=${#NODES[@]}
 
 # Helper: get current block number from RPC
@@ -368,7 +368,7 @@ echo -e "${BOLD}╠════════════════════�
 CHECK_FROM=$BLOCK_START
 CHECK_TO=$((BLOCK_AFTER > 0 ? BLOCK_AFTER : LAST_BNUM))
 HASH_OUT=$(/tmp/block_hash_checker \
-    --nodes "master=http://127.0.0.1:8757,node3=http://192.168.1.231:10750" \
+    --nodes "master=http://127.0.0.1:8757,node3=http://127.0.0.1:10750" \
     --from $CHECK_FROM --to $CHECK_TO 2>&1)
 
 LAST_LINE=$(echo "$HASH_OUT" | tail -1)
