@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"golang.org/x/sync/errgroup"
 )
 
