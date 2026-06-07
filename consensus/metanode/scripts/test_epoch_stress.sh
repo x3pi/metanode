@@ -31,11 +31,11 @@ done
 
 # Step 4: Kill + restart node 0, blast more
 echo "💀 Step 4: Crashing Node 0 to test recovery..."
-kill -9 $(pgrep -f "metanode.*node-0") || true
+tmux kill-session -t go-master-0 || true
 sleep 5
 echo "⚡ Restarting Node 0..."
 cd ../../../../consensus/metanode/scripts
-./node/node.sh 0 start
+./mtn-orchestrator.sh start-node 0
 sleep 10
 
 echo "🔥 Blasting 100,000 more transactions after recovery..."
