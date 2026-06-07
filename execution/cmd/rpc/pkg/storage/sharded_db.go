@@ -334,24 +334,16 @@ func (b *shardBatch) Reset() {
 	}
 }
 
-// Replay applies the batch to the database.  **YOU MUST IMPLEMENT THIS**
+// Replay applies the batch to the database.
 func (b *shardBatch) Replay(db ethdb.KeyValueWriter) error {
-	fmt.Println("Replay method called. Implementation needed.")
-
-	// TODO: Implement Replay logic here. This is a placeholder.
-	// You need to iterate through b.batch and apply the Put and Delete operations
-	// to the provided db (which is an ethdb.KeyValueWriter).  Consider handling
-	// potential errors during the replay process.
 	for _, batch := range b.batch {
 		for _, kv := range batch {
 			if len(kv[1]) == 0 { // Delete operation
-				if err := b.Delete(kv[0]); err != nil {
-					logger.Error("error deleting key")
+				if err := db.Delete(kv[0]); err != nil {
 					return fmt.Errorf("error deleting key %x: %w", kv[0], err)
 				}
 			} else { // Put operation
-				if err := b.Put(kv[0], kv[1]); err != nil {
-					logger.Error("error putting key")
+				if err := db.Put(kv[0], kv[1]); err != nil {
 					return fmt.Errorf("error putting key %x: %w", kv[0], err)
 				}
 			}

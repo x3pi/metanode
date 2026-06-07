@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
@@ -478,6 +479,44 @@ type shardIterator struct {
 }
 
 func (it *shardIterator) Next() bool {
+	if it.pos == -1 {
+		kvs, err := it.db.PrefixScan(nil)
+		if err != nil {
+			it.err = err
+			return false
+		}
+
+		type kvPair struct {
+			key []byte
+			val []byte
+		}
+		var pairs []kvPair
+
+		for _, kv := range kvs {
+			key := kv[0]
+			val := kv[1]
+
+			if it.start != nil && bytes.Compare(key, it.start) < 0 {
+				continue
+			}
+			if it.end != nil && bytes.Compare(key, it.end) >= 0 {
+				continue
+			}
+			pairs = append(pairs, kvPair{key: key, val: val})
+		}
+
+		sort.Slice(pairs, func(i, j int) bool {
+			return bytes.Compare(pairs[i].key, pairs[j].key) < 0
+		})
+
+		it.keys = make([][]byte, len(pairs))
+		it.vals = make([][]byte, len(pairs))
+		for i, p := range pairs {
+			it.keys[i] = p.key
+			it.vals[i] = p.val
+		}
+	}
+
 	it.pos++
 	return it.pos < len(it.keys)
 }
