@@ -46,6 +46,9 @@ type ShardelDB struct {
 
 // getShardIndex returns the shard index for a given key.
 func (s *ShardelDB) getShardIndex(key []byte) uint32 {
+	if s.numShards == 1 {
+		return 0
+	}
 	hash := xxhash.Sum64(key)
 	return uint32(hash % uint64(s.numShards))
 }
@@ -97,6 +100,12 @@ func (s *ShardelDB) Open() error {
 
 // Flush forces all shards to write pending memtable buffers to disk.
 func (s *ShardelDB) Flush() error {
+	if s.numShards == 1 {
+		if s.shards[0] != nil {
+			return s.shards[0].Flush()
+		}
+		return nil
+	}
 	var g errgroup.Group
 	for i, shard := range s.shards {
 		if shard == nil {
@@ -116,6 +125,13 @@ func (s *ShardelDB) Flush() error {
 // Checkpoint creates an atomic snapshot of all shards to destBaseDir.
 // Each shard is checkpointed in parallel to destBaseDir/db_shard_N.
 func (s *ShardelDB) Checkpoint(destBaseDir string) error {
+	if s.numShards == 1 {
+		if s.shards[0] != nil {
+			destDir := fmt.Sprintf("%s/db_shard_0", destBaseDir)
+			return s.shards[0].Checkpoint(destDir)
+		}
+		return nil
+	}
 	var g errgroup.Group
 	for i, shard := range s.shards {
 		if shard == nil {
@@ -135,6 +151,9 @@ func (s *ShardelDB) Checkpoint(destBaseDir string) error {
 
 // Băm key để quyết định lưu vào shard nào
 func (s *ShardelDB) getShard(key []byte) ShardDBInterface {
+	if s.numShards == 1 {
+		return s.shards[0]
+	}
 	index := s.getShardIndex(key)
 	return s.shards[index]
 }
@@ -230,6 +249,18 @@ func (b *shardBatch) Delete(key []byte) error {
 }
 
 func (s *ShardelDB) BatchDelete(keys [][]byte) error {
+	if s.numShards == 1 {
+		shard := s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		for _, key := range keys {
+			if err := shard.Delete(key); err != nil {
+				return fmt.Errorf("shard 0: key %x, error: %w", key, err)
+			}
+		}
+		return nil
+	}
 	var g errgroup.Group
 	shardKeys := make(map[int][][]byte)
 	// Nhóm keys theo shard
@@ -260,6 +291,13 @@ func (s *ShardelDB) BatchDelete(keys [][]byte) error {
 }
 
 func (s *ShardelDB) BatchPut(kvs [][2][]byte) error {
+	if s.numShards == 1 {
+		shard := s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		return shard.BatchPut(kvs)
+	}
 	var g errgroup.Group
 	shardBatches := make(map[int][][2][]byte)
 
@@ -294,6 +332,13 @@ func (s *ShardelDB) BatchPut(kvs [][2][]byte) error {
 
 // PrefixScan performs a prefix scan across all shards and merges the results.
 func (s *ShardelDB) PrefixScan(prefix []byte) ([][2][]byte, error) {
+	if s.numShards == 1 {
+		shard := s.shards[0]
+		if shard == nil {
+			return nil, fmt.Errorf("shard 0 is nil")
+		}
+		return shard.PrefixScan(prefix)
+	}
 	var allResults [][2][]byte
 	var mu sync.Mutex
 	var g errgroup.Group
@@ -322,6 +367,17 @@ func (s *ShardelDB) PrefixScan(prefix []byte) ([][2][]byte, error) {
 }
 
 func (b *shardBatch) Write() error {
+	if b.s.numShards == 1 {
+		shard := b.s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		batch := b.batch[0]
+		if len(batch) == 0 {
+			return nil
+		}
+		return shard.BatchPut(batch)
+	}
 	logger.Warn("Write method called. Implementation needed.")
 	var wg sync.WaitGroup
 	errChan := make(chan error, b.s.numShards)
