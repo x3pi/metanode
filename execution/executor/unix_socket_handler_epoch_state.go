@@ -354,7 +354,10 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 // This is the single authoritative source for epoch transition data, ensuring consistency
 func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error) {
 	defer func(start time.Time) {
-		if d := time.Since(start); d > 100*time.Millisecond {
+		// NOTE: Threshold is 500ms (not 100ms like lightweight handlers) because this
+		// handler performs heavy I/O: NOMT state queries, validator cache lookups,
+		// epoch data retrieval, and opportunistic cache writes. 200-400ms is normal.
+		if d := time.Since(start); d > 500*time.Millisecond {
 			logger.Warn("⚠️ [FFI STALL] HandleGetEpochBoundaryDataRequest took %v (Slow!)", d)
 		}
 	}(time.Now())

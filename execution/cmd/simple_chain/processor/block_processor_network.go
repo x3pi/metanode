@@ -213,6 +213,7 @@ func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlo
 	stallTicker := time.NewTicker(15 * time.Second)
 	defer stallTicker.Stop()
 	lastProcessedTime := time.Now()
+	var lastStallLogGEI uint64 // Track GEI at last stall-detect tick to detect DB-sync progress (SyncOnly nodes)
 
 PROCESS_LOOP:
 	for {
@@ -237,24 +238,37 @@ PROCESS_LOOP:
 			// STALL DETECTOR: Log diagnostic state when no blocks are being processed
 			stallDuration := time.Since(lastProcessedTime)
 			if stallDuration > 15*time.Second {
-				// Enhanced diagnostics: full pipeline state
-				pendingTxCount := bp.transactionProcessor.pendingTxManager.Count()
-				poolSize := bp.transactionProcessor.transactionPool.CountTransactions()
-				authQueueDepth := len(authQueue)
-				authQueueCap := cap(authQueue)
+				// FIX (Jun 2026): SyncOnly nodes receive blocks via HandleSyncBlocksRequest→DB,
+				// NOT via dataChan. When GEI advances through syncLocalStateWithDB, dataChan
+				// being empty is EXPECTED — not a DIGEST-GATE stall.
+				// Check whether GEI is advancing before emitting the alarming WARN log.
+				geiAdvancing := nextExpectedGlobalExecIndex > lastStallLogGEI && lastStallLogGEI > 0
+				if geiAdvancing {
+					logger.Debug("🔄 [STALL-DETECT] dataChan idle but GEI advancing via DB sync (%d→%d). "+
+						"SyncOnly node operating normally. dataChan=%d/%d, currentBlock=%d",
+						lastStallLogGEI, nextExpectedGlobalExecIndex,
+						len(dataChan), cap(dataChan), currentBlockNumber)
+				} else {
+					// Enhanced diagnostics: full pipeline state
+					pendingTxCount := bp.transactionProcessor.pendingTxManager.Count()
+					poolSize := bp.transactionProcessor.transactionPool.CountTransactions()
+					authQueueDepth := len(authQueue)
+					authQueueCap := cap(authQueue)
 
-				logger.Warn("🔒 [STALL-DETECT] No blocks processed for %v. "+
-					"dataChan=%d/%d, authQueue=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
-					"nextExpectedGEI=%d, currentBlock=%d, "+
-					"pendingTx=%d, poolSize=%d. "+
-					"Investigate: Rust CommitProcessor may be stuck in DIGEST-GATE.",
-					stallDuration,
-					len(dataChan), cap(dataChan),
-					authQueueDepth, authQueueCap,
-					len(bp.commitChannel), cap(bp.commitChannel),
-					bp.snapshotGateOpen.Load(),
-					nextExpectedGlobalExecIndex, currentBlockNumber,
-					pendingTxCount, poolSize)
+					logger.Warn("🔒 [STALL-DETECT] No blocks processed for %v. "+
+						"dataChan=%d/%d, authQueue=%d/%d, commitCh=%d/%d, snapshotGate=%v, "+
+						"nextExpectedGEI=%d, currentBlock=%d, "+
+						"pendingTx=%d, poolSize=%d. "+
+						"Investigate: Rust CommitProcessor may be stuck in DIGEST-GATE.",
+						stallDuration,
+						len(dataChan), cap(dataChan),
+						authQueueDepth, authQueueCap,
+						len(bp.commitChannel), cap(bp.commitChannel),
+						bp.snapshotGateOpen.Load(),
+						nextExpectedGlobalExecIndex, currentBlockNumber,
+						pendingTxCount, poolSize)
+				}
+				lastStallLogGEI = nextExpectedGlobalExecIndex
 			}
 			bp.syncLocalStateWithDB(&nextExpectedGlobalExecIndex, &currentBlockNumber)
 			continue

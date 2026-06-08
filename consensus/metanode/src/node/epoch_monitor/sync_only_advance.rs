@@ -101,8 +101,11 @@ pub(super) async fn advance_sync_only_epoch(
         }
 
         if !boundary_found {
-            warn!(
-                "⚠️ [EPOCH MONITOR] SyncOnly: no peer had boundary for epoch {}. Stopping at epoch {}.",
+            // NOTE: This is INFO, not WARN, because it's an expected condition when
+            // the network hasn't started the target epoch yet. The epoch_monitor loop
+            // will retry on the next poll cycle.
+            info!(
+                "ℹ️  [EPOCH MONITOR] SyncOnly: no peer had boundary for epoch {}. Staying at epoch {}. Will retry next cycle.",
                 target_epoch, current_go_epoch
             );
             break;

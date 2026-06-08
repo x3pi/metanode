@@ -73,11 +73,23 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 		runtime.ReadMemStats(&m)
 		allocMB := m.Alloc / 1024 / 1024
 		sysMB := m.Sys / 1024 / 1024
-		if allocMB > 2048 { // > 2GB
-			logger.Warn("RESOURCE_MONITOR: High memory allocation: %d MB (Sys: %d MB)", allocMB, sysMB)
+
+		// Determine memLimitGB from config, fallback to default 8GB
+		memLimitGB := 8
+		if bp.config != nil && bp.config.GoMemLimitGB > 0 {
+			memLimitGB = bp.config.GoMemLimitGB
 		}
-		if sysMB > 4096 { // > 4GB
-			logger.Error("RESOURCE_MONITOR: 🚨 Very high memory system usage: %d MB (possible memory leak!)", sysMB)
+		memLimitMB := uint64(memLimitGB) * 1024
+
+		// Warn at 80% of limit, Error at 95% of limit (since Sys can include large mapped memory)
+		warnAllocMB := memLimitMB * 80 / 100
+		errSysMB := memLimitMB * 95 / 100
+
+		if allocMB > warnAllocMB {
+			logger.Warn("RESOURCE_MONITOR: High memory allocation: %d MB (Sys: %d MB, Config Limit: %d GB)", allocMB, sysMB, memLimitGB)
+		}
+		if sysMB > errSysMB {
+			logger.Error("RESOURCE_MONITOR: 🚨 Very high memory system usage: %d MB (possible memory leak! Limit: %d GB)", sysMB, memLimitGB)
 		}
 
 		// Pipeline health monitoring
