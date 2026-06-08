@@ -204,7 +204,20 @@ if [ "$SNAP_MODE" = "network" ]; then
     TAR_URL="$SNAP_FILES_URL/$TAR_NAME"
     
     echo -e "${CYAN}  📥 Thử tải snapshot dưới dạng Tarball nguyên tử qua HTTP...${NC}"
-    HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+    
+    MAX_WAIT=12
+    WAIT_COUNT=0
+    HTTP_CODE="000"
+    
+    while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+        HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+        if [ "$HTTP_CODE" = "200" ]; then
+            break
+        fi
+        echo -e "${YELLOW}      ⏳ Chưa thấy file .tar (Server có thể đang nén). Chờ 5s... ($((WAIT_COUNT+1))/$MAX_WAIT)${NC}"
+        sleep 5
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+    done
     
     if [ "$HTTP_CODE" = "200" ]; then
         echo -e "${GREEN}  ✅ Tìm thấy file Tarball trên server. Bắt đầu tải...${NC}"
@@ -267,7 +280,7 @@ for folder in "$SNAP_DIR"/*; do
       elif [ "$folder_name" = "history" ]; then
           echo "    📦 Mapping history directory directly..."
           cp -a "$folder"/* "$NODE_DATA/data/data/history/" 2>/dev/null || true
-      elif [ "$folder_name" = "nomt_db" ] || [ "$folder_name" = "smart_contract_code" ] || [ "$folder_name" = "smart_contract_storage" ] || [ "$folder_name" = "backup_device_key_storage" ] || [ "$folder_name" = "xapian" ] || [ "$folder_name" = "xapian_node" ]; then
+      elif [ "$folder_name" = "nomt_db" ] || [ "$folder_name" = "smart_contract_code" ] || [ "$folder_name" = "smart_contract_storage" ] || [ "$folder_name" = "backup_device_key_storage" ] || [ "$folder_name" = "xapian" ] || [ "$folder_name" = "xapian_node" ] || [ "$folder_name" = "account_state" ] || [ "$folder_name" = "stake_db" ] || [ "$folder_name" = "trie_database" ]; then
           echo "    📦 Mapping consensus database: $folder_name -> consensus/$folder_name..."
           cp -a "$folder" "$NODE_DATA/data/data/consensus/"
       elif [ "$folder_name" = "other" ]; then
