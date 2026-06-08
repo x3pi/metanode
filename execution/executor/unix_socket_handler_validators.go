@@ -376,6 +376,7 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			if csErr != nil {
 				return nil, fmt.Errorf("could not create chain state at block %d: %w", blockNumber, csErr)
 			}
+			defer chainStateAtBlock.Close()
 
 			// Get all validators from state at this block
 			validators, err = chainStateAtBlock.GetStakeStateDB().GetAllValidators()

@@ -98,6 +98,8 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
 	}
 	for i, tx := range txs {
+		tx.AddRelatedAddress(tx.FromAddress())
+		tx.AddRelatedAddress(tx.ToAddress())
 		// Build grouping addresses: filter out native dispatch addresses
 		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
 		for _, addr := range tx.RelatedAddresses() {
@@ -124,6 +126,7 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
+	defer chainState.Close()
 
 	// Use the block's stored timestamp for deterministic replay during validation
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s

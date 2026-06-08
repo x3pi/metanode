@@ -744,6 +744,8 @@ impl PeerRpcServer {
             for tx_hex in &submit_req.transactions_hex {
                 match hex::decode(tx_hex) {
                     Ok(tx_bytes) => {
+                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
+                        crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_RECEIVED", "Transaction forwarded from peer, received by Rust peer RPC server");
                         all_tx_bytes.push(tx_bytes);
                     }
                     Err(e) => {
@@ -761,6 +763,10 @@ impl PeerRpcServer {
                 };
 
                 for chunk in chunks {
+                    for tx_bytes in &chunk {
+                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_bytes);
+                        crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_SUBMITTED", "Transaction submitted to local Rust consensus from peer RPC");
+                    }
                     match submitter.submit(chunk).await {
                         Ok((_block_ref, _indices, _status_rx)) => {}
                         Err(e) => {
@@ -798,6 +804,12 @@ impl PeerRpcServer {
             let _ = stream.write_all(http_response.as_bytes()).await;
         } else {
             // No submitter available (SyncOnly node) — just acknowledge
+            for tx_hex in &submit_req.transactions_hex {
+                if let Ok(tx_bytes) = hex::decode(tx_hex) {
+                    let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
+                    crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_ACK_SYNCONLY", "Acknowledged transaction on SyncOnly node");
+                }
+            }
             info!(
                 "📡 [TX BROADCAST-RECV] Acknowledged {} TXs (no submitter — SyncOnly node)",
                 tx_count

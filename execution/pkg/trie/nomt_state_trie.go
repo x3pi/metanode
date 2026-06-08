@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -963,6 +964,8 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 		if fs != nil {
 			if err := fs.CommitPayload(n.handle); err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+			} else if string(n.namespace) == "account_state" && blockNum > 0 {
+				storage.UpdateLastNomtCommittedBlock(blockNum)
 			}
 		}
 		
@@ -1374,6 +1377,9 @@ func (n *NomtStateTrie) CommitPayload() error {
 		if err := fs.CommitPayload(n.handle); err != nil {
 			return fmt.Errorf("NomtStateTrie CommitPayload failed: %w", err)
 		}
+		if string(n.namespace) == "account_state" && blockNum > 0 {
+			storage.UpdateLastNomtCommittedBlock(blockNum)
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -1411,11 +1417,21 @@ func (n *NomtStateTrie) CommitPayload() error {
 	return nil
 }
 
-// CommitPayloadAsync extracts pending finished session and changelogs synchronously
-// to prevent subsequent block commits from overwriting them, and then flushes
-// the payload to disk asynchronously in a background goroutine.
-func (n *NomtStateTrie) CommitPayloadAsync() {
+// NomtPayload holds the extracted pending finished session and changelog
+// to be committed asynchronously.
+type NomtPayload struct {
+	trie          *NomtStateTrie
+	fs            *nomt_ffi.FinishedSession
+	changes       []state_changelog.StateChange
+	blockNum      uint64
+	committingMap interface{}
+}
+
+// ExtractPendingPayload extracts the pending payload synchronously.
+func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	n.sessionMu.Lock()
+	defer n.sessionMu.Unlock()
+
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
 	changes := n.pendingChangelog
@@ -1424,40 +1440,72 @@ func (n *NomtStateTrie) CommitPayloadAsync() {
 	n.pendingChangelogBlock = 0
 	committingMap := n.pendingCommittingMap
 	n.pendingCommittingMap = nil
-	n.sessionMu.Unlock()
 
 	if fs == nil && len(changes) == 0 {
-		return // Nothing to commit to disk
+		return nil
+	}
+
+	return &NomtPayload{
+		trie:          n,
+		fs:            fs,
+		changes:       changes,
+		blockNum:      blockNum,
+		committingMap: committingMap,
+	}
+}
+
+// WriteChangelog writes the changes to the StateChangelogDB synchronously.
+func (p *NomtPayload) WriteChangelog() {
+	if p == nil || len(p.changes) == 0 || p.trie.changelogDB == nil {
+		return
+	}
+	if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
+		logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB: %v", err)
+	}
+}
+
+// CommitAsync flushes the extracted payload to disk asynchronously in a background goroutine.
+func (p *NomtPayload) CommitAsync() {
+	if p == nil || (p.fs == nil && p.committingMap == nil) {
+		return
 	}
 
 	go func() {
-		n.handle.LockCommitPayload()
-		defer n.handle.UnlockCommitPayload()
+		p.trie.handle.LockCommitPayload()
+		defer p.trie.handle.UnlockCommitPayload()
 
-		if fs != nil {
-			if err := fs.CommitPayload(n.handle); err != nil {
+		if p.fs != nil {
+			if err := p.fs.CommitPayload(p.trie.handle); err != nil {
 				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
 			}
-		}
-
-		if n.changelogDB != nil && len(changes) > 0 {
-			if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
-				logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB asynchronously: %v", err)
+			if string(p.trie.namespace) == "account_state" && p.blockNum > 0 {
+				storage.UpdateLastNomtCommittedBlock(p.blockNum)
 			}
 		}
 
-		n.writerMu.Lock()
-		view := n.loadReadView()
-		if view.committing != nil && committingMap != nil &&
-			reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(committingMap).Pointer() {
-			n.publishReadView(
+		p.trie.writerMu.Lock()
+		view := p.trie.loadReadView()
+		if view.committing != nil && p.committingMap != nil &&
+			reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(p.committingMap).Pointer() {
+			p.trie.publishReadView(
 				view.dirty,
 				nil,
 				view.rootHash,
 			)
 		}
-		n.writerMu.Unlock()
+		p.trie.writerMu.Unlock()
 	}()
+}
+
+// CommitPayloadAsync extracts pending finished session and changelogs synchronously
+// to prevent subsequent block commits from overwriting them, and then flushes
+// the payload to disk asynchronously in a background goroutine.
+func (n *NomtStateTrie) CommitPayloadAsync() {
+	payload := n.ExtractPendingPayload()
+	if payload != nil {
+		payload.WriteChangelog()
+		payload.CommitAsync()
+	}
 }
 
 func (n *NomtStateTrie) WaitCommitPayload() {

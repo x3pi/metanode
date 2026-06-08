@@ -165,7 +165,7 @@ START_TIME=$(date +%s)
 # Step 1: Stop Node
 echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng Node $NODE_ID...${NC}"
-"$SCRIPT_DIR/stop_node.sh" "$NODE_ID" 2>/dev/null || true
+"$SCRIPT_DIR/../mtn-orchestrator.sh" stop-node "$NODE_ID" 2>/dev/null || true
 
 for sess in "go-master-${NODE_ID}" "go-sub-${NODE_ID}"; do
     if tmux has-session -t "$sess" 2>/dev/null; then
@@ -353,11 +353,9 @@ echo -e "${BLUE}[5/7] 🚀 Khởi động tuần tự Node $NODE_ID...${NC}"
 cd "$GO_SIMPLE_ROOT"
 DATA="${GO_DATA_DIR[$NODE_ID]}"
 
-echo -e "${CYAN}  [5a] Go Node...${NC}"
-XAPIAN_NODE="sample/$DATA/data/data/xapian_node"
-tmux new-session -d -s "${GO_SESSION[$NODE_ID]}" -c "$GO_SIMPLE_ROOT" \
-    "ulimit -n 100000; export GOTOOLCHAIN=go1.23.5 && export GOMEMLIMIT=4GiB && export XAPIAN_BASE_PATH='$XAPIAN_NODE' && export MVM_LOG_DIR='$LOG_DIR/node_$NODE_ID' && ./simple_chain -config=${GO_CONFIG[$NODE_ID]} >> \"$LOG_DIR/node_$NODE_ID/go-master-stdout.log\" 2>&1"
-echo -e "${GREEN}    🚀 Go Node started (${GO_SESSION[$NODE_ID]})${NC}"
+echo -e "${CYAN}  [5a] Go Node (Unified via Orchestrator)...${NC}"
+"$SCRIPT_DIR/../mtn-orchestrator.sh" start-node "$NODE_ID" >/dev/null
+echo -e "${GREEN}    🚀 Go Node started via Orchestrator${NC}"
 
 echo -e "${CYAN}  [5b] Đợi Go nhận dữ liệu snapshot (10s)...${NC}"
 sleep 10
