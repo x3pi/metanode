@@ -770,14 +770,22 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 		tarStart := time.Now()
 		tarName := snapshotName + ".tar"
 		tarPath := filepath.Join(sm.snapshotBaseDir, tarName)
+		tmpTarPath := tarPath + ".tmp"
 		logger.Info("📦 [SNAPSHOT-TAR] Creating atomic tarball in background: %s", tarName)
 
-		// Package the directory relative to its base directory to keep structure neat
-		cmd := exec.Command("tar", "-cf", tarPath, "-C", sm.snapshotBaseDir, snapshotName)
+		// Package the directory relative to its base directory to keep structure neat.
+		// MUST use -S (--sparse) to handle NOMT sparse files efficiently (e.g. 40GB logical -> 700MB actual)
+		cmd := exec.Command("tar", "-Scf", tmpTarPath, "-C", sm.snapshotBaseDir, snapshotName)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			logger.Error("❌ [SNAPSHOT-TAR] Failed to create tarball: %v, output: %s", err, string(output))
+			os.Remove(tmpTarPath)
 		} else {
-			logger.Info("📦 [SNAPSHOT-TAR] ✅ Tarball created successfully: %s (took %v)", tarName, time.Since(tarStart))
+			if err := os.Rename(tmpTarPath, tarPath); err != nil {
+				logger.Error("❌ [SNAPSHOT-TAR] Failed to rename tmp tarball to final: %v", err)
+				os.Remove(tmpTarPath)
+			} else {
+				logger.Info("📦 [SNAPSHOT-TAR] ✅ Tarball created successfully: %s (took %v)", tarName, time.Since(tarStart))
+			}
 		}
 	}()
 

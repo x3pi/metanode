@@ -215,14 +215,40 @@ if ! command -v wget &>/dev/null; then
     exit 1
 fi
 
-wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
-    --reject="index.html*" \
-    "$DOWNLOAD_URL" \
-    -P "$TEMP_SNAP" || {
-    echo -e "${RED}❌ Tải snapshot thất bại! Vui lòng kiểm tra lại đường dẫn: $DOWNLOAD_URL${NC}"
-    rm -rf "$TEMP_SNAP"
-    exit 1
-}
+TAR_URL="${SNAP_FILES_URL}/${SNAP_NAME}.tar"
+TAR_FILE="$TEMP_SNAP/${SNAP_NAME}.tar"
+
+echo -e "   🔄 Thử tải file nén (.tar) trước cho nhanh..."
+HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+
+if [ "$HTTP_CODE" = "200" ]; then
+    echo -e "${GREEN}  ✅ Tìm thấy file Tarball trên server. Bắt đầu tải...${NC}"
+    wget -c -q --show-progress --progress=bar:force:noscroll "$TAR_URL" -O "$TAR_FILE" || {
+        echo -e "${RED}  ❌ Tải Tarball thất bại!${NC}"
+        rm -f "$TAR_FILE"
+        exit 1
+    }
+    echo -e "${CYAN}  📦 Đang giải nén Tarball trực tiếp...${NC}"
+    
+    tar -xf "$TAR_FILE" -C "$TEMP_SNAP" 2>/dev/null || {
+        echo -e "${YELLOW}  ⚠️ Giải nén lỗi, thử giải nén ra thư mục tạm...${NC}"
+        mkdir -p "/tmp/extract_$$"
+        tar -xf "$TAR_FILE" -C "/tmp/extract_$$"
+        mv "/tmp/extract_$$/$SNAP_NAME" "$TEMP_SNAP/"
+        rm -rf "/tmp/extract_$$"
+    }
+    rm -f "$TAR_FILE"
+else
+    echo -e "${YELLOW}  ⚠️ Không tìm thấy file .tar (hoặc chưa tạo xong). Chuyển sang tải đệ quy từng folder...${NC}"
+    wget -c -r -np -nH --cut-dirs=2 -q --show-progress --progress=bar:force:noscroll \
+        --reject="index.html*" \
+        "$DOWNLOAD_URL" \
+        -P "$TEMP_SNAP" || {
+        echo -e "${RED}❌ Tải snapshot thất bại! Vui lòng kiểm tra lại đường dẫn: $DOWNLOAD_URL${NC}"
+        rm -rf "$TEMP_SNAP"
+        exit 1
+    }
+fi
 
 # Xác định thư mục snapshot thực tế tải về
 # Do wget --cut-dirs=2, nếu url là http://ip:port/files/snap_name/

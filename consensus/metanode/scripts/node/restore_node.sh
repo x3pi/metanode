@@ -204,12 +204,12 @@ if [ "$SNAP_MODE" = "network" ]; then
     TAR_URL="$SNAP_FILES_URL/$TAR_NAME"
     
     echo -e "${CYAN}  📥 Thử tải snapshot dưới dạng Tarball nguyên tử qua HTTP...${NC}"
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
     
     if [ "$HTTP_CODE" = "200" ]; then
         echo -e "${GREEN}  ✅ Tìm thấy file Tarball trên server. Bắt đầu tải...${NC}"
         TEMP_TAR="/tmp/${TAR_NAME}_$$"
-        wget -c -q --show-progress "$TAR_URL" -O "$TEMP_TAR" || {
+        wget -c -q --show-progress --progress=bar:force:noscroll "$TAR_URL" -O "$TEMP_TAR" || {
             echo -e "${RED}  ❌ Tải Tarball thất bại!${NC}"
             rm -f "$TEMP_TAR"
             exit 1
@@ -237,7 +237,7 @@ if [ "$SNAP_MODE" = "network" ]; then
         echo -e "${YELLOW}  ⚠️  Không tìm thấy file Tarball (server chạy phiên bản cũ). Fallback tải đệ quy từng file...${NC}"
         TEMP_SNAP="/tmp/snapshot_restore_$$"
         mkdir -p "$TEMP_SNAP"
-        wget -c -r -np -nH --cut-dirs=2 -q --show-progress \
+        wget -c -r -np -nH --cut-dirs=2 -q --show-progress --progress=bar:force:noscroll \
             "$SNAP_FILES_URL/$SNAP_NAME/" \
             -P "$TEMP_SNAP" 2>&1 || {
             echo -e "${RED}  ❌ Download thất bại!${NC}"

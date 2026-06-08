@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -199,7 +200,12 @@ func getDirSizeAndCount(path string) (int64, int) {
 	var fileCount int
 	filepath.Walk(path, func(_ string, info os.FileInfo, _ error) error {
 		if info != nil && !info.IsDir() {
-			totalSize += info.Size()
+			if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+				// sys.Blocks is the number of 512-byte blocks allocated
+				totalSize += sys.Blocks * 512
+			} else {
+				totalSize += info.Size()
+			}
 			fileCount++
 		}
 		return nil
