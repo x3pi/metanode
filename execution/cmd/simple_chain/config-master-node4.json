@@ -1,5 +1,6 @@
 {
   "debug": true,
+  "go_mem_limit_gb": 32,
   "mvm_cache_enabled": false,
   "chainId": 991,
   "private_key": "6c8489f6f86fea58b26e34c8c37e13e5993651f09f5f96739d9febf65aded718",
