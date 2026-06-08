@@ -10,7 +10,7 @@ CLIENTS=${1:-10}
 TX_PER_CLIENT=${2:-20000}
 BATCH_SIZE=2000
 # Combine Node 0 local port and Node 1 remote ports to balance the load
-NODES=("127.0.0.1:4201" "127.0.0.1:6201" "127.0.0.1:6211" "127.0.0.1:6221")
+NODES=("192.168.1.234:4201" "192.168.1.233:6201" "127.0.0.1:6211" "192.168.1.231:6221")
 NUM_NODES=${#NODES[@]}
 
 # Note: Report generation (Engine tx/s) requires access to Node 0 logs.
