@@ -13,11 +13,12 @@ import (
 )
 
 var (
-	LastBlockNumberHashKey     common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastBlockNumberHashKey")))
-	LastGlobalExecIndexHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastGlobalExecIndexHashKey")))
-	LastExecutedCommitHashKey  common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastExecutedCommitHashKey")))
+	LastBlockNumberHashKey        common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastBlockNumberHashKey")))
+	LastGlobalExecIndexHashKey    common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastGlobalExecIndexHashKey")))
+	LastExecutedCommitHashKey     common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastExecutedCommitHashKey")))
 	LastHandledCommitIndexHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastHandledCommitIndexHashKey")))
 	LastHandledCommitEpochHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastHandledCommitEpochHashKey")))
+	LastNomtCommittedBlockHashKey common.Hash = common.BytesToHash(crypto.Keccak256([]byte("lastNomtCommittedBlockHashKey")))
 )
 
 // StorageType sử dụng enum (iota) để định danh loại Storage
@@ -138,6 +139,8 @@ func (sm *StorageManager) InitSharedDatabase(rootPath string, dbType DBType) err
 		sm.storages[sType] = NewPrefixStorage(sm.sharedDB, prefix)
 	}
 
+	SetBackupDbInstance(sm.storages[STORAGE_BACKUP_DB])
+
 	return nil
 }
 
@@ -189,6 +192,9 @@ func (sm *StorageManager) AddStorage(dbType StorageType, storage Storage) error 
 	}
 
 	sm.storages[dbType] = storage
+	if dbType == STORAGE_BACKUP_DB {
+		SetBackupDbInstance(storage)
+	}
 	return nil
 }
 

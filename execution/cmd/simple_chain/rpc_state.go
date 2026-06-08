@@ -223,6 +223,12 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 }
 
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
+	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
+		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*mt_trie.NomtStateTrie); ok {
+			nomtTrie.WaitCommitPayload()
+		}
+	}
+
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		if blockNr == rpc.PendingBlockNumber || blockNr == rpc.LatestBlockNumber {
 			as, err := api.App.chainState.GetAccountStateDB().AccountStateReadOnly(address)
@@ -340,6 +346,12 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 
 // GetProof returns the Merkle proof for a given account address at a specific block.
 func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
+	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
+		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*mt_trie.NomtStateTrie); ok {
+			nomtTrie.WaitCommitPayload()
+		}
+	}
+
 	// Resolve block map to get stateRoot
 	var blockMap map[string]interface{}
 	var errGetBlock error

@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"encoding/binary"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +24,9 @@ var (
 	lastExecutedCommitHash    []byte // Rust DAG commit digest
 	lastHandledCommitIndex    uint32 // Rust consensus commit index
 	lastHandledCommitEpoch    uint64 // Epoch when lastHandledCommitIndex was recorded
+	lastNomtCommittedBlock    uint64 // Last block committed to NOMT trie
+	backupDbInstance          Storage
+	backupDbInstanceMu        sync.RWMutex
 
 	// Callback invoked when a new block is committed (used by SnapshotManager)
 	blockCommitCallback BlockCommitCallback
@@ -333,4 +338,51 @@ func SetSyncStartBlock(blockNumber uint64) {
 // GetSyncStartBlock returns the first block number that sync will process after consensus ends
 func GetSyncStartBlock() uint64 {
 	return atomic.LoadUint64(&syncStartBlock)
+}
+
+func SetBackupDbInstance(db Storage) {
+	backupDbInstanceMu.Lock()
+	backupDbInstance = db
+	backupDbInstanceMu.Unlock()
+}
+
+func GetBackupDbInstance() Storage {
+	backupDbInstanceMu.RLock()
+	defer backupDbInstanceMu.RUnlock()
+	return backupDbInstance
+}
+
+func UpdateLastNomtCommittedBlock(blockNumber uint64) {
+	for {
+		current := atomic.LoadUint64(&lastNomtCommittedBlock)
+		if blockNumber <= current {
+			return
+		}
+		if atomic.CompareAndSwapUint64(&lastNomtCommittedBlock, current, blockNumber) {
+			db := GetBackupDbInstance()
+			if db != nil {
+				blockNumberBytes := make([]byte, 8)
+				binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
+				if err := db.Put(LastNomtCommittedBlockHashKey.Bytes(), blockNumberBytes); err != nil {
+					logger.Error("Failed to persist lastNomtCommittedBlock in PebbleDB: %v", err)
+				}
+			}
+			return
+		}
+	}
+}
+
+func GetLastNomtCommittedBlock() uint64 {
+	val := atomic.LoadUint64(&lastNomtCommittedBlock)
+	if val == 0 {
+		db := GetBackupDbInstance()
+		if db != nil {
+			data, err := db.Get(LastNomtCommittedBlockHashKey.Bytes())
+			if err == nil && len(data) == 8 {
+				val = binary.BigEndian.Uint64(data)
+				atomic.StoreUint64(&lastNomtCommittedBlock, val)
+			}
+		}
+	}
+	return val
 }

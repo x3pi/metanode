@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <shared_mutex>
+#include <mutex>
 
 using namespace std;
 using namespace tbb;
@@ -73,6 +74,8 @@ public:
     uint256_t getAddress() const;
     uint256_t getBalance() const;
     void setBalance(const uint256_t &newBalance);
+    void addBalance(const uint256_t &value);
+    void subBalance(const uint256_t &value);
 
     const std::vector<uint8_t> &getCode() const;
     void setCode(const std::vector<uint8_t> &newCode);
@@ -98,4 +101,5 @@ private:
 
     // Thêm thành viên lưu thời gian tương tác cuối
     std::atomic<std::chrono::steady_clock::time_point> last_interaction_time;
+    mutable std::mutex state_mutex;
 };

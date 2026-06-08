@@ -435,7 +435,15 @@ impl CommitSyncerSupervisor {
 impl<C: NetworkClient> CommitSyncer<C> {
     // Derived interval 
     fn poll_interval(&self) -> Duration {
-        match self.coordination_hub.get_phase() {
+        let phase = self.coordination_hub.get_phase();
+        if phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
+            let quorum_commit = self.get_effective_quorum_commit();
+            let lag = quorum_commit.saturating_sub(self.synced_commit_index);
+            if lag > 0 {
+                return Duration::from_millis(200); // Poll fast if there is any lag
+            }
+        }
+        match phase {
             crate::coordination_hub::NodeConsensusPhase::Initializing => Duration::from_secs(1),
             crate::coordination_hub::NodeConsensusPhase::CatchingUp => Duration::from_millis(150),
             crate::coordination_hub::NodeConsensusPhase::Bootstrapping => Duration::from_millis(200),
@@ -698,7 +706,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     // STATE MACHINE: Check for state transitions dynamically
                     let now = tokio::time::Instant::now();
                     let check_interval = if self.coordination_hub.is_healthy() {
-                        Duration::from_secs(2)
+                        let quorum_commit = self.get_effective_quorum_commit();
+                        let lag = quorum_commit.saturating_sub(self.synced_commit_index);
+                        if lag > 0 {
+                            Duration::from_millis(200) // Check state transition fast if there is any lag
+                        } else {
+                            Duration::from_secs(2)
+                        }
                     } else {
                         Duration::from_millis(500)
                     };

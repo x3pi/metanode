@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -41,6 +40,9 @@ type ShardelDB struct {
 
 // Hàm bổ sung để lấy index của shard
 func (s *ShardelDB) getShardIndex(key []byte) uint32 {
+	if s.numShards == 1 {
+		return 0
+	}
 	hash := md5.Sum(key)
 	index := binary.BigEndian.Uint32(hash[:4]) % uint32(s.numShards)
 	return index
@@ -93,6 +95,9 @@ func (s *ShardelDB) Open() error {
 
 // Băm key để quyết định lưu vào shard nào
 func (s *ShardelDB) getShard(key []byte) ShardDBInterface {
+	if s.numShards == 1 {
+		return s.shards[0]
+	}
 	hash := md5.Sum(key)
 	index := binary.BigEndian.Uint32(hash[:4]) % uint32(s.numShards)
 	return s.shards[index]
@@ -189,6 +194,18 @@ func (b *shardBatch) Delete(key []byte) error {
 }
 
 func (s *ShardelDB) BatchDelete(keys [][]byte) error {
+	if s.numShards == 1 {
+		shard := s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		for _, key := range keys {
+			if err := shard.Delete(key); err != nil {
+				return fmt.Errorf("shard 0: key %x, error: %w", key, err)
+			}
+		}
+		return nil
+	}
 	var g errgroup.Group
 	shardKeys := make(map[int][][]byte)
 	// Nhóm keys theo shard
@@ -219,6 +236,13 @@ func (s *ShardelDB) BatchDelete(keys [][]byte) error {
 }
 
 func (s *ShardelDB) BatchPut(kvs [][2][]byte) error {
+	if s.numShards == 1 {
+		shard := s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		return shard.BatchPut(kvs)
+	}
 	var g errgroup.Group
 	shardBatches := make(map[int][][2][]byte)
 
@@ -252,6 +276,17 @@ func (s *ShardelDB) BatchPut(kvs [][2][]byte) error {
 }
 
 func (b *shardBatch) Write() error {
+	if b.s.numShards == 1 {
+		shard := b.s.shards[0]
+		if shard == nil {
+			return fmt.Errorf("shard 0 is nil")
+		}
+		batch := b.batch[0]
+		if len(batch) == 0 {
+			return nil
+		}
+		return shard.BatchPut(batch)
+	}
 	fmt.Println("Write method called. Implementation needed.")
 	var wg sync.WaitGroup
 	errChan := make(chan error, b.s.numShards)
@@ -298,24 +333,16 @@ func (b *shardBatch) Reset() {
 	}
 }
 
-// Replay applies the batch to the database.  **YOU MUST IMPLEMENT THIS**
+// Replay applies the batch to the database.
 func (b *shardBatch) Replay(db ethdb.KeyValueWriter) error {
-	fmt.Println("Replay method called. Implementation needed.")
-
-	// TODO: Implement Replay logic here. This is a placeholder.
-	// You need to iterate through b.batch and apply the Put and Delete operations
-	// to the provided db (which is an ethdb.KeyValueWriter).  Consider handling
-	// potential errors during the replay process.
 	for _, batch := range b.batch {
 		for _, kv := range batch {
 			if len(kv[1]) == 0 { // Delete operation
-				if err := b.Delete(kv[0]); err != nil {
-					logger.Error("error deleting key")
+				if err := db.Delete(kv[0]); err != nil {
 					return fmt.Errorf("error deleting key %x: %w", kv[0], err)
 				}
 			} else { // Put operation
-				if err := b.Put(kv[0], kv[1]); err != nil {
-					logger.Error("error putting key")
+				if err := db.Put(kv[0], kv[1]); err != nil {
 					return fmt.Errorf("error putting key %x: %w", kv[0], err)
 				}
 			}

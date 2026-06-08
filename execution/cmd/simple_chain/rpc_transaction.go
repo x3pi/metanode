@@ -31,21 +31,14 @@ import (
 
 // GetTransactionByHash returns the transaction for the given hash
 func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Hash) (*RPCTransaction, error) {
-
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashEth)
 	hashTx := hashEth
+	if blsHash, okBls := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth); okBls {
+		hashTx = blsHash
+	}
+
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashTx)
 
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
-		// Try bls mapping
-		hash, okBls := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
-		if okBls {
-			blockNumber, ok = blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hash)
-			if ok && blockNumber <= storage.GetLastBlockNumber() {
-				hashTx = hash
-				goto PROCESS_COMMITTED
-			}
-		}
-
 		// Fallback to cache as a pending transaction
 		if rawTx, success := blockchain.GetBlockChainInstance().GetTxFromCache(hashEth); success {
 			txE := new(types.Transaction)
@@ -88,8 +81,6 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 
 		return nil, fmt.Errorf("transaction not found by hash: %v", hashEth)
 	}
-
-PROCESS_COMMITTED:
 
 	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
 

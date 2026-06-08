@@ -115,8 +115,7 @@ shared_ptr<State> State::getInstance(const uint256_t &address)
 }
 
 std::optional<uint256_t> State::getValue(const KeyType &key) const {
-  // Reading does not usually update interaction time, but check requirements
-  // update_interaction_time(); // Uncomment if reads should prevent cleanup
+  std::lock_guard<std::mutex> lock(state_mutex);
   concurrent_hash_map<KeyType, uint256_t, KeyHashCompare>::const_accessor acc;
   if (stateMap.find(acc, key)) {
     return acc->second;
@@ -126,6 +125,7 @@ std::optional<uint256_t> State::getValue(const KeyType &key) const {
 
 void State::insertOrUpdate(const KeyType &key, const uint256_t &value) {
   update_interaction_time(); // Update time on modification
+  std::lock_guard<std::mutex> lock(state_mutex);
   concurrent_hash_map<KeyType, uint256_t, KeyHashCompare>::accessor acc;
   // Insert first, then update the value regardless of whether it was new or
   // existing
@@ -135,12 +135,12 @@ void State::insertOrUpdate(const KeyType &key, const uint256_t &value) {
 
 void State::erase(const KeyType &key) {
   update_interaction_time(); // Update time on modification
+  std::lock_guard<std::mutex> lock(state_mutex);
   stateMap.erase(key);
 }
 
 bool State::keyExists(const KeyType &key) const {
-  // Reading does not usually update interaction time
-  // update_interaction_time(); // Uncomment if checks should prevent cleanup
+  std::lock_guard<std::mutex> lock(state_mutex);
   concurrent_hash_map<KeyType, uint256_t, KeyHashCompare>::const_accessor acc;
   return stateMap.find(acc, key);
 }
@@ -155,29 +155,53 @@ bool State::instanceExists(const uint256_t &address) {
 // (Update interaction time on setters)
 
 uint256_t State::getAddress() const { /* read-only */ return address; }
-uint256_t State::getBalance() const { /* read-only */ return balance; }
+uint256_t State::getBalance() const {
+  std::lock_guard<std::mutex> lock(state_mutex);
+  return balance;
+}
 void State::setBalance(const uint256_t &newBalance) {
   update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
   balance = newBalance;
 }
+void State::addBalance(const uint256_t &value) {
+  update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
+  balance += value;
+}
+void State::subBalance(const uint256_t &value) {
+  update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
+  balance -= value;
+}
 
-const std::vector<uint8_t> &State::getCode() const { /* read-only */
+const std::vector<uint8_t> &State::getCode() const {
+  std::lock_guard<std::mutex> lock(state_mutex);
   return code;
 }
 void State::setCode(const std::vector<uint8_t> &newCode) {
   update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
   code = newCode;
 }
 
-uint256_t State::getNonce() const { /* read-only */ return nonce; }
+uint256_t State::getNonce() const {
+  std::lock_guard<std::mutex> lock(state_mutex);
+  return nonce;
+}
 void State::setNonce(const uint256_t &newNonce) {
   update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
   nonce = newNonce;
 }
 
-uint256_t State::getLastHash() const { /* read-only */ return last_hash; }
+uint256_t State::getLastHash() const {
+  std::lock_guard<std::mutex> lock(state_mutex);
+  return last_hash;
+}
 void State::setLastHash(const uint256_t &newLastHash) {
   update_interaction_time();
+  std::lock_guard<std::mutex> lock(state_mutex);
   last_hash = newLastHash;
 }
 

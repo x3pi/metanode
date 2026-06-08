@@ -53,6 +53,10 @@ type CommitJob struct {
 
 	// Snapshot Fix: Track the rust consensus commit index
 	GlobalExecIndex uint64
+
+	// Extracted NOMT payloads for sequential async commit to disk
+	AccountNomtPayload interface{}
+	StakeNomtPayload   interface{}
 }
 
 
