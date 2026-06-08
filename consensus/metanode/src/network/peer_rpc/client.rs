@@ -248,89 +248,93 @@ pub async fn fetch_blocks_from_peer(
 
     let total_blocks = to_block.saturating_sub(from_block) + 1;
     info!(
-        "🔄 [BLOCK-FETCH] Fetching {} blocks ({} to {}) from {} peer(s)",
+        "🔄 [BLOCK-FETCH] Fetching {} blocks ({} to {}) from {} peer(s) in PARALLEL",
         total_blocks,
         from_block,
         to_block,
         peer_addresses.len()
     );
 
-    let mut all_blocks = Vec::new();
-    
-    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
     let batch_size = if total_blocks >= 1000 {
-        500u64 // Lệch cực xa -> Max batch server cho phép
+        100u64 // Safe batch to prevent server OOM
     } else if total_blocks >= 200 {
-        200u64 // Lệch xa -> Batch lớn
+        100u64
     } else if total_blocks >= 50 {
-        100u64 // Lệch vừa
-    } else {
-        // Nếu chỉ lệch 1 block, hệ thống vẫn chỉ lấy 1 block (nhờ hàm min ở dưới)
-        // Số 50 ở đây chỉ mang ý nghĩa: "Trong một lần hỏi TCP, lấy TỐI ĐA 50 block"
         50u64
+    } else {
+        20u64
     };
-    
+
+    let max_concurrent = std::cmp::min(peer_addresses.len() * 2, 8);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
+    let mut join_handles = Vec::new();
     let mut current_from = from_block;
+    let mut peer_idx = 0;
+
+    let peer_list = peer_addresses.to_vec();
 
     while current_from <= to_block {
         let current_to = std::cmp::min(current_from + batch_size - 1, to_block);
-        let mut batch_fetched = false;
-        let mut max_block_fetched = 0;
-
-        // Try each peer until one succeeds for this batch
-        for peer_addr in peer_addresses {
-            match fetch_block_batch(peer_addr, current_from, current_to).await {
-                Ok(blocks) => {
-                    if blocks.is_empty() {
+        
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let peers = peer_list.clone();
+        
+        // Spawn a task for this chunk
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            let mut last_err = None;
+            
+            for i in 0..peers.len() {
+                let peer_addr = &peers[(peer_idx + i) % peers.len()];
+                match fetch_block_batch(peer_addr, current_from, current_to).await {
+                    Ok(blocks) => {
                         info!(
-                            "✅ [BLOCK-FETCH] Got 0 blocks ({}-{}) from peer {}",
-                            current_from, current_to, peer_addr
+                            "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
+                            blocks.len(), current_from, current_to, peer_addr
                         );
-                        continue; // Try next peer
+                        return Ok((current_from, current_to, blocks));
                     }
-                    info!(
-                        "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
-                        blocks.len(),
-                        current_from,
-                        current_to,
-                        peer_addr
-                    );
-                    batch_fetched = true;
-                    if let Some(max_block) = blocks.iter().map(|b| b.block_number).max() {
-                        max_block_fetched = max_block;
+                    Err(e) => {
+                        warn!(
+                            "⚠️ [BLOCK-FETCH] Peer {} failed for blocks {}-{}: {}",
+                            peer_addr, current_from, current_to, e
+                        );
+                        last_err = Some(e);
                     }
-                    all_blocks.extend(blocks);
-                    break;
-                }
-                Err(e) => {
-                    warn!(
-                        "⚠️ [BLOCK-FETCH] Peer {} failed for blocks {}-{}: {}",
-                        peer_addr, current_from, current_to, e
-                    );
-                    continue;
                 }
             }
-        }
-
-        if !batch_fetched {
-            warn!(
-                "⚠️ [BLOCK-FETCH] All peers failed for batch {}-{}. Returning {} blocks fetched so far.",
-                current_from, current_to, all_blocks.len()
-            );
-            break;
-        }
-
-        // Yield execution to allow other async tasks (like socket listeners) to run
-        tokio::task::yield_now().await;
-
-        current_from = std::cmp::max(current_from + 1, max_block_fetched + 1);
+            Err(anyhow::anyhow!(
+                "All peers failed for batch {}-{}. Last error: {:?}",
+                current_from, current_to, last_err
+            ))
+        });
+        
+        join_handles.push(handle);
+        current_from = current_to + 1;
+        peer_idx += 1;
     }
+
+    let mut all_blocks_map = std::collections::BTreeMap::new();
+    
+    for handle in join_handles {
+        match handle.await.unwrap() {
+            Ok((_, _, blocks)) => {
+                for block in blocks {
+                    all_blocks_map.insert(block.block_number, block);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let all_blocks: Vec<BlockData> = all_blocks_map.into_values().collect();
 
     info!(
         "📦 [BLOCK-FETCH] Total: {} blocks fetched ({} to {})",
         all_blocks.len(),
         from_block,
-        from_block + all_blocks.len() as u64 - 1
+        to_block
     );
 
     Ok(all_blocks)
@@ -441,71 +445,86 @@ pub async fn fetch_executable_blocks_from_peer(
 
     let total = to_gei.saturating_sub(from_gei) + 1;
     info!(
-        "🔄 [EXEC-BLOCK-FETCH] Fetching {} executable blocks (GEI {} to {}) from {} peer(s)",
+        "🔄 [EXEC-BLOCK-FETCH] Fetching {} executable blocks (GEI {} to {}) from {} peer(s) in PARALLEL",
         total,
         from_gei,
         to_gei,
         peer_addresses.len()
     );
 
-    let mut all_blocks = Vec::new();
-    
-    // Tự động điều chỉnh batch_size dựa trên khoảng cách lệch block (linh hoạt)
     let batch_size = if total >= 1000 {
-        500u64 // Lệch cực xa -> Max batch server cho phép
+        100u64
     } else if total >= 200 {
-        200u64 // Lệch xa -> Batch lớn
+        100u64
     } else if total >= 50 {
-        100u64 // Lệch vừa
-    } else {
-        // Tương tự, nếu chỉ thiếu 1 block thì vẫn lấy ngay 1 block
-        // Số 50 u64 là giới hạn "TỐI ĐA" cho mỗi request HTTP
         50u64
+    } else {
+        20u64
     };
+
+    let max_concurrent = std::cmp::min(peer_addresses.len() * 2, 8);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
+    let mut join_handles = Vec::new();
     let mut current_from = from_gei;
+    let mut peer_idx = 0;
+
+    let peer_list = peer_addresses.to_vec();
 
     while current_from <= to_gei {
         let current_to = std::cmp::min(current_from + batch_size - 1, to_gei);
-        let mut batch_fetched = false;
-
-        for peer_addr in peer_addresses {
-            match fetch_executable_block_batch(peer_addr, current_from, current_to).await {
-                Ok(blocks) => {
-                    if blocks.is_empty() {
-                        continue;
+        
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let peers = peer_list.clone();
+        
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            let mut last_err = None;
+            
+            for i in 0..peers.len() {
+                let peer_addr = &peers[(peer_idx + i) % peers.len()];
+                match fetch_executable_block_batch(peer_addr, current_from, current_to).await {
+                    Ok(blocks) => {
+                        info!(
+                            "✅ [EXEC-BLOCK-FETCH] Got {} executable blocks (GEI {}-{}) from peer {}",
+                            blocks.len(), current_from, current_to, peer_addr
+                        );
+                        return Ok((current_from, current_to, blocks));
                     }
-                    info!(
-                        "✅ [EXEC-BLOCK-FETCH] Got {} executable blocks (GEI {}-{}) from peer {}",
-                        blocks.len(),
-                        current_from,
-                        current_to,
-                        peer_addr
-                    );
-                    batch_fetched = true;
-                    all_blocks.extend(blocks);
-                    break;
-                }
-                Err(e) => {
-                    warn!(
-                        "⚠️ [EXEC-BLOCK-FETCH] Peer {} failed for GEI {}-{}: {}",
-                        peer_addr, current_from, current_to, e
-                    );
-                    continue;
+                    Err(e) => {
+                        warn!(
+                            "⚠️ [EXEC-BLOCK-FETCH] Peer {} failed for GEI {}-{}: {}",
+                            peer_addr, current_from, current_to, e
+                        );
+                        last_err = Some(e);
+                    }
                 }
             }
-        }
+            Err(anyhow::anyhow!(
+                "All peers failed for batch GEI {}-{}. Last error: {:?}",
+                current_from, current_to, last_err
+            ))
+        });
 
-        if !batch_fetched {
-            warn!(
-                "⚠️ [EXEC-BLOCK-FETCH] All peers failed for batch GEI {}-{}. Returning {} blocks so far.",
-                current_from, current_to, all_blocks.len()
-            );
-            break;
-        }
-
-        tokio::task::yield_now().await;
+        join_handles.push(handle);
         current_from = current_to + 1;
+        peer_idx += 1;
     }
+
+    let mut all_blocks_map = std::collections::BTreeMap::new();
+    
+    for handle in join_handles {
+        match handle.await.unwrap() {
+            Ok((_, _, blocks)) => {
+                for (gei, data) in blocks {
+                    all_blocks_map.insert(gei, data);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let mut all_blocks: Vec<(u64, Vec<u8>)> = all_blocks_map.into_iter().collect();
 
     // Sort by GEI for sequential execution
     all_blocks.sort_by_key(|(gei, _)| *gei);
