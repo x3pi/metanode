@@ -460,6 +460,7 @@ cat > "$INSTALL_DIR/config/execution.json" <<EOF
     "nomt_leaf_cache_mb": 1024,
     "rust_config_path": "${INSTALL_DIR}/config/consensus.toml",
     "is_explorer": ${IS_EXPLORER:-false},
+    "is_rpc_node": $([ "$NODE_TYPE" = "synconly" ] && echo "true" || echo "false"),
     "explorer_db_path": "${INSTALL_DIR}/data/execution/explorer",
     "log": {
         "level": "${LOG_LEVEL:-info}",
@@ -646,6 +647,7 @@ TimeoutStopSec=90
 
 # Environment
 Environment=GOTRACEBACK=all
+Environment=NODE_TYPE=${NODE_TYPE}
 # Removed GOMEMLIMIT=4GiB to let Go use all available physical RAM
 LimitNOFILE=100000
 
