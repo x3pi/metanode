@@ -9,10 +9,11 @@ set -euo pipefail
 NODE_ID=""
 SNAPSHOT_URL=""
 SNAP_NAME=""
+AUTO_YES=false
 
 usage() {
-    echo "Usage: sudo bash $0 --node <node_id> --snapshot-url <url> [--snapshot-name <name>]"
-    echo "Ví dụ: sudo bash $0 --node 2 --snapshot-url http://192.168.1.100:8604"
+    echo "Usage: sudo bash $0 --node <node_id> --snapshot-url <url> [--snapshot-name <name>] [--yes|-y]"
+    echo "Ví dụ: sudo bash $0 --node 2 --snapshot-url http://192.168.1.100:8604 -y"
     exit 1
 }
 
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
     --snapshot-name|-s)
       SNAP_NAME="$2"
       shift 2
+      ;;
+    --yes|-y)
+      AUTO_YES=true
+      shift 1
       ;;
     -h|--help)
       usage
@@ -161,7 +166,7 @@ fi
 DOWNLOAD_URL="${SNAP_FILES_URL}/${SNAP_NAME}/"
 echo -e "${BLUE}  📥 Sẽ tải dữ liệu từ:${NC} $DOWNLOAD_URL"
 
-# Xác nhận người dùng
+# Cảnh báo thao tác khôi phục snapshot
 echo ""
 echo -e "${YELLOW}⚠️  CẢNH BÁO:${NC}"
 echo "   1. Dừng các service systemd của Node $NODE_ID"
@@ -169,11 +174,8 @@ echo "   2. XÓA TOÀN BỘ dữ liệu blockchain hiện tại của Node $NODE
 echo "   3. Khôi phục từ snapshot: $SNAP_NAME"
 echo "   4. Khởi động lại các service của Node $NODE_ID"
 echo ""
-read -p "   Bạn có chắc chắn muốn tiếp tục? (y/N): " CONFIRM
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    echo "Đã hủy thao tác."
-    exit 0
-fi
+echo "🚀 Tự động chạy khôi phục..."
+
 
 START_TIME=$(date +%s)
 

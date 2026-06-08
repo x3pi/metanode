@@ -726,7 +726,7 @@ if $DO_RESTORE; then
                             sudo \"\$@\"
                         fi
                     }
-                    _sudo bash restore_snapshot_systemd.sh --node $r_node --snapshot-url '${RESTORE_SNAPSHOT_URL}'
+                    _sudo bash restore_snapshot_systemd.sh --node $r_node --snapshot-url '${RESTORE_SNAPSHOT_URL}' -y
                 "
                 ssh_cmd "$target_server" "$CMD_SEQ"
                 log_ok "Restore complete for Node $r_node on $target_server"

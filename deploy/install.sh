@@ -260,6 +260,25 @@ GO_BIN="$SRC_DIR/execution/cmd/simple_chain/simple_chain"
 log_ok "Go binary verified: $GO_BIN"
 
 # Copy binaries
+# Đảm bảo các tiến trình cũ của node này dừng hẳn trước khi ghi đè để tránh lỗi "Text file busy"
+log_info "Waiting for node-${NODE_ID} processes to exit..."
+for i in {1..30}; do
+    if ! pgrep -f "node-${NODE_ID}/bin/simple_chain" >/dev/null && ! pgrep -f "node-${NODE_ID}/bin/metanode" >/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+
+# Force kill nếu vẫn chưa dừng hẳn
+if pgrep -f "node-${NODE_ID}/bin/simple_chain" >/dev/null; then
+    log_warn "Force killing execution process of node-${NODE_ID}..."
+    pkill -9 -f "node-${NODE_ID}/bin/simple_chain" || true
+fi
+if pgrep -f "node-${NODE_ID}/bin/metanode" >/dev/null; then
+    log_warn "Force killing consensus process of node-${NODE_ID}..."
+    pkill -9 -f "node-${NODE_ID}/bin/metanode" || true
+fi
+
 cp "$RUST_BIN" "$INSTALL_DIR/bin/metanode"
 cp "$GO_BIN"   "$INSTALL_DIR/bin/simple_chain"
 chmod +x "$INSTALL_DIR/bin/metanode" "$INSTALL_DIR/bin/simple_chain"
