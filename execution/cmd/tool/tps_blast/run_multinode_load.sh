@@ -23,9 +23,9 @@ NC='\033[0m'
 TOTAL_TX=$((CLIENTS * TX_PER_CLIENT))
 
 # Sub-node TCP ports for TX injection
-NODES=("192.168.1.234:4201" "192.168.1.233:6201" "127.0.0.1:6211" "192.168.1.231:6221")
+NODES=("192.168.1.234:4201" "192.168.1.233:6201" "192.168.1.231:6211" "192.168.1.231:6221")
 # Use MASTER node RPC ports for verification (must use real IPs for remote nodes)
-RPCS=("127.0.0.1:8757" "192.168.1.233:10747" "127.0.0.1:10749" "192.168.1.231:10750")
+RPCS=("127.0.0.1:8757" "192.168.1.233:10747" "192.168.1.231:10749" "192.168.1.231:10750")
 NUM_NODES=${#NODES[@]}
 
 # Helper: get current block number from RPC

@@ -438,6 +438,7 @@ cat > "$INSTALL_DIR/config/execution.json" <<EOF
     "snapshot_enabled": ${SNAPSHOT_ENABLED:-false},
     "snapshot_frequency_blocks": ${SNAPSHOT_FREQUENCY:-500},
     "snapshot_block_offset": ${SNAPSHOT_OFFSET:-0},
+    "snapshot_max_snapshots": 5,
     "Databases": {
         "RootPath": "${INSTALL_DIR}/data/execution/db",
         "DBEngine": "sharded",
