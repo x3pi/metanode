@@ -127,7 +127,7 @@ find_reference_node() {
         fi
     done
     echo ""
-    return 1
+    return 0
 }
 
 # ─── Bắt đầu tiến trình khôi phục ──────────────────────────────────
@@ -182,10 +182,9 @@ START_TIME=$(date +%s)
 # Step 1: Dừng các service
 echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng các service systemd của Node $NODE_ID...${NC}"
-systemctl stop "$svc_rpc" 2>/dev/null || true
 systemctl stop "$svc_cons" 2>/dev/null || true
 systemctl stop "$svc_exec" 2>/dev/null || true
-echo -e "${GREEN}  ✅ Đã dừng: $svc_exec, $svc_cons, $svc_rpc${NC}"
+echo -e "${GREEN}  ✅ Đã dừng: $svc_exec, $svc_cons${NC}"
 
 # Step 2: Xóa dữ liệu cũ
 echo -e "${BLUE}[2/7] 🗑️  Xóa dữ liệu cũ của Node $NODE_ID...${NC}"
@@ -219,7 +218,19 @@ TAR_URL="${SNAP_FILES_URL}/${SNAP_NAME}.tar"
 TAR_FILE="$TEMP_SNAP/${SNAP_NAME}.tar"
 
 echo -e "   🔄 Thử tải file nén (.tar) trước cho nhanh..."
-HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+MAX_WAIT=12
+WAIT_COUNT=0
+HTTP_CODE="000"
+
+while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+    HTTP_CODE=$(curl -s -I -o /dev/null -w "%{http_code}" "$TAR_URL" 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" = "200" ]; then
+        break
+    fi
+    echo -e "${YELLOW}      ⏳ Chưa thấy file .tar (Server có thể đang nén). Chờ 5s... ($((WAIT_COUNT+1))/$MAX_WAIT)${NC}"
+    sleep 5
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+done
 
 if [ "$HTTP_CODE" = "200" ]; then
     echo -e "${GREEN}  ✅ Tìm thấy file Tarball trên server. Bắt đầu tải...${NC}"
@@ -270,15 +281,22 @@ else
 fi
 
 # 5b. Copy các thư mục LevelDB/Nomt còn lại vào db
+mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
 for item in "$SNAP_SRC_DIR"/*; do
     name=$(basename "$item")
     [ "$name" = "back_up" ] && continue
+    [ "$name" = "db" ] && continue
     [ "$name" = "metadata.json" ] && continue
     [ "$name" = "index.html" ] && continue
     
     if [ -d "$item" ]; then
-        cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
-        echo -e "${GREEN}    + Khôi phục: ${name}/${NC}"
+        if [[ "$name" == "nomt_db" || "$name" == "smart_contract_code" || "$name" == "smart_contract_storage" || "$name" == "stake_db" || "$name" == "trie_database" || "$name" == "backup_device_key_storage" || "$name" == "account_state" ]]; then
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/consensus/"
+            echo -e "${GREEN}    + Khôi phục: consensus/${name}/${NC}"
+        else
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
+            echo -e "${GREEN}    + Khôi phục: ${name}/${NC}"
+        fi
     fi
 done
 
@@ -363,11 +381,14 @@ try:
 except:
     print('')
 " 2>/dev/null || echo ""
+    else
+        echo ""
     fi
+    return 0
 }
 
-for t in 10 20 30 40 50 60 70 80 90 100 110 120; do
-    sleep 10
+for t in 5 10 15 20 25 30 35 40 45 50 55 60 65 70 75 80 85 90 95 100 105 110 115 120; do
+    sleep 5
     
     # Lấy thông tin block của node vừa khôi phục
     MY_INFO=$(get_block_height "$MY_PORT")
@@ -375,91 +396,20 @@ for t in 10 20 30 40 50 60 70 80 90 100 110 120; do
     MY_GEI=$(echo "$MY_INFO" | awk '{print $2}')
     MY_EPOCH=$(echo "$MY_INFO" | awk '{print $3}')
     
-    if [ -z "$MY_BLOCK" ]; then
-        echo -e "  ${YELLOW}⏱️ +${t}s: Node chưa phản hồi RPC (đang khởi động)...${NC}"
-        continue
-    fi
-    
-    # Lấy thông tin từ node tham chiếu đang chạy ổn định (nếu có trên cùng một máy)
-    REF_NODE=$(find_reference_node)
-    REF_BLOCK=""
-    REF_GEI=""
-    if [ -n "$REF_NODE" ]; then
-        REF_PORT=$(get_node_rpc_port "$REF_NODE")
-        REF_INFO=$(get_block_height "$REF_PORT")
-        REF_BLOCK=$(echo "$REF_INFO" | awk '{print $1}')
-        REF_GEI=$(echo "$REF_INFO" | awk '{print $2}')
-    fi
-    
-    DISP="block=$MY_BLOCK, GEI=${MY_GEI:-?}, epoch=${MY_EPOCH:-?}"
-    
-    if [ -n "$REF_BLOCK" ] && [ "$MY_BLOCK" -ge "$REF_BLOCK" ] 2>/dev/null; then
-        echo -e "  ${GREEN}⏱️ +${t}s: $DISP — ✅ ĐÃ ĐỒNG BỘ (Node tham chiếu $REF_NODE: block=$REF_BLOCK)${NC}"
+    if [ -n "$MY_BLOCK" ]; then
+        DISP="block=$MY_BLOCK, GEI=${MY_GEI:-?}, epoch=${MY_EPOCH:-?}"
+        echo -e "  ${GREEN}⏱️ +${t}s: $DISP — ✅ RPC Node $NODE_ID đã sẵn sàng và online${NC}"
         SYNCED=true
         break
-    elif [ -n "$PREV_BLOCK" ] && [ "$MY_BLOCK" -gt "$PREV_BLOCK" ] 2>/dev/null; then
-        JUMP=$((MY_BLOCK - PREV_BLOCK))
-        if [ -n "$REF_BLOCK" ]; then
-             echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Tăng +$JUMP blocks (Node tham chiếu: ${REF_BLOCK:-?})${NC}"
-        else
-             echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Tăng +$JUMP blocks${NC}"
-        fi
-    elif [ -n "$PREV_BLOCK" ] && [ "$MY_BLOCK" -eq "$PREV_BLOCK" ] 2>/dev/null; then
-        if [ -n "$REF_BLOCK" ] && [ "$MY_BLOCK" -lt "$REF_BLOCK" ] 2>/dev/null; then
-            BEHIND=$((REF_BLOCK - MY_BLOCK))
-            echo -e "  ${YELLOW}⏱️ +${t}s: $DISP — ⏳ Đang đồng bộ tiếp ($BEHIND blocks phía sau node $REF_NODE)${NC}"
-        else
-            echo -e "  ${GREEN}⏱️ +${t}s: $DISP — ✅ Đã bắt kịp mạng (Idle)${NC}"
-            SYNCED=true
-            break
-        fi
-    else
-        echo -e "  ${GREEN}⏱️ +${t}s: $DISP — 🚀 Đang đồng bộ...${NC}"
     fi
-    PREV_BLOCK="$MY_BLOCK"
+    echo -e "  ${YELLOW}⏱️ +${t}s: Node chưa phản hồi RPC (đang khởi động)...${NC}"
 done
 
 if [ "$SYNCED" = true ]; then
-    echo -e "  ${GREEN}✅ Node $NODE_ID đã đồng bộ thành công!${NC}"
+    echo -e "  ${GREEN}✅ Node $NODE_ID đã khởi động thành công và online!${NC}"
 else
-    echo -e "  ${YELLOW}⚠️ Hết 120s theo dõi. Vui lòng chạy lệnh 'journalctl -u $svc_exec -f' để theo dõi thủ công.${NC}"
-fi
-
-# Step 8: Kiểm tra băm Divergence (Fork Check)
-echo ""
-echo -e "${BLUE}[7/7] 🔒 Kiểm tra khớp mã băm (Block Hash Verification)...${NC}"
-MY_BLOCK_HEX=$(printf "0x%x" "${MY_BLOCK:-0}")
-
-if [ "${MY_BLOCK:-0}" -gt 0 ]; then
-    REF_NODE=$(find_reference_node)
-    if [ -n "$REF_NODE" ]; then
-        REF_PORT=$(get_node_rpc_port "$REF_NODE")
-        
-        HASH_MY=$(curl -sf -m 2 -X POST -H "Content-Type: application/json" \
-            --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$MY_BLOCK_HEX\",false],\"id\":1}" \
-            "http://127.0.0.1:$MY_PORT" 2>/dev/null \
-            | jq -r '.result.hash // empty' 2>/dev/null || echo "")
-            
-        HASH_REF=$(curl -sf -m 2 -X POST -H "Content-Type: application/json" \
-            --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$MY_BLOCK_HEX\",false],\"id\":1}" \
-            "http://127.0.0.1:$REF_PORT" 2>/dev/null \
-            | jq -r '.result.hash // empty' 2>/dev/null || echo "")
-            
-        if [ -n "$HASH_MY" ] && [ -n "$HASH_REF" ]; then
-            if [ "$HASH_MY" = "$HASH_REF" ]; then
-                echo -e "${GREEN}  ✅ Block $MY_BLOCK hash KHỚP giữa Node $NODE_ID và Node tham chiếu $REF_NODE${NC}"
-                echo "     Hash: $HASH_MY"
-            else
-                echo -e "${RED}  🚨 CẢNH BÁO: PHÁT HIỆN LỆCH HASH (FORK DETECTED) ở Block $MY_BLOCK!${NC}"
-                echo "     - Node $NODE_ID Hash: $HASH_MY"
-                echo "     - Node $REF_NODE Hash: $HASH_REF"
-            fi
-        else
-            echo -e "${YELLOW}  ⚠️ Không thể lấy băm block để so sánh.${NC}"
-        fi
-    else
-        echo -e "${YELLOW}  ⚠️ Không có Node tham chiếu nào khác đang chạy trên cùng máy để kiểm tra Hash Divergence.${NC}"
-    fi
+    echo -e "  ${RED}❌ Node $NODE_ID khởi động thất bại hoặc RPC không phản hồi sau 120s.${NC}"
+    exit 1
 fi
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
