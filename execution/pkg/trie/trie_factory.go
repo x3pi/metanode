@@ -300,6 +300,17 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 // PREREQUISITE: The caller (SnapshotManager) MUST have already called:
 //   PauseExecution() + WaitForPersistence() to ensure no active sessions or pending I/O.
 func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
+	// Eagerly pre-initialize critical NOMT handles before copying
+	// to ensure their directories exist and they are captured in the snapshot
+	if globalNomtConfig != nil {
+		if _, err := GetOrInitNomtHandle("account_state"); err != nil {
+			logger.Warn("⚠️ [TRIE] Failed to eagerly pre-init account_state NOMT handle: %v", err)
+		}
+		if _, err := GetOrInitNomtHandle("stake_db"); err != nil {
+			logger.Warn("⚠️ [TRIE] Failed to eagerly pre-init stake_db NOMT handle: %v", err)
+		}
+	}
+
 	globalNomtHandlesMu.Lock()
 	// Create a stable snapshot of handles to iterate
 	handlesList := make([]struct {
