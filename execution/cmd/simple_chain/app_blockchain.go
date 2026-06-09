@@ -402,37 +402,44 @@ func (app *App) initBlockchain() error {
 						logger.Error("❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: %v", err)
 					}
 				} else if (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
-					logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
-						nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
-					found := false
-					for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
-						key := []byte(fmt.Sprintf("blockNumber_%d", bn))
-						data, err := app.storageManager.GetStorageMapping().Get(key)
-						if err != nil || data == nil || len(data) != 32 {
-							continue
+					if trie.GetStateBackend() == trie.BackendNOMT {
+						logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Patching header to match NOMT roots for NOMT backend.",
+							nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+						app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
+						app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
+					} else {
+						logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
+							nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+						found := false
+						for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
+							key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+							data, err := app.storageManager.GetStorageMapping().Get(key)
+							if err != nil || data == nil || len(data) != 32 {
+								continue
+							}
+							blockHash := e_common.BytesToHash(data)
+							blk, err := blockDatabase.GetBlockByHash(blockHash)
+							if err != nil || blk == nil {
+								continue
+							}
+							// BOTH roots must match!
+							if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
+								correctedGEI := blk.Header().GlobalExecIndex()
+								logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
+									bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
+								app.startLastBlock = blk
+								storage.ForceSetLastBlockNumber(bn)
+								storage.ForceSetLastGlobalExecIndex(correctedGEI)
+								storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+								storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
+								found = true
+								break
+							}
 						}
-						blockHash := e_common.BytesToHash(data)
-						blk, err := blockDatabase.GetBlockByHash(blockHash)
-						if err != nil || blk == nil {
-							continue
+						if !found {
+							logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
+								nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
 						}
-						// BOTH roots must match!
-						if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
-							correctedGEI := blk.Header().GlobalExecIndex()
-							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
-								bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
-							app.startLastBlock = blk
-							storage.ForceSetLastBlockNumber(bn)
-							storage.ForceSetLastGlobalExecIndex(correctedGEI)
-							storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
-							storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
-							found = true
-							break
-						}
-					}
-					if !found {
-						logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
-							nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
 					}
 				}
 			}
