@@ -280,6 +280,9 @@ for folder in "$SNAP_DIR"/*; do
       elif [ "$folder_name" = "history" ]; then
           echo "    📦 Mapping history directory directly..."
           cp -a "$folder"/* "$NODE_DATA/data/data/history/" 2>/dev/null || true
+      elif [ "$folder_name" = "consensus" ]; then
+          echo "    📦 Mapping consensus directory directly..."
+          cp -a "$folder"/* "$NODE_DATA/data/data/consensus/" 2>/dev/null || true
       elif [ "$folder_name" = "nomt_db" ] || [ "$folder_name" = "smart_contract_code" ] || [ "$folder_name" = "smart_contract_storage" ] || [ "$folder_name" = "backup_device_key_storage" ] || [ "$folder_name" = "xapian" ] || [ "$folder_name" = "xapian_node" ] || [ "$folder_name" = "account_state" ] || [ "$folder_name" = "stake_db" ] || [ "$folder_name" = "trie_database" ]; then
           echo "    📦 Mapping consensus database: $folder_name -> consensus/$folder_name..."
           cp -a "$folder" "$NODE_DATA/data/data/consensus/"
