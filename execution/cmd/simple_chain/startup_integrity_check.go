@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -105,10 +109,38 @@ func (app *App) runStartupIntegrityCheck(checkDepth int) *IntegrityCheckResult {
 	headerStateRoot := app.startLastBlock.Header().AccountStatesRoot()
 	if headerStateRoot != (common.Hash{}) {
 		if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
-			if nomtRoot != headerStateRoot {
+			// Attempt to load metadata.json to check if this is a snapshot recovery
+			var metadata *executor.SnapshotMetadata
+			metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
+			if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
+				var md executor.SnapshotMetadata
+				if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
+					metadata = &md
+				}
+			}
+
+			isSnapshotRecovery := false
+			if metadata != nil && metadata.StateRoot != "" {
+				nomtRootHex := nomtRoot.Hex()
+				metadataRootHex := metadata.StateRoot
+				if !strings.HasPrefix(nomtRootHex, "0x") {
+					nomtRootHex = "0x" + nomtRootHex
+				}
+				if !strings.HasPrefix(metadataRootHex, "0x") {
+					metadataRootHex = "0x" + metadataRootHex
+				}
+				if strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+					isSnapshotRecovery = true
+				}
+			}
+
+			if nomtRoot != headerStateRoot && !isSnapshotRecovery {
 				result.CriticalErrors = append(result.CriticalErrors,
 					fmt.Sprintf("NOMT account_state root MISMATCH: header=%s, NOMT=%s — state is corrupted",
 						headerStateRoot.Hex()[:18]+"...", nomtRoot.Hex()[:18]+"..."))
+			} else if isSnapshotRecovery {
+				logger.Info("✅ [INTEGRITY] CHECK 4/5: NOMT account_state root matches snapshot metadata StateRoot (%s). Bypassing header state mismatch.",
+					metadata.StateRoot)
 			} else {
 				logger.Info("✅ [INTEGRITY] CHECK 4/5: NOMT account_state root matches header: %s",
 					nomtRoot.Hex()[:18]+"...")
