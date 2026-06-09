@@ -524,6 +524,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
+		// Anti-drift check: Even if the block was found in LevelDB, if the state backend is NOMT
+		// and the block is not committed to NOMT, we must force execution on NOMT.
+		if isFullyExecuted && trie.GetStateBackend() == trie.BackendNOMT && blockNum > storage.GetLastNomtCommittedBlock() {
+			isFullyExecuted = false
+			logger.Info("🔄 [NOMT-SYNC-RECOVERY] Block #%d exists in LevelDB but is NOT committed to NOMT (lastNomt=%d). Forcing re-execution on NOMT.", blockNum, storage.GetLastNomtCommittedBlock())
+		}
+
 		if isFullyExecuted {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
