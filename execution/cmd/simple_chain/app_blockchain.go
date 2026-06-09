@@ -463,8 +463,10 @@ func (app *App) initBlockchain() error {
 
 					isMetadataZero := isZeroHashHex(metadata.StateRoot)
 					isNomtZeroOrEmpty := nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot
+					isBlock0ZeroState := metadata.BlockNumber == 0 && isMetadataZero
+					isNomtHeaderMatch := nomtAccountRoot == headerAccountRoot
 
-					if (isMetadataZero && isNomtZeroOrEmpty) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+					if (isMetadataZero && isNomtZeroOrEmpty) || (isBlock0ZeroState && isNomtHeaderMatch) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
 						isSnapshotRecovery = true
 						logger.Info("📸 [STARTUP] NOMT root matches snapshot metadata StateRoot (%s). Bypassing Early Root Mismatch check.", metadata.StateRoot)
 					}
@@ -585,19 +587,12 @@ func (app *App) initBlockchain() error {
 			headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
 			headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
 
-			emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
-			emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
-
-			isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
-			isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
-
-			isHeaderAccountEmpty := (headerAccountRoot == (e_common.Hash{}) || headerAccountRoot == emptyAccountRoot || headerAccountRoot == emptyStakeRoot)
-			isHeaderStakeEmpty := (headerStakeRoot == (e_common.Hash{}) || headerStakeRoot == emptyAccountRoot || headerStakeRoot == emptyStakeRoot)
-
-			shouldRepopulateAccount := okAccount && isEmptyAccountNomt && !isHeaderAccountEmpty
-			shouldRepopulateStake := okStake && isEmptyStakeNomt && !isHeaderStakeEmpty
+			shouldRepopulateAccount := okAccount && nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{})
+			shouldRepopulateStake := okStake && nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{})
 
 			if shouldRepopulateAccount || shouldRepopulateStake {
+				logger.Info("⏳ [STARTUP] Mismatch detected at Block 0. Account match: %v, Stake match: %v. Repopulating genesis state.", 
+					nomtAccountRoot == headerAccountRoot, nomtStakeRoot == headerStakeRoot)
 				if err := app.repopulateGenesisState(); err != nil {
 					return fmt.Errorf("failed to repopulate genesis state: %v", err)
 				}
@@ -755,9 +750,12 @@ SKIP_GENESIS:
 
 				isMetadataZero := isZeroHashHex(metadata.StateRoot)
 				isNomtZeroOrEmpty := nomtRoot == (e_common.Hash{}) || nomtRoot == emptyAccountRoot || nomtRoot == emptyStakeRoot
+				isBlock0ZeroState := metadata.BlockNumber == 0 && isMetadataZero
 
 				rootsMatch := false
 				if isMetadataZero && isNomtZeroOrEmpty {
+					rootsMatch = true
+				} else if isBlock0ZeroState && (nomtRoot == startStateRoot || nomtRootHex == startStateRoot.Hex()) {
 					rootsMatch = true
 				} else if nomtRootHex == metadata.StateRoot || nomtRoot.Hex() == metadata.StateRoot {
 					rootsMatch = true

@@ -148,8 +148,10 @@ func (app *App) runStartupIntegrityCheck(checkDepth int) *IntegrityCheckResult {
 
 				isMetadataZero := isZeroHashHex(metadata.StateRoot)
 				isNomtZeroOrEmpty := nomtRoot == (common.Hash{}) || nomtRoot == emptyAccountRoot || nomtRoot == emptyStakeRoot
+				isBlock0ZeroState := metadata.BlockNumber == 0 && isMetadataZero
+				isNomtHeaderMatch := nomtRoot == headerStateRoot
 
-				if (isMetadataZero && isNomtZeroOrEmpty) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+				if (isMetadataZero && isNomtZeroOrEmpty) || (isBlock0ZeroState && isNomtHeaderMatch) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
 					isSnapshotRecovery = true
 				}
 			}
