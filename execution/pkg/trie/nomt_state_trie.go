@@ -1057,11 +1057,38 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	logger.Warn("🔧 [NOMT-ALIGN-REBUILD] NOMT C++ root %s != expected %s. Rebuilding NOMT trie from storage for namespace %s...",
 		currentRoot.Hex()[:18], expectedRoot.Hex()[:18], string(n.namespace))
 
-	// 1. Prefix scan all keys/values from prefix storage
-	// Pass empty prefix to get all entries for this namespace sharding domain
-	kvs, err := storage.PrefixScan(nil)
-	if err != nil {
-		return fmt.Errorf("failed to scan keys from storage: %w", err)
+	// 1. Retrieve all keys/values.
+	// For NOMT, we read values directly from the handle using the key registry,
+	// since account states are not persisted in the shared PebbleDB storage.
+	// We MUST do this before resetting the handle, because resetting wipes the DB.
+	var kvs [][2][]byte
+
+	knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
+	n.knownKeysMu.RLock()
+	for hexKey, origKey := range n.knownKeys {
+		keyCopy := make([]byte, len(origKey))
+		copy(keyCopy, origKey)
+		knownKeys[hexKey] = keyCopy
+	}
+	n.knownKeysMu.RUnlock()
+
+	for _, origKey := range knownKeys {
+		keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
+		val, found, readErr := n.handle.Read(keyPath)
+		if readErr == nil && found && len(val) > 0 {
+			kvs = append(kvs, [2][]byte{origKey, val})
+		}
+	}
+
+	// Fallback to prefix scan from shared storage if no keys retrieved from registry + handle
+	if len(kvs) == 0 {
+		var scanErr error
+		kvs, scanErr = storage.PrefixScan(nil)
+		if scanErr != nil {
+			return fmt.Errorf("failed to scan keys from storage: %w", scanErr)
+		}
+	} else {
+		logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from registry + NOMT handle for rebuilding namespace %s", len(kvs), string(n.namespace))
 	}
 
 	// 2. Reset the NOMT handle (closes, wipes, and reopens)
