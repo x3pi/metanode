@@ -1038,6 +1038,105 @@ func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
 	}
 }
 
+// AlignWithExpectedRoot verifies if the C++ NOMT Merkle root matches the expected root hash.
+// If it does not match, it resets the database, reads all keys/values from storage,
+// inserts them, and commits the state to align the C++ engine root with the consensus root.
+func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedRoot e_common.Hash) error {
+	nomtRootBytes, err := n.handle.Root()
+	var currentRoot e_common.Hash
+	if err == nil {
+		currentRoot = e_common.BytesToHash(nomtRootBytes[:])
+	}
+
+	if currentRoot == expectedRoot {
+		// Roots are already aligned. Just ensure Go's readView matches.
+		n.RealignRoot(expectedRoot)
+		return nil
+	}
+
+	logger.Warn("🔧 [NOMT-ALIGN-REBUILD] NOMT C++ root %s != expected %s. Rebuilding NOMT trie from storage for namespace %s...",
+		currentRoot.Hex()[:18], expectedRoot.Hex()[:18], string(n.namespace))
+
+	// 1. Prefix scan all keys/values from prefix storage
+	// Pass empty prefix to get all entries for this namespace sharding domain
+	kvs, err := storage.PrefixScan(nil)
+	if err != nil {
+		return fmt.Errorf("failed to scan keys from storage: %w", err)
+	}
+
+	// 2. Reset the NOMT handle (closes, wipes, and reopens)
+	newHandle, err := ResetNomtHandle(string(n.namespace))
+	if err != nil {
+		return fmt.Errorf("failed to reset NOMT handle: %w", err)
+	}
+
+	// 3. Update handle and reset internal trie state under writerMu
+	n.writerMu.Lock()
+	n.handle = newHandle
+	n.wDirty = make(map[string]*nomtDirtyEntry)
+	n.wOldValues = make(map[string][]byte)
+	n.wOldLoaded = make(map[string]bool)
+	n.knownKeys = make(map[string][]byte)
+	for _, kv := range kvs {
+		n.knownKeys[hex.EncodeToString(kv[0])] = kv[0]
+	}
+	n.registryChanged = true
+
+	// Reset readView to empty state
+	n.readView.Store(&nomtReadView{
+		dirty:      make(map[string]*nomtDirtyEntry),
+		committing: nil,
+		rootHash:   e_common.Hash{},
+	})
+	n.writerMu.Unlock()
+
+	// 4. Save registry to file
+	n.persistRegistryToFile()
+
+	// 5. Populate keys/values into NOMT
+	if len(kvs) > 0 {
+		keys := make([][]byte, len(kvs))
+		values := make([][]byte, len(kvs))
+		for i, kv := range kvs {
+			keys[i] = kv[0]
+			values[i] = kv[1]
+		}
+
+		// BatchUpdate will acquire n.writerMu
+		if err := n.BatchUpdate(keys, values); err != nil {
+			return fmt.Errorf("failed to batch update in rebuilt trie: %w", err)
+		}
+
+		newRoot, _, _, err := n.Commit(true)
+		if err != nil {
+			return fmt.Errorf("failed to commit rebuilt trie: %w", err)
+		}
+
+		if err := n.CommitPayload(); err != nil {
+			return fmt.Errorf("failed to commit payload for rebuilt trie: %w", err)
+		}
+
+		if newRoot != expectedRoot {
+			logger.Error("🚨 [NOMT-ALIGN-REBUILD] CRITICAL: Rebuilt NOMT root %s still differs from expected root %s!",
+				newRoot.Hex()[:18], expectedRoot.Hex()[:18])
+			return fmt.Errorf("rebuilt root mismatch: got %s, expected %s", newRoot.Hex(), expectedRoot.Hex())
+		}
+		logger.Info("✅ [NOMT-ALIGN-REBUILD] Rebuilt NOMT successfully aligned to expected root: %s", expectedRoot.Hex()[:18])
+	} else {
+		// Empty database
+		n.writerMu.Lock()
+		n.publishReadView(make(map[string]*nomtDirtyEntry), nil, e_common.Hash{})
+		n.writerMu.Unlock()
+		if expectedRoot != (e_common.Hash{}) && expectedRoot != EmptyRootHash {
+			return fmt.Errorf("expected non-empty root %s but storage has 0 keys", expectedRoot.Hex())
+		}
+		logger.Info("✅ [NOMT-ALIGN-REBUILD] Wiped NOMT successfully aligned to empty root")
+	}
+
+	return nil
+}
+
+
 // Commit finalizes changes: writes all dirty entries to NOMT via batch session.
 // Returns (rootHash, nil, nil, nil) — NOMT handles its own node management internally.
 //

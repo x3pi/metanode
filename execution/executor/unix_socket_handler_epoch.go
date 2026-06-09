@@ -819,14 +819,18 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// Realign account state trie block-by-block
 				if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
 					if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-						nomtTrie.RealignRoot(newAccountRoot)
+						if err := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), newAccountRoot); err != nil {
+							logger.Error("❌ [NOMT-SYNC-REALIGN] Failed to align account NOMT for block #%d: %v", blockNum, err)
+						}
 						asDB.SetOriginRootHash(newAccountRoot)
 					}
 				}
 				// Realign stake state trie block-by-block
 				if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
 					if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-						nomtTrie.RealignRoot(newStakeRoot)
+						if err := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), newStakeRoot); err != nil {
+							logger.Error("❌ [NOMT-SYNC-REALIGN] Failed to align stake NOMT for block #%d: %v", blockNum, err)
+						}
 						stakeDB.SetOriginRootHash(newStakeRoot)
 					}
 				}
