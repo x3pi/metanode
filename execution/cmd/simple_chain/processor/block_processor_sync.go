@@ -83,6 +83,21 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			if lastBlock != nil {
 				parentStatesRoot := lastBlock.Header().AccountStatesRoot()
 				if nomtRoot != parentStatesRoot {
+					// Wait for any pending async NOMT commits to complete to resolve transient mismatches
+					if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
+						if nomtTrie, ok := bp.chainState.GetAccountStateDB().Trie().(*trie.NomtStateTrie); ok {
+							logger.Info("⏳ [NOMT-SYNC-RECOVERY] Waiting for pending async commits before verifying NOMT root alignment...")
+							if err := nomtTrie.WaitCommitPayload(); err != nil {
+								logger.Error("❌ [NOMT-SYNC-RECOVERY] WaitCommitPayload failed: %v", err)
+							}
+							if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+								nomtRoot = updatedNomtRoot
+							}
+						}
+					}
+				}
+
+				if nomtRoot != parentStatesRoot {
 					lastNomtCommitted := storage.GetLastNomtCommittedBlock()
 					if lastNomtCommitted == incomingBlockNum {
 						nomtAheadReplay = true
@@ -871,6 +886,21 @@ PROCESS_BLOCK:
 	if globalExecIndex > 0 && trie.GetStateBackend() == trie.BackendNOMT {
 		nomtRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
 		trieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
+		if hasNomtRoot && nomtRoot != trieRoot {
+			// Wait for any pending async NOMT commits to complete to resolve transient mismatches
+			if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
+				if nomtTrie, ok := bp.chainState.GetAccountStateDB().Trie().(*trie.NomtStateTrie); ok {
+					logger.Info("⏳ [FORK-PREVENTION] Waiting for pending async commits before verifying NOMT root alignment...")
+					if err := nomtTrie.WaitCommitPayload(); err != nil {
+						logger.Error("❌ [FORK-PREVENTION] WaitCommitPayload failed: %v", err)
+					}
+					if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						nomtRoot = updatedNomtRoot
+					}
+				}
+			}
+		}
+
 		if hasNomtRoot && nomtRoot != trieRoot {
 			logger.Error("🚨 [FORK-PREVENTION] NOMT handle root DIFFERS from trie root BEFORE processing block #%d! "+
 				"nomtRoot=%s, trieRoot=%s. Forcing trie re-alignment...",
