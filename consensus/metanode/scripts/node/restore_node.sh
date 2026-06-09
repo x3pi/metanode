@@ -463,7 +463,14 @@ done
 if [ "$SYNCED" = true ]; then
     echo -e "  ${GREEN}✅ Node $NODE_ID đã đồng bộ thành công!${NC}"
 else
-    echo -e "  ${YELLOW}⚠️  Hết 120s giám sát. Kiểm tra logs để xác nhận trạng thái sync.${NC}"
+    echo -e "  ${RED}❌ Hết 120s giám sát. Node $NODE_ID khởi động thất bại hoặc chưa online RPC!${NC}"
+    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI (Go Master & Rust) ---${NC}"
+    echo -e "${CYAN}=== Go Master logs (last 50 lines) ===${NC}"
+    tail -n 50 "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null || true
+    echo -e "${CYAN}=== Rust Consensus logs (last 50 lines) ===${NC}"
+    tail -n 50 "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null || true
+    echo -e "${YELLOW}🔍 ---------------------------------------------${NC}"
+    exit 1
 fi
 
 # Step 7: Hash Check

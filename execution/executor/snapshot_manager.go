@@ -151,7 +151,7 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"other",
 		},
 		pebbleDBDirs: []string{
-			"../../back_up/backup_db",
+			"../../back_up/consensus/backup_db",
 			"../../back_up_write",
 			"../../data-write",
 		},
