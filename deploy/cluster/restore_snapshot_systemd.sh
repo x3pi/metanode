@@ -296,7 +296,7 @@ for item in "$SNAP_SRC_DIR"/*; do
         elif [ "$name" = "history" ]; then
             echo -e "    📦 Khôi phục history directory directly..."
             cp -a "$item"/* "${INSTALL_DIR}/data/execution/db/history/" 2>/dev/null || true
-        elif [ "$name" = "nomt_db" ] || [ "$name" = "smart_contract_code" ] || [ "$name" = "smart_contract_storage" ] || [ "$name" = "backup_device_key_storage" ] || [ "$name" = "xapian" ] || [ "$name" = "xapian_node" ] || [ "$name" = "account_state" ] || [ "$name" = "stake_db" ] || [ "$name" = "trie_database" ]; then
+        elif [ "$name" = "nomt_db" ] || [ "$name" = "smart_contract_code" ] || [ "$name" = "smart_contract_storage" ] || [ "$name" = "backup_device_key_storage" ] || [ "$name" = "xapian" ] || [ "$name" = "account_state" ] || [ "$name" = "stake_db" ] || [ "$name" = "trie_database" ] || [ "$name" = "backup_db" ]; then
             echo -e "    📦 Khôi phục consensus database: ${name} -> consensus/${name}..."
             cp -a "$item" "${INSTALL_DIR}/data/execution/db/consensus/"
         elif [ "$name" = "other" ]; then
@@ -310,7 +310,7 @@ for item in "$SNAP_SRC_DIR"/*; do
 done
 
 # 🚨 CRITICAL: Xóa thư mục rust_consensus từ snapshot (nếu có) để tránh split-brain
-rm -rf "${INSTALL_DIR}/data/execution/db/rust_consensus" 2>/dev/null || true
+rm -rf "${INSTALL_DIR}/data/execution/db/consensus/rust_consensus" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Đã xóa rust_consensus cũ để ép node chạy Bootstrapping sạch${NC}"
 
 # 5c. Khôi phục metadata.json

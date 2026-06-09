@@ -65,9 +65,10 @@ func (app *App) initBlockchain() error {
 		// can't just check directory existence. SST files only exist when actual
 		// data has been committed and flushed to disk.
 		// ═══════════════════════════════════════════════════════════════════
+		// FIX: Correctly check for SST files in history/blocks instead of just /blocks
 		dataDir := app.config.Databases.RootPath
-		blocksPath := dataDir + "/blocks"
-		metadataPath := dataDir + "/metadata.json"
+		blocksPath := filepath.Join(dataDir, "history", "blocks")
+		metadataPath := filepath.Join(dataDir, "metadata.json")
 		hasExistingData := false
 
 		// Check if any shard in blocks has SST files
@@ -77,7 +78,7 @@ func (app *App) initBlockchain() error {
 				if !entry.IsDir() {
 					continue
 				}
-				shardPath := blocksPath + "/" + entry.Name()
+				shardPath := filepath.Join(blocksPath, entry.Name())
 				shardEntries, _ := os.ReadDir(shardPath)
 				for _, se := range shardEntries {
 					if strings.HasSuffix(se.Name(), ".sst") {
