@@ -164,6 +164,10 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerLegacyTx.V = v
 			innerLegacyTx.R = r
 			innerLegacyTx.S = s
+		} else {
+			innerLegacyTx.V = big.NewInt(0)
+			innerLegacyTx.R = big.NewInt(0)
+			innerLegacyTx.S = big.NewInt(0)
 		}
 		// Return pointer directly from NewTx
 		res = e_types.NewTx(innerLegacyTx)
@@ -207,6 +211,10 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerAccessListTx.V = v
 			innerAccessListTx.R = r
 			innerAccessListTx.S = s
+		} else {
+			innerAccessListTx.V = big.NewInt(0)
+			innerAccessListTx.R = big.NewInt(0)
+			innerAccessListTx.S = big.NewInt(0)
 		}
 		// SỬA: Trả về con trỏ trực tiếp từ NewTx
 		res = e_types.NewTx(innerAccessListTx)
@@ -254,6 +262,10 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerDynamicFeeTx.V = v
 			innerDynamicFeeTx.R = r
 			innerDynamicFeeTx.S = s
+		} else {
+			innerDynamicFeeTx.V = big.NewInt(0)
+			innerDynamicFeeTx.R = big.NewInt(0)
+			innerDynamicFeeTx.S = big.NewInt(0)
 		}
 		res = e_types.NewTx(innerDynamicFeeTx)
 	default:

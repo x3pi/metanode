@@ -429,3 +429,55 @@ func copyDirFallback(src, dst string) error {
 	}
 	return nil
 }
+
+var (
+	emptyNomtRoots   = make(map[string]e_common.Hash)
+	emptyNomtRootsMu sync.RWMutex
+)
+
+// GetEmptyNomtRoot dynamically determines the empty NOMT root hash for a given database configuration.
+// It opens a temporary NOMT database, queries its initial root, and caches the result.
+func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
+	key := fmt.Sprintf("%d_%t", hashtableBuckets, preallocate)
+	
+	emptyNomtRootsMu.RLock()
+	root, exists := emptyNomtRoots[key]
+	emptyNomtRootsMu.RUnlock()
+	if exists {
+		return root
+	}
+
+	emptyNomtRootsMu.Lock()
+	defer emptyNomtRootsMu.Unlock()
+	
+	// Double-check
+	if root, exists = emptyNomtRoots[key]; exists {
+		return root
+	}
+
+	tempDir, err := os.MkdirTemp("", "empty_nomt_" + key)
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to create temp directory for EmptyNomtRoot check (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+	defer os.RemoveAll(tempDir)
+
+	handle, err := nomt_ffi.Open(tempDir, 1, 0, 0, hashtableBuckets, preallocate)
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to open temp NOMT for EmptyNomtRoot check (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+	defer handle.Close()
+
+	rootBytes, err := handle.Root()
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to get root of empty temp NOMT (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+
+	res := e_common.BytesToHash(rootBytes[:])
+	emptyNomtRoots[key] = res
+	logger.Info("🎯 [TRIE] Dynamically determined EmptyNomtRoot for config %s: %s", key, res.Hex())
+	return res
+}
+

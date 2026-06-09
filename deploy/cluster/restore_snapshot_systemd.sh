@@ -241,10 +241,10 @@ if [ "$HTTP_CODE" = "200" ]; then
     }
     echo -e "${CYAN}  📦 Đang giải nén Tarball trực tiếp...${NC}"
     
-    tar -xf "$TAR_FILE" -C "$TEMP_SNAP" 2>/dev/null || {
+    tar -Sxf "$TAR_FILE" -C "$TEMP_SNAP" 2>/dev/null || {
         echo -e "${YELLOW}  ⚠️ Giải nén lỗi, thử giải nén ra thư mục tạm...${NC}"
         mkdir -p "/tmp/extract_$$"
-        tar -xf "$TAR_FILE" -C "/tmp/extract_$$"
+        tar -Sxf "$TAR_FILE" -C "/tmp/extract_$$"
         mv "/tmp/extract_$$/$SNAP_NAME" "$TEMP_SNAP/"
         rm -rf "/tmp/extract_$$"
     }

@@ -366,13 +366,18 @@ func (app *App) initBlockchain() error {
 						headerStakeRoot.Hex()[:18]+"...")
 				}
 
-				EmptyNomtRoot := e_common.HexToHash("0x59244d688eccda45a938566777f742597e2a84ea7bb048c209a52ac89b3fcf0e")
-				isEmptyNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == EmptyNomtRoot)
+				emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
+				emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
 
-				if isEmptyNomt && headerAccountRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=%s) but header expects %s. "+
+				isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
+				isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
+				isEmptyNomt := isEmptyAccountNomt || isEmptyStakeNomt
+
+
+				if isEmptyNomt && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
+					logger.Warn("⚠️ [STARTUP] NOMT database is EMPTY (account=%s, stake=%s) but header expects (account=%s, stake=%s). "+
 						"Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.",
-						nomtAccountRoot.Hex(), headerAccountRoot.Hex()[:18]+"...")
+						nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
 					
 					// Load block 0 (genesis) from block database
 					key := []byte("blockNumber_0")
