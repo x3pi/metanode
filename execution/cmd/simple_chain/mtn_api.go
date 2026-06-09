@@ -232,23 +232,6 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 		}
 	}()
 
-	var isLatest bool
-	if blockNr, ok := blockNrOrHash.Number(); ok {
-		if blockNr == rpc.LatestBlockNumber || blockNr == rpc.PendingBlockNumber {
-			isLatest = true
-		}
-	}
-
-	if !isLatest {
-		stateRoot, err := api.resolveStateRoot(ctx, blockNrOrHash)
-		if err == nil {
-			cacheKey := stateRoot.Hex() + ":" + strings.ToLower(address.Hex())
-			if cached, ok := api.accountStateCache.Get(cacheKey); ok {
-				return cloneAccountStateMap(cached), nil
-			}
-		}
-	}
-
 	// Use unified historical state resolution from ethApi which correctly supports NOMT's StateChangelogDB
 	as, err := api.ethApi.resolveAccountState(ctx, address, blockNrOrHash)
 	if err != nil {
@@ -297,11 +280,6 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 		"smartContractState": smartContractState,
 	}
 
-	if !isLatest {
-		stateRoot, _ := api.resolveStateRoot(ctx, blockNrOrHash)
-		cacheKey := stateRoot.Hex() + ":" + strings.ToLower(address.Hex())
-		api.accountStateCache.Add(cacheKey, account)
-	}
 	return cloneAccountStateMap(account), nil
 }
 
