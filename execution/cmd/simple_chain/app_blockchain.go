@@ -414,8 +414,16 @@ func (app *App) initBlockchain() error {
 
 				isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
 				isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
-				isEmptyNomt := isEmptyAccountNomt || isEmptyStakeNomt
+				
+				// CRITICAL FIX: Only treat the database as EMPTY (triggering genesis alignment)
+				// if the account state NOMT itself is empty. If only the stake DB is empty but the 
+				// account state is intact, resetting the block tip to 0 while leaving the active 
+				// account trie at block N causes an integrity mismatch and a fatal crash.
+				isEmptyNomt := isEmptyAccountNomt
 
+				if isEmptyStakeNomt && !isEmptyAccountNomt {
+					logger.Warn("⚠️ [STARTUP] NOMT stake_db is empty, but account_state is active. Proceeding without genesis alignment.")
+				}
 
 				if isEmptyNomt && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
 					logger.Warn("⚠️ [STARTUP] NOMT database is EMPTY (account=%s, stake=%s) but header expects (account=%s, stake=%s). "+
@@ -1276,6 +1284,10 @@ func (app *App) repopulateGenesisState() error {
 	}
 
 	logger.Info("Committing stake state...")
+	if _, err := cs.IntermediateRoot(true); err != nil {
+		logger.Error("Failed to calculate intermediate root for stake state: %v", err)
+		return err
+	}
 	_, commitErr := cs.Commit()
 	if commitErr != nil {
 		logger.Error("Failed to commit stake state: %v", commitErr)
