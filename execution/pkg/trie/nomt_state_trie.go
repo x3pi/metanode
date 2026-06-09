@@ -1470,8 +1470,12 @@ func (p *NomtPayload) CommitAsync() {
 		return
 	}
 
+	// CRITICAL FIX: Acquire LockCommitPayload synchronously before spawning the background
+	// goroutine. This prevents the race condition where WaitCommitPayload() returns
+	// prematurely because the goroutine hasn't started yet.
+	p.trie.handle.LockCommitPayload()
+
 	go func() {
-		p.trie.handle.LockCommitPayload()
 		defer p.trie.handle.UnlockCommitPayload()
 
 		if p.fs != nil {

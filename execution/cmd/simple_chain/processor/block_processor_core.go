@@ -894,7 +894,29 @@ func (bp *BlockProcessor) WaitForPersistence() {
 		bp.commitChannel <- CommitJob{DoneChan: commitDone}
 		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...")
 		<-commitDone
-		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE. Starting backupDbWg.Wait()...")
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE.")
+
+		// CRITICAL FIX: Wait for NOMT Async commits to finish!
+		// Even though commitWorker is done, it spawns a background goroutine for
+		// payload.CommitAsync() which flushes NOMT data to disk. We MUST wait for
+		// it to finish before allowing the snapshot to proceed, otherwise the
+		// snapshot captures an incomplete NOMT state, causing a StateRoot mismatch!
+		if bp.chainState != nil {
+			logger.Info("⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...")
+			if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
+				if trie, ok := accDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					trie.WaitCommitPayload()
+				}
+			}
+			if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
+				if trie, ok := stakeDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					trie.WaitCommitPayload()
+				}
+			}
+			logger.Info("⏳ [PERSIST] WaitForPersistence: NOMT async commits DONE.")
+		}
+
+		logger.Info("⏳ [PERSIST] WaitForPersistence: Starting backupDbWg.Wait()...")
 
 		// 2. Wait for background persistence (FlushAll + BackupDb)
 		bp.backupDbWg.Wait()
