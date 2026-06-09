@@ -43,6 +43,18 @@ func (app *App) initBlockchain() error {
 	}
 	blockDatabase.SetBackupDir(backupDir)
 
+	// Attempt to load metadata.json early so it can be used for verification and bypass decisions
+	var metadata *executor.SnapshotMetadata
+	metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
+	if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
+		var md executor.SnapshotMetadata
+		if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
+			metadata = &md
+			logger.Info("📸 [STARTUP-METADATA] Pre-loaded metadata.json: Block=%d, GEI=%d, StateRoot=%s",
+				md.BlockNumber, md.GlobalExecIndex, md.StateRoot)
+		}
+	}
+
 	app.transactionPool = transaction_pool.NewTransactionPool()
 
 	// Set up event system
@@ -425,6 +437,22 @@ func (app *App) initBlockchain() error {
 					logger.Warn("⚠️ [STARTUP] NOMT stake_db is empty, but account_state is active. Proceeding without genesis alignment.")
 				}
 
+				isSnapshotRecovery := false
+				if metadata != nil && metadata.StateRoot != "" {
+					nomtRootHex := nomtAccountRoot.Hex()
+					metadataRootHex := metadata.StateRoot
+					if !strings.HasPrefix(nomtRootHex, "0x") {
+						nomtRootHex = "0x" + nomtRootHex
+					}
+					if !strings.HasPrefix(metadataRootHex, "0x") {
+						metadataRootHex = "0x" + metadataRootHex
+					}
+					if strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+						isSnapshotRecovery = true
+						logger.Info("📸 [STARTUP] NOMT root matches snapshot metadata StateRoot (%s). Bypassing Early Root Mismatch check.", metadata.StateRoot)
+					}
+				}
+
 				if isEmptyNomt && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
 					logger.Warn("⚠️ [STARTUP] NOMT database is EMPTY (account=%s, stake=%s) but header expects (account=%s, stake=%s). "+
 						"Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.",
@@ -449,7 +477,7 @@ func (app *App) initBlockchain() error {
 					} else {
 						logger.Error("❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: %v", err)
 					}
-				} else if (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
+				} else if !isSnapshotRecovery && (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
 					logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
 						nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 
@@ -662,18 +690,7 @@ SKIP_GENESIS:
 			logger.Warn("⚠️ [STARTUP] stake_db NOMT handle not initialized, cannot verify StakeStatesRoot")
 		}
 
-		// Attempt to load metadata.json
-		metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
-		var metadata *executor.SnapshotMetadata
-
-		if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
-			var md executor.SnapshotMetadata
-			if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
-				metadata = &md
-				logger.Info("📸 [SNAPSHOT FIX] Loaded metadata.json: Block=%d, GEI=%d, StateRoot=%s",
-					md.BlockNumber, md.GlobalExecIndex, md.StateRoot)
-			}
-		}
+		// metadata.json is already pre-loaded at the start of initBlockchain
 
 		if nomtRoot != (e_common.Hash{}) {
 			if metadata != nil && metadata.StateRoot != "" {
