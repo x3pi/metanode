@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -370,7 +371,7 @@ var storageTypeToDirName = map[StorageType]string{
 	STORAGE_STAKE:             "stake_db",
 	STORAGE_DATABASE_TRIE:     "trie_database",
 	STORAGE_BACKUP_DEVICE_KEY: "backup_device_key_storage",
-	STORAGE_BACKUP_DB:         "back_up/backup_db",
+	STORAGE_BACKUP_DB:         "back_up/consensus/backup_db",
 }
 
 // CheckpointAll creates atomic PebbleDB checkpoints for all databases to destBaseDir.
@@ -405,6 +406,11 @@ func (sm *StorageManager) CheckpointAll(destBaseDir string) error {
 		}
 
 		destDir := destBaseDir + "/" + dirName
+		// Ensure parent directories exist (e.g. back_up/consensus)
+		if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+			checkpointErrs = append(checkpointErrs, fmt.Errorf("%s: failed to create parent dir: %w", dbType.String(), err))
+			continue
+		}
 		if err := shardelDB.Checkpoint(destDir); err != nil {
 			checkpointErrs = append(checkpointErrs, errors.New(dbType.String()+": "+err.Error()))
 		}

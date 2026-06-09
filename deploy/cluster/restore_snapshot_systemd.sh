@@ -409,6 +409,12 @@ if [ "$SYNCED" = true ]; then
     echo -e "  ${GREEN}✅ Node $NODE_ID đã khởi động thành công và online!${NC}"
 else
     echo -e "  ${RED}❌ Node $NODE_ID khởi động thất bại hoặc RPC không phản hồi sau 120s.${NC}"
+    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI SYSTEMD (Execution & Consensus) ---${NC}"
+    echo -e "${CYAN}=== metanode-execution-${NODE_ID} logs (last 50 lines) ===${NC}"
+    journalctl -u "$svc_exec" -n 50 --no-pager || true
+    echo -e "${CYAN}=== metanode-consensus-${NODE_ID} logs (last 50 lines) ===${NC}"
+    journalctl -u "$svc_cons" -n 50 --no-pager || true
+    echo -e "${YELLOW}🔍 ---------------------------------------------------------${NC}"
     exit 1
 fi
 
