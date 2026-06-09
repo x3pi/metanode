@@ -293,6 +293,56 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	return newHandle, nil
 }
 
+// ResetNomtHandle closes, wipes the files, and re-opens a fresh NOMT database for the namespace.
+func ResetNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
+	globalNomtHandlesMu.Lock()
+	defer globalNomtHandlesMu.Unlock()
+
+	handle, exists := globalNomtHandles[namespace]
+	if exists && handle != nil {
+		logger.Info("[TRIE] Closing NOMT handle for namespace %s to reset", namespace)
+		handle.Close()
+		delete(globalNomtHandles, namespace)
+	}
+
+	dbPath := filepath.Join(globalNomtConfig.basePath, namespace)
+	// Wipe directory
+	if err := os.RemoveAll(dbPath); err != nil {
+		logger.Error("❌ [TRIE] Failed to wipe NOMT database directory at %s: %v", dbPath, err)
+		return nil, err
+	}
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create NOMT directory: %w", err)
+	}
+
+	// Reopen handle using the same options as GetOrInitNomtHandle
+	pageCache := globalNomtConfig.pageCacheMB
+	leafCache := globalNomtConfig.leafCacheMB
+	if namespace != "account_state" && namespace != "smart_contract_storage" {
+		if pageCache > 64 {
+			pageCache = 64
+		}
+		if leafCache > 64 {
+			leafCache = 64
+		}
+	}
+	hashtableBuckets := 64000
+	preallocate := true
+	if namespace == "account_state" || namespace == "smart_contract_storage" {
+		hashtableBuckets = 10000000
+		preallocate = false
+	}
+
+	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache, hashtableBuckets, preallocate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reopen NOMT database at %s: %w", dbPath, err)
+	}
+
+	globalNomtHandles[namespace] = newHandle
+	return newHandle, nil
+}
+
+
 // SnapshotAllNomtDBs coordinates taking a snapshot of all active NOMT databases.
 // Uses the Checkpoint API to copy files while the database remains OPEN —
 // no Close/Reopen needed, eliminating ~700ms overhead and os error 11 lock issues.
