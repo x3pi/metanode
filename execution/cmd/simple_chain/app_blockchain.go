@@ -23,7 +23,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
+
 
 // initBlockchain initializes blockchain-related components
 func (app *App) initBlockchain() error {
@@ -153,26 +155,39 @@ func (app *App) initBlockchain() error {
 							}
 
 							// Re-initialize startLastBlock to genesis block 0
-							app.startLastBlock = block.NewBlock(
-								block.NewBlockHeader(
-									e_common.Hash{},
-									0,
-									trie.EmptyRootHash,
-									e_common.Hash{},
-									e_common.Hash{},
-									e_common.Address{},
-									app.genesis.Config.EpochTimestampMs,
-									trie.EmptyRootHash,
-									0,
-								),
-								nil,
-								nil,
-							)
-							storage.ForceSetLastBlockNumber(0)
+							var blk0 types.Block
+							key := []byte("blockNumber_0")
+							if data, err := app.storageManager.GetStorageMapping().Get(key); err == nil && data != nil && len(data) == 32 {
+								blockHash := e_common.BytesToHash(data)
+								if b, err := blockDatabase.GetBlockByHash(blockHash); err == nil && b != nil {
+									blk0 = b
+								}
+							}
+							if blk0 != nil {
+								logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0 in metadata recovery reset.")
+								app.startLastBlock = blk0
+							} else {
+								// Fallback to dummy genesis block if not found
+								app.startLastBlock = block.NewBlock(
+									block.NewBlockHeader(
+										e_common.Hash{},
+										0,
+										trie.EmptyRootHash,
+										e_common.Hash{},
+										e_common.Hash{},
+										e_common.Address{},
+										app.genesis.Config.EpochTimestampMs,
+										trie.EmptyRootHash,
+										0,
+									),
+									nil,
+									nil,
+								)
+							}
+							storage.ResetAllBlockCounters(0)
 							storage.ForceSetLastGlobalExecIndex(0)
 							storage.ForceSetLastHandledCommitIndex(0)
 							storage.UpdateLastHandledCommitEpoch(0)
-							storage.UpdateLastBlockNumber(0)
 						}
 					}
 
@@ -415,13 +430,10 @@ func (app *App) initBlockchain() error {
 						if err == nil && blk0 != nil {
 							logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
 							app.startLastBlock = blk0
-							storage.ForceSetLastBlockNumber(0)
+							storage.ResetAllBlockCounters(0)
 							storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
 							storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
 							storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
-							
-							// Also reset the last block number in backup db or storage if needed
-							storage.UpdateLastBlockNumber(0)
 						} else {
 							logger.Error("❌ [STARTUP] Failed to load genesis block by hash %s: %v", blockHash.Hex(), err)
 						}
@@ -483,11 +495,10 @@ func (app *App) initBlockchain() error {
 								if err == nil && blk0 != nil {
 									logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
 									app.startLastBlock = blk0
-									storage.ForceSetLastBlockNumber(0)
+									storage.ResetAllBlockCounters(0)
 									storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
 									storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
 									storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
-									storage.UpdateLastBlockNumber(0)
 								} else {
 									logger.Fatal("🚨 [STARTUP] CRITICAL: Failed to load genesis block #0 by hash %s: %v", blockHash.Hex(), err)
 								}
@@ -506,6 +517,22 @@ func (app *App) initBlockchain() error {
 		app.chainState, err = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
 		if err != nil {
 			return fmt.Errorf("failed NewChainState: %v", err)
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// REPOPULATE GENESIS STATE FOR WIPED NOMT (May 2026):
+		// If NOMT was wiped and tip block reset to 0, NOMT is empty.
+		// We must repopulate genesis allocations and validators into NOMT,
+		// otherwise integrity checks and subsequent execution will fail.
+		// ═══════════════════════════════════════════════════════════════
+		if trie.GetStateBackend() == trie.BackendNOMT && app.startLastBlock.Header().BlockNumber() == 0 {
+			nomtAccountRoot, okAccount := trie.GetNomtHandleRoot("account_state")
+			headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
+			if okAccount && nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
+				if err := app.repopulateGenesisState(); err != nil {
+					return fmt.Errorf("failed to repopulate genesis state: %v", err)
+				}
+			}
 		}
 
 		if futureNomtRoot != (e_common.Hash{}) {
@@ -1104,3 +1131,157 @@ func (app *App) loadFreeFeeAddresses() {
 		fatal.Exit("FreeFeeAddresses in config.json is not an array")
 	}
 }
+
+// repopulateGenesisState populates genesis accounts, validators, and stakes into a wiped NOMT database.
+// This is used to reconstruct the state at block 0 when NOMT is wiped during startup recovery.
+func (app *App) repopulateGenesisState() error {
+	logger.Info("⏳ [STARTUP] Repopulating genesis allocations and validators in the wiped NOMT database...")
+
+	// 1. Set genesis accounts
+	addressMap := make(map[e_common.Address]bool)
+	for _, account := range app.genesis.Alloc {
+		a := account.ToAccountState()
+		if _, exists := addressMap[a.Address()]; exists {
+			logger.Error("Duplicate address found in genesis allocation: %s", a.Address())
+			return fmt.Errorf("duplicate address in genesis allocation: %s", a.Address().Hex())
+		}
+		addressMap[a.Address()] = true
+		a.PlusOneNonce()
+		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	// Commit account state changes
+	app.chainState.GetAccountStateDB().IntermediateRoot(true)
+	accountHash, err := app.chainState.GetAccountStateDB().Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit genesis state: %v", err)
+	}
+	logger.Info("✅ [STARTUP] Committed genesis account state root: %s", accountHash.Hex())
+
+	// Open and parse genesis JSON once for delegator stakes
+	genesisFile, err := os.Open(app.config.GenesisFilePath)
+	if err != nil {
+		logger.Error("Failed to open genesis file for delegator_stakes: %v", err)
+		return err
+	}
+	defer genesisFile.Close()
+
+	var genesisRaw map[string]interface{}
+	if err := json.NewDecoder(genesisFile).Decode(&genesisRaw); err != nil {
+		logger.Error("Failed to parse genesis JSON: %v", err)
+		return err
+	}
+
+	// 2. Register validators
+	cs := app.chainState.GetStakeStateDB()
+	logger.Info("Registering %d validators from genesis.json...", len(app.genesis.Validators))
+	for _, val := range app.genesis.Validators {
+		minSelfDelegation := new(big.Int)
+		minSelfDelegation, ok := minSelfDelegation.SetString(val.GetMinSelfDelegation(), 10)
+		if !ok {
+			return fmt.Errorf("invalid GetMinSelfDelegation value: %s", val.GetMinSelfDelegation())
+		}
+		name := val.GetHostname()
+		if name == "" {
+			name = val.GetName()
+		}
+		pubkeyBls := val.GetAuthorityKey()
+		if len(pubkeyBls) == 0 {
+			pubkeyBls = []byte(val.GetPubkeyBls())
+		}
+		pubkeySecp := val.GetProtocolKey()
+		if len(pubkeySecp) == 0 {
+			pubkeySecp = []byte(val.GetPubkeySecp())
+		}
+		networkKey := val.GetNetworkKey()
+		if len(networkKey) == 0 {
+			networkKey = pubkeySecp
+		}
+		validatorAddress := e_common.HexToAddress(val.GetAddress())
+
+		cs.CreateRegisterWithKeys(
+			validatorAddress,
+			name,
+			val.GetDescription(),
+			val.GetWebsite(),
+			val.GetImage(),
+			val.GetCommissionRate(),
+			minSelfDelegation,
+			val.GetPrimaryAddress(),
+			val.GetWorkerAddress(),
+			val.GetP2PAddress(),
+			hex.EncodeToString(pubkeyBls),
+			pubkeySecp,
+			networkKey,
+			name,
+			pubkeyBls,
+		)
+
+		// 3. Set initial stake from delegator_stakes in genesis.json
+		var delegatorStakesFromGenesis []map[string]interface{}
+		if validatorsRaw, ok := genesisRaw["validators"].([]interface{}); ok {
+			for _, valRaw := range validatorsRaw {
+				if valMap, ok := valRaw.(map[string]interface{}); ok {
+					if address, ok := valMap["address"].(string); ok && strings.EqualFold(address, validatorAddress.Hex()) {
+						if delegatorStakes, ok := valMap["delegator_stakes"].([]interface{}); ok {
+							for _, stakeRaw := range delegatorStakes {
+								if stakeMap, ok := stakeRaw.(map[string]interface{}); ok {
+									delegatorStakesFromGenesis = append(delegatorStakesFromGenesis, stakeMap)
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		delegators := delegatorStakesFromGenesis
+		logger.Info("Validator %s has %d delegators from genesis.json", validatorAddress.Hex(), len(delegators))
+
+		totalStakeFromGenesis := big.NewInt(0)
+		for i, delegatorStake := range delegators {
+			delegatorAddrStr, ok := delegatorStake["address"].(string)
+			if !ok {
+				logger.Error("Invalid delegator address format for validator %s", validatorAddress.Hex())
+				continue
+			}
+			delegatorAddress := e_common.HexToAddress(delegatorAddrStr)
+
+			amountStr, ok := delegatorStake["amount"].(string)
+			if !ok {
+				logger.Error("Invalid stake amount format for validator %s, delegator %s", validatorAddress.Hex(), delegatorAddress.Hex())
+				continue
+			}
+
+			stakeAmount := new(big.Int)
+			stakeAmount, ok = stakeAmount.SetString(amountStr, 10)
+			if !ok {
+				logger.Error("Invalid stake amount for validator %s, delegator %s: %s", validatorAddress.Hex(), delegatorAddress.Hex(), amountStr)
+				continue
+			}
+			if stakeAmount.Sign() <= 0 {
+				continue
+			}
+
+			totalStakeFromGenesis.Add(totalStakeFromGenesis, stakeAmount)
+			logger.Info("Delegator[%d] for validator %s: address=%s, amount=%s", i, validatorAddress.Hex(), delegatorAddress.Hex(), stakeAmount.String())
+
+			if err := cs.Delegate(validatorAddress, delegatorAddress, stakeAmount); err != nil {
+				logger.Error("Failed to delegate stake for validator %s, delegator %s: %v", validatorAddress.Hex(), delegatorAddress.Hex(), err)
+				return fmt.Errorf("failed to set initial stake for validator %s: %v", validatorAddress.Hex(), err)
+			}
+		}
+	}
+
+	logger.Info("Committing stake state...")
+	_, commitErr := cs.Commit()
+	if commitErr != nil {
+		logger.Error("Failed to commit stake state: %v", commitErr)
+		return commitErr
+	}
+	logger.Info("Stake state committed successfully in repopulate genesis.")
+
+	return nil
+}
+
