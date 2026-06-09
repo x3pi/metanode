@@ -235,10 +235,10 @@ if [ "$SNAP_MODE" = "network" ]; then
         mkdir -p "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}"
         
         # Giải nén
-        tar -xf "$TEMP_TAR" -C "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/" 2>/dev/null || {
+        tar -Sxf "$TEMP_TAR" -C "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/" 2>/dev/null || {
             # Nếu lệnh trên bị lỗi cấu trúc thư mục, giải nén ra tmp rồi di chuyển
             mkdir -p "/tmp/extract_$$"
-            tar -xf "$TEMP_TAR" -C "/tmp/extract_$$"
+            tar -Sxf "$TEMP_TAR" -C "/tmp/extract_$$"
             mv "/tmp/extract_$$/$SNAP_NAME" "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/"
             rm -rf "/tmp/extract_$$"
         }
