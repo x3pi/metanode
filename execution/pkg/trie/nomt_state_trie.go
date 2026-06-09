@@ -128,6 +128,9 @@ type NomtStateTrie struct {
 
 	// currentCommitBlock tracks the block number for the current commit
 	currentCommitBlock uint64
+
+	// commitWg waits for background CommitAsync operations
+	commitWg sync.WaitGroup
 }
 
 type nomtDirtyEntry struct {
@@ -1470,12 +1473,15 @@ func (p *NomtPayload) CommitAsync() {
 		return
 	}
 
-	// CRITICAL FIX: Acquire LockCommitPayload synchronously before spawning the background
-	// goroutine. This prevents the race condition where WaitCommitPayload() returns
-	// prematurely because the goroutine hasn't started yet.
-	p.trie.handle.LockCommitPayload()
+	// Add to WaitGroup to track this asynchronous task.
+	// This ensures WaitCommitPayload() blocks until all pending disk writes finish
+	// WITHOUT stalling the commitWorker synchronously.
+	p.trie.commitWg.Add(1)
 
 	go func() {
+		defer p.trie.commitWg.Done()
+		
+		p.trie.handle.LockCommitPayload()
 		defer p.trie.handle.UnlockCommitPayload()
 
 		if p.fs != nil {
@@ -1513,8 +1519,10 @@ func (n *NomtStateTrie) CommitPayloadAsync() {
 }
 
 func (n *NomtStateTrie) WaitCommitPayload() {
-	n.handle.LockCommitPayload()
-	n.handle.UnlockCommitPayload()
+	// Block until all background CommitAsync goroutines finish.
+	// This guarantees that all in-flight disk writes are fully flushed,
+	// which is required before triggering an atomic database snapshot.
+	n.commitWg.Wait()
 }
 
 // GetCommitBatch returns the entries from the last Commit for network replication.
