@@ -1238,6 +1238,7 @@ func (app *App) repopulateGenesisState() error {
 	if err != nil {
 		return fmt.Errorf("failed to commit genesis state: %v", err)
 	}
+	app.startLastBlock.Header().SetAccountStatesRoot(accountHash)
 	logger.Info("✅ [STARTUP] Committed genesis account state root: %s", accountHash.Hex())
 
 	// Open and parse genesis JSON once for delegator stakes
@@ -1361,12 +1362,19 @@ func (app *App) repopulateGenesisState() error {
 		logger.Error("Failed to calculate intermediate root for stake state: %v", err)
 		return err
 	}
-	_, commitErr := cs.Commit()
+	commitHash, commitErr := cs.Commit()
 	if commitErr != nil {
 		logger.Error("Failed to commit stake state: %v", commitErr)
 		return commitErr
 	}
+	app.startLastBlock.Header().SetStakeStatesRoot(commitHash)
 	logger.Info("Stake state committed successfully in repopulate genesis.")
+
+	// Update the genesis block in LevelDB so subsequent boots don't mismatch
+	if db := app.chainState.GetBlockDatabase(); db != nil {
+		db.SaveBlockByHash(app.startLastBlock)
+	}
+	app.storageManager.GetStorageMapping().Put([]byte("blockNumber_0"), app.startLastBlock.Header().Hash().Bytes())
 
 	return nil
 }
