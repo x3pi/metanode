@@ -269,8 +269,13 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	}
 
 	// Phase 2.4: Try to get historical state from StateChangelogDB
+	// CRITICAL FIX (Jun 2026): Use `<=` (not `<`) so that when the queried block equals the
+	// last committed block, we still use StateChangelogDB instead of the current in-memory
+	// NOMT state which may already be partially applying the next block.
+	// Off-by-one example: if lastBlock=38 and targetBlock=38, `38 < 38 = false` skips the
+	// changelog → falls through to live NOMT trie → returns state from block 39+ instead of 38.
 	changelogDB := api.App.chainState.GetChangelogDB()
-	isHistorical := foundBlockNumber && targetBlockNumber < storage.GetLastBlockNumber()
+	isHistorical := foundBlockNumber && targetBlockNumber <= storage.GetLastBlockNumber()
 	if changelogDB != nil && isHistorical {
 		logger.Info("🔍 [DEBUG-RPC] Resolving historical state for %x at block %d using StateChangelogDB", address.Bytes(), targetBlockNumber)
 		stateBytes, err := changelogDB.GetStateAt(address.Bytes(), targetBlockNumber)
