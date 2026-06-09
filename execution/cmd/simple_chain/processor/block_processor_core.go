@@ -905,12 +905,18 @@ func (bp *BlockProcessor) WaitForPersistence() {
 			logger.Info("⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...")
 			if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
 				if trie, ok := accDB.Trie().(*mt_trie.NomtStateTrie); ok {
-					trie.WaitCommitPayload()
+					if err := trie.WaitCommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] AccountStateDB WaitCommitPayload failed: %v", err)
+						panic(fmt.Sprintf("FATAL: AccountStateDB async commit failed: %v", err))
+					}
 				}
 			}
 			if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
 				if trie, ok := stakeDB.Trie().(*mt_trie.NomtStateTrie); ok {
-					trie.WaitCommitPayload()
+					if err := trie.WaitCommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: %v", err)
+						panic(fmt.Sprintf("FATAL: StakeStateDB async commit failed: %v", err))
+					}
 				}
 			}
 			logger.Info("⏳ [PERSIST] WaitForPersistence: NOMT async commits DONE.")

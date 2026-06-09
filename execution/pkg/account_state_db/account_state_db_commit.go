@@ -877,8 +877,10 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 				// reads from memory-mapped pages, ~5-10μs per read, ~5ms for 1000
 				// accounts. Negligible cost for absolute determinism guarantee.
 				// ═══════════════════════════════════════════════════════════════
-				nomtTrie.WaitCommitPayload()
-				if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
+				if err := nomtTrie.WaitCommitPayload(); err != nil {
+					logger.Error("WaitCommitPayload failed (NOMT): %v", err)
+					updateErr = fmt.Errorf("trie WaitCommitPayload error: %w", err)
+				} else if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
 					logger.Error("BatchUpdate (NOMT direct read) failed: %v", err)
 					updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 				}

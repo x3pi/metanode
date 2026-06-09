@@ -131,6 +131,9 @@ type NomtStateTrie struct {
 
 	// commitWg waits for background CommitAsync operations
 	commitWg sync.WaitGroup
+
+	// asyncErr stores any error that occurred during background commits
+	asyncErr atomic.Pointer[error]
 }
 
 type nomtDirtyEntry struct {
@@ -1428,6 +1431,17 @@ type NomtPayload struct {
 	changes       []state_changelog.StateChange
 	blockNum      uint64
 	committingMap interface{}
+	doneOnce      sync.Once
+}
+
+// Discard decrements the WaitGroup counter. Safe for concurrent/repeated calls.
+func (p *NomtPayload) Discard() {
+	if p == nil {
+		return
+	}
+	p.doneOnce.Do(func() {
+		p.trie.commitWg.Done()
+	})
 }
 
 // ExtractPendingPayload extracts the pending payload synchronously.
@@ -1448,13 +1462,21 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 		return nil
 	}
 
-	return &NomtPayload{
+	n.commitWg.Add(1)
+
+	payload := &NomtPayload{
 		trie:          n,
 		fs:            fs,
 		changes:       changes,
 		blockNum:      blockNum,
 		committingMap: committingMap,
 	}
+
+	runtime.SetFinalizer(payload, func(p *NomtPayload) {
+		p.Discard()
+	})
+
+	return payload
 }
 
 // WriteChangelog writes the changes to the StateChangelogDB synchronously.
@@ -1469,17 +1491,16 @@ func (p *NomtPayload) WriteChangelog() {
 
 // CommitAsync flushes the extracted payload to disk asynchronously in a background goroutine.
 func (p *NomtPayload) CommitAsync() {
-	if p == nil || (p.fs == nil && p.committingMap == nil) {
+	if p == nil {
+		return
+	}
+	if p.fs == nil && p.committingMap == nil {
+		p.Discard()
 		return
 	}
 
-	// Add to WaitGroup to track this asynchronous task.
-	// This ensures WaitCommitPayload() blocks until all pending disk writes finish
-	// WITHOUT stalling the commitWorker synchronously.
-	p.trie.commitWg.Add(1)
-
 	go func() {
-		defer p.trie.commitWg.Done()
+		defer p.Discard()
 		
 		p.trie.handle.LockCommitPayload()
 		defer p.trie.handle.UnlockCommitPayload()
@@ -1487,6 +1508,7 @@ func (p *NomtPayload) CommitAsync() {
 		if p.fs != nil {
 			if err := p.fs.CommitPayload(p.trie.handle); err != nil {
 				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
+				p.trie.setAsyncError(fmt.Errorf("background CommitPayload failed for block #%d: %w", p.blockNum, err))
 			}
 			if string(p.trie.namespace) == "account_state" && p.blockNum > 0 {
 				storage.UpdateLastNomtCommittedBlock(p.blockNum)
@@ -1518,11 +1540,27 @@ func (n *NomtStateTrie) CommitPayloadAsync() {
 	}
 }
 
-func (n *NomtStateTrie) WaitCommitPayload() {
+func (n *NomtStateTrie) setAsyncError(err error) {
+	if err == nil {
+		return
+	}
+	n.asyncErr.Store(&err)
+}
+
+func (n *NomtStateTrie) getAsyncError() error {
+	pErr := n.asyncErr.Load()
+	if pErr == nil {
+		return nil
+	}
+	return *pErr
+}
+
+func (n *NomtStateTrie) WaitCommitPayload() error {
 	// Block until all background CommitAsync goroutines finish.
 	// This guarantees that all in-flight disk writes are fully flushed,
 	// which is required before triggering an atomic database snapshot.
 	n.commitWg.Wait()
+	return n.getAsyncError()
 }
 
 // GetCommitBatch returns the entries from the last Commit for network replication.
