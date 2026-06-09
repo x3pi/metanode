@@ -197,7 +197,8 @@ rm -f "${INSTALL_DIR}/logs/consensus/consensus.log" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Đã xóa sạch dữ liệu cũ tại ${INSTALL_DIR}/data/${NC}"
 
 # Step 3: Tạo lại cấu trúc thư mục rỗng
-mkdir -p "${INSTALL_DIR}/data/execution/db"
+mkdir -p "${INSTALL_DIR}/data/execution/db/history"
+mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
 mkdir -p "${INSTALL_DIR}/data/execution/backup"
 mkdir -p "${INSTALL_DIR}/data/consensus"
 mkdir -p "${INSTALL_DIR}/logs/execution"
@@ -280,8 +281,7 @@ else
     echo -e "${YELLOW}  ⚠️ Không tìm thấy thư mục 'back_up' trong snapshot${NC}"
 fi
 
-# 5b. Copy các thư mục LevelDB/Nomt còn lại vào db
-mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+# 5b. Copy các thư mục LevelDB/Nomt còn lại vào db với đúng mapping history/consensus
 for item in "$SNAP_SRC_DIR"/*; do
     name=$(basename "$item")
     [ "$name" = "back_up" ] && continue
@@ -290,12 +290,21 @@ for item in "$SNAP_SRC_DIR"/*; do
     [ "$name" = "index.html" ] && continue
     
     if [ -d "$item" ]; then
-        if [[ "$name" == "nomt_db" || "$name" == "smart_contract_code" || "$name" == "smart_contract_storage" || "$name" == "stake_db" || "$name" == "trie_database" || "$name" == "backup_device_key_storage" || "$name" == "account_state" ]]; then
+        if [ "$name" = "blocks" ] || [ "$name" = "receipts" ] || [ "$name" = "transaction_state" ] || [ "$name" = "mapping" ] || [ "$name" = "changelog_db_account" ] || [ "$name" = "changelog_db_stake" ]; then
+            echo -e "    📦 Khôi phục history database: ${name} -> history/${name}..."
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/history/"
+        elif [ "$name" = "history" ]; then
+            echo -e "    📦 Khôi phục history directory directly..."
+            cp -a "$item"/* "${INSTALL_DIR}/data/execution/db/history/" 2>/dev/null || true
+        elif [ "$name" = "nomt_db" ] || [ "$name" = "smart_contract_code" ] || [ "$name" = "smart_contract_storage" ] || [ "$name" = "backup_device_key_storage" ] || [ "$name" = "xapian" ] || [ "$name" = "xapian_node" ]; then
+            echo -e "    📦 Khôi phục consensus database: ${name} -> consensus/${name}..."
             cp -a "$item" "${INSTALL_DIR}/data/execution/db/consensus/"
-            echo -e "${GREEN}    + Khôi phục: consensus/${name}/${NC}"
-        else
+        elif [ "$name" = "other" ]; then
+            echo -e "    📦 Khôi phục explorer database: other -> other..."
             cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
-            echo -e "${GREEN}    + Khôi phục: ${name}/${NC}"
+        else
+            echo -e "    📦 Khôi phục other data folder: ${name} -> db/${name}..."
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
         fi
     fi
 done
