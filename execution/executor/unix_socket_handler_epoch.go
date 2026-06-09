@@ -503,22 +503,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						isFullyExecuted = false
 					} else {
 						// ═══════════════════════════════════════════════════════════
-						// FORK-SAFE (May 2026): DO NOT wipe DB or os.Exit on hash mismatch!
+						// FORK-SAFE (June 2026): Force execution on hash mismatch!
 						//
-						// During high-load sync, hash mismatches can occur transiently
-						// when a node receives blocks from a peer that decided a different
-						// leader (before digest-gate corrects it). Killing the node here
-						// causes cascading quorum loss → total cluster stall.
+						// If we `continue` (skip) here, the local database retains the WRONG block.
+						// Then, the NEXT block in the sync batch will immediately fail the
+						// `parent-hash mismatch` check because its parent is the correct block,
+						// but our local DB has the wrong block. This causes a permanent sync stall!
 						//
-						// Instead: SKIP this block entirely. The node continues processing
-						// and will receive the correct block via consensus commit path.
-						// This follows the mandate: "thà pending chứ không fork" —
-						// better to pend than to fork.
+						// By setting `isFullyExecuted = false`, we FORCE execution of the peer's
+						// block, overwriting our local stale block. This allows the node to 
+						// correctly align with the consensus chain.
 						// ═══════════════════════════════════════════════════════════
-						logger.Error("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
-							"SKIPPING this block (not wiping DB). Node will recover via consensus.",
+						logger.Warn("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
+							"FORCING execution/overwrite of this block to resolve local fork.",
 							blockNum, localHash[:8], blockHash[:8])
-						continue // Skip this block, process next one
+						isFullyExecuted = false // Overwrite local stale block
 					}
 				}
 			}
