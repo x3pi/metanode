@@ -410,22 +410,22 @@ func (app *App) initBlockchain() error {
 				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s | stake_db NOMT root=%s, header StakeStatesRoot=%s",
 					nomtAccountRoot.Hex(), headerAccountRoot.Hex(), nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 
-				if nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0) but header expects %s. "+
-						"STARTUP-SYNC will fetch missing blocks and reconcile.",
-						headerAccountRoot.Hex()[:18]+"...")
-				}
-				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0) but header expects %s. "+
-						"STARTUP-SYNC will fetch missing blocks and reconcile.",
-						headerStakeRoot.Hex()[:18]+"...")
-				}
-
 				emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
 				emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
 
 				isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
 				isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
+
+				if isEmptyAccountNomt && headerAccountRoot != (e_common.Hash{}) && headerAccountRoot != emptyAccountRoot && headerAccountRoot != emptyStakeRoot {
+					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=%s) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						nomtAccountRoot.Hex()[:18]+"...", headerAccountRoot.Hex()[:18]+"...")
+				}
+				if isEmptyStakeNomt && headerStakeRoot != (e_common.Hash{}) && headerStakeRoot != emptyAccountRoot && headerStakeRoot != emptyStakeRoot {
+					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=%s) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						nomtStakeRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
+				}
 				
 				// CRITICAL FIX: Only treat the database as EMPTY (triggering genesis alignment)
 				// if the account state NOMT itself is empty. If only the stake DB is empty but the 
@@ -447,7 +447,24 @@ func (app *App) initBlockchain() error {
 					if !strings.HasPrefix(metadataRootHex, "0x") {
 						metadataRootHex = "0x" + metadataRootHex
 					}
-					if strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+
+					isZeroHashHex := func(h string) bool {
+						trimmed := strings.TrimPrefix(strings.ToLower(h), "0x")
+						if trimmed == "" {
+							return true
+						}
+						for i := 0; i < len(trimmed); i++ {
+							if trimmed[i] != '0' {
+								return false
+							}
+						}
+						return true
+					}
+
+					isMetadataZero := isZeroHashHex(metadata.StateRoot)
+					isNomtZeroOrEmpty := nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot
+
+					if (isMetadataZero && isNomtZeroOrEmpty) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
 						isSnapshotRecovery = true
 						logger.Info("📸 [STARTUP] NOMT root matches snapshot metadata StateRoot (%s). Bypassing Early Root Mismatch check.", metadata.StateRoot)
 					}
@@ -564,8 +581,23 @@ func (app *App) initBlockchain() error {
 		// ═══════════════════════════════════════════════════════════════
 		if trie.GetStateBackend() == trie.BackendNOMT && app.startLastBlock.Header().BlockNumber() == 0 {
 			nomtAccountRoot, okAccount := trie.GetNomtHandleRoot("account_state")
+			nomtStakeRoot, okStake := trie.GetNomtHandleRoot("stake_db")
 			headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
-			if okAccount && nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
+			headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+
+			emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
+			emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
+
+			isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
+			isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
+
+			isHeaderAccountEmpty := (headerAccountRoot == (e_common.Hash{}) || headerAccountRoot == emptyAccountRoot || headerAccountRoot == emptyStakeRoot)
+			isHeaderStakeEmpty := (headerStakeRoot == (e_common.Hash{}) || headerStakeRoot == emptyAccountRoot || headerStakeRoot == emptyStakeRoot)
+
+			shouldRepopulateAccount := okAccount && isEmptyAccountNomt && !isHeaderAccountEmpty
+			shouldRepopulateStake := okStake && isEmptyStakeNomt && !isHeaderStakeEmpty
+
+			if shouldRepopulateAccount || shouldRepopulateStake {
 				if err := app.repopulateGenesisState(); err != nil {
 					return fmt.Errorf("failed to repopulate genesis state: %v", err)
 				}
@@ -705,7 +737,33 @@ SKIP_GENESIS:
 					metadataRootHex = "0x" + metadataRootHex
 				}
 
-				if nomtRootHex != metadata.StateRoot && nomtRoot.Hex() != metadata.StateRoot {
+				emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
+				emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
+
+				isZeroHashHex := func(h string) bool {
+					trimmed := strings.TrimPrefix(strings.ToLower(h), "0x")
+					if trimmed == "" {
+						return true
+					}
+					for i := 0; i < len(trimmed); i++ {
+						if trimmed[i] != '0' {
+							return false
+						}
+					}
+					return true
+				}
+
+				isMetadataZero := isZeroHashHex(metadata.StateRoot)
+				isNomtZeroOrEmpty := nomtRoot == (e_common.Hash{}) || nomtRoot == emptyAccountRoot || nomtRoot == emptyStakeRoot
+
+				rootsMatch := false
+				if isMetadataZero && isNomtZeroOrEmpty {
+					rootsMatch = true
+				} else if nomtRootHex == metadata.StateRoot || nomtRoot.Hex() == metadata.StateRoot {
+					rootsMatch = true
+				}
+
+				if !rootsMatch {
 					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! NOMT root=%s, but metadata.json claims StateRoot=%s",
 						nomtRoot.Hex(), metadata.StateRoot)
 					fatal.Exit("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
