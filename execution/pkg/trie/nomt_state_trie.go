@@ -1106,12 +1106,25 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		n.activeSession.Abort()
 		n.activeSession = nil
 	}
-	if n.pendingFinishedSession != nil {
-		logger.Warn("⚠️ [NomtStateTrie] Aborting finished session before ResetNomtHandle for namespace=%s", string(n.namespace))
-		n.pendingFinishedSession.Abort()
-		n.pendingFinishedSession = nil
-	}
+	
+	fsToAbort := n.pendingFinishedSession
+	n.pendingFinishedSession = nil
 	n.sessionMu.Unlock()
+
+	if fsToAbort != nil {
+		logger.Warn("⚠️ [NomtStateTrie] Aborting finished session before ResetNomtHandle for namespace=%s", string(n.namespace))
+		// ═══════════════════════════════════════════════════════════════════════════
+		// CRITICAL DOUBLE FREE FIX:
+		// We MUST acquire LockCommitPayload before aborting the pending finished session.
+		// If PersistAsync() spawned a CommitAsync() goroutine, it holds LockCommitPayload()
+		// while executing C.nomt_commit_payload. If we call fs.Abort() concurrently, it
+		// will execute C.nomt_finished_session_abort on the exact same session pointer!
+		// This concurrent C++ access caused the "double free or corruption (out)" crash.
+		// ═══════════════════════════════════════════════════════════════════════════
+		n.handle.LockCommitPayload()
+		fsToAbort.Abort()
+		n.handle.UnlockCommitPayload()
+	}
 
 	// 2. Reset the NOMT handle (closes, wipes, and reopens)
 	newHandle, err := ResetNomtHandle(string(n.namespace))
