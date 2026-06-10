@@ -154,7 +154,10 @@ type NomtSessionToFlush struct {
 // FlushNomtSessions performs disk I/O synchronously for a batch of sessions.
 func FlushNomtSessions(sessions []NomtSessionToFlush) error {
 	for _, s := range sessions {
-		if err := s.Session.CommitPayload(s.Handle); err != nil {
+		s.Handle.LockCommitPayload()
+		err := s.Session.CommitPayload(s.Handle)
+		s.Handle.UnlockCommitPayload()
+		if err != nil {
 			return err
 		}
 	}
@@ -968,7 +971,10 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 		logger.Info("⏳ [NOMT-SYNC-DRAIN] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
 		
 		if fs != nil {
-			if err := fs.CommitPayload(n.handle); err != nil {
+			n.handle.LockCommitPayload()
+			err := fs.CommitPayload(n.handle)
+			n.handle.UnlockCommitPayload()
+			if err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
 			} else if string(n.namespace) == "account_state" && blockNum > 0 {
 				storage.UpdateLastNomtCommittedBlock(blockNum)
