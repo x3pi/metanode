@@ -301,7 +301,17 @@ func ResetNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	handle, exists := globalNomtHandles[namespace]
 	if exists && handle != nil {
 		logger.Info("[TRIE] Closing NOMT handle for namespace %s to reset", namespace)
+		
+		// ═══════════════════════════════════════════════════════════════
+		// CRITICAL FIX: We MUST acquire LockCommitPayload to wait for any
+		// background CommitAsync to finish before closing the handle.
+		// Otherwise, nomt_close frees the C++ object while nomt_commit_payload
+		// is executing, causing a "double free or corruption" crash!
+		// ═══════════════════════════════════════════════════════════════
+		handle.LockCommitPayload()
 		handle.Close()
+		handle.UnlockCommitPayload()
+		
 		delete(globalNomtHandles, namespace)
 	}
 
