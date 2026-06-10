@@ -256,13 +256,13 @@ pub async fn fetch_blocks_from_peer(
     );
 
     let batch_size = if total_blocks >= 1000 {
-        100u64 // Safe batch to prevent server OOM
+        10u64 // Safe batch to prevent server OOM
     } else if total_blocks >= 200 {
-        100u64
+        10u64
     } else if total_blocks >= 50 {
-        50u64
+        10u64
     } else {
-        20u64
+        10u64
     };
 
     let max_concurrent = std::cmp::min(peer_addresses.len() * 2, 8);
@@ -453,13 +453,13 @@ pub async fn fetch_executable_blocks_from_peer(
     );
 
     let batch_size = if total >= 1000 {
-        100u64
+        10u64
     } else if total >= 200 {
-        100u64
+        10u64
     } else if total >= 50 {
-        50u64
+        10u64
     } else {
-        20u64
+        10u64
     };
 
     let max_concurrent = std::cmp::min(peer_addresses.len() * 2, 8);
