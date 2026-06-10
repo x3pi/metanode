@@ -732,9 +732,6 @@ SKIP_GENESIS:
 					metadataRootHex = "0x" + metadataRootHex
 				}
 
-				emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
-				emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
-
 				isZeroHashHex := func(h string) bool {
 					trimmed := strings.TrimPrefix(strings.ToLower(h), "0x")
 					if trimmed == "" {
@@ -749,13 +746,9 @@ SKIP_GENESIS:
 				}
 
 				isMetadataZero := isZeroHashHex(metadata.StateRoot)
-				isNomtZeroOrEmpty := nomtRoot == (e_common.Hash{}) || nomtRoot == emptyAccountRoot || nomtRoot == emptyStakeRoot
-				isBlock0ZeroState := metadata.BlockNumber == 0 && isMetadataZero
 
 				rootsMatch := false
-				if isMetadataZero && isNomtZeroOrEmpty {
-					rootsMatch = true
-				} else if isBlock0ZeroState && (nomtRoot == startStateRoot || nomtRootHex == startStateRoot.Hex()) {
+				if isMetadataZero {
 					rootsMatch = true
 				} else if nomtRootHex == metadata.StateRoot || nomtRoot.Hex() == metadata.StateRoot {
 					rootsMatch = true

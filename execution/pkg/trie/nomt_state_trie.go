@@ -666,8 +666,8 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 	}
 
 	// Track key in knownKeys registry if not skipped
-	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
-	if !n.isReplicationSync && !skipRegistry {
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
+	if !skipRegistry {
 		n.knownKeysMu.Lock()
 		if _, exists := n.knownKeys[hexKey]; !exists {
 			n.knownKeys[hexKey] = keyCopy
@@ -762,9 +762,9 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map
-	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
-	if !n.isReplicationSync && !skipRegistry {
+	if !skipRegistry {
 		n.knownKeysMu.Lock()
 	}
 
@@ -786,7 +786,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 			value:       values[i],
 		}
 
-		if !n.isReplicationSync && !skipRegistry {
+		if !skipRegistry {
 			if _, exists := n.knownKeys[e.hexKey]; !exists {
 				n.knownKeys[e.hexKey] = e.originalKey
 				n.registryChanged = true
@@ -794,7 +794,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 		}
 	}
 
-	if !n.isReplicationSync && !skipRegistry {
+	if !skipRegistry {
 		n.knownKeysMu.Unlock()
 	}
 
@@ -892,9 +892,9 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	wg.Wait()
 
 	// Phase 2: SEQUENTIAL — update dirty map + inject old values
-	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "account_state" || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
+	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
-	if !n.isReplicationSync && !skipRegistry {
+	if !skipRegistry {
 		n.knownKeysMu.Lock()
 	}
 
@@ -916,7 +916,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 			value:       values[i],
 		}
 
-		if !n.isReplicationSync && !skipRegistry {
+		if !skipRegistry {
 			if _, exists := n.knownKeys[e.hexKey]; !exists {
 				n.knownKeys[e.hexKey] = e.originalKey
 				n.registryChanged = true
@@ -924,7 +924,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		}
 	}
 
-	if !n.isReplicationSync && !skipRegistry {
+	if !skipRegistry {
 		n.knownKeysMu.Unlock()
 	}
 
@@ -1091,9 +1091,26 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from registry + NOMT handle for rebuilding namespace %s", len(kvs), string(n.namespace))
 	}
 
+	// Lock session creation to prevent concurrent BeginSession FFI calls during reset,
+	// and abort any active/pending sessions that were bound to the old handle.
+	n.sessionInitMu.Lock()
+	n.sessionMu.Lock()
+	if n.activeSession != nil {
+		logger.Warn("⚠️ [NomtStateTrie] Aborting active session before ResetNomtHandle for namespace=%s", string(n.namespace))
+		n.activeSession.Abort()
+		n.activeSession = nil
+	}
+	if n.pendingFinishedSession != nil {
+		logger.Warn("⚠️ [NomtStateTrie] Aborting finished session before ResetNomtHandle for namespace=%s", string(n.namespace))
+		n.pendingFinishedSession.Abort()
+		n.pendingFinishedSession = nil
+	}
+	n.sessionMu.Unlock()
+
 	// 2. Reset the NOMT handle (closes, wipes, and reopens)
 	newHandle, err := ResetNomtHandle(string(n.namespace))
 	if err != nil {
+		n.sessionInitMu.Unlock()
 		return fmt.Errorf("failed to reset NOMT handle: %w", err)
 	}
 
@@ -1103,11 +1120,16 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	n.wDirty = make(map[string]*nomtDirtyEntry)
 	n.wOldValues = make(map[string][]byte)
 	n.wOldLoaded = make(map[string]bool)
+	n.knownKeysMu.Lock()
 	n.knownKeys = make(map[string][]byte)
 	for _, kv := range kvs {
 		n.knownKeys[hex.EncodeToString(kv[0])] = kv[0]
 	}
+	n.knownKeysMu.Unlock()
 	n.registryChanged = true
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
+	n.pendingCommittingMap = nil
 
 	// Reset readView to empty state
 	n.readView.Store(&nomtReadView{
@@ -1116,6 +1138,10 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		rootHash:   e_common.Hash{},
 	})
 	n.writerMu.Unlock()
+
+	// Unlock sessionInitMu after handle is updated, allowing subsequent session
+	// creations to safely target the new handle.
+	n.sessionInitMu.Unlock()
 
 	// 4. Save registry to file
 	n.persistRegistryToFile()
@@ -1380,7 +1406,7 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		string(n.namespace), dirtyCount, currentRoot.Hex()[:18], newRoot.Hex()[:18])
 
 	// FORK-SAFE: Persist knownKeys to file OUTSIDE the Merkle trie.
-	if !n.isReplicationSync && n.registryChanged {
+	if n.registryChanged {
 		n.persistRegistryToFile()
 		n.registryChanged = false
 	}

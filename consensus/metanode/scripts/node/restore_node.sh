@@ -296,10 +296,10 @@ for folder in "$SNAP_DIR"/*; do
       fi
   fi
 done
-# 🚨 CRITICAL: Remove `rust_consensus` imported from the snapshot to avoid split-brain.
-# This forces the restored node to resync DAG state from peers.
-rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
-echo -e "${GREEN}  ✅ Removed dirty rust_consensus to force clean Phase: Bootstrapping${NC}"
+# 🚨 CRITICAL: Keep `rust_consensus` imported from the snapshot to maintain alignment
+# between the execution state and consensus DAG state.
+# rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
+echo -e "${GREEN}  ✅ Kept rust_consensus to maintain alignment with execution state${NC}"
 
 echo -e "${GREEN}  ✅ Data dirs copied${NC}"
 
