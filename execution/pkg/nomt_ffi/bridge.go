@@ -98,13 +98,59 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB, hashtableBuc
 }
 
 // Close frees all resources associated with the database.
+// Close frees all resources associated with the database.
+// It pauses new session creation, waits for all active sessions to finish or abort,
+// aborts any pending finished sessions to release their memory, and then closes the handle.
 func (h *Handle) Close() {
+	// 1. Prevent new sessions from starting
+	h.sessionsMu.Lock()
+	h.closing = true
+
+	// 2. Wait for all active sessions to either Abort() or turn into FinishedSessions
+	waitStart := time.Now()
+	diagDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-diagDone:
+				return
+			case <-ticker.C:
+				h.sessionsMu.Lock()
+				ac, ps := h.activeCount, len(h.pendingSessions)
+				h.sessionsMu.Unlock()
+				fmt.Printf("🔒 [NOMT-DIAG] Close WAITING at %s: activeCount=%d, pendingSessions=%d, elapsed=%v\n",
+					h.path, ac, ps, time.Since(waitStart))
+			}
+		}
+	}()
+	for h.activeCount > len(h.pendingSessions) {
+		h.activeCond.Wait()
+	}
+	close(diagDone)
+
+	pending := h.pendingSessions
+	h.pendingSessions = nil
+	h.sessionsMu.Unlock()
+
+	// 3. Abort all pending finished sessions to release memory safely
+	h.LockCommitPayload()
+	for _, fs := range pending {
+		if fs != nil {
+			fs.Abort()
+		}
+	}
+	h.UnlockCommitPayload()
+
+	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
+	// Arc<Core> references, nomt_close will fully drop the database synchronously.
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.ptr != nil {
 		C.nomt_close(h.ptr)
 		h.ptr = nil
 	}
+	h.mu.Unlock()
 }
 
 // GetPath returns the filesystem path of the database.
@@ -157,6 +203,7 @@ func (h *Handle) CloseForSnapshot() {
 	// 3. Acquire exclusive lock to prevent any Reads while we close
 	h.mu.Lock()
 
+	h.LockCommitPayload()
 	for _, fs := range pending {
 		if fs != nil && fs.ptr != nil {
 			fmt.Printf("nomt_ffi: forcefully flushing pending finished session at %s before snapshot\n", h.path)
@@ -164,6 +211,7 @@ func (h *Handle) CloseForSnapshot() {
 			fs.ptr = nil
 		}
 	}
+	h.UnlockCommitPayload()
 
 	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
 	// Arc<Core> references, nomt_close will fully drop the database synchronously,
@@ -646,6 +694,11 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.ptr == nil {
+		s.ptr = nil
+		h.sessionsMu.Lock()
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
 		return [32]byte{}, nil, fmt.Errorf("nomt_ffi: handle closed")
 	}
 
@@ -672,6 +725,7 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 	fs := &FinishedSession{ptr: ptr, handle: h}
 	h.sessionsMu.Lock()
 	h.pendingSessions = append(h.pendingSessions, fs)
+	h.activeCond.Broadcast()
 	h.sessionsMu.Unlock()
 
 	return newRoot, fs, nil
@@ -689,6 +743,17 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	}
 
 	if h.ptr == nil {
+		fs.ptr = nil
+		h.sessionsMu.Lock()
+		for i, pfs := range h.pendingSessions {
+			if pfs == fs {
+				h.pendingSessions = append(h.pendingSessions[:i], h.pendingSessions[i+1:]...)
+				break
+			}
+		}
+		h.activeCount--
+		h.activeCond.Broadcast()
+		h.sessionsMu.Unlock()
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
