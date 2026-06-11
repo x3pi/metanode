@@ -15,7 +15,7 @@ SRC_IP=${3:-127.0.0.1}
 
 SNAPSHOT_PORT=$((8700 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node"
+LEVELDB_DIRS="account_state history/blocks history/receipts history/transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node history/changelog_db_account history/changelog_db_stake"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -73,6 +73,7 @@ echo -e "${YELLOW}📂 Step 5: Restoring data...${NC}"
 mkdir -p "$DST/data/data" "$DST/back_up" "$DST/data-write" "$DST/back_up_write"
 for dir_name in $LEVELDB_DIRS; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
+        mkdir -p "$(dirname "$DST/data/data/$dir_name")"
         mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
     fi
 done

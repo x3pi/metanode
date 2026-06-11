@@ -43,7 +43,7 @@ SNAPSHOT_PORT=$((8700 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
 
 # LevelDB dirs that go into data/data/
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node"
+LEVELDB_DIRS="account_state history/blocks history/receipts history/transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node history/changelog_db_account history/changelog_db_stake"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -148,10 +148,12 @@ mkdir -p "$DST/data/data/history" "$DST/data-write/data/history"
 mkdir -p "$DST/data/data/consensus" "$DST/data-write/data/consensus"
 for dir_name in $LEVELDB_DIRS nomt_db; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
-        if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
+        if [[ "$dir_name" == history/* ]]; then
             # History
-            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/history/"
-            cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data-write/data/history/"
+            mkdir -p "$(dirname "$DST/data/data/$dir_name")"
+            mkdir -p "$(dirname "$DST/data-write/data/$dir_name")"
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$(dirname "$DST/data/data/$dir_name")/"
+            cp -a "$DOWNLOAD_DIR/$dir_name" "$(dirname "$DST/data-write/data/$dir_name")/"
         elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
             # Consensus
             cp -a "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/consensus/"

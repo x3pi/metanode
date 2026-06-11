@@ -24,7 +24,7 @@ DST_RPC_PORT=$((8757 + (DST_NODE == 0 ? 0 : DST_NODE == 1 ? 1990 : DST_NODE == 2
 
 SNAPSHOT_PORT=$((8600 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
-LEVELDB_DIRS="account_state blocks receipts transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
+LEVELDB_DIRS="account_state history/blocks history/receipts history/transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
 
 TX_PUMP_PID=""
 
@@ -140,8 +140,9 @@ log "  📂 Restoring state..."
 mkdir -p "$DST/data/data/history" "$DST/data/data/consensus" "$DST/back_up" "$DST/data-write" "$DST/back_up_write"
 for dir_name in $LEVELDB_DIRS; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
-        if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
-            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/history/$dir_name"
+        if [[ "$dir_name" == history/* ]]; then
+            mkdir -p "$(dirname "$DST/data/data/$dir_name")"
+            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
         elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
             mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/consensus/$dir_name"
         else

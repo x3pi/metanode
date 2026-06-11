@@ -32,7 +32,7 @@ CATCHUP_TIMEOUT=300
 LIVENESS_WAIT=120
 SETTLE_TIME=15
 TX_PUMP_PID=""
-LEVELDB_DIRS="account_state blocks receipts transaction_state mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db"
+LEVELDB_DIRS="account_state history/blocks history/receipts history/transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -435,8 +435,9 @@ run_single_round() {
     mkdir -p "$dst_data/data/data/history" "$dst_data/data/data/consensus" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
     for dir_name in $LEVELDB_DIRS; do
         if [ -d "$dl_dir/$dir_name" ]; then
-            if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
-                mv "$dl_dir/$dir_name" "$dst_data/data/data/history/$dir_name"
+            if [[ "$dir_name" == history/* ]]; then
+                mkdir -p "$(dirname "$dst_data/data/data/$dir_name")"
+                mv "$dl_dir/$dir_name" "$dst_data/data/data/$dir_name"
             elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
                 mv "$dl_dir/$dir_name" "$dst_data/data/data/consensus/$dir_name"
             else
