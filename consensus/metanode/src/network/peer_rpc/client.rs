@@ -289,6 +289,18 @@ pub async fn fetch_blocks_from_peer(
                 let peer_addr = &peers[(peer_idx + i) % peers.len()];
                 match fetch_block_batch(peer_addr, current_from, current_to).await {
                     Ok(blocks) => {
+                        let expected = (current_to - current_from + 1) as usize;
+                        if blocks.len() < expected {
+                            warn!(
+                                "⚠️ [BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for range {}-{}",
+                                peer_addr, blocks.len(), expected, current_from, current_to
+                            );
+                            last_err = Some(anyhow::anyhow!(
+                                "Incomplete blocks: got {}, expected {}",
+                                blocks.len(), expected
+                            ));
+                            continue;
+                        }
                         info!(
                             "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
                             blocks.len(), current_from, current_to, peer_addr
@@ -485,6 +497,18 @@ pub async fn fetch_executable_blocks_from_peer(
                 let peer_addr = &peers[(peer_idx + i) % peers.len()];
                 match fetch_executable_block_batch(peer_addr, current_from, current_to).await {
                     Ok(blocks) => {
+                        let expected = (current_to - current_from + 1) as usize;
+                        if blocks.len() < expected {
+                            warn!(
+                                "⚠️ [EXEC-BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for GEI {}-{}",
+                                peer_addr, blocks.len(), expected, current_from, current_to
+                            );
+                            last_err = Some(anyhow::anyhow!(
+                                "Incomplete blocks: got {}, expected {}",
+                                blocks.len(), expected
+                            ));
+                            continue;
+                        }
                         info!(
                             "✅ [EXEC-BLOCK-FETCH] Got {} executable blocks (GEI {}-{}) from peer {}",
                             blocks.len(), current_from, current_to, peer_addr
