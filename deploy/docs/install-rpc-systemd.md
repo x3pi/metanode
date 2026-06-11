@@ -44,7 +44,7 @@ sudo bash install-rpc-systemd.sh
 ```
 Thực hiện tuần tự:
 1. **Build** binary `rpc-client` từ source Go
-2. **Đọc port** từ `node-N_keys/*.env` (không cần chỉnh tay)
+2. **Đọc cấu hình** từ `node-N_keys/execution.json` (không cần chỉnh tay)
 3. **Cập nhật** `config-rpc-nodeN.json` và `config-client-tcp-nodeN.json`
 4. **Tạo** file service `/etc/systemd/system/metanode-rpc-N.service`
 5. **Dừng** instance RPC cũ (nếu đang chạy)
@@ -135,7 +135,7 @@ tail -f /home/abc/nhat/con-chain-v2/metanode/execution/cmd/rpc/cmd/rpc-client/no
 
 > Port **HTTP Client** (cột 3) là địa chỉ bạn nhập vào MetaMask: `http://localhost:8545`
 
-> Các port này được đọc tự động từ `node-N_keys/*.env`, **không hardcode** trong script.
+> Các port này được đọc tự động từ `node-N_keys/execution.json`, **không hardcode** trong script.
 
 ---
 
@@ -145,8 +145,7 @@ tail -f /home/abc/nhat/con-chain-v2/metanode/execution/cmd/rpc/cmd/rpc-client/no
 deploy/
 ├── install-rpc-systemd.sh      ← Script này
 ├── node-N_keys/
-│   ├── validator.env           ← Nguồn port cho Node 0-3
-│   └── synconly.env            ← Nguồn port cho Node 4
+│   ├── execution.json          ← Nguồn port cho RPC Client
 execution/cmd/rpc/cmd/rpc-client/
 ├── rpc-client                  ← Binary (được build bởi script)
 ├── config-rpc-nodeN.json       ← Config HTTP/WSS (được update tự động)

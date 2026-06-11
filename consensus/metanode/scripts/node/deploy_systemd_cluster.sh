@@ -33,6 +33,7 @@ DO_PUSH=false
 DO_IPS=false
 DO_START=false
 DO_STOP=false
+DO_SETUP=false
 KEEP_DATA=false
 CUSTOM_ENV=""
 ONLY_NODE=""
@@ -102,6 +103,7 @@ fi
 [[ "$*" == *"--stop"* ]] && DO_STOP=true
 [[ "$*" == *"--restore-node"* ]] && DO_RESTORE=true
 [[ "$*" == *"--keep-data"* ]] && KEEP_DATA=true
+[[ "$*" == *"--setup"* ]] && DO_SETUP=true
 
 # ─── Helper Functions ───────────────────────────────────────────────
 
@@ -164,6 +166,148 @@ log_ok()   { echo -e "${GREEN}  ✅ $1${NC}"; }
 log_warn() { echo -e "${YELLOW}  ⚠️  $1${NC}"; }
 log_info() { echo -e "${CYAN}  ℹ️  $1${NC}"; }
 log_err()  { echo -e "${RED}  ❌ $1${NC}"; }
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE --setup: Generate all node configs from genesis-main.json
+# ═══════════════════════════════════════════════════════════════════
+if $DO_SETUP; then
+    log_step "PHASE --setup: Generating node configurations"
+
+    DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy" && pwd)"
+    GENESIS_MAIN="${DEPLOY_DIR}/genesis-main.json"
+    GEN_VALIDATOR_SCRIPT="${DEPLOY_DIR}/gen_validator_entry.py"
+
+    if [ ! -f "$GENESIS_MAIN" ]; then
+        log_err "genesis-main.json not found at: $GENESIS_MAIN"
+        exit 1
+    fi
+    if [ ! -f "$GEN_VALIDATOR_SCRIPT" ]; then
+        log_err "gen_validator_entry.py not found at: $GEN_VALIDATOR_SCRIPT"
+        exit 1
+    fi
+
+    # Detect metanode binary (prioritize root target/release)
+    METANODE_BIN=""
+    for candidate in \
+        "$(cd "${PROJECT_ROOT}" && pwd)/target/release/metanode" \
+        "${LOCAL_METANODE}/target/release/metanode" \
+        "/opt/metanode/bin/metanode"; do
+        if [ -f "$candidate" ]; then
+            METANODE_BIN="$candidate"
+            break
+        fi
+    done
+    if [ -z "$METANODE_BIN" ]; then
+        log_err "metanode binary not found — build Rust first (--build) or place binary in target/release/metanode"
+        exit 1
+    fi
+    log_info "Using metanode binary: $METANODE_BIN"
+
+    # Get all node IDs sorted
+    ALL_NODE_IDS=($(echo "${!NODE_SERVER[@]}" | tr ' ' '\n' | sort -n))
+
+    # Parse BTRFS_NODES into an associative set for quick lookup
+    declare -A BTRFS_SET
+    for bn in ${BTRFS_NODES:-}; do
+        BTRFS_SET[$bn]=1
+    done
+
+    # Build peers map for Python script
+    PEERS_MAP=""
+    for i in "${ALL_NODE_IDS[@]}"; do
+        PEERS_MAP="${PEERS_MAP}${i}=${NODE_SERVER[$i]},"
+    done
+    PEERS_MAP="${PEERS_MAP%,}" # remove trailing comma
+
+    # ── Step 1: Generate keys + config for each node ─────────────────
+    log_info "Generating keys and configs for nodes: ${ALL_NODE_IDS[*]}"
+    for nid in "${ALL_NODE_IDS[@]}"; do
+        KEYS_DIR="${DEPLOY_DIR}/node-${nid}_keys"
+        IS_SYNCONLY=false
+        if [ -n "${BTRFS_SET[$nid]+_}" ]; then
+            IS_SYNCONLY=true
+        fi
+
+        NODE_TYPE_FLAG="validator"
+        $IS_SYNCONLY && NODE_TYPE_FLAG="synconly"
+
+        log_info "Node $nid ($NODE_TYPE_FLAG) → $KEYS_DIR"
+
+        python3 "$GEN_VALIDATOR_SCRIPT" \
+            --hostname "node-${nid}" \
+            --node-id "$nid" \
+            --node-type "$NODE_TYPE_FLAG" \
+            --ip "${NODE_SERVER[$nid]}" \
+            --peers-map "$PEERS_MAP" \
+            --keys-dir "$KEYS_DIR" \
+            --output "${KEYS_DIR}/node-${nid}_genesis.json" \
+            --metanode-bin "$METANODE_BIN" \
+            || { log_err "gen_validator_entry.py failed for node $nid"; exit 1; }
+
+        # Apply synconly settings to generated configs
+        if $IS_SYNCONLY; then
+            # execution.json: is_explorer = true
+            if [ -f "$KEYS_DIR/execution.json" ]; then
+                jq '.is_explorer = true' "$KEYS_DIR/execution.json" > "$KEYS_DIR/execution.json.tmp" \
+                    && mv "$KEYS_DIR/execution.json.tmp" "$KEYS_DIR/execution.json"
+                log_info "  Node $nid: is_explorer = true (synconly)"
+            fi
+            # consensus.toml: executor_commit_enabled = false
+            if [ -f "$KEYS_DIR/consensus.toml" ]; then
+                sed -i 's/^executor_commit_enabled *= *true/executor_commit_enabled = false/' \
+                    "$KEYS_DIR/consensus.toml"
+                log_info "  Node $nid: executor_commit_enabled = false (synconly)"
+            fi
+        fi
+
+        log_ok "Node $nid generated"
+    done
+
+    # ── Step 2: Build genesis.json validators array from validator nodes ──
+    log_info "Building genesis.json validators from non-synconly nodes..."
+    VALIDATOR_ENTRIES_JSON="[]"
+    for nid in "${ALL_NODE_IDS[@]}"; do
+        # Skip BTRFS (synconly) nodes — they don't participate in consensus
+        if [ -n "${BTRFS_SET[$nid]+_}" ]; then
+            log_info "  Node $nid: synconly — skipped from validators"
+            continue
+        fi
+        GENESIS_ENTRY="${DEPLOY_DIR}/node-${nid}_keys/node-${nid}_genesis.json"
+        if [ ! -f "$GENESIS_ENTRY" ]; then
+            log_err "  Genesis entry not found: $GENESIS_ENTRY"
+            exit 1
+        fi
+        VALIDATOR_ENTRIES_JSON=$(echo "$VALIDATOR_ENTRIES_JSON" | \
+            jq --slurpfile entry "$GENESIS_ENTRY" '. + [$entry[0]]')
+        log_ok "  Node $nid added to validators"
+    done
+
+    # ── Step 3: Write genesis.json from genesis-main.json + validators ──
+    GENESIS_OUT="${DEPLOY_DIR}/genesis.json"
+    jq --argjson validators "$VALIDATOR_ENTRIES_JSON" '.validators = $validators' \
+        "$GENESIS_MAIN" > "$GENESIS_OUT"
+    log_ok "genesis.json written with $(echo "$VALIDATOR_ENTRIES_JSON" | jq 'length') validators → $GENESIS_OUT"
+
+    # ── Step 4: Copy genesis.json into each node's keys folder ──────────
+    log_info "Distributing genesis.json to all node key directories..."
+    for nid in "${ALL_NODE_IDS[@]}"; do
+        KEYS_DIR="${DEPLOY_DIR}/node-${nid}_keys"
+        cp "$GENESIS_OUT" "$KEYS_DIR/genesis.json"
+        log_ok "  Copied genesis.json → $KEYS_DIR/"
+    done
+
+    log_step "--setup COMPLETE"
+    echo -e "${GREEN}  All node configs generated in ${DEPLOY_DIR}/node-*_keys/${NC}"
+    echo -e "${GREEN}  genesis.json written: ${GENESIS_OUT}${NC}"
+    echo -e "${CYAN}  Next steps:${NC}"
+    echo -e "     Push + Start: ${CYAN}./deploy_systemd_cluster.sh --env <your.env> --push --start${NC}"
+    echo ""
+
+    # If only --setup, exit here
+    if ! $DO_BUILD && ! $DO_PUSH && ! $DO_START; then
+        exit 0
+    fi
+fi
 
 # ═══════════════════════════════════════════════════════════════════
 # PHASE 0: Validate
@@ -335,7 +479,7 @@ fi
 # Verify binaries exist
 GO_BINARY="${LOCAL_GO_SIMPLE}/simple_chain"
 
-if ($DO_PUSH || $DO_START) && [ ! -f "$GO_BINARY" ]; then
+if { $DO_PUSH || $DO_START; } && [ ! -f "$GO_BINARY" ]; then
     log_err "Go binary not found: $GO_BINARY (run with --build first)"
     exit 1
 fi
@@ -505,10 +649,6 @@ if $DO_PUSH; then
             rsync_cmd "${LOCAL_METANODE}/${RUST_CONFIGS[$id]}" "$server" "${REMOTE_METANODE}/${RUST_CONFIGS[$id]}"
             rsync_cmd "${LOCAL_METANODE}/config/node_${id}_network_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_network_key.json"
             rsync_cmd "${LOCAL_METANODE}/config/node_${id}_protocol_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_protocol_key.json"
-
-            # RPC Proxy configs
-            rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/config-rpc-node${id}.json" "$server" "${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client/config-rpc-node${id}.json"
-            rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/config-client-tcp-node${id}.json" "$server" "${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client/config-client-tcp-node${id}.json"
         done
 
         log_ok "Deployed to $server"
@@ -518,59 +658,9 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-# PHASE 4: Update IPs in config files on remote servers
+# PHASE 4: Update IPs in config files on remote servers (REMOVED)
 # ═══════════════════════════════════════════════════════════════════
-if $DO_IPS; then
-    log_step "Phase 4: Updating IP addresses in configs"
-
-    IP_ARGS="${NODE_SERVER[0]:-127.0.0.1} ${NODE_SERVER[1]:-127.0.0.1} ${NODE_SERVER[2]:-127.0.0.1} ${NODE_SERVER[3]:-127.0.0.1}"
-    if [ -n "${NODE_SERVER[4]:-}" ]; then
-        IP_ARGS="$IP_ARGS ${NODE_SERVER[4]}"
-    else
-        IP_ARGS="$IP_ARGS ${NODE_SERVER[3]:-127.0.0.1}"
-    fi
-
-    for server in $SERVERS; do
-        nodes=$(get_nodes_for_server "$server")
-        if [ -z "$nodes" ]; then continue; fi
-        log_info "Updating IPs and Network Setup (Firewall/NTP) on $server..."
-        
-        # Build commands to execute setup scripts for the specific nodes running on this server
-        SETUP_CMDS=""
-        for id in $nodes; do
-            SETUP_CMDS="${SETUP_CMDS}
-            if [ -f setup_node_${id}.sh ]; then
-                echo '  🛠 Executing setup_node_${id}.sh...'
-                chmod +x setup_node_${id}.sh
-                if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then
-                    echo \"\${SSH_PASSWORD}\" | sudo -S bash setup_node_${id}.sh || true
-                else
-                    sudo bash setup_node_${id}.sh || true
-                fi
-            fi"
-        done
-
-        ssh_cmd "$server" "
-            set -euo pipefail;
-            cd '${REMOTE_SCRIPTS}'
-            if [ -f update_ips.sh ]; then
-                # Sinh ra file setup_node_{0..4}.sh
-                bash update_ips.sh $IP_ARGS
-                
-                # Pass SSH vars down to the remote shell for sudo -S
-                SSH_AUTH='${SSH_AUTH:-}'
-                SSH_PASSWORD='${SSH_PASSWORD:-}'
-                
-                $SETUP_CMDS
-            else
-                echo 'update_ips.sh not found, skipping'
-            fi
-        "
-        log_ok "IPs and Setup completed on $server"
-    done
-else
-    log_info "Phase 4: Skipped (use --ips to enable)"
-fi
+# IP update logic is now handled locally during --setup.
 
 # ═══════════════════════════════════════════════════════════════════
 # PHASE 5: Start nodes on remote servers (via deploy orchestrator)
@@ -650,29 +740,44 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 # PHASE 6: Generate rpc_nodes.json for auto_test.sh
 # ═══════════════════════════════════════════════════════════════════
-log_step "Phase 6: Generating rpc_nodes.json for Health Checking"
+log_step "Phase 6: Generating rpc_nodes.json for Health Checking & Tests"
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
 declare -A RPC_PORTS=( [0]=8757 [1]=10747 [2]=10749 [3]=10750 [4]=10748 )
 JSON_NODES=()
+JSON_RPC_PROXIES=()
+JSON_TCP_PROXIES=()
 
 for id in "${!NODE_SERVER[@]}"; do
     ip="${NODE_SERVER[$id]}"
     port="${RPC_PORTS[$id]}"
+    proxy_http=$((8545 + id))
+    proxy_tcp=$((6200 + id)) # TCP connection_address set in config-client-tcp.json
+    
     JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
+    JSON_RPC_PROXIES+=("\"m${id}\": \"http://${ip}:${proxy_http}\"")
+    JSON_TCP_PROXIES+=("\"m${id}\": \"${ip}:${proxy_tcp}\"")
 done
 
 # Nối các string lại bằng dấu phẩy
-JOINED=$(IFS=, ; echo "${JSON_NODES[*]}")
+JOINED_NODES=$(IFS=, ; echo "${JSON_NODES[*]}")
+JOINED_RPC=$(IFS=, ; echo "${JSON_RPC_PROXIES[*]}")
+JOINED_TCP=$(IFS=, ; echo "${JSON_TCP_PROXIES[*]}")
 
 cat > "$RPC_JSON_PATH" <<EOF
 {
   "nodes": {
-    $JOINED
+    $JOINED_NODES
+  },
+  "rpc_proxies": {
+    $JOINED_RPC
+  },
+  "tcp_proxies": {
+    $JOINED_TCP
   }
 }
 EOF
-log_ok "Generated $RPC_JSON_PATH"
+log_ok "Generated $RPC_JSON_PATH with proxy endpoints"
 
 # ═══════════════════════════════════════════════════════════════════
 # PHASE 7: Starting RPC Proxies (via systemd)
@@ -767,6 +872,7 @@ done
 
 echo ""
 echo -e "    📝 Commands:"
+echo -e "       Gen configs:   ${CYAN}./deploy_systemd_cluster.sh --env <your.env> --setup${NC}"
 echo -e "       Full deploy:   ${CYAN}./deploy_cluster.sh --all${NC}"
 echo -e "       Start keep db: ${CYAN}./deploy_cluster.sh --start --keep-data${NC}"
 echo -e "       Stop/Start 1 node: ${CYAN}./deploy_cluster.sh --stop --only-node 4${NC}"
