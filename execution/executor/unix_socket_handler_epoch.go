@@ -620,9 +620,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// we MUST trigger the trie rebuild even if the block was already in LevelDB.
 			// Otherwise, NOMT memory state stays stale and subsequent blocks will fork.
 			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d", blockNum)
-				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
+				lastBlockNum := storage.GetLastBlockNumber()
+				if blockNum >= lastBlockNum {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d (tip is #%d)", blockNum, lastBlockNum)
+					if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
+					}
+				} else {
+					logger.Info("🔧 [STARTUP-SYNC] Skipping NOMT trie rebuild on intermediate skipped block #%d because Go tip is ahead (#%d)", blockNum, lastBlockNum)
 				}
 			}
 			continue
@@ -1012,19 +1017,24 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && len(blocks) > 0 {
 		lastBlockData := blocks[len(blocks)-1]
 		lastBlockNum := lastBlockData.GetBlockNumber()
-		if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
-			lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
-			if err == nil && lastBlk != nil {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d", lastBlockNum)
-				if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
-				} else {
-					rh.chainState.InvalidateAllState()
-					finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-					logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
-						finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
+		goTipBlock := storage.GetLastBlockNumber()
+		if lastBlockNum >= goTipBlock {
+			if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
+				lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
+				if err == nil && lastBlk != nil {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d (Go tip is #%d)", lastBlockNum, goTipBlock)
+					if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
+					} else {
+						rh.chainState.InvalidateAllState()
+						finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+						logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
+							finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
+					}
 				}
 			}
+		} else {
+			logger.Info("🔧 [STARTUP-SYNC] Skipping final NOMT trie alignment for block #%d because Go tip is ahead (#%d)", lastBlockNum, goTipBlock)
 		}
 	}
 
