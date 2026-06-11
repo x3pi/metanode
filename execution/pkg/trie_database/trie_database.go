@@ -210,7 +210,19 @@ func (trieDatabae *TrieDatabase) IntermediateRoot() (common.Hash, error) {
 		}
 		trieDatabae.backUpDb = data
 	}
-	rootHash := trieDatabae.trieR.Hash()
+	var rootHash common.Hash
+	if nomtTrie, isNomt := trieDatabae.trieR.(*p_trie.NomtStateTrie); isNomt {
+		// NOMT computes root hash only on Commit
+		committedHash, _, _, commitErr := nomtTrie.Commit(true)
+		if commitErr != nil {
+			logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during TrieDatabase.IntermediateRoot failed: %v", commitErr)
+			rootHash = nomtTrie.Hash()
+		} else {
+			rootHash = committedHash
+		}
+	} else {
+		rootHash = trieDatabae.trieR.Hash()
+	}
 	trieDatabae.dirtyData.Clear()
 
 	return rootHash, nil

@@ -666,8 +666,10 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			// No caching. No race conditions. This ensures that NOMT is strictly
 			// a lock-free structure that derives correctly from its own C++ state,
 			// preventing `0x0` root hashes.
-			nomtTrie.WaitCommitPayload()
-			if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
+			if err := nomtTrie.WaitCommitPayload(); err != nil {
+				logger.Error("WaitCommitPayload failed (NOMT Stake): %v", err)
+				updateErr = fmt.Errorf("trie WaitCommitPayload error: %w", err)
+			} else if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
 		} 

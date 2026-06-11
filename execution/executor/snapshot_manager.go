@@ -135,6 +135,8 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"history/receipts",
 			"history/transaction_state",
 			"history/mapping",
+			"history/changelog_db_account",
+			"history/changelog_db_stake",
 			"smart_contract_code",
 			"smart_contract_storage",
 			"stake_db",
@@ -149,7 +151,7 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"other",
 		},
 		pebbleDBDirs: []string{
-			"../../back_up/backup_db",
+			"../../back_up/consensus/backup_db",
 			"../../back_up_write",
 			"../../data-write",
 		},

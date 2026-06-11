@@ -105,6 +105,12 @@ func (api *DebugApi) GetTransactionTrace(ctx context.Context, hash common.Hash) 
 	}
 	trace, exists := tx_processor.GlobalTxTraceStore.GetTrace(hash)
 	if !exists {
+		// Try mapping from ETH hash to BLS hash
+		if blsHash, ok := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hash); ok {
+			trace, exists = tx_processor.GlobalTxTraceStore.GetTrace(blsHash)
+		}
+	}
+	if !exists {
 		return nil, fmt.Errorf("GetTransactionTrace: trace not found for hash %s", hash.Hex())
 	}
 	return trace, nil

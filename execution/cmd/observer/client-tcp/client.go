@@ -1058,33 +1058,40 @@ func (client *Client) SendTransactionWithDeviceKey(
 		timeout := time.NewTimer(20 * time.Second)
 		defer timeout.Stop()
 
-		select {
-		case receipt := <-responseCh:
-			logger.Info("Receipt Data: %v", receipt)
-			return receipt, nil
-		case txErr := <-client.transactionErrorChan:
-			client.receiptRequests <- receiptRequest{
-				action:     receiptRequestCancel,
-				txHash:     tx.Hash(),
-				matchType:  matchByTxHash,
-				responseCh: responseCh,
-			}
-			logger.Error("transaction error:txHash %v \n desc %s \n output %s", common.BytesToHash(txErr.Proto().Hash), txErr.Proto().Description, common.Bytes2Hex(txErr.Proto().Output))
-			return nil, fmt.Errorf("transaction error: output %s", common.BytesToHash(txErr.Proto().Output))
-		case <-timeout.C:
-			client.receiptRequests <- receiptRequest{
-				action:     receiptRequestCancel,
-				txHash:     tx.Hash(),
-				matchType:  matchByTxHash,
-				responseCh: responseCh,
-			}
-			// Kiểm tra lần cuối nếu có receipt
+		for {
 			select {
 			case receipt := <-responseCh:
+				logger.Info("Receipt Data: %v", receipt)
 				return receipt, nil
-			default:
+			case txErr := <-client.transactionErrorChan:
+				errHash := common.BytesToHash(txErr.Proto().Hash)
+				if errHash != tx.Hash() {
+					logger.Warn("⚠️ [TCP-CLIENT] Received TransactionError for a different tx: %s (expected: %s). Ignoring and continuing to wait.", errHash.Hex(), tx.Hash().Hex())
+					continue
+				}
+				client.receiptRequests <- receiptRequest{
+					action:     receiptRequestCancel,
+					txHash:     tx.Hash(),
+					matchType:  matchByTxHash,
+					responseCh: responseCh,
+				}
+				logger.Error("transaction error:txHash %v \n desc %s \n output %s", errHash, txErr.Proto().Description, common.Bytes2Hex(txErr.Proto().Output))
+				return nil, fmt.Errorf("transaction error: output %s", common.BytesToHash(txErr.Proto().Output))
+			case <-timeout.C:
+				client.receiptRequests <- receiptRequest{
+					action:     receiptRequestCancel,
+					txHash:     tx.Hash(),
+					matchType:  matchByTxHash,
+					responseCh: responseCh,
+				}
+				// Kiểm tra lần cuối nếu có receipt
+				select {
+				case receipt := <-responseCh:
+					return receipt, nil
+				default:
+				}
+				return nil, fmt.Errorf("timeout (20s) waiting for receipt with txHash %s", tx.Hash().Hex())
 			}
-			return nil, fmt.Errorf("timeout (20s) waiting for receipt with txHash %s", tx.Hash().Hex())
 		}
 	}
 

@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 )
 
 type TrieDatabaseSnapshot struct {
@@ -82,27 +83,41 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 			// Thêm key-value vào map mới này
 			manager.collectedBatches[key] = value
 			
-			// Commit directly from the snapshot copy
+			// Commit directly from the snapshot copy (or live trie for NOMT)
 			if snapshot.TrieCopy != nil {
-				root, nodeSet, _, err := snapshot.TrieCopy.Commit(true)
-				if err != nil {
-					return err
-				}
-				if nomtTrie, isNomt := snapshot.TrieCopy.(*p_trie.NomtStateTrie); isNomt {
+				var root common.Hash
+				var nodeSet *node.NodeSet
+				var err error
+
+				if nomtTrie, isNomt := trieDB.trieR.(*p_trie.NomtStateTrie); isNomt {
+					// For NOMT, we commit the live trieR because it holds the pendingFinishedSession
+					root, nodeSet, _, err = nomtTrie.Commit(true)
+					if err != nil {
+						return err
+					}
 					if err := nomtTrie.CommitPayload(); err != nil {
 						return err
 					}
+					if closer, ok := snapshot.TrieCopy.(interface{ Close() }); ok {
+						closer.Close()
+					}
+				} else {
+					root, nodeSet, _, err = snapshot.TrieCopy.Commit(true)
+					if err != nil {
+						return err
+					}
+					if closer, ok := snapshot.TrieCopy.(interface{ Close() }); ok {
+						closer.Close()
+					}
 				}
-				if closer, ok := snapshot.TrieCopy.(interface{ Close() }); ok {
-					closer.Close()
-				}
+
 				if nodeSet != nil && len(nodeSet.Nodes) > 0 {
 					batch := make([][2][]byte, 0, len(nodeSet.Nodes))
-					for _, node := range nodeSet.Nodes {
-						if node.Hash == (common.Hash{}) {
+					for _, n := range nodeSet.Nodes {
+						if n.Hash == (common.Hash{}) {
 							continue
 						}
-						batch = append(batch, [2][]byte{node.Hash.Bytes(), node.Blob})
+						batch = append(batch, [2][]byte{n.Hash.Bytes(), n.Blob})
 					}
 					if len(batch) > 0 {
 						if err := trieDB.db.BatchPut(batch); err != nil {

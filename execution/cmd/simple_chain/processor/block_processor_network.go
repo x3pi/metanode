@@ -638,10 +638,16 @@ PROCESS_LOOP:
 // with the database. This is critical when P2P Sync or Rust writes blocks to DB directly,
 // bypassing the Go Master consensus processor loop (e.g. during dynamic catch-up sync).
 func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint64, currentBlockNumber *uint64) {
+	if storage.IsPreConsensusSyncActive() {
+		return
+	}
 	actualLastGEI := storage.GetLastGlobalExecIndex()
 
 	// CRITICAL FIX: Actually advance local state when DB is ahead
 	if actualLastGEI > 0 && actualLastGEI >= *nextExpectedGlobalExecIndex {
+		bp.chainState.LockCommit()
+		defer bp.chainState.UnlockCommit()
+
 		oldNextExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = actualLastGEI + 1
 
@@ -675,7 +681,7 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						if trie.GetStateBackend() == trie.BackendNOMT {
 							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)",
 								actualLastBlockDB, actualLastGEI)
-							if err := bp.chainState.UpdateStateForNewHeader(freshBlock.Header()); err != nil {
+							if err := bp.chainState.UpdateStateForNewHeaderUnlocked(freshBlock.Header()); err != nil {
 								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
 							}
 						}

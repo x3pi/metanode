@@ -225,7 +225,9 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
 		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*mt_trie.NomtStateTrie); ok {
-			nomtTrie.WaitCommitPayload()
+			if err := nomtTrie.WaitCommitPayload(); err != nil {
+				logger.Error("WaitCommitPayload failed in resolveAccountState (NOMT): %v", err)
+			}
 		}
 	}
 
@@ -269,8 +271,13 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 	}
 
 	// Phase 2.4: Try to get historical state from StateChangelogDB
+	// CRITICAL FIX (Jun 2026): Use `<=` (not `<`) so that when the queried block equals the
+	// last committed block, we still use StateChangelogDB instead of the current in-memory
+	// NOMT state which may already be partially applying the next block.
+	// Off-by-one example: if lastBlock=38 and targetBlock=38, `38 < 38 = false` skips the
+	// changelog → falls through to live NOMT trie → returns state from block 39+ instead of 38.
 	changelogDB := api.App.chainState.GetChangelogDB()
-	isHistorical := foundBlockNumber && targetBlockNumber < storage.GetLastBlockNumber()
+	isHistorical := foundBlockNumber && targetBlockNumber <= storage.GetLastBlockNumber()
 	if changelogDB != nil && isHistorical {
 		logger.Info("🔍 [DEBUG-RPC] Resolving historical state for %x at block %d using StateChangelogDB", address.Bytes(), targetBlockNumber)
 		stateBytes, err := changelogDB.GetStateAt(address.Bytes(), targetBlockNumber)
@@ -348,7 +355,9 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
 		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*mt_trie.NomtStateTrie); ok {
-			nomtTrie.WaitCommitPayload()
+			if err := nomtTrie.WaitCommitPayload(); err != nil {
+				logger.Error("WaitCommitPayload failed in GetProof (NOMT): %v", err)
+			}
 		}
 	}
 
