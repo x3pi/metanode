@@ -420,12 +420,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	storage.SetPreConsensusSyncActive(isPreConsensusSync)
 	defer storage.SetPreConsensusSyncActive(false)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
+	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
+	// all prior consensus block executions have been fully committed to disk,
+	// preventing concurrent PebbleDB writes or stale parent root checks.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if sm := rh.getSnapshotManager(); sm != nil {
+		logger.Info("⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+		sm.WaitForPersistence()
+	}
+
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
-		if sm := rh.getSnapshotManager(); sm != nil {
-			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
-			sm.WaitForPersistence()
-		}
 	}
 
 	// R7: Crash-guard for Cache Invalidation
