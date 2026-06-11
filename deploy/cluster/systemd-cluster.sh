@@ -234,11 +234,13 @@ cmd_logs() {
 cmd_setup() {
     local only_node="all"
     local auto_yes=""
+    local use_env=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
             -y|--yes) auto_yes="-y"; shift ;;
+            --use-env) use_env="--use-env"; shift ;;
             *) shift ;;
         esac
     done
@@ -297,7 +299,7 @@ cmd_setup() {
 
     echo ""
     log_info "Bắt đầu cài đặt lại sau khi xóa data..."
-    cmd_install --node "${only_node}" $auto_yes
+    cmd_install --node "${only_node}" $auto_yes ${use_env}
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -308,11 +310,13 @@ cmd_setup() {
 cmd_install() {
     local only_node="all"
     local auto_yes=""
+    local use_env="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
             -y|--yes) auto_yes="-y"; shift ;;
+            --use-env) use_env="true"; shift ;;
             *) shift ;;
         esac
     done
@@ -334,7 +338,16 @@ cmd_install() {
         local net_key="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}_network_key.json"
 
         local extra_args=""
-        if [ -f "$json_cfg" ] && [ -f "$toml_cfg" ]; then
+        if [ "$use_env" = "true" ]; then
+            # --use-env: bỏ qua JSON/TOML, dùng thẳng file .env trong node-N_keys/
+            if [ ! -f "$cfg" ]; then
+                log_err "Config .env không tồn tại: $cfg"
+                log_err "Kiểm tra lại thư mục keys: $(dirname "$cfg")"
+                continue
+            fi
+            log_info "[--use-env] Dùng file .env: $cfg"
+            extra_args="--config $cfg"
+        elif [ -f "$json_cfg" ] && [ -f "$toml_cfg" ]; then
             log_info "Tìm thấy cấu hình JSON/TOML có sẵn. Tái sử dụng trực tiếp..."
             extra_args="--json-config $json_cfg --toml-config $toml_cfg --node-id $nid"
             if [ -f "$proto_key" ]; then
@@ -472,10 +485,17 @@ case "$CMD" in
         echo "  logs N both          Xem cả 2 service Node N"
         echo "  reset-failed         Gỡ bỏ rate-limit systemd (sau crash loop)"
         echo ""
+        echo "Options:"
+        echo "  --use-env            Bỏ qua JSON/TOML, dùng file .env trong node-N_keys/"
+        echo "                       (dùng với setup hoặc install)"
+        echo ""
         echo "Ví dụ:"
         echo "  sudo bash $0 setup               # Lần đầu hoặc reset mạng"
         echo "  sudo bash $0 setup -y            # Reset không hỏi xác nhận"
         echo "  sudo bash $0 install             # Update code, giữ data"
+        echo "  sudo bash $0 install --use-env   # Dùng node-N_keys/*.env thay vì JSON"
+        echo "  sudo bash $0 install --node 0 --use-env  # Chỉ Node 0, dùng .env"
+        echo "  sudo bash $0 setup --node 0 --use-env -y # Setup Node 0 từ .env"
         echo "  sudo bash $0 start               # Khởi động tất cả"
         echo "  sudo bash $0 status              # Kiểm tra trạng thái"
         echo "  sudo bash $0 check               # Kiểm tra block height"
