@@ -14,6 +14,7 @@ impl ConsensusNode {
         executor_client: &Arc<ExecutorClient>,
         best_socket: &str,
         peer_last_block: u64,
+        current_epoch: u64,
     ) -> (u64, u64, [u8; 32], Option<u32>, u64) {
         if !config.executor_read_enabled {
             return (0, 0, [0; 32], None, 0);
@@ -40,10 +41,21 @@ impl ConsensusNode {
         };
 
         let (last_handled_commit_index, last_block_timestamp_ms) = match executor_client.get_last_handled_commit_index().await {
-            Ok((commit_index, _, _, _, _, ts, state_root)) => {
+            Ok((commit_index, _, _, go_epoch, _, ts, state_root)) => {
                 let state_root_hex = hex::encode(&state_root);
-                tracing::info!("🔑 [GO-AUTH GEI] Post-init query: state_root=0x{}", state_root_hex);
-                (Some(commit_index), ts)
+                tracing::info!(
+                    "🔑 [GO-AUTH GEI] Post-init query: state_root=0x{}, go_epoch={}, rust_epoch={}",
+                    state_root_hex, go_epoch, current_epoch
+                );
+                if go_epoch != current_epoch && commit_index > 0 {
+                    tracing::error!(
+                        "🚨 [STARTUP] EPOCH MISMATCH: Go epoch={} != Rust epoch={}! Go commit_index={} is from wrong epoch. Forcing last_handled_commit_index=None.",
+                        go_epoch, current_epoch, commit_index
+                    );
+                    (None, ts)
+                } else {
+                    (Some(commit_index), ts)
+                }
             },
             Err(e) => {
                 warn!("⚠️ [STARTUP] Failed to get last_handled_commit_index from Go: {}", e);

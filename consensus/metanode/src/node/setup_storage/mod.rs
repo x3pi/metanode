@@ -710,6 +710,7 @@ impl ConsensusNode {
             &executor_client,
             &best_socket,
             peer_last_block,
+            current_epoch,
         )
         .await;
 

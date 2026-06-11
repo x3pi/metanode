@@ -381,20 +381,25 @@ run_single_round() {
 
     # ── Phase 1: Check snapshot availability ──
     log "### Giai đoạn 1: Kiểm tra Snapshot"
-    local snap_json=$(curl -sf "${snap_url}/api/snapshots" 2>/dev/null || echo "null")
-    if [ "$snap_json" = "null" ] || [ -z "$snap_json" ]; then
+    local snap_json=$(curl -sf "${snap_url}/api/snapshots" 2>/dev/null || echo "")
+    if [ -z "$snap_json" ]; then
         log "- ❌ API Snapshot không phản hồi trên Node $src"
         return 1
     fi
-    local snap_count=$(echo "$snap_json" | jq 'length' 2>/dev/null || echo "0")
+    local snap_count=0
+    if [ "$snap_json" != "null" ] && [ -n "$snap_json" ]; then
+        snap_count=$(echo "$snap_json" | jq 'length' 2>/dev/null || echo "0")
+    fi
     if [ "$snap_count" -eq 0 ]; then
         log "- ⚠️ Không có snapshot nào. Bơm giao dịch để bắt buộc chuyển epoch..."
         start_tx_pump
         for attempt in $(seq 1 12); do
             sleep 5
-            snap_json=$(curl -sf "${snap_url}/api/snapshots" 2>/dev/null || echo "null")
-            snap_count=$(echo "$snap_json" | jq 'length' 2>/dev/null || echo "0")
-            [ "$snap_count" -gt 0 ] && break
+            snap_json=$(curl -sf "${snap_url}/api/snapshots" 2>/dev/null || echo "")
+            if [ -n "$snap_json" ] && [ "$snap_json" != "null" ]; then
+                snap_count=$(echo "$snap_json" | jq 'length' 2>/dev/null || echo "0")
+                [ "$snap_count" -gt 0 ] && break
+            fi
         done
         stop_tx_pump
         if [ "$snap_count" -eq 0 ]; then
@@ -422,15 +427,43 @@ run_single_round() {
 
     local dl_dir="$TMP_DIR/snapshot_download_stability_${dst}"
     rm -rf "$dl_dir"; mkdir -p "$dl_dir"
-    wget -q -c -r -np -nH --cut-dirs=2 -P "$dl_dir" --reject="index.html*" "${snap_url}/files/${snap_name}/" 2>/dev/null
-    if [ ! -d "$dl_dir" ] || [ -z "$(ls -A "$dl_dir" 2>/dev/null)" ]; then
-        log "- ❌ Snapshot download failed from ${snap_url}"
+    
+    local tar_url="${snap_url}/files/${snap_name}.tar"
+    local tar_file="$dl_dir/${snap_name}.tar"
+    log "- ⏳ Downloading snapshot tarball from ${tar_url}..."
+    
+    local downloaded=false
+    for attempt in $(seq 1 30); do
+        if wget -q -c -O "$tar_file" "$tar_url" 2>/dev/null; then
+            if [ -s "$tar_file" ] && tar -tf "$tar_file" >/dev/null 2>&1; then
+                downloaded=true
+                break
+            fi
+        fi
+        sleep 2
+    done
+    
+    if [ "$downloaded" = false ]; then
+        log "- ❌ Snapshot tarball download failed or corrupt from ${tar_url}"
         return 1
     fi
-    # Diagnostic: Verify NOMT binary files were downloaded correctly via HTTP
+    
+    log "- 📦 Extracting sparse tarball..."
+    if ! tar -Sxf "$tar_file" -C "$dl_dir/"; then
+        log "- ❌ Failed to extract snapshot tarball"
+        return 1
+    fi
+    rm -f "$tar_file"
+    
+    if [ -d "$dl_dir/${snap_name}" ]; then
+        mv "$dl_dir/${snap_name}/"* "$dl_dir/" 2>/dev/null || true
+        rm -rf "$dl_dir/${snap_name}"
+    fi
+
+    # Diagnostic: Verify NOMT binary files were downloaded correctly
     local dl_total=$(find "$dl_dir" -type f 2>/dev/null | wc -l)
     local dl_nomt=$(find "$dl_dir/nomt_db" -type f 2>/dev/null | wc -l)
-    log "- 📦 Downloaded $dl_total files total ($dl_nomt in nomt_db/) from HTTP server"
+    log "- 📦 Extracted $dl_total files total ($dl_nomt in nomt_db/) from sparse tarball"
 
     mkdir -p "$dst_data/data/data/history" "$dst_data/data/data/consensus" "$dst_data/back_up" "$dst_data/data-write" "$dst_data/back_up_write"
     for dir_name in $LEVELDB_DIRS; do
