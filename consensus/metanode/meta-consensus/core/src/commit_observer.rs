@@ -320,11 +320,20 @@ impl CommitObserver {
                     vec![]
                 };
 
-                let committed_sub_dag = load_committed_subdag_from_store(
+                let mut committed_sub_dag = load_committed_subdag_from_store(
                     self.store.as_ref(),
                     commit,
                     reputation_scores,
                 );
+
+                if committed_sub_dag.commit_ref.index < last_commit_index && !committed_sub_dag.recovered_rejected_transactions {
+                    info!(
+                        "Marking historical recovery commit {} as already finalized (index < last_commit_index {})",
+                        committed_sub_dag.commit_ref.index, last_commit_index
+                    );
+                    committed_sub_dag.recovered_rejected_transactions = true;
+                    committed_sub_dag.decided_with_local_blocks = true;
+                }
 
                 if !committed_sub_dag.recovered_rejected_transactions && !seen_unfinalized_commit {
                     info!(
