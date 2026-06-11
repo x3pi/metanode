@@ -1229,15 +1229,19 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	})
 	n.writerMu.Unlock()
 
-	// Unlock sessionInitMu after handle is updated, allowing subsequent session
-	// creations to safely target the new handle.
-	n.sessionInitMu.Unlock()
-
 	// 4. Save registry to file
 	n.persistRegistryToFile()
 
 	// 5. Populate keys/values into NOMT
 	if len(kvs) > 0 {
+		// Begin the session for rebuild while still holding sessionInitMu
+		rebuildSession := nomt_ffi.BeginSession(newHandle)
+		n.sessionMu.Lock()
+		n.activeSession = rebuildSession
+		n.sessionMu.Unlock()
+
+		n.sessionInitMu.Unlock()
+
 		keys := make([][]byte, len(kvs))
 		values := make([][]byte, len(kvs))
 		for i, kv := range kvs {
@@ -1247,6 +1251,12 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 
 		// BatchUpdate will acquire n.writerMu
 		if err := n.BatchUpdate(keys, values); err != nil {
+			n.sessionMu.Lock()
+			if n.activeSession == rebuildSession {
+				rebuildSession.Abort()
+				n.activeSession = nil
+			}
+			n.sessionMu.Unlock()
 			return fmt.Errorf("failed to batch update in rebuilt trie: %w", err)
 		}
 
@@ -1266,6 +1276,8 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		}
 		logger.Info("✅ [NOMT-ALIGN-REBUILD] Rebuilt NOMT successfully aligned to expected root: %s", expectedRoot.Hex()[:18])
 	} else {
+		n.sessionInitMu.Unlock()
+
 		// Empty database
 		n.writerMu.Lock()
 		n.publishReadView(make(map[string]*nomtDirtyEntry), nil, e_common.Hash{})
@@ -1498,9 +1510,7 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	// FORK-SAFE: Persist knownKeys to file OUTSIDE the Merkle trie.
 	if n.registryChanged {
 		n.updateRegistryCache()
-		if !n.isReplicationSync {
-			n.persistRegistryToFile()
-		}
+		n.persistRegistryToFile()
 		n.registryChanged = false
 	}
 
@@ -1868,6 +1878,8 @@ func ApplyNomtReplicationBatches(
 					nomtKeys = append(nomtKeys, newKey)
 					nomtValues = append(nomtValues, kv[1])
 				} else {
+					nomtKeys = append(nomtKeys, kv[0])
+					nomtValues = append(nomtValues, kv[1])
 					nonNomtBatch = append(nonNomtBatch, kv)
 				}
 			} else {
@@ -1875,6 +1887,8 @@ func ApplyNomtReplicationBatches(
 					nomtKeys = append(nomtKeys, kv[0][5:])
 					nomtValues = append(nomtValues, kv[1])
 				} else {
+					nomtKeys = append(nomtKeys, kv[0])
+					nomtValues = append(nomtValues, kv[1])
 					nonNomtBatch = append(nonNomtBatch, kv)
 				}
 			}
@@ -1982,15 +1996,11 @@ func ApplyNomtReplicationBatches(
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}
-				hadRegistryChange := trie.registryChanged
 				if _, _, _, err := trie.Commit(true); err != nil {
 					return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
 				if err := trie.CommitPayload(); err != nil {
 					return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch: %w", err)
-				}
-				if hadRegistryChange {
-					trie.persistRegistryToFile()
 				}
 
 				// FORK-DIAG: Log handle root AFTER sync

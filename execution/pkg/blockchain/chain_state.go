@@ -274,7 +274,7 @@ func NewChainStateWithGenesis(
 
 // UpdateStateForNewHeader cập nhật trạng thái dựa trên header mới.
 // Hàm này sẽ cập nhật con trỏ header và khởi tạo lại các DB trạng thái liên quan.
-func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error {
+func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error {
 	if newHeader == nil {
 		return fmt.Errorf("cannot update state with a nil header")
 	}
@@ -395,6 +395,29 @@ func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error
 
 	// logger.Info("ChainState updated for new header", "blockNumber", newHeader.BlockNumber(), "accountRoot", newAccountRoot, "stakeRoot", newStakeRoot)
 	return nil
+}
+
+// LockCommit locks the commit mutex to serialize external operations with block committing.
+func (cs *ChainState) LockCommit() {
+	cs.commitMutex.Lock()
+}
+
+// UnlockCommit unlocks the commit mutex.
+func (cs *ChainState) UnlockCommit() {
+	cs.commitMutex.Unlock()
+}
+
+// UpdateStateForNewHeader updates state using the new header under the commit lock.
+func (cs *ChainState) UpdateStateForNewHeader(newHeader types.BlockHeader) error {
+	cs.commitMutex.Lock()
+	defer cs.commitMutex.Unlock()
+	return cs.updateStateForNewHeader(newHeader)
+}
+
+// UpdateStateForNewHeaderUnlocked updates state using the new header without acquiring the commit lock.
+// The caller MUST hold the commitMutex.
+func (cs *ChainState) UpdateStateForNewHeaderUnlocked(newHeader types.BlockHeader) error {
+	return cs.updateStateForNewHeader(newHeader)
 }
 
 // NewChainState tạo một đối tượng ChainState mới.

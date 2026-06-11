@@ -642,6 +642,9 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 
 	// CRITICAL FIX: Actually advance local state when DB is ahead
 	if actualLastGEI > 0 && actualLastGEI >= *nextExpectedGlobalExecIndex {
+		bp.chainState.LockCommit()
+		defer bp.chainState.UnlockCommit()
+
 		oldNextExpected := *nextExpectedGlobalExecIndex
 		*nextExpectedGlobalExecIndex = actualLastGEI + 1
 
@@ -675,7 +678,7 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						if trie.GetStateBackend() == trie.BackendNOMT {
 							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)",
 								actualLastBlockDB, actualLastGEI)
-							if err := bp.chainState.UpdateStateForNewHeader(freshBlock.Header()); err != nil {
+							if err := bp.chainState.UpdateStateForNewHeaderUnlocked(freshBlock.Header()); err != nil {
 								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
 							}
 						}

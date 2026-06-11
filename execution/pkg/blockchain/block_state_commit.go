@@ -195,7 +195,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	headerStakeRoot := common.Hash(header.StakeStatesRoot())
 
 	if cfg.rebuildTries || activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
-		if err := cs.UpdateStateForNewHeader(header); err != nil {
+		if err := cs.updateStateForNewHeader(header); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to align/rebuild tries for block #%d: %v", blockNum, err)
 			return blockNum, err
 		}

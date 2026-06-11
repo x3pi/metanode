@@ -354,7 +354,7 @@ func (bp *BlockProcessor) commitWorker() {
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // PersistAsync runs inline (synchronous) to guarantee trie swap completes before
 // the next block starts processing — eliminating the fork race condition.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) error {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) (accountBatch []byte, stakeBatch []byte, smartContractBatch []byte, smartContractStorageBatch []byte, codeBatchPut []byte, err error) {
 	overallStart := time.Now()
 
 	// Will hold the pipeline results for async persistence
@@ -391,7 +391,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			scStart := time.Now()
 			if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
 				logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
-				return fmt.Errorf("SmartContractDB commit failed: %w", err)
+				return nil, nil, nil, nil, nil, fmt.Errorf("SmartContractDB commit failed: %w", err)
 			}
 			scDuration = time.Since(scStart)
 			logger.Debug("[PERF] SmartContractDB (Sequential): %v", scDuration)
@@ -486,7 +486,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		for _, errStr := range commitErrors {
 			if len(errStr) > 15 && (errStr[:15] == "AccountPipeline" || errStr[:13] == "StakePipeline") {
 				logger.Error("🚨 [COMMIT] CRITICAL pipeline task failed: %s — block MUST be reverted to prevent fork", errStr)
-				return fmt.Errorf("critical commit failure: %s", errStr)
+				return nil, nil, nil, nil, nil, fmt.Errorf("critical commit failure: %s", errStr)
 			}
 		}
 		logger.Error("🚨 [COMMIT] %d non-critical commit tasks failed: %v — node continues (will self-heal)",
@@ -496,10 +496,11 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	var accountPersistDuration, stakePersistDuration, receiptPersistDuration time.Duration
 
 	if accountPipelineResult != nil {
+		accountBatch = accountPipelineResult.AccountBatch
 		startPersist := time.Now()
 		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
-			return fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
 		bp.pendingAccountPayload = accountPipelineResult.NomtPayload
 		accountPersistDuration = time.Since(startPersist)
@@ -508,10 +509,11 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 	}
 	if stakePipelineResult != nil {
+		stakeBatch = stakePipelineResult.StakeBatch
 		startPersist := time.Now()
 		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
-			return fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
 		bp.pendingStakePayload = stakePipelineResult.NomtPayload
 		stakePersistDuration = time.Since(startPersist)
@@ -523,12 +525,19 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		startPersist := time.Now()
 		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
-			return fmt.Errorf("Receipts PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("Receipts PersistAsync failed: %w", err)
 		}
 		receiptPersistDuration = time.Since(startPersist)
 		if receiptPersistDuration > 10*time.Millisecond {
 			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", receiptPersistDuration)
 		}
+	}
+
+	// Capture contract batches while we are sequentially safe inside commitToMemoryParallel
+	if isStateChanging && !tx_processor.NomtAheadReplayMode.Load() {
+		smartContractBatch = bp.chainState.GetSmartContractDB().GetSmartContractBatch()
+		smartContractStorageBatch = bp.chainState.GetSmartContractDB().GetSmartContractStorageBatch()
+		codeBatchPut = bp.chainState.GetSmartContractDB().GetCodeBatchPut()
 	}
 
 	overallDuration := time.Since(overallStart)
@@ -537,7 +546,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			blockNumber, scDuration, maxDuration, maxTask, accountPersistDuration, stakePersistDuration, receiptPersistDuration, overallDuration)
 	}
 
-	return nil
+	return accountBatch, stakeBatch, smartContractBatch, smartContractStorageBatch, codeBatchPut, nil
 }
 
 // persistWorker REMOVED (May 2026): Was a no-op fence goroutine. PersistAsync

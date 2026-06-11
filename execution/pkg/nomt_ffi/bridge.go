@@ -59,6 +59,7 @@ type Session struct {
 // FinishedSession wraps an opaque pointer to a session that has finished
 // computing its Merkle root but has NOT yet written to disk.
 type FinishedSession struct {
+	mu     sync.Mutex
 	ptr    *C.FinishedSessionHandle
 	handle *Handle
 }
@@ -205,10 +206,15 @@ func (h *Handle) CloseForSnapshot() {
 
 	h.LockCommitPayload()
 	for _, fs := range pending {
-		if fs != nil && fs.ptr != nil {
-			fmt.Printf("nomt_ffi: forcefully flushing pending finished session at %s before snapshot\n", h.path)
-			C.nomt_commit_payload(h.ptr, fs.ptr)
-			fs.ptr = nil
+		if fs != nil {
+			fs.mu.Lock()
+			ptr := fs.ptr
+			if ptr != nil {
+				fmt.Printf("nomt_ffi: forcefully flushing pending finished session at %s before snapshot\n", h.path)
+				C.nomt_commit_payload(h.ptr, ptr)
+				fs.ptr = nil
+			}
+			fs.mu.Unlock()
 		}
 	}
 	h.UnlockCommitPayload()
@@ -299,10 +305,15 @@ func (h *Handle) Checkpoint(destPath string) error {
 	h.sessionsMu.Unlock()
 
 	for _, fs := range pending {
-		if fs != nil && fs.ptr != nil {
-			fmt.Printf("nomt_ffi: flushing pending session before checkpoint at %s\n", h.path)
-			C.nomt_commit_payload(h.ptr, fs.ptr)
-			fs.ptr = nil
+		if fs != nil {
+			fs.mu.Lock()
+			ptr := fs.ptr
+			if ptr != nil {
+				fmt.Printf("nomt_ffi: flushing pending session before checkpoint at %s\n", h.path)
+				C.nomt_commit_payload(h.ptr, ptr)
+				fs.ptr = nil
+			}
+			fs.mu.Unlock()
 		}
 	}
 
@@ -738,12 +749,16 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if fs.ptr == nil {
+	fs.mu.Lock()
+	ptr := fs.ptr
+	if ptr == nil {
+		fs.mu.Unlock()
 		return nil // already consumed by CloseForSnapshot or earlier commit
 	}
 
 	if h.ptr == nil {
 		fs.ptr = nil
+		fs.mu.Unlock()
 		h.sessionsMu.Lock()
 		for i, pfs := range h.pendingSessions {
 			if pfs == fs {
@@ -757,7 +772,9 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
-	ret := C.nomt_commit_payload(h.ptr, fs.ptr)
+	ret := C.nomt_commit_payload(h.ptr, ptr)
+	fs.ptr = nil
+	fs.mu.Unlock()
 	
 	h.sessionsMu.Lock()
 	for i, pfs := range h.pendingSessions {
@@ -768,13 +785,11 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	}
 
 	if ret != 0 {
-		fs.ptr = nil
 		h.activeCount--
 		h.activeCond.Broadcast()
 		h.sessionsMu.Unlock()
 		return fmt.Errorf("nomt_ffi: failed to commit payload")
 	}
-	fs.ptr = nil
 
 	h.activeCount--
 	h.activeCond.Broadcast()
@@ -803,18 +818,26 @@ func (s *Session) Abort() {
 // Abort discards an uncommitted finished session.
 func (fs *FinishedSession) Abort() {
 	if fs.ptr != nil && fs.handle != nil {
+		fs.mu.Lock()
+		ptr := fs.ptr
+		if ptr == nil {
+			fs.mu.Unlock()
+			return
+		}
+		fs.ptr = nil
 		h := fs.handle
+		fs.mu.Unlock()
+
 		h.mu.RLock()
 		if h.ptr != nil {
-			C.nomt_finished_session_abort(fs.ptr)
+			C.nomt_finished_session_abort(ptr)
 		}
 		h.mu.RUnlock()
-		fs.ptr = nil
 
 		h.sessionsMu.Lock()
 		for i, pfs := range h.pendingSessions {
 			if pfs == fs {
-				h.pendingSessions = append(h.pendingSessions[:i], h.pendingSessions[i+1:]...)
+				h.pendingSessions = append(h.pendingSessions[:i], pfs.handle.pendingSessions[i+1:]...)
 				break
 			}
 		}
