@@ -199,7 +199,7 @@ start_tx_pump() {
     
     # Build tx_sender nếu chưa có binary
     if [ ! -x "$TX_SENDER_DIR/tx_sender" ]; then
-        (cd "$TX_SENDER_DIR" && go build -o tx_sender .) || true
+        (cd "$TX_SENDER_DIR" && go build -o tx_sender main.go) || true
     fi
     
     # Xóa PID file cũ nếu process đã chết

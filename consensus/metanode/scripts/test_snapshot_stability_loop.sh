@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-TMP_DIR=$(mktemp -d)
+TMP_DIR=$(mktemp -d -p "$GO_DIR/sample")
 GLOBAL_LOG="$TMP_DIR/global.log"
 ROUND_LOG="$GLOBAL_LOG"
 AVAILABLE_DST_NODES=(1 2 3 4)
@@ -81,7 +81,7 @@ get_snapshot_port() { echo $((8600 + $1)); }
 
 start_tx_pump() {
     [ ! -d "$TX_SENDER_DIR" ] && return
-    [ ! -x "$TX_SENDER_DIR/tx_sender" ] && (cd "$TX_SENDER_DIR" && go build -o tx_sender . 2>/dev/null) || true
+    [ ! -x "$TX_SENDER_DIR/tx_sender" ] && (cd "$TX_SENDER_DIR" && go build -o tx_sender main.go 2>/dev/null) || true
     "$TX_SENDER_DIR/tx_sender" --config "$TX_SENDER_DIR/config.json" \
         --data "$TX_SENDER_DIR/data.json" --loop --node "$TX_SENDER_NODE" > /dev/null 2>&1 &
     TX_PUMP_PID=$!
@@ -420,7 +420,7 @@ run_single_round() {
     rm -rf "$LOG_BASE/node_$dst" "$RUST_DIR/config/storage/node_$dst"
     log "- 🗑️ Node $dst state wiped"
 
-    local dl_dir="/tmp/snapshot_download_stability_${dst}"
+    local dl_dir="$TMP_DIR/snapshot_download_stability_${dst}"
     rm -rf "$dl_dir"; mkdir -p "$dl_dir"
     wget -q -c -r -np -nH --cut-dirs=2 -P "$dl_dir" --reject="index.html*" "${snap_url}/files/${snap_name}/" 2>/dev/null
     if [ ! -d "$dl_dir" ] || [ -z "$(ls -A "$dl_dir" 2>/dev/null)" ]; then
