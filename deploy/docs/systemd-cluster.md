@@ -61,14 +61,21 @@ sudo bash systemd-cluster.sh setup -y
 > 🔴 **CẢNH BÁO:** Xóa vĩnh viễn toàn bộ blockchain data trong `/opt/metanode/node-X/data/` và `/logs/`. Không thể khôi phục!
 
 ```bash
-# Xóa data TẤT CẢ 5 node + cài mới (có hỏi xác nhận)
-sudo bash systemd-cluster.sh setup
+
 
 # Xóa data + cài mới, tự động đồng ý (không hỏi)
 sudo bash systemd-cluster.sh setup -y
 
-# Xóa data + cài mới chỉ Node 4
-sudo bash systemd-cluster.sh setup --node 4 -y
+# Xóa data + cài mới chỉ Node 4 (tìm file JSON/TOML trước rồi mới tìm env)
+sudo bash systemd-cluster.sh setup --node 0 -y
+
+# Setup sạch (xóa data) node 0, dùng .env
+sudo bash systemd-cluster.sh setup --node 0 --use-env -y
+
+# Install tất cả node, dùng folder node-N_keys/*.env
+sudo bash systemd-cluster.sh install --use-env
+# Chỉ node 0, dùng node-0_keys/validator.env
+sudo bash systemd-cluster.sh install --node 0 --use-env
 ```
 
 ---
@@ -80,8 +87,6 @@ sudo bash systemd-cluster.sh setup --node 4 -y
 > ✅ **An toàn:** Không đụng vào `data/`. Node sẽ tiếp tục sync từ block cũ sau khi restart.
 
 ```bash
-# Cập nhật TẤT CẢ 5 node
-sudo bash systemd-cluster.sh install
 
 # Cập nhật không hỏi xác nhận
 sudo bash systemd-cluster.sh install -y
