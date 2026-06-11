@@ -68,9 +68,7 @@ pub fn update_go_tx_trace(hash: &[u8], step: &str, details: &str) {
         if let Some(func) = callbacks.update_tx_trace {
             let step_c = std::ffi::CString::new(step).unwrap_or_default();
             let details_c = std::ffi::CString::new(details).unwrap_or_default();
-            unsafe {
-                func(hash.as_ptr(), step_c.as_ptr(), details_c.as_ptr());
-            }
+            func(hash.as_ptr(), step_c.as_ptr(), details_c.as_ptr());
         }
     }
 }

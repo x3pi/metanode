@@ -177,8 +177,17 @@ func toEthAccessList(pbAccessList []*pb.AccessTuple) types.AccessList {
 }
 
 func extractSignature(tx *pb.Transaction) (v, r, s *big.Int) {
-	r = new(big.Int).SetBytes(tx.R)
-	s = new(big.Int).SetBytes(tx.S)
-	v = new(big.Int).SetBytes(tx.V)
+	if tx == nil {
+		return nil, nil, nil
+	}
+	if len(tx.R) > 0 {
+		r = new(big.Int).SetBytes(tx.R)
+	}
+	if len(tx.S) > 0 {
+		s = new(big.Int).SetBytes(tx.S)
+	}
+	if len(tx.V) > 0 {
+		v = new(big.Int).SetBytes(tx.V)
+	}
 	return
 }

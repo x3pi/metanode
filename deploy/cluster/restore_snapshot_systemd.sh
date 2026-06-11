@@ -197,7 +197,8 @@ rm -f "${INSTALL_DIR}/logs/consensus/consensus.log" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Đã xóa sạch dữ liệu cũ tại ${INSTALL_DIR}/data/${NC}"
 
 # Step 3: Tạo lại cấu trúc thư mục rỗng
-mkdir -p "${INSTALL_DIR}/data/execution/db"
+mkdir -p "${INSTALL_DIR}/data/execution/db/history"
+mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
 mkdir -p "${INSTALL_DIR}/data/execution/backup"
 mkdir -p "${INSTALL_DIR}/data/consensus"
 mkdir -p "${INSTALL_DIR}/logs/execution"
@@ -241,10 +242,10 @@ if [ "$HTTP_CODE" = "200" ]; then
     }
     echo -e "${CYAN}  📦 Đang giải nén Tarball trực tiếp...${NC}"
     
-    tar -xf "$TAR_FILE" -C "$TEMP_SNAP" 2>/dev/null || {
+    tar -Sxf "$TAR_FILE" -C "$TEMP_SNAP" 2>/dev/null || {
         echo -e "${YELLOW}  ⚠️ Giải nén lỗi, thử giải nén ra thư mục tạm...${NC}"
         mkdir -p "/tmp/extract_$$"
-        tar -xf "$TAR_FILE" -C "/tmp/extract_$$"
+        tar -Sxf "$TAR_FILE" -C "/tmp/extract_$$"
         mv "/tmp/extract_$$/$SNAP_NAME" "$TEMP_SNAP/"
         rm -rf "/tmp/extract_$$"
     }
@@ -280,8 +281,7 @@ else
     echo -e "${YELLOW}  ⚠️ Không tìm thấy thư mục 'back_up' trong snapshot${NC}"
 fi
 
-# 5b. Copy các thư mục LevelDB/Nomt còn lại vào db
-mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+# 5b. Copy các thư mục LevelDB/Nomt còn lại vào db với đúng mapping history/consensus
 for item in "$SNAP_SRC_DIR"/*; do
     name=$(basename "$item")
     [ "$name" = "back_up" ] && continue
@@ -290,18 +290,27 @@ for item in "$SNAP_SRC_DIR"/*; do
     [ "$name" = "index.html" ] && continue
     
     if [ -d "$item" ]; then
-        if [[ "$name" == "nomt_db" || "$name" == "smart_contract_code" || "$name" == "smart_contract_storage" || "$name" == "stake_db" || "$name" == "trie_database" || "$name" == "backup_device_key_storage" || "$name" == "account_state" ]]; then
+        if [ "$name" = "blocks" ] || [ "$name" = "receipts" ] || [ "$name" = "transaction_state" ] || [ "$name" = "mapping" ] || [ "$name" = "changelog_db_account" ] || [ "$name" = "changelog_db_stake" ]; then
+            echo -e "    📦 Khôi phục history database: ${name} -> history/${name}..."
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/history/"
+        elif [ "$name" = "history" ]; then
+            echo -e "    📦 Khôi phục history directory directly..."
+            cp -a "$item"/* "${INSTALL_DIR}/data/execution/db/history/" 2>/dev/null || true
+        elif [ "$name" = "nomt_db" ] || [ "$name" = "smart_contract_code" ] || [ "$name" = "smart_contract_storage" ] || [ "$name" = "backup_device_key_storage" ] || [ "$name" = "xapian" ] || [ "$name" = "account_state" ] || [ "$name" = "stake_db" ] || [ "$name" = "trie_database" ] || [ "$name" = "backup_db" ]; then
+            echo -e "    📦 Khôi phục consensus database: ${name} -> consensus/${name}..."
             cp -a "$item" "${INSTALL_DIR}/data/execution/db/consensus/"
-            echo -e "${GREEN}    + Khôi phục: consensus/${name}/${NC}"
-        else
+        elif [ "$name" = "other" ]; then
+            echo -e "    📦 Khôi phục explorer database: other -> other..."
             cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
-            echo -e "${GREEN}    + Khôi phục: ${name}/${NC}"
+        else
+            echo -e "    📦 Khôi phục other data folder: ${name} -> db/${name}..."
+            cp -a "$item" "${INSTALL_DIR}/data/execution/db/"
         fi
     fi
 done
 
 # 🚨 CRITICAL: Xóa thư mục rust_consensus từ snapshot (nếu có) để tránh split-brain
-rm -rf "${INSTALL_DIR}/data/execution/db/rust_consensus" 2>/dev/null || true
+rm -rf "${INSTALL_DIR}/data/execution/db/consensus/rust_consensus" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Đã xóa rust_consensus cũ để ép node chạy Bootstrapping sạch${NC}"
 
 # 5c. Khôi phục metadata.json
@@ -409,6 +418,12 @@ if [ "$SYNCED" = true ]; then
     echo -e "  ${GREEN}✅ Node $NODE_ID đã khởi động thành công và online!${NC}"
 else
     echo -e "  ${RED}❌ Node $NODE_ID khởi động thất bại hoặc RPC không phản hồi sau 120s.${NC}"
+    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI SYSTEMD (Execution & Consensus) ---${NC}"
+    echo -e "${CYAN}=== metanode-execution-${NODE_ID} logs (last 50 lines) ===${NC}"
+    journalctl -u "$svc_exec" -n 50 --no-pager || true
+    echo -e "${CYAN}=== metanode-consensus-${NODE_ID} logs (last 50 lines) ===${NC}"
+    journalctl -u "$svc_cons" -n 50 --no-pager || true
+    echo -e "${YELLOW}🔍 ---------------------------------------------------------${NC}"
     exit 1
 fi
 

@@ -86,6 +86,10 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
+# Fallback for old env files to ensure directory conflict avoidance
+PROJECT_ROOT="${PROJECT_ROOT:-${LOCAL_CHAIN_DIR}/metanode}"
+REMOTE_PROJECT_ROOT="${REMOTE_PROJECT_ROOT:-${REMOTE_DEPLOY_DIR}/metanode}"
+
 if [ $# -eq 0 ] || [[ "$*" == *"--all"* ]]; then
     DO_BUILD=true; DO_BUILD_EVM=true; DO_PUSH=true; DO_IPS=true; DO_START=true
 fi
@@ -466,7 +470,7 @@ if $DO_PUSH; then
 
         # Push deploy directory for remote orchestration
         echo -e "    📄 Pushing deploy orchestrator..."
-        rsync_cmd "${LOCAL_CHAIN_DIR}/metanode/deploy/" "$server" "${REMOTE_DEPLOY_DIR}/metanode/deploy/"
+        rsync_cmd "${PROJECT_ROOT}/deploy/" "$server" "${REMOTE_PROJECT_ROOT}/deploy/"
 
         # Push per-node configs
         for id in $nodes; do
@@ -627,7 +631,7 @@ if $DO_START; then
 
         ssh_cmd "$server" "
             set -euo pipefail;
-            cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
+            cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
             export SSH_AUTH='${SSH_AUTH:-}'
             export SSH_PASSWORD='${SSH_PASSWORD:-}'
             _sudo() {
@@ -685,7 +689,7 @@ if $DO_START; then
             
             CMD_RPC="
                 set -euo pipefail;
-                cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
+                cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
                 if [ \"${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"${SSH_PASSWORD:-}\" ]; then
                     echo \"${SSH_PASSWORD}\" | sudo -S bash install-rpc-systemd.sh --node ${id} --no-build
                 else
@@ -716,7 +720,7 @@ if $DO_RESTORE; then
                 log_info "Restoring Node $r_node on $target_server..."
                 CMD_SEQ="
                     set -euo pipefail;
-                    cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
+                    cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
                     export SSH_AUTH='${SSH_AUTH:-}'
                     export SSH_PASSWORD='${SSH_PASSWORD:-}'
                     _sudo() {

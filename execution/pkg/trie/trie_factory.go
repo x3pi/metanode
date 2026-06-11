@@ -293,6 +293,58 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	return newHandle, nil
 }
 
+// ResetNomtHandle closes, wipes the files, and re-opens a fresh NOMT database for the namespace.
+func ResetNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
+	globalNomtHandlesMu.Lock()
+	defer globalNomtHandlesMu.Unlock()
+
+	handle, exists := globalNomtHandles[namespace]
+	if exists && handle != nil {
+		logger.Info("[TRIE] Closing NOMT handle for namespace %s to reset", namespace)
+		
+		handle.Close()
+		
+		delete(globalNomtHandles, namespace)
+	}
+
+	dbPath := filepath.Join(globalNomtConfig.basePath, namespace)
+	// Wipe directory
+	if err := os.RemoveAll(dbPath); err != nil {
+		logger.Error("❌ [TRIE] Failed to wipe NOMT database directory at %s: %v", dbPath, err)
+		return nil, err
+	}
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create NOMT directory: %w", err)
+	}
+
+	// Reopen handle using the same options as GetOrInitNomtHandle
+	pageCache := globalNomtConfig.pageCacheMB
+	leafCache := globalNomtConfig.leafCacheMB
+	if namespace != "account_state" && namespace != "smart_contract_storage" {
+		if pageCache > 64 {
+			pageCache = 64
+		}
+		if leafCache > 64 {
+			leafCache = 64
+		}
+	}
+	hashtableBuckets := 64000
+	preallocate := true
+	if namespace == "account_state" || namespace == "smart_contract_storage" {
+		hashtableBuckets = 10000000
+		preallocate = false
+	}
+
+	newHandle, err := nomt_ffi.Open(dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache, hashtableBuckets, preallocate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reopen NOMT database at %s: %w", dbPath, err)
+	}
+
+	globalNomtHandles[namespace] = newHandle
+	return newHandle, nil
+}
+
+
 // SnapshotAllNomtDBs coordinates taking a snapshot of all active NOMT databases.
 // Uses the Checkpoint API to copy files while the database remains OPEN —
 // no Close/Reopen needed, eliminating ~700ms overhead and os error 11 lock issues.
@@ -300,6 +352,17 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 // PREREQUISITE: The caller (SnapshotManager) MUST have already called:
 //   PauseExecution() + WaitForPersistence() to ensure no active sessions or pending I/O.
 func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
+	// Eagerly pre-initialize critical NOMT handles before copying
+	// to ensure their directories exist and they are captured in the snapshot
+	if globalNomtConfig != nil {
+		if _, err := GetOrInitNomtHandle("account_state"); err != nil {
+			logger.Warn("⚠️ [TRIE] Failed to eagerly pre-init account_state NOMT handle: %v", err)
+		}
+		if _, err := GetOrInitNomtHandle("stake_db"); err != nil {
+			logger.Warn("⚠️ [TRIE] Failed to eagerly pre-init stake_db NOMT handle: %v", err)
+		}
+	}
+
 	globalNomtHandlesMu.Lock()
 	// Create a stable snapshot of handles to iterate
 	handlesList := make([]struct {
@@ -429,3 +492,55 @@ func copyDirFallback(src, dst string) error {
 	}
 	return nil
 }
+
+var (
+	emptyNomtRoots   = make(map[string]e_common.Hash)
+	emptyNomtRootsMu sync.RWMutex
+)
+
+// GetEmptyNomtRoot dynamically determines the empty NOMT root hash for a given database configuration.
+// It opens a temporary NOMT database, queries its initial root, and caches the result.
+func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
+	key := fmt.Sprintf("%d_%t", hashtableBuckets, preallocate)
+	
+	emptyNomtRootsMu.RLock()
+	root, exists := emptyNomtRoots[key]
+	emptyNomtRootsMu.RUnlock()
+	if exists {
+		return root
+	}
+
+	emptyNomtRootsMu.Lock()
+	defer emptyNomtRootsMu.Unlock()
+	
+	// Double-check
+	if root, exists = emptyNomtRoots[key]; exists {
+		return root
+	}
+
+	tempDir, err := os.MkdirTemp("", "empty_nomt_" + key)
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to create temp directory for EmptyNomtRoot check (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+	defer os.RemoveAll(tempDir)
+
+	handle, err := nomt_ffi.Open(tempDir, 1, 0, 0, hashtableBuckets, preallocate)
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to open temp NOMT for EmptyNomtRoot check (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+	defer handle.Close()
+
+	rootBytes, err := handle.Root()
+	if err != nil {
+		logger.Error("❌ [TRIE] Failed to get root of empty temp NOMT (%s): %v", key, err)
+		return e_common.Hash{}
+	}
+
+	res := e_common.BytesToHash(rootBytes[:])
+	emptyNomtRoots[key] = res
+	logger.Info("🎯 [TRIE] Dynamically determined EmptyNomtRoot for config %s: %s", key, res.Hex())
+	return res
+}
+

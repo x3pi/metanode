@@ -455,7 +455,7 @@ impl PeerRpcServer {
             return;
         };
 
-        let max_batch = 500u64;
+        let max_batch = 20u64;
         let actual_to = std::cmp::min(to, from + max_batch - 1);
 
         info!(
@@ -572,7 +572,7 @@ impl PeerRpcServer {
         };
 
         // Limit batch size to prevent DoS or timeouts on huge blocks
-        let max_batch = 500u64;
+        let max_batch = 20u64;
         let actual_to = std::cmp::min(to, from + max_batch - 1);
 
         info!(

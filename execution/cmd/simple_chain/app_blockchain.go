@@ -23,7 +23,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
+
 
 // initBlockchain initializes blockchain-related components
 func (app *App) initBlockchain() error {
@@ -40,6 +42,18 @@ func (app *App) initBlockchain() error {
 		backupDir = "./sample/node0/back_up"
 	}
 	blockDatabase.SetBackupDir(backupDir)
+
+	// Attempt to load metadata.json early so it can be used for verification and bypass decisions
+	var metadata *executor.SnapshotMetadata
+	metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
+	if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
+		var md executor.SnapshotMetadata
+		if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
+			metadata = &md
+			logger.Info("📸 [STARTUP-METADATA] Pre-loaded metadata.json: Block=%d, GEI=%d, StateRoot=%s",
+				md.BlockNumber, md.GlobalExecIndex, md.StateRoot)
+		}
+	}
 
 	app.transactionPool = transaction_pool.NewTransactionPool()
 
@@ -63,9 +77,10 @@ func (app *App) initBlockchain() error {
 		// can't just check directory existence. SST files only exist when actual
 		// data has been committed and flushed to disk.
 		// ═══════════════════════════════════════════════════════════════════
+		// FIX: Correctly check for SST files in history/blocks instead of just /blocks
 		dataDir := app.config.Databases.RootPath
-		blocksPath := dataDir + "/blocks"
-		metadataPath := dataDir + "/metadata.json"
+		blocksPath := filepath.Join(dataDir, "history", "blocks")
+		metadataPath := filepath.Join(dataDir, "metadata.json")
 		hasExistingData := false
 
 		// Check if any shard in blocks has SST files
@@ -75,7 +90,7 @@ func (app *App) initBlockchain() error {
 				if !entry.IsDir() {
 					continue
 				}
-				shardPath := blocksPath + "/" + entry.Name()
+				shardPath := filepath.Join(blocksPath, entry.Name())
 				shardEntries, _ := os.ReadDir(shardPath)
 				for _, se := range shardEntries {
 					if strings.HasSuffix(se.Name(), ".sst") {
@@ -130,22 +145,62 @@ func (app *App) initBlockchain() error {
 					}
 
 					// Now verify NOMT roots match header — BEFORE ChainState is created
-					if nomtAccountRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
-						headerRoot := app.startLastBlock.Header().AccountStatesRoot()
-						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=account_state nomtRoot=%s headerRoot=%s", nomtAccountRoot.Hex(), headerRoot.Hex())
-						if nomtAccountRoot != headerRoot {
-							logger.Warn("⚠️ [SNAPSHOT] AccountState NOMT root MISMATCH: nomt=%s header=%s → patching header",
-								nomtAccountRoot.Hex(), headerRoot.Hex())
-							app.startLastBlock.Header().SetAccountStatesRoot(nomtAccountRoot)
-						}
-					}
-					if nomtStakeRoot, ok := trie.GetNomtHandleRoot("stake_db"); ok {
+					nomtAccountRoot, okAccount := trie.GetNomtHandleRoot("account_state")
+					nomtStakeRoot, okStake := trie.GetNomtHandleRoot("stake_db")
+
+					if okAccount && okStake {
+						headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
 						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
-						logger.Info("🔍 [FORK-DIAG] Startup NOMT vs Header Root Check: type=stake_db nomtRoot=%s headerRoot=%s", nomtStakeRoot.Hex(), headerStakeRoot.Hex())
-						if nomtStakeRoot != headerStakeRoot {
-							logger.Warn("⚠️ [SNAPSHOT] StakeState NOMT root MISMATCH: nomt=%s header=%s → patching header",
-								nomtStakeRoot.Hex(), headerStakeRoot.Hex())
-							app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeRoot)
+
+						if nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot {
+							logger.Warn("⚠️ [SNAPSHOT] NOMT root MISMATCH in metadata recovery path: account(nomt=%s header=%s), stake(nomt=%s header=%s). Wiping NOMT database and resetting block tip to genesis to force clean sync!",
+								nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+
+							// Close all handles
+							trie.CloseNomtDB()
+
+							// Wipe nomt_db directory
+							nomtDbDir := filepath.Join(app.config.Databases.RootPath, "consensus", "nomt_db")
+							if err := os.RemoveAll(nomtDbDir); err != nil {
+								logger.Error("❌ [STARTUP] Failed to wipe NOMT database directory at %s: %v", nomtDbDir, err)
+							} else {
+								logger.Info("✅ [STARTUP] Successfully wiped NOMT database directory at %s", nomtDbDir)
+							}
+
+							// Re-initialize startLastBlock to genesis block 0
+							var blk0 types.Block
+							key := []byte("blockNumber_0")
+							if data, err := app.storageManager.GetStorageMapping().Get(key); err == nil && data != nil && len(data) == 32 {
+								blockHash := e_common.BytesToHash(data)
+								if b, err := blockDatabase.GetBlockByHash(blockHash); err == nil && b != nil {
+									blk0 = b
+								}
+							}
+							if blk0 != nil {
+								logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0 in metadata recovery reset.")
+								app.startLastBlock = blk0
+							} else {
+								// Fallback to dummy genesis block if not found
+								app.startLastBlock = block.NewBlock(
+									block.NewBlockHeader(
+										e_common.Hash{},
+										0,
+										trie.EmptyRootHash,
+										e_common.Hash{},
+										e_common.Hash{},
+										e_common.Address{},
+										app.genesis.Config.EpochTimestampMs,
+										trie.EmptyRootHash,
+										0,
+									),
+									nil,
+									nil,
+								)
+							}
+							storage.ResetAllBlockCounters(0)
+							storage.ForceSetLastGlobalExecIndex(0)
+							storage.ForceSetLastHandledCommitIndex(0)
+							storage.UpdateLastHandledCommitEpoch(0)
 						}
 					}
 
@@ -355,24 +410,72 @@ func (app *App) initBlockchain() error {
 				logger.Info("🔍 [STARTUP] account_state NOMT root=%s, header AccountStatesRoot=%s | stake_db NOMT root=%s, header StakeStatesRoot=%s",
 					nomtAccountRoot.Hex(), headerAccountRoot.Hex(), nomtStakeRoot.Hex(), headerStakeRoot.Hex())
 
-				if nomtAccountRoot == (e_common.Hash{}) && headerAccountRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0) but header expects %s. "+
-						"STARTUP-SYNC will fetch missing blocks and reconcile.",
-						headerAccountRoot.Hex()[:18]+"...")
-				}
-				if nomtStakeRoot == (e_common.Hash{}) && headerStakeRoot != (e_common.Hash{}) {
-					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0) but header expects %s. "+
-						"STARTUP-SYNC will fetch missing blocks and reconcile.",
-						headerStakeRoot.Hex()[:18]+"...")
-				}
+				emptyAccountRoot := trie.GetEmptyNomtRoot(10000000, false)
+				emptyStakeRoot := trie.GetEmptyNomtRoot(64000, true)
 
-				EmptyNomtRoot := e_common.HexToHash("0x59244d688eccda45a938566777f742597e2a84ea7bb048c209a52ac89b3fcf0e")
-				isEmptyNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == EmptyNomtRoot)
+				isEmptyAccountNomt := (nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot)
+				isEmptyStakeNomt := (nomtStakeRoot == (e_common.Hash{}) || nomtStakeRoot == emptyAccountRoot || nomtStakeRoot == emptyStakeRoot)
 
-				if isEmptyNomt && headerAccountRoot != (e_common.Hash{}) {
+				if isEmptyAccountNomt && headerAccountRoot != (e_common.Hash{}) && headerAccountRoot != emptyAccountRoot && headerAccountRoot != emptyStakeRoot {
 					logger.Warn("⚠️ [STARTUP] account_state NOMT database is EMPTY (root=%s) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						nomtAccountRoot.Hex()[:18]+"...", headerAccountRoot.Hex()[:18]+"...")
+				}
+				if isEmptyStakeNomt && headerStakeRoot != (e_common.Hash{}) && headerStakeRoot != emptyAccountRoot && headerStakeRoot != emptyStakeRoot {
+					logger.Warn("⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=%s) but header expects %s. "+
+						"STARTUP-SYNC will fetch missing blocks and reconcile.",
+						nomtStakeRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
+				}
+				
+				// CRITICAL FIX: Only treat the database as EMPTY (triggering genesis alignment)
+				// if the account state NOMT itself is empty. If only the stake DB is empty but the 
+				// account state is intact, resetting the block tip to 0 while leaving the active 
+				// account trie at block N causes an integrity mismatch and a fatal crash.
+				isEmptyNomt := isEmptyAccountNomt
+
+				if isEmptyStakeNomt && !isEmptyAccountNomt {
+					logger.Warn("⚠️ [STARTUP] NOMT stake_db is empty, but account_state is active. Proceeding without genesis alignment.")
+				}
+
+				isSnapshotRecovery := false
+				if metadata != nil && metadata.StateRoot != "" {
+					nomtRootHex := nomtAccountRoot.Hex()
+					metadataRootHex := metadata.StateRoot
+					if !strings.HasPrefix(nomtRootHex, "0x") {
+						nomtRootHex = "0x" + nomtRootHex
+					}
+					if !strings.HasPrefix(metadataRootHex, "0x") {
+						metadataRootHex = "0x" + metadataRootHex
+					}
+
+					isZeroHashHex := func(h string) bool {
+						trimmed := strings.TrimPrefix(strings.ToLower(h), "0x")
+						if trimmed == "" {
+							return true
+						}
+						for i := 0; i < len(trimmed); i++ {
+							if trimmed[i] != '0' {
+								return false
+							}
+						}
+						return true
+					}
+
+					isMetadataZero := isZeroHashHex(metadata.StateRoot)
+					isNomtZeroOrEmpty := nomtAccountRoot == (e_common.Hash{}) || nomtAccountRoot == emptyAccountRoot || nomtAccountRoot == emptyStakeRoot
+					isBlock0ZeroState := metadata.BlockNumber == 0 && isMetadataZero
+					isNomtHeaderMatch := nomtAccountRoot == headerAccountRoot
+
+					if (isMetadataZero && isNomtZeroOrEmpty) || (isBlock0ZeroState && isNomtHeaderMatch) || strings.ToLower(nomtRootHex) == strings.ToLower(metadataRootHex) {
+						isSnapshotRecovery = true
+						logger.Info("📸 [STARTUP] NOMT root matches snapshot metadata StateRoot (%s). Bypassing Early Root Mismatch check.", metadata.StateRoot)
+					}
+				}
+
+				if isEmptyNomt && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
+					logger.Warn("⚠️ [STARTUP] NOMT database is EMPTY (account=%s, stake=%s) but header expects (account=%s, stake=%s). "+
 						"Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.",
-						nomtAccountRoot.Hex(), headerAccountRoot.Hex()[:18]+"...")
+						nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
 					
 					// Load block 0 (genesis) from block database
 					key := []byte("blockNumber_0")
@@ -383,22 +486,20 @@ func (app *App) initBlockchain() error {
 						if err == nil && blk0 != nil {
 							logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
 							app.startLastBlock = blk0
-							storage.ForceSetLastBlockNumber(0)
+							storage.ResetAllBlockCounters(0)
 							storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
 							storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
 							storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
-							
-							// Also reset the last block number in backup db or storage if needed
-							storage.UpdateLastBlockNumber(0)
 						} else {
 							logger.Error("❌ [STARTUP] Failed to load genesis block by hash %s: %v", blockHash.Hex(), err)
 						}
 					} else {
 						logger.Error("❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: %v", err)
 					}
-				} else if (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
+				} else if !isSnapshotRecovery && (nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot) && (headerAccountRoot != (e_common.Hash{}) || headerStakeRoot != (e_common.Hash{})) {
 					logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
 						nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+
 					found := false
 					for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
 						key := []byte(fmt.Sprintf("blockNumber_%d", bn))
@@ -425,9 +526,45 @@ func (app *App) initBlockchain() error {
 							break
 						}
 					}
+
 					if !found {
-						logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
-							nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
+						if trie.GetStateBackend() == trie.BackendNOMT {
+							logger.Warn("🛡️ [STARTUP] ⚠️ No matching block found in LevelDB for NOMT roots. Wiping NOMT database and resetting block tip to genesis to force clean sync!")
+
+							// Close all handles
+							trie.CloseNomtDB()
+
+							// Wipe nomt_db directory
+							nomtDbDir := filepath.Join(app.config.Databases.RootPath, "consensus", "nomt_db")
+							if err := os.RemoveAll(nomtDbDir); err != nil {
+								logger.Error("❌ [STARTUP] Failed to wipe NOMT database directory at %s: %v", nomtDbDir, err)
+							} else {
+								logger.Info("✅ [STARTUP] Successfully wiped NOMT database directory at %s", nomtDbDir)
+							}
+
+							// Reset startup block tip to genesis (block 0)
+							key := []byte("blockNumber_0")
+							data, err := app.storageManager.GetStorageMapping().Get(key)
+							if err == nil && data != nil && len(data) == 32 {
+								blockHash := e_common.BytesToHash(data)
+								blk0, err := blockDatabase.GetBlockByHash(blockHash)
+								if err == nil && blk0 != nil {
+									logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
+									app.startLastBlock = blk0
+									storage.ResetAllBlockCounters(0)
+									storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
+									storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
+									storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
+								} else {
+									logger.Fatal("🚨 [STARTUP] CRITICAL: Failed to load genesis block #0 by hash %s: %v", blockHash.Hex(), err)
+								}
+							} else {
+								logger.Fatal("🚨 [STARTUP] CRITICAL: Failed to find blockNumber_0 in LevelDB mapping: %v", err)
+							}
+						} else {
+							logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
+								nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
+						}
 					}
 				}
 			}
@@ -436,6 +573,30 @@ func (app *App) initBlockchain() error {
 		app.chainState, err = blockchain.NewChainStateWithGenesis(app.storageManager, blockDatabase, app.startLastBlock.Header(), app.config, FreeFeeAddresses, &app.genesis.Config, app.config.BackupPath)
 		if err != nil {
 			return fmt.Errorf("failed NewChainState: %v", err)
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// REPOPULATE GENESIS STATE FOR WIPED NOMT (May 2026):
+		// If NOMT was wiped and tip block reset to 0, NOMT is empty.
+		// We must repopulate genesis allocations and validators into NOMT,
+		// otherwise integrity checks and subsequent execution will fail.
+		// ═══════════════════════════════════════════════════════════════
+		if trie.GetStateBackend() == trie.BackendNOMT && app.startLastBlock.Header().BlockNumber() == 0 {
+			nomtAccountRoot, okAccount := trie.GetNomtHandleRoot("account_state")
+			nomtStakeRoot, okStake := trie.GetNomtHandleRoot("stake_db")
+			headerAccountRoot := app.startLastBlock.Header().AccountStatesRoot()
+			headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
+
+			shouldRepopulateAccount := okAccount && nomtAccountRoot != headerAccountRoot && headerAccountRoot != (e_common.Hash{})
+			shouldRepopulateStake := okStake && nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{})
+
+			if shouldRepopulateAccount || shouldRepopulateStake {
+				logger.Info("⏳ [STARTUP] Mismatch detected at Block 0. Account match: %v, Stake match: %v. Repopulating genesis state.", 
+					nomtAccountRoot == headerAccountRoot, nomtStakeRoot == headerStakeRoot)
+				if err := app.repopulateGenesisState(); err != nil {
+					return fmt.Errorf("failed to repopulate genesis state: %v", err)
+				}
+			}
 		}
 
 		if futureNomtRoot != (e_common.Hash{}) {
@@ -546,9 +707,8 @@ SKIP_GENESIS:
 					headerStakeRoot.Hex()[:18]+"...")
 			}
 			if nomtStakeHandleRoot != headerStakeRoot {
-				logger.Error("🚨 [STARTUP] NOMT stake_db handle root (%s) differs from header StakeStatesRoot (%s)! Patching header.",
+				logger.Error("🚨 [STARTUP] NOMT stake_db handle root (%s) differs from header StakeStatesRoot (%s)!",
 					nomtStakeHandleRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
-				app.startLastBlock.Header().SetStakeStatesRoot(nomtStakeHandleRoot)
 			} else {
 				logger.Info("✅ [STARTUP] NOMT stake_db handle root matches header: %s",
 					nomtStakeHandleRoot.Hex()[:18]+"...")
@@ -557,18 +717,7 @@ SKIP_GENESIS:
 			logger.Warn("⚠️ [STARTUP] stake_db NOMT handle not initialized, cannot verify StakeStatesRoot")
 		}
 
-		// Attempt to load metadata.json
-		metadataPath := filepath.Join(app.config.Databases.RootPath, "metadata.json")
-		var metadata *executor.SnapshotMetadata
-
-		if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
-			var md executor.SnapshotMetadata
-			if jsonErr := json.Unmarshal(metadataBytes, &md); jsonErr == nil {
-				metadata = &md
-				logger.Info("📸 [SNAPSHOT FIX] Loaded metadata.json: Block=%d, GEI=%d, StateRoot=%s",
-					md.BlockNumber, md.GlobalExecIndex, md.StateRoot)
-			}
-		}
+		// metadata.json is already pre-loaded at the start of initBlockchain
 
 		if nomtRoot != (e_common.Hash{}) {
 			if metadata != nil && metadata.StateRoot != "" {
@@ -583,7 +732,29 @@ SKIP_GENESIS:
 					metadataRootHex = "0x" + metadataRootHex
 				}
 
-				if nomtRootHex != metadata.StateRoot && nomtRoot.Hex() != metadata.StateRoot {
+				isZeroHashHex := func(h string) bool {
+					trimmed := strings.TrimPrefix(strings.ToLower(h), "0x")
+					if trimmed == "" {
+						return true
+					}
+					for i := 0; i < len(trimmed); i++ {
+						if trimmed[i] != '0' {
+							return false
+						}
+					}
+					return true
+				}
+
+				isMetadataZero := isZeroHashHex(metadata.StateRoot)
+
+				rootsMatch := false
+				if isMetadataZero {
+					rootsMatch = true
+				} else if nomtRootHex == metadata.StateRoot || nomtRoot.Hex() == metadata.StateRoot {
+					rootsMatch = true
+				}
+
+				if !rootsMatch {
 					logger.Error("❌ [FATAL] Snapshot Restore Mismatch! NOMT root=%s, but metadata.json claims StateRoot=%s",
 						nomtRoot.Hex(), metadata.StateRoot)
 					fatal.Exit("FATAL: Snapshot restore failed. NOMT state corrupted or mismatched with metadata.")
@@ -1035,3 +1206,169 @@ func (app *App) loadFreeFeeAddresses() {
 		fatal.Exit("FreeFeeAddresses in config.json is not an array")
 	}
 }
+
+// repopulateGenesisState populates genesis accounts, validators, and stakes into a wiped NOMT database.
+// This is used to reconstruct the state at block 0 when NOMT is wiped during startup recovery.
+func (app *App) repopulateGenesisState() error {
+	logger.Info("⏳ [STARTUP] Repopulating genesis allocations and validators in the wiped NOMT database...")
+
+	// 1. Set genesis accounts
+	addressMap := make(map[e_common.Address]bool)
+	for _, account := range app.genesis.Alloc {
+		a := account.ToAccountState()
+		if _, exists := addressMap[a.Address()]; exists {
+			logger.Error("Duplicate address found in genesis allocation: %s", a.Address())
+			return fmt.Errorf("duplicate address in genesis allocation: %s", a.Address().Hex())
+		}
+		addressMap[a.Address()] = true
+		a.PlusOneNonce()
+		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	// Commit account state changes
+	app.chainState.GetAccountStateDB().IntermediateRoot(true)
+	accountHash, err := app.chainState.GetAccountStateDB().Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit genesis state: %v", err)
+	}
+	app.startLastBlock.Header().SetAccountStatesRoot(accountHash)
+	logger.Info("✅ [STARTUP] Committed genesis account state root: %s", accountHash.Hex())
+
+	// Open and parse genesis JSON once for delegator stakes
+	genesisFile, err := os.Open(app.config.GenesisFilePath)
+	if err != nil {
+		logger.Error("Failed to open genesis file for delegator_stakes: %v", err)
+		return err
+	}
+	defer genesisFile.Close()
+
+	var genesisRaw map[string]interface{}
+	if err := json.NewDecoder(genesisFile).Decode(&genesisRaw); err != nil {
+		logger.Error("Failed to parse genesis JSON: %v", err)
+		return err
+	}
+
+	// 2. Register validators
+	cs := app.chainState.GetStakeStateDB()
+	logger.Info("Registering %d validators from genesis.json...", len(app.genesis.Validators))
+	for _, val := range app.genesis.Validators {
+		minSelfDelegation := new(big.Int)
+		minSelfDelegation, ok := minSelfDelegation.SetString(val.GetMinSelfDelegation(), 10)
+		if !ok {
+			return fmt.Errorf("invalid GetMinSelfDelegation value: %s", val.GetMinSelfDelegation())
+		}
+		name := val.GetHostname()
+		if name == "" {
+			name = val.GetName()
+		}
+		pubkeyBls := val.GetAuthorityKey()
+		if len(pubkeyBls) == 0 {
+			pubkeyBls = []byte(val.GetPubkeyBls())
+		}
+		pubkeySecp := val.GetProtocolKey()
+		if len(pubkeySecp) == 0 {
+			pubkeySecp = []byte(val.GetPubkeySecp())
+		}
+		networkKey := val.GetNetworkKey()
+		if len(networkKey) == 0 {
+			networkKey = pubkeySecp
+		}
+		validatorAddress := e_common.HexToAddress(val.GetAddress())
+
+		cs.CreateRegisterWithKeys(
+			validatorAddress,
+			name,
+			val.GetDescription(),
+			val.GetWebsite(),
+			val.GetImage(),
+			val.GetCommissionRate(),
+			minSelfDelegation,
+			val.GetPrimaryAddress(),
+			val.GetWorkerAddress(),
+			val.GetP2PAddress(),
+			hex.EncodeToString(pubkeyBls),
+			pubkeySecp,
+			networkKey,
+			name,
+			pubkeyBls,
+		)
+
+		// 3. Set initial stake from delegator_stakes in genesis.json
+		var delegatorStakesFromGenesis []map[string]interface{}
+		if validatorsRaw, ok := genesisRaw["validators"].([]interface{}); ok {
+			for _, valRaw := range validatorsRaw {
+				if valMap, ok := valRaw.(map[string]interface{}); ok {
+					if address, ok := valMap["address"].(string); ok && strings.EqualFold(address, validatorAddress.Hex()) {
+						if delegatorStakes, ok := valMap["delegator_stakes"].([]interface{}); ok {
+							for _, stakeRaw := range delegatorStakes {
+								if stakeMap, ok := stakeRaw.(map[string]interface{}); ok {
+									delegatorStakesFromGenesis = append(delegatorStakesFromGenesis, stakeMap)
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		delegators := delegatorStakesFromGenesis
+		logger.Info("Validator %s has %d delegators from genesis.json", validatorAddress.Hex(), len(delegators))
+
+		totalStakeFromGenesis := big.NewInt(0)
+		for i, delegatorStake := range delegators {
+			delegatorAddrStr, ok := delegatorStake["address"].(string)
+			if !ok {
+				logger.Error("Invalid delegator address format for validator %s", validatorAddress.Hex())
+				continue
+			}
+			delegatorAddress := e_common.HexToAddress(delegatorAddrStr)
+
+			amountStr, ok := delegatorStake["amount"].(string)
+			if !ok {
+				logger.Error("Invalid stake amount format for validator %s, delegator %s", validatorAddress.Hex(), delegatorAddress.Hex())
+				continue
+			}
+
+			stakeAmount := new(big.Int)
+			stakeAmount, ok = stakeAmount.SetString(amountStr, 10)
+			if !ok {
+				logger.Error("Invalid stake amount for validator %s, delegator %s: %s", validatorAddress.Hex(), delegatorAddress.Hex(), amountStr)
+				continue
+			}
+			if stakeAmount.Sign() <= 0 {
+				continue
+			}
+
+			totalStakeFromGenesis.Add(totalStakeFromGenesis, stakeAmount)
+			logger.Info("Delegator[%d] for validator %s: address=%s, amount=%s", i, validatorAddress.Hex(), delegatorAddress.Hex(), stakeAmount.String())
+
+			if err := cs.Delegate(validatorAddress, delegatorAddress, stakeAmount); err != nil {
+				logger.Error("Failed to delegate stake for validator %s, delegator %s: %v", validatorAddress.Hex(), delegatorAddress.Hex(), err)
+				return fmt.Errorf("failed to set initial stake for validator %s: %v", validatorAddress.Hex(), err)
+			}
+		}
+	}
+
+	logger.Info("Committing stake state...")
+	if _, err := cs.IntermediateRoot(true); err != nil {
+		logger.Error("Failed to calculate intermediate root for stake state: %v", err)
+		return err
+	}
+	commitHash, commitErr := cs.Commit()
+	if commitErr != nil {
+		logger.Error("Failed to commit stake state: %v", commitErr)
+		return commitErr
+	}
+	app.startLastBlock.Header().SetStakeStatesRoot(commitHash)
+	logger.Info("Stake state committed successfully in repopulate genesis.")
+
+	// Update the genesis block in LevelDB so subsequent boots don't mismatch
+	if db := app.chainState.GetBlockDatabase(); db != nil {
+		db.SaveBlockByHash(app.startLastBlock)
+	}
+	app.storageManager.GetStorageMapping().Put([]byte("blockNumber_0"), app.startLastBlock.Header().Hash().Bytes())
+
+	return nil
+}
+

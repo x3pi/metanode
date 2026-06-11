@@ -235,10 +235,10 @@ if [ "$SNAP_MODE" = "network" ]; then
         mkdir -p "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}"
         
         # Giải nén
-        tar -xf "$TEMP_TAR" -C "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/" 2>/dev/null || {
+        tar -Sxf "$TEMP_TAR" -C "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/" 2>/dev/null || {
             # Nếu lệnh trên bị lỗi cấu trúc thư mục, giải nén ra tmp rồi di chuyển
             mkdir -p "/tmp/extract_$$"
-            tar -xf "$TEMP_TAR" -C "/tmp/extract_$$"
+            tar -Sxf "$TEMP_TAR" -C "/tmp/extract_$$"
             mv "/tmp/extract_$$/$SNAP_NAME" "$GO_SIMPLE_ROOT/snapshot_data_node${NODE_ID}/"
             rm -rf "/tmp/extract_$$"
         }
@@ -280,6 +280,9 @@ for folder in "$SNAP_DIR"/*; do
       elif [ "$folder_name" = "history" ]; then
           echo "    📦 Mapping history directory directly..."
           cp -a "$folder"/* "$NODE_DATA/data/data/history/" 2>/dev/null || true
+      elif [ "$folder_name" = "consensus" ]; then
+          echo "    📦 Mapping consensus directory directly..."
+          cp -a "$folder"/* "$NODE_DATA/data/data/consensus/" 2>/dev/null || true
       elif [ "$folder_name" = "nomt_db" ] || [ "$folder_name" = "smart_contract_code" ] || [ "$folder_name" = "smart_contract_storage" ] || [ "$folder_name" = "backup_device_key_storage" ] || [ "$folder_name" = "xapian" ] || [ "$folder_name" = "xapian_node" ] || [ "$folder_name" = "account_state" ] || [ "$folder_name" = "stake_db" ] || [ "$folder_name" = "trie_database" ]; then
           echo "    📦 Mapping consensus database: $folder_name -> consensus/$folder_name..."
           cp -a "$folder" "$NODE_DATA/data/data/consensus/"
@@ -293,10 +296,10 @@ for folder in "$SNAP_DIR"/*; do
       fi
   fi
 done
-# 🚨 CRITICAL: Remove `rust_consensus` imported from the snapshot to avoid split-brain.
-# This forces the restored node to resync DAG state from peers.
-rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
-echo -e "${GREEN}  ✅ Removed dirty rust_consensus to force clean Phase: Bootstrapping${NC}"
+# 🚨 CRITICAL: Keep `rust_consensus` imported from the snapshot to maintain alignment
+# between the execution state and consensus DAG state.
+# rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
+echo -e "${GREEN}  ✅ Kept rust_consensus to maintain alignment with execution state${NC}"
 
 echo -e "${GREEN}  ✅ Data dirs copied${NC}"
 
@@ -463,7 +466,14 @@ done
 if [ "$SYNCED" = true ]; then
     echo -e "  ${GREEN}✅ Node $NODE_ID đã đồng bộ thành công!${NC}"
 else
-    echo -e "  ${YELLOW}⚠️  Hết 120s giám sát. Kiểm tra logs để xác nhận trạng thái sync.${NC}"
+    echo -e "  ${RED}❌ Hết 120s giám sát. Node $NODE_ID khởi động thất bại hoặc chưa online RPC!${NC}"
+    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI (Go Master & Rust) ---${NC}"
+    echo -e "${CYAN}=== Go Master logs (last 50 lines) ===${NC}"
+    tail -n 50 "$LOG_DIR/node_$NODE_ID/go-master-stdout.log" 2>/dev/null || true
+    echo -e "${CYAN}=== Rust Consensus logs (last 50 lines) ===${NC}"
+    tail -n 50 "$LOG_DIR/node_$NODE_ID/rust.log" 2>/dev/null || true
+    echo -e "${YELLOW}🔍 ---------------------------------------------${NC}"
+    exit 1
 fi
 
 # Step 7: Hash Check

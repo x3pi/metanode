@@ -44,6 +44,13 @@ func (rh *RequestHandler) SetSnapshotManager(sm *SnapshotManager) {
 	rh.snapshotManager = sm
 }
 
+func (rh *RequestHandler) getSnapshotManager() *SnapshotManager {
+	if rh.snapshotManager == nil {
+		rh.snapshotManager = GetGlobalSnapshotManager()
+	}
+	return rh.snapshotManager
+}
+
 // SetNetworkComponents sets ConnectionsManager and MessageSender for broadcasting to Sub nodes
 func (rh *RequestHandler) SetNetworkComponents(cm network.ConnectionsManager, ms network.MessageSender) {
 	rh.connectionsManager = cm

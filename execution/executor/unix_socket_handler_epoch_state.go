@@ -313,8 +313,8 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 		"boundary_gei", request.BoundaryGei)
 
 	// 📸 Notify snapshot manager about epoch transition
-	if rh.snapshotManager != nil {
-		rh.snapshotManager.OnEpochAdvanced(request.BoundaryBlock, request.NewEpoch)
+	if sm := rh.getSnapshotManager(); sm != nil {
+		sm.OnEpochAdvanced(request.BoundaryBlock, request.NewEpoch)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════

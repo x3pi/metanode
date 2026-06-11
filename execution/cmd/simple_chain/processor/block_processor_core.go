@@ -539,25 +539,6 @@ func NewBlockProcessor(
 		logger.Info("🛡️ [NOMT-RECOVERY-GUARD] Startup check: highest block in BackupDb is #%d", bp.startupLastHandledBlockNum)
 	}
 
-	// Khởi chạy goroutine committer để cập nhật state tuần tự
-	go bp.stateCommitter()
-	// Khởi chạy goroutine cleanup buffer để tránh rò rỉ bộ nhớ
-	bp.BlockBuffers.StartCleanupWorkers(func() uint64 {
-		return bp.nextBlockNumber.Load()
-	})
-	// Khởi chạy goroutine monitoring để theo dõi resource usage
-	go bp.startResourceMonitoring()
-	// Cleanup stale pending receipts to prevent memory leak from disconnected clients
-	go bp.cleanupPendingReceipts()
-	if bp.storageManager.IsExplorer() {
-		go bp.startIndexingProcess()
-	}
-	// go bp.commitWorker()
-	go bp.backupDbWorker() // Coalesced BackupDb builder
-	go bp.geiWorker()      // Coalesced GEI updates
-	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
-	go bp.inputTPSWorker()
-
 	// 📸 SNAPSHOT SYSTEM + LOG ROTATION: Luôn khởi tạo
 	// InitSnapshotSystem đăng ký block commit callback cho LOG ROTATION (luôn cần)
 	// và snapshot (chỉ khi enabled). Nếu snapshot tắt, log rotation vẫn hoạt động.
@@ -573,10 +554,10 @@ func NewBlockProcessor(
 
 		// Set callback to fetch atomic StateRoot during snapshot
 		snapshotManager.SetStateRootCallback(func() string {
-			if root, ok := mt_trie.GetNomtHandleRoot("account_state"); ok {
+			if root, ok := mt_trie.GetNomtHandleRoot("account_state"); ok && root != (common.Hash{}) {
 				return root.Hex()
 			}
-			// Fallback to flat trie if NOMT isn't active
+			// Fallback to flat trie if NOMT isn't active or root is zero
 			if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
 				return bp.chainState.GetAccountStateDB().Trie().Hash().Hex()
 			}
@@ -585,8 +566,12 @@ func NewBlockProcessor(
 
 		// Set callback to fetch atomic StakeStatesRoot during snapshot
 		snapshotManager.SetStakeRootCallback(func() string {
-			if root, ok := mt_trie.GetNomtHandleRoot("stake_db"); ok {
+			if root, ok := mt_trie.GetNomtHandleRoot("stake_db"); ok && root != (common.Hash{}) {
 				return root.Hex()
+			}
+			// Fallback to flat trie if NOMT isn't active or root is zero
+			if bp.chainState != nil && bp.chainState.GetStakeStateDB() != nil {
+				return bp.chainState.GetStakeStateDB().Trie().Hash().Hex()
 			}
 			return ""
 		})
@@ -628,6 +613,25 @@ func NewBlockProcessor(
 			})
 		}
 	}
+
+	// Khởi chạy goroutine committer để cập nhật state tuần tự
+	go bp.stateCommitter()
+	// Khởi chạy goroutine cleanup buffer để tránh rò rỉ bộ nhớ
+	bp.BlockBuffers.StartCleanupWorkers(func() uint64 {
+		return bp.nextBlockNumber.Load()
+	})
+	// Khởi chạy goroutine monitoring để theo dõi resource usage
+	go bp.startResourceMonitoring()
+	// Cleanup stale pending receipts to prevent memory leak from disconnected clients
+	go bp.cleanupPendingReceipts()
+	if bp.storageManager.IsExplorer() {
+		go bp.startIndexingProcess()
+	}
+	// go bp.commitWorker()
+	go bp.backupDbWorker() // Coalesced BackupDb builder
+	go bp.geiWorker()      // Coalesced GEI updates
+	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
+	go bp.inputTPSWorker()
 
 	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer
 	// which now listens on config.PeerRPCPort (e.g. 1920x) for HTTP JSON-RPC.
@@ -894,7 +898,35 @@ func (bp *BlockProcessor) WaitForPersistence() {
 		bp.commitChannel <- CommitJob{DoneChan: commitDone}
 		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...")
 		<-commitDone
-		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE. Starting backupDbWg.Wait()...")
+		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE.")
+
+		// CRITICAL FIX: Wait for NOMT Async commits to finish!
+		// Even though commitWorker is done, it spawns a background goroutine for
+		// payload.CommitAsync() which flushes NOMT data to disk. We MUST wait for
+		// it to finish before allowing the snapshot to proceed, otherwise the
+		// snapshot captures an incomplete NOMT state, causing a StateRoot mismatch!
+		if bp.chainState != nil {
+			logger.Info("⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...")
+			if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
+				if trie, ok := accDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					if err := trie.WaitCommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] AccountStateDB WaitCommitPayload failed: %v", err)
+						panic(fmt.Sprintf("FATAL: AccountStateDB async commit failed: %v", err))
+					}
+				}
+			}
+			if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
+				if trie, ok := stakeDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					if err := trie.WaitCommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: %v", err)
+						panic(fmt.Sprintf("FATAL: StakeStateDB async commit failed: %v", err))
+					}
+				}
+			}
+			logger.Info("⏳ [PERSIST] WaitForPersistence: NOMT async commits DONE.")
+		}
+
+		logger.Info("⏳ [PERSIST] WaitForPersistence: Starting backupDbWg.Wait()...")
 
 		// 2. Wait for background persistence (FlushAll + BackupDb)
 		bp.backupDbWg.Wait()
