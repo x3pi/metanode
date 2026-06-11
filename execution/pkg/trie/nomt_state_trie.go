@@ -1156,7 +1156,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	}
 
 	if !retrievedFromChangelog {
-		// Fallback to legacy retrieval from registry + handle (if changelog is disabled or empty)
+		// Fallback to legacy retrieval from registry + storage/handle (if changelog is disabled or empty)
 		knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
 		n.knownKeysMu.RLock()
 		for hexKey, origKey := range n.knownKeys {
@@ -1166,23 +1166,40 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		}
 		n.knownKeysMu.RUnlock()
 
+		var readFromStorageCount, readFromHandleCount int
 		for _, origKey := range knownKeys {
-			keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
-			val, found, readErr := n.handle.Read(keyPath)
-			if readErr == nil && found && len(val) > 0 {
+			// First attempt to read the key-value from the persistent flat DB (storage)
+			// as it represents the true committed state, bypassing any C++ handle corruption.
+			storageKey := append([]byte("nomt:"), origKey...)
+			val, readErr := storage.Get(storageKey)
+			if readErr == nil && len(val) > 0 {
 				kvs = append(kvs, [2][]byte{origKey, val})
+				readFromStorageCount++
+			} else {
+				// Fallback to reading from the old C++ handle if not found in storage
+				keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
+				val, found, readErr := n.handle.Read(keyPath)
+				if readErr == nil && found && len(val) > 0 {
+					kvs = append(kvs, [2][]byte{origKey, val})
+					readFromHandleCount++
+				}
 			}
 		}
 
-		// Fallback to prefix scan from shared storage if no keys retrieved from registry + handle
+		// Fallback to prefix scan from shared storage if no keys retrieved from registry
 		if len(kvs) == 0 {
 			var scanErr error
-			kvs, scanErr = storage.PrefixScan(nil)
+			// Scan only 'nomt:' prefixed keys which yields exact key-value pairs with 'nomt:' prefix stripped.
+			kvs, scanErr = storage.PrefixScan([]byte("nomt:"))
 			if scanErr != nil {
 				return fmt.Errorf("failed to scan keys from storage: %w", scanErr)
 			}
+			if len(kvs) > 0 {
+				logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from storage PrefixScan for namespace %s", len(kvs), string(n.namespace))
+			}
 		} else {
-			logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from registry + NOMT handle for rebuilding namespace %s", len(kvs), string(n.namespace))
+			logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values (storage=%d, handle=%d) for rebuilding namespace %s",
+				len(kvs), readFromStorageCount, readFromHandleCount, string(n.namespace))
 		}
 	}
 
