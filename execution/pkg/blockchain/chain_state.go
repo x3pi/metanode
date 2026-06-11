@@ -301,7 +301,7 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 		// Realign/Rebuild account state trie
 		if asDB := cs.GetAccountStateDB(); asDB != nil {
 			if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-				if err := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), newAccountRoot); err != nil {
+				if err := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), newAccountRoot, newHeader.BlockNumber()); err != nil {
 					logger.Error("❌ [NOMT-FAST-PATH] Failed to align account state NOMT: %v", err)
 					return fmt.Errorf("failed to align account state NOMT: %w", err)
 				}
@@ -311,7 +311,7 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 		// Realign/Rebuild stake state trie
 		if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
 			if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-				if err := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), newStakeRoot); err != nil {
+				if err := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), newStakeRoot, newHeader.BlockNumber()); err != nil {
 					logger.Error("❌ [NOMT-FAST-PATH] Failed to align stake NOMT: %v", err)
 					return fmt.Errorf("failed to align stake NOMT: %w", err)
 				}
