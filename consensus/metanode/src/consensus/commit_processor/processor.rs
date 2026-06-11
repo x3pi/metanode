@@ -944,50 +944,45 @@ impl CommitProcessor {
                                     );
                                     true
                                 } else {
-                                    // Check digest data availability
-                                    let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
-                                        checker()
-                                    } else {
-                                        false
-                                    };
-                                    if !digest_has_data_ooo {
-                                        // ZERO-TIMEOUT PEER ATTESTATION (OOO PATH):
-                                        // No digest data = cold-start. Instead of blind dispatch,
-                                        // use peer attestation to verify deterministically.
-                                        if let Some(ref attestor) = peer_commit_attestation {
-                                            let local_digest = pending.commit_ref.digest.into_inner();
-                                            match attestor(next_expected_index, local_digest) {
-                                                PeerAttestResult::Ok => {
-                                                    info!(
-                                                        "✅ [DIGEST-GATE-OOO PEER-ATTEST] Commit {} dispatching: \
-                                                         peer attestation confirmed. Data-driven (zero timeout).",
-                                                        next_expected_index
-                                                    );
-                                                    true
-                                                }
-                                                PeerAttestResult::Conflict => {
-                                                    warn!(
-                                                        "🚨 [DIGEST-GATE-OOO PEER-ATTEST] Commit {} CONFLICT: \
-                                                         peers disagree on digest. DISCARDING immediately.",
-                                                        next_expected_index
-                                                    );
-                                                    break; // Break the while loop to discard and wait for CertifiedCommit
-                                                }
-                                                PeerAttestResult::Insufficient => {
-                                                    // Not enough peers — stay pending
-                                                    false
-                                                }
+                                    // ZERO-TIMEOUT PEER ATTESTATION (OOO PATH):
+                                    // Verifier returned None. Instead of blind dispatch,
+                                    // use peer attestation to verify deterministically.
+                                    if let Some(ref attestor) = peer_commit_attestation {
+                                        let local_digest = pending.commit_ref.digest.into_inner();
+                                        match attestor(next_expected_index, local_digest) {
+                                            PeerAttestResult::Ok => {
+                                                info!(
+                                                    "✅ [DIGEST-GATE-OOO PEER-ATTEST] Commit {} dispatching: \
+                                                     peer attestation confirmed. Data-driven (zero timeout).",
+                                                    next_expected_index
+                                                );
+                                                true
                                             }
-                                        } else {
-                                            // No attestor — stay pending (safe default)
-                                            false
+                                            PeerAttestResult::Conflict => {
+                                                warn!(
+                                                    "🚨 [DIGEST-GATE-OOO PEER-ATTEST] Commit {} CONFLICT: \
+                                                     peers disagree on digest. DISCARDING immediately.",
+                                                    next_expected_index
+                                                );
+                                                break; // Break the while loop to discard and wait for CertifiedCommit
+                                            }
+                                            PeerAttestResult::Insufficient => {
+                                                // Check if digest data is available for diagnostic logging
+                                                let digest_has_data_ooo = if let Some(ref checker) = digest_data_checker {
+                                                    checker()
+                                                } else {
+                                                    false
+                                                };
+                                                info!(
+                                                    "🛡️ [DIGEST-GATE-OOO] Commit {} staying in buffer: verifier returned None, \
+                                                     attestor returned Insufficient (digest_has_data={}). Waiting for CertifiedCommit.",
+                                                    next_expected_index, digest_has_data_ooo
+                                                );
+                                                false
+                                            }
                                         }
                                     } else {
-                                        info!(
-                                            "🛡️ [DIGEST-GATE-OOO] Commit {} staying in buffer: digest_has_data=true \
-                                             but verifier returned None. Waiting for CertifiedCommit.",
-                                            next_expected_index
-                                        );
+                                        // No attestor — stay pending (safe default)
                                         false
                                     }
                                 }
@@ -1251,47 +1246,38 @@ impl CommitProcessor {
                                                 true
                                             } else {
                                                 // ZERO-TIMEOUT PEER ATTESTATION (IMMEDIATE PATH):
-                                                // Check digest data availability first.
-                                                let digest_has_data = if let Some(ref checker) = digest_data_checker {
-                                                    checker()
-                                                } else {
-                                                    false
-                                                };
-                                                if !digest_has_data {
-                                                    // No digest data = cold-start. Use peer attestation.
-                                                    if let Some(ref attestor) = peer_commit_attestation {
-                                                        let local_digest = subdag.commit_ref.digest.into_inner();
-                                                        let result = attestor(commit_index, local_digest);
-                                                        match result {
-                                                            PeerAttestResult::Ok => {
-                                                                info!(
-                                                                    "✅ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} dispatching: \
-                                                                     peer attestation confirmed. Data-driven (zero timeout).",
-                                                                    commit_index
-                                                                );
-                                                                true
-                                                            }
-                                                            other => {
-                                                                // Conflict or Insufficient — buffer for POLL path
-                                                                info!(
-                                                                    "🛡️ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} buffered: \
-                                                                     peer attestation returned {:?}. Will retry in POLL path.",
-                                                                    commit_index, other
-                                                                );
-                                                                false
-                                                            }
+                                                // Verifier returned None. Use peer attestation.
+                                                if let Some(ref attestor) = peer_commit_attestation {
+                                                    let local_digest = subdag.commit_ref.digest.into_inner();
+                                                    let result = attestor(commit_index, local_digest);
+                                                    match result {
+                                                        PeerAttestResult::Ok => {
+                                                            info!(
+                                                                "✅ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} dispatching: \
+                                                                 peer attestation confirmed. Data-driven (zero timeout).",
+                                                                commit_index
+                                                            );
+                                                            true
                                                         }
-                                                    } else {
-                                                        // No attestor — buffer (safe default)
-                                                        false
+                                                        other => {
+                                                            // Check if digest data is available for diagnostic logging
+                                                            let digest_has_data = if let Some(ref checker) = digest_data_checker {
+                                                                checker()
+                                                            } else {
+                                                                false
+                                                            };
+                                                            // Conflict or Insufficient — buffer for POLL path
+                                                            info!(
+                                                                "🛡️ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} buffered: \
+                                                                 peer attestation returned {:?} (digest_has_data={}). Will retry in POLL path.",
+                                                                commit_index, other, digest_has_data
+                                                            );
+                                                            false
+                                                        }
                                                     }
                                                 } else {
-                                                    info!(
-                                                        "🛡️ [DIGEST-GATE-IMMEDIATE] Commit {} buffered: digest_has_data=true \
-                                                         but verifier returned None. Will poll for CertifiedCommit.",
-                                                        commit_index
-                                                    );
-                                                    false // Buffer — Wait for CertifiedCommit
+                                                    // No attestor — buffer (safe default)
+                                                    false
                                                 }
                                             }
                                         } else {

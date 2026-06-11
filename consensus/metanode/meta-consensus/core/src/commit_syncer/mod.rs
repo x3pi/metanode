@@ -1114,7 +1114,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             // pending because no historical commits were fetched.
                             // Without this, Case B never triggers → permanent deadlock.
                             || (self.coordination_hub.is_healthy()
-                                && self.coordination_hub.is_schedule_recovery_pending());
+                                && self.coordination_hub.is_schedule_recovery_pending())
+                            // Healthy + liveness stall: local commit has been frozen for >= 5s.
+                            // Actively query peers to see if they are ahead (Case A) or at same level (Case B/C).
+                            || (self.coordination_hub.is_healthy()
+                                && liveness_stall_duration >= Duration::from_secs(5));
 
                         if needs_active_sync_recovery
                             && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
