@@ -539,25 +539,6 @@ func NewBlockProcessor(
 		logger.Info("🛡️ [NOMT-RECOVERY-GUARD] Startup check: highest block in BackupDb is #%d", bp.startupLastHandledBlockNum)
 	}
 
-	// Khởi chạy goroutine committer để cập nhật state tuần tự
-	go bp.stateCommitter()
-	// Khởi chạy goroutine cleanup buffer để tránh rò rỉ bộ nhớ
-	bp.BlockBuffers.StartCleanupWorkers(func() uint64 {
-		return bp.nextBlockNumber.Load()
-	})
-	// Khởi chạy goroutine monitoring để theo dõi resource usage
-	go bp.startResourceMonitoring()
-	// Cleanup stale pending receipts to prevent memory leak from disconnected clients
-	go bp.cleanupPendingReceipts()
-	if bp.storageManager.IsExplorer() {
-		go bp.startIndexingProcess()
-	}
-	// go bp.commitWorker()
-	go bp.backupDbWorker() // Coalesced BackupDb builder
-	go bp.geiWorker()      // Coalesced GEI updates
-	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
-	go bp.inputTPSWorker()
-
 	// 📸 SNAPSHOT SYSTEM + LOG ROTATION: Luôn khởi tạo
 	// InitSnapshotSystem đăng ký block commit callback cho LOG ROTATION (luôn cần)
 	// và snapshot (chỉ khi enabled). Nếu snapshot tắt, log rotation vẫn hoạt động.
@@ -632,6 +613,25 @@ func NewBlockProcessor(
 			})
 		}
 	}
+
+	// Khởi chạy goroutine committer để cập nhật state tuần tự
+	go bp.stateCommitter()
+	// Khởi chạy goroutine cleanup buffer để tránh rò rỉ bộ nhớ
+	bp.BlockBuffers.StartCleanupWorkers(func() uint64 {
+		return bp.nextBlockNumber.Load()
+	})
+	// Khởi chạy goroutine monitoring để theo dõi resource usage
+	go bp.startResourceMonitoring()
+	// Cleanup stale pending receipts to prevent memory leak from disconnected clients
+	go bp.cleanupPendingReceipts()
+	if bp.storageManager.IsExplorer() {
+		go bp.startIndexingProcess()
+	}
+	// go bp.commitWorker()
+	go bp.backupDbWorker() // Coalesced BackupDb builder
+	go bp.geiWorker()      // Coalesced GEI updates
+	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
+	go bp.inputTPSWorker()
 
 	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer
 	// which now listens on config.PeerRPCPort (e.g. 1920x) for HTTP JSON-RPC.
