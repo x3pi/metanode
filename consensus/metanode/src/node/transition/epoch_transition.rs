@@ -531,7 +531,7 @@ async fn stop_authority_and_poll_go(
             expected_last_block
         );
     } else {
-        poll_go_until_synced(executor_client, expected_last_block, new_epoch, config).await;
+        poll_go_until_synced(executor_client, node.executor_client.as_deref(), expected_last_block, new_epoch, config).await;
     }
 
     // Fetch final synced_index from Go
@@ -594,6 +594,7 @@ async fn stop_authority_and_poll_go(
 /// complete in < 10s instead of the previous 30+s.
 async fn poll_go_until_synced(
     executor_client: &ExecutorClient,
+    old_executor_client: Option<&ExecutorClient>,
     expected_last_block: u64,
     _new_epoch: u64,
     _config: &crate::config::NodeConfig,
@@ -619,6 +620,19 @@ async fn poll_go_until_synced(
 
     loop {
         attempt += 1;
+
+        // Flush old client if it still contains blocks (e.g. late dispatches from old CommitProcessor)
+        if let Some(old_client) = old_executor_client {
+            let has_blocks = {
+                let buffer = old_client.send_buffer.lock().await;
+                !buffer.is_empty()
+            };
+            if has_blocks {
+                if let Err(e) = old_client.flush_buffer().await {
+                    warn!("⚠️ [SYNC POLL] Old executor client flush failed: {}", e);
+                }
+            }
+        }
 
         match executor_client.get_last_global_exec_index().await {
             Ok(go_last_gei) => {
