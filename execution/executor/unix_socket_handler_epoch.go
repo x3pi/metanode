@@ -831,25 +831,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				newAccountRoot := header.AccountStatesRoot()
 				newStakeRoot := common.Hash(header.StakeStatesRoot())
 
-				// Realign account state trie block-by-block
+				// Realign account state trie block-by-block via Go cache pointers (lightweight)
 				if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
+					asDB.SetOriginRootHash(newAccountRoot)
 					if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-						if err := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), newAccountRoot); err != nil {
-							logger.Error("❌ [NOMT-SYNC-REALIGN] Failed to align account NOMT for block #%d: %v", blockNum, err)
-						}
-						asDB.SetOriginRootHash(newAccountRoot)
+						nomtTrie.RealignRoot(newAccountRoot)
 					}
 				}
-				// Realign stake state trie block-by-block
+				// Realign stake state trie block-by-block via Go cache pointers (lightweight)
 				if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
+					stakeDB.SetOriginRootHash(newStakeRoot)
 					if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-						if err := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), newStakeRoot); err != nil {
-							logger.Error("❌ [NOMT-SYNC-REALIGN] Failed to align stake NOMT for block #%d: %v", blockNum, err)
-						}
-						stakeDB.SetOriginRootHash(newStakeRoot)
+						nomtTrie.RealignRoot(newStakeRoot)
 					}
 				}
-				logger.Debug("🔧 [NOMT-SYNC-REALIGN] Block #%d: trie roots realigned block-by-block: account=%s, stake=%s",
+				logger.Debug("🔧 [NOMT-SYNC-REALIGN] Block #%d: Go cache pointers realigned: account=%s, stake=%s",
 					blockNum, newAccountRoot.Hex()[:18]+"...", newStakeRoot.Hex()[:18]+"...")
 			}
 
@@ -938,17 +934,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					// actual root. This guarantees that ProcessTransactions on
 					// the first consensus block reads from the correct state.
 					// ═══════════════════════════════════════════════════════════════
-					if hasNomtRoot && isPreConsensusSync {
-						logger.Info("🔧 [STARTUP-SYNC] Forcing trie re-alignment from NOMT handle root for block #%d", blockNum)
-						if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-							logger.Error("❌ [STARTUP-SYNC] Failed to re-align trie from NOMT handle: %v", err)
-						} else {
-							rh.chainState.InvalidateAllState()
-							finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-							logger.Info("✅ [STARTUP-SYNC] Trie re-aligned: trieRoot=%s (block=#%d). Ready for consensus.",
-								finalTrieRoot.Hex()[:18]+"...", blockNum)
-						}
-					}
+					// ═══════════════════════════════════════════════════════════════
+					// NOTE (June 2026): Trie re-alignment from NOMT handle root is
+					// DEFERRED to the end of SyncBlocks (after sessions are flushed).
+					// Calling UpdateStateForNewHeader block-by-block here is unsafe
+					// because sessions are not flushed, causing stale root mismatches
+					// and triggering destructive rebuilds on NOMT backend.
+					// ═══════════════════════════════════════════════════════════════
 				} else {
 					// Non-NOMT backend: strict verification with halt on mismatch
 					if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
@@ -1003,6 +995,26 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		logger.Info("🔧 [NOMT-SYNC] Flushing %d deferred NOMT sessions to disk after chunk completion", len(allNomtSessions))
 		if err := trie.FlushNomtSessions(allNomtSessions); err != nil {
 			logger.Error("❌ [NOMT-SYNC] Failed to flush deferred NOMT sessions: %v", err)
+		}
+	}
+
+	// Force final NOMT trie alignment for the last block of the batch after all sessions are flushed to disk
+	if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && len(blocks) > 0 {
+		lastBlockData := blocks[len(blocks)-1]
+		lastBlockNum := lastBlockData.GetBlockNumber()
+		if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
+			lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
+			if err == nil && lastBlk != nil {
+				logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d", lastBlockNum)
+				if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
+					logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
+				} else {
+					rh.chainState.InvalidateAllState()
+					finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+					logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
+						finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
+				}
+			}
 		}
 	}
 

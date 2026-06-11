@@ -1116,9 +1116,9 @@ func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
 }
 
 // AlignWithExpectedRoot verifies if the C++ NOMT Merkle root matches the expected root hash.
-// If it does not match, it resets the database, reads all keys/values from storage,
+// If it does not match, it resets the database, reads all keys/values from storage/changelog,
 // inserts them, and commits the state to align the C++ engine root with the consensus root.
-func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedRoot e_common.Hash) error {
+func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedRoot e_common.Hash, blockNumber uint64) error {
 	nomtRootBytes, err := n.handle.Root()
 	var currentRoot e_common.Hash
 	if err == nil {
@@ -1135,37 +1135,55 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		currentRoot.Hex()[:18], expectedRoot.Hex()[:18], string(n.namespace))
 
 	// 1. Retrieve all keys/values.
-	// For NOMT, we read values directly from the handle using the key registry,
-	// since account states are not persisted in the shared PebbleDB storage.
-	// We MUST do this before resetting the handle, because resetting wipes the DB.
+	// We attempt to fetch the state from historical changelogDB first to get the absolute source of truth.
 	var kvs [][2][]byte
+	var retrievedFromChangelog bool
 
-	knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
-	n.knownKeysMu.RLock()
-	for hexKey, origKey := range n.knownKeys {
-		keyCopy := make([]byte, len(origKey))
-		copy(keyCopy, origKey)
-		knownKeys[hexKey] = keyCopy
-	}
-	n.knownKeysMu.RUnlock()
-
-	for _, origKey := range knownKeys {
-		keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
-		val, found, readErr := n.handle.Read(keyPath)
-		if readErr == nil && found && len(val) > 0 {
-			kvs = append(kvs, [2][]byte{origKey, val})
+	if n.changelogDB != nil {
+		addresses, err := n.changelogDB.GetAllUniqueAddresses()
+		if err == nil && len(addresses) > 0 {
+			for _, addr := range addresses {
+				val, err := n.changelogDB.GetStateAt(addr, blockNumber)
+				if err == nil && len(val) > 0 {
+					kvs = append(kvs, [2][]byte{addr, val})
+				}
+			}
+			if len(kvs) > 0 {
+				retrievedFromChangelog = true
+				logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from StateChangelogDB for block #%d to align namespace %s", len(kvs), blockNumber, string(n.namespace))
+			}
 		}
 	}
 
-	// Fallback to prefix scan from shared storage if no keys retrieved from registry + handle
-	if len(kvs) == 0 {
-		var scanErr error
-		kvs, scanErr = storage.PrefixScan(nil)
-		if scanErr != nil {
-			return fmt.Errorf("failed to scan keys from storage: %w", scanErr)
+	if !retrievedFromChangelog {
+		// Fallback to legacy retrieval from registry + handle (if changelog is disabled or empty)
+		knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
+		n.knownKeysMu.RLock()
+		for hexKey, origKey := range n.knownKeys {
+			keyCopy := make([]byte, len(origKey))
+			copy(keyCopy, origKey)
+			knownKeys[hexKey] = keyCopy
 		}
-	} else {
-		logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from registry + NOMT handle for rebuilding namespace %s", len(kvs), string(n.namespace))
+		n.knownKeysMu.RUnlock()
+
+		for _, origKey := range knownKeys {
+			keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
+			val, found, readErr := n.handle.Read(keyPath)
+			if readErr == nil && found && len(val) > 0 {
+				kvs = append(kvs, [2][]byte{origKey, val})
+			}
+		}
+
+		// Fallback to prefix scan from shared storage if no keys retrieved from registry + handle
+		if len(kvs) == 0 {
+			var scanErr error
+			kvs, scanErr = storage.PrefixScan(nil)
+			if scanErr != nil {
+				return fmt.Errorf("failed to scan keys from storage: %w", scanErr)
+			}
+		} else {
+			logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from registry + NOMT handle for rebuilding namespace %s", len(kvs), string(n.namespace))
+		}
 	}
 
 	// Lock session creation to prevent concurrent BeginSession FFI calls during reset,

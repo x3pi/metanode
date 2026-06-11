@@ -13,6 +13,7 @@ package blockchain
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -187,19 +188,45 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// if a concurrent reader detects the height has advanced, all the underlying mapping entries 
 	// and DB/cache records are fully queryable and resolved without returning null.
 	storage.UpdateLastBlockNumber(blockNum)
-
 	// ─── 7. Rebuild or realign state tries from header roots if out of sync ───
 	activeAccountRoot := cs.GetAccountStateDB().GetOriginRootHash()
 	activeStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
 	headerAccountRoot := header.AccountStatesRoot()
 	headerStakeRoot := common.Hash(header.StakeStatesRoot())
 
-	if cfg.rebuildTries || activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
-		if err := cs.updateStateForNewHeader(header); err != nil {
-			logger.Error("❌ [COMMIT STATE] Failed to align/rebuild tries for block #%d: %v", blockNum, err)
-			return blockNum, err
+	if trie.GetStateBackend() == trie.BackendNOMT {
+		if cfg.rebuildTries {
+			if err := cs.updateStateForNewHeader(header); err != nil {
+				logger.Error("❌ [COMMIT STATE] Failed to align/rebuild tries for block #%d: %v", blockNum, err)
+				return blockNum, err
+			}
+			logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt tries from block #%d header roots", blockNum)
+		} else if activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
+			// Lightweight realignment: update Go's root pointers without touching C++ handle
+			if asDB := cs.GetAccountStateDB(); asDB != nil {
+				asDB.SetOriginRootHash(headerAccountRoot)
+				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(headerAccountRoot)
+				}
+			}
+			if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+				stakeDB.SetOriginRootHash(headerStakeRoot)
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(headerStakeRoot)
+				}
+			}
+			logger.Debug("🔧 [COMMIT STATE] Lightweight root realignment for block #%d (account=%s, stake=%s)",
+				blockNum, headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 		}
-		logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt tries from block #%d header roots", blockNum)
+	} else {
+		// Legacy MPT/LevelDB backend behavior
+		if cfg.rebuildTries || activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
+			if err := cs.updateStateForNewHeader(header); err != nil {
+				logger.Error("❌ [COMMIT STATE] Failed to align/rebuild MPT tries for block #%d: %v", blockNum, err)
+				return blockNum, err
+			}
+			logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt MPT tries from block #%d header roots", blockNum)
+		}
 	}
 
 
