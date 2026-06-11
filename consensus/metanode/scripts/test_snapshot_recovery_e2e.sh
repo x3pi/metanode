@@ -130,7 +130,13 @@ DOWNLOAD_URL="${SNAPSHOT_URL}/files/${SNAP_NAME}/"
 DOWNLOAD_DIR="/tmp/snapshot_download_node${DST_NODE}"
 rm -rf "$DOWNLOAD_DIR"
 mkdir -p "$DOWNLOAD_DIR"
-wget -q -c -r -np -nH --cut-dirs=2 -P "$DOWNLOAD_DIR" --reject="index.html*" "$DOWNLOAD_URL"
+local_snap_dir="$GO_DIR/snapshot_data_node${SRC_NODE}/${SNAP_NAME}"
+if [ -d "$local_snap_dir" ]; then
+    log "  ⚡ Local directory detected. Copying snapshot directly via cp --sparse=always..."
+    cp -r --sparse=always "$local_snap_dir"/* "$DOWNLOAD_DIR/"
+else
+    wget -q -c -r -np -nH --cut-dirs=2 -P "$DOWNLOAD_DIR" --reject="index.html*" "$DOWNLOAD_URL"
+fi
 if [ ! -d "$DOWNLOAD_DIR" ] || [ -z "$(ls -A "$DOWNLOAD_DIR")" ]; then
     log "${RED}❌ Download failed!${NC}"
     exit 1

@@ -428,32 +428,43 @@ run_single_round() {
     local dl_dir="$TMP_DIR/snapshot_download_stability_${dst}"
     rm -rf "$dl_dir"; mkdir -p "$dl_dir"
     
-    local tar_url="${snap_url}/files/${snap_name}.tar"
-    local tar_file="$dl_dir/${snap_name}.tar"
-    log "- ⏳ Downloading snapshot tarball from ${tar_url}..."
-    
-    local downloaded=false
-    for attempt in $(seq 1 30); do
-        if wget -q -c -O "$tar_file" "$tar_url" 2>/dev/null; then
-            if [ -s "$tar_file" ] && tar -tf "$tar_file" >/dev/null 2>&1; then
-                downloaded=true
-                break
+    local local_snap_dir="$GO_DIR/snapshot_data_node${src}/${snap_name}"
+    if [ -d "$local_snap_dir" ]; then
+        log "- ⚡ Local directory detected. Copying snapshot directly via cp --sparse=always..."
+        cp -r --sparse=always "$local_snap_dir"/* "$dl_dir/"
+    else
+        local tar_url="${snap_url}/files/${snap_name}.tar"
+        local tar_file="$dl_dir/${snap_name}.tar"
+        log "- ⏳ Downloading snapshot tarball from ${tar_url}..."
+        
+        local downloaded=false
+        for attempt in $(seq 1 30); do
+            if wget -q -c -O "$tar_file" "$tar_url" 2>/dev/null; then
+                if [ -s "$tar_file" ] && tar -tf "$tar_file" >/dev/null 2>&1; then
+                    downloaded=true
+                    break
+                fi
             fi
+            sleep 2
+        done
+        
+        if [ "$downloaded" = false ]; then
+            log "- ❌ Snapshot tarball download failed or corrupt from ${tar_url}"
+            return 1
         fi
-        sleep 2
-    done
-    
-    if [ "$downloaded" = false ]; then
-        log "- ❌ Snapshot tarball download failed or corrupt from ${tar_url}"
+        
+        log "- 📦 Extracting sparse tarball..."
+        if ! tar -Sxf "$tar_file" -C "$dl_dir/"; then
+            log "- ❌ Failed to extract snapshot tarball"
+            return 1
+        fi
+        rm -f "$tar_file"
+    fi
+
+    if [ ! -d "$dl_dir" ] || [ -z "$(ls -A "$dl_dir" 2>/dev/null)" ]; then
+        log "- ❌ Snapshot download/copy failed"
         return 1
     fi
-    
-    log "- 📦 Extracting sparse tarball..."
-    if ! tar -Sxf "$tar_file" -C "$dl_dir/"; then
-        log "- ❌ Failed to extract snapshot tarball"
-        return 1
-    fi
-    rm -f "$tar_file"
     
     if [ -d "$dl_dir/${snap_name}" ]; then
         mv "$dl_dir/${snap_name}/"* "$dl_dir/" 2>/dev/null || true
