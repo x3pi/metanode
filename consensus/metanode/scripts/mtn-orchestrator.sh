@@ -259,7 +259,7 @@ start_go_master() {
     cmd+="export GOTRACEBACK=crash && "
     cmd+="export GOTOOLCHAIN=go1.23.5 && "
     cmd+="export GOMEMLIMIT=12GiB && "
-    cmd+="export RUST_LOG=warn && "
+    cmd+="export RUST_LOG=info && "
     cmd+="export XAPIAN_BASE_PATH=\"${xapian_path}\" && "
     cmd+="export MVM_LOG_DIR=\"${log_dir}\" && "
     cmd+="set -o pipefail; "
