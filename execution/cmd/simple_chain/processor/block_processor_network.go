@@ -638,6 +638,9 @@ PROCESS_LOOP:
 // with the database. This is critical when P2P Sync or Rust writes blocks to DB directly,
 // bypassing the Go Master consensus processor loop (e.g. during dynamic catch-up sync).
 func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint64, currentBlockNumber *uint64) {
+	if storage.IsPreConsensusSyncActive() {
+		return
+	}
 	actualLastGEI := storage.GetLastGlobalExecIndex()
 
 	// CRITICAL FIX: Actually advance local state when DB is ahead

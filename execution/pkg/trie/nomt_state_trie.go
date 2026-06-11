@@ -1896,8 +1896,6 @@ func ApplyNomtReplicationBatches(
 					nomtKeys = append(nomtKeys, newKey)
 					nomtValues = append(nomtValues, kv[1])
 				} else {
-					nomtKeys = append(nomtKeys, kv[0])
-					nomtValues = append(nomtValues, kv[1])
 					nonNomtBatch = append(nonNomtBatch, kv)
 				}
 			} else {
@@ -1905,8 +1903,6 @@ func ApplyNomtReplicationBatches(
 					nomtKeys = append(nomtKeys, kv[0][5:])
 					nomtValues = append(nomtValues, kv[1])
 				} else {
-					nomtKeys = append(nomtKeys, kv[0])
-					nomtValues = append(nomtValues, kv[1])
 					nonNomtBatch = append(nonNomtBatch, kv)
 				}
 			}

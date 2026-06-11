@@ -43,6 +43,10 @@ var (
 
 	// commitLock is used to serialize block commits to PebbleDB
 	commitLock uint32
+
+	// preConsensusSyncActive is set to 1 during active SyncBlocks request to prevent
+	// concurrent syncLocalStateWithDB from triggering destructive NOMT rebuilds.
+	preConsensusSyncActive uint32
 )
 
 // Update state constants
@@ -396,4 +400,18 @@ func GetLastNomtCommittedBlock() uint64 {
 		}
 	}
 	return val
+}
+
+// SetPreConsensusSyncActive sets whether pre-consensus sync is actively running.
+func SetPreConsensusSyncActive(active bool) {
+	if active {
+		atomic.StoreUint32(&preConsensusSyncActive, 1)
+	} else {
+		atomic.StoreUint32(&preConsensusSyncActive, 0)
+	}
+}
+
+// IsPreConsensusSyncActive returns whether pre-consensus sync is active.
+func IsPreConsensusSyncActive() bool {
+	return atomic.LoadUint32(&preConsensusSyncActive) == 1
 }

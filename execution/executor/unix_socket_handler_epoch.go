@@ -417,6 +417,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			isPreConsensusSync = true
 		}
 	}
+	storage.SetPreConsensusSyncActive(isPreConsensusSync)
+	defer storage.SetPreConsensusSyncActive(false)
+
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
 		if rh.snapshotManager != nil {
