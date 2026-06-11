@@ -19,7 +19,7 @@ for ((i=1; i<=MAX_RUNS; i++)); do
     
     # Kiểm tra xem Node 0 đã có snapshot chưa trước khi chạy test (vì test 4.5 cần snapshot)
     echo "🔍 Đang kiểm tra Node 0 xem đã có snapshot chưa..."
-    SNAPSHOTS_JSON=$(curl -sf "http://127.0.0.1:8700/api/snapshots" 2>/dev/null || echo "null")
+    SNAPSHOTS_JSON=$(curl -sf "http://127.0.0.1:8600/api/snapshots" 2>/dev/null || curl -sf "http://127.0.0.1:8700/api/snapshots" 2>/dev/null || echo "null")
     if [ "$SNAPSHOTS_JSON" = "null" ] || [ -z "$SNAPSHOTS_JSON" ]; then
         echo -e "⚠️ Node 0 chưa có snapshot (HTTP không phản hồi). Dừng test một cách an toàn."
         exit 0
@@ -41,19 +41,42 @@ for ((i=1; i<=MAX_RUNS; i++)); do
         
         # Sau khi e2e_test_suite.sh pass, verify state root trên tất cả nodes
         echo "🔍 Đang kiểm tra State Root parity giữa các nodes..."
-        ROOT_0=$(curl -sf "http://127.0.0.1:19200/peer_info" | jq -r '.state_root' 2>/dev/null)
-        ROOT_1=$(curl -sf "http://127.0.0.1:19201/peer_info" | jq -r '.state_root' 2>/dev/null)
-
-        if [ -n "$ROOT_0" ] && [ -n "$ROOT_1" ] && [ "$ROOT_0" != "null" ] && [ "$ROOT_1" != "null" ]; then
-            if [ "$ROOT_0" != "$ROOT_1" ]; then
-                echo "🚨 STATE ROOT MISMATCH! Node 0: $ROOT_0 ≠ Node 1: $ROOT_1"
+        
+        retries=30
+        root_0=""
+        root_1=""
+        block_0=""
+        block_1=""
+        
+        while [ $retries -gt 0 ]; do
+            INFO_0=$(curl -sf "http://127.0.0.1:19200/peer_info" || echo "")
+            INFO_1=$(curl -sf "http://127.0.0.1:19201/peer_info" || echo "")
+            
+            if [ -n "$INFO_0" ] && [ -n "$INFO_1" ]; then
+                block_0=$(echo "$INFO_0" | jq -r '.last_block' 2>/dev/null || echo "")
+                block_1=$(echo "$INFO_1" | jq -r '.last_block' 2>/dev/null || echo "")
+                root_0=$(echo "$INFO_0" | jq -r '.state_root' 2>/dev/null || echo "")
+                root_1=$(echo "$INFO_1" | jq -r '.state_root' 2>/dev/null || echo "")
+                
+                if [ "$block_0" = "$block_1" ] && [ -n "$block_0" ] && [ "$block_0" != "null" ]; then
+                    break
+                fi
+            fi
+            echo "   ⏳ Node heights differ (Node 0: $block_0, Node 1: $block_1). Waiting for sync (retries left: $retries)..."
+            sleep 1
+            retries=$((retries - 1))
+        done
+        
+        if [ "$block_0" != "$block_1" ] || [ -z "$root_0" ] || [ -z "$root_1" ] || [ "$root_0" = "null" ] || [ "$root_1" = "null" ]; then
+            echo "⚠️ Không thể so sánh State Root do lệch block height hoặc lỗi kết nối (Node 0: block=$block_0, root=$root_0 | Node 1: block=$block_1, root=$root_1)"
+        else
+            if [ "$root_0" != "$root_1" ]; then
+                echo "🚨 STATE ROOT MISMATCH at block $block_0! Node 0: $root_0 ≠ Node 1: $root_1"
                 echo "   → Fork CONFIRMED ngay cả khi e2e_test_suite.sh passed!"
                 FAILED=$((FAILED + 1))
                 exit 1
             fi
-            echo "✅ State root verified: $ROOT_0"
-        else
-            echo "⚠️ Không thể lấy được State Root từ một trong hai node. Bỏ qua check."
+            echo "✅ State root verified: $root_0 at block $block_0"
         fi
 
         echo -e "\n✅ Vòng $i PASSED thành công rực rỡ!"
@@ -64,7 +87,7 @@ for ((i=1; i<=MAX_RUNS; i++)); do
         
         # Pull log lỗi nổi bật
         echo "🔍 Đang trích xuất log lỗi của Node $TARGET_NODE..."
-        tail -n 200 logs/node_${TARGET_NODE}/rust-consensus.log | grep -E "ERROR|WARN|CRITICAL|PANIC" || true
+        tail -n 200 logs/node_${TARGET_NODE}/go-master-stdout.log | grep -E "ERROR|WARN|CRITICAL|PANIC" || true
         
         echo "🚨 Dừng spam test vì có lỗi tại vòng $i!"
         exit 1

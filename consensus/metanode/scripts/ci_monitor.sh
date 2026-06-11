@@ -61,7 +61,7 @@ echo "🔍 [MONITOR] Checking cluster health (Type: $TYPE)..."
 NODES_DOWN=()
 for i in {0..4}; do
     # Get status from orchestrator
-    STATUS_LINE=$("$ORCHESTRATOR" status | grep -E "^[[:space:]]*$i[[:space:]]+│" || true)
+    STATUS_LINE=$("$ORCHESTRATOR" status | grep -E "║?[[:space:]]*$i[[:space:]]+[│|]" || true)
     if [[ "$STATUS_LINE" =~ "DOWN" ]] || [ -z "$STATUS_LINE" ]; then
         NODES_DOWN+=($i)
     fi
