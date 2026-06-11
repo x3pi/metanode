@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+sudo() {
+    echo "1234@abcd" | command sudo -S "$@"
+}
+
+
 echo "==========================================================="
 echo "🚀 BẮT ĐẦU TẠO PHÂN VÙNG BTRFS VẬT LÝ TỪ LVM / LOOPBACK"
 echo "==========================================================="

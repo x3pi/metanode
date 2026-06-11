@@ -858,7 +858,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
                         let execution_stall_duration = now.duration_since(self.last_highest_handled_change_at);
                         if execution_stall_duration >= Duration::from_secs(20)
-                            && highest_handled < quorum_commit
+                            && highest_handled < self.synced_commit_index
                         {
                             tracing::error!(
                                 "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
