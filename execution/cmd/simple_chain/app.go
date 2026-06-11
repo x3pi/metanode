@@ -453,6 +453,11 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 	trieCacheKey := stateRoot.Hex()
 	if app.blockProcessor != nil {
 		if cachedTrie, ok := app.blockProcessor.GetTrieCache(trieCacheKey); ok {
+			if nomtTrie, ok := cachedTrie.(*mt_trie.NomtStateTrie); ok && app.chainState != nil {
+				if nomtTrie.GetChangelogDB() == nil {
+					nomtTrie.SetChangelogDB(app.chainState.GetChangelogDB())
+				}
+			}
 			return cachedTrie, nil
 		}
 	}
