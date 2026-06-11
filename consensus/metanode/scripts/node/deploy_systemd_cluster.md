@@ -88,22 +88,31 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 ## 4. Kiểm tra trạng thái sau khi Deploy
 
-Vì kịch bản này điều khiển `systemd`, bạn có thể kiểm tra các tiến trình đang chạy tại bất kỳ máy con nào bằng các lệnh:
+Vì kịch bản này điều khiển `systemd`, bạn có thể kiểm tra các tiến trình đang chạy tại bất kỳ máy con nào. 
 
+**Để xem danh sách TOÀN BỘ các tiến trình Metanode đang chạy trên máy hiện tại:**
 ```bash
-# Xem Execution Engine (Go)
-sudo systemctl status metanode-execution-0
-
-# Xem Consensus Engine (Rust)
-sudo systemctl status metanode-consensus-0
-
-# Xem RPC Proxy (EVM)
-sudo systemctl status metanode-rpc-0
+systemctl list-units --type=service | grep metanode
 ```
+---
+
+## 5. Cấu hình IP/Port trung tâm (rpc_nodes.json)
+
+Sau khi chạy xong lệnh deploy (ở **PHASE 6**), script sẽ tự động sinh ra một file `/tmp/rpc_nodes.json` tại máy chính. Đây là "Nguồn thông tin duy nhất" (Source of Truth) chứa toàn bộ danh sách địa chỉ và cổng kết nối của mạng lưới.
+
+**Để đọc và kiểm tra cấu hình mạng lưới hiện tại:**
+```bash
+cat /tmp/rpc_nodes.json | jq .
+```
+
+File này chứa 3 nhóm cấu hình rất quan trọng dành cho các bài Test:
+- `nodes`: Chứa HTTP port gốc của blockchain (thường là 8757, 10747...) - Dùng cho API Admin hoặc truy vấn Snapshot.
+- `rpc_proxies`: Chứa HTTP port của **RPC Proxy** (ví dụ 8545, 8546) - Các script test transaction sẽ đọc và tự động điều hướng request qua đây để test như với chuẩn Ethereum.
+- `tcp_proxies`: Chứa TCP port của RPC Proxy (ví dụ 9545, 9546) - Dùng cho test TPS hoặc P2P qua RPC.
 
 ---
 
-## 5. Thu thập Logs tự động từ các máy con (Systemd Logs)
+## 6. Thu thập Logs tự động từ các máy con (Systemd Logs)
 
 Nếu bạn gặp lỗi hoặc cần kiểm tra log của các node đang chạy trên systemd qua nhiều server, bạn có thể dùng script `fetch_systemd_logs.sh` để tải toàn bộ log về máy tính hiện tại.
 

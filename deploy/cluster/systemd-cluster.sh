@@ -34,16 +34,16 @@ log_phase() { echo -e "\n${BOLD}${CYAN}═══ $* ═══${NC}"; }
 # ─── Cấu hình mỗi node ──────────────────────────────────────────
 # Mảng: NODE_IDS — danh sách node ID cần quản lý
 # Mảng: NODE_TYPES — loại node tương ứng (validator/synconly)
-# Mảng: NODE_CONFIGS — đường dẫn file .env tương ứng
+# Mảng: NODE_CONFIGS — đường dẫn thư mục chứa cấu hình json/toml tương ứng
 
 NODE_IDS=(0 1 2 3 4)
 NODE_TYPES=(validator validator validator validator synconly)
 NODE_CONFIGS=(
-    "$DEPLOY_DIR/node-0_keys/validator.env"
-    "$DEPLOY_DIR/node-1_keys/validator.env"
-    "$DEPLOY_DIR/node-2_keys/validator.env"
-    "$DEPLOY_DIR/node-3_keys/validator.env"
-    "$DEPLOY_DIR/node-4_keys/synconly.env"
+    "$DEPLOY_DIR/node-0_keys"
+    "$DEPLOY_DIR/node-1_keys"
+    "$DEPLOY_DIR/node-2_keys"
+    "$DEPLOY_DIR/node-3_keys"
+    "$DEPLOY_DIR/node-4_keys"
 )
 
 # Delay giữa các node khi khởi động (giây)
@@ -240,7 +240,6 @@ cmd_setup() {
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
             -y|--yes) auto_yes="-y"; shift ;;
-            --use-env) use_env="--use-env"; shift ;;
             *) shift ;;
         esac
     done
@@ -299,7 +298,7 @@ cmd_setup() {
 
     echo ""
     log_info "Bắt đầu cài đặt lại sau khi xóa data..."
-    cmd_install --node "${only_node}" $auto_yes ${use_env}
+    cmd_install --node "${only_node}" $auto_yes
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -310,13 +309,12 @@ cmd_setup() {
 cmd_install() {
     local only_node="all"
     local auto_yes=""
-    local use_env="false"
+    local 
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
             -y|--yes) auto_yes="-y"; shift ;;
-            --use-env) use_env="true"; shift ;;
             *) shift ;;
         esac
     done
@@ -331,39 +329,13 @@ cmd_install() {
         local cfg="${NODE_CONFIGS[$i]}"
         local ntype="${NODE_TYPES[$i]}"
 
-        # Absolute paths for existing configurations
-        local json_cfg="$DEPLOY_DIR/../execution/cmd/simple_chain/config-master-node${nid}.json"
-        local toml_cfg="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}.toml"
-        local proto_key="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}_protocol_key.json"
-        local net_key="$DEPLOY_DIR/../consensus/metanode/config/node_${nid}_network_key.json"
-
-        local extra_args=""
-        if [ "$use_env" = "true" ]; then
-            # --use-env: bỏ qua JSON/TOML, dùng thẳng file .env trong node-N_keys/
-            if [ ! -f "$cfg" ]; then
-                log_err "Config .env không tồn tại: $cfg"
-                log_err "Kiểm tra lại thư mục keys: $(dirname "$cfg")"
-                continue
-            fi
-            log_info "[--use-env] Dùng file .env: $cfg"
-            extra_args="--config $cfg"
-        elif [ -f "$json_cfg" ] && [ -f "$toml_cfg" ]; then
-            log_info "Tìm thấy cấu hình JSON/TOML có sẵn. Tái sử dụng trực tiếp..."
-            extra_args="--json-config $json_cfg --toml-config $toml_cfg --node-id $nid"
-            if [ -f "$proto_key" ]; then
-                extra_args="$extra_args --protocol-key $proto_key"
-            fi
-            if [ -f "$net_key" ]; then
-                extra_args="$extra_args --network-key $net_key"
-            fi
-        else
-            if [ ! -f "$cfg" ]; then
-                log_err "Config không tồn tại: $cfg (và không tìm thấy config JSON/TOML cũ)"
-                log_err "Tạo keys trước: python3 gen_validator_entry.py --node-id $nid ..."
-                continue
-            fi
-            extra_args="--config $cfg"
+        if [ ! -d "$cfg" ]; then
+            log_err "Config directory không tồn tại: $cfg"
+            log_err "Tạo keys trước: python3 gen_validator_entry.py --node-id $nid ..."
+            continue
         fi
+        
+        local extra_args="--config-dir $cfg"
 
         log_info "Đang cài đặt Node ${nid} (${ntype})..."
         bash "$DEPLOY_DIR/install.sh" $extra_args $auto_yes
@@ -396,8 +368,8 @@ cmd_check() {
 
         # Lấy RPC port từ config file
         local rpc_port=""
-        if [ -f "$cfg" ]; then
-            rpc_port=$(grep "^RPC_PORT=" "$cfg" 2>/dev/null | cut -d'=' -f2 | tr -d ':' | tr -d '"' || true)
+        if [ -f "$cfg/execution.json" ]; then
+            rpc_port=$(jq -r '.rpc_port' "$cfg/execution.json" 2>/dev/null | tr -d ':' || true)
         fi
 
         local se=$(svc_exec $nid)
@@ -485,17 +457,12 @@ case "$CMD" in
         echo "  logs N both          Xem cả 2 service Node N"
         echo "  reset-failed         Gỡ bỏ rate-limit systemd (sau crash loop)"
         echo ""
-        echo "Options:"
-        echo "  --use-env            Bỏ qua JSON/TOML, dùng file .env trong node-N_keys/"
-        echo "                       (dùng với setup hoặc install)"
-        echo ""
         echo "Ví dụ:"
         echo "  sudo bash $0 setup               # Lần đầu hoặc reset mạng"
         echo "  sudo bash $0 setup -y            # Reset không hỏi xác nhận"
         echo "  sudo bash $0 install             # Update code, giữ data"
-        echo "  sudo bash $0 install --use-env   # Dùng node-N_keys/*.env thay vì JSON"
-        echo "  sudo bash $0 install --node 0 --use-env  # Chỉ Node 0, dùng .env"
-        echo "  sudo bash $0 setup --node 0 --use-env -y # Setup Node 0 từ .env"
+        echo "  sudo bash $0 install --node 0   # Chỉ Node 0"
+        echo "  sudo bash $0 setup --node 0 -y  # Setup Node 0"
         echo "  sudo bash $0 start               # Khởi động tất cả"
         echo "  sudo bash $0 status              # Kiểm tra trạng thái"
         echo "  sudo bash $0 check               # Kiểm tra block height"
