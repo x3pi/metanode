@@ -999,9 +999,11 @@ pkill -f tx_sender 2>/dev/null || true
 
 # ─── Test 1: Hash Parity ────────────────────────────────────────
 test_hash_parity "Test 1: Hash Parity Check (Pre-test Baseline)"
+if [ "$FAILED_TESTS" -gt 0 ]; then finalize_report; fi
 
 # ─── Test 2: Log Scan ───────────────────────────────────────────
 test_scan_fork_warnings
+if [ "$FAILED_TESTS" -gt 0 ]; then finalize_report; fi
 
 # ─── Test 3+4: Destructive tests ────────────────────────────────
 if [ "$SKIP_DESTRUCTIVE" = "true" ]; then
@@ -1009,8 +1011,11 @@ if [ "$SKIP_DESTRUCTIVE" = "true" ]; then
     log ""
 else
     test_node_restart
+    if [ "$FAILED_TESTS" -gt 0 ]; then finalize_report; fi
     test_dag_wipe_recovery
+    if [ "$FAILED_TESTS" -gt 0 ]; then finalize_report; fi
     test_full_wipe_restore
+    if [ "$FAILED_TESTS" -gt 0 ]; then finalize_report; fi
 fi
 
 # ─── Test 5: Post-recovery hash parity ──────────────────────────

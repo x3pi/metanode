@@ -22,6 +22,7 @@ NC='\033[0m'
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 METANODE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ORCHESTRATOR="$METANODE_ROOT/scripts/mtn-orchestrator.sh"
 GO_PROJECT_ROOT="$(cd "$METANODE_ROOT/../.." && pwd)/execution"
 GO_SIMPLE_ROOT="$GO_PROJECT_ROOT/cmd/simple_chain"
 LOG_DIR="$METANODE_ROOT/logs"
@@ -37,7 +38,7 @@ echo ""
 
 # ─── Step 1: Stop node ───────────────────────────────────────
 echo -e "${BLUE}[1/3] 🛑 Stopping node $NODE_ID...${NC}"
-"$SCRIPT_DIR/stop_node.sh" "$NODE_ID" 2>/dev/null || true
+"$ORCHESTRATOR" stop-node "$NODE_ID" >/dev/null 2>&1 || true
 sleep 3
 
 # Force kill if still running
