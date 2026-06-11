@@ -306,37 +306,36 @@ impl RustSyncNode {
 
                     if peer_block > 0 && from_block > peer_block {
                         debug!("[RUST-SYNC] Our block ({}) is ahead of peer max block ({}). Skipping fetch.", go_block, peer_block);
-                        return Ok(0);
-                    }
-
-                    let to_block = if peer_block > 0 {
-                        std::cmp::min(from_block + batch_size - 1, peer_block)
+                        Vec::new()
                     } else {
-                        from_block + batch_size - 1
-                    };
+                        let to_block = if peer_block > 0 {
+                            std::cmp::min(from_block + batch_size - 1, peer_block)
+                        } else {
+                            from_block + batch_size - 1
+                        };
 
-                    if from_block > to_block {
-                        return Ok(0);
-                    }
+                        if from_block > to_block {
+                            Vec::new()
+                        } else {
+                            info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
+                            let fetched_blocks = match crate::network::peer_rpc::fetch_blocks_from_peer(&peer_rpc_addresses, from_block, to_block).await {
+                                Ok(blocks) => {
+                                    info!("🚀 [SYNC-LOOP-DEBUG] fetch_blocks_from_peer returned {} blocks", blocks.len());
+                                    blocks
+                                }
+                                Err(e) => {
+                                    warn!("❌ [SYNC-LOOP] Fetch blocks failed: {}", e);
+                                    return Ok(0);
+                                }
+                            };
 
-                    info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
-                    let fetched_blocks = match crate::network::peer_rpc::fetch_blocks_from_peer(&peer_rpc_addresses, from_block, to_block).await {
-                        Ok(blocks) => {
-                            info!("🚀 [SYNC-LOOP-DEBUG] fetch_blocks_from_peer returned {} blocks", blocks.len());
-                            blocks
+                            if fetched_blocks.is_empty() {
+                                warn!("⚠️ [SYNC-LOOP] No blocks from peers (range {}..{})", from_block, to_block);
+                            }
+
+                            fetched_blocks
                         }
-                        Err(e) => {
-                            warn!("❌ [SYNC-LOOP] Fetch blocks failed: {}", e);
-                            return Ok(0);
-                        }
-                    };
-
-                    if fetched_blocks.is_empty() {
-                        warn!("⚠️ [SYNC-LOOP] No blocks from peers (range {}..{})", from_block, to_block);
-                        return Ok(0);
                     }
-
-                    fetched_blocks
                 }
             };
 
