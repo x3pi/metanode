@@ -837,7 +837,11 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 		if f, errFile := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
 			f.WriteString(fmt.Sprintf("ProcessPoolSub: allTxs=%d, validTxs=%d, futureTxs=%d\n", len(allTxs), len(validTxs), len(futureTxs)))
 			if len(allTxs) > 0 {
-				f.WriteString(fmt.Sprintf("  Sample Tx: actualNonce=%d, expectedNonce=%d, from=%s\n", allTxs[0].GetNonce(), nonceMap[allTxs[0].FromAddress()]-1, allTxs[0].FromAddress().String()))
+				expectedNonce := uint64(0)
+				if nonceMap[allTxs[0].FromAddress()] > 0 {
+					expectedNonce = nonceMap[allTxs[0].FromAddress()] - 1
+				}
+				f.WriteString(fmt.Sprintf("  Sample Tx: actualNonce=%d, expectedNonce=%d, from=%s\n", allTxs[0].GetNonce(), expectedNonce, allTxs[0].FromAddress().String()))
 			}
 			f.Close()
 		}
