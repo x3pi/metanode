@@ -133,12 +133,13 @@ pub(super) async fn setup_validator_consensus(
         .with_committee_size(committee.size())
         .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
-    if let Some(c) = exec_client_proc {
+    if let Some(ref c) = exec_client_proc {
         processor = processor.with_executor_client(c.clone());
         let peer_addrs = config.peer_rpc_addresses.clone();
+        let c_clone = c.clone();
         tokio::spawn(async move {
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
-                c,
+                c_clone,
                 delivery_rx,
                 peer_addrs,
             );
@@ -194,6 +195,8 @@ pub(super) async fn setup_validator_consensus(
             ));
         }
     }
+
+    node.executor_client = exec_client_proc;
 
     Ok(())
 }
@@ -370,7 +373,7 @@ pub(super) async fn setup_synconly_sync(
     ));
 
     match crate::node::rust_sync_node::start_rust_sync_task_with_network(
-        rust_sync_executor,
+        rust_sync_executor.clone(),
         node.epoch_transition_sender.clone(),
         new_epoch,
         0,
@@ -391,6 +394,12 @@ pub(super) async fn setup_synconly_sync(
         Err(e) => {
             warn!("⚠️ [SYNC ONLY] Failed to start Rust P2P sync: {}", e);
         }
+    }
+
+    if exec_client_proc.is_some() {
+        node.executor_client = exec_client_proc;
+    } else {
+        node.executor_client = Some(rust_sync_executor);
     }
 
     Ok(())
