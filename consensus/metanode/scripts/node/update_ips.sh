@@ -325,6 +325,38 @@ if [ -f "$TPS_BENCH_CFG" ]; then
         "parent_connection_address → ${IPS[0]}:${GO_MASTER_CONN_PORTS[0]}"
 fi
 
+# ─── Update Suite Config JSONs ───────────────────────────────────────────────
+echo -e "\n${BOLD}═══ Suite Configs (test-tcp/config-local.json, test-rpc/config-local.json) ═══${NC}"
+
+SUITE_DIR=""
+if [ -d "/home/abc/nhat/consensus-chain/metanode-suite" ]; then
+    SUITE_DIR="/home/abc/nhat/consensus-chain/metanode-suite"
+elif [ -d "$METANODE_DIR/../../../metanode-suite" ]; then
+    SUITE_DIR="$(cd "$METANODE_DIR/../../../metanode-suite" && pwd)"
+fi
+
+if [ -n "$SUITE_DIR" ]; then
+    # test-tcp/caller-tcp/config-local.json — connects to node0 Master TCP port (4201)
+    TCP_CLIENT_CFG="$SUITE_DIR/test-simple/test-tcp/caller-tcp/config-local.json"
+    if [ -f "$TCP_CLIENT_CFG" ]; then
+        echo -e "\n  ${BOLD}📄 test-simple/test-tcp/caller-tcp/config-local.json${NC}"
+        safe_sed "$TCP_CLIENT_CFG" \
+            "s|\"parent_connection_address\": \"[^\"]*\"|\"parent_connection_address\": \"${IPS[0]}:4201\"|" \
+            "parent_connection_address → ${IPS[0]}:4201"
+    fi
+
+    # test-rpc/config-local.json — connects to node0 RPC Proxy HTTP port (8545)
+    RPC_CLIENT_CFG="$SUITE_DIR/test-simple/test-rpc/config-local.json"
+    if [ -f "$RPC_CLIENT_CFG" ]; then
+        echo -e "\n  ${BOLD}📄 test-simple/test-rpc/config-local.json${NC}"
+        safe_sed "$RPC_CLIENT_CFG" \
+            "s|\"rpc_url\": \"[^\"]*\"|\"rpc_url\": \"http://${IPS[0]}:8545\"|" \
+            "rpc_url → http://${IPS[0]}:8545"
+    fi
+else
+    echo -e "  ${YELLOW}⚠️  Bỏ qua cập nhật Suite Configs (không tồn tại thư mục metanode-suite)${NC}"
+fi
+
 # ─── Update Genesis JSON ─────────────────────────────────────────────────────
 echo -e "\n${BOLD}═══ Genesis (genesis.json) ═══${NC}"
 
