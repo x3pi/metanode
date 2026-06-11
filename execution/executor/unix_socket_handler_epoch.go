@@ -360,7 +360,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// CloseForSnapshot waits forever → DEADLOCK.
 	// Rust will retry this RPC after the snapshot completes.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if rh.snapshotManager != nil && rh.snapshotManager.IsSnapshotInProgress() {
+	if sm := rh.getSnapshotManager(); sm != nil && sm.IsSnapshotInProgress() {
 		logger.Warn("⏸️ [SYNC] SyncBlocksRequest rejected: snapshot in progress. Rust should retry.")
 		return &pb.SyncBlocksResponse{
 			SyncedCount:     0,
@@ -422,9 +422,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
-		if rh.snapshotManager != nil {
+		if sm := rh.getSnapshotManager(); sm != nil {
 			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
-			rh.snapshotManager.WaitForPersistence()
+			sm.WaitForPersistence()
 		}
 	}
 
