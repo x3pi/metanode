@@ -10,8 +10,12 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use std::time::Instant;
+use std::sync::atomic::AtomicU64;
 
 use crate::network::peer_rpc::{query_peer_epoch_boundary_data, query_peer_epochs_network};
+
+static CACHED_PEER_BLOCK: AtomicU64 = AtomicU64::new(0);
+static LAST_QUERY_SECS: AtomicU64 = AtomicU64::new(0);
 
 impl RustSyncNode {
     /// Start the sync node
@@ -277,7 +281,44 @@ impl RustSyncNode {
                 Some(blocks) => blocks,
                 None => {
                     let from_block = go_block + 1;
-                    let to_block = from_block + batch_size - 1;
+                    
+                    // Fetch latest peer block height from network, but limit to once per second to avoid spamming
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or(std::time::Duration::ZERO)
+                        .as_secs();
+                    let last_query = LAST_QUERY_SECS.load(Ordering::Relaxed);
+                    let peer_block = if now_secs.saturating_sub(last_query) >= 1 {
+                        match crate::network::peer_rpc::query_peer_epochs_network(&peer_rpc_addresses).await {
+                            Ok((_, block, _, _)) => {
+                                CACHED_PEER_BLOCK.store(block, Ordering::Relaxed);
+                                LAST_QUERY_SECS.store(now_secs, Ordering::Relaxed);
+                                block
+                            }
+                            Err(_) => {
+                                LAST_QUERY_SECS.store(now_secs, Ordering::Relaxed);
+                                CACHED_PEER_BLOCK.load(Ordering::Relaxed)
+                            }
+                        }
+                    } else {
+                        CACHED_PEER_BLOCK.load(Ordering::Relaxed)
+                    };
+
+                    if peer_block > 0 && from_block > peer_block {
+                        debug!("[RUST-SYNC] Our block ({}) is ahead of peer max block ({}). Skipping fetch.", go_block, peer_block);
+                        return Ok(0);
+                    }
+
+                    let to_block = if peer_block > 0 {
+                        std::cmp::min(from_block + batch_size - 1, peer_block)
+                    } else {
+                        from_block + batch_size - 1
+                    };
+
+                    if from_block > to_block {
+                        return Ok(0);
+                    }
+
                     info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
                     let fetched_blocks = match crate::network::peer_rpc::fetch_blocks_from_peer(&peer_rpc_addresses, from_block, to_block).await {
                         Ok(blocks) => {
@@ -311,42 +352,56 @@ impl RustSyncNode {
                 // PHASE C: PARALLEL — Start prefetching NEXT batch while
                 //          Go FFI processes current batch
                 // ═══════════════════════════════════════════════════════
+                let mut prefetch_handle = None;
                 let prefetch_from = last_fetched_block + 1;
-                let prefetch_to = prefetch_from + batch_size - 1;
-                let prefetch_peers = peer_rpc_addresses.clone();
-                let prefetch_buffer_clone = self.prefetch_buffer.clone();
+                let peer_block = CACHED_PEER_BLOCK.load(Ordering::Relaxed);
 
-                let prefetch_handle = tokio::spawn(async move {
-                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                        &prefetch_peers,
-                        prefetch_from,
-                        prefetch_to,
-                    )
-                    .await
-                    {
-                        Ok(blocks) if !blocks.is_empty() => {
-                            let prefetched_count = blocks.len();
-                            let mut buf = prefetch_buffer_clone.lock().await;
-                            *buf = Some(blocks);
-                            info!(
-                                "⚡ [PREFETCH] Prefetched {} blocks ({}..{}) ready for next round",
-                                prefetched_count, prefetch_from, prefetch_from + prefetched_count as u64 - 1
-                            );
+                if peer_block > 0 && prefetch_from > peer_block {
+                    debug!("[PREFETCH] Next block {} is ahead of cached peer height {}. Skipping prefetch.", prefetch_from, peer_block);
+                } else {
+                    let prefetch_to = if peer_block > 0 {
+                        std::cmp::min(prefetch_from + batch_size - 1, peer_block)
+                    } else {
+                        prefetch_from + batch_size - 1
+                    };
+                    let prefetch_peers = peer_rpc_addresses.clone();
+                    let prefetch_buffer_clone = self.prefetch_buffer.clone();
+
+                    let handle = tokio::spawn(async move {
+                        match crate::network::peer_rpc::fetch_blocks_from_peer(
+                            &prefetch_peers,
+                            prefetch_from,
+                            prefetch_to,
+                        )
+                        .await
+                        {
+                            Ok(blocks) if !blocks.is_empty() => {
+                                let prefetched_count = blocks.len();
+                                let mut buf = prefetch_buffer_clone.lock().await;
+                                *buf = Some(blocks);
+                                info!(
+                                    "⚡ [PREFETCH] Prefetched {} blocks ({}..{}) ready for next round",
+                                    prefetched_count, prefetch_from, prefetch_from + prefetched_count as u64 - 1
+                                );
+                            }
+                            Ok(_) => {
+                                debug!("[PREFETCH] No more blocks available from peers");
+                            }
+                            Err(e) => {
+                                debug!("[PREFETCH] Prefetch failed (non-fatal): {}", e);
+                            }
                         }
-                        Ok(_) => {
-                            debug!("[PREFETCH] No more blocks available from peers");
-                        }
-                        Err(e) => {
-                            debug!("[PREFETCH] Prefetch failed (non-fatal): {}", e);
-                        }
-                    }
-                });
+                    });
+                    prefetch_handle = Some(handle);
+                }
 
                 // Execute current batch via FFI (this is the CPU-bound part)
                 let execute_result = self.executor_client.sync_and_execute_blocks(blocks_to_process).await;
 
                 // Wait for prefetch to complete (it's usually faster than FFI execution)
-                let _ = prefetch_handle.await;
+                if let Some(handle) = prefetch_handle {
+                    let _ = handle.await;
+                }
 
                 match execute_result {
                     Ok((synced, last_block, _gei)) => {
