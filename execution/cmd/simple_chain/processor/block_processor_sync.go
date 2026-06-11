@@ -83,17 +83,34 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 			if lastBlock != nil {
 				parentStatesRoot := lastBlock.Header().AccountStatesRoot()
 				if nomtRoot != parentStatesRoot {
-					// Wait for any pending async NOMT commits to complete to resolve transient mismatches
-					if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
-						if nomtTrie, ok := bp.chainState.GetAccountStateDB().Trie().(*trie.NomtStateTrie); ok {
-							logger.Info("⏳ [NOMT-SYNC-RECOVERY] Waiting for pending async commits before verifying NOMT root alignment...")
-							if err := nomtTrie.WaitCommitPayload(); err != nil {
-								logger.Error("❌ [NOMT-SYNC-RECOVERY] WaitCommitPayload failed: %v", err)
-							}
-							if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
-								nomtRoot = updatedNomtRoot
+					logger.Info("⏳ [NOMT-SYNC-RECOVERY] Root mismatch detected before execution: local=%s, parent=%s. Waiting for commitWorker to drain...",
+						nomtRoot.Hex()[:18]+"...", parentStatesRoot.Hex()[:18]+"...")
+					// 1. Drain Commit Worker to ensure all prior block commits are processed
+					if bp.commitChannel != nil {
+						commitDone := make(chan struct{})
+						bp.commitChannel <- CommitJob{DoneChan: commitDone}
+						<-commitDone
+					}
+					// 2. Wait for NOMT async commits to finish
+					if bp.chainState != nil {
+						if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
+							if nomtTrie, ok := accDB.Trie().(*trie.NomtStateTrie); ok {
+								if err := nomtTrie.WaitCommitPayload(); err != nil {
+									logger.Error("❌ [NOMT-SYNC-RECOVERY] AccountStateDB WaitCommitPayload failed: %v", err)
+								}
 							}
 						}
+						if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
+							if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+								if err := nomtTrie.WaitCommitPayload(); err != nil {
+									logger.Error("❌ [NOMT-SYNC-RECOVERY] StakeStateDB WaitCommitPayload failed: %v", err)
+								}
+							}
+						}
+					}
+					// 3. Re-read the root
+					if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+						nomtRoot = updatedNomtRoot
 					}
 				}
 
@@ -887,17 +904,34 @@ PROCESS_BLOCK:
 		nomtRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
 		trieRoot := bp.chainState.GetAccountStateDB().Trie().Hash()
 		if hasNomtRoot && nomtRoot != trieRoot {
-			// Wait for any pending async NOMT commits to complete to resolve transient mismatches
-			if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
-				if nomtTrie, ok := bp.chainState.GetAccountStateDB().Trie().(*trie.NomtStateTrie); ok {
-					logger.Info("⏳ [FORK-PREVENTION] Waiting for pending async commits before verifying NOMT root alignment...")
-					if err := nomtTrie.WaitCommitPayload(); err != nil {
-						logger.Error("❌ [FORK-PREVENTION] WaitCommitPayload failed: %v", err)
-					}
-					if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
-						nomtRoot = updatedNomtRoot
+			logger.Info("⏳ [FORK-PREVENTION] Root mismatch detected: nomtRoot=%s, trieRoot=%s. Waiting for commitWorker to drain...",
+				nomtRoot.Hex()[:18]+"...", trieRoot.Hex()[:18]+"...")
+			// 1. Drain Commit Worker to ensure all prior block commits are processed
+			if bp.commitChannel != nil {
+				commitDone := make(chan struct{})
+				bp.commitChannel <- CommitJob{DoneChan: commitDone}
+				<-commitDone
+			}
+			// 2. Wait for NOMT async commits to finish
+			if bp.chainState != nil {
+				if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
+					if nomtTrie, ok := accDB.Trie().(*trie.NomtStateTrie); ok {
+						if err := nomtTrie.WaitCommitPayload(); err != nil {
+							logger.Error("❌ [FORK-PREVENTION] AccountStateDB WaitCommitPayload failed: %v", err)
+						}
 					}
 				}
+				if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
+					if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+						if err := nomtTrie.WaitCommitPayload(); err != nil {
+							logger.Error("❌ [FORK-PREVENTION] StakeStateDB WaitCommitPayload failed: %v", err)
+						}
+					}
+				}
+			}
+			// 3. Re-read the root
+			if updatedNomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+				nomtRoot = updatedNomtRoot
 			}
 		}
 
