@@ -223,13 +223,6 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 }
 
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
-	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
-		if nomtTrie, ok := api.App.chainState.GetAccountStateDB().Trie().(*mt_trie.NomtStateTrie); ok {
-			if err := nomtTrie.WaitCommitPayload(); err != nil {
-				logger.Error("WaitCommitPayload failed in resolveAccountState (NOMT): %v", err)
-			}
-		}
-	}
 
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		if blockNr == rpc.PendingBlockNumber || blockNr == rpc.LatestBlockNumber {
