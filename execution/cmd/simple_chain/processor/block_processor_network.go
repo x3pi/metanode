@@ -589,24 +589,25 @@ PROCESS_LOOP:
 			logger.Warn("🔄 [TRANSITION GUARD] Flushing uncommitted block #%d to DB (last committed: #%d)",
 				lastBlockNum, lastCommittedNum)
 
+			// Write changelog synchronously BEFORE CommitBlockState to guarantee sequential progression
+			// and visibility of historical states when block counter is advanced.
+			if bp.pendingAccountPayload != nil {
+				if payload, ok := bp.pendingAccountPayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+			if bp.pendingStakePayload != nil {
+				if payload, ok := bp.pendingStakePayload.(interface{ WriteChangelog() }); ok {
+					payload.WriteChangelog()
+				}
+			}
+
 			if _, err := bp.chainState.CommitBlockState(lastBlock,
 				blockchain.WithPersistToDB(),
 				blockchain.WithCommitMappings(),
 			); err != nil {
 				logger.Error("🔄 [TRANSITION GUARD] Failed to commit block #%d: %v", lastBlockNum, err)
 			} else {
-				// Write changelog synchronously
-				if bp.pendingAccountPayload != nil {
-					if payload, ok := bp.pendingAccountPayload.(interface{ WriteChangelog() }); ok {
-						payload.WriteChangelog()
-					}
-				}
-				if bp.pendingStakePayload != nil {
-					if payload, ok := bp.pendingStakePayload.(interface{ WriteChangelog() }); ok {
-						payload.WriteChangelog()
-					}
-				}
-
 				// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
 				if bp.pendingAccountPayload != nil {
 					if payload, ok := bp.pendingAccountPayload.(interface{ CommitAsync() }); ok {

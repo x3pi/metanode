@@ -698,7 +698,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// Capture NOMT root BEFORE apply to compute delta
 				var rootBeforeApply common.Hash
 				var hasRootBefore bool
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
 					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
 
 					// ═══════════════════════════════════════════════════════════════
@@ -751,7 +751,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// batch apply during STARTUP-SYNC. This pinpoints the exact block
 				// where state drift begins (if any batch is incomplete/corrupted).
 				// ═══════════════════════════════════════════════════════════════
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						expectedAccountRoot := header.AccountStatesRoot()
 
@@ -920,7 +920,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if trie.GetStateBackend() == trie.BackendNOMT {
 					// Cross-check: Query the NOMT handle root directly to verify
 					// it matches both the trie's cached root and the block header.
-					nomtHandleRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+					var nomtHandleRoot common.Hash
+					var hasNomtRoot bool
+					if i == 0 {
+						nomtHandleRoot, hasNomtRoot = trie.GetNomtHandleRoot("account_state")
+					}
 
 					logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
 						blockNum,
