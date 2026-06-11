@@ -530,6 +530,21 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Info("🔄 [NOMT-SYNC-RECOVERY] Block #%d exists in LevelDB but is NOT committed to NOMT (lastNomt=%d). Forcing re-execution on NOMT.", blockNum, storage.GetLastNomtCommittedBlock())
 		}
 
+		// STRICT BLOCK NUMBER GUARD: If the block number is already committed and there is no hash mismatch,
+		// it is fully executed. This prevents executing state batches for duplicate blocks.
+		if !isFullyExecuted && blockNum > 0 {
+			lastBlockNum := storage.GetLastBlockNumber()
+			if blockNum < lastBlockNum {
+				isFullyExecuted = true
+				logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is strictly older than last committed #%d. Skipping execution.", blockNum, lastBlockNum)
+			} else if blockNum == lastBlockNum {
+				if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
+					isFullyExecuted = true
+					logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is duplicate of last committed tip. Skipping execution.", blockNum)
+				}
+			}
+		}
+
 		if isFullyExecuted {
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)

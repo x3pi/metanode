@@ -455,12 +455,25 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	phase32Start := time.Now()
 	var trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	trieDBSnapshots = processResults.TrieDBSnapshots
-	if commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber); commitErr != nil {
+	var accountBatch []byte
+	var stakeBatch []byte
+	var smartContractBatch []byte
+	var smartContractStorageBatch []byte
+	var codeBatchPut []byte
+
+	retAccount, retStake, retSmartContract, retSmartContractStorage, retCodeBatchPut, commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
+	if commitErr != nil {
 		// CRITICAL: commitToMemoryParallel failed (SmartContractDB, AccountPipeline, or StakePipeline).
 		// Block has already been SetLastBlock'd (line 398) so we cannot fully revert here.
 		// The error is logged at ERROR level for monitoring. The commitWorker will still
 		// persist whatever state was successfully committed.
 		logger.Error("🚨 [COMMIT-MEMORY] commitToMemoryParallel error for block #%d: %v — block will be committed with partial state", currentBlockNumber, commitErr)
+	} else {
+		accountBatch = retAccount
+		stakeBatch = retStake
+		smartContractBatch = retSmartContract
+		smartContractStorageBatch = retSmartContractStorage
+		codeBatchPut = retCodeBatchPut
 	}
 	phase32Elapsed := time.Since(phase32Start)
 
@@ -472,11 +485,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// Only TrieDB needs snapshotting because it's explicitly reset via ResetCollectedBatches().
 	// Other batch data (Account, SmartContract, etc.) is safe — each block creates fresh data.
 	var trieBatchSnapshot map[string][]byte
-	var accountBatch []byte
-	var smartContractBatch []byte
-	var smartContractStorageBatch []byte
-	var codeBatchPut []byte
-	var stakeBatch []byte
 
 	var tTrie, tAccount, tContract, tStake, tDispatch time.Duration
 
@@ -485,21 +493,6 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		trieBatchSnapshot = trie_database.GetTrieDatabaseManager().GetCollectedBatches()
 		trie_database.GetTrieDatabaseManager().ResetCollectedBatches()
 		tTrie = time.Since(startTrie)
-
-		// Phase 6 FIX: Synchronously snapshot all other generated Database Batches BEFORE the async dispatch
-		startAccount := time.Now()
-		accountBatch = bp.chainState.GetAccountStateDB().GetAccountBatch()
-		tAccount = time.Since(startAccount)
-
-		startContract := time.Now()
-		smartContractBatch = bp.chainState.GetSmartContractDB().GetSmartContractBatch()
-		smartContractStorageBatch = bp.chainState.GetSmartContractDB().GetSmartContractStorageBatch()
-		codeBatchPut = bp.chainState.GetSmartContractDB().GetCodeBatchPut()
-		tContract = time.Since(startContract)
-
-		startStake := time.Now()
-		stakeBatch = bp.chainState.GetStakeStateDB().GetStakeBatch()
-		tStake = time.Since(startStake)
 	}
 
 	// Wait for mapping generation to complete before constructing CommitJob
