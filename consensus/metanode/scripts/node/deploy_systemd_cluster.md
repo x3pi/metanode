@@ -19,6 +19,7 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 **Lệnh quan trọng nhất (Cài đặt toàn bộ từ A-Z):**
 ```bash
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --setup
 ./deploy_systemd_cluster.sh --env deploy-muti-node.env --all
 ```
 *Lệnh này sẽ tự động Build -> Đẩy file qua mạng -> Tắt các node cũ -> Xóa Data -> Khởi động lại mạng lưới mới hoàn toàn.*
@@ -53,7 +54,7 @@ Khi chạy đầy đủ, script thực hiện tuần tự các bước:
 
 **Dừng toàn bộ mạng lưới:**
 ```bash
-./deploy_systemd_cluster.sh --env deploy-muti-node.env --stop
+./deploy_systemd_cluster.sh --env deploy-muti-node.env --stop --only-node 2
 ```
 
 **Khởi động chỉ 1 Node (ví dụ Node 2):**
@@ -108,7 +109,7 @@ cat /tmp/rpc_nodes.json | jq .
 File này chứa 3 nhóm cấu hình rất quan trọng dành cho các bài Test:
 - `nodes`: Chứa HTTP port gốc của blockchain (thường là 8757, 10747...) - Dùng cho API Admin hoặc truy vấn Snapshot.
 - `rpc_proxies`: Chứa HTTP port của **RPC Proxy** (ví dụ 8545, 8546) - Các script test transaction sẽ đọc và tự động điều hướng request qua đây để test như với chuẩn Ethereum.
-- `tcp_proxies`: Chứa TCP port của RPC Proxy (ví dụ 9545, 9546) - Dùng cho test TPS hoặc P2P qua RPC.
+- `tcp_nodes`: Chứa TCP port (Connection Address nội bộ) của node (ví dụ 6200, 6201) - Dùng cho test TPS hoặc P2P TCP test.
 
 ---
 

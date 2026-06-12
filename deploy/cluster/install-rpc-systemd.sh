@@ -154,10 +154,19 @@ for idx in "${!NODE_IDS[@]}"; do
                 cp "$SCRIPT_DIR/../single-node/rpc/config-client-tcp.json" "$CONFIG_TCP"
             fi
 
-            log_info "Cập nhật các cổng kết nối (HTTP/WSS/TCP/P2P) cho rpc-client node $i"
-            jq ".rpc_server_url = \"http://127.0.0.1:${rpc_port}\" | .wss_server_url = \"ws://127.0.0.1:${rpc_port}/ws\" | .server_port = \":$((8545 + i))\" | .https_port = \":$((8666 + i))\" | .tcp_server_port = \":$((9545 + i))\"" "$CONFIG_RPC" > "${CONFIG_RPC}.tmp" && mv "${CONFIG_RPC}.tmp" "$CONFIG_RPC"
+            # Thay thế tất cả "node0_data" thành "node${i}_data" cho các thư mục db/logs
+            sed -i "s/node0_data/node${i}_data/g" "$CONFIG_RPC"
 
-            jq ".connection_address = \"0.0.0.0:$((6200 + i))\"" "$CONFIG_TCP" > "${CONFIG_TCP}.tmp" && mv "${CONFIG_TCP}.tmp" "$CONFIG_TCP"
+            log_info "Cập nhật các cổng kết nối (HTTP/WSS/TCP/P2P) cho rpc-client node $i"
+            jq ".rpc_server_url = \"http://127.0.0.1:${rpc_port}\" | .wss_server_url = \"ws://127.0.0.1:${rpc_port}/ws\" | .server_port = \":$((8650 + i))\" | .https_port = \":$((8666 + i))\" | .tcp_server_port = \":$((9545 + i))\"" "$CONFIG_RPC" > "${CONFIG_RPC}.tmp" && mv "${CONFIG_RPC}.tmp" "$CONFIG_RPC"
+
+            jq ".parent_connection_address = \"127.0.0.1:$((6200 + i))\"" "$CONFIG_TCP" > "${CONFIG_TCP}.tmp" && mv "${CONFIG_TCP}.tmp" "$CONFIG_TCP"
+            
+            # Mở port trên firewall ufw cho RPC Proxy
+            log_info "Đang mở port Firewall (UFW) cho RPC Proxy Node $i..."
+            sudo ufw allow $((8650 + i))/tcp comment "Metanode RPC Proxy HTTP"
+            sudo ufw allow $((8666 + i))/tcp comment "Metanode RPC Proxy HTTPS"
+            sudo ufw allow $((9545 + i))/tcp comment "Metanode RPC Proxy TCP"
         else
             log_warn "Không tìm thấy rpc_port hoặc file config RPC/TCP, bỏ qua cập nhật."
         fi
@@ -188,8 +197,8 @@ WorkingDirectory=$RPC_DIR
 ExecStart=$RPC_DIR/rpc-client-bin --config config-rpc-node${i}.json --tcp-config config-client-tcp-node${i}.json
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 
-# Restart=on-failure
-# RestartSec=5s
+Restart=on-failure
+RestartSec=5s
 LimitNOFILE=100000
 
 StandardOutput=append:$RPC_DIR/node${i}_data/logs/systemd.log

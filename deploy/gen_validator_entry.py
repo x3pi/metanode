@@ -185,7 +185,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     p2p_port         = getattr(args, "primary_port",      6200 + node_id)
     dns_port         = getattr(args, "dns_port",          9080 + node_id)
     peer_rpc_port    = getattr(args, "peer_rpc_port",     19200 + node_id)
-    consensus_port   = getattr(args, "p2p_port",          9000 + node_id)
+    consensus_port   = getattr(args, "p2p_port",          9100 + node_id)
     snapshot_port    = getattr(args, "snapshot_port",     8600 + node_id)
     meta_rpc_port    = getattr(args, "meta_node_rpc_port",10100 + node_id)
     metrics_port     = getattr(args, "metrics_port",      9200 + node_id)
@@ -387,7 +387,7 @@ def parse_args():
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
     parser.add_argument("--ip",           default="127.0.0.1")
-    parser.add_argument("--p2p-port",     type=int, default=None, help="Rust consensus P2P port (default: 9000 + node_id)")
+    parser.add_argument("--p2p-port",     type=int, default=None, help="Rust consensus P2P port (default: 9100 + node_id)")
     parser.add_argument("--primary-port", type=int, default=None, help="Go P2P primary port (default: 6200 + node_id)")
     parser.add_argument("--worker-port",  type=int, default=None, help="Go worker port (default: 4012 + node_id)")
     parser.add_argument("--peers-map",    default=None, help="Comma-separated map of node_id=ip (e.g. 0=192.168.1.1,1=192.168.1.2)")
@@ -407,7 +407,7 @@ def main():
 
     # Auto-calculate port defaults if not specified, based on node_id
     if args.p2p_port is None:
-        args.p2p_port = 9000 + args.node_id
+        args.p2p_port = 9100 + args.node_id
     if args.primary_port is None:
         args.primary_port = 6200 + args.node_id
     if args.worker_port is None:
@@ -505,10 +505,7 @@ def main():
     print(f"  1. Use configs directly with install.sh:")
     print(f"       sudo bash install.sh --config-dir {keys_dir}")
     
-    
-    
-    
-    
+
     print()
 
 

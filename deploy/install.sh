@@ -341,8 +341,8 @@ ExecStop=/bin/kill -SIGTERM \$MAINPID
 
 # Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
 TimeoutStopSec=90
-#Restart=on-failure
-#RestartSec=15s
+Restart=on-failure
+RestartSec=15s
 
 # Environment
 Environment=GOTRACEBACK=all
@@ -380,8 +380,8 @@ ExecStart=${INSTALL_DIR}/bin/metanode start --config ${INSTALL_DIR}/config/conse
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 
 TimeoutStopSec=60
-#Restart=on-failure
-#RestartSec=10s
+Restart=on-failure
+RestartSec=10s
 
 # Environment
 Environment=RUST_BACKTRACE=full
