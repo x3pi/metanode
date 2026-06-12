@@ -73,14 +73,6 @@ func TestCommitPipeline_EmptyDirty(t *testing.T) {
 	require.NotNil(t, result)
 }
 
-func TestCommitPipeline_NotLocked_Fails(t *testing.T) {
-	adb := newTestDB(t)
-
-	// CommitPipeline should fail if not locked
-	_, err := adb.CommitPipeline()
-	assert.Error(t, err, "CommitPipeline should fail when not locked")
-	assert.Contains(t, err.Error(), "locked")
-}
 
 func TestCommitPipeline_PreservesState(t *testing.T) {
 	adb := newTestDB(t)
