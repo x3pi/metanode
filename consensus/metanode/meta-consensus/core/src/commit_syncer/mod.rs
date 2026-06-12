@@ -2522,6 +2522,14 @@ impl<C: NetworkClient> Inner<C> {
                 self.transaction_certifier
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);
             }
+            
+            // FEED VOTE BLOCKS TO MONITOR:
+            // Crucial for zero-timeout peer_commit_attestation in CommitProcessor.
+            // If we don't observe these blocks, the monitor will stay at Insufficient
+            // votes, causing a local execution deadlock under high TPS when CommitSyncer
+            // is the primary source of commits.
+            self.commit_vote_monitor.observe_block(&block);
+
             for vote in block.commit_votes() {
                 // CROSS-EPOCH STAKE ALIGNMENT: Compare only index and digest.
                 // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0
