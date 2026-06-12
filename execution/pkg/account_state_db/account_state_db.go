@@ -775,72 +775,123 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 	}
 	prewarmDuration := time.Since(startPrewarm)
 
-	numWorkers := 32
-	if len(toLoad) < numWorkers {
-		numWorkers = len(toLoad)
+	// Dynamic worker allocation to prevent CGO thread contention and GC overhead.
+	// - For small batches (<= 64), run sequentially (1 worker) to avoid scheduling latency.
+	// - For larger batches, target 64 addresses per worker.
+	// - Cap the maximum number of concurrent workers at 8 (instead of a static 32)
+	//   to prevent OS thread thrashing when executing concurrent blocking CGO calls.
+	numWorkers := 1
+	if len(toLoad) > 64 {
+		numWorkers = (len(toLoad) + 63) / 64
+		if numWorkers > 8 {
+			numWorkers = 8
+		}
 	}
 
-	startWorkers := time.Now()
-	var wg sync.WaitGroup
-	chunkSize := (len(toLoad) + numWorkers - 1) / numWorkers
-	for i := 0; i < numWorkers; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if start >= len(toLoad) {
-			break
+	var workersDuration time.Duration
+	if numWorkers == 1 {
+		startWorkers := time.Now()
+		var localTrie p_trie.StateTrie
+		if isFlatTrie {
+			localTrie = baseCopy
+		} else {
+			localTrie = baseCopy.Copy()
 		}
-		if end > len(toLoad) {
-			end = len(toLoad)
-		}
-
-		wg.Add(1)
-		go func(addrs []common.Address) {
-			defer wg.Done()
-			// CRITICAL FORK-SAFETY AND PERFORMANCE:
-			// MPT's Trie.Get() mutates its internal unhasher map cache, so sharing
-			// a single trie object across goroutines causes panic:"concurrent map write".
-			// FlatStateTrie's Get() is completely thread-safe and holds its own RLock.
-			var localTrie p_trie.StateTrie
-			if isFlatTrie {
-				localTrie = baseCopy
+		for _, addr := range toLoad {
+			var bData []byte
+			var getErr error
+			if lf, ok := localTrie.(lockFreeReader); ok {
+				bData, getErr = lf.GetLockFree(addr.Bytes())
 			} else {
-				localTrie = baseCopy.Copy()
+				bData, getErr = localTrie.Get(addr.Bytes())
 			}
-			for _, addr := range addrs {
-				var bData []byte
-				var getErr error
-				if lf, ok := localTrie.(lockFreeReader); ok {
-					bData, getErr = lf.GetLockFree(addr.Bytes())
-				} else {
-					bData, getErr = localTrie.Get(addr.Bytes())
-				}
 
-				if getErr != nil {
-					logger.Debug("PreloadAccounts: Error getting %s from Trie: %v", addr.Hex(), getErr)
+			if getErr != nil {
+				logger.Debug("PreloadAccounts: Error getting %s from Trie: %v", addr.Hex(), getErr)
+				continue
+			}
+
+			var accountState types.AccountState
+			if len(bData) == 0 {
+				// New account — create fresh state
+				accountState = state.NewAccountState(addr)
+			} else {
+				// Existing account — unmarshal from trie data
+				loaded := &state.AccountState{}
+				if err := loaded.Unmarshal(bData); err != nil {
+					logger.Error("PreloadAccounts: Unmarshal error for %s: %v", addr.Hex(), err)
 					continue
 				}
+				accountState = loaded
+			}
 
-				var accountState types.AccountState
-				if len(bData) == 0 {
-					// New account — create fresh state
-					accountState = state.NewAccountState(addr)
+			// Store into loadedAccounts (not dirtyAccounts) — preloaded accounts are read-only.
+			db.loadedAccounts.LoadOrStore(addr, accountState)
+		}
+		workersDuration = time.Since(startWorkers)
+	} else {
+		startWorkers := time.Now()
+		var wg sync.WaitGroup
+		chunkSize := (len(toLoad) + numWorkers - 1) / numWorkers
+		for i := 0; i < numWorkers; i++ {
+			start := i * chunkSize
+			end := start + chunkSize
+			if start >= len(toLoad) {
+				break
+			}
+			if end > len(toLoad) {
+				end = len(toLoad)
+			}
+
+			wg.Add(1)
+			go func(addrs []common.Address) {
+				defer wg.Done()
+				// CRITICAL FORK-SAFETY AND PERFORMANCE:
+				// MPT's Trie.Get() mutates its internal unhasher map cache, so sharing
+				// a single trie object across goroutines causes panic:"concurrent map write".
+				// FlatStateTrie's Get() is completely thread-safe and holds its own RLock.
+				var localTrie p_trie.StateTrie
+				if isFlatTrie {
+					localTrie = baseCopy
 				} else {
-					// Existing account — unmarshal from trie data
-					loaded := &state.AccountState{}
-					if err := loaded.Unmarshal(bData); err != nil {
-						logger.Error("PreloadAccounts: Unmarshal error for %s: %v", addr.Hex(), err)
+					localTrie = baseCopy.Copy()
+				}
+				for _, addr := range addrs {
+					var bData []byte
+					var getErr error
+					if lf, ok := localTrie.(lockFreeReader); ok {
+						bData, getErr = lf.GetLockFree(addr.Bytes())
+					} else {
+						bData, getErr = localTrie.Get(addr.Bytes())
+					}
+
+					if getErr != nil {
+						logger.Debug("PreloadAccounts: Error getting %s from Trie: %v", addr.Hex(), getErr)
 						continue
 					}
-					accountState = loaded
-				}
 
-				// Store into loadedAccounts (not dirtyAccounts) — preloaded accounts are read-only.
-				db.loadedAccounts.LoadOrStore(addr, accountState)
-			}
-		}(toLoad[start:end])
+					var accountState types.AccountState
+					if len(bData) == 0 {
+						// New account — create fresh state
+						accountState = state.NewAccountState(addr)
+					} else {
+						// Existing account — unmarshal from trie data
+						loaded := &state.AccountState{}
+						if err := loaded.Unmarshal(bData); err != nil {
+							logger.Error("PreloadAccounts: Unmarshal error for %s: %v", addr.Hex(), err)
+							continue
+						}
+						accountState = loaded
+					}
+
+					// Store into loadedAccounts (not dirtyAccounts) — preloaded accounts are read-only.
+					db.loadedAccounts.LoadOrStore(addr, accountState)
+				}
+			}(toLoad[start:end])
+		}
+		wg.Wait()
+		workersDuration = time.Since(startWorkers)
 	}
-	wg.Wait()
-	workersDuration := time.Since(startWorkers)
 	totalDuration := time.Since(startAll)
 
 	logger.Info("⏱️  [PRELOAD-PERF] Loaded %d/%d accounts in %v (filter=%v, prewarm=%v, workers=%v)",
