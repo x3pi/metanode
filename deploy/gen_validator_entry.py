@@ -181,7 +181,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     is_validator = (args.node_type == "validator")
     node_id          = getattr(args, "node_id",           0)
     install_dir      = f"/opt/metanode/node-{node_id}"
-    rpc_port         = getattr(args, "rpc_port",          f":{8757 if node_id == 0 else 10746 + node_id}")
+    rpc_port         = getattr(args, "rpc_port",          f":{10746 + node_id}")
     p2p_port         = getattr(args, "primary_port",      6200 + node_id)
     dns_port         = getattr(args, "dns_port",          9080 + node_id)
     peer_rpc_port    = getattr(args, "peer_rpc_port",     19200 + node_id)

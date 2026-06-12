@@ -744,16 +744,34 @@ fi
 log_step "Phase 6: Generating rpc_nodes.json for Health Checking & Tests"
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
-declare -A RPC_PORTS=( [0]=8757 [1]=10747 [2]=10749 [3]=10750 [4]=10748 )
 JSON_NODES=()
 JSON_RPC_PROXIES=()
 JSON_TCP_NODES=()
 
 for id in "${!NODE_SERVER[@]}"; do
     ip="${NODE_SERVER[$id]}"
-    port="${RPC_PORTS[$id]}"
+    
+    # Lấy rpc_port động từ file cấu hình của từng node
+    local_cfg_dir="../../../../deploy/node-${id}_keys"
+    port=""
+    tcp_port=""
+    if [ -f "$local_cfg_dir/execution.json" ]; then
+        port=$(jq -r '.rpc_port' "$local_cfg_dir/execution.json" | tr -d ':')
+        
+        # Lấy tcp_port (p2p_port) động từ trường connection_address
+        conn_addr=$(jq -r '.connection_address' "$local_cfg_dir/execution.json")
+        if [ "$conn_addr" != "null" ]; then
+            tcp_port="${conn_addr##*:}"
+        fi
+    fi
+    
+    # Nếu không đọc được rpc_port hoặc tcp_port, báo lỗi và dừng script ngay lập tức!
+    if [ -z "$port" ] || [ "$port" == "null" ] || [ -z "$tcp_port" ]; then
+        log_err "Không thể đọc rpc_port hoặc connection_address từ $local_cfg_dir/execution.json. Dừng lại!"
+        exit 1
+    fi
+    
     proxy_http=$((8650 + id))
-    tcp_port=$((6200 + id)) 
     
     JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
     JSON_RPC_PROXIES+=("\"m${id}\": \"http://${ip}:${proxy_http}\"")

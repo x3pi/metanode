@@ -309,8 +309,6 @@ cmd_setup() {
 cmd_install() {
     local only_node="all"
     local auto_yes=""
-    local 
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --node) only_node="$2"; shift 2 ;;
