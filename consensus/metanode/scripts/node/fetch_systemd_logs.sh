@@ -14,16 +14,36 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${1:-$SCRIPT_DIR/deploy.env}"
 
-if [ "$#" -ge 2 ] && [ "$1" == "--env" ]; then
-    ENV_FILE="$2"
-    if [[ "$ENV_FILE" != /* ]]; then
-        ENV_FILE="$SCRIPT_DIR/$ENV_FILE"
-    fi
-elif [ "$#" -eq 1 ] && [[ "$1" != --* ]]; then
-    ENV_FILE="$1"
-    if [[ "$ENV_FILE" != /* ]]; then
-        ENV_FILE="$SCRIPT_DIR/$ENV_FILE"
-    fi
+FETCH_RPC=false
+ENV_FILE_SET=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)
+            if [ -z "${2:-}" ]; then
+                echo -e "${YELLOW}Thiếu đường dẫn file env sau tham số --env${NC}"
+                exit 1
+            fi
+            ENV_FILE="$2"
+            ENV_FILE_SET=1
+            shift 2
+            ;;
+        --rpc)
+            FETCH_RPC=true
+            shift
+            ;;
+        *)
+            if [[ "$1" != --* ]] && [ "$ENV_FILE_SET" -eq 0 ]; then
+                ENV_FILE="$1"
+                ENV_FILE_SET=1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ "$ENV_FILE" != /* ]]; then
+    ENV_FILE="$SCRIPT_DIR/$ENV_FILE"
 fi
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -114,6 +134,24 @@ for server in $SERVERS; do
             echo "     - Folder logs: Đã lấy thành công"
         else
             echo "     - Folder logs: Không tìm thấy hoặc trống"
+        fi
+
+        if $FETCH_RPC; then
+            RPC_LOGS_DIR="/opt/metanode/rpc-proxy/node${id}_data/logs"
+            TARGET_RPC_DIR="$RUN_LOGS_DIR/node_${id}_rpc_logs"
+            if [ "${SSH_AUTH:-key}" == "password" ]; then
+                sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+            elif [ -n "${SSH_KEY:-}" ]; then
+                scp $SSH_OPTS -r -i "$SSH_KEY" "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+            else
+                scp $SSH_OPTS -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+            fi
+
+            if [ -d "$TARGET_RPC_DIR" ]; then
+                echo "     - Folder RPC logs: Đã lấy thành công"
+            else
+                echo "     - Folder RPC logs: Không tìm thấy hoặc trống"
+            fi
         fi
 
     done
