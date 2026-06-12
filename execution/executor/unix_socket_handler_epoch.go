@@ -420,12 +420,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	storage.SetPreConsensusSyncActive(isPreConsensusSync)
 	defer storage.SetPreConsensusSyncActive(false)
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
+	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
+	// all prior consensus block executions have been fully committed to disk,
+	// preventing concurrent PebbleDB writes or stale parent root checks.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if sm := rh.getSnapshotManager(); sm != nil {
+		logger.Info("⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+		sm.WaitForPersistence()
+	}
+
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")
-		if sm := rh.getSnapshotManager(); sm != nil {
-			logger.Info("⏳ [STARTUP-SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
-			sm.WaitForPersistence()
-		}
 	}
 
 	// R7: Crash-guard for Cache Invalidation
@@ -613,9 +620,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// we MUST trigger the trie rebuild even if the block was already in LevelDB.
 			// Otherwise, NOMT memory state stays stale and subsequent blocks will fork.
 			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d", blockNum)
-				if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
+				lastBlockNum := storage.GetLastBlockNumber()
+				if blockNum >= lastBlockNum {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d (tip is #%d)", blockNum, lastBlockNum)
+					if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
+					}
+				} else {
+					logger.Info("🔧 [STARTUP-SYNC] Skipping NOMT trie rebuild on intermediate skipped block #%d because Go tip is ahead (#%d)", blockNum, lastBlockNum)
 				}
 			}
 			continue
@@ -637,8 +649,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if actualParentHash != expectedParentHash {
 					logger.Error("🚨 [SYNC-FORK-GUARD] parent-hash mismatch at block #%d! "+
 						"Synced block has parentHash=%s, but local block #%d hash is %s. "+
-						"Rejecting block to prevent chain corruption.",
-						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex())
+						"Rolling back block counters to %d to force resync of the mismatched block.",
+						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex(), prevBlockNum-1)
+					
+					// Force rollback of Go's block counters to prevBlockNum-1 so the next sync request
+					// starts from prevBlockNum, allowing Go to fetch and overwrite the stale local block.
+					storage.ResetAllBlockCounters(prevBlockNum - 1)
+					storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
+					
 					return &pb.SyncBlocksResponse{
 						SyncedCount:     executedCount,
 						LastSyncedBlock: lastExecutedBlock,
@@ -686,7 +704,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// Capture NOMT root BEFORE apply to compute delta
 				var rootBeforeApply common.Hash
 				var hasRootBefore bool
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
 					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
 
 					// ═══════════════════════════════════════════════════════════════
@@ -739,7 +757,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				// batch apply during STARTUP-SYNC. This pinpoints the exact block
 				// where state drift begins (if any batch is incomplete/corrupted).
 				// ═══════════════════════════════════════════════════════════════
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
+				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
 					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
 						expectedAccountRoot := header.AccountStatesRoot()
 
@@ -908,7 +926,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if trie.GetStateBackend() == trie.BackendNOMT {
 					// Cross-check: Query the NOMT handle root directly to verify
 					// it matches both the trie's cached root and the block header.
-					nomtHandleRoot, hasNomtRoot := trie.GetNomtHandleRoot("account_state")
+					var nomtHandleRoot common.Hash
+					var hasNomtRoot bool
+					if i == 0 {
+						nomtHandleRoot, hasNomtRoot = trie.GetNomtHandleRoot("account_state")
+					}
 
 					logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
 						blockNum,
@@ -1005,19 +1027,24 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && len(blocks) > 0 {
 		lastBlockData := blocks[len(blocks)-1]
 		lastBlockNum := lastBlockData.GetBlockNumber()
-		if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
-			lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
-			if err == nil && lastBlk != nil {
-				logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d", lastBlockNum)
-				if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
-				} else {
-					rh.chainState.InvalidateAllState()
-					finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-					logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
-						finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
+		goTipBlock := storage.GetLastBlockNumber()
+		if lastBlockNum >= goTipBlock {
+			if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
+				lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
+				if err == nil && lastBlk != nil {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d (Go tip is #%d)", lastBlockNum, goTipBlock)
+					if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
+					} else {
+						rh.chainState.InvalidateAllState()
+						finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+						logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
+							finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
+					}
 				}
 			}
+		} else {
+			logger.Info("🔧 [STARTUP-SYNC] Skipping final NOMT trie alignment for block #%d because Go tip is ahead (#%d)", lastBlockNum, goTipBlock)
 		}
 	}
 

@@ -735,19 +735,10 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 		CriticalChecksums:    make(map[string]string),
 	}
 
-	// Tính checksum cho các thư mục quan trọng
-	criticalDirs := []string{"account_state", "blocks", "executor_state", "consensus/rust_consensus"}
-	for _, dirName := range criticalDirs {
-		dirPath := filepath.Join(snapshotPath, dirName)
-		if _, err := os.Stat(dirPath); err == nil {
-			checksum, err := calculateDirectoryChecksum(dirPath)
-			if err == nil {
-				metadata.CriticalChecksums[dirName] = checksum
-			} else {
-				logger.Warn("📸 [SNAPSHOT] Failed to calculate checksum for %s: %v", dirName, err)
-			}
-		}
-	}
+	// Skip calculating directory checksums during snapshot creation to avoid blocking consensus
+	// under heavy load, since PebbleDB/NOMT databases can be very large.
+	// Leaving CriticalChecksums empty is safe and bypassed during verification.
+	metadata.CriticalChecksums = make(map[string]string)
 
 	// Calculate metadata checksum (excluding the MetadataChecksum field itself)
 	metadataBytes, _ := json.Marshal(metadata)

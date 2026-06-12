@@ -62,6 +62,7 @@ pub fn start_unified_epoch_monitor(
 
         let mut last_known_epoch: u64 = 0;
         let mut last_known_mode: Option<crate::node::NodeMode> = None;
+        let mut last_known_phase: Option<consensus_core::coordination_hub::NodeConsensusPhase> = None;
 
         loop {
             // T3-4: Use adaptive interval
@@ -118,12 +119,15 @@ pub fn start_unified_epoch_monitor(
                     Ok(node_guard) => {
                         last_known_epoch = node_guard.current_epoch;
                         last_known_mode = Some(node_guard.node_mode.clone());
-                        Some((node_guard.current_epoch, node_guard.node_mode.clone()))
+                        let phase = node_guard.coordination_hub.get_phase();
+                        last_known_phase = Some(phase);
+                        Some((node_guard.current_epoch, node_guard.node_mode.clone(), phase))
                     }
                     Err(_) => {
                         if let Some(ref mode) = last_known_mode {
-                            debug!("⏳ [EPOCH MONITOR] Node registry lock is busy (transition in progress). Falling back to last known: epoch={}, mode={:?}", last_known_epoch, mode);
-                            Some((last_known_epoch, mode.clone()))
+                            let phase = last_known_phase.unwrap_or(consensus_core::coordination_hub::NodeConsensusPhase::Initializing);
+                            debug!("⏳ [EPOCH MONITOR] Node registry lock is busy (transition in progress). Falling back to last known: epoch={}, mode={:?}, phase={:?}", last_known_epoch, mode, phase);
+                            Some((last_known_epoch, mode.clone(), phase))
                         } else {
                             None
                         }
@@ -133,7 +137,7 @@ pub fn start_unified_epoch_monitor(
                 None
             };
 
-            let (rust_epoch, current_mode) = match lock_res {
+            let (rust_epoch, current_mode, current_phase) = match lock_res {
                 Some(res) => res,
                 None => {
                     debug!("⚠️ [EPOCH MONITOR] Node not registered yet or lock busy with no last known state, waiting...");
@@ -144,6 +148,7 @@ pub fn start_unified_epoch_monitor(
             // 4. Stall check for Validator mode
             if matches!(current_mode, crate::node::NodeMode::Validator)
                 && !config_clone.peer_rpc_addresses.is_empty()
+                && current_phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy
             {
                 // Get current Go block number
                 let go_block = match client_arc.get_last_block_number().await {
@@ -189,18 +194,22 @@ pub fn start_unified_epoch_monitor(
                     }
                 }
                 crate::node::NodeMode::Validator => {
-                    if let Err(e) = validator_transition::validator_multi_epoch_transition(
-                        &client_arc,
-                        &config_clone,
-                        rust_epoch,
-                        network_epoch,
-                        local_go_epoch,
-                        &mut fast_cycles_remaining,
-                        fast_cycles_max,
-                    )
-                    .await
-                    {
-                        warn!("⚠️ [EPOCH MONITOR] Validator transition failed: {}", e);
+                    if current_phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy {
+                        if let Err(e) = validator_transition::validator_multi_epoch_transition(
+                            &client_arc,
+                            &config_clone,
+                            rust_epoch,
+                            network_epoch,
+                            local_go_epoch,
+                            &mut fast_cycles_remaining,
+                            fast_cycles_max,
+                        )
+                        .await
+                        {
+                            warn!("⚠️ [EPOCH MONITOR] Validator transition failed: {}", e);
+                        }
+                    } else {
+                        debug!("⏳ [EPOCH MONITOR] Skipping validator transition because node phase is {:?}", current_phase);
                     }
                 }
             }

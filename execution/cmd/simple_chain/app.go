@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -367,6 +368,10 @@ func (app *App) Run() error {
 	// Start socket server in a goroutine
 	go func() {
 		if err := app.socketServer.Listen(app.config.ConnectionAddress); err != nil {
+			if errors.Is(err, context.Canceled) {
+				logger.Info("SocketServer listener stopped gracefully (context canceled)")
+				return
+			}
 			logger.Error("FATAL ERROR: SocketServer Listen failed: %v", err)
 			os.Exit(1)
 		}
@@ -448,6 +453,11 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 	trieCacheKey := stateRoot.Hex()
 	if app.blockProcessor != nil {
 		if cachedTrie, ok := app.blockProcessor.GetTrieCache(trieCacheKey); ok {
+			if nomtTrie, ok := cachedTrie.(*mt_trie.NomtStateTrie); ok && app.chainState != nil {
+				if nomtTrie.GetChangelogDB() == nil {
+					nomtTrie.SetChangelogDB(app.chainState.GetChangelogDB())
+				}
+			}
 			return cachedTrie, nil
 		}
 	}

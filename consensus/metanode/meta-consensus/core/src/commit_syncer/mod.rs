@@ -858,7 +858,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
                         let execution_stall_duration = now.duration_since(self.last_highest_handled_change_at);
                         if execution_stall_duration >= Duration::from_secs(20)
-                            && highest_handled < quorum_commit
+                            && highest_handled < self.synced_commit_index
                         {
                             tracing::error!(
                                 "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
@@ -1114,7 +1114,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             // pending because no historical commits were fetched.
                             // Without this, Case B never triggers → permanent deadlock.
                             || (self.coordination_hub.is_healthy()
-                                && self.coordination_hub.is_schedule_recovery_pending());
+                                && self.coordination_hub.is_schedule_recovery_pending())
+                            // Healthy + liveness stall: local commit has been frozen for >= 5s.
+                            // Actively query peers to see if they are ahead (Case A) or at same level (Case B/C).
+                            || (self.coordination_hub.is_healthy()
+                                && liveness_stall_duration >= Duration::from_secs(5));
 
                         if needs_active_sync_recovery
                             && now.duration_since(self.last_quorum_change_at) >= Duration::from_secs(5)
@@ -2518,6 +2522,14 @@ impl<C: NetworkClient> Inner<C> {
                 self.transaction_certifier
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);
             }
+            
+            // FEED VOTE BLOCKS TO MONITOR:
+            // Crucial for zero-timeout peer_commit_attestation in CommitProcessor.
+            // If we don't observe these blocks, the monitor will stay at Insufficient
+            // votes, causing a local execution deadlock under high TPS when CommitSyncer
+            // is the primary source of commits.
+            self.commit_vote_monitor.observe_block(&block);
+
             for vote in block.commit_votes() {
                 // CROSS-EPOCH STAKE ALIGNMENT: Compare only index and digest.
                 // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0

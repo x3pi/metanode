@@ -47,7 +47,7 @@ if [ "$TEST_ONLY" -eq 0 ]; then
     echo "[2/4] Bắt đầu bơm giao dịch (để đạt block > 500 và sinh snapshot)..."
     TX_SENDER_DIR="$BASE_DIR/execution/cmd/tool/tx_sender"
     if [ ! -x "$TX_SENDER_DIR/tx_sender" ]; then
-        (cd "$TX_SENDER_DIR" && go build -o tx_sender .)
+        (cd "$TX_SENDER_DIR" && go build -o tx_sender main.go)
     fi
     "$TX_SENDER_DIR/tx_sender" --config "$TX_SENDER_DIR/config.json" \
         --data "$TX_SENDER_DIR/data.json" --loop --node "127.0.0.1:4201" > /dev/null 2>&1 &
