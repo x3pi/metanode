@@ -752,7 +752,7 @@ for id in "${!NODE_SERVER[@]}"; do
     ip="${NODE_SERVER[$id]}"
     
     # Lấy rpc_port động từ file cấu hình của từng node
-    local_cfg_dir="../../../../deploy/node-${id}_keys"
+    local_cfg_dir="${PROJECT_ROOT}/deploy/node-${id}_keys"
     port=""
     tcp_port=""
     if [ -f "$local_cfg_dir/execution.json" ]; then
