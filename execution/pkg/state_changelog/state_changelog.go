@@ -23,6 +23,9 @@ type StateChangelogDB struct {
 	// historical data because we don't know what happened before tracking started.
 	// Persisted as a PebbleDB key: "__meta__:start_block" → 8-byte big-endian.
 	startBlock atomic.Uint64 // 0 = not yet initialized
+
+	// Cache to track if a key already has changelog entries to avoid costly Pebble Iterators.
+	hasEntryCache sync.Map // string -> bool
 }
 
 // StateChange represents a single state mutation
@@ -135,7 +138,17 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		// FORK-DIAG & HISTORICAL ROOT FIX:
 		// If this is the VERY FIRST time this address is modified, we must record its OldValue
 		// at block 0, so that queries for states before this block can find the genesis state.
-		if !c.HasAnyEntry(change.Key) {
+		// Safe optimization: Check memory cache first, then use lockless hasAnyEntryUnlocked (as c.mu is already RLocked)
+		hasEntry := false
+		addrStr := string(change.Key)
+		if _, ok := c.hasEntryCache.Load(addrStr); ok {
+			hasEntry = true
+		} else if c.hasAnyEntryUnlocked(change.Key) {
+			hasEntry = true
+			c.hasEntryCache.Store(addrStr, true)
+		}
+
+		if !hasEntry {
 			oldKey := c.encodeKey(change.Key, 0)
 			oldVal := change.OldValue
 			if len(oldVal) == 0 {
@@ -145,6 +158,9 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 				return fmt.Errorf("failed to set genesis changelog key: %w", err)
 			}
 		}
+
+		// Store in cache: now this key definitely has entries in DB
+		c.hasEntryCache.Store(addrStr, true)
 	}
 
 	// Use pebble.Sync instead of NoSync to ensure durability of historical changelogs,
@@ -344,9 +360,24 @@ func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
 //
 // Performance: single Pebble SeekGE (~1µs) — negligible overhead.
 func (c *StateChangelogDB) HasAnyEntry(address []byte) bool {
+	addrStr := string(address)
+	if _, ok := c.hasEntryCache.Load(addrStr); ok {
+		return true
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	hasEntry := c.hasAnyEntryUnlocked(address)
+	if hasEntry {
+		c.hasEntryCache.Store(addrStr, true)
+	}
+	return hasEntry
+}
+
+// hasAnyEntryUnlocked is a lockless version of HasAnyEntry.
+// Caller MUST hold c.mu.RLock() or c.mu.Lock().
+func (c *StateChangelogDB) hasAnyEntryUnlocked(address []byte) bool {
 	prefix := c.encodeKeyPrefix(address)
 
 	opts := &pebble.IterOptions{

@@ -24,7 +24,7 @@ DST_RPC_PORT=$((8757 + (DST_NODE == 0 ? 0 : DST_NODE == 1 ? 1990 : DST_NODE == 2
 
 SNAPSHOT_PORT=$((8600 + SRC_NODE))
 SNAPSHOT_URL="http://${SRC_IP}:${SNAPSHOT_PORT}"
-LEVELDB_DIRS="account_state blocks receipts transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
+LEVELDB_DIRS="account_state history/blocks history/receipts history/transaction_state history/mapping smart_contract_code smart_contract_storage stake_db trie_database backup_device_key_storage xapian xapian_node nomt_db history/changelog_db_account history/changelog_db_stake"
 
 TX_PUMP_PID=""
 
@@ -130,7 +130,13 @@ DOWNLOAD_URL="${SNAPSHOT_URL}/files/${SNAP_NAME}/"
 DOWNLOAD_DIR="/tmp/snapshot_download_node${DST_NODE}"
 rm -rf "$DOWNLOAD_DIR"
 mkdir -p "$DOWNLOAD_DIR"
-wget -q -c -r -np -nH --cut-dirs=2 -P "$DOWNLOAD_DIR" --reject="index.html*" "$DOWNLOAD_URL"
+local_snap_dir="$GO_DIR/snapshot_data_node${SRC_NODE}/${SNAP_NAME}"
+if [ -d "$local_snap_dir" ]; then
+    log "  ⚡ Local directory detected. Copying snapshot directly via cp --sparse=always..."
+    cp -r --sparse=always "$local_snap_dir"/* "$DOWNLOAD_DIR/"
+else
+    wget -q -c -r -np -nH --cut-dirs=2 -P "$DOWNLOAD_DIR" --reject="index.html*" "$DOWNLOAD_URL"
+fi
 if [ ! -d "$DOWNLOAD_DIR" ] || [ -z "$(ls -A "$DOWNLOAD_DIR")" ]; then
     log "${RED}❌ Download failed!${NC}"
     exit 1
@@ -140,8 +146,9 @@ log "  📂 Restoring state..."
 mkdir -p "$DST/data/data/history" "$DST/data/data/consensus" "$DST/back_up" "$DST/data-write" "$DST/back_up_write"
 for dir_name in $LEVELDB_DIRS; do
     if [ -d "$DOWNLOAD_DIR/$dir_name" ]; then
-        if [ "$dir_name" = "blocks" ] || [ "$dir_name" = "receipts" ] || [ "$dir_name" = "transaction_state" ] || [ "$dir_name" = "mapping" ] || [ "$dir_name" = "changelog_db_account" ] || [ "$dir_name" = "changelog_db_stake" ]; then
-            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/history/$dir_name"
+        if [[ "$dir_name" == history/* ]]; then
+            mkdir -p "$(dirname "$DST/data/data/$dir_name")"
+            mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
         elif [ "$dir_name" = "nomt_db" ] || [ "$dir_name" = "smart_contract_code" ] || [ "$dir_name" = "smart_contract_storage" ] || [ "$dir_name" = "backup_device_key_storage" ] || [ "$dir_name" = "xapian" ] || [ "$dir_name" = "xapian_node" ]; then
             mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/consensus/$dir_name"
         else
