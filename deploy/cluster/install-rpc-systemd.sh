@@ -2,7 +2,7 @@
 # ═══════════════════════════════════════════════════════════════════
 #  Metanode RPC Installer
 #  Cài đặt RPC Client thành systemd services.
-#  Tự động đọc port từ node-N_keys/*.env để cấu hình đúng.
+#  Tự động đọc port từ execution.json để cấu hình đúng.
 #
 #  Cách dùng:
 #    sudo bash install-rpc-systemd.sh              # Cài tất cả 5 node
@@ -89,11 +89,11 @@ fi
 NODE_IDS=(0 1 2 3 4)
 NODE_TYPES=(validator validator validator validator synconly)
 NODE_CONFIGS=(
-    "$SCRIPT_DIR/../node-0_keys/validator.env"
-    "$SCRIPT_DIR/../node-1_keys/validator.env"
-    "$SCRIPT_DIR/../node-2_keys/validator.env"
-    "$SCRIPT_DIR/../node-3_keys/validator.env"
-    "$SCRIPT_DIR/../node-4_keys/synconly.env"
+    "$SCRIPT_DIR/../node-0_keys"
+    "$SCRIPT_DIR/../node-1_keys"
+    "$SCRIPT_DIR/../node-2_keys"
+    "$SCRIPT_DIR/../node-3_keys"
+    "$SCRIPT_DIR/../node-4_keys"
 )
 
 # ─── Kiểm tra jq ─────────────────────────────────────────────────
@@ -125,7 +125,9 @@ log_step "BƯỚC 2: Cấu hình RPC và tạo Systemd Service"
 for idx in "${!NODE_IDS[@]}"; do
     i="${NODE_IDS[$idx]}"
     NODE_TYPE="${NODE_TYPES[$idx]}"
-    ENV_FILE="${NODE_CONFIGS[$idx]}"
+    CONFIG_DIR="${NODE_CONFIGS[$idx]}"
+    CONFIG_RPC="$RPC_DIR/config-rpc-node${i}.json"
+    CONFIG_TCP="$RPC_DIR/config-client-tcp-node${i}.json"
 
     # Bỏ qua nếu không phải node được chỉ định
     [ "$ONLY_NODE" != "all" ] && [ "$ONLY_NODE" != "$i" ] && continue
@@ -133,60 +135,41 @@ for idx in "${!NODE_IDS[@]}"; do
     echo ""
     log_info "Cấu hình RPC Node ${i} (${NODE_TYPE})..."
 
-    # Kiểm tra file .env tồn tại
-    SKIP_JSON_UPDATE=false
-    if [ ! -f "$ENV_FILE" ]; then
-        log_warn "Không tìm thấy: $ENV_FILE. Sẽ bỏ qua cập nhật JSON (giả định config đã được setup sẵn)."
-        SKIP_JSON_UPDATE=true
+    # Kiểm tra thư mục keys tồn tại
+    if [ ! -d "$CONFIG_DIR" ]; then
+        log_warn "Không tìm thấy thư mục: $CONFIG_DIR. Bỏ qua cập nhật JSON (giả định config đã được setup sẵn)."
     else
-        # ─── Đọc port từ .env ─────────────────────────────────────────
-        # RPC_PORT trong .env là port Execution lắng nghe (dạng :10746)
-        EXECUTION_RPC_PORT=$(grep "^RPC_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ':' | tr -d '"')
-        # P2P port để tcp-client kết nối vào
-        P2P_PORT=$(grep "^P2P_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"')
-
-        if [ -z "$EXECUTION_RPC_PORT" ]; then
-            log_warn "Không đọc được RPC_PORT từ $ENV_FILE, dùng port mặc định: $((10750 + i))"
-            EXECUTION_RPC_PORT=$((10750 + i))
+        # ─── Đọc port từ execution.json ─────────────────────────────────────────
+        rpc_port=""
+        if [ -f "$CONFIG_DIR/execution.json" ]; then
+            rpc_port=$(jq -r '.rpc_port' "$CONFIG_DIR/execution.json" 2>/dev/null | tr -d ':' || true)
         fi
-        if [ -z "$P2P_PORT" ]; then
-            log_warn "Không đọc được P2P_PORT từ $ENV_FILE, dùng port mặc định: $((6200 + i))"
-            P2P_PORT=$((6200 + i))
+        
+        if [ -n "$rpc_port" ]; then
+            # Copy templates if missing
+            if [ ! -f "$CONFIG_RPC" ]; then
+                cp "$SCRIPT_DIR/../single-node/rpc/config-rpc.json" "$CONFIG_RPC"
+            fi
+            if [ ! -f "$CONFIG_TCP" ]; then
+                cp "$SCRIPT_DIR/../single-node/rpc/config-client-tcp.json" "$CONFIG_TCP"
+            fi
+
+            # Thay thế tất cả "node0_data" thành "node${i}_data" cho các thư mục db/logs
+            sed -i "s/node0_data/node${i}_data/g" "$CONFIG_RPC"
+
+            log_info "Cập nhật các cổng kết nối (HTTP/WSS/TCP/P2P) cho rpc-client node $i"
+            jq ".rpc_server_url = \"http://127.0.0.1:${rpc_port}\" | .wss_server_url = \"ws://127.0.0.1:${rpc_port}/ws\" | .server_port = \":$((8650 + i))\" | .https_port = \":$((8666 + i))\" | .tcp_server_port = \":$((9545 + i))\"" "$CONFIG_RPC" > "${CONFIG_RPC}.tmp" && mv "${CONFIG_RPC}.tmp" "$CONFIG_RPC"
+
+            jq ".parent_connection_address = \"127.0.0.1:$((6200 + i))\"" "$CONFIG_TCP" > "${CONFIG_TCP}.tmp" && mv "${CONFIG_TCP}.tmp" "$CONFIG_TCP"
+            
+            # Mở port trên firewall ufw cho RPC Proxy
+            log_info "Đang mở port Firewall (UFW) cho RPC Proxy Node $i..."
+            sudo ufw allow $((8650 + i))/tcp comment "Metanode RPC Proxy HTTP"
+            sudo ufw allow $((8666 + i))/tcp comment "Metanode RPC Proxy HTTPS"
+            sudo ufw allow $((9545 + i))/tcp comment "Metanode RPC Proxy TCP"
+        else
+            log_warn "Không tìm thấy rpc_port hoặc file config RPC/TCP, bỏ qua cập nhật."
         fi
-
-        # Port mở cho người dùng bên ngoài (MetaMask, dApp...)
-        SERVER_PORT=$((8545 + i))
-        HTTPS_PORT=$((8666 + i))
-        TCP_SERVER_PORT=$((9545 + i))
-    fi
-
-    CONFIG_RPC="$RPC_DIR/config-rpc-node${i}.json"
-    CONFIG_TCP="$RPC_DIR/config-client-tcp-node${i}.json"
-
-    # ─── Cập nhật config-rpc-nodeN.json ───────────────────────────
-    if ! $SKIP_JSON_UPDATE && [ -f "$CONFIG_RPC" ]; then
-        jq ".rpc_server_url = \"http://127.0.0.1:${EXECUTION_RPC_PORT}\" |
-            .wss_server_url = \"ws://127.0.0.1:${EXECUTION_RPC_PORT}/ws\" |
-            .server_port = \":${SERVER_PORT}\" |
-            .https_port = \":${HTTPS_PORT}\" |
-            .tcp_server_port = \":${TCP_SERVER_PORT}\"" \
-        "$CONFIG_RPC" > "${CONFIG_RPC}.tmp" && mv -f "${CONFIG_RPC}.tmp" "$CONFIG_RPC"
-        log_ok "config-rpc-node${i}.json → Execution RPC: ${EXECUTION_RPC_PORT} | HTTP: ${SERVER_PORT}"
-    elif $SKIP_JSON_UPDATE; then
-        log_info "Bỏ qua cập nhật $CONFIG_RPC vì thiếu .env"
-    else
-        log_warn "Không tìm thấy $CONFIG_RPC, bỏ qua cập nhật"
-    fi
-
-    # ─── Cập nhật config-client-tcp-nodeN.json ────────────────────
-    if ! $SKIP_JSON_UPDATE && [ -f "$CONFIG_TCP" ]; then
-        jq ".parent_connection_address = \"127.0.0.1:${P2P_PORT}\"" \
-        "$CONFIG_TCP" > "${CONFIG_TCP}.tmp" && mv -f "${CONFIG_TCP}.tmp" "$CONFIG_TCP"
-        log_ok "config-client-tcp-node${i}.json → P2P: ${P2P_PORT}"
-    elif $SKIP_JSON_UPDATE; then
-        log_info "Bỏ qua cập nhật $CONFIG_TCP vì thiếu .env"
-    else
-        log_warn "Không tìm thấy $CONFIG_TCP, bỏ qua cập nhật"
     fi
 
     # Determine actual user/group if run under sudo
@@ -214,8 +197,8 @@ WorkingDirectory=$RPC_DIR
 ExecStart=$RPC_DIR/rpc-client-bin --config config-rpc-node${i}.json --tcp-config config-client-tcp-node${i}.json
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 
-# Restart=on-failure
-# RestartSec=5s
+Restart=on-failure
+RestartSec=5s
 LimitNOFILE=100000
 
 StandardOutput=append:$RPC_DIR/node${i}_data/logs/systemd.log

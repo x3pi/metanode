@@ -1,0 +1,28 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../file-storage"
+		},
+		{
+			"path": "../../metanode-suite"
+		}
+	],
+	"settings": {
+		"rust-analyzer.linkedProjects": [
+			"consensus/metanode/Cargo.toml",
+			"consensus/client/Cargo.toml",
+			"execution/pkg/nomt_ffi/rust_lib/Cargo.toml"
+		],
+		"rust-analyzer.cargo.buildScripts.enable": true,
+		"rust-analyzer.procMacro.enable": true,
+		"clangd.arguments": [
+			"--background-index",
+			"--clang-tidy",
+			"--log=verbose",
+			"--compile-commands-dir=${workspaceFolder}/execution/pkg/mvm/c_mvm/build"
+		]
+	}
+}
