@@ -649,8 +649,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				if actualParentHash != expectedParentHash {
 					logger.Error("🚨 [SYNC-FORK-GUARD] parent-hash mismatch at block #%d! "+
 						"Synced block has parentHash=%s, but local block #%d hash is %s. "+
-						"Rejecting block to prevent chain corruption.",
-						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex())
+						"Rolling back block counters to %d to force resync of the mismatched block.",
+						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex(), prevBlockNum-1)
+					
+					// Force rollback of Go's block counters to prevBlockNum-1 so the next sync request
+					// starts from prevBlockNum, allowing Go to fetch and overwrite the stale local block.
+					storage.ResetAllBlockCounters(prevBlockNum - 1)
+					storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
+					
 					return &pb.SyncBlocksResponse{
 						SyncedCount:     executedCount,
 						LastSyncedBlock: lastExecutedBlock,
