@@ -459,14 +459,23 @@ func memoryPressureRelief(memLimitBytes int64) {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 
-		if m.Sys >= critThreshold {
-			logger.Warn("🚨 [OOM-GUARD] CRITICAL memory pressure: Sys=%dMB (limit=%dMB). Forcing GC + FreeOSMemory.",
-				m.Sys>>20, uint64(memLimitBytes)>>20)
+		// Estimate resident physical memory footprint of the Go runtime.
+		// m.Sys measures Go's reserved virtual address space. Under GOMEMLIMIT
+		// and heavy load, virtual address reservation remains high even after
+		// physical pages are released to the OS (measured by HeapReleased).
+		physicalMem := m.Sys
+		if m.Sys > m.HeapReleased {
+			physicalMem = m.Sys - m.HeapReleased
+		}
+
+		if physicalMem >= critThreshold {
+			logger.Warn("🚨 [OOM-GUARD] CRITICAL memory pressure: EstPhys=%dMB (Sys=%dMB, Released=%dMB, limit=%dMB). Forcing GC + FreeOSMemory.",
+				physicalMem>>20, m.Sys>>20, m.HeapReleased>>20, uint64(memLimitBytes)>>20)
 			runtime.GC()
 			runtime_debug.FreeOSMemory()
-		} else if m.Sys >= warnThreshold {
-			logger.Warn("⚠️ [OOM-GUARD] High memory pressure: Sys=%dMB (limit=%dMB). Forcing GC.",
-				m.Sys>>20, uint64(memLimitBytes)>>20)
+		} else if physicalMem >= warnThreshold {
+			logger.Warn("⚠️ [OOM-GUARD] High memory pressure: EstPhys=%dMB (Sys=%dMB, Released=%dMB, limit=%dMB). Forcing GC.",
+				physicalMem>>20, m.Sys>>20, m.HeapReleased>>20, uint64(memLimitBytes)>>20)
 			runtime.GC()
 		}
 	}
