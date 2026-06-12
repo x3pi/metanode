@@ -658,11 +658,6 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-# PHASE 4: Update IPs in config files on remote servers (REMOVED)
-# ═══════════════════════════════════════════════════════════════════
-# IP update logic is now handled locally during --setup.
-
-# ═══════════════════════════════════════════════════════════════════
 # PHASE 5: Start nodes on remote servers (via deploy orchestrator)
 # ═══════════════════════════════════════════════════════════════════
 if $DO_START; then
@@ -717,6 +712,12 @@ if $DO_START; then
                 echo '  ▶ Setup Node $id (cleaning data)...'
                 _sudo bash systemd-cluster.sh setup --node $id -y"
             fi
+            
+            CMD_SEQ="${CMD_SEQ}
+            if [ -f \"../node-${id}_keys/open_ports.sh\" ]; then
+                echo '  ▶ Thực thi open_ports.sh để tự động mở firewall ufw cho Node $id...'
+                _sudo bash \"../node-${id}_keys/open_ports.sh\" || true
+            fi"
         done
 
         ssh_cmd "$server" "
@@ -746,23 +747,23 @@ RPC_JSON_PATH="/tmp/rpc_nodes.json"
 declare -A RPC_PORTS=( [0]=8757 [1]=10747 [2]=10749 [3]=10750 [4]=10748 )
 JSON_NODES=()
 JSON_RPC_PROXIES=()
-JSON_TCP_PROXIES=()
+JSON_TCP_NODES=()
 
 for id in "${!NODE_SERVER[@]}"; do
     ip="${NODE_SERVER[$id]}"
     port="${RPC_PORTS[$id]}"
-    proxy_http=$((8545 + id))
-    proxy_tcp=$((6200 + id)) # TCP connection_address set in config-client-tcp.json
+    proxy_http=$((8650 + id))
+    tcp_port=$((6200 + id)) 
     
     JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
     JSON_RPC_PROXIES+=("\"m${id}\": \"http://${ip}:${proxy_http}\"")
-    JSON_TCP_PROXIES+=("\"m${id}\": \"${ip}:${proxy_tcp}\"")
+    JSON_TCP_NODES+=("\"m${id}\": \"${ip}:${tcp_port}\"")
 done
 
 # Nối các string lại bằng dấu phẩy
 JOINED_NODES=$(IFS=, ; echo "${JSON_NODES[*]}")
 JOINED_RPC=$(IFS=, ; echo "${JSON_RPC_PROXIES[*]}")
-JOINED_TCP=$(IFS=, ; echo "${JSON_TCP_PROXIES[*]}")
+JOINED_TCP=$(IFS=, ; echo "${JSON_TCP_NODES[*]}")
 
 cat > "$RPC_JSON_PATH" <<EOF
 {
@@ -772,7 +773,7 @@ cat > "$RPC_JSON_PATH" <<EOF
   "rpc_proxies": {
     $JOINED_RPC
   },
-  "tcp_proxies": {
+  "tcp_nodes": {
     $JOINED_TCP
   }
 }
