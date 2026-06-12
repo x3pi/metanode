@@ -20,6 +20,10 @@ ENV_FILE_SET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env)
+            if [ -z "${2:-}" ]; then
+                echo -e "${YELLOW}Thiếu đường dẫn file env sau tham số --env${NC}"
+                exit 1
+            fi
             ENV_FILE="$2"
             ENV_FILE_SET=1
             shift 2
