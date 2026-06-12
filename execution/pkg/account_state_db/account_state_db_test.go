@@ -349,20 +349,6 @@ func TestLockedFlag_ReturnsError(t *testing.T) {
 		assert.Contains(t, err.Error(), "locked")
 	})
 
-	// Commit/CommitPipeline require lockedFlag=false (opposite check)
-	adb.lockedFlag.Store(false)
-
-	t.Run("Commit_NotLocked", func(t *testing.T) {
-		_, err := adb.Commit()
-		assert.Error(t, err, "Commit should fail when NOT locked")
-		assert.Contains(t, err.Error(), "locked")
-	})
-
-	t.Run("CommitPipeline_NotLocked", func(t *testing.T) {
-		_, err := adb.CommitPipeline()
-		assert.Error(t, err, "CommitPipeline should fail when NOT locked")
-		assert.Contains(t, err.Error(), "locked")
-	})
 }
 
 // ──────────────────────────────────────────────

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync" // Keep sync package
 	"sync/atomic"
@@ -776,27 +777,28 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 	prewarmDuration := time.Since(startPrewarm)
 
 	// Dynamic worker allocation to prevent CGO thread contention and GC overhead.
-	// - For small batches (<= 64), run sequentially (1 worker) to avoid scheduling latency.
-	// - For larger batches, target 64 addresses per worker.
-	// - Cap the maximum number of concurrent workers at 8 (instead of a static 32)
-	//   to prevent OS thread thrashing when executing concurrent blocking CGO calls.
+	// - For small batches (<= 16), run sequentially (1 worker) to avoid scheduling latency.
+	// - For larger batches, target 32 addresses per worker.
+	// - Cap the maximum number of concurrent workers dynamically based on CPU count (NumCPU / 2, capped between 8 and 48).
 	numWorkers := 1
-	if len(toLoad) > 64 {
-		numWorkers = (len(toLoad) + 63) / 64
-		if numWorkers > 8 {
-			numWorkers = 8
+	if len(toLoad) > 16 {
+		numWorkers = (len(toLoad) + 31) / 32
+		maxWorkers := runtime.NumCPU() / 2
+		if maxWorkers < 8 {
+			maxWorkers = 8
+		}
+		if maxWorkers > 48 {
+			maxWorkers = 48
+		}
+		if numWorkers > maxWorkers {
+			numWorkers = maxWorkers
 		}
 	}
 
 	var workersDuration time.Duration
 	if numWorkers == 1 {
 		startWorkers := time.Now()
-		var localTrie p_trie.StateTrie
-		if isFlatTrie {
-			localTrie = baseCopy
-		} else {
-			localTrie = baseCopy.Copy()
-		}
+		localTrie := baseCopy
 		for _, addr := range toLoad {
 			var bData []byte
 			var getErr error
@@ -894,7 +896,7 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 	}
 	totalDuration := time.Since(startAll)
 
-	logger.Info("⏱️  [PRELOAD-PERF] Loaded %d/%d accounts in %v (filter=%v, prewarm=%v, workers=%v)",
+	logger.Warn("⏱️  [PRELOAD-PERF] Loaded %d/%d accounts in %v (filter=%v, prewarm=%v, workers=%v)",
 		len(toLoad), len(addresses), totalDuration.Round(time.Microsecond),
 		filterDuration.Round(time.Microsecond), prewarmDuration.Round(time.Microsecond), workersDuration.Round(time.Microsecond))
 }
