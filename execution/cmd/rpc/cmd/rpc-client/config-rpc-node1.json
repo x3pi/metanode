@@ -2,7 +2,7 @@
   "rpc_server_url": "http://127.0.0.1:10747",
   "wss_server_url": "ws://127.0.0.1:10747/ws",
   "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-  "server_port": ":8546",
+  "server_port": ":8651",
   "chain_id": 991,
   "https_port": ":8667",
   "cert_file": "certificate.pem",
