@@ -457,7 +457,7 @@ if $DO_BUILD; then
         if [ "$NUM_PROCS" -gt 4 ]; then
             NUM_PROCS=4
         fi
-        go build -p $NUM_PROCS -o simple_chain . 2>&1
+        go build -p $NUM_PROCS -o simple_chain . 2>&1 || exit 1
     )
     log_ok "Go binary: ${LOCAL_GO_SIMPLE}/simple_chain"
 
@@ -466,7 +466,7 @@ if $DO_BUILD; then
     (
         cd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client"
         rm -f rpc-client-bin
-        go build -o rpc-client-bin . 2>&1
+        go build -o rpc-client-bin . 2>&1 || exit 1
         if [ ! -f certificate.pem ]; then
             openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
         fi
@@ -519,7 +519,7 @@ if $DO_PUSH || $DO_START; then
                     if _sudo systemctl list-unit-files | grep -q metanode-consensus-\$id; then
                         _sudo systemctl stop metanode-consensus-\$id 2>/dev/null || true
                     fi
-                    _sudo pkill -f "metanode.*--node-id \$id" 2>/dev/null || true
+                    _sudo pkill -f \"metanode.*--node-id \$id\" 2>/dev/null || true
                     rm -f /tmp/executor*-node\${id}*.sock /tmp/rust-go-node\${id}*.sock /tmp/metanode-tx-node\${id}*.sock 2>/dev/null || true
                 done
             " 2>/dev/null || true
