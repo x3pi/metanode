@@ -256,9 +256,9 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "db_type": 2,
         "genesis_file_path": f"{install_dir}/config/genesis.json",
         "snapshot_enabled": snapshot_enabled,
-        "snapshot_frequency_blocks": 500,
+        "snapshot_frequency_blocks": 50,
         "snapshot_block_offset": 0,
-        "snapshot_max_snapshots": 5,
+        "snapshot_max_snapshots": 3,
         "Databases": {
             "RootPath": f"{install_dir}/data/execution/db",
             "DBEngine": "sharded",
