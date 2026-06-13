@@ -89,7 +89,7 @@ source "$ENV_FILE"
 
 # Fallback for old env files to ensure directory conflict avoidance
 PROJECT_ROOT="${PROJECT_ROOT:-${LOCAL_CHAIN_DIR}/metanode}"
-REMOTE_PROJECT_ROOT="${REMOTE_PROJECT_ROOT:-${REMOTE_DEPLOY_DIR}/metanode}"
+REMOTE_PROJECT_ROOT="${REMOTE_PROJECT_ROOT:-${REMOTE_DEPLOY_DIR:-/opt/metanode-deploy}/metanode}"
 
 DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy" && pwd)"
 

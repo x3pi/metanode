@@ -102,6 +102,14 @@
   ],
   "alloc": [
     {
+      "address": "0xac1137f94f0a4cf8fdc0f4fb6f69a8be98032041",
+      "balance": "100000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+    },
+    {
       "address": "0x7174Ad7F17a5B57a7d1835ba1a942521407c0dC6",
       "balance": "100000000000000000000",
       "pending_balance": "0",
