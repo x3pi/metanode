@@ -13,7 +13,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -d "/opt/metanode/rpc-proxy" ] && [ -f "/opt/metanode/rpc-proxy/rpc-client-bin" ]; then
+
+# Auto-detect standalone release package
+if [ -f "$SCRIPT_DIR/../bin/rpc-client-bin" ]; then
+    RPC_DIR="$(realpath "$SCRIPT_DIR/../bin")"
+    STANDALONE_MODE=true
+elif [ -d "/opt/metanode/rpc-proxy" ] && [ -f "/opt/metanode/rpc-proxy/rpc-client-bin" ]; then
     RPC_DIR="/opt/metanode/rpc-proxy"
 else
     RPC_DIR="$(realpath "$SCRIPT_DIR/../../execution/cmd/rpc/cmd/rpc-client")"
@@ -59,6 +64,11 @@ while [[ $# -gt 0 ]]; do
         *) shift ;;
     esac
 done
+
+if [ "${STANDALONE_MODE:-false}" = "true" ]; then
+    NO_BUILD=true
+    log_info "Standalone mode detected: Build step will be skipped."
+fi
 
 # ─── Helper: dừng service ────────────────────────────────────────
 stop_rpc() {
@@ -146,12 +156,18 @@ for idx in "${!NODE_IDS[@]}"; do
         fi
         
         if [ -n "$rpc_port" ]; then
+            # Xác định thư mục chứa template RPC
+            RPC_TPL_DIR="$SCRIPT_DIR/../single-node/rpc"
+            if [ "${STANDALONE_MODE:-false}" = "true" ]; then
+                RPC_TPL_DIR="$SCRIPT_DIR/../configs/rpc"
+            fi
+
             # Copy templates if missing
             if [ ! -f "$CONFIG_RPC" ]; then
-                cp "$SCRIPT_DIR/../single-node/rpc/config-rpc.json" "$CONFIG_RPC"
+                cp "$RPC_TPL_DIR/config-rpc.json" "$CONFIG_RPC"
             fi
             if [ ! -f "$CONFIG_TCP" ]; then
-                cp "$SCRIPT_DIR/../single-node/rpc/config-client-tcp.json" "$CONFIG_TCP"
+                cp "$RPC_TPL_DIR/config-client-tcp.json" "$CONFIG_TCP"
             fi
 
             # Thay thế tất cả "node0_data" thành "node${i}_data" cho các thư mục db/logs

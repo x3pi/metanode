@@ -91,6 +91,8 @@ source "$ENV_FILE"
 PROJECT_ROOT="${PROJECT_ROOT:-${LOCAL_CHAIN_DIR}/metanode}"
 REMOTE_PROJECT_ROOT="${REMOTE_PROJECT_ROOT:-${REMOTE_DEPLOY_DIR}/metanode}"
 
+DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy" && pwd)"
+
 if [ $# -eq 0 ] || [[ "$*" == *"--all"* ]]; then
     DO_BUILD=true; DO_BUILD_EVM=true; DO_PUSH=true; DO_IPS=true; DO_START=true
 fi
@@ -421,7 +423,7 @@ fi
 # PHASE 1: Build locally
 # ═══════════════════════════════════════════════════════════════════
 if $DO_BUILD; then
-    log_step "Phase 1: Building binaries locally"
+    log_step "Phase 1: Building binaries locally (Standalone Release Package)"
 
     if $DO_BUILD_EVM; then
         log_info "Building EVM (C++ MVM)..."
@@ -430,57 +432,22 @@ if $DO_BUILD; then
         ) || exit 1
     fi
 
-    # Build Rust metanode library (unified)
-    log_info "Building Rust metanode..."
+    log_info "Building all components via deploy/build_release.sh..."
     (
-        cd "${LOCAL_METANODE}"
-        cargo build --release 2>&1 | tail -3
-    )
+        cd "${DEPLOY_DIR}"
+        bash build_release.sh
+    ) || { log_err "build_release.sh failed"; exit 1; }
 
-    log_info "Building NOMT FFI (Rust)..."
-    (
-        cd "${LOCAL_GO_SIMPLE}/../../pkg/nomt_ffi/rust_lib"
-        cargo build --release 2>&1 | tail -3
-    ) || exit 1
-
-    log_info "Touching FFI bridge files to ensure Go relinks..."
-    touch "${LOCAL_GO_SIMPLE}/../../executor/ffi_bridge.go" "${LOCAL_GO_SIMPLE}/../../pkg/nomt_ffi/bridge.go" 2>/dev/null || true
-
-    # Build Go simple_chain
-    log_info "Building Go simple_chain..."
-    (
-        cd "${LOCAL_GO_SIMPLE}"
-        export GOTOOLCHAIN=${GO_TOOLCHAIN}
-        export CGO_ENABLED=1
-        rm -f simple_chain
-        NUM_PROCS=$(nproc)
-        if [ "$NUM_PROCS" -gt 4 ]; then
-            NUM_PROCS=4
-        fi
-        go build -p $NUM_PROCS -o simple_chain . 2>&1 || exit 1
-    )
-    log_ok "Go binary: ${LOCAL_GO_SIMPLE}/simple_chain"
-
-    # Build RPC Proxy
-    log_info "Building RPC Proxy..."
-    (
-        cd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client"
-        rm -f rpc-client-bin
-        go build -o rpc-client-bin . 2>&1 || exit 1
-        if [ ! -f certificate.pem ]; then
-            openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
-        fi
-    )
-    log_ok "RPC Proxy binary: ${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/rpc-client-bin"
+    log_ok "Standalone release package built successfully."
 else
     log_info "Phase 1: Skipped (use --build to enable)"
 fi
 
-# Verify binaries exist
-GO_BINARY="${LOCAL_GO_SIMPLE}/simple_chain"
+# Verify binaries exist (checking for the standalone package)
+TARBALL_PATH="${DEPLOY_DIR}/../metanode-deploy.tar.gz"
 
-if { $DO_PUSH || $DO_START; } && [ ! -f "$GO_BINARY" ]; then
-    log_err "Go binary not found: $GO_BINARY (run with --build first)"
+if { $DO_PUSH || $DO_START; } && [ ! -f "$TARBALL_PATH" ]; then
+    log_err "Standalone package not found: $TARBALL_PATH (run with --build first)"
     exit 1
 fi
 
@@ -564,91 +531,64 @@ if $DO_PUSH || $DO_START; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-# PHASE 3: Push binaries + configs to each server
+# PHASE 3: Push Standalone Release Package to remote servers
 # ═══════════════════════════════════════════════════════════════════
 if $DO_PUSH; then
-    log_step "Phase 3: Creating remote directories + pushing files"
+    log_step "Phase 3: Pushing Standalone Release Package to remote servers"
 
-    GO_MASTER_CONFIGS=("config-master-node0.json" "config-master-node1.json" "config-master-node2.json" "config-master-node3.json" "config-master-node4.json")
-    RUST_CONFIGS=("config/node_0.toml" "config/node_1.toml" "config/node_2.toml" "config/node_3.toml" "config/node_4.toml")
+    TARBALL_PATH="${DEPLOY_DIR}/../metanode-deploy.tar.gz"
+    if [ ! -f "$TARBALL_PATH" ]; then
+        log_err "Tarball not found: $TARBALL_PATH"
+        exit 1
+    fi
 
     for server in $SERVERS; do
         nodes=$(get_nodes_for_server "$server")
         if [ -z "$nodes" ]; then continue; fi
         log_info "Deploying to $server (nodes: [$nodes])..."
 
-        # Create directory structure on remote
+        # Create target directory
         ssh_cmd "$server" "
             set -euo pipefail;
-            mkdir -p '${REMOTE_GO_SIMPLE}'
-            mkdir -p '${REMOTE_METANODE}/config'
-            mkdir -p '${REMOTE_METANODE}/logs'
-            mkdir -p '${REMOTE_SCRIPTS}'
-            mkdir -p '${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client'
+            export SSH_AUTH='${SSH_AUTH:-}'
+            export SSH_PASSWORD='${SSH_PASSWORD:-}'
+            _sudo() {
+                if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
+                    echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
+                else
+                    sudo \"\$@\"
+                fi
+            }
+            _sudo rm -rf /opt/metanode-deploy
+            _sudo mkdir -p /opt/metanode-deploy
+            _sudo chown -R ${SSH_USER:-abc}:${SSH_USER:-abc} /opt/metanode-deploy
+            
+            # Giữ lại các data folder cũ để tương thích (không bị lỗi quyền)
+            for id in $nodes; do
+                _sudo mkdir -p /opt/metanode/node-\${id}/data
+                _sudo mkdir -p /opt/metanode/node-\${id}/logs
+                _sudo chown -R metanode:metanode /opt/metanode 2>/dev/null || true
+            done
         "
 
-        # Push binaries
-        echo -e "    📦 Pushing Go binary..."
-        rsync_cmd "$GO_BINARY" "$server" "${REMOTE_GO_SIMPLE}/simple_chain"
+        # Push tarball
+        echo -e "    📦 Pushing standalone tarball..."
+        rsync_cmd "$TARBALL_PATH" "$server" "/opt/metanode-deploy/metanode-deploy.tar.gz"
 
-        echo -e "    📦 Pushing Rust binary..."
-        ssh_cmd "$server" "mkdir -p '${REMOTE_METANODE}/target/release'"
-        rsync_cmd "${LOCAL_METANODE}/target/release/metanode" "$server" "${REMOTE_METANODE}/target/release/metanode"
+        # Extract tarball
+        ssh_cmd "$server" "
+            set -euo pipefail;
+            cd /opt/metanode-deploy
+            tar -xzf metanode-deploy.tar.gz
+            mv metanode-deploy/* .
+            rm -rf metanode-deploy metanode-deploy.tar.gz
+        "
 
-        echo -e "    📦 Pushing RPC Proxy binary & TLS certs..."
-        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/rpc-client-bin" "$server" "${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client/rpc-client-bin"
-        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/certificate.pem" "$server" "${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client/certificate.pem"
-        rsync_cmd "${LOCAL_GO_SIMPLE}/../rpc/cmd/rpc-client/private.key" "$server" "${REMOTE_GO_SIMPLE}/../rpc/cmd/rpc-client/private.key"
-
-        # Push genesis.json
-        echo -e "    📄 Pushing genesis.json..."
-        rsync_cmd "${LOCAL_GO_SIMPLE}/genesis.json" "$server" "${REMOTE_GO_SIMPLE}/genesis.json"
-
-        # Push Rust committee.json
-        echo -e "    📄 Pushing committee.json..."
-        rsync_cmd "${LOCAL_METANODE}/config/committee.json" "$server" "${REMOTE_METANODE}/config/committee.json"
-
-        # Push scripts (update_ips.sh, deploy scripts)
-        echo -e "    📄 Pushing scripts..."
-        rsync_cmd "${LOCAL_METANODE}/scripts/node/" "$server" "${REMOTE_SCRIPTS}/"
-
-        # Push deploy directory for remote orchestration
-        echo -e "    📄 Pushing deploy orchestrator..."
-        rsync_cmd "${PROJECT_ROOT}/deploy/" "$server" "${REMOTE_PROJECT_ROOT}/deploy/"
-
-        # Push per-node configs
+        # Push per-node keys
         for id in $nodes; do
-            echo -e "    📄 Node $id configs..."
-
-            # Create node data directories
-            # Create node data directories using sudo to bypass root ownership from systemd
-            ssh_cmd "$server" "
-                set -euo pipefail;
-                export SSH_AUTH='${SSH_AUTH:-}'
-                export SSH_PASSWORD='${SSH_PASSWORD:-}'
-                _sudo() {
-                    if [ \"\$SSH_AUTH\" == \"password\" ] && [ -n \"\$SSH_PASSWORD\" ]; then
-                        echo \"\$SSH_PASSWORD\" | sudo -S \"\$@\"
-                    else
-                        sudo \"\$@\"
-                    fi
-                }
-                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data/data/xapian_node'
-                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/data-write/data/xapian_node'
-                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up'
-                _sudo mkdir -p '${REMOTE_GO_SIMPLE}/sample/node${id}/back_up_write'
-                _sudo mkdir -p '${REMOTE_METANODE}/config/storage/node_${id}'
-                _sudo mkdir -p '${REMOTE_METANODE}/logs/node_${id}'
-                _sudo chown -R ${SSH_USER:-abc}:${SSH_USER:-abc} '${REMOTE_GO_SIMPLE}/sample' '${REMOTE_METANODE}/config/storage' '${REMOTE_METANODE}/logs' 2>/dev/null || true
-            "
-
-            # Go configs (master)
-            rsync_cmd "${LOCAL_GO_SIMPLE}/${GO_MASTER_CONFIGS[$id]}" "$server" "${REMOTE_GO_SIMPLE}/${GO_MASTER_CONFIGS[$id]}"
-
-            # Rust config + keys
-            rsync_cmd "${LOCAL_METANODE}/${RUST_CONFIGS[$id]}" "$server" "${REMOTE_METANODE}/${RUST_CONFIGS[$id]}"
-            rsync_cmd "${LOCAL_METANODE}/config/node_${id}_network_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_network_key.json"
-            rsync_cmd "${LOCAL_METANODE}/config/node_${id}_protocol_key.json" "$server" "${REMOTE_METANODE}/config/node_${id}_protocol_key.json"
+            echo -e "    📄 Pushing Node $id keys..."
+            ssh_cmd "$server" "mkdir -p /opt/metanode-deploy/node-${id}_keys"
+            rsync_cmd "${DEPLOY_DIR}/node-${id}_keys/" "$server" "/opt/metanode-deploy/node-${id}_keys/"
         done
 
         log_ok "Deployed to $server"
@@ -722,7 +662,7 @@ if $DO_START; then
 
         ssh_cmd "$server" "
             set -euo pipefail;
-            cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
+            cd '/opt/metanode-deploy/cluster'
             export SSH_AUTH='${SSH_AUTH:-}'
             export SSH_PASSWORD='${SSH_PASSWORD:-}'
             _sudo() {
@@ -813,7 +753,7 @@ if $DO_START; then
             
             CMD_RPC="
                 set -euo pipefail;
-                cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
+                cd '/opt/metanode-deploy/cluster'
                 if [ \"${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"${SSH_PASSWORD:-}\" ]; then
                     echo \"${SSH_PASSWORD}\" | sudo -S bash install-rpc-systemd.sh --node ${id} --no-build
                 else
@@ -844,7 +784,7 @@ if $DO_RESTORE; then
                 log_info "Restoring Node $r_node on $target_server..."
                 CMD_SEQ="
                     set -euo pipefail;
-                    cd '${REMOTE_PROJECT_ROOT}/deploy/cluster'
+                    cd '/opt/metanode-deploy/cluster'
                     export SSH_AUTH='${SSH_AUTH:-}'
                     export SSH_PASSWORD='${SSH_PASSWORD:-}'
                     _sudo() {

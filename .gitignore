@@ -454,3 +454,6 @@ consensus/metanode/rpc-proxy/rpc-client-bin
 
 metanode.code-workspace
 *.code-workspace
+
+# Standalone Deploy folder
+metanode-deploy/
