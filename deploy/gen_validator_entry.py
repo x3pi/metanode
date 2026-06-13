@@ -55,6 +55,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT   = SCRIPT_DIR.parent  # metanode/
 
 METANODE_BIN_CANDIDATES = [
+    SCRIPT_DIR / "bin" / "metanode",
     REPO_ROOT / "target/release/metanode",
     REPO_ROOT / "consensus/metanode/target/release/metanode",
     Path("/opt/metanode/bin/metanode"),
@@ -471,11 +472,18 @@ def main():
                 
                 print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_main_path}")))
                 
-                # Copy to simple_chain folder
-                target_genesis = "../execution/cmd/simple_chain/genesis.json"
-                shutil.copy2(genesis_main_path, target_genesis)
-                print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
-                
+                # Copy to simple_chain folder if it exists (source mode)
+                target_dir = os.path.join("..", "execution", "cmd", "simple_chain")
+                target_genesis = os.path.join(target_dir, "genesis.json")
+                if os.path.exists(target_dir):
+                    shutil.copy2(genesis_main_path, target_genesis)
+                    print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
+                else:
+                    # In standalone release mode, we just copy to configs/genesis.json if configs/ exists
+                    configs_dir = "configs"
+                    if os.path.exists(configs_dir):
+                        shutil.copy2(genesis_main_path, os.path.join(configs_dir, "genesis.json"))
+                        print(bold(green(f"  ✅ Automatically copied to {configs_dir}/genesis.json")))
         except Exception as e:
             print(f"\n  ❌ Failed to auto-merge into {genesis_main_path}: {e}")
 

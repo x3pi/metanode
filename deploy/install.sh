@@ -41,6 +41,9 @@ fi
 
 CONFIG_DIR=""
 SKIP_BUILD="false"
+BIN_CONSENSUS=""
+BIN_EXECUTION=""
+GENESIS=""
 
 ARGS=("$@")
 for i in "${!ARGS[@]}"; do
@@ -49,6 +52,21 @@ for i in "${!ARGS[@]}"; do
         --config-dir)
             next=$((i+1))
             [ "$next" -lt "${#ARGS[@]}" ] && CONFIG_DIR="${ARGS[$next]}"
+            ;;
+        --bin-consensus=*) BIN_CONSENSUS="${ARGS[$i]#--bin-consensus=}" ;;
+        --bin-consensus)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && BIN_CONSENSUS="${ARGS[$next]}"
+            ;;
+        --bin-execution=*) BIN_EXECUTION="${ARGS[$i]#--bin-execution=}" ;;
+        --bin-execution)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && BIN_EXECUTION="${ARGS[$next]}"
+            ;;
+        --genesis=*) GENESIS="${ARGS[$i]#--genesis=}" ;;
+        --genesis)
+            next=$((i+1))
+            [ "$next" -lt "${#ARGS[@]}" ] && GENESIS="${ARGS[$next]}"
             ;;
         --skip-build) SKIP_BUILD="true" ;;
         --yes|-y) AUTO_YES="true" ;;
@@ -155,54 +173,75 @@ log_step "Step 2: Preparing and building binaries"
 LOCAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_USER="${SUDO_USER:-$(whoami)}"
 
-if [ -d "$LOCAL_ROOT/consensus/metanode" ] && [ -d "$LOCAL_ROOT/execution/cmd/simple_chain" ]; then
-    log_info "Detected local repository at: $LOCAL_ROOT"
-    log_info "Building directly from local source under user: $BUILD_USER"
-    SRC_DIR="$LOCAL_ROOT"
+if [ -n "$BIN_CONSENSUS" ] && [ -n "$BIN_EXECUTION" ] && [ "$SKIP_BUILD" == "true" ]; then
+    log_info "Standalone mode detected. Skipping repository cloning and building."
+    SRC_DIR=""
 else
-    log_info "Local repository not detected. Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
-    if [ ! -d "$BUILD_DIR/.git" ]; then
-        git clone --branch "$REPO_BRANCH" "$REPO_URL" "$BUILD_DIR"
+    if [ -d "$LOCAL_ROOT/consensus/metanode" ] && [ -d "$LOCAL_ROOT/execution/cmd/simple_chain" ]; then
+        log_info "Detected local repository at: $LOCAL_ROOT"
+        log_info "Building directly from local source under user: $BUILD_USER"
+        SRC_DIR="$LOCAL_ROOT"
     else
-        log_info "Repository already exists. Pulling latest..."
-        git -C "$BUILD_DIR" fetch origin "$REPO_BRANCH"
-        git -C "$BUILD_DIR" reset --hard "origin/$REPO_BRANCH"
+        log_info "Local repository not detected. Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
+        if [ ! -d "$BUILD_DIR/.git" ]; then
+            git clone --branch "$REPO_BRANCH" "$REPO_URL" "$BUILD_DIR"
+        else
+            log_info "Repository already exists. Pulling latest..."
+            git -C "$BUILD_DIR" fetch origin "$REPO_BRANCH"
+            git -C "$BUILD_DIR" reset --hard "origin/$REPO_BRANCH"
+        fi
+        SRC_DIR="$BUILD_DIR"
     fi
-    SRC_DIR="$BUILD_DIR"
 fi
 
-GENESIS_FILE="$SRC_DIR/execution/cmd/simple_chain/genesis.json"
+if [ -n "$GENESIS" ] && [ -f "$GENESIS" ]; then
+    GENESIS_FILE="$GENESIS"
+elif [ -n "$SRC_DIR" ]; then
+    GENESIS_FILE="$SRC_DIR/execution/cmd/simple_chain/genesis.json"
+else
+    log_err "No genesis file provided and no source directory available."
+    exit 1
+fi
+
 if [ ! -f "$GENESIS_FILE" ]; then
     log_err "Genesis file not found at: $GENESIS_FILE"
     exit 1
 fi
 log_info "Using genesis file: $GENESIS_FILE"
 
-
-
 # Build Rust consensus engine
-if [ "$SKIP_BUILD" != "true" ] && [ -f "$SRC_DIR/consensus/metanode/Cargo.toml" ]; then
+if [ "$SKIP_BUILD" != "true" ] && [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/consensus/metanode/Cargo.toml" ]; then
     log_info "Building Rust consensus engine (this may take ~10 minutes)..."
     EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/consensus/metanode' && cargo build --release --bin metanode" 2>&1 | \
         grep -E "^(error|warning: unused|Compiling|Finished|error\[)" || true
 else
-    log_info "Skipping Rust build (either --skip-build or source code not found, using prebuilt binary)"
+    log_info "Skipping Rust build (either --skip-build or standalone mode)"
 fi
-RUST_BIN="$SRC_DIR/target/release/metanode"
-[ -f "$RUST_BIN" ] || RUST_BIN="$SRC_DIR/consensus/metanode/target/release/metanode"
+
+if [ -n "$BIN_CONSENSUS" ] && [ -f "$BIN_CONSENSUS" ]; then
+    RUST_BIN="$BIN_CONSENSUS"
+else
+    RUST_BIN="$SRC_DIR/target/release/metanode"
+    [ -f "$RUST_BIN" ] || RUST_BIN="$SRC_DIR/consensus/metanode/target/release/metanode"
+fi
 [ -f "$RUST_BIN" ] || { log_err "Rust build failed — binary not found"; exit 1; }
 log_ok "Rust binary verified: $RUST_BIN"
 
 # Build Go execution engine
-if [ "$SKIP_BUILD" != "true" ] && [ -f "$SRC_DIR/execution/cmd/simple_chain/go.mod" ]; then
+if [ "$SKIP_BUILD" != "true" ] && [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/execution/cmd/simple_chain/go.mod" ]; then
     log_info "Building Go execution engine..."
     EXT_PATH="/usr/local/go/bin:/home/$BUILD_USER/go/bin:/usr/local/go1.24.3/bin:/home/$BUILD_USER/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     sudo -u "$BUILD_USER" env PATH="$EXT_PATH" bash -c "cd '$SRC_DIR/execution/cmd/simple_chain' && CGO_ENABLED=1 go build -o simple_chain ."
 else
-    log_info "Skipping Go build (either --skip-build or source code not found, using prebuilt binary)"
+    log_info "Skipping Go build (either --skip-build or standalone mode)"
 fi
-GO_BIN="$SRC_DIR/execution/cmd/simple_chain/simple_chain"
+
+if [ -n "$BIN_EXECUTION" ] && [ -f "$BIN_EXECUTION" ]; then
+    GO_BIN="$BIN_EXECUTION"
+else
+    GO_BIN="$SRC_DIR/execution/cmd/simple_chain/simple_chain"
+fi
 [ -f "$GO_BIN" ] || { log_err "Go build failed — binary not found"; exit 1; }
 log_ok "Go binary verified: $GO_BIN"
 

@@ -335,6 +335,14 @@ cmd_install() {
         
         local extra_args="--config-dir $cfg"
 
+        # Standalone support: pass pre-built binaries if they exist in DEPLOY_DIR/bin/
+        if [ -f "$DEPLOY_DIR/bin/metanode" ] && [ -f "$DEPLOY_DIR/bin/simple_chain" ]; then
+            extra_args="$extra_args --bin-consensus $DEPLOY_DIR/bin/metanode --bin-execution $DEPLOY_DIR/bin/simple_chain --skip-build"
+            if [ -f "$DEPLOY_DIR/configs/genesis.json" ]; then
+                extra_args="$extra_args --genesis $DEPLOY_DIR/configs/genesis.json"
+            fi
+        fi
+
         log_info "Đang cài đặt Node ${nid} (${ntype})..."
         bash "$DEPLOY_DIR/install.sh" $extra_args $auto_yes
         log_ok "Node ${nid} đã cài xong"
