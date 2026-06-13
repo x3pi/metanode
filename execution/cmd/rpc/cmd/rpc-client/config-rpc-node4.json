@@ -1,8 +1,8 @@
 {
-  "rpc_server_url": "http://127.0.0.1:10748",
-  "wss_server_url": "ws://127.0.0.1:10748/ws",
+  "rpc_server_url": "http://127.0.0.1:10750",
+  "wss_server_url": "ws://127.0.0.1:10750/ws",
   "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-  "server_port": ":8549",
+  "server_port": ":8654",
   "chain_id": 991,
   "https_port": ":8670",
   "cert_file": "certificate.pem",
