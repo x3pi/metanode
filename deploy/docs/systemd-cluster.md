@@ -38,7 +38,7 @@ python3 gen_validator_entry.py --hostname node-4 --node-type synconly --ip 127.0
 ```
 
 > **Lưu ý mới (Tái sử dụng cấu hình cũ):** 
-> Nếu bạn đã có sẵn các file cấu hình cũ (`config-master-nodeX.json` và `node_X.toml`) nằm trong thư mục `execution/cmd/simple_chain/` và `consensus/metanode/config/`, script `systemd-cluster.sh` sẽ **tự động phát hiện (Auto-detect) và sử dụng trực tiếp** các file này mà không cần bạn phải sinh lại file `.env` qua script python nữa. 
+> Nếu bạn đã có sẵn các file cấu hình cũ (`config-master-nodeX.json` và `node_X.toml`) nằm trong thư mục `execution/cmd/simple_chain/` và `consensus/metanode/config/`, script `systemd-cluster.sh` sẽ **tự động phát hiện (Auto-detect) và sử dụng trực tiếp** các file này mà không cần bạn phải sinh lại file cấu hình qua script python nữa. 
 > 
 > **Cách sử dụng:** Bỏ qua hoàn toàn Bước 1 (không cần chạy script python), bạn chuyển thẳng sang **Bước 2** và chạy bình thường lệnh `setup` hoặc `install`. Script sẽ tự động lấy các file cũ của bạn đưa vào hệ thống!
 
@@ -61,14 +61,19 @@ sudo bash systemd-cluster.sh setup -y
 > 🔴 **CẢNH BÁO:** Xóa vĩnh viễn toàn bộ blockchain data trong `/opt/metanode/node-X/data/` và `/logs/`. Không thể khôi phục!
 
 ```bash
-# Xóa data TẤT CẢ 5 node + cài mới (có hỏi xác nhận)
-sudo bash systemd-cluster.sh setup
+
 
 # Xóa data + cài mới, tự động đồng ý (không hỏi)
 sudo bash systemd-cluster.sh setup -y
 
-# Xóa data + cài mới chỉ Node 4
-sudo bash systemd-cluster.sh setup --node 4 -y
+# Setup sạch (xóa data) node 0
+sudo bash systemd-cluster.sh setup --node 0 -y
+
+# Install tất cả node
+sudo bash systemd-cluster.sh install
+
+# Chỉ node 0
+sudo bash systemd-cluster.sh install --node 0
 ```
 
 ---
@@ -80,8 +85,6 @@ sudo bash systemd-cluster.sh setup --node 4 -y
 > ✅ **An toàn:** Không đụng vào `data/`. Node sẽ tiếp tục sync từ block cũ sau khi restart.
 
 ```bash
-# Cập nhật TẤT CẢ 5 node
-sudo bash systemd-cluster.sh install
 
 # Cập nhật không hỏi xác nhận
 sudo bash systemd-cluster.sh install -y

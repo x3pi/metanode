@@ -1,5 +1,5 @@
 
-# 🔧 Giải thích chi tiết `install.sh` và file cấu hình `.env`
+# 🔧 Giải thích chi tiết `install.sh` và file cấu hình JSON/TOML
 
 > Tài liệu này dành cho developer/maintainer của dự án muốn hiểu **cơ chế bên trong** của script deployment. Người vận hành node (node operator) bình thường chỉ cần đọc tài liệu [Validator Setup](./validator-setup) hoặc [Sync-Only Setup](./synconly-setup).
 
@@ -10,15 +10,15 @@
 Luồng cài đặt được thiết kế theo mô hình giống Sui Network:
 
 ```
-validator.env          install.sh            /opt/metanode/
+node-N_keys/            install.sh            /opt/metanode/
 ┌────────────────┐    ┌──────────────┐      ┌───────────────────────────┐
-│ NODE_TYPE      │    │ Step 1       │      │ bin/                      │
-│ NODE_ID        │───►│ Create user  │─────►│   simple_chain  (Go)      │
-│ BLS_PRIVATE_KEY│    │ & dirs       │      │   metanode      (Rust)    │
-│ ETH_PRIVATE_KEY│    ├──────────────┤      ├───────────────────────────┤
-│ PEER_RPC_...   │    │ Step 2       │      │ config/                   │
-│ PORTS, ...     │    │ Clone & Build│      │   execution.json  (Go)    │
-└────────────────┘    ├──────────────┤      │   consensus.toml  (Rust)  │
+│ execution.json │    │ Step 1       │      │ bin/                      │
+│ consensus.toml │───►│ Create user  │─────►│   simple_chain  (Go)      │
+│ network_key    │    │ & dirs       │      │   metanode      (Rust)    │
+│ protocol_key   │    ├──────────────┤      ├───────────────────────────┤
+│                │    │ Step 2       │      │ config/                   │
+└────────────────┘    │ Clone & Build│      │   execution.json  (Go)    │
+                      ├──────────────┤      │   consensus.toml  (Rust)  │
                       │ Step 3       │      │   genesis.json            │
                       │ Gen configs  │      ├───────────────────────────┤
                       ├──────────────┤      │ keys/                     │
@@ -62,7 +62,7 @@ chmod 750 /opt/metanode-${NODE_ID}/keys   # Chỉ owner đọc được keys
 | Đường dẫn | Mục đích |
 |-----------|---------|
 | `/opt/metanode-${NODE_ID}/bin/` | Chứa 2 binary: `simple_chain` (Go), `metanode` (Rust) |
-| `/opt/metanode-${NODE_ID}/config/` | File cấu hình sinh ra từ `.env` |
+| `/opt/metanode-${NODE_ID}/config/` | File cấu hình `execution.json` và `consensus.toml` |
 | `/opt/metanode-${NODE_ID}/keys/` | Private keys (chmod 600, chỉ user `metanode` đọc được) |
 | `/opt/metanode-${NODE_ID}/data/execution/` | Database của Go execution layer (NOMT state backend) |
 | `/opt/metanode-${NODE_ID}/data/consensus/` | DAG storage của Rust consensus engine |
@@ -92,32 +92,12 @@ Hiện tại chưa có release pipeline tự động publish binary. Ngoài ra, 
 
 ---
 
-### Bước 3 — Sinh config files từ biến `.env`
+### Bước 3 — Copy config files và keys
 
-Script tạo **2 file config** từ các biến trong `.env`:
+Script copy **2 file config** từ thư mục cấu hình truyền vào (`--config-dir`):
 
 #### `execution.json` (Go layer config)
 
-| Field quan trọng | Nguồn | Mô tả |
-|-----------------|-------|-------|
-| `private_key` | `BLS_PRIVATE_KEY` | Khóa BLS private key dùng làm node network identity |
-| `address` | `ETH_ADDRESS` | Ethereum address tương ứng của validator |
-| `BLSPrivateKey` | `BLS_PRIVATE_KEY` | Khóa BLS private key dùng để ký Block (block signer) |
-| `rpc_port` | `RPC_PORT` | JSON-RPC endpoint cho DApp |
-| `peer_rpc_port` | `PEER_RPC_PORT` | Giao tiếp giữa các validator |
-| `rust_*_socket_path` | `NODE_ID` | IPC sockets với Rust layer |
-| `genesis_file_path` | Cố định | Trỏ vào `/opt/metanode-${NODE_ID}/config/genesis.json` |
-| `RootPath` | Cố định | `/opt/metanode-${NODE_ID}/data/execution/db` |
-
-#### `consensus.toml` (Rust layer config)
-
-| Field quan trọng | Nguồn | Mô tả |
-|-----------------|-------|-------|
-| `node_id` | `NODE_ID` | Index trong genesis.validators[] |
-| `network_address` | `CONSENSUS_PORT` | Cổng P2P của Rust |
-| `executor_commit_enabled` | `NODE_TYPE` | `false` nếu sync-only |
-| `peer_rpc_port` | `PEER_RPC_PORT` | Phải khớp với Go |
-| `peer_rpc_addresses` | `PEER_RPC_ADDRESSES` | Danh sách validator khác |
 | `protocol_key_path` | Cố định | `/opt/metanode-${NODE_ID}/keys/protocol_key.json` |
 
 ---
@@ -232,25 +212,11 @@ systemctl start metanode-consensus-${NODE_ID}   # Start Rust sau
 
 ---
 
-## Giải thích chi tiết các biến trong `.env`
+### Khởi chạy nhiều node trên cùng server
 
-### Biến bắt buộc
+Khi chạy **nhiều node trên cùng 1 server**, mỗi node phải cấu hình một bộ cổng không trùng nhau trong file `execution.json` và `consensus.toml`:
 
-| Biến | Ví dụ | Mô tả |
-|------|-------|-------|
-| `NODE_TYPE` | `validator` | `validator` hoặc `synconly` |
-| `NODE_ID` | `0` | Index trong `genesis.json` validators array |
-| `BLS_PRIVATE_KEY` | `5dd973...` | Khóa BLS private key (không có `0x`) - Dùng cho cả định danh P2P và ký block |
-| `ETH_PRIVATE_KEY` | `b252eb...` | Ethereum private key (không có `0x`) - Dùng để chạy mining/giao dịch thưởng |
-| `ETH_ADDRESS` | `1ea550...` | Địa chỉ Ethereum của validator (không có `0x`) |
-| `GENESIS_FILE` | `/path/to/genesis.json` | Genesis.json nhận từ team |
-| `PEER_RPC_ADDRESSES` | `"IP1:19201", "IP2:19202"` | Tất cả validator KHÁC (không ghi IP của mình) |
-
-### Biến cổng mạng
-
-Khi chạy **nhiều node trên cùng 1 server**, mỗi node phải có bộ cổng không trùng nhau:
-
-| Biến | Node 0 | Node 1 | Node 2 | Mô tả |
+| Loại Cổng | Node 0 | Node 1 | Node 2 | Mô tả |
 |------|--------|--------|--------|-------|
 | `RPC_PORT` | `:8757` | `:10747` | `:10749` | JSON-RPC (Ethereum compat.) |
 | `P2P_PORT` | `4000` | `6201` | `6202` | Go P2P sync |
@@ -270,9 +236,9 @@ Khi mỗi node **chạy trên server riêng**, tất cả cổng có thể giữ
 │   ├── simple_chain          # Go execution binary
 │   └── metanode              # Rust consensus binary
 ├── config/
-│   ├── execution.json        # Go config (sinh từ .env)
-│   ├── consensus.toml        # Rust config (sinh từ .env)
-│   └── genesis.json          # Copy từ đường dẫn chỉ định trong .env
+│   ├── execution.json        # Go config
+│   ├── consensus.toml        # Rust config
+│   └── genesis.json          # Copy từ config dir
 ├── keys/
 │   ├── protocol_key.json     # BLS protocol key (chmod 600)
 │   └── network_key.json      # Ed25519 network key (chmod 600)

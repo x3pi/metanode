@@ -1,10 +1,10 @@
 {
-  "rpc_server_url": "http://localhost:10748",
-  "wss_server_url": "ws://localhost:10748/ws",
+  "rpc_server_url": "http://127.0.0.1:10750",
+  "wss_server_url": "ws://127.0.0.1:10750/ws",
   "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-  "server_port": ":8550",
+  "server_port": ":8654",
   "chain_id": 991,
-  "https_port": ":8671",
+  "https_port": ":8670",
   "cert_file": "certificate.pem",
   "key_file": "private.key",
   "master_password": "your_strong_master_password_here",
@@ -23,7 +23,7 @@
     "0x0000000000000000000000000000000009df1b47"
   ],
   "reward_amount": 1000000000000000000,
-  "tcp_server_port": ":9550",
+  "tcp_server_port": ":9549",
   "extra_account": 1000000000000000000,
   "free_gas_min_balance": 10000000000000000,
   "disable_free_gas": false
