@@ -228,9 +228,15 @@ pub async fn transition_mode_only(
     } else {
         0
     };
+    let mut last_executed_commit_hash = [0u8; 32];
+    if let Some(client) = &node.executor_client {
+        if let Ok((_, _, _, hash, _)) = client.get_last_block_number().await {
+            last_executed_commit_hash = hash;
+        }
+    }
     // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
     let (commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after, go_replay_after, node.last_executed_commit_hash, epoch_timestamp_to_use);
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, last_executed_commit_hash, epoch_timestamp_to_use);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
