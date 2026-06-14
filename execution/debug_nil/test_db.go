@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 import ( "fmt"; "github.com/cockroachdb/pebble" )
 func main() {

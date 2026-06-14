@@ -124,10 +124,10 @@ func TestGroupTransactionsDeterministic(t *testing.T) {
 	assert.Equal(t, 2, len(groups[0].Items))
 	assert.Equal(t, 1, len(groups[1].Items))
 
-	// Within Group 1, items are sorted by ID (original block index) ascending.
-	// txA has ID 1, txB has ID 2. So txA should be first!
-	assert.Equal(t, txA.hash, groups[0].Items[0].Tx.Hash())
-	assert.Equal(t, txB.hash, groups[0].Items[1].Tx.Hash())
+	// Within Group 1, items are sorted by FromAddress then Nonce ascending.
+	// txB has nonce 1, txA has nonce 2. So txB should be first!
+	assert.Equal(t, txB.hash, groups[0].Items[0].Tx.Hash())
+	assert.Equal(t, txA.hash, groups[0].Items[1].Tx.Hash())
 
 	// Verify Group IDs
 	assert.Equal(t, 0, groups[0].GroupID)
