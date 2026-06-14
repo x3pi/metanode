@@ -18,7 +18,7 @@ impl ConsensusNode {
         commit_consumer: &mut CommitConsumerArgs,
         commit_processor: &mut crate::consensus::commit_processor::CommitProcessor,
         executor_client_for_proc: &Arc<ExecutorClient>,
-        shared_last_global_exec_index: &Arc<tokio::sync::Mutex<u64>>,
+        shared_last_global_exec_index: &Arc<std::sync::atomic::AtomicU64>,
         go_replay_after: u32,
     ) -> Result<(u64, u64)> {
         let mut startup_total_synced_blocks: u64 = 0;
@@ -394,8 +394,7 @@ impl ConsensusNode {
                                                 coordination_hub.set_initial_global_exec_index(new_gei).await;
                                                 
                                                 {
-                                                    let mut gei_guard = shared_last_global_exec_index.lock().await;
-                                                    *gei_guard = new_gei;
+                                                    shared_last_global_exec_index.store(new_gei, std::sync::atomic::Ordering::SeqCst);
                                                     tracing::info!("🔄 [STARTUP-SYNC] Updated shared_last_global_exec_index to {}", new_gei);
                                                 }
                                                 
@@ -626,8 +625,7 @@ impl ConsensusNode {
                                     commit_consumer.update_replay_after_commit_index(commit_idx);
         
                                     {
-                                        let mut gei_guard = shared_last_global_exec_index.lock().await;
-                                        *gei_guard = gei;
+                                        shared_last_global_exec_index.store(gei, std::sync::atomic::Ordering::SeqCst);
                                         tracing::info!("🔄 [FINAL-GATE] Updated shared_last_global_exec_index to {}", gei);
                                     }
                                 }

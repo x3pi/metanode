@@ -106,7 +106,7 @@ pub struct ConsensusCoordinationHub {
     /// The highest Global Execution Index (GEI) that Go has executed or skipped.
     /// Mutated by CommitProcessor (skip) and CommitObserver (execution).
     /// Read by Peer P2P Sync to inform peers of local catch-up progress.
-    global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+    global_exec_index: Arc<std::sync::atomic::AtomicU64>,
 
     /// The highest quorum commit index observed by CommitVoteMonitor.
     /// Used by Core to prevent the local committer from diverging when missing network commits.
@@ -182,7 +182,7 @@ impl ConsensusCoordinationHub {
             recovery_barrier: Arc::new(RecoveryBarrier::new()),
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
-            global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
+            global_exec_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(false)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),
@@ -198,12 +198,11 @@ impl ConsensusCoordinationHub {
 
     /// Set initial GEI value (e.g., loaded from DB or network boundary)
     pub async fn set_initial_global_exec_index(&self, gei: u64) {
-        let mut lock = self.global_exec_index.lock().await;
-        *lock = gei;
+        self.global_exec_index.store(gei, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Retrieve the shared reference to the Global Execution Index
-    pub fn get_global_exec_index_ref(&self) -> Arc<tokio::sync::Mutex<u64>> {
+    pub fn get_global_exec_index_ref(&self) -> Arc<std::sync::atomic::AtomicU64> {
         self.global_exec_index.clone()
     }
 
@@ -572,7 +571,7 @@ impl ConsensusCoordinationHub {
             recovery_barrier: Arc::new(RecoveryBarrier::new()), // Inactive = can propose
             is_transitioning: Arc::new(AtomicBool::new(false)),
             startup_sync_active: Arc::new(AtomicBool::new(false)),
-            global_exec_index: Arc::new(tokio::sync::Mutex::new(0)),
+            global_exec_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             quorum_commit_index: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             startup_go_sync_completed: Arc::new(AtomicBool::new(true)),
             schedule_recovery_pending: Arc::new(AtomicBool::new(false)),

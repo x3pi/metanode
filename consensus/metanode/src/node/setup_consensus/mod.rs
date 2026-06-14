@@ -529,7 +529,7 @@ impl ConsensusNode {
         next_expected_commit_index: u32,
         executor_client_for_proc: &ExecutorClient,
         commit_processor: &mut crate::consensus::commit_processor::CommitProcessor,
-        shared_last_global_exec_index: &Arc<tokio::sync::Mutex<u64>>,
+        shared_last_global_exec_index: &Arc<std::sync::atomic::AtomicU64>,
     ) {
         if config.executor_read_enabled {
             match executor_client_for_proc.get_last_handled_commit_index().await {
@@ -643,10 +643,7 @@ impl ConsensusNode {
                         commit_processor.next_expected_index = 1;
                     }
 
-                    let cp_gei = {
-                        let gei_guard = shared_last_global_exec_index.lock().await;
-                        *gei_guard + 1
-                    };
+                    let cp_gei = shared_last_global_exec_index.load(std::sync::atomic::Ordering::SeqCst) + 1;
                     let ec_cp_delta = (executor_next_expected as i64) - (cp_gei as i64);
                     if ec_cp_delta.abs() > 1 {
                         tracing::warn!(

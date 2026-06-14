@@ -19,7 +19,7 @@ pub fn create_commit_index_callback(
 
 /// Creates a global execution index callback that updates the shared global exec index
 pub fn create_global_exec_index_callback(
-    _shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+    _shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
 ) -> impl Fn(u64) + Send + Sync + 'static {
     move |global_exec_index| {
         // We no longer asynchronously overwrite the shared_last_global_exec_index here.

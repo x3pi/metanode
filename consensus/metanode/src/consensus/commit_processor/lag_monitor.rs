@@ -35,7 +35,7 @@ pub enum LagAlert {
 /// It works by comparing the shared next expected GEI in Rust with the actual GEI from Go.
 pub struct LagMonitor {
     executor_client: Arc<ExecutorClient>,
-    shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+    shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
     lag_alert_sender: tokio::sync::mpsc::Sender<LagAlert>,
     moderate_lag_threshold: u64,
     severe_lag_threshold: u64,
@@ -44,7 +44,7 @@ pub struct LagMonitor {
 impl LagMonitor {
     pub fn new(
         executor_client: Arc<ExecutorClient>,
-        shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+        shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
         lag_alert_sender: tokio::sync::mpsc::Sender<LagAlert>,
     ) -> Self {
         Self {
@@ -84,7 +84,7 @@ impl LagMonitor {
             interval.tick().await;
 
             // 1. Get current Rust GEI (what we've committed)
-            let rust_gei = *self.shared_last_global_exec_index.lock().await;
+            let rust_gei = self.shared_last_global_exec_index.load(std::sync::atomic::Ordering::SeqCst);
 
             // 2. Get current Go GEI (what Go has finished executing)
             let go_gei = self
