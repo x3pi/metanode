@@ -228,10 +228,9 @@ pub async fn transition_mode_only(
     } else {
         0
     };
-    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
-    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
     let (commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32], epoch_timestamp_to_use);
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, node.last_executed_commit_hash, epoch_timestamp_to_use);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );

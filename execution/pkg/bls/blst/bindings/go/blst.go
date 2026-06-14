@@ -591,7 +591,7 @@ func (sig *P2Affine) FastAggregateVerify(sigGroupcheck bool,
 	optional ...interface{}) bool { // pass-through to Verify
 	n := len(pks)
 
-	// TODO: return value for length zero?
+	// Return false for length zero to prevent trivial bypass of signature verification
 	if n == 0 {
 		return false
 	}

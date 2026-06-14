@@ -38,9 +38,7 @@ inline auto from_big_endian(const uint8_t *begin, size_t size = 32u) {
 }
 
 inline void to_big_endian(const uint256_t &v, uint8_t *out) {
-  // TODO: Is this cast safe?
-  // uint8_t(&arr)[32] =
-  // *static_cast<uint8_t(*)[32]>(static_cast<void*>(out));
+  // Safe cast because the caller is responsible for ensuring `out` points to an array of at least 32 bytes.
   intx::be::unsafe::store(out, v);
 }
 
