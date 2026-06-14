@@ -35,10 +35,9 @@ pub(super) async fn setup_validator_consensus(
     // Fragment offset was also reset. So go_replay_after=0, next_expected=1.
     let go_replay_after = 0u32;
     
-    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
-    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
     let (commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after, go_replay_after, [0; 32], epoch_timestamp);
+        CommitConsumerArgs::new(go_replay_after, go_replay_after, node.last_executed_commit_hash, epoch_timestamp);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
@@ -219,10 +218,9 @@ pub(super) async fn setup_synconly_sync(
 
     // FORK-SAFETY FIX v5: New epoch starts fresh — no commits processed yet.
     let go_replay_after_sync = 0u32;
-    // TODO: Phase 1 Handshake - Retrieve last_executed_commit_hash from Go.
-    // For now, using default hash [0; 32] until Go execution engine exposes hash in FFI.
+    // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
     let (_commit_consumer, commit_receiver, mut block_receiver) =
-        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync, [0; 32], epoch_timestamp);
+        CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync, node.last_executed_commit_hash, epoch_timestamp);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
     );
