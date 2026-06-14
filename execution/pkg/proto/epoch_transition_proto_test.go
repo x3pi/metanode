@@ -187,8 +187,8 @@ func TestEpochBoundaryData_Serialization(t *testing.T) {
 		EpochStartTimestampMs: 1772784000000,
 		BoundaryBlock:         18392,
 		Validators: []*pb.ValidatorInfo{
-			{Address: "0x1234", Stake: "100000", AuthorityKey: "key1"},
-			{Address: "0x5678", Stake: "200000", AuthorityKey: "key2"},
+			{Address: "0x1234", Stake: "100000", AuthorityKey: []byte("key1")},
+			{Address: "0x5678", Stake: "200000", AuthorityKey: []byte("key2")},
 		},
 		EpochDurationSeconds: 900,
 	}

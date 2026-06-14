@@ -89,7 +89,7 @@ fn get_num_pages_from_total_pages(total_pages: u64) -> Option<u32> {
 /// - `page_cache_mb`: page cache size in MiB (default: 256)
 /// - `leaf_cache_mb`: leaf cache size in MiB (default: 256)
 #[no_mangle]
-pub extern "C" fn nomt_open(
+pub unsafe extern "C" fn nomt_open(
     path: *const c_char,
     commit_concurrency: c_int,
     page_cache_mb: c_int,
@@ -172,7 +172,7 @@ pub extern "C" fn nomt_open(
 /// # Safety
 /// The handle must have been created by `nomt_open` and not yet closed.
 #[no_mangle]
-pub extern "C" fn nomt_close(handle: *mut NomtHandle) {
+pub unsafe extern "C" fn nomt_close(handle: *mut NomtHandle) {
     if !handle.is_null() {
         unsafe {
             let _ = Box::from_raw(handle);
@@ -189,7 +189,7 @@ pub extern "C" fn nomt_close(handle: *mut NomtHandle) {
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8) -> c_int {
+pub unsafe extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8) -> c_int {
     if handle.is_null() || root_out.is_null() {
         return -1;
     }
@@ -222,7 +222,7 @@ pub extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8) -> c_i
 /// - 1: key not found (no value)
 /// - -1: error
 #[no_mangle]
-pub extern "C" fn nomt_read(
+pub unsafe extern "C" fn nomt_read(
     handle: *const NomtHandle,
     key: *const u8,
     val_out: *mut u8,
@@ -277,7 +277,7 @@ pub extern "C" fn nomt_read(
 /// # Returns
 /// Pointer to SessionHandle, or null on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut SessionHandle {
+pub unsafe extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut SessionHandle {
     if handle.is_null() {
         return ptr::null_mut();
     }
@@ -300,7 +300,7 @@ pub extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut SessionHan
 /// Dispatches a background asynchronous fetch to the NOMT threadpool to load 
 /// the Merkle authentication branch for this key.
 #[no_mangle]
-pub extern "C" fn nomt_session_warm_up(
+pub unsafe extern "C" fn nomt_session_warm_up(
     session: *mut SessionHandle,
     key: *const u8,
 ) -> c_int {
@@ -331,7 +331,7 @@ pub extern "C" fn nomt_session_warm_up(
 /// - `val`: pointer to previous value bytes (null if key didn't exist)
 /// - `val_len`: length of the previous value (0 if key didn't exist)
 #[no_mangle]
-pub extern "C" fn nomt_session_record_read(
+pub unsafe extern "C" fn nomt_session_record_read(
     session: *mut SessionHandle,
     key: *const u8,
     val: *const u8,
@@ -369,7 +369,7 @@ pub extern "C" fn nomt_session_record_read(
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_write(
+pub unsafe extern "C" fn nomt_session_write(
     session: *mut SessionHandle,
     key: *const u8,
     val: *const u8,
@@ -412,7 +412,7 @@ pub extern "C" fn nomt_session_write(
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_batch_write(
+pub unsafe extern "C" fn nomt_session_batch_write(
     session: *mut SessionHandle,
     keys: *const u8,
     vals: *const u8,
@@ -463,7 +463,7 @@ pub extern "C" fn nomt_session_batch_write(
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_batch_record_read(
+pub unsafe extern "C" fn nomt_session_batch_record_read(
     session: *mut SessionHandle,
     keys: *const u8,
     vals: *const u8,
@@ -516,7 +516,7 @@ pub extern "C" fn nomt_session_batch_record_read(
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_commit(
+pub unsafe extern "C" fn nomt_session_commit(
     handle: *mut NomtHandle,
     session: *mut SessionHandle,
     new_root_out: *mut u8,
@@ -602,7 +602,7 @@ pub extern "C" fn nomt_session_commit(
 /// # Returns
 /// Pointer to FinishedSessionHandle, or null on failure.
 #[no_mangle]
-pub extern "C" fn nomt_session_finish(
+pub unsafe extern "C" fn nomt_session_finish(
     handle: *mut NomtHandle,
     session: *mut SessionHandle,
     new_root_out: *mut u8,
@@ -664,7 +664,7 @@ pub extern "C" fn nomt_session_finish(
 /// # Returns
 /// 0 on success, -1 on test failure.
 #[no_mangle]
-pub extern "C" fn nomt_commit_payload(
+pub unsafe extern "C" fn nomt_commit_payload(
     handle: *mut NomtHandle,
     finished_session: *mut FinishedSessionHandle,
 ) -> c_int {
@@ -686,7 +686,7 @@ pub extern "C" fn nomt_commit_payload(
 
 /// Abort an uncommitted finished session.
 #[no_mangle]
-pub extern "C" fn nomt_finished_session_abort(finished_session: *mut FinishedSessionHandle) {
+pub unsafe extern "C" fn nomt_finished_session_abort(finished_session: *mut FinishedSessionHandle) {
     if !finished_session.is_null() {
         unsafe {
             let _ = Box::from_raw(finished_session);
@@ -699,7 +699,7 @@ pub extern "C" fn nomt_finished_session_abort(finished_session: *mut FinishedSes
 /// # Safety
 /// The session handle must have been created by `nomt_session_begin` and not yet committed.
 #[no_mangle]
-pub extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
+pub unsafe extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
     if !session.is_null() {
         unsafe {
             let _ = Box::from_raw(session);
@@ -777,7 +777,7 @@ fn recursive_copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
 /// # Returns
 /// 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_checkpoint(
+pub unsafe extern "C" fn nomt_checkpoint(
     handle: *const NomtHandle,
     src_path: *const c_char,
     dest_path: *const c_char,
@@ -820,9 +820,10 @@ pub extern "C" fn nomt_checkpoint(
 /// - `key`: 32-byte key path
 /// - `proof_out`: Pointer to receive the allocated proof byte array
 /// - `proof_len`: Pointer to receive the length of the proof byte array
+///
 /// Returns 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn nomt_generate_proof(
+pub unsafe extern "C" fn nomt_generate_proof(
     handle: *const NomtHandle,
     key: *const u8,
     proof_out: *mut *mut u8,
@@ -871,7 +872,7 @@ pub extern "C" fn nomt_generate_proof(
 
 /// Free the proof byte array allocated by `nomt_generate_proof`.
 #[no_mangle]
-pub extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
     if !proof_ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(proof_ptr, len, len);

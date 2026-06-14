@@ -238,6 +238,7 @@ func NewMockTransaction(from e_common.Address, to e_common.Address, nonce uint64
 }
 
 func (mt *MockTransaction) Hash() e_common.Hash           { return mt.hash }
+func (mt *MockTransaction) EthHash() e_common.Hash        { return mt.hash }
 func (mt *MockTransaction) RHash() e_common.Hash          { return mt.rHash }
 func (mt *MockTransaction) NewDeviceKey() e_common.Hash   { return e_common.Hash{} }
 func (mt *MockTransaction) LastDeviceKey() e_common.Hash  { return e_common.Hash{} }

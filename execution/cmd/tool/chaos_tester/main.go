@@ -81,7 +81,8 @@ func main() {
 		fmt.Println("   Ensure all 5 nodes are running with: mtn-orchestrator.sh restart --fresh --build-all")
 		os.Exit(1)
 	}
-	fmt.Println("   🟢 Cluster is healthy. Ready for chaos.\n")
+	fmt.Println("   🟢 Cluster is healthy. Ready for chaos.")
+	fmt.Println()
 
 	// ─── Chaos Rounds ─────────────────────────────────────────────────────
 	for round := 1; round <= flagRounds; round++ {

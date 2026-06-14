@@ -149,26 +149,17 @@ func TestSimpleChainConfig_JSONParsing(t *testing.T) {
 	assert.Equal(t, "genesis.json", cfg.GenesisFilePath)
 	assert.Equal(t, "flat", cfg.StateBackend)
 	assert.Equal(t, "./data", cfg.Databases.RootPath)
-	assert.Equal(t, STORAGE_LOCAL, cfg.Databases.NodeType)
 	assert.Equal(t, "0.0.0.0:4201", cfg.Nodes.MasterAddress)
 	assert.True(t, cfg.Nodes.NetworkSyncEnabled)
 }
 
 func TestDatabasesConfig_Defaults(t *testing.T) {
 	configJSON := `{
-		"RootPath": "./data",
-		"NodeType": "STORAGE_REMOTE"
+		"RootPath": "./data"
 	}`
 
 	var db DatabasesConfig
 	err := json.Unmarshal([]byte(configJSON), &db)
 	require.NoError(t, err)
-	assert.Equal(t, STORAGE_REMOTE, db.NodeType)
 	assert.Equal(t, "./data", db.RootPath)
-}
-
-func TestNodeType_Constants(t *testing.T) {
-	assert.Equal(t, NodeType("STORAGE_REMOTE"), STORAGE_REMOTE)
-	assert.Equal(t, NodeType("STORAGE_CLIENT"), STORAGE_CLIENT)
-	assert.Equal(t, NodeType("STORAGE_LOCAL"), STORAGE_LOCAL)
 }
