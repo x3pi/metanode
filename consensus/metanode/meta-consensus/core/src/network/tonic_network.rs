@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use consensus_config::{AuthorityIndex, NetworkKeyPair, NetworkPublicKey};
+use consensus_config::{AuthorityIndex, NetworkKeyPair};
 use consensus_types::block::{BlockRef, Round};
 use futures::{stream, Stream, StreamExt as _};
 use meta_http::ServerHandle;
@@ -859,6 +859,7 @@ pub(crate) struct TonicManager {
     network_keypair: NetworkKeyPair,
     client: Arc<TonicClient>,
     server: Option<ServerHandle>,
+    connections: ConnectionsInfo,
 }
 
 impl TonicManager {
@@ -868,6 +869,7 @@ impl TonicManager {
             network_keypair: network_keypair.clone(),
             client: Arc::new(TonicClient::new(context, network_keypair)),
             server: None,
+            connections: ConnectionsInfo::new(),
         }
     }
 }
@@ -908,6 +910,7 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
 
         // Hardcode disable TLS for testing - use proper PeerInfo lookup from committee
         let committee = self.context.committee.clone(); // Clone for lifetime
+        let connections = self.connections.clone();
         let layers = tower::ServiceBuilder::new()
             .map_request(move |mut request: http::Request<_>| {
                 // Get remote address first
@@ -935,6 +938,10 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                 };
 
                 let peer_info = PeerInfo { authority_index };
+                
+                // Track connection health
+                connections.update_peer(authority_index);
+                
                 trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?} for remote_addr={:?}",
                       authority_index, remote_addr);
                 request.extensions_mut().insert(peer_info);
@@ -1149,27 +1156,32 @@ fn create_socket(address: &SocketAddr) -> tokio::net::TcpSocket {
 ///
 /// TODO: Add connection monitoring, and keep track of connected peers.
 /// TODO: Maybe merge with connection_monitor.rs
+#[derive(Clone)]
 #[allow(dead_code)]
-struct ConnectionsInfo {
-    authority_key_to_index: BTreeMap<NetworkPublicKey, AuthorityIndex>,
+pub(crate) struct ConnectionsInfo {
+    last_seen: Arc<parking_lot::RwLock<BTreeMap<AuthorityIndex, std::time::Instant>>>,
 }
 
 #[allow(dead_code)]
 impl ConnectionsInfo {
-    fn new(context: Arc<Context>) -> Self {
-        let authority_key_to_index = context
-            .committee
-            .authorities()
-            .map(|(index, authority)| (authority.network_key.clone(), index))
-            .collect();
+    pub(crate) fn new() -> Self {
         Self {
-            authority_key_to_index,
+            last_seen: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
         }
     }
 
-    #[allow(dead_code)]
-    fn authority_index(&self, key: &NetworkPublicKey) -> Option<AuthorityIndex> {
-        self.authority_key_to_index.get(key).copied()
+    pub(crate) fn update_peer(&self, index: AuthorityIndex) {
+        self.last_seen.write().insert(index, std::time::Instant::now());
+    }
+
+    pub(crate) fn connected_peers(&self, timeout: std::time::Duration) -> Vec<AuthorityIndex> {
+        let now = std::time::Instant::now();
+        self.last_seen
+            .read()
+            .iter()
+            .filter(|(_, &time)| now.saturating_duration_since(time) < timeout)
+            .map(|(&index, _)| index)
+            .collect()
     }
 }
 
