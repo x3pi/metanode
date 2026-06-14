@@ -12,13 +12,10 @@ use std::{
 
 use async_trait::async_trait;
 use consensus_types::block::{BlockRef, Round};
-use mysten_metrics::{
-    monitored_mpsc::{channel, Receiver, Sender, WeakSender},
-    monitored_scope, spawn_logged_monitored_task,
-};
 use parking_lot::RwLock;
 use thiserror::Error;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc::{Sender, Receiver, WeakSender, channel}, oneshot, watch};
+use tokio::task::JoinHandle;
 
 
 use crate::{
@@ -153,39 +150,39 @@ impl CoreThread {
                     self.context.metrics.node_metrics.core_lock_dequeued.inc();
                     match command {
                         CoreThreadCommand::AddBlocks(blocks, sender) => {
-                            let _scope = monitored_scope("CoreThread::loop::add_blocks");
+                            /* let _scope = tracing::info_span!("CoreThread::loop::add_blocks").entered(); */
                             let missing_block_refs = self.core.add_blocks(blocks)?;
                             sender.send(missing_block_refs).ok();
                         }
                         CoreThreadCommand::CheckBlockRefs(block_refs, sender) => {
-                            let _scope = monitored_scope("CoreThread::loop::check_block_refs");
+                            /* let _scope = tracing::info_span!("CoreThread::loop::check_block_refs").entered(); */
                             let missing_block_refs = self.core.check_block_refs(block_refs)?;
                             sender.send(missing_block_refs).ok();
                         }
                         CoreThreadCommand::AddCertifiedCommits(commits, sender) => {
-                            let _scope = monitored_scope("CoreThread::loop::add_certified_commits");
+                            /* let _scope = tracing::info_span!("CoreThread::loop::add_certified_commits").entered(); */
                             let missing_block_refs = self.core.add_certified_commits(commits)?;
                             sender.send(missing_block_refs).ok();
                         }
                         CoreThreadCommand::NewBlock(round, sender, force) => {
-                            let _scope = monitored_scope("CoreThread::loop::new_block");
+                            /* let _scope = tracing::info_span!("CoreThread::loop::new_block").entered(); */
                             self.core.new_block(round, force)?;
                             sender.send(()).ok();
                         }
                         CoreThreadCommand::GetMissing(sender) => {
-                            let _scope = monitored_scope("CoreThread::loop::get_missing");
+                            /* let _scope = tracing::info_span!("CoreThread::loop::get_missing").entered(); */
                             sender.send(self.core.get_missing_blocks()).ok();
                         }
                     }
                 }
                 _ = self.rx_last_known_proposed_round.changed() => {
-                    let _scope = monitored_scope("CoreThread::loop::set_last_known_proposed_round");
+                    /* let _scope = tracing::info_span!("CoreThread::loop::set_last_known_proposed_round").entered(); */
                     let round = *self.rx_last_known_proposed_round.borrow();
                     self.core.set_last_known_proposed_round(round);
                     self.core.new_block(round + 1, true)?;
                 }
                 _ = self.rx_propagation_delay.changed() => {
-                    let _scope = monitored_scope("CoreThread::loop::set_propagation_delay");
+                    /* let _scope = tracing::info_span!("CoreThread::loop::set_propagation_delay").entered(); */
                     let should_propose_before = self.core.should_propose();
                     let propagation_delay = *self.rx_propagation_delay.borrow();
                     self.core.set_propagation_delay(
@@ -233,7 +230,7 @@ impl ChannelCoreThreadDispatcher {
         };
 
         let (sender, receiver) =
-            channel("consensus_core_commands", CORE_THREAD_COMMANDS_CHANNEL_SIZE);
+            channel(CORE_THREAD_COMMANDS_CHANNEL_SIZE);
         let (tx_propagation_delay, mut rx_propagation_delay) = watch::channel(0);
         let (tx_last_known_proposed_round, mut rx_last_known_proposed_round) = watch::channel(0);
         rx_propagation_delay.mark_unchanged();
@@ -246,7 +243,7 @@ impl ChannelCoreThreadDispatcher {
             context: context.clone(),
         };
 
-        let join_handle = spawn_logged_monitored_task!(
+        let join_handle = tokio::spawn(
             async move {
                 use futures::FutureExt;
                 let res = std::panic::AssertUnwindSafe(core_thread.run()).catch_unwind().await;
@@ -285,8 +282,7 @@ impl ChannelCoreThreadDispatcher {
                         std::panic::resume_unwind(panic_err);
                     }
                 }
-            },
-            "ConsensusCoreThread"
+            }
         );
 
         // Explicitly using downgraded sender in order to allow sharing the CoreThreadDispatcher but
@@ -484,7 +480,7 @@ impl CoreThreadDispatcher for MockCoreThreadDispatcher {
 
 #[cfg(test)]
 mod test {
-    use mysten_metrics::monitored_mpsc;
+    use tokio::sync::mpsc;
     use parking_lot::RwLock;
 
     use super::*;
@@ -510,11 +506,11 @@ mod test {
         let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
         let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),

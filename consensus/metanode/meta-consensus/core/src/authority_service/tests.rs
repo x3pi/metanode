@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockDigest, BlockRef, Round};
-use mysten_metrics::monitored_mpsc;
+use tokio::sync::mpsc;
 use parking_lot::{Mutex, RwLock};
 use tokio::{sync::broadcast, time::sleep};
 
@@ -192,9 +192,10 @@ async fn test_handle_send_block() {
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -313,9 +314,10 @@ async fn test_handle_fetch_blocks() {
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -483,9 +485,10 @@ async fn test_handle_fetch_latest_blocks() {
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),

@@ -11,7 +11,7 @@ use consensus_types::block::Round;
 use futures::{stream::FuturesUnordered, StreamExt as _};
 use itertools::Itertools as _;
 use meta_macros::fail_point_async;
-use mysten_metrics::monitored_mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use parking_lot::RwLock;
 
 use tokio::{

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
@@ -598,6 +599,7 @@ func ConvertAddressMapToStringSlice(addressMap map[e_common.Address]struct{}) []
 	for addr := range addressMap {
 		addresses = append(addresses, addr.Hex())
 	}
+	sort.Strings(addresses)
 	return addresses
 }
 

@@ -9,7 +9,6 @@ use std::{
 
 use consensus_types::block::{BlockRef, Round};
 use itertools::Itertools as _;
-use mysten_metrics::monitored_scope;
 use parking_lot::RwLock;
 use tracing::{debug, trace, warn};
 
@@ -77,7 +76,7 @@ impl BlockManager {
         &mut self,
         blocks: Vec<VerifiedBlock>,
     ) -> (Vec<VerifiedBlock>, BTreeSet<BlockRef>) {
-        let _s = monitored_scope("BlockManager::try_accept_blocks");
+        /* let _s = tracing::info_span!("BlockManager::try_accept_blocks").entered(); */
         self.try_accept_blocks_internal(blocks, false)
     }
 
@@ -89,7 +88,7 @@ impl BlockManager {
         blocks: Vec<VerifiedBlock>,
     ) -> Vec<VerifiedBlock> {
         // Just accept the blocks
-        let _s = monitored_scope("BlockManager::try_accept_committed_blocks");
+        /* let _s = tracing::info_span!("BlockManager::try_accept_committed_blocks").entered(); */
         let (accepted_blocks, missing_blocks) = self.try_accept_blocks_internal(blocks, true);
         assert!(
             missing_blocks.is_empty(),
@@ -106,7 +105,7 @@ impl BlockManager {
         mut blocks: Vec<VerifiedBlock>,
         committed: bool,
     ) -> (Vec<VerifiedBlock>, BTreeSet<BlockRef>) {
-        let _s = monitored_scope("BlockManager::try_accept_blocks_internal");
+        /* let _s = tracing::info_span!("BlockManager::try_accept_blocks_internal").entered(); */
         let start = std::time::Instant::now();
         let mut db_total = std::time::Duration::ZERO;
 
@@ -222,7 +221,7 @@ impl BlockManager {
     /// Tries to find the provided block_refs in DagState and BlockManager,
     /// and returns missing block refs.
     pub(crate) fn try_find_blocks(&mut self, block_refs: Vec<BlockRef>) -> BTreeSet<BlockRef> {
-        let _s = monitored_scope("BlockManager::try_find_blocks");
+        /* let _s = tracing::info_span!("BlockManager::try_find_blocks").entered(); */
         let gc_round = self.dag_state.read().gc_round();
 
         // No need to fetch blocks that are <= gc_round as they won't get processed anyways and they'll get skipped.
@@ -559,7 +558,7 @@ impl BlockManager {
     /// Tries to unsuspend any blocks for the latest gc round. If gc round hasn't changed then no blocks will be unsuspended due to
     /// this action.
     pub(crate) fn try_unsuspend_blocks_for_latest_gc_round(&mut self) {
-        let _s = monitored_scope("BlockManager::try_unsuspend_blocks_for_latest_gc_round");
+        /* let _s = tracing::info_span!("BlockManager::try_unsuspend_blocks_for_latest_gc_round").entered(); */
         let gc_round = self.dag_state.read().gc_round();
         let mut blocks_unsuspended_below_gc_round = 0;
         let mut blocks_gc_ed = 0;

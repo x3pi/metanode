@@ -15,7 +15,6 @@ pub mod proposer;
 
 pub mod block_importer;
 
-use mysten_metrics::monitored_scope;
 use parking_lot::RwLock;
 use tracing::info;
 
@@ -288,7 +287,7 @@ impl Core {
         round: Round,
         force: bool,
     ) -> ConsensusResult<Option<VerifiedBlock>> {
-        let _scope = monitored_scope("Core::new_block");
+        /* let _scope = tracing::info_span!("Core::new_block").entered(); */
         if self.last_proposed_round() < round {
             self.context
                 .metrics

@@ -29,8 +29,9 @@ async fn suspend_blocks_with_missing_ancestors() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -81,8 +82,9 @@ async fn try_accept_block_returns_missing_blocks() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -121,8 +123,9 @@ async fn accept_blocks_with_complete_causal_history() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG of 2 rounds
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -164,6 +167,7 @@ async fn accept_blocks_with_causal_history_below_gc_round() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // We "fake" the commit for round 10, so we can test the GC round 6 (commit_round - gc_depth = 10 - 4 = 6)
     let last_commit = TrustedCommit::new_for_test(
@@ -181,7 +185,7 @@ async fn accept_blocks_with_causal_history_below_gc_round() {
         "GC round should have moved to round 6"
     );
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG of 10 rounds with some weak links for the blocks of round 9
     let dag_str = "DAG {
@@ -254,6 +258,7 @@ async fn skip_accepting_blocks_below_gc_round() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // We "fake" the commit for round 10, so we can test the GC round 6 (commit_round - gc_depth = 10 - 4 = 6)
     let last_commit = TrustedCommit::new_for_test(
@@ -271,7 +276,7 @@ async fn skip_accepting_blocks_below_gc_round() {
         "GC round should have moved to round 6"
     );
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG of 6 rounds
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -313,8 +318,9 @@ async fn accept_blocks_unsuspend_children_blocks() {
 
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-        let mut block_manager = BlockManager::new(context.clone(), dag_state);
+        let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         // WHEN
         let mut all_accepted_blocks = vec![];
@@ -369,8 +375,9 @@ async fn unsuspend_blocks_for_latest_gc_round(#[values(5, 10, 14)] gc_depth: u32
 
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-        let mut block_manager = BlockManager::new(context.clone(), dag_state.clone());
+        let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         // WHEN
         for block in &all_blocks {
@@ -428,6 +435,7 @@ async fn try_accept_committed_blocks() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // We "fake" the commit for round 6, so GC round moves to (commit_round - gc_depth = 6 - 4 = 2)
     let last_commit = TrustedCommit::new_for_test(
@@ -445,7 +453,7 @@ async fn try_accept_committed_blocks() {
         "GC round should have moved to round 2"
     );
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG of 12 rounds
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -481,8 +489,9 @@ async fn try_find_blocks() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state);
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG
     let mut dag_builder = DagBuilder::new(context.clone());
@@ -566,8 +575,9 @@ async fn test_verify_block_timestamps_and_accept() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     // create a DAG where authority 0 timestamp is always higher than the others.
     let mut dag_builder = DagBuilder::new(context.clone());

@@ -89,7 +89,7 @@ pub(crate) fn build_dag_layer(
         );
         references.push(block.reference());
         let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-        dag_state_writer.accept_block(block);
+        dag_state_writer.accept_blocks(vec![block]);
     }
     references
 }

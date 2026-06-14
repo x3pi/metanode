@@ -29,7 +29,6 @@ itertools = { workspace = true }
 quinn-proto = "0.11.7"
 mockall = "0.11.4"
 mysten-common = { path = "../../../../crates/mysten-common" }
-mysten-metrics = { path = "../../../../crates/mysten-metrics" }
 mysten-network = { path = "../../../../crates/mysten-network" }
 nom = "7.1.3"
 parking_lot = { workspace = true }

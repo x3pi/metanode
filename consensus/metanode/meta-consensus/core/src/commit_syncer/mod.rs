@@ -42,7 +42,6 @@ use std::{
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use itertools::Itertools as _;
-use mysten_metrics::spawn_logged_monitored_task;
 use parking_lot::RwLock;
 use tokio::{
     sync::oneshot,
@@ -333,7 +332,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
     pub(crate) fn start(self) -> CommitSyncerHandle {
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let schedule_task = spawn_logged_monitored_task!(self.schedule_loop(rx_shutdown), "commit_syncer_loop");
+        let schedule_task = tokio::spawn(self.schedule_loop(rx_shutdown));
         CommitSyncerHandle {
             schedule_task,
             tx_shutdown,
@@ -2614,7 +2613,7 @@ mod tests {
     use bytes::Bytes;
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockRef, Round};
-    use mysten_metrics::monitored_mpsc;
+    use tokio::sync::mpsc;
     use parking_lot::RwLock;
 
     use crate::{
@@ -2745,7 +2744,7 @@ mod tests {
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             block_verifier.clone(),
