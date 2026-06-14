@@ -1002,7 +1002,7 @@ impl ConsensusNode {
         lag_alert_receiver: tokio::sync::mpsc::Receiver<crate::consensus::commit_processor::lag_monitor::LagAlert>,
         is_terminally_failed: Arc<AtomicBool>,
         commit_processor: crate::consensus::commit_processor::CommitProcessor,
-        block_receiver: mysten_metrics::monitored_mpsc::UnboundedReceiver<consensus_core::CertifiedBlocksOutput>,
+        block_receiver: tokio::sync::mpsc::UnboundedReceiver<consensus_core::CertifiedBlocksOutput>,
         startup_total_synced_blocks: u64,
         startup_local_block: u64,
         start_as_validator: bool,
