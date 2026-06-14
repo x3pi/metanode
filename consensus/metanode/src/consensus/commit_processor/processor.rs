@@ -357,31 +357,23 @@ impl CommitProcessor {
                 }
             }
 
-            // Timeout check: prevent permanent CommitProcessor stall
+            // Timeout check REMOVED (Fork-Safety Fix)
+            // We wait indefinitely for epoch_eth_addresses.
+            // Thà pending (chờ) chứ TUYỆT ĐỐI không fork.
             let elapsed = resolve_start.elapsed();
-            if elapsed.as_secs() >= MAX_WAIT_SECS {
-                error!(
-                    "🚨 [LEADER] TIMEOUT after {}s waiting for epoch_eth_addresses! \
-                     epoch={}, index={}, commit={}. \
-                     Proceeding with EMPTY leader_address to unblock CommitProcessor. \
-                     This commit's block will have LeaderAddress=0x00..00.",
-                    elapsed.as_secs(), epoch, leader_author_index, subdag.commit_ref.index
-                );
-                return;
-            }
 
             // Cache not ready yet — wait and retry (rate-limited warning)
             if !logged_warning {
                 warn!(
-                    "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={}, timeout={}s)...",
-                    epoch, leader_author_index, MAX_WAIT_SECS
+                    "⏳ [LEADER] Waiting for epoch_eth_addresses (epoch={}, index={})...",
+                    epoch, leader_author_index
                 );
                 logged_warning = true;
             } else if elapsed.as_secs() % 5 == 0 && elapsed.as_millis() % 5000 < 200 {
                 // Log progress every ~5s instead of every 200ms to reduce log spam
                 warn!(
-                    "⏳ [LEADER] Still waiting for epoch_eth_addresses (epoch={}, index={}, elapsed={}s/{}s)...",
-                    epoch, leader_author_index, elapsed.as_secs(), MAX_WAIT_SECS
+                    "⏳ [LEADER] Still waiting for epoch_eth_addresses (epoch={}, index={}, elapsed={}s)...",
+                    epoch, leader_author_index, elapsed.as_secs()
                 );
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -663,16 +655,6 @@ impl CommitProcessor {
                     let mut discarded_indices: Vec<u32> = Vec::new();
                     for (&local_idx, local_commit) in pending_local_commits.iter() {
                         let local_digest = local_commit.commit_ref.digest.into_inner();
-                        let is_epoch_boundary = local_commit.extract_end_of_epoch_transaction().is_some();
-                        if is_epoch_boundary {
-                            info!(
-                                "⚡ [DIGEST-GATE POLL] Commit {} EPOCH-BOUNDARY-BYPASS: \
-                                 EndOfEpoch system transaction detected. Dispatching immediately to prevent consensus deadlock.",
-                                local_idx
-                            );
-                            verified_indices.push(local_idx);
-                            continue;
-                        }
 
                         match verifier(local_idx) {
                             Some(quorum_digest) => {
@@ -741,13 +723,16 @@ impl CommitProcessor {
                                 };
 
                                 if quorum_gc_bypass {
-                                    info!(
-                                        "✅ [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
+                                    warn!(
+                                        "🚨 [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
                                          quorum_commit_index has advanced far past this commit. \
-                                         Digest entry was GC'd = implicitly verified by quorum.",
+                                         Local commit digest cannot be verified (GC'd). \
+                                         DISCARDING immediately to prevent fork. \
+                                         Slot stays open for CertifiedCommit.",
                                         local_idx
                                     );
-                                    verified_indices.push(local_idx);
+                                    discarded_indices.push(local_idx);
+                                    break; // STRICT ORDER: stop evaluating, wait for CertifiedCommit
                                 } else if peer_attest_result == Some(PeerAttestResult::Ok) {
                                     info!(
                                         "✅ [DIGEST-GATE PEER-ATTEST] Commit {} dispatching: \
@@ -900,15 +885,7 @@ impl CommitProcessor {
                 // ═══════════════════════════════════════════════════════
                 if pending.decided_with_local_blocks {
                     let local_digest = pending.commit_ref.digest.into_inner();
-                    let is_epoch_boundary = pending.extract_end_of_epoch_transaction().is_some();
-                    let digest_match = if is_epoch_boundary {
-                        info!(
-                            "⚡ [DIGEST-GATE-OOO] Commit {} EPOCH-BOUNDARY-BYPASS: \
-                             EndOfEpoch transaction detected in OOO path. Dispatching immediately.",
-                            next_expected_index
-                        );
-                        true
-                    } else if let Some(ref verifier) = digest_verifier {
+                    let digest_match = if let Some(ref verifier) = digest_verifier {
                         match verifier(next_expected_index) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -937,12 +914,14 @@ impl CommitProcessor {
                                     0
                                 };
                                 if qci_val > next_expected_index + 50_000 {
-                                    info!(
-                                        "✅ [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
-                                         digest GC'd, quorum={} >> commit. Implicitly verified.",
+                                    warn!(
+                                        "🚨 [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
+                                         digest GC'd, quorum={} >> commit. Local commit cannot be verified. \
+                                         DISCARDING immediately to prevent fork. \
+                                         Slot open for CertifiedCommit.",
                                         next_expected_index, qci_val
                                     );
-                                    true
+                                    break; // Break the while loop to discard and wait for CertifiedCommit
                                 } else {
                                     // ZERO-TIMEOUT PEER ATTESTATION (OOO PATH):
                                     // Verifier returned None. Instead of blind dispatch,
@@ -1202,15 +1181,7 @@ impl CommitProcessor {
                             let local_digest = subdag.commit_ref.digest.into_inner();
 
                             // Check if digest is already verified by network quorum
-                            let is_epoch_boundary = subdag.extract_end_of_epoch_transaction().is_some();
-                            let digest_match = if is_epoch_boundary {
-                                info!(
-                                    "⚡ [DIGEST-GATE-IMMEDIATE] Commit {} EPOCH-BOUNDARY-BYPASS: \
-                                     EndOfEpoch transaction detected. Dispatching immediately.",
-                                    commit_index
-                                );
-                                true
-                            } else if let Some(ref verifier) = digest_verifier {
+                            let digest_match = if let Some(ref verifier) = digest_verifier {
                                 match verifier(commit_index) {
                                     Some(quorum_digest) => {
                                         if quorum_digest == local_digest {
@@ -1238,12 +1209,13 @@ impl CommitProcessor {
                                         if let Some(ref qci) = _quorum_commit_index_ref {
                                             let qci_val = qci.load(std::sync::atomic::Ordering::Relaxed);
                                             if qci_val > commit_index + 50_000 {
-                                                info!(
-                                                    "✅ [DIGEST-GATE-IMMEDIATE] Commit {} QUORUM-GC-BYPASS: \
-                                                     quorum={} >> commit. Implicitly verified.",
+                                                warn!(
+                                                    "🚨 [DIGEST-GATE-IMMEDIATE] Commit {} QUORUM-GC-BYPASS: \
+                                                     quorum={} >> commit. Local commit cannot be verified. \
+                                                     Buffered — waiting for POLL path to discard or CertifiedCommit.",
                                                     commit_index, qci_val
                                                 );
-                                                true
+                                                false
                                             } else {
                                                 // ZERO-TIMEOUT PEER ATTESTATION (IMMEDIATE PATH):
                                                 // Verifier returned None. Use peer attestation.
