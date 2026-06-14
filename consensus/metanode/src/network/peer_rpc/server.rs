@@ -36,7 +36,7 @@ pub struct PeerRpcServer {
     /// Optional dynamic reference to the ConsensusNode for fetching the transaction_submitter
     node: Option<Arc<tokio::sync::Mutex<crate::node::ConsensusNode>>>,
     /// Shared index to get the last global execution index
-    shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+    shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PeerRpcServer {
@@ -46,7 +46,7 @@ impl PeerRpcServer {
         port: u16,
         network_address: String,
         executor_client: Arc<ExecutorClient>,
-        shared_last_global_exec_index: Arc<tokio::sync::Mutex<u64>>,
+        shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
             node_id,
@@ -197,7 +197,7 @@ impl PeerRpcServer {
         executor: &Arc<ExecutorClient>,
         node_id: usize,
         network_address: &str,
-        shared_exec_index: &Arc<tokio::sync::Mutex<u64>>,
+        shared_exec_index: &Arc<std::sync::atomic::AtomicU64>,
     ) {
         // Query epoch and block from Go Master with timeout
         let epoch = match timeout(Duration::from_secs(5), executor.get_current_epoch()).await {
@@ -241,10 +241,7 @@ impl PeerRpcServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let last_global_exec_index = {
-            let guard = shared_exec_index.lock().await;
-            *guard
-        };
+        let last_global_exec_index = shared_exec_index.load(std::sync::atomic::Ordering::SeqCst);
 
         let state_root = crate::ffi::get_go_state_root();
 

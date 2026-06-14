@@ -216,7 +216,7 @@ impl InitializedNode {
                         node_config.network_address.clone(),
                         exc,
                         shared_index_for_peer
-                            .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(0))),
+                            .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))),
                     );
                     // Inject dynamic node reference instead of static transaction submitter
                     peer_server = peer_server.with_node(node.clone());

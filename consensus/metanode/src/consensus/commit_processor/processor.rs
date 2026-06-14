@@ -18,7 +18,7 @@ use crate::node::executor_client::ExecutorClient;
 pub struct CommitProcessorConfig {
     pub commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     pub global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
-    pub shared_last_global_exec_index: Option<Arc<tokio::sync::Mutex<u64>>>,
+    pub shared_last_global_exec_index: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub executor_client: Option<Arc<ExecutorClient>>,
     pub is_transitioning: Option<Arc<AtomicBool>>,
     pub delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
@@ -107,7 +107,7 @@ impl CommitProcessor {
     /// Set shared last global exec index for direct updates
     pub fn with_shared_last_global_exec_index(
         mut self,
-        shared_index: Arc<tokio::sync::Mutex<u64>>,
+        shared_index: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         self.config.shared_last_global_exec_index = Some(shared_index);
         self
@@ -780,10 +780,7 @@ impl CommitProcessor {
                                 local_idx, current_epoch, confirmed.leader, poll_leader_idx, poll_leader_eth,
                                 hex::encode(&local_digest[..4]), poll_txs, confirmed.timestamp_ms
                             );
-                            let exec_gei = {
-                                let gei_guard = shared_gei.lock().await;
-                                *gei_guard + 1
-                            };
+                            let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
                             Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
                             // WAL: Record PENDING before FFI
                             if let Some(ref mut wal) = commit_wal {
@@ -804,16 +801,13 @@ impl CommitProcessor {
                             if let Some(ref mut wal) = commit_wal {
                                 let _ = wal.mark_committed(local_idx);
                             }
-                            {
-                                let mut gei_guard = shared_gei.lock().await;
-                                *gei_guard += geis_consumed;
-                            }
+                            shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                             if let Some(ref recycler) = tx_recycler {
                                 let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
                                 if total_txs > 0 {
-                                    let committed_tx_data: Vec<Vec<u8>> = confirmed
+                                    let committed_tx_data: Vec<&[u8]> = confirmed
                                         .blocks.iter()
-                                        .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                                        .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
                                         .collect();
                                     recycler.confirm_committed(&committed_tx_data).await;
                                 }
@@ -836,10 +830,7 @@ impl CommitProcessor {
                             // Check EndOfEpoch
                             if let Some((_block_ref, system_tx)) = confirmed.extract_end_of_epoch_transaction() {
                                 if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
-                                    let current_gei = {
-                                        let gei_guard = shared_gei.lock().await;
-                                        *gei_guard
-                                    };
+                                    let current_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst);
                                     if let Some(ref callback) = epoch_transition_callback {
                                         if let Err(e) = callback(new_epoch, confirmed.timestamp_ms, boundary_block, current_gei) {
                                             warn!("❌ Failed to trigger epoch transition: {}", e);
@@ -1005,20 +996,17 @@ impl CommitProcessor {
                 }
 
                 let pending_commit_index = next_expected_index;
-                let pending_gei = {
-                    let gei_guard = shared_gei.lock().await;
-                    *gei_guard + 1
-                };
+                let pending_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
 
                 Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
                 if let Some(ref recycler) = tx_recycler {
                     let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
                     if total_txs > 0 {
-                        let committed_tx_data: Vec<Vec<u8>> = pending
+                        let committed_tx_data: Vec<&[u8]> = pending
                             .blocks
                             .iter()
-                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
                             .collect();
                         recycler.confirm_committed(&committed_tx_data).await;
                     }
@@ -1042,10 +1030,7 @@ impl CommitProcessor {
                     let _ = wal.mark_committed(pending_commit_index);
                 }
 
-                {
-                    let mut gei_guard = shared_gei.lock().await;
-                    *gei_guard += geis_consumed;
-                }
+                shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
 
                 if let Some(ref callback) = commit_index_callback {
                     callback(pending_commit_index);
@@ -1055,10 +1040,7 @@ impl CommitProcessor {
 
                 if let Some((_block_ref, system_tx)) = pending.extract_end_of_epoch_transaction() {
                     if let Some((new_epoch, boundary_block)) = system_tx.as_end_of_epoch() {
-                        let current_gei = {
-                            let gei_guard = shared_gei.lock().await;
-                            *gei_guard
-                        };
+                        let current_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst);
                         if let Some(ref callback) = epoch_transition_callback {
                             if let Err(e) = callback(new_epoch, pending.timestamp_ms, boundary_block, current_gei) {
                                 warn!("❌ Failed to trigger epoch transition from pending system transaction: {}", e);
@@ -1393,10 +1375,7 @@ impl CommitProcessor {
                             .map(|b| b.transactions().len())
                             .sum();
 
-                        let gei = {
-                            let gei_guard = shared_gei.lock().await;
-                            *gei_guard + 1
-                        };
+                        let gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
 
                         let dispatch_path = if subdag.decided_with_local_blocks {
                             "DIGEST-GATE-IMMEDIATE"
@@ -1478,19 +1457,16 @@ impl CommitProcessor {
                         }
 
                         // Accumulate exact number of fragments consumed by this commit
-                        {
-                            let mut gei_guard = shared_gei.lock().await;
-                            *gei_guard += geis_consumed;
-                        }
+                        shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                         
                         // ♻️ TX RECYCLER: Confirm committed TXs
                         if let Some(ref recycler) = tx_recycler {
                             if total_txs_in_commit > 0 {
-                                let committed_tx_data: Vec<Vec<u8>> = subdag
+                                let committed_tx_data: Vec<&[u8]> = subdag
                                     .blocks
                                     .iter()
                                     .flat_map(|b| {
-                                        b.transactions().iter().map(|tx| tx.data().to_vec())
+                                        b.transactions().iter().map(|tx| tx.data())
                                     })
                                     .collect();
                                 recycler.confirm_committed(&committed_tx_data).await;
@@ -1517,10 +1493,7 @@ impl CommitProcessor {
                                         commit_index, new_epoch
                                     );
 
-                                    let current_gei = {
-                                        let gei_guard = shared_gei.lock().await;
-                                        *gei_guard
-                                    };
+                                    let current_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst);
                                     if let Err(e) = callback(
                                         new_epoch,
                                         subdag.timestamp_ms,
@@ -1627,10 +1600,7 @@ impl CommitProcessor {
                                 }
                                 // Dispatch the CertifiedCommit immediately
                                 let mut certified = subdag;
-                                let exec_gei = {
-                                    let gei_guard = shared_gei.lock().await;
-                                    *gei_guard + 1
-                                };
+                                let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
                                 Self::resolve_leader_address(&epoch_eth_addresses, &mut certified, current_epoch).await;
                                 // WAL: Record PENDING before FFI
                                 if let Some(ref mut wal) = commit_wal {
@@ -1651,10 +1621,7 @@ impl CommitProcessor {
                                 if let Some(ref mut wal) = commit_wal {
                                     let _ = wal.mark_committed(commit_index);
                                 }
-                                {
-                                    let mut gei_guard = shared_gei.lock().await;
-                                    *gei_guard += geis_consumed;
-                                }
+                                shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                                 let certified_digest = certified.commit_ref.digest.into_inner();
                                 info!(
                                     "📊 [DIGEST-AUDIT] commit_index={}, path=CERTIFIED-REPLACE, gei={}, \
@@ -1665,9 +1632,9 @@ impl CommitProcessor {
                                 if let Some(ref recycler) = tx_recycler {
                                     let total_txs: usize = certified.blocks.iter().map(|b| b.transactions().len()).sum();
                                     if total_txs > 0 {
-                                        let committed_tx_data: Vec<Vec<u8>> = certified
+                                        let committed_tx_data: Vec<&[u8]> = certified
                                             .blocks.iter()
-                                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data().to_vec()))
+                                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
                                             .collect();
                                         recycler.confirm_committed(&committed_tx_data).await;
                                     }
