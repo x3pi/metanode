@@ -318,16 +318,8 @@ impl CommitProcessor {
 
         // BOUNDED WAIT (May 2026): Prevent infinite blocking of CommitProcessor.
         // ROOT CAUSE: During epoch catch-up or late-joining nodes, the committee
-        // cache may never be populated for the current epoch, causing this loop
-        // to block ALL commit processing indefinitely. The node then falls behind,
-        // triggers connection timeouts, and is killed by external monitors.
-        //
-        // After MAX_WAIT_SECS, we log a critical error and return with empty
-        // leader_address. The block will have LeaderAddress=0x00..00 which is
-        // deterministically incorrect but CONSISTENT across all nodes in the
-        // same state — no fork risk. The correct address will be resolved
-        // when the epoch committee is eventually populated.
-        const MAX_WAIT_SECS: u64 = 30;
+        // cache may never be populated for the current epoch.
+        // We wait indefinitely instead of timing out, per the "zero fork" policy.
         let resolve_start = std::time::Instant::now();
         let mut logged_warning = false;
 
