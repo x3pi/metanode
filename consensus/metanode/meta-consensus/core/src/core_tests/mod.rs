@@ -6,7 +6,7 @@
 use std::{sync::Arc, vec};
 
 use consensus_config::{local_committee_and_keys, AuthorityIndex, Stake};
-use mysten_metrics::monitored_mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedReceiver;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
@@ -86,7 +86,7 @@ impl CoreTextFixture {
         let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
         let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
         let (blocks_sender, _blocks_receiver) =
-            mysten_metrics::monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),
@@ -162,7 +162,7 @@ use consensus_config::Parameters;
 use consensus_types::block::{BlockTimestampMs, TransactionIndex};
 use futures::{stream::FuturesUnordered, StreamExt};
 use meta_protocol_config::ProtocolConfig;
-use mysten_metrics::monitored_mpsc;
+use tokio::sync::mpsc;
 use std::iter;
 use tokio::time::sleep;
 

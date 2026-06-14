@@ -14,8 +14,6 @@ use consensus_config::AuthorityIndex;
 use consensus_types::block::BlockRef;
 use futures::{stream::FuturesUnordered, StreamExt as _};
 use meta_macros::fail_point_async;
-use mysten_common::debug_fatal;
-use mysten_metrics::{monitored_future, monitored_scope};
 use parking_lot::RwLock;
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
 
@@ -50,8 +48,8 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         let core_dispatcher = self.core_dispatcher.clone();
 
         self.fetch_own_last_block_task
-            .spawn(monitored_future!(async move {
-                let _scope = monitored_scope("FetchOwnLastBlockTask");
+            .spawn(async move {
+                /* let _scope = tracing::info_span!("FetchOwnLastBlockTask").entered(); */
 
                 let fetch_own_block = |authority_index: AuthorityIndex, fetch_own_block_delay: Duration| {
                     let network_client_cloned = network_client.clone();
@@ -201,7 +199,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 if let Err(err) = core_dispatcher.set_last_known_proposed_round(highest_round) {
                     warn!("Error received while calling dispatcher, probably dispatcher is shutting down, will now exit: {err:?}");
                 }
-            }));
+            });
     }
 
 
@@ -242,8 +240,8 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         }
 
         self.fetch_blocks_scheduler_task
-            .spawn(monitored_future!(async move {
-                let _scope = monitored_scope("FetchMissingBlocksScheduler");
+            .spawn(async move {
+                /* let _scope = tracing::info_span!("FetchMissingBlocksScheduler").entered(); */
                 context
                     .metrics
                     .node_metrics
@@ -328,7 +326,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     "Total blocks requested to fetch: {}, total fetched: {}",
                     total_requested, total_fetched
                 );
-            }));
+            });
         Ok(())
     }
 
@@ -417,7 +415,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         // Send the fetch requests
         for batch in authorities.chunks(num_authorities_per_peer) {
             let Some(peer) = peers.next() else {
-                debug_fatal!("No more peers left to fetch blocks!");
+                panic!("No more peers left to fetch blocks!");
                 break;
             };
             let peer_hostname = &context.committee.authority(peer).hostname;

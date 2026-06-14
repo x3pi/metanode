@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use mysten_metrics::monitored_scope;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -71,7 +70,7 @@ impl ProposedBlockHandler {
             tracing::debug!("⏳ [PROPOSED BLOCK HANDLER] Ignoring proposed block because phase is {:?}", self.coordination_hub.get_phase());
             return;
         }
-        let _scope = monitored_scope("handle_proposed_block");
+        /* let _scope = tracing::info_span!("handle_proposed_block").entered(); */
         self.transaction_certifier
             .add_proposed_block(extended_block.block.clone());
     }

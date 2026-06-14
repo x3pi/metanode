@@ -6,7 +6,6 @@ use std::{sync::Arc, time::Instant};
 use consensus_config::{AuthorityIndex, Committee, NetworkKeyPair, Parameters, ProtocolKeyPair};
 use itertools::Itertools;
 use meta_protocol_config::ProtocolConfig;
-use mysten_metrics::spawn_logged_monitored_task;
 use parking_lot::RwLock;
 use prometheus::Registry;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -402,7 +401,10 @@ where
             broadcast_sender_keeper.receiver_count()
         );
         let proposed_block_handler =
-            spawn_logged_monitored_task!(proposed_block_handler.run(), "proposed_block_handler");
+            tokio::spawn(async move { 
+                let mut handler = proposed_block_handler;
+                handler.run().await 
+            });
 
         let sync_last_known_own_block = boot_counter == 0
             && dag_state.read().highest_accepted_round() == 0

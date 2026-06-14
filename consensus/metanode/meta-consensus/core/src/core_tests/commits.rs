@@ -62,13 +62,13 @@ async fn test_commit_and_notify_for_block_status() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -98,7 +98,7 @@ async fn test_commit_and_notify_for_block_status() {
     // Now recover Core and other components.
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -235,13 +235,13 @@ async fn test_multiple_commits_advance_threshold_clock() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -271,7 +271,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -668,7 +668,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
         LeaderSchedule::from_store(context.clone(), dag_state.clone())
             .with_num_commits_per_schedule(10),
@@ -678,7 +678,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),

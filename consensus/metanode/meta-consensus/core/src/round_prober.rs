@@ -21,7 +21,6 @@ use std::{sync::Arc, time::Duration};
 use consensus_types::block::Round;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use mysten_common::sync::notify_once::NotifyOnce;
-use mysten_metrics::monitored_scope;
 use parking_lot::RwLock;
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 
@@ -106,7 +105,7 @@ impl<C: NetworkClient> RoundProber<C> {
     // Probes each peer for the latest rounds they received from others.
     // Returns the propagation delay of own blocks.
     pub(crate) async fn probe(&self) -> Round {
-        let _scope = monitored_scope("RoundProber");
+        /* let _scope = tracing::info_span!("RoundProber").entered(); */
 
         let node_metrics = &self.context.metrics.node_metrics;
         let request_timeout =

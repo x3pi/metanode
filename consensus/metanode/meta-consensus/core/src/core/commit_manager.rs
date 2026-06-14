@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use consensus_types::block::{BlockRef, Round};
 use meta_macros::fail_point;
-use mysten_metrics::monitored_scope;
 use tracing::{info, warn};
 
 use crate::{
@@ -19,7 +18,7 @@ impl Core {
         &mut self,
         certified_commits: CertifiedCommits,
     ) -> ConsensusResult<BTreeSet<BlockRef>> {
-        let _scope = monitored_scope("Core::add_certified_commits");
+        /* let _scope = tracing::info_span!("Core::add_certified_commits").entered(); */
 
         let last_commit = self.dag_state.read().last_commit_index();
         let commits_count = certified_commits.commits().len();

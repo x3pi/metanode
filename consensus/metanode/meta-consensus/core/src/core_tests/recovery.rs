@@ -48,7 +48,7 @@ async fn test_core_recover_from_store_for_full_round() {
         dag_state.clone(),
     ));
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -75,7 +75,7 @@ async fn test_core_recover_from_store_for_full_round() {
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -195,7 +195,7 @@ async fn test_core_recover_from_store_for_partial_round() {
         dag_state.clone(),
     ));
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -222,7 +222,7 @@ async fn test_core_recover_from_store_for_partial_round() {
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),

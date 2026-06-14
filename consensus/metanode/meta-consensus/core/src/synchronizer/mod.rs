@@ -12,10 +12,6 @@ use std::{
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockRef, Round};
-use mysten_metrics::{
-    monitored_future,
-    monitored_mpsc::{channel, Receiver, Sender},
-};
 use parking_lot::{Mutex, RwLock};
 
 use tokio::{
@@ -169,6 +165,8 @@ enum Command {
     KickOffScheduler,
 }
 
+use tokio::sync::mpsc::{Sender, Receiver, channel};
+
 pub(crate) struct SynchronizerHandle {
     commands_sender: Sender<Command>,
     tasks: tokio::sync::Mutex<JoinSet<()>>,
@@ -261,7 +259,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         sync_last_known_own_block: bool,
     ) -> Arc<SynchronizerHandle> {
         let (commands_sender, commands_receiver) =
-            channel("consensus_synchronizer_commands", 1_000);
+            channel(1_000);
         let inflight_blocks_map = InflightBlocksMap::new();
 
         // Spawn the tasks to fetch the blocks from the others
@@ -272,7 +270,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 continue;
             }
             let (sender, receiver) =
-                channel("consensus_synchronizer_fetches", FETCH_BLOCKS_CONCURRENCY);
+                channel(FETCH_BLOCKS_CONCURRENCY);
             let fetch_blocks_from_authority_async = Self::fetch_blocks_from_authority(
                 index,
                 network_client.clone(),
@@ -285,7 +283,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 receiver,
                 commands_sender.clone(),
             );
-            tasks.spawn(monitored_future!(fetch_blocks_from_authority_async));
+            tasks.spawn(fetch_blocks_from_authority_async);
             fetch_block_senders.insert(index, sender);
         }
 
@@ -298,7 +296,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         }
 
         // Spawn the task to listen to the requests & periodic runs
-        tasks.spawn(monitored_future!(async move {
+        tasks.spawn(async move {
             let mut s = Self {
                 context,
                 commands_receiver,
@@ -316,7 +314,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 consecutive_sync_failures: Arc::new(AtomicU32::new(0)),
             };
             s.run().await;
-        }));
+        });
 
         Arc::new(SynchronizerHandle {
             commands_sender,
@@ -639,7 +637,7 @@ mod tests {
     use bytes::Bytes;
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockDigest, BlockRef, Round};
-    use mysten_metrics::monitored_mpsc;
+    use tokio::sync::mpsc;
     use parking_lot::RwLock;
     use tokio::{sync::Mutex, time::sleep};
 
@@ -917,7 +915,7 @@ mod tests {
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let network_client = Arc::new(MockNetworkClient::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -974,7 +972,7 @@ mod tests {
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1043,7 +1041,7 @@ mod tests {
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1121,7 +1119,7 @@ mod tests {
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1259,7 +1257,7 @@ mod tests {
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
@@ -1383,7 +1381,7 @@ mod tests {
         let block_verifier = Arc::new(NoopBlockVerifier {});
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel("consensus_block_output");
+            tokio::sync::mpsc::unbounded_channel();
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
@@ -1394,7 +1392,7 @@ mod tests {
             blocks_sender,
         );
         let (commands_sender, _commands_receiver) =
-            monitored_mpsc::channel("consensus_synchronizer_commands", 1000);
+            tokio::sync::mpsc::channel(1000);
 
         // Create input test blocks:
         // - Authority 0 block at round 60.

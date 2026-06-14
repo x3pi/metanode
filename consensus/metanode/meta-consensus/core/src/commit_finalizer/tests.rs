@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod tests {
-use mysten_metrics::monitored_mpsc;
+use tokio::sync::mpsc;
 use parking_lot::RwLock;
 
 use crate::{
@@ -42,16 +42,16 @@ fn create_commit_finalizer_fixture() -> Fixture {
         context.clone(),
         Arc::new(MemStore::new()),
     )));
-    let linearizer = Linearizer::new(context.clone(), dag_state.clone());
+    let linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
         dag_state.clone(),
         blocks_sender,
     );
-    let (commit_sender, _commit_receiver) = unbounded_channel("consensus_commit_output");
+    let (commit_sender, _commit_receiver) = unbounded_channel();
     let commit_finalizer = CommitFinalizer::new(
         context.clone(),
         dag_state.clone(),

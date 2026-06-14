@@ -6,8 +6,7 @@ use consensus_config::Epoch;
 use consensus_types::block::{
     BlockRef, Round, TransactionIndex, NUM_RESERVED_TRANSACTION_INDICES, PING_TRANSACTION_INDEX,
 };
-use mysten_common::debug_fatal;
-use mysten_metrics::monitored_mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use parking_lot::Mutex;
 use tap::TapFallible;
 use thiserror::Error;
@@ -215,7 +214,7 @@ impl TransactionConsumer {
                         self.max_num_transactions_in_block,
                         self.max_transactions_in_block_bytes
                     );
-                    debug_fatal!(
+                    panic!(
                         "Previously pending transaction(s) should fit into an empty block! Dropping: {:?}",
                         pending_transactions.transactions
                     );
@@ -357,7 +356,7 @@ impl TransactionClient {
         context: Arc<Context>,
         max_pending_transactions: usize,
     ) -> (Self, Receiver<TransactionsGuard>) {
-        let (sender, receiver) = channel("consensus_input", max_pending_transactions);
+        let (sender, receiver) = channel(max_pending_transactions);
         (
             Self {
                 sender,

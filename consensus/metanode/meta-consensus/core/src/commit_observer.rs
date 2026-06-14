@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use mysten_metrics::monitored_mpsc::UnboundedSender;
+use tokio::sync::mpsc::UnboundedSender;
 use parking_lot::RwLock;
 use tokio::time::Instant;
 use tracing::info;
@@ -460,7 +460,7 @@ impl CommitObserver {
 mod tests {
     use consensus_config::AuthorityIndex;
     use consensus_types::block::BlockRef;
-    use mysten_metrics::monitored_mpsc::{unbounded_channel, UnboundedReceiver};
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
     use parking_lot::RwLock;
     use rstest::rstest;
     use tokio::time::timeout;
@@ -490,7 +490,7 @@ mod tests {
         let last_processed_commit_index = 0;
         let (commit_consumer, mut commit_receiver, _transaction_receiver) =
             CommitConsumerArgs::new(0, last_processed_commit_index, [0; 32], 0);
-        let (blocks_sender, _blocks_receiver) = unbounded_channel("consensus_block_output");
+        let (blocks_sender, _blocks_receiver) = unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),
@@ -643,7 +643,7 @@ mod tests {
             context.clone(),
             mem_store.clone(),
         )));
-        let (blocks_sender, _blocks_receiver) = unbounded_channel("consensus_block_output");
+        let (blocks_sender, _blocks_receiver) = unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),

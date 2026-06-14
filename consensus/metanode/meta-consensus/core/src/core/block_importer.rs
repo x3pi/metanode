@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use tracing::trace;
 
 use consensus_types::block::BlockRef;
-use mysten_metrics::monitored_scope;
 
 use crate::{block::VerifiedBlock, core::Core, error::ConsensusResult};
 
@@ -16,7 +15,7 @@ impl Core {
         &mut self,
         blocks: Vec<VerifiedBlock>,
     ) -> ConsensusResult<BTreeSet<BlockRef>> {
-        let _scope = monitored_scope("Core::add_blocks");
+        /* let _scope = tracing::info_span!("Core::add_blocks").entered(); */
         let _s = self
             .context
             .metrics
@@ -89,7 +88,7 @@ impl Core {
         &mut self,
         block_refs: Vec<BlockRef>,
     ) -> ConsensusResult<BTreeSet<BlockRef>> {
-        let _scope = monitored_scope("Core::check_block_refs");
+        /* let _scope = tracing::info_span!("Core::check_block_refs").entered(); */
         let _s = self
             .context
             .metrics
@@ -116,7 +115,7 @@ impl Core {
     }
 
     pub(crate) fn get_missing_blocks(&self) -> BTreeSet<BlockRef> {
-        let _scope = monitored_scope("Core::get_missing_blocks");
+        /* let _scope = tracing::info_span!("Core::get_missing_blocks").entered(); */
         self.block_manager.missing_blocks()
     }
 }

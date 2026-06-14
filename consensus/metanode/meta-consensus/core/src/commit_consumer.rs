@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use mysten_metrics::monitored_mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tracing::debug;
 
@@ -46,8 +46,8 @@ impl CommitConsumerArgs {
         UnboundedReceiver<CommittedSubDag>,
         UnboundedReceiver<CertifiedBlocksOutput>,
     ) {
-        let (commit_sender, commit_receiver) = unbounded_channel("consensus_commit_output");
-        let (block_sender, block_receiver) = unbounded_channel("consensus_block_output");
+        let (commit_sender, commit_receiver) = unbounded_channel();
+        let (block_sender, block_receiver) = unbounded_channel();
 
         let monitor = Arc::new(CommitConsumerMonitor::new(
             replay_after_commit_index,

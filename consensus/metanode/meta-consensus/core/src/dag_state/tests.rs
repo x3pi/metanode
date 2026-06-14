@@ -1224,6 +1224,7 @@ async fn test_last_quorum() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // WHEN no blocks exist then genesis should be returned
     {
@@ -1276,6 +1277,7 @@ async fn test_last_block_for_authority() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // WHEN no blocks exist then genesis should be returned
     {

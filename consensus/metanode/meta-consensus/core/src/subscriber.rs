@@ -6,7 +6,6 @@ use std::{sync::Arc, time::Duration};
 use consensus_config::AuthorityIndex;
 use consensus_types::block::Round;
 use futures::StreamExt;
-use mysten_metrics::spawn_monitored_task;
 use parking_lot::{Mutex, RwLock};
 use tokio::{task::JoinHandle, time::sleep};
 use tracing::{debug, error, info};
@@ -87,7 +86,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         
         let coordination_hub = self.coordination_hub.clone();
         
-        subscriptions[peer.value()] = Some(spawn_monitored_task!(Self::subscription_loop(
+        subscriptions[peer.value()] = Some(tokio::spawn(Self::subscription_loop(
             context,
             network_client,
             authority_service,

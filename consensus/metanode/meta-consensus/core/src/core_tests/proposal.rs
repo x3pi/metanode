@@ -14,11 +14,11 @@ async fn test_core_propose_after_genesis() {
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let (transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -203,7 +203,7 @@ async fn test_core_set_min_propose_round() {
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -213,7 +213,7 @@ async fn test_core_set_min_propose_round() {
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -560,7 +560,7 @@ async fn test_core_set_propagation_delay_per_authority() {
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone());
+    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -570,7 +570,7 @@ async fn test_core_set_propagation_delay_per_authority() {
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
     let (blocks_sender, _blocks_receiver) =
-        monitored_mpsc::unbounded_channel("consensus_block_output");
+        tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),

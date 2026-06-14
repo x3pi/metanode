@@ -12,7 +12,6 @@ use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockRef, Round};
 use futures::{stream, StreamExt};
 use meta_macros::fail_point_async;
-use mysten_metrics::spawn_monitored_task;
 use rand::seq::SliceRandom as _;
 use tap::TapFallible;
 use tracing::{debug, info, warn};
@@ -158,7 +157,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                 .with_label_values(&[peer_hostname])
                 .inc_by(missing_ancestors.len() as u64);
             let synchronizer = self.synchronizer.clone();
-            spawn_monitored_task!(async move {
+            tokio::spawn(async move {
                 // This does not wait for the fetch request to complete.
                 // It only waits for synchronizer to queue the request to a peer.
                 // When this fails, it usually means the queue is full.
@@ -206,7 +205,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                 .inc_by(missing_excluded_ancestors.len() as u64);
 
             let synchronizer = self.synchronizer.clone();
-            spawn_monitored_task!(async move {
+            tokio::spawn(async move {
                 if let Err(err) = synchronizer
                     .fetch_blocks(missing_excluded_ancestors, peer)
                     .await

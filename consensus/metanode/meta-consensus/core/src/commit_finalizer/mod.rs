@@ -8,12 +8,9 @@ use std::{
 
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, Round, TransactionIndex};
-use mysten_metrics::{
-    monitored_mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    monitored_scope, spawn_logged_monitored_task,
-};
 use parking_lot::RwLock;
 use tokio::task::JoinSet;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 
 use crate::{
     commit::DEFAULT_WAVE_LENGTH,
@@ -119,12 +116,12 @@ impl CommitFinalizer {
         last_processed_commit: Option<CommitIndex>,
     ) -> CommitFinalizerHandle {
         let mut processor = Self::new(context, dag_state, transaction_certifier, commit_sender, last_processed_commit);
-        let (sender, receiver) = unbounded_channel("consensus_commit_finalizer");
+        let (sender, receiver) = unbounded_channel();
         // Clone the sender and store it in the processor to prevent race condition.
         // This ensures the internal channel stays open until the task starts running.
         processor.internal_sender_keeper = Some(sender.clone());
         let _handle =
-            spawn_logged_monitored_task!(processor.run(receiver), "consensus_commit_finalizer");
+            tokio::spawn(processor.run(receiver));
         CommitFinalizerHandle { sender }
     }
 
@@ -188,7 +185,7 @@ impl CommitFinalizer {
         &mut self,
         committed_sub_dag: CommittedSubDag,
     ) -> Vec<CommittedSubDag> {
-        let _scope = monitored_scope("CommitFinalizer::process_commit");
+        /* let _scope = tracing::info_span!("CommitFinalizer::process_commit").entered(); */
 
         if let Some(last_processed_commit) = self.last_processed_commit {
             let expected = last_processed_commit + 1;
@@ -543,9 +540,9 @@ impl CommitFinalizer {
     }
 
     async fn try_indirect_finalize_pending_transactions_in_first_commit(&mut self) {
-        let _scope = monitored_scope(
+        /* let _scope = tracing::info_span!(
             "CommitFinalizer::try_indirect_finalize_pending_transactions_in_first_commit",
-        );
+        ).entered(); */
 
         let pending_blocks: Vec<_> = self.pending_commits[0]
             .pending_transactions

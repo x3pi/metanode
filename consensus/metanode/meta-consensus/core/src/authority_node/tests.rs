@@ -10,7 +10,7 @@ use super::*;
 
     use consensus_config::{local_committee_and_keys, Parameters};
     use meta_protocol_config::ProtocolConfig;
-    use mysten_metrics::monitored_mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::UnboundedReceiver;
     
     use prometheus::Registry;
     use rstest::rstest;
