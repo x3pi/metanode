@@ -4,7 +4,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use consensus_core::coordination_hub::PeerAttestResult;
-use mysten_metrics::monitored_mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
