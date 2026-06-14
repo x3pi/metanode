@@ -2574,7 +2574,7 @@ impl<C: NetworkClient> Inner<C> {
                  Trusting commit sequence from single peer {} based on cryptographic chaining.",
                 peer
             );
-        } else if _is_epoch_boundary || vote_blocks.is_empty() || is_catching_up || is_historical || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
+        } else if _is_epoch_boundary || is_catching_up || is_historical || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
                  (historical / epoch boundary / catching up sync / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",

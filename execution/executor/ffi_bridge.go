@@ -115,8 +115,8 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 	}()
 
 	// Sanity check length to prevent overflow or out-of-memory allocations
-	if length == 0 || length > 100*1024*1024 {
-		logger.Error("[FFI Bridge] Invalid block length from Rust: %d", length)
+	if payload == nil || length == 0 || length > 100*1024*1024 {
+		logger.Error("[FFI Bridge] Invalid block payload or length from Rust: %d", length)
 		return C.bool(false)
 	}
 
@@ -235,8 +235,8 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 
 	// Sanity check length to prevent overflow or out-of-memory allocations
 	// Raise limit to 1GB to support large SyncBlocksRequest payloads safely
-	if reqLen == 0 || reqLen > 1024*1024*1024 {
-		logger.Error("[FFI Bridge] Invalid rpc request length from Rust: %d", reqLen)
+	if reqPayload == nil || reqLen == 0 || reqLen > 1024*1024*1024 {
+		logger.Error("[FFI Bridge] Invalid rpc request payload or length from Rust: %d", reqLen)
 		return C.bool(false)
 	}
 
