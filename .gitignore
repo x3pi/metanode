@@ -181,7 +181,6 @@ ehthumbs.db
 # Deploy environment files (may contain SSH passwords / credentials)
 consensus/metanode/scripts/node/deploy.env
 consensus/deploy/prod_deploy.env
-**/prod_deploy.env
 consensus/metanode/scripts/node/setup_node_*.sh
 # Error/debug output files
 **/*.exe
@@ -315,10 +314,10 @@ pkg/storage/coverage.out
 **/*.profraw
 # Project specific
 *.py
-!deploy/**/*.py
-deploy/*_keys/
-deploy/*.env
-!deploy/*.env.example
+!deploy_systemd/**/*.py
+deploy_systemd/*_keys/
+deploy_systemd/*.env
+!deploy_systemd/*.env.example
 **/*.pyc
 **/__pycache__/
 __pycache__/

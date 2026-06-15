@@ -1,0 +1,113 @@
+---
+- name: Create metanode system group
+  ansible.builtin.group:
+    name: metanode
+    system: yes
+
+- name: Create metanode system user
+  ansible.builtin.user:
+    name: metanode
+    group: metanode
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+
+- name: Create node subdirectories
+  ansible.builtin.file:
+    path: "{{ metanode_install_dir }}/node-{{ item[0] }}/{{ item[1] }}"
+    state: directory
+    owner: metanode
+    group: metanode
+    mode: '0755'
+  loop: "{{ active_nodes | product(['bin', 'config', 'keys', 'data/execution/db/data/xapian_node', 'data/execution/backup', 'data/execution/snapshots', 'data/execution/explorer', 'data/consensus', 'logs/execution', 'logs/consensus']) | list }}"
+
+
+- name: Copy binaries to node bin directory
+  ansible.builtin.copy:
+    src: "{{ remote_deploy_dir }}/bin/{{ item[1] }}"
+    dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/bin/{{ item[1] }}"
+    remote_src: yes
+    owner: metanode
+    group: metanode
+    mode: '0755'
+  loop: "{{ active_nodes | product(['metanode', 'simple_chain']) | list }}"
+
+- name: Copy execution and consensus config
+  ansible.builtin.copy:
+    src: "{{ remote_deploy_dir }}/node-{{ item[0] }}_keys/{{ item[1] }}"
+    dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/config/{{ item[1] }}"
+    remote_src: yes
+    owner: metanode
+    group: metanode
+    mode: '0644'
+  loop: "{{ active_nodes | product(['execution.json', 'consensus.toml']) | list }}"
+
+- name: Copy keys
+  ansible.builtin.copy:
+    src: "{{ remote_deploy_dir }}/node-{{ item[0] }}_keys/{{ item[1] }}"
+    dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/keys/{{ item[1] }}"
+    remote_src: yes
+    owner: metanode
+    group: metanode
+    mode: '0644'
+  loop: "{{ active_nodes | product(['protocol_key.json', 'network_key.json', 'authority_key.json', 'eth_key.json']) | list }}"
+
+- name: Copy genesis file
+  ansible.builtin.copy:
+    src: "{{ deploy_dir }}/genesis-main.json"
+    dest: "{{ metanode_install_dir }}/node-{{ item }}/config/genesis.json"
+    remote_src: no
+    owner: metanode
+    group: metanode
+    mode: '0644'
+  loop: "{{ active_nodes }}"
+
+- name: Generate systemd service for Execution
+  ansible.builtin.template:
+    src: metanode-execution.service.j2
+    dest: /etc/systemd/system/metanode-execution-{{ item }}.service
+    mode: '0644'
+  loop: "{{ active_nodes }}"
+  notify: reload systemd
+
+- name: Generate systemd service for Consensus
+  ansible.builtin.template:
+    src: metanode-consensus.service.j2
+    dest: /etc/systemd/system/metanode-consensus-{{ item }}.service
+    mode: '0644'
+  loop: "{{ active_nodes }}"
+  notify: reload systemd
+
+- name: Enable and start Execution services
+  ansible.builtin.systemd:
+    name: "metanode-execution-{{ item }}"
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  loop: "{{ active_nodes }}"
+
+- name: Wait 5 seconds before starting Consensus
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Enable and start Consensus services
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
+    state: started
+    enabled: yes
+  loop: "{{ active_nodes }}"
+
+- name: Open firewall ports for node
+  ansible.builtin.shell: |
+    bash open_ports.sh
+  args:
+    chdir: "{{ remote_deploy_dir }}/node-{{ item }}_keys"
+  loop: "{{ active_nodes }}"
+  when: "open_ports | default('false') | bool == true"
+
+- name: Generate and start systemd service for RPC Proxy
+  ansible.builtin.shell: |
+    bash install-rpc-systemd.sh --node {{ item }} --no-build
+  args:
+    chdir: "{{ remote_deploy_dir }}/cluster"
+  loop: "{{ active_nodes }}"

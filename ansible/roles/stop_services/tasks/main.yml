@@ -1,0 +1,22 @@
+---
+- name: Stop existing Consensus services to prevent file lock
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
+    state: stopped
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Stop existing Execution services to prevent file lock
+  ansible.builtin.systemd:
+    name: "metanode-execution-{{ item }}"
+    state: stopped
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Force kill any orphaned Consensus processes
+  ansible.builtin.shell: "pkill -9 -x metanode || true"
+  failed_when: false
+
+- name: Force kill any orphaned Execution processes
+  ansible.builtin.shell: "pkill -9 -x simple_chain || true"
+  failed_when: false

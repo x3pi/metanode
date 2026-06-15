@@ -150,8 +150,13 @@ impl InitializedNode {
                     let refresh_interval =
                         std::time::Duration::from_secs(node_config.peer_discovery_refresh_secs);
                     let service = Arc::new(
-                        PeerDiscoveryService::new(go_rpc_url.clone(), peer_port)
-                            .with_refresh_interval(refresh_interval),
+                        PeerDiscoveryService::new(
+                            go_rpc_url.clone(), 
+                            node_config.peer_rpc_addresses.clone(),
+                            node_config.node_id as u64,
+                            peer_port
+                        )
+                        .with_refresh_interval(refresh_interval),
                     );
                     let addresses_handle = service.get_addresses_handle();
 

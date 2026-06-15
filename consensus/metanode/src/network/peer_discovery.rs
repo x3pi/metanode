@@ -73,21 +73,25 @@ pub struct PeerDiscoveryService {
     /// Refresh interval
     refresh_interval: Duration,
 
-    /// Peer RPC port to use when building addresses
-    peer_rpc_port: u16,
+    /// Configured peer RPC addresses for precise matching
+    configured_rpc_addresses: Vec<String>,
+
+    /// Base peer RPC port to use when building addresses as fallback
+    base_peer_rpc_port: u16,
 
     /// HTTP client for RPC calls
     client: reqwest::Client,
 }
 
 impl PeerDiscoveryService {
-    /// Create a new PeerDiscoveryService
-    pub fn new(go_rpc_url: String, peer_rpc_port: u16) -> Self {
+    pub fn new(go_rpc_url: String, configured_rpc_addresses: Vec<String>, node_id: u64, peer_rpc_port: u16) -> Self {
+        let base_peer_rpc_port = peer_rpc_port.saturating_sub(node_id as u16);
         Self {
             go_rpc_url,
             peer_addresses: Arc::new(RwLock::new(Vec::new())),
             refresh_interval: Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS),
-            peer_rpc_port,
+            configured_rpc_addresses,
+            base_peer_rpc_port,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -166,12 +170,24 @@ impl PeerDiscoveryService {
                     // Get validator info to extract hostname
                     match self.get_validator_info(&validator_addr).await {
                         Ok(info) => {
-                            // Build peer RPC address from primary_address or hostname
-                            // Format: http://{host}:{port}
-                            let host = Self::extract_host(&info.primary_address);
-                            if !host.is_empty() {
-                                let peer_addr =
-                                    format!("http://{}:{}", host, self.peer_rpc_port + i as u16);
+                            // Build peer RPC address from config or primary_address fallback
+                            let peer_addr = if (i as usize) < self.configured_rpc_addresses.len() {
+                                let addr = &self.configured_rpc_addresses[i as usize];
+                                if addr.starts_with("http://") || addr.starts_with("https://") {
+                                    addr.clone()
+                                } else {
+                                    format!("http://{}", addr)
+                                }
+                            } else {
+                                let host = Self::extract_host(&info.primary_address);
+                                if !host.is_empty() {
+                                    format!("http://{}:{}", host, self.base_peer_rpc_port + i as u16)
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            
+                            if !peer_addr.is_empty() {
                                 debug!(
                                     "🔍 [PEER DISCOVERY] Found validator {}: {} -> {}",
                                     info.name, info.primary_address, peer_addr

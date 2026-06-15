@@ -43,13 +43,19 @@ log_step "Building Rust Consensus Engine"
 cd "$PROJECT_ROOT/consensus/metanode"
 # Cần export RUSTFLAGS nếu cần, hoặc mặc định
 cargo build --release
-cp target/release/metanode "$RELEASE_DIR/bin/"
+
+# FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
+mkdir -p "$PROJECT_ROOT/consensus/metanode/target/release"
+cp -p "$PROJECT_ROOT/target/release/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/release/libmetanode.a" 2>/dev/null || true
+
+cp "$PROJECT_ROOT/target/release/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
 log_step "Building Go Execution Engine"
 cd "$PROJECT_ROOT/execution/cmd/simple_chain"
-go build -o simple_chain .
+go clean -cache
+go build -a -o simple_chain .
 cp simple_chain "$RELEASE_DIR/bin/"
 log_ok "simple_chain binary copied to release."
 
@@ -105,7 +111,7 @@ log_ok "Scripts & templates copied successfully."
 # ─── 5. Create Tarball ──────────────────────────────────────────────────────
 log_step "Packaging Release"
 cd "$PROJECT_ROOT"
-tar -czvf "$TARBALL_NAME" $(basename "$RELEASE_DIR")
+tar -czvf "$TARBALL_NAME" "$(basename "$RELEASE_DIR")"
 
 log_step "DONE"
 log_ok "Successfully created Standalone Release Package: ${PROJECT_ROOT}/${TARBALL_NAME}"
