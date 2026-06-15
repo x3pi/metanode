@@ -415,7 +415,7 @@ func TransactionsFromProto(pbTxs []*pb.Transaction) []types.Transaction {
 
 func (t *Transaction) Unmarshal(b []byte) error {
 	pbTransaction := &pb.Transaction{}
-	err := proto.Unmarshal(b, pbTransaction)
+	err := pbTransaction.UnmarshalVT(b)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package transaction_pool
 
 import (
 	"fmt"
+	"sort"
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -22,6 +23,11 @@ type countReq struct {
 	reply chan int
 }
 
+type evictReq struct {
+	count int
+	reply chan int
+}
+
 type getTxReq struct {
 	hash  common.Hash
 	reply chan getTxResp
@@ -38,6 +44,7 @@ type TransactionPool struct {
 	addTxsCh      chan []types.Transaction
 	getTxsCh      chan getTxsReq
 	countCh       chan countReq
+	evictCh       chan evictReq
 	getTxByHashCh chan getTxReq
 
 	NotifyChan chan struct{} // GO-2: Event channel to notify workers of new transactions
@@ -50,6 +57,7 @@ func NewTransactionPool() *TransactionPool {
 		addTxsCh:      make(chan []types.Transaction),
 		getTxsCh:      make(chan getTxsReq),
 		countCh:       make(chan countReq),
+		evictCh:       make(chan evictReq),
 		getTxByHashCh: make(chan getTxReq),
 		NotifyChan:    make(chan struct{}, 1),
 	}
@@ -142,6 +150,58 @@ func (tp *TransactionPool) loop() {
 		case req := <-tp.countCh:
 			req.reply <- len(transactions)
 
+		case req := <-tp.evictCh:
+			if len(transactions) <= req.count {
+				// Evict all
+				evicted := len(transactions)
+				transactions = make([]types.Transaction, 0)
+				transactionKeys = make(map[txPoolKey]bool)
+				txHashMap = make(map[common.Hash]types.Transaction)
+				atomic.StoreInt64(&tp.count, 0)
+				req.reply <- evicted
+				continue
+			}
+
+			// Sort a slice of indices to find the lowest gas price transactions
+			type txInfo struct {
+				index int
+				gas   uint64
+			}
+			infos := make([]txInfo, len(transactions))
+			for i, tx := range transactions {
+				infos[i] = txInfo{index: i, gas: tx.MaxGasPrice()}
+			}
+
+			// Sort by GasPrice ascending
+			sort.Slice(infos, func(i, j int) bool {
+				return infos[i].gas < infos[j].gas
+			})
+
+			// Create a set of indices to remove
+			toRemove := make(map[int]bool)
+			for i := 0; i < req.count; i++ {
+				toRemove[infos[i].index] = true
+			}
+
+			newTxs := make([]types.Transaction, 0, len(transactions)-req.count)
+			for i, tx := range transactions {
+				if toRemove[i] {
+					// Remove from maps
+					key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
+					delete(transactionKeys, key)
+					h := tx.Hash()
+					if h != (common.Hash{}) {
+						delete(txHashMap, h)
+					}
+				} else {
+					newTxs = append(newTxs, tx)
+				}
+			}
+
+			transactions = newTxs
+			atomic.StoreInt64(&tp.count, int64(len(transactions)))
+			req.reply <- req.count
+
 		case req := <-tp.getTxByHashCh:
 			if req.hash == (common.Hash{}) {
 				logger.Warn("GetTransactionByHash called with a zero hash value.")
@@ -157,6 +217,12 @@ func (tp *TransactionPool) loop() {
 
 func (tp *TransactionPool) CountTransactions() int {
 	return int(atomic.LoadInt64(&tp.count))
+}
+
+func (tp *TransactionPool) EvictLowestGasPrice(count int) int {
+	reply := make(chan int, 1)
+	tp.evictCh <- evictReq{count: count, reply: reply}
+	return <-reply
 }
 
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
