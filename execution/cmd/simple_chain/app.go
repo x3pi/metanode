@@ -412,6 +412,13 @@ func (app *App) Run() error {
 
 	logger.Info("App is running")
 
+	if app.keyPair != nil {
+		logger.Info("================================================================================")
+		logger.Info("Node Info - Address: %s", app.keyPair.Address().Hex())
+		logger.Info("Node Info - Public Key: %x", app.keyPair.PublicKey().Bytes())
+		logger.Info("================================================================================")
+	}
+
 	// Log validator information after app is fully initialized
 	if app.chainState != nil {
 		allValidators, startupErr := app.chainState.GetStakeStateDB().GetAllValidators()
