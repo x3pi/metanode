@@ -1,0 +1,27 @@
+---
+- name: Build Standalone Release Package
+  ansible.builtin.shell: |
+    bash build_release.sh
+  args:
+    chdir: "{{ deploy_dir }}"
+  register: build_result
+  changed_when: build_result.rc == 0
+
+- name: Generate Validator Keys
+  ansible.builtin.shell: |
+    python3 gen_validator_entry.py \
+      --hostname "node-{{ item.node_id }}" \
+      --node-id "{{ item.node_id }}" \
+      --node-type "{% if item.is_synconly | default(false) %}synconly{% else %}validator{% endif %}" \
+      --ip "{{ item.ip }}" \
+      --peers-map "{{ peers_map }}" \
+      --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
+      --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
+      --metanode-bin "{{ deploy_dir }}/../target/release/metanode"
+  args:
+    chdir: "{{ deploy_dir }}"
+  loop: "{{ cluster_nodes }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
+  
+# Note: For full automation, `cluster_nodes` and `peers_map` should be constructed dynamically from the inventory
+# using set_fact before running these tasks.

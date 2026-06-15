@@ -1,0 +1,49 @@
+---
+- name: Local build and configuration generation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  pre_tasks:
+    - name: Build cluster_nodes list from inventory
+      set_fact:
+        cluster_nodes: >-
+          {%- set nodes = [] -%}
+          {%- for host in groups['metanode_cluster'] -%}
+            {%- for nid in hostvars[host]['node_ids'] -%}
+              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': hostvars[host]['is_synconly'] | default(false)}) -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ nodes }}
+          
+    - name: Build peers_map string
+      set_fact:
+        peers_map: >-
+          {%- set parts = [] -%}
+          {%- for node in cluster_nodes | sort(attribute='node_id') -%}
+            {%- set _ = parts.append(node.node_id | string ~ '=' ~ node.ip) -%}
+          {%- endfor -%}
+          {{ parts | join(',') }}
+  roles:
+    - { role: local_build, when: "ansible_action in ['start', 'setup']" }
+
+- name: Deploy and Setup Metanode Cluster
+  hosts: metanode_cluster
+  become: yes
+  gather_facts: true
+  pre_tasks:
+    - name: Filter active nodes
+      set_fact:
+        active_nodes: >-
+          {%- set nodes = [] -%}
+          {%- for nid in node_ids -%}
+            {%- if target_node == 'all' or target_node | string == nid | string -%}
+              {%- set _ = nodes.append(nid) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ nodes }}
+  roles:
+    - { role: stop_services, when: "active_nodes | length > 0" }
+    - { role: clean_data, when: "active_nodes | length > 0 and ansible_action == 'setup' and keep_data | bool == false" }
+    - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
+    - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
+    - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }

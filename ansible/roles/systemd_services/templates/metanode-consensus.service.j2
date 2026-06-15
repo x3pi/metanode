@@ -1,0 +1,31 @@
+[Unit]
+Description=Metanode Consensus Engine (Rust) — Node {{ item }}
+Documentation=https://github.com/x3pi/metanode
+After=network-online.target metanode-execution-{{ item }}.service
+Wants=network-online.target
+Requires=metanode-execution-{{ item }}.service
+
+[Service]
+Type=simple
+User=metanode
+Group=metanode
+WorkingDirectory={{ metanode_install_dir }}/node-{{ item }}/bin
+
+ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/metanode start --config {{ metanode_install_dir }}/node-{{ item }}/config/consensus.toml
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10s
+
+# Environment
+Environment=RUST_BACKTRACE=full
+LimitNOFILE=100000
+
+# Logging
+StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
+StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
+SyslogIdentifier=metanode-consensus-{{ item }}
+
+[Install]
+WantedBy=multi-user.target

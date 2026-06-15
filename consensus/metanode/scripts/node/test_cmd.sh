@@ -6,7 +6,7 @@ r_node="2"
 RESTORE_SNAPSHOT_URL="http://url"
 CMD_SEQ="
     set -euo pipefail;
-    cd '${REMOTE_DEPLOY_DIR}/metanode/deploy/cluster'
+    cd '${REMOTE_DEPLOY_DIR}/metanode/deploy_systemd/cluster'
     SSH_AUTH='${SSH_AUTH:-}'
     SSH_PASSWORD='${SSH_PASSWORD:-}'
     if [ \"\${SSH_AUTH:-key}\" == \"password\" ] && [ -n \"\${SSH_PASSWORD:-}\" ]; then

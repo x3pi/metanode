@@ -1,0 +1,36 @@
+[Unit]
+Description=Metanode Execution Layer (Go) — Node {{ item }}
+Documentation=https://github.com/x3pi/metanode
+After=network-online.target
+Wants=network-online.target
+# Consensus depends on execution — execution must start first
+Before=metanode-consensus-{{ item }}.service
+
+[Service]
+Type=simple
+User=metanode
+Group=metanode
+WorkingDirectory={{ metanode_install_dir }}/node-{{ item }}/bin
+
+ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/simple_chain -config={{ metanode_install_dir }}/node-{{ item }}/config/execution.json
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=15s
+
+# Environment
+Environment=GOTRACEBACK=all
+# Default to validator, but synconly logic can be injected here based on variables
+Environment=NODE_TYPE={% if item in btrfs_nodes|default([]) %}synconly{% else %}validator{% endif %}
+
+LimitNOFILE=100000
+
+# Logging
+StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
+StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
+SyslogIdentifier=metanode-execution-{{ item }}
+
+[Install]
+WantedBy=multi-user.target
