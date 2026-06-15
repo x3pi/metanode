@@ -236,11 +236,17 @@ func (w *ChannelWorker) sendBatchWithResponse(batch []byte) (bool, error) {
 		return false, err
 	}
 
-	// Đọc response từ Rust: [4 bytes: response_length][response_json]
-	// Response format: {"success":true/false,"error":"..."}
+	// Đọc response từ Rust theo chuẩn Binary: [1 byte: status][4 bytes: message_length][message_bytes]
 	w.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	defer w.conn.SetReadDeadline(time.Time{})
 	defer w.conn.SetWriteDeadline(time.Time{})
+
+	// Đọc status (1 byte)
+	statusBuf := make([]byte, 1)
+	if _, err := io.ReadFull(w.conn, statusBuf); err != nil {
+		return false, fmt.Errorf("failed to read response status: %w", err)
+	}
+	success := statusBuf[0] == 0x01
 
 	// Đọc response length (4 bytes)
 	respLenBuf := make([]byte, 4)
@@ -249,40 +255,37 @@ func (w *ChannelWorker) sendBatchWithResponse(batch []byte) (bool, error) {
 	}
 
 	respLen := binary.BigEndian.Uint32(respLenBuf)
-	if respLen == 0 || respLen > 1024*1024 { // Max 1MB response
+	if respLen > 1024*1024 { // Max 1MB response message
 		return false, fmt.Errorf("invalid response length: %d", respLen)
 	}
 
-	// Đọc response data
-	respData := make([]byte, respLen)
-	if _, err := io.ReadFull(w.conn, respData); err != nil {
-		return false, fmt.Errorf("failed to read response data: %w", err)
+	var respStr string
+	if respLen > 0 {
+		// Đọc response message data
+		respData := make([]byte, respLen)
+		if _, err := io.ReadFull(w.conn, respData); err != nil {
+			return false, fmt.Errorf("failed to read response data: %w", err)
+		}
+		respStr = strings.ToLower(string(respData))
 	}
 
-	// Parse JSON response to check if rejected
-	// Response format: {"success":true/false,"queued":true/false,"error":"..."}
-	respStr := strings.ToLower(string(respData))
-	if len(respStr) > 0 && (respStr[0] == '{' || respStr[0] == '[') {
-		// SUCCESS CHECK: If response contains "success":true or "queued":true, treat as accepted
-		if strings.Contains(respStr, `"success":true`) || strings.Contains(respStr, `"queued":true`) {
-			return false, nil // Not rejected — Rust accepted or queued the TX
-		}
-		// REJECTION CHECK: Only reject if success is false AND contains error keywords
-		if strings.Contains(respStr, "epoch transition") ||
-			strings.Contains(respStr, "not ready") ||
-			strings.Contains(respStr, "node not ready") ||
-			strings.Contains(respStr, "fetching") ||
-			strings.Contains(respStr, "initializing") ||
-			strings.Contains(respStr, "catching up") ||
-			strings.Contains(respStr, "initialization") {
-			return true, nil // Rejected (Retryable)
-		}
-		// Handle UNKNOWN errors explicitly: return the error so it's not silently treated as a success
-		return false, fmt.Errorf("UDS sender reported error: %s", respStr)
+	if success {
+		return false, nil // Not rejected — Rust accepted or queued the TX
 	}
 
-	// Non-JSON response (hoặc rỗng)
-	return false, fmt.Errorf("invalid response format from UDS sender: %s", respStr)
+	// REJECTION CHECK: Only reject if success is false AND contains error keywords
+	if strings.Contains(respStr, "epoch transition") ||
+		strings.Contains(respStr, "not ready") ||
+		strings.Contains(respStr, "node not ready") ||
+		strings.Contains(respStr, "fetching") ||
+		strings.Contains(respStr, "initializing") ||
+		strings.Contains(respStr, "catching up") ||
+		strings.Contains(respStr, "initialization") {
+		return true, nil // Rejected (Retryable)
+	}
+
+	// Handle UNKNOWN errors explicitly: return the error so it's not silently treated as a success
+	return false, fmt.Errorf("UDS sender reported error: %s", respStr)
 }
 
 // reconnect tạo connection mới

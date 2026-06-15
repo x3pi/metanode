@@ -18,6 +18,18 @@ use std::path::Path;
 use std::ptr;
 use std::slice;
 
+macro_rules! ffi_catch_unwind {
+    ($default:expr, $body:expr) => {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $body
+        })).unwrap_or_else(|err| {
+            eprintln!("[nomt_ffi] PANIC CAUGHT: {:?}", err);
+            $default
+        })
+    };
+}
+
+
 
 /// Opaque handle to the NOMT database instance.
 /// Wrapped in Mutex to safely share between Go goroutines.
@@ -97,6 +109,8 @@ pub unsafe extern "C" fn nomt_open(
     hashtable_buckets: c_int,
     preallocate_ht: c_int,
 ) -> *mut NomtHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
     if path.is_null() {
         eprintln!("[nomt_ffi] nomt_open: null path");
         return ptr::null_mut();
@@ -165,6 +179,8 @@ pub unsafe extern "C" fn nomt_open(
             ptr::null_mut()
         }
     }
+
+    })
 }
 
 /// Close a NOMT database and free all resources.
@@ -173,11 +189,15 @@ pub unsafe extern "C" fn nomt_open(
 /// The handle must have been created by `nomt_open` and not yet closed.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_close(handle: *mut NomtHandle) {
+    ffi_catch_unwind!((), {
+
     if !handle.is_null() {
         unsafe {
             let _ = Box::from_raw(handle);
         }
     }
+
+    })
 }
 
 /// Get the current root hash of the trie.
@@ -190,6 +210,8 @@ pub unsafe extern "C" fn nomt_close(handle: *mut NomtHandle) {
 /// 0 on success, -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || root_out.is_null() {
         return -1;
     }
@@ -202,6 +224,8 @@ pub unsafe extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8)
         ptr::copy_nonoverlapping(root_bytes.as_ptr(), root_out, 32);
     }
     0
+
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -229,6 +253,8 @@ pub unsafe extern "C" fn nomt_read(
     val_max_len: size_t,
     val_actual_len: *mut size_t,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || key.is_null() {
         return -1;
     }
@@ -263,6 +289,8 @@ pub unsafe extern "C" fn nomt_read(
             -1
         }
     }
+
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -278,6 +306,8 @@ pub unsafe extern "C" fn nomt_read(
 /// Pointer to SessionHandle, or null on failure.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut SessionHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
     if handle.is_null() {
         return ptr::null_mut();
     }
@@ -295,6 +325,8 @@ pub unsafe extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut Ses
         reads: Vec::new(),
     });
     Box::into_raw(session_handle)
+
+    })
 }
 
 /// Dispatches a background asynchronous fetch to the NOMT threadpool to load 
@@ -304,6 +336,8 @@ pub unsafe extern "C" fn nomt_session_warm_up(
     session: *mut SessionHandle,
     key: *const u8,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if session.is_null() || key.is_null() {
         return -1;
     }
@@ -317,6 +351,8 @@ pub unsafe extern "C" fn nomt_session_warm_up(
 
     session_ref.session.warm_up(key_path);
     0
+
+    })
 }
 
 /// Add a read record to the session (for ReadThenWrite tracking).
@@ -337,6 +373,8 @@ pub unsafe extern "C" fn nomt_session_record_read(
     val: *const u8,
     val_len: size_t,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if session.is_null() || key.is_null() {
         return -1;
     }
@@ -356,6 +394,8 @@ pub unsafe extern "C" fn nomt_session_record_read(
 
     session.reads.push((key_path, value));
     0
+
+    })
 }
 
 /// Add a write to the session.
@@ -375,6 +415,8 @@ pub unsafe extern "C" fn nomt_session_write(
     val: *const u8,
     val_len: size_t,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if session.is_null() || key.is_null() {
         return -1;
     }
@@ -394,6 +436,8 @@ pub unsafe extern "C" fn nomt_session_write(
 
     session.writes.push((key_path, value));
     0
+
+    })
 }
 
 /// Batch-add multiple writes to the session at once.
@@ -419,6 +463,8 @@ pub unsafe extern "C" fn nomt_session_batch_write(
     val_lens: *const size_t,
     count: size_t,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if session.is_null() || keys.is_null() || val_lens.is_null() {
         return -1;
     }
@@ -449,6 +495,8 @@ pub unsafe extern "C" fn nomt_session_batch_write(
         }
     }
     0
+
+    })
 }
 
 /// Batch-add multiple read records to the session (for ReadThenWrite tracking).
@@ -470,6 +518,8 @@ pub unsafe extern "C" fn nomt_session_batch_record_read(
     val_lens: *const size_t,
     count: size_t,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if session.is_null() || keys.is_null() || val_lens.is_null() {
         return -1;
     }
@@ -500,6 +550,8 @@ pub unsafe extern "C" fn nomt_session_batch_record_read(
         }
     }
     0
+
+    })
 }
 
 
@@ -521,6 +573,8 @@ pub unsafe extern "C" fn nomt_session_commit(
     session: *mut SessionHandle,
     new_root_out: *mut u8,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || session.is_null() {
         return -1;
     }
@@ -594,6 +648,8 @@ pub unsafe extern "C" fn nomt_session_commit(
             -1
         }
     }
+
+    })
 }
 
 /// Finish the session: compute the Merkle root but DO NOT write to disk yet.
@@ -607,6 +663,8 @@ pub unsafe extern "C" fn nomt_session_finish(
     session: *mut SessionHandle,
     new_root_out: *mut u8,
 ) -> *mut FinishedSessionHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
     if handle.is_null() || session.is_null() {
         return ptr::null_mut();
     }
@@ -657,6 +715,8 @@ pub unsafe extern "C" fn nomt_session_finish(
             ptr::null_mut()
         }
     }
+
+    })
 }
 
 /// Commit a finished session to disk (Disk I/O bound).
@@ -668,6 +728,8 @@ pub unsafe extern "C" fn nomt_commit_payload(
     handle: *mut NomtHandle,
     finished_session: *mut FinishedSessionHandle,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || finished_session.is_null() {
         return -1;
     }
@@ -682,16 +744,22 @@ pub unsafe extern "C" fn nomt_commit_payload(
             -1
         }
     }
+
+    })
 }
 
 /// Abort an uncommitted finished session.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_finished_session_abort(finished_session: *mut FinishedSessionHandle) {
+    ffi_catch_unwind!((), {
+
     if !finished_session.is_null() {
         unsafe {
             let _ = Box::from_raw(finished_session);
         }
     }
+
+    })
 }
 
 /// Abort an uncommitted session and free its resources.
@@ -700,11 +768,15 @@ pub unsafe extern "C" fn nomt_finished_session_abort(finished_session: *mut Fini
 /// The session handle must have been created by `nomt_session_begin` and not yet committed.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
+    ffi_catch_unwind!((), {
+
     if !session.is_null() {
         unsafe {
             let _ = Box::from_raw(session);
         }
     }
+
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -782,6 +854,8 @@ pub unsafe extern "C" fn nomt_checkpoint(
     src_path: *const c_char,
     dest_path: *const c_char,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || src_path.is_null() || dest_path.is_null() {
         eprintln!("[nomt_ffi] nomt_checkpoint: null argument");
         return -1;
@@ -813,6 +887,8 @@ pub unsafe extern "C" fn nomt_checkpoint(
             -1
         }
     }
+
+    })
 }
 
 /// Generate a Merkle proof for the given key path.
@@ -829,6 +905,8 @@ pub unsafe extern "C" fn nomt_generate_proof(
     proof_out: *mut *mut u8,
     proof_len: *mut usize,
 ) -> c_int {
+    ffi_catch_unwind!(-1, {
+
     if handle.is_null() || key.is_null() || proof_out.is_null() || proof_len.is_null() {
         eprintln!("[nomt_ffi] nomt_generate_proof: null pointer argument");
         return -1;
@@ -868,14 +946,20 @@ pub unsafe extern "C" fn nomt_generate_proof(
             -1
         }
     }
+
+    })
 }
 
 /// Free the proof byte array allocated by `nomt_generate_proof`.
 #[no_mangle]
 pub unsafe extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
+    ffi_catch_unwind!((), {
+
     if !proof_ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(proof_ptr, len, len);
         }
     }
+
+    })
 }

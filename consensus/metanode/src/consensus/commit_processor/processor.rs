@@ -581,17 +581,18 @@ impl CommitProcessor {
                         info!("⏳ [STATION 3: PROCESSOR] Pausing execution - epoch transition in progress...");
                         logged = true;
                     }
-                    // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
-                    // flag is never cleared (e.g., panic in transition code despite
-                    // Drop guard, or silent task cancellation).
-                    // Increased to 300s to allow for heavy state trie updates during Go epoch transitions
-                    if transition_wait_start.elapsed() > tokio::time::Duration::from_secs(300) {
-                        error!(
-                            "🚨 [PROCESSOR] is_transitioning stuck for 300s! Force-clearing to prevent permanent deadlock."
+                    
+                    // FORK-SAFETY FIX: Timeout removed entirely to enforce ZERO-FORK INVARIANT.
+                    // If Go is stuck transitioning, we MUST pend indefinitely.
+                    // Force-clearing this flag while Go is still transitioning would cause a hard fork.
+                    // Log warning periodically instead.
+                    if transition_wait_start.elapsed().as_secs() > 0 && transition_wait_start.elapsed().as_secs() % 60 == 0 {
+                        warn!(
+                            "⏳ [PROCESSOR] Still waiting for Go epoch transition to finish... (elapsed={}s)", 
+                            transition_wait_start.elapsed().as_secs()
                         );
-                        is_transitioning.store(false, std::sync::atomic::Ordering::Release);
-                        break;
                     }
+                    
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
                 if logged {
