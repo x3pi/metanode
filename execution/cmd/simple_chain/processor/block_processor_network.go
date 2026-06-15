@@ -3,18 +3,14 @@
 package processor
 
 import (
-	"context"
+
 	"fmt"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	"github.com/meta-node-blockchain/meta-node/pkg/block"
-	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -24,7 +20,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
-	"github.com/meta-node-blockchain/meta-node/types/network"
+
 )
 
 // runUnixSocket starts the Unix socket for Rust queries / or FFI Bridge
