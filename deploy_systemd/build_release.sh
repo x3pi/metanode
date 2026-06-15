@@ -54,7 +54,8 @@ log_ok "Metanode binary copied to release."
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
 log_step "Building Go Execution Engine"
 cd "$PROJECT_ROOT/execution/cmd/simple_chain"
-go build -o simple_chain .
+go clean -cache
+go build -a -o simple_chain .
 cp simple_chain "$RELEASE_DIR/bin/"
 log_ok "simple_chain binary copied to release."
 
@@ -110,7 +111,7 @@ log_ok "Scripts & templates copied successfully."
 # ─── 5. Create Tarball ──────────────────────────────────────────────────────
 log_step "Packaging Release"
 cd "$PROJECT_ROOT"
-tar -czvf "$TARBALL_NAME" $(basename "$RELEASE_DIR")
+tar -czvf "$TARBALL_NAME" "$(basename "$RELEASE_DIR")"
 
 log_step "DONE"
 log_ok "Successfully created Standalone Release Package: ${PROJECT_ROOT}/${TARBALL_NAME}"

@@ -24,6 +24,7 @@
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
     mode: '0755'
+    extra_opts: ['--strip-components=1']
 
 - name: Copy keys for each node to remote
   ansible.builtin.copy:

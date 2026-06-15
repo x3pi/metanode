@@ -43,7 +43,7 @@
           {{ nodes }}
   roles:
     - { role: stop_services, when: "active_nodes | length > 0" }
-    - { role: clean_data, when: "active_nodes | length > 0 and ansible_action == 'setup' and keep_data | bool == false" }
+    - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
