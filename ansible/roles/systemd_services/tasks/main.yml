@@ -54,9 +54,9 @@
 
 - name: Copy genesis file
   ansible.builtin.copy:
-    src: "{{ remote_deploy_dir }}/configs/genesis.json"
+    src: "{{ deploy_dir }}/genesis-main.json"
     dest: "{{ metanode_install_dir }}/node-{{ item }}/config/genesis.json"
-    remote_src: yes
+    remote_src: no
     owner: metanode
     group: metanode
     mode: '0644'
