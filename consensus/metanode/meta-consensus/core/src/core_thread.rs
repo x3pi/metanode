@@ -15,9 +15,6 @@ use consensus_types::block::{BlockRef, Round};
 use parking_lot::RwLock;
 use thiserror::Error;
 use tokio::sync::{mpsc::{Sender, Receiver, WeakSender, channel}, oneshot, watch};
-use tokio::task::JoinHandle;
-
-
 use crate::{
     block::VerifiedBlock,
     commit::CertifiedCommits,

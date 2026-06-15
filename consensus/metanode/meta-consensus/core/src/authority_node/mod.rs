@@ -388,7 +388,7 @@ where
 
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
 
-        let mut proposed_block_handler = ProposedBlockHandler::new(
+        let proposed_block_handler = ProposedBlockHandler::new(
             context.clone(),
             signals_receivers.block_broadcast_receiver(),
             transaction_certifier.clone(),
