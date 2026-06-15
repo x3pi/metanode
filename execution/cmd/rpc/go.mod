@@ -13,6 +13,7 @@ require (
 	github.com/herumi/bls-eth-go-binary v1.37.0
 	github.com/holiman/uint256 v1.3.1
 	github.com/otiai10/copy v1.14.0
+	github.com/planetscale/vtprotobuf v0.6.0
 	github.com/quic-go/quic-go v0.50.0
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible
 	github.com/stretchr/testify v1.10.0
