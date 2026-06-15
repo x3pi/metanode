@@ -12,6 +12,23 @@ Bạn **KHÔNG CẦN** phải gõ lệnh `ansible-playbook` dài dòng nữa. H�
 
 > **Lưu ý:** Mọi cấu hình về IP, tài khoản SSH, mật khẩu đều được tự động lấy từ file `inventory.yml`. Bạn chỉ cần sửa file đó 1 lần duy nhất!
 
+### 📌 Tổng hợp các Cờ (Flags) và Giá trị Mặc định
+
+Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn có thể truyền vào khi chạy `ansible_deploy.sh`:
+
+| Tham số (Flag) | Giá trị Mặc định | Ý nghĩa & Tác dụng |
+| --- | --- | --- |
+| `--start` | Được gọi tự động nếu chạy không tham số | Khởi động Node, cập nhật file chạy (binary) mới nhất. **Giữ nguyên** Dữ liệu (Database) và Chìa khóa (Keys). |
+| `--reset-all` | N/A | Chế độ cài mới. **Xóa sạch** toàn bộ Dữ liệu cũ, đúc lại bộ Chìa khóa/Genesis mới và khởi động mạng lưới mới tinh. |
+| `--stop` | N/A | Gửi lệnh dừng an toàn (Stop) đến toàn bộ các dịch vụ (Execution, Consensus, RPC Proxy) đang chạy. |
+| `--clean` | `false` | Ép hệ thống **Xóa sạch Database cũ** nhưng KHÔNG đúc lại chìa khóa (Keys) mới. Hữu ích khi bạn muốn reset Blockchain về block 0 nhưng vẫn giữ nguyên danh tính Node. Kết hợp: `--start --clean`. |
+| `--only-node N` | `all` (Mặc định chạy trên tất cả các node) | Chỉ định thực hiện các thao tác (start, stop, reset) **DUY NHẤT** trên máy chủ chứa Node số `N`. |
+| `--restore-node N`| `none` (Không thực hiện khôi phục) | Cờ đặc biệt: Báo hiệu sẽ khôi phục dữ liệu cho Node `N`. Hệ thống sẽ tải Snapshot và giải nén vào thư mục `data`. Thường kết hợp với `--reset-all`. |
+| `--snapshot-url` | Rỗng (`""`) | Cung cấp đường link tải Snapshot (Ví dụ: `http://192.168.1.230:8604`). Bắt buộc đi kèm khi sử dụng `--restore-node`. |
+| `--open-ports` | `false` (Không mở port) | Gọi script cấu hình Firewall (UFW) trên Server để mở thông tất cả các cổng (P2P, RPC, Metrics...). Thường chỉ chạy 1 lần lúc cài đặt máy chủ mới. |
+
+---
+
 ### 1. Cài đặt mới từ đầu (Tạo Keys, Cấu hình, Xóa DATA)
 Để tạo cấu hình mới, sinh lại chìa khóa (Keys) và làm sạch toàn bộ dữ liệu cũ từ đầu đến cuối, bạn hãy dùng cờ `--reset-all`.
 ```bash
@@ -73,6 +90,20 @@ Giả sử Node 2 bị hỏng data, bạn muốn cài đặt lại Node 2 và t�
 ```
 **Lệnh này sẽ làm gì?**
 Thực hiện toàn bộ quy trình của lệnh `--reset-all` đối với Node 2. Tuy nhiên, thay vì bật máy lên ngay để Node 2 tự sync từ khối số 0, nó sẽ mồi (gọi bash script) tải file Snapshot từ URL được cấp và bung nén thẳng vào thư mục `data` của Node 2 trước khi Start Node.
+
+---
+
+### 6. Tự động khởi động RPC Proxy & Mở Tường Lửa (Firewall)
+Hệ thống Ansible giờ đây sẽ lo trọn gói việc khởi động **Proxy RPC** và định tuyến tường lửa cho bạn. 
+- Mặc định sau quá trình deploy (chạy `--start` hoặc `--reset-all`), service `metanode-rpc-<id>.service` sẽ được tự động cấu hình và bật song song với hai tiến trình chính.
+- Nếu bạn cài đặt trên một cụm Server mới tinh và muốn mở port Firewall (UFW) một cách tự động, hãy thêm cờ `--open-ports` vào lệnh:
+```bash
+./ansible_deploy.sh --start --open-ports
+# Hoặc kết hợp với reset:
+./ansible_deploy.sh --reset-all --open-ports
+```
+**Lệnh này sẽ làm gì?**
+Thực thi script `open_ports.sh` trên từng máy chủ tương ứng để tự động thêm rule `ufw allow` cho tất cả các cổng cần thiết (Execution, Consensus, RPC, Snapshot, Metrics). Vì Firewall chỉ cần mở 1 lần duy nhất, bạn không cần dùng cờ này trong các lần cập nhật tiếp theo.
 
 ---
 

@@ -47,3 +47,63 @@
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
+
+- name: Post-deployment actions
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Generate /tmp/rpc_nodes.json for testing tools
+      ansible.builtin.shell: |
+        RPC_JSON_PATH="/tmp/rpc_nodes.json"
+        JSON_NODES=()
+        JSON_RPC_PROXIES=()
+        JSON_TCP_NODES=()
+
+        {% for node in cluster_nodes | sort(attribute='node_id') %}
+        id={{ node.node_id }}
+        ip="{{ node.ip }}"
+        local_cfg_dir="{{ deploy_dir }}/node-${id}_keys"
+        
+        port=""
+        tcp_port=""
+        if [ -f "$local_cfg_dir/execution.json" ]; then
+            port=$(jq -r '.rpc_port' "$local_cfg_dir/execution.json" | tr -d ':')
+            conn_addr=$(jq -r '.connection_address' "$local_cfg_dir/execution.json")
+            if [ "$conn_addr" != "null" ]; then
+                tcp_port="${conn_addr##*:}"
+            fi
+        fi
+        
+        if [ -z "$port" ] || [ "$port" == "null" ] || [ -z "$tcp_port" ]; then
+            echo "Cannot read rpc_port or connection_address from $local_cfg_dir/execution.json" >&2
+            exit 1
+        fi
+        
+        proxy_http=$((8650 + id))
+        
+        JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
+        JSON_RPC_PROXIES+=("\"m${id}\": \"http://${ip}:${proxy_http}\"")
+        JSON_TCP_NODES+=("\"m${id}\": \"${ip}:${tcp_port}\"")
+        {% endfor %}
+
+        JOINED_NODES=$(IFS=, ; echo "${JSON_NODES[*]}")
+        JOINED_RPC=$(IFS=, ; echo "${JSON_RPC_PROXIES[*]}")
+        JOINED_TCP=$(IFS=, ; echo "${JSON_TCP_NODES[*]}")
+
+        cat > "$RPC_JSON_PATH" <<EOF
+        {
+          "nodes": {
+            $JOINED_NODES
+          },
+          "rpc_proxies": {
+            $JOINED_RPC
+          },
+          "tcp_nodes": {
+            $JOINED_TCP
+          }
+        }
+        EOF
+      args:
+        executable: /bin/bash
+

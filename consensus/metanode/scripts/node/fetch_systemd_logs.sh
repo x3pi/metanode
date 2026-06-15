@@ -124,11 +124,11 @@ for server in $SERVERS; do
         TARGET_DIR="$RUN_LOGS_DIR/node_${id}_logs"
         
         if [ "${SSH_AUTH:-key}" == "password" ]; then
-            sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
+            sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -q -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}"
         elif [ -n "${SSH_KEY:-}" ]; then
-            scp $SSH_OPTS -r -i "$SSH_KEY" "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
+            scp $SSH_OPTS -q -r -i "$SSH_KEY" "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}"
         else
-            scp $SSH_OPTS -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}" 2>/dev/null
+            scp $SSH_OPTS -q -r "${SSH_USER}@${server}:${NODE_LOGS_DIR}" "${TARGET_DIR}"
         fi
 
         if [ -d "$TARGET_DIR" ]; then
@@ -141,11 +141,11 @@ for server in $SERVERS; do
             RPC_LOGS_DIR="/opt/metanode/rpc-proxy/node${id}_data/logs"
             TARGET_RPC_DIR="$RUN_LOGS_DIR/node_${id}_rpc_logs"
             if [ "${SSH_AUTH:-key}" == "password" ]; then
-                sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+                sshpass -p "$SSH_PASSWORD" scp $SSH_OPTS -q -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" || true
             elif [ -n "${SSH_KEY:-}" ]; then
-                scp $SSH_OPTS -r -i "$SSH_KEY" "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+                scp $SSH_OPTS -q -r -i "$SSH_KEY" "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" || true
             else
-                scp $SSH_OPTS -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" 2>/dev/null || true
+                scp $SSH_OPTS -q -r "${SSH_USER}@${server}:${RPC_LOGS_DIR}" "${TARGET_RPC_DIR}" || true
             fi
 
             if [ -d "$TARGET_RPC_DIR" ]; then
