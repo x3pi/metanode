@@ -493,6 +493,10 @@ pub struct LogConfig {
     pub file_output: bool,
     #[serde(default)]
     pub file_path: Option<String>,
+    #[serde(default)]
+    pub enable_otlp_tracing: bool,
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Default for LogConfig {
@@ -503,6 +507,8 @@ impl Default for LogConfig {
             console_output: default_true(),
             file_output: false,
             file_path: None,
+            enable_otlp_tracing: false,
+            otlp_endpoint: None,
         }
     }
 }

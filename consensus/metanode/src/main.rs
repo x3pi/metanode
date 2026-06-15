@@ -49,25 +49,32 @@ async fn main() -> Result<()> {
 
             // Initialize tracing from config file
             let log_config = node_config.log.clone().unwrap_or_default();
-            let level = log_config.level.as_str();
-            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("metanode={},consensus_core={}", level, level).into());
+            let level = log_config.level.clone();
 
-            let builder = tracing_subscriber::fmt().with_env_filter(env_filter);
+            // Create registry for metrics early so we can pass it to telemetry
+            let registry = prometheus::Registry::new();
+
+            let mut telemetry_config = telemetry_subscribers::TelemetryConfig::new()
+                .with_log_level(&level)
+                .with_prom_registry(&registry);
 
             if log_config.format == "json" {
-                builder.json().init();
-            } else {
-                builder.init();
+                telemetry_config = telemetry_config.with_json();
             }
+
+            if log_config.enable_otlp_tracing {
+                std::env::set_var("TRACE_FILTER", "info");
+                if let Some(endpoint) = &log_config.otlp_endpoint {
+                    std::env::set_var("OTLP_ENDPOINT", endpoint);
+                }
+            }
+
+            let _guards = telemetry_config.with_env().init();
 
             info!("Starting MetaNode Consensus Engine...");
             info!("Loading configuration from: {:?}", config);
             info!("Node ID: {}", node_config.node_id);
             info!("Network address: {}", node_config.network_address);
-
-            // Create registry for metrics
-            let registry = prometheus::Registry::new();
 
             // Initialize and start the node
             let startup_config = StartupConfig::new(node_config, registry, None);

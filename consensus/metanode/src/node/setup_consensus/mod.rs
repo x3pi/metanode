@@ -1067,10 +1067,12 @@ impl ConsensusNode {
         let executor_client_for_manager = executor_client_for_proc.clone();
         let del_rx = delivery_rx;
         tokio::spawn(async move {
+            let metrics = std::sync::Arc::new(crate::node::sync_metrics::SyncMetrics::new(prometheus::default_registry()));
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 executor_client_for_manager,
                 del_rx,
                 peer_addrs,
+                metrics,
             );
             manager.run().await;
             tracing::info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager gracefully exited (expected on Epoch Transition).");
