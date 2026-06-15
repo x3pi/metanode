@@ -19,10 +19,10 @@ const (
 	BASE_FEE_CHANGE_PERCENTAGE            = 12.5
 	MAX_GASS_FEE                          = 5000000
 
-	MAX_GROUP_GAS    = 9999999999999999999
-	MAX_TOTAL_GAS    = 9999999999999999999
-	MAX_GROUP_TIME   = 9999999999999999999 // Millisecond giây
-	MAX_TOTAL_TIME   = 9999999999999999999 // Millisecond giây
+	MAX_GROUP_GAS    uint64 = 9999999999999999999
+	MAX_TOTAL_GAS    uint64 = 9999999999999999999
+	MAX_GROUP_TIME   uint64 = 9999999999999999999 // Millisecond giây
+	MAX_TOTAL_TIME   uint64 = 9999999999999999999 // Millisecond giây
 	MIN_TX_TIME      = 1                   // Millisecond giây
 	MAX_TIME_PENDING = 5                   // phút
 
