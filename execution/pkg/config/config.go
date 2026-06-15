@@ -143,6 +143,8 @@ type SimpleChainConfig struct {
 	BlsAdminStorage           string   `json:"bls_admin_storage"`
 	OwnerFileStorageAddress   string   `json:"owner_file_storage_address"`
 
+	MinGasPrice               uint64   `json:"min_gas_price,omitempty"`
+
 	// Cross-chain configuration
 	CrossChain CrossChainConfig `json:"cross_chain"`
 
@@ -284,6 +286,11 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			} else if v == "false" || v == "0" {
 				ConfigApp.IsRPCNode = false
 			}
+		}
+		if v := os.Getenv("META_MIN_GAS_PRICE"); v != "" {
+			var parsed uint64
+			fmt.Sscanf(v, "%d", &parsed)
+			ConfigApp.MinGasPrice = parsed
 		}
 
 		if ConfigApp.MVMCacheEnabled == nil {

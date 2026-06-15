@@ -61,7 +61,7 @@ func NewTxValidatorPool(
 	pendingTxManager *PendingTransactionManager,
 	blockProcessingLock *sync.RWMutex,
 ) *TxValidatorPool {
-	return &TxValidatorPool{
+	vp := &TxValidatorPool{
 		env:                 env,
 		offChainProcessor:   offChainProcessor,
 		chainState:          chainState,
@@ -73,11 +73,47 @@ func NewTxValidatorPool(
 		futureTxTimeMap:     make(map[common.Hash]time.Time),
 		blockProcessingLock: blockProcessingLock,
 	}
+
+	vp.StartMemoryMonitor()
+	return vp
 }
 
 // SetEnvironment updates the environment reference
 func (vp *TxValidatorPool) SetEnvironment(env ITransactionProcessorEnvironment) {
 	vp.env = env
+}
+
+// StartMemoryMonitor periodically checks OS memory usage and evicts transactions if approaching GoMemLimitGB.
+func (vp *TxValidatorPool) StartMemoryMonitor() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if vp.chainState == nil || vp.chainState.GetConfig() == nil {
+				continue
+			}
+			limitGB := vp.chainState.GetConfig().GoMemLimitGB
+			if limitGB <= 0 {
+				continue
+			}
+
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+
+			limitBytes := uint64(limitGB) * 1024 * 1024 * 1024
+			threshold := uint64(float64(limitBytes) * 0.90) // 90% threshold
+
+			if memStats.Alloc > threshold {
+				currentCount := vp.transactionPool.CountTransactions()
+				if currentCount > 1000 {
+					evictCount := currentCount / 2 // Evict 50% of mempool
+					logger.Error("🚨 [DDoS PROTECTION] Memory usage high (%d MB > 90%% of limit %d GB). Evicting %d lowest-fee transactions!", 
+						memStats.Alloc/1024/1024, limitGB, evictCount)
+					vp.transactionPool.EvictLowestGasPrice(evictCount)
+				}
+			}
+		}
+	}()
 }
 
 func (vp *TxValidatorPool) AddExcludedItems(items []grouptxns.Item) {
@@ -116,9 +152,18 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.InvalidTransaction.Code, fmt.Errorf("tx nil")
 	}
 
+	minGasPrice := vp.chainState.GetConfig().MinGasPrice
+	if minGasPrice > 0 && tx.MaxGasPrice() < minGasPrice {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction gas price (%d) is below node minimum (%d)", tx.MaxGasPrice(), minGasPrice)
+	}
+
 	// Limit pool size to prevent GC stall / OOM
 	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
-		return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d)", MaxMempoolSize)
+		logger.Warn("⚠️ Mempool is full (limit=%d). Evicting 100 lowest-fee transactions to make room for new txs.", MaxMempoolSize)
+		evicted := vp.transactionPool.EvictLowestGasPrice(100)
+		if evicted == 0 {
+			return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+		}
 	}
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {
@@ -232,14 +277,16 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	}
 
 	// Limit pool size to prevent GC stall / OOM
-	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
-		err := fmt.Errorf("transaction pool is full (limit=%d)", MaxMempoolSize)
-		errs := make([]error, len(txs))
-		for i := range errs {
-			errs[i] = err
+	if vp.transactionPool.CountTransactions()+len(txs) >= MaxMempoolSize {
+		evictCount := len(txs)
+		if evictCount < 1000 {
+			evictCount = 1000
 		}
-		return errs
+		logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
+		vp.transactionPool.EvictLowestGasPrice(evictCount)
 	}
+
+	minGasPrice := vp.chainState.GetConfig().MinGasPrice
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {
 		err := fmt.Errorf(transaction.NodeSyncingError.Description)
@@ -311,6 +358,10 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 				defer wg.Done()
 				for i := s; i < e; i++ {
 					if txs[i] == nil {
+						continue
+					}
+					if minGasPrice > 0 && txs[i].MaxGasPrice() < minGasPrice {
+						errorsList[i] = fmt.Errorf("[code:%d] transaction gas price (%d) is below node minimum (%d)", transaction.InvalidTransaction.Code, txs[i].MaxGasPrice(), minGasPrice)
 						continue
 					}
 					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, nil); err != nil {
