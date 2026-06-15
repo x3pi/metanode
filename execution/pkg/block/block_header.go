@@ -38,6 +38,7 @@ type BlockHeader struct {
 	epoch              uint64 // Bổ sung epoch field
 	globalExecIndex    uint64 // Maps Go block number → Rust consensus commit index
 	commitIndex        uint64 // Rust consensus commit index
+	logsBloom          []byte // Bloom Filter for Event Logs
 }
 
 func NewBlockHeader(
@@ -126,6 +127,14 @@ func (b *BlockHeader) SetCommitIndex(index uint64) {
 	b.commitIndex = index
 }
 
+func (b *BlockHeader) LogsBloom() []byte {
+	return b.logsBloom
+}
+
+func (b *BlockHeader) SetLogsBloom(bloom []byte) {
+	b.logsBloom = bloom
+}
+
 func (b *BlockHeader) Marshal() ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(b.Proto())
 }
@@ -163,6 +172,7 @@ func (b *BlockHeader) Hash() common.Hash {
 	pbHeader.TransactionsRoot = b.transactionsRoot.Bytes()
 	pbHeader.Epoch = b.epoch
 	pbHeader.GlobalExecIndex = b.globalExecIndex
+	pbHeader.LogsBloom = b.logsBloom
 
 	bufPtr := blockHashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -187,6 +197,7 @@ func (b *BlockHeader) Proto() *pb.BlockHeader {
 		Epoch:             b.epoch,
 		GlobalExecIndex:   b.globalExecIndex,
 		CommitIndex:       b.commitIndex,
+		LogsBloom:         b.logsBloom,
 	}
 }
 
@@ -203,6 +214,7 @@ func (b *BlockHeader) FromProto(pbBlockHeader *pb.BlockHeader) {
 	b.epoch = pbBlockHeader.Epoch
 	b.globalExecIndex = pbBlockHeader.GlobalExecIndex
 	b.commitIndex = pbBlockHeader.CommitIndex
+	b.logsBloom = pbBlockHeader.LogsBloom
 }
 
 func (b *BlockHeader) SetAccountStatesRoot(hash common.Hash) {

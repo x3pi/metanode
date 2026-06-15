@@ -18,6 +18,7 @@ message BlockHeader{
   uint64 TimeStamp = 7;
   bytes TransactionsRoot = 8;
   bytes StakeStatesRoot = 9;
+  bytes LogsBloom = 13;
 }
 
 message Block {
