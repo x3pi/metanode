@@ -43,6 +43,11 @@ log_step "Building Rust Consensus Engine"
 cd "$PROJECT_ROOT/consensus/metanode"
 # Cần export RUSTFLAGS nếu cần, hoặc mặc định
 cargo build --release
+
+# FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
+mkdir -p "$PROJECT_ROOT/consensus/metanode/target/release"
+cp -p "$PROJECT_ROOT/target/release/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/release/libmetanode.a" 2>/dev/null || true
+
 cp "$PROJECT_ROOT/target/release/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
