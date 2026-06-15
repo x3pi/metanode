@@ -317,7 +317,7 @@ ntp_servers = [
 ]
 ntp_sync_interval_seconds = 300
 executor_read_enabled = true
-executor_commit_enabled = true
+executor_commit_enabled = {str(is_validator).lower()}
 executor_send_socket_path = "/tmp/executor{node_id}.sock"
 executor_receive_socket_path = "/tmp/rust-go-node{node_id}-master.sock"
 commit_sync_batch_size = {commit_batch_size}
@@ -448,9 +448,9 @@ def main():
         json.dump(entry, f, indent=2)
         f.write("\n")
 
-    # Auto merge into genesis-main.json if it exists
+    # Auto merge into genesis-main.json if it exists and env_type is validator
     genesis_main_path = "genesis-main.json"
-    if os.path.exists(genesis_main_path):
+    if os.path.exists(genesis_main_path) and env_type == "validator":
         try:
             with open(genesis_main_path, "r") as gf:
                 g_data = json.load(gf)

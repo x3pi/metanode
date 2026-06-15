@@ -91,7 +91,7 @@ source "$ENV_FILE"
 PROJECT_ROOT="${PROJECT_ROOT:-${LOCAL_CHAIN_DIR}/metanode}"
 REMOTE_PROJECT_ROOT="${REMOTE_PROJECT_ROOT:-${REMOTE_DEPLOY_DIR:-/opt/metanode-deploy}/metanode}"
 
-DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy" && pwd)"
+DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy_systemd" && pwd)"
 
 if [ $# -eq 0 ] || [[ "$*" == *"--all"* ]]; then
     DO_BUILD=true; DO_BUILD_EVM=true; DO_PUSH=true; DO_IPS=true; DO_START=true
@@ -175,7 +175,7 @@ log_err()  { echo -e "${RED}  ❌ $1${NC}"; }
 if $DO_SETUP; then
     log_step "PHASE --setup: Generating node configurations"
 
-    DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy" && pwd)"
+    DEPLOY_DIR="$(cd "${PROJECT_ROOT}/deploy_systemd" && pwd)"
     GENESIS_MAIN="${DEPLOY_DIR}/genesis-main.json"
     GEN_VALIDATOR_SCRIPT="${DEPLOY_DIR}/gen_validator_entry.py"
 
@@ -432,7 +432,7 @@ if $DO_BUILD; then
         ) || exit 1
     fi
 
-    log_info "Building all components via deploy/build_release.sh..."
+    log_info "Building all components via deploy_systemd/build_release.sh..."
     (
         cd "${DEPLOY_DIR}"
         bash build_release.sh
@@ -692,7 +692,7 @@ for id in "${!NODE_SERVER[@]}"; do
     ip="${NODE_SERVER[$id]}"
     
     # Lấy rpc_port động từ file cấu hình của từng node
-    local_cfg_dir="${PROJECT_ROOT}/deploy/node-${id}_keys"
+    local_cfg_dir="${PROJECT_ROOT}/deploy_systemd/node-${id}_keys"
     port=""
     tcp_port=""
     if [ -f "$local_cfg_dir/execution.json" ]; then
