@@ -171,7 +171,7 @@ impl AnemoConnectionMonitor {
         }
     }
 
-    // TODO: Replace this with ClosureMetric
+
     fn update_quinn_metrics_for_peer(
         &self,
         peer_id: &str,
