@@ -277,7 +277,7 @@ pub async fn fetch_blocks_from_peer(
     while current_from <= to_block {
         let current_to = std::cmp::min(current_from + batch_size - 1, to_block);
         
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
         let peers = peer_list.clone();
         
         // Spawn a task for this chunk
@@ -330,7 +330,7 @@ pub async fn fetch_blocks_from_peer(
     let mut all_blocks_map = std::collections::BTreeMap::new();
     
     for handle in join_handles {
-        match handle.await.unwrap() {
+        match handle.await.map_err(|e| anyhow::anyhow!("Task panicked: {}", e))? {
             Ok((_, _, blocks)) => {
                 for block in blocks {
                     all_blocks_map.insert(block.block_number, block);
@@ -486,7 +486,7 @@ pub async fn fetch_executable_blocks_from_peer(
     while current_from <= to_gei {
         let current_to = std::cmp::min(current_from + batch_size - 1, to_gei);
         
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
         let peers = peer_list.clone();
         
         let handle = tokio::spawn(async move {
@@ -538,7 +538,7 @@ pub async fn fetch_executable_blocks_from_peer(
     let mut all_blocks_map = std::collections::BTreeMap::new();
     
     for handle in join_handles {
-        match handle.await.unwrap() {
+        match handle.await.map_err(|e| anyhow::anyhow!("Task panicked: {}", e))? {
             Ok((_, _, blocks)) => {
                 for (gei, data) in blocks {
                     all_blocks_map.insert(gei, data);
