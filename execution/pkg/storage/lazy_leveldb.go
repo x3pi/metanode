@@ -215,6 +215,22 @@ func (ldb *LazyLevelDB) Delete(key []byte) error {
 	return nil
 }
 
+// BatchDelete buffers multiple delete operations as tombstones in memory.
+func (ldb *LazyLevelDB) BatchDelete(keys [][]byte) error {
+	ldb.mu.RLock()
+	defer ldb.mu.RUnlock()
+
+	if ldb.isClosed {
+		return fmt.Errorf("database is closed")
+	}
+
+	for _, key := range keys {
+		ldb.memoryCache.Store(string(key), nil) // nil represents a tombstone
+	}
+
+	return nil
+}
+
 // BatchPut buffers multiple write operations in memory.
 func (ldb *LazyLevelDB) BatchPut(keys [][2][]byte) error {
 	ldb.mu.RLock()

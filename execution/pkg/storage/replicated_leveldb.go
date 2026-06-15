@@ -158,6 +158,21 @@ func (r *ReplicatedLevelDB) Delete(key []byte) error {
 	return r.updateSnapshot()
 }
 
+// Xóa nhiều key trong một batch
+func (r *ReplicatedLevelDB) BatchDelete(keys [][]byte) error {
+	batch := new(leveldb.Batch)
+	for _, key := range keys {
+		batch.Delete(key)
+	}
+	writeOptions := &opt.WriteOptions{}
+	err := r.primaryDB.Write(batch, writeOptions)
+	if err != nil {
+		return err
+	}
+
+	return r.updateSnapshot()
+}
+
 // Kiểm tra key có tồn tại không
 func (r *ReplicatedLevelDB) Has(key []byte) bool {
 	if r.snapshot == nil {
