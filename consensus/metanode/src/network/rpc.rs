@@ -517,10 +517,16 @@ impl RpcServer {
                     }
                 }
                 if is_length_prefixed {
-                    // LOCALHOST OPTIMIZATION: Không gửi response cho localhost
-                    // Go client không đọc response, giữ connection mở để gửi nhiều transactions liên tục
-                    // Chỉ log để debug, không gửi response để tối ưu throughput
-                    // Connection sẽ được giữ mở và tái sử dụng cho batch tiếp theo
+                    // Fix: Luôn gửi binary response để tránh việc Go bị block 120s chờ response
+                    if let Err(e) = Self::send_binary_response(
+                        stream,
+                        true,
+                        "OK",
+                    )
+                    .await
+                    {
+                        error!("❌ [TX FLOW] Failed to send binary success response: {}", e);
+                    }
                 } else {
                     // Send HTTP JSON response
                     let response = format!(

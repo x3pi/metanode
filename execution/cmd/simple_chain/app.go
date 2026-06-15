@@ -305,9 +305,6 @@ func (app *App) initRoutes() {
 
 	// Node-level TCP routes (replacing libp2p stream protocols)
 	if app.node != nil {
-		r["BlockRequest"] = app.node.HandleBlockRequest
-		r["BlockResponse"] = app.node.HandleBlockResponse // CRITICAL: Sub receives block data here
-		r["BlockRangeRequest"] = app.node.HandleBlockRangeRequest
 		r["FileTransfer"] = app.node.HandleFileTransfer
 		r["FileRequest"] = app.node.HandleFileRequest
 		r["FreeFeeRequest"] = app.node.HandleFreeFeeRequest
@@ -405,7 +402,8 @@ func (app *App) Run() error {
 	go app.blockProcessor.TxsProcessor2()
 
 	// Bắt đầu tiến trình tải dữ liệu history nếu là rpc node
-	go app.blockProcessor.StartRPCHistorySync()
+	// MÔ HÌNH SYNC MỚI: Toàn bộ quá trình đồng bộ history nay đã được uỷ thác cho Rust, Go không tự sync nữa.
+	// go app.blockProcessor.StartRPCHistorySync()
 
 	// ── CRASH SAFETY: Periodic disk flush every 5 seconds ──────────────
 	// Keeps NoSync for maximum write throughput but limits crash data loss
