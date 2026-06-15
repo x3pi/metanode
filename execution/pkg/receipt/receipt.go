@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -371,4 +372,18 @@ func LoadReceiptByHash(receiptsDataDir string, hash common.Hash) (types.Receipt,
 // This method defines how a Receipt object is converted to JSON.
 func (r *Receipt) MarshalJSON() ([]byte, error) {
 	return r.Json()
+}
+
+// CreateLogsBloom creates a bloom filter for all receipts in the slice.
+func CreateLogsBloom(receipts []types.Receipt) eth_types.Bloom {
+	var bin eth_types.Bloom
+	for _, receipt := range receipts {
+		for _, log := range receipt.EventLogs() {
+			bin.Add(log.Address)
+			for _, topic := range log.Topics {
+				bin.Add(topic)
+			}
+		}
+	}
+	return bin
 }

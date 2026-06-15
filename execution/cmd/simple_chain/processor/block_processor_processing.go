@@ -361,6 +361,12 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		return nil
 	}
 
+	// Bổ sung Bloom Filter cho Event Logs vào Header
+	if len(processResults.Receipts) > 0 {
+		logsBloom := receipt.CreateLogsBloom(processResults.Receipts)
+		bl.Header().SetLogsBloom(logsBloom.Bytes())
+	}
+
 	// NOTE: GlobalExecIndex is already set by NewBlockHeader() constructor (variadic param).
 	// No need to call SetGlobalExecIndex() again — the constructor handles it.
 
