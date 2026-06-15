@@ -243,6 +243,17 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			ConfigApp.RpcRateLimit.BlockDurationSecs = 300 // 5 minutes default block
 		}
 
+		// Pruning default configuration (Pruned/Full mode)
+		if ConfigApp.Pruning.Mode == "" {
+			ConfigApp.Pruning.Mode = "full"
+			if ConfigApp.EpochsToKeep != nil && *ConfigApp.EpochsToKeep > 0 {
+				ConfigApp.Pruning.EpochsToKeep = *ConfigApp.EpochsToKeep
+			} else {
+				ConfigApp.Pruning.EpochsToKeep = 128 // Default to keeping ~128 epochs
+			}
+			ConfigApp.Pruning.PruneIntervalBlocks = 100
+		}
+
 		// Databases sharding defaults
 		if ConfigApp.Databases.NumShardsDefault == 0 {
 			ConfigApp.Databases.NumShardsDefault = 1 // TUNED: Restore to 1 to prevent massive OOM

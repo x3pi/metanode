@@ -28,6 +28,7 @@ type ShardDBInterface interface {
 	Put(key, value []byte) error
 	Delete(key []byte) error
 	BatchPut(keys [][2][]byte) error
+	BatchDelete(keys [][]byte) error
 	PrefixScan(prefix []byte) ([][2][]byte, error)
 	Flush() error
 	Close() error
@@ -255,10 +256,8 @@ func (s *ShardelDB) BatchDelete(keys [][]byte) error {
 		if shard == nil {
 			return fmt.Errorf("shard 0 is nil")
 		}
-		for _, key := range keys {
-			if err := shard.Delete(key); err != nil {
-				return fmt.Errorf("shard 0: key %x, error: %w", key, err)
-			}
+		if err := shard.BatchDelete(keys); err != nil {
+			return fmt.Errorf("shard 0 batch delete error: %w", err)
 		}
 		return nil
 	}
@@ -278,10 +277,8 @@ func (s *ShardelDB) BatchDelete(keys [][]byte) error {
 			if shard == nil {
 				return fmt.Errorf("shard %d is nil", shardIndex)
 			}
-			for _, key := range keys {
-				if err := shard.Delete(key); err != nil {
-					return fmt.Errorf("shard %d: key %x, error: %w", shardIndex, key, err)
-				}
+			if err := shard.BatchDelete(keys); err != nil {
+				return fmt.Errorf("shard %d: batch delete error: %w", shardIndex, err)
 			}
 			return nil
 		})

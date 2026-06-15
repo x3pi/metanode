@@ -45,6 +45,8 @@ type BlockHeader interface {
 	SetGlobalExecIndex(uint64)
 	CommitIndex() uint64
 	SetCommitIndex(uint64)
+	LogsBloom() []byte
+	SetLogsBloom([]byte)
 }
 
 type ConfirmedBlockData interface {

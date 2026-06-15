@@ -233,6 +233,20 @@ func (p *PebbleDB) BatchPut(kvs [][2][]byte) error {
 	return batch.Commit(pebble.Sync)
 }
 
+// BatchDelete removes multiple keys in a single atomic batch.
+func (p *PebbleDB) BatchDelete(keys [][]byte) error {
+	batch := p.db.NewBatch()
+	defer batch.Close()
+
+	for _, key := range keys {
+		if err := batch.Delete(key, nil); err != nil {
+			return fmt.Errorf("pebble batch delete error: %w", err)
+		}
+	}
+
+	return batch.Commit(pebble.Sync)
+}
+
 // PrefixScan iterates all keys with the given prefix and returns key-value pairs.
 // Keys in results have the prefix stripped.
 func (p *PebbleDB) PrefixScan(prefix []byte) ([][2][]byte, error) {
@@ -504,6 +518,19 @@ func (lp *LazyPebbleDB) BatchPut(kvs [][2][]byte) error {
 		valCopy := make([]byte, len(kv[1]))
 		copy(valCopy, kv[1])
 		lp.memoryCache.Store(string(kv[0]), valCopy)
+	}
+	return nil
+}
+
+// BatchDelete buffers multiple deletes as tombstones in memory.
+func (lp *LazyPebbleDB) BatchDelete(keys [][]byte) error {
+	lp.mu.RLock()
+	defer lp.mu.RUnlock()
+	if lp.isClosed {
+		return fmt.Errorf("database is closed")
+	}
+	for _, key := range keys {
+		lp.memoryCache.Store(string(key), nil)
 	}
 	return nil
 }

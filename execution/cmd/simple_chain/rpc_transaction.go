@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -25,7 +26,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -664,6 +664,40 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	return receiptMap, nil
 }
 
+// checkBloomFilter checks if a bloom filter might contain the given addresses and topics.
+// If it returns false, we are 100% sure the block does not contain matching logs.
+func checkBloomFilter(bloom eth_types.Bloom, addresses []common.Address, topics [][]common.Hash) bool {
+	if len(addresses) > 0 {
+		var match bool
+		for _, addr := range addresses {
+			if eth_types.BloomLookup(bloom, addr) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+
+	for _, sub := range topics {
+		if len(sub) == 0 {
+			continue // empty rule set == wildcard
+		}
+		var match bool
+		for _, topic := range sub {
+			if eth_types.BloomLookup(bloom, topic) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	return true
+}
+
 // GetLogs returns logs matching the given argument that are stored within the state.
 func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([]*types.Log, error) {
 	if len(crit.Topics) > maxTopics {
@@ -732,12 +766,29 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 			continue
 		}
 
+		if len(blockData.Transactions()) == 0 {
+			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
+			continue
+		}
+
+		// 🚀 OPTIMIZATION: Check Bloom Filter before opening ReceiptTrie
+		// If the block header has a valid LogsBloom, we can skip decoding the receipts
+		// if the Bloom filter definitively says there's no match.
+		if len(blockData.Header().LogsBloom()) > 0 {
+			bloom := eth_types.BytesToBloom(blockData.Header().LogsBloom())
+			if !checkBloomFilter(bloom, crit.Addresses, crit.Topics) {
+				currentBlockNum.Add(currentBlockNum, big.NewInt(1))
+				continue
+			}
+		}
+
 		rcpDb, err := receipt.NewReceiptsFromRoot(blockData.Header().ReceiptRoot(), api.App.storageManager.GetStorageReceipt())
 		if err != nil {
 			return nil, err
 		}
 
-		for _, txsHash := range blockData.Transactions() {
+		logIndex := uint(0)
+		for txIndex, txsHash := range blockData.Transactions() {
 			receipt, err := rcpDb.GetReceipt(txsHash)
 			if err != nil {
 				return nil, err
@@ -746,23 +797,6 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 			events := receipt.EventLogs()
 
 			for _, eventLog := range events {
-				tx, err := api.GetTransactionByHash(ctx, common.BytesToHash(eventLog.TransactionHash))
-				if err != nil {
-					logger.Warn("error GetTransactionByHash ", err)
-					continue
-				}
-
-				blockNumberUint64, err := utils.HexutilBigToUint64(tx.BlockNumber)
-				if err != nil {
-					logger.Warn("error converting block number ", err)
-					continue
-				}
-
-				if blockNumberUint64 != currentBlockNum.Uint64() {
-					logger.Warn("log block number mismatch", "logBlock", blockNumberUint64, "currentBlock", currentBlockNum.Uint64())
-					continue
-				}
-
 				topics := make([]common.Hash, len(eventLog.Topics))
 				for j, topicStr := range eventLog.Topics {
 					topics[j] = common.BytesToHash(topicStr)
@@ -770,13 +804,17 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 
 				evL := &types.Log{
 					Address:     common.BytesToAddress(eventLog.Address),
-					BlockNumber: blockNumberUint64,
+					BlockNumber: currentBlockNum.Uint64(),
 					Topics:      topics,
 					Data:        eventLog.Data,
 					TxHash:      common.BytesToHash(eventLog.TransactionHash),
 					BlockHash:   hash,
+					TxIndex:     uint(txIndex),
+					Index:       logIndex,
 				}
 				eventLogs = append(eventLogs, evL)
+				logIndex++
+				
 				if len(eventLogs) > maxLogsPerRequest {
 					return nil, fmt.Errorf("log result exceeds maximum of %d entries", maxLogsPerRequest)
 				}

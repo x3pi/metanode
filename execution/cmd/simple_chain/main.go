@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -286,8 +287,8 @@ signal.Ignore(syscall.SIGPIPE)
 	// Monitors Sys memory and forces GC when approaching limits.
 	go memoryPressureRelief(int64(actualMemLimitGB) << 30)
 
-	startRPCServer(app)
-	handleExitSignals(app)
+	rpcServer := startRPCServer(app)
+	handleExitSignals(app, rpcServer)
 
 }
 
@@ -363,7 +364,7 @@ func startDebugServer(addr string) {
 	}()
 }
 
-func handleExitSignals(app *App) {
+func handleExitSignals(app *App, rpcServer *http.Server) {
 	sigs := make(chan os.Signal, 1)
 	done := make(chan struct{})
 	// Thêm SIGHUP để xử lý tmux kill-session (gửi SIGHUP thay vì SIGTERM)
@@ -390,6 +391,18 @@ func handleExitSignals(app *App) {
 		n := runtime.Stack(buf, true)
 		logger.Info("[SIGNAL] Stack trace của tất cả goroutines:\n%s", buf[:n])
 
+		// Dừng RPC Server trước tiên
+		if rpcServer != nil {
+			logger.Info("[SIGNAL] Đang dừng RPC Server (Ngừng nhận HTTP/WS requests mới)...")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := rpcServer.Shutdown(ctx); err != nil {
+				logger.Error("Lỗi khi dừng RPC Server: %v", err)
+			} else {
+				logger.Info("[SIGNAL] RPC Server đã dừng hoàn toàn")
+			}
+		}
+
 		logger.Info("[SIGNAL] Đang dừng app...")
 		app.Stop()
 		logger.Info("[SIGNAL] App đã dừng")
@@ -402,7 +415,17 @@ func handleExitSignals(app *App) {
 	logger.SyncFileLog()
 }
 
-func startRPCServer(app *App) {
+func startRPCServer(app *App) *http.Server {
+	mux := NewServer(app)
+	server := &http.Server{
+		Addr:              app.config.RpcPort,
+		Handler:           mux,
+		ReadTimeout:       rpcServerReadTimeout,
+		ReadHeaderTimeout: rpcServerReadHeaderTimeout,
+		WriteTimeout:      rpcServerWriteTimeout,
+		IdleTimeout:       rpcServerIdleTimeout,
+	}
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -413,16 +436,8 @@ func startRPCServer(app *App) {
 				logger.SyncFileLog()
 			}
 		}()
-		mux := NewServer(app)
+
 		logger.Info("RPC server đang chạy tại port: ", app.config.RpcPort)
-		server := &http.Server{
-			Addr:              app.config.RpcPort,
-			Handler:           mux,
-			ReadTimeout:       rpcServerReadTimeout,
-			ReadHeaderTimeout: rpcServerReadHeaderTimeout,
-			WriteTimeout:      rpcServerWriteTimeout,
-			IdleTimeout:       rpcServerIdleTimeout,
-		}
 		if app.config.TlsCert != "" && app.config.TlsKey != "" {
 			logger.Info("Starting HTTPS server...")
 			if err := server.ListenAndServeTLS(app.config.TlsCert, app.config.TlsKey); err != nil && err != http.ErrServerClosed {
@@ -438,6 +453,8 @@ func startRPCServer(app *App) {
 			}
 		}
 	}()
+
+	return server
 }
 
 // memoryPressureRelief monitors system memory usage and proactively triggers GC
