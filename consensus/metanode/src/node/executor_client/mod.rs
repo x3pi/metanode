@@ -343,7 +343,10 @@ impl ExecutorClient {
             match self.get_last_block_number().await {
                 Ok((go_block_number, go_gei, go_is_ready, _go_hash, go_last_epoch)) => {
                     if go_is_ready {
-                        info!("📊 [INIT] Connected to Go Master. Last block={}, GEI={}, Epoch={}", go_block_number, go_gei, go_last_epoch);
+                        info!(
+                            "📊 [INIT] Connected to Go Master. Last block={}, GEI={}, Epoch={}",
+                            go_block_number, go_gei, go_last_epoch
+                        );
                         break Some((go_block_number, go_gei, go_last_epoch));
                     } else {
                         warn!("⏳ [INIT] Go Master is connected but not fully ready (DB loading). Retrying in 1s...");
@@ -491,7 +494,11 @@ impl ExecutorClient {
 
     /// Execute an RPC request synchronously via CGo FFI
     pub(crate) async fn execute_rpc_request(&self, request_buf: &[u8]) -> Result<Vec<u8>> {
-        let _permit = self.rpc_semaphore.acquire().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+        let _permit = self
+            .rpc_semaphore
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
         const MAX_RETRIES: u32 = 3;
         const BACKOFF_MS: [u64; 3] = [100, 500, 1000];
 
@@ -499,25 +506,36 @@ impl ExecutorClient {
 
         for attempt in 0..=MAX_RETRIES {
             let req = req_buf_clone.clone();
-            
+
             // Execute the blocking CGo FFI call in a spawn_blocking block to prevent
             // blocking the async executor.
-            let result = tokio::task::spawn_blocking(move || {
-                Self::execute_rpc_request_inner(&req)
-            }).await.map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?;
+            let result = tokio::task::spawn_blocking(move || Self::execute_rpc_request_inner(&req))
+                .await
+                .map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?;
 
             match result {
                 Ok(buf) if !buf.is_empty() => return Ok(buf),
-                Ok(_) => { /* empty response, considered equivalent to error/EOF */ },
+                Ok(_) => { /* empty response, considered equivalent to error/EOF */ }
                 Err(e) => {
-                    tracing::warn!("RPC attempt {}/{} failed: {}", attempt+1, MAX_RETRIES + 1, e);
+                    tracing::warn!(
+                        "RPC attempt {}/{} failed: {}",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        e
+                    );
                 }
             }
             if attempt < MAX_RETRIES {
-                tokio::time::sleep(tokio::time::Duration::from_millis(BACKOFF_MS[attempt as usize])).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    BACKOFF_MS[attempt as usize],
+                ))
+                .await;
             }
         }
-        Err(anyhow::anyhow!("RPC request failed after {} retries", MAX_RETRIES))
+        Err(anyhow::anyhow!(
+            "RPC request failed after {} retries",
+            MAX_RETRIES
+        ))
     }
 
     fn execute_rpc_request_inner(request_buf: &[u8]) -> Result<Vec<u8>> {

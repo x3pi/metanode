@@ -43,7 +43,7 @@ log_step "Building Rust Consensus Engine"
 cd "$PROJECT_ROOT/consensus/metanode"
 # Cần export RUSTFLAGS nếu cần, hoặc mặc định
 cargo build --release
-cp target/release/metanode "$RELEASE_DIR/bin/"
+cp "$PROJECT_ROOT/target/release/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
