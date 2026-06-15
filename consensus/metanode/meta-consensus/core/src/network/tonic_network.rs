@@ -989,7 +989,7 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                     self.context
                         .committee
                         .authorities()
-                        .map(|(_i, a)| a.network_key.clone().into_inner())
+                        .map(|(_i, a)| a.network_key.to_bytes())
                         .collect(),
                 ),
             ))
