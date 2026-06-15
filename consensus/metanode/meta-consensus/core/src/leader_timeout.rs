@@ -158,21 +158,21 @@ mod tests {
             &self,
             _blocks: Vec<VerifiedBlock>,
         ) -> Result<BTreeSet<BlockRef>, CoreError> {
-            todo!()
+            Ok(BTreeSet::new())
         }
 
         async fn check_block_refs(
             &self,
             _block_refs: Vec<BlockRef>,
         ) -> Result<BTreeSet<BlockRef>, CoreError> {
-            todo!()
+            Ok(BTreeSet::new())
         }
 
         async fn add_certified_commits(
             &self,
             _commits: CertifiedCommits,
         ) -> Result<BTreeSet<BlockRef>, CoreError> {
-            todo!()
+            Ok(BTreeSet::new())
         }
 
         async fn new_block(&self, round: Round, force: bool) -> Result<(), CoreError> {
@@ -183,19 +183,19 @@ mod tests {
         }
 
         async fn get_missing_blocks(&self) -> Result<BTreeSet<BlockRef>, CoreError> {
-            todo!()
+            Ok(BTreeSet::new())
         }
 
         fn set_propagation_delay(&self, _propagation_delay: Round) -> Result<(), CoreError> {
-            todo!()
+            Ok(())
         }
 
         fn set_last_known_proposed_round(&self, _round: Round) -> Result<(), CoreError> {
-            todo!()
+            Ok(())
         }
 
         fn highest_received_rounds(&self) -> Vec<Round> {
-            todo!()
+            Vec::new()
         }
     }
 

@@ -26,8 +26,7 @@ static SUPPORTED_ALGORITHMS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorith
 /// it only acts as a gatekeeper to decide if we should even try.  For example, we may want
 /// to filter our actions to well known public keys.
 pub trait Allower: std::fmt::Debug + Send + Sync {
-    // TODO: change allower interface to use raw key bytes.
-    fn allowed(&self, key: &Ed25519PublicKey) -> bool;
+    fn allowed(&self, key: &[u8]) -> bool;
 }
 
 /// AllowAll will allow all public certificates to be validated, it fails open
@@ -35,33 +34,36 @@ pub trait Allower: std::fmt::Debug + Send + Sync {
 pub struct AllowAll;
 
 impl Allower for AllowAll {
-    fn allowed(&self, _: &Ed25519PublicKey) -> bool {
+    fn allowed(&self, _: &[u8]) -> bool {
         true
     }
 }
 
-/// AllowPublicKeys restricts keys to those that are found in the member set. non-members will
-/// not be allowed.
 #[derive(Debug, Clone, Default)]
 pub struct AllowPublicKeys {
-    inner: Arc<ArcSwap<BTreeSet<Ed25519PublicKey>>>,
+    inner: Arc<ArcSwap<BTreeSet<[u8; 32]>>>,
 }
 
 impl AllowPublicKeys {
-    pub fn new(allowed: BTreeSet<Ed25519PublicKey>) -> Self {
+    pub fn new(allowed: BTreeSet<[u8; 32]>) -> Self {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(allowed)),
         }
     }
 
-    pub fn update(&self, new_allowed: BTreeSet<Ed25519PublicKey>) {
+    pub fn update(&self, new_allowed: BTreeSet<[u8; 32]>) {
         self.inner.store(Arc::new(new_allowed));
     }
 }
 
 impl Allower for AllowPublicKeys {
-    fn allowed(&self, key: &Ed25519PublicKey) -> bool {
-        self.inner.load().contains(key)
+    fn allowed(&self, key: &[u8]) -> bool {
+        if key.len() != 32 {
+            return false;
+        }
+        let mut key_arr = [0u8; 32];
+        key_arr.copy_from_slice(key);
+        self.inner.load().contains(&key_arr)
     }
 }
 
@@ -124,7 +126,7 @@ impl<A: Allower> rustls::server::danger::ClientCertVerifier for ClientCertVerifi
     ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
         // Step 1: Check this matches the key we expect
         let public_key = public_key_from_certificate(end_entity)?;
-        if !self.allower.allowed(&public_key) {
+        if !self.allower.allowed(public_key.as_ref()) {
             return Err(rustls::Error::General(format!(
                 "invalid certificate: {:?} is not in the validator set",
                 public_key,
