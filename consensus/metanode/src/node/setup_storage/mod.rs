@@ -494,17 +494,22 @@ impl ConsensusNode {
             current_epoch
         );
 
-        // Log each validator's ETH address for forensic verification across nodes
-        for (idx, eth_addr) in validator_eth_addresses.iter().enumerate() {
+        // Log each validator's keys for forensic verification across nodes
+        for (authority_idx, authority) in committee.authorities() {
+            let idx = authority_idx.value();
+            let eth_addr = validator_eth_addresses.get(idx).map(|v| v.as_slice()).unwrap_or(&[]);
+            let protocol_hex = hex::encode(authority.protocol_key.to_bytes());
+            let network_hex = hex::encode(authority.network_key.to_bytes());
+
             if eth_addr.len() == 20 {
                 info!(
-                    "  📋 [COMMITTEE] Validator {}: ETH=0x{}",
-                    idx, hex::encode(eth_addr)
+                    "  📋 [COMMITTEE] Validator {}: ETH=0x{}, Protocol={}, Network={}",
+                    idx, hex::encode(eth_addr), protocol_hex, network_hex
                 );
             } else {
                 warn!(
-                    "  ⚠️ [COMMITTEE] Validator {}: INVALID ETH address ({} bytes)",
-                    idx, eth_addr.len()
+                    "  ⚠️ [COMMITTEE] Validator {}: INVALID ETH address ({} bytes), Protocol={}, Network={}",
+                    idx, eth_addr.len(), protocol_hex, network_hex
                 );
             }
         }
@@ -789,6 +794,18 @@ impl ConsensusNode {
 
         let protocol_keypair = config.load_protocol_keypair()?;
         let network_keypair = config.load_network_keypair()?;
+
+        let protocol_pubkey_hex = hex::encode(protocol_keypair.public().to_bytes());
+        let network_pubkey_hex = hex::encode(network_keypair.public().to_bytes());
+
+        info!(
+            "🔑 [STARTUP] Rust Protocol PubKey (hex): {}",
+            protocol_pubkey_hex
+        );
+        info!(
+            "🔑 [STARTUP] Rust Network PubKey (hex): {}",
+            network_pubkey_hex
+        );
 
         // Identity: find own index in committee
         let own_protocol_pubkey = protocol_keypair.public();
