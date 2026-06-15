@@ -8,8 +8,8 @@
   },
   "validators": [
     {
-      "address": "0x610776a3eb1812e458ec4a58f466fd249204d797",
-      "eth_private_key": "0x43f1253de2b9108e62061874a71bcda3fd95810a231929d227ffe74cb5b53dde",
+      "address": "0x85cdbdf91a09a99e77854c00f0e8056e773ec56a",
+      "eth_private_key": "0x0ae2d7bab6efd7b084e84aa0da11a7191f384cc8b14238e1cef2a600eeb1efa1",
       "primary_address": "192.168.1.234:6200",
       "worker_address": "192.168.1.234:4012",
       "p2p_address": "/ip4/192.168.1.234/tcp/9100",
@@ -21,19 +21,19 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x610776a3eb1812e458ec4a58f466fd249204d797",
+          "address": "0x85cdbdf91a09a99e77854c00f0e8056e773ec56a",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "qEJLd4ozUEQxjladAIr/vY9/jgQ+hipKELbmC5e4hTY=",
+      "network_key": "/FNVc9x5L3rd2IjD20ufL0q/Ey0VebHoJYeOg6jx0fs=",
       "hostname": "node-0",
-      "authority_key": "mXQtAbIq8ABuHVxhdnhVxFeI/AnOFOfQgtepYd8GFG4aSBz+KAp9aTFTFRuNAF2VA4uQ5XoZNU03nBUyIr6L6pOocO3f/TSHLdRX0E3yC4nN3b1MTQVtg9zi+V4YFNO9",
-      "protocol_key": "5P3aGeL6BHcH5gl7u6gV6Wd8xmBmXUk3rQvEmkQHl8Q="
+      "authority_key": "jwQa812NqLU70tzed9LH0VP7wbf25SQK7txnnM2S8Br/kTGGuUdhAL6Wj/F0Nu6UCcqAAUZAGZ90snKPT1U5WpvYRePNlJ3W+LmExs90dn7Kezdh3P0u0b5P/1e65T+p",
+      "protocol_key": "Ahr4llw4ICb/OFrvMRfXUHe3pefq+BJ15x4TH4J9X+A="
     },
     {
-      "address": "0x169ca3c3e600c015bbba64eaeb6874af6094e0ff",
-      "eth_private_key": "0x5f96896e84eb9a2761b2f57a8ebe642ad7e44cbc7c2dd075b5ad6c182381789e",
+      "address": "0x663079442ff1825be493d0f0ed54d20e51094f32",
+      "eth_private_key": "0xb46b125fef8883b8bdc3faa82c8d443b735e186e23cdb07e7a1e20103adf4f49",
       "primary_address": "192.168.1.233:6201",
       "worker_address": "192.168.1.233:4013",
       "p2p_address": "/ip4/192.168.1.233/tcp/9101",
@@ -45,19 +45,19 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x169ca3c3e600c015bbba64eaeb6874af6094e0ff",
+          "address": "0x663079442ff1825be493d0f0ed54d20e51094f32",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "qn/c7T5+6x6fiIoHQn47DAL6tyEagMWeXWzeHQOCiAI=",
+      "network_key": "TJB1RrfVxCTPMMuzwd0kbej5WIaImHSAEb+5eJZcbu4=",
       "hostname": "node-1",
-      "authority_key": "oK+q5uwc0QU1cM8HUMSi0YVzI8mcIh1iKoqpdcikSCtxzi0cygytU4K0mkKllEVzEYuXT2g2hAfHcDu6HQhO7f/2aSHg0ZBERYaIaHIfxFfWGOJza3k2fSio+G4fF8ve",
-      "protocol_key": "1osFl2qhrZUbO9RoT+MN43DTU6N3SHdC5NsF4dP3ZwE="
+      "authority_key": "i/W3PkHgFCPKSCcWx6iRpY3CNUZt/nVe5vZ5retJCGA7rA2YR1qUWjN09p2JLoVuDaYUsBScJH0IsswK1dUl1nvstGWoPsdXkGWVhHpi5aAq4YSP5K3MSG3HjvL86Jjp",
+      "protocol_key": "tqk6yn9OGPZhp4yaM0IfLBQBrqYZoBvCnq+Xz+N4rNo="
     },
     {
-      "address": "0x1f8d13a6a303892414dd610faade71ea7ce2e2d0",
-      "eth_private_key": "0x38d8c5e3260eefb043ac29afb06590ac6d2e2ed543977749f99d4451473beceb",
+      "address": "0x348e81920a2073decf11035b5e3487381339a6fa",
+      "eth_private_key": "0xc64a884d10566af0c4cec5b951c89276b5422159555e6202bb2f9e7d63f88003",
       "primary_address": "192.168.1.232:6202",
       "worker_address": "192.168.1.232:4014",
       "p2p_address": "/ip4/192.168.1.232/tcp/9102",
@@ -69,19 +69,19 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x1f8d13a6a303892414dd610faade71ea7ce2e2d0",
+          "address": "0x348e81920a2073decf11035b5e3487381339a6fa",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "43FG76uy3qhTnekkj5A1xLNoCI2Ka1mHwTHRyZXwNXw=",
+      "network_key": "kZ8DutqFi98O40WKyuTQbu3Gw07TG1Du4Hg39fUskoE=",
       "hostname": "node-2",
-      "authority_key": "tvr5HBvZ1/UkKpnVJ3mzz7joC85iX3N862QuVSb2rB+NEIQIhWJlDDYi6SSsvqzaFUORw1oN5QYC4QlGxPnfv48A42AwiaAOQocHuUIhkJmjF0uLun8A6wFeLhqrNPQD",
-      "protocol_key": "f5+aF4aDZjyeUGIaWz1nLCRaUnAHaz2EZN7XSRTTpYE="
+      "authority_key": "paR8532BPlNpUgBlBwoHu0W2xtYt4FAkTUcxLzVMVGVeIloJ+w3ZpGqRPlCS+PXRDGJP/uSpwQru5jwzVEdzY/ccDmKG0/XQeW3YhGSUT75cmYbTnUM7qmhUIaDa9Jy6",
+      "protocol_key": "3lToZJ9F3j5xBPHeIH3yUFeW0TDgm0i3bUPv96yEhd0="
     },
     {
-      "address": "0x0cbe1d7440e448372d2917d74b460aae5d2946d7",
-      "eth_private_key": "0x4c8a3d814d0252303912728b36a1cfae5d5b17c22cc49f4836723080ff742d37",
+      "address": "0x48a1d6309c83a82a5d094434687eca67b20046aa",
+      "eth_private_key": "0x955a99621475709e09159ac6780fae93611960ac721dbeb68ff6594ad4760400",
       "primary_address": "192.168.1.231:6203",
       "worker_address": "192.168.1.231:4015",
       "p2p_address": "/ip4/192.168.1.231/tcp/9103",
@@ -93,15 +93,15 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x0cbe1d7440e448372d2917d74b460aae5d2946d7",
+          "address": "0x48a1d6309c83a82a5d094434687eca67b20046aa",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "0RPrWs/Or7/tV5Q7cNx4JUk1DChr9UP1W93M/RDMOvU=",
+      "network_key": "3ZK2tcc5E75smV6DoCycCAGx9eXytPd5t0ShRYtkEfo=",
       "hostname": "node-3",
-      "authority_key": "ghBC/rb2cP9iiBhdkiJ5OteO2sivHTGrVni+HIvRCTxZafT1sZjgDvilOqWsGPrACZy8A21h7Jbsc4psyLWLclf+aHYDGdZ08cMCCyZ46AgNjnKm+JqkiQCTrHOCkGXs",
-      "protocol_key": "1QSvZAGdKNssP/08eGgZX79Cv9NocUtOyzfzNwRaLf8="
+      "authority_key": "hncybdHxGnH2wwilO1dXdiIWJTbEbErA7u0WjFnqQxxZiMbMyDU9MBObYZMc+DpyE7T2EV1omeoWO10ACZjaH/xcgc85xv/oMqKnoyInNjKUhh23EhMN+TGhNC/mCMTn",
+      "protocol_key": "LeWAPEtRW0y8Ju8dyGdOtctI6tCfmWxSv6tKxcl3sBs="
     },
     {
       "address": "0x42e067b0ceb410a585f24fead248dc9ce18abd3c",
