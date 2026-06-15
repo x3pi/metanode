@@ -143,10 +143,12 @@ pub(super) async fn setup_validator_consensus(
         let peer_addrs = config.peer_rpc_addresses.clone();
         let c_clone = c.clone();
         tokio::spawn(async move {
+            let metrics = std::sync::Arc::new(crate::node::sync_metrics::SyncMetrics::new(prometheus::default_registry()));
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 c_clone,
                 delivery_rx,
                 peer_addrs,
+                metrics,
             );
             manager.run().await;
         });
@@ -324,10 +326,12 @@ pub(super) async fn setup_synconly_sync(
         processor = processor.with_executor_client(c.clone());
         let peer_addrs = config.peer_rpc_addresses.clone();
         tokio::spawn(async move {
+            let metrics = std::sync::Arc::new(crate::node::sync_metrics::SyncMetrics::new(prometheus::default_registry()));
             let manager = crate::node::block_delivery::BlockDeliveryManager::new(
                 c,
                 delivery_rx,
                 peer_addrs,
+                metrics,
             );
             manager.run().await;
         });

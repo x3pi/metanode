@@ -20,6 +20,29 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use once_cell::sync::Lazy;
+use prometheus::{register_counter_vec_with_registry, CounterVec, Registry};
+
+static GLOBAL_CB_METRICS: Lazy<CircuitBreakerMetrics> =
+    Lazy::new(|| CircuitBreakerMetrics::register(prometheus::default_registry()));
+
+pub struct CircuitBreakerMetrics {
+    pub circuit_breaker_transitions_total: CounterVec,
+}
+
+impl CircuitBreakerMetrics {
+    fn register(registry: &Registry) -> Self {
+        Self {
+            circuit_breaker_transitions_total: register_counter_vec_with_registry!(
+                "circuit_breaker_transitions_total",
+                "Total circuit breaker state transitions",
+                &["method", "state"],
+                registry
+            ).expect("valid metric: circuit_breaker_transitions_total"),
+        }
+    }
+}
+
 /// Circuit breaker state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
@@ -134,6 +157,7 @@ impl RpcCircuitBreaker {
                         // Transition to HalfOpen
                         circuit.state = CircuitState::HalfOpen;
                         circuit.consecutive_successes = 0;
+                        GLOBAL_CB_METRICS.circuit_breaker_transitions_total.with_label_values(&[method, "half_open"]).inc();
                         debug!(
                             "🔌 [CIRCUIT] {} transitioning Open → HalfOpen (cooldown expired)",
                             method
@@ -177,6 +201,7 @@ impl RpcCircuitBreaker {
                 if circuit.consecutive_successes >= self.config.success_threshold {
                     circuit.state = CircuitState::Closed;
                     circuit.opened_at = None;
+                    GLOBAL_CB_METRICS.circuit_breaker_transitions_total.with_label_values(&[method, "closed"]).inc();
                     info!(
                         "✅ [CIRCUIT] {} transitioning HalfOpen → Closed (probe succeeded)",
                         method
@@ -211,6 +236,7 @@ impl RpcCircuitBreaker {
                 if circuit.consecutive_failures >= self.config.failure_threshold {
                     circuit.state = CircuitState::Open;
                     circuit.opened_at = Some(Instant::now());
+                    GLOBAL_CB_METRICS.circuit_breaker_transitions_total.with_label_values(&[method, "open"]).inc();
                     warn!(
                         "🔴 [CIRCUIT] {} transitioning Closed → Open ({} consecutive failures)",
                         method, circuit.consecutive_failures
@@ -221,6 +247,7 @@ impl RpcCircuitBreaker {
                 // Probe failed — go back to Open
                 circuit.state = CircuitState::Open;
                 circuit.opened_at = Some(Instant::now());
+                GLOBAL_CB_METRICS.circuit_breaker_transitions_total.with_label_values(&[method, "open"]).inc();
                 warn!(
                     "🔴 [CIRCUIT] {} transitioning HalfOpen → Open (probe failed)",
                     method

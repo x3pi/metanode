@@ -28,6 +28,7 @@ pub struct ValidatedCommit {
 pub struct BlockDeliveryManager {
     executor_client: Arc<ExecutorClient>,
     receiver: mpsc::Receiver<ValidatedCommit>,
+    metrics: Arc<crate::node::sync_metrics::SyncMetrics>,
 }
 
 impl BlockDeliveryManager {
@@ -35,10 +36,12 @@ impl BlockDeliveryManager {
         executor_client: Arc<ExecutorClient>,
         receiver: mpsc::Receiver<ValidatedCommit>,
         _peer_addrs: Vec<String>,
+        metrics: Arc<crate::node::sync_metrics::SyncMetrics>,
     ) -> Self {
         Self {
             executor_client,
             receiver,
+            metrics,
         }
     }
 
@@ -58,6 +61,10 @@ impl BlockDeliveryManager {
                 )
                 .await;
             let elapsed = start_delivery.elapsed();
+            
+            // Record Prometheus metrics
+            self.metrics.go_send_per_commit_seconds.observe(elapsed.as_secs_f64());
+            self.metrics.blocks_sent_to_go_total.inc();
 
             if elapsed.as_millis() > 50 {
                 tracing::warn!(
