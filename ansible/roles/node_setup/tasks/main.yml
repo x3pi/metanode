@@ -1,0 +1,37 @@
+---
+- name: Ensure base deployment directory exists
+  ansible.builtin.file:
+    path: "{{ remote_deploy_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Create node data and log directories
+  ansible.builtin.file:
+    path: "{{ metanode_install_dir }}/node-{{ item[0] }}/{{ item[1] }}"
+    state: directory
+    owner: metanode
+    group: metanode
+    mode: '0755'
+  loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
+  ignore_errors: true # In case metanode user doesn't exist yet, it's fine
+
+- name: Unarchive release tarball
+  ansible.builtin.unarchive:
+    src: "{{ project_root }}/metanode-deploy.tar.gz"
+    dest: "{{ remote_deploy_dir }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Copy keys for each node to remote
+  ansible.builtin.copy:
+    src: "{{ deploy_dir }}/node-{{ item }}_keys/"
+    dest: "{{ remote_deploy_dir }}/node-{{ item }}_keys/"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  loop: "{{ active_nodes }}"
+
+

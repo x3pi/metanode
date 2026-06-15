@@ -1,0 +1,15 @@
+---
+- name: Setup BTRFS filesystem for synconly node
+  ansible.builtin.shell: |
+    bash setup-cluster-btrfs.sh
+  args:
+    chdir: "{{ remote_deploy_dir }}/cluster"
+  when: "is_synconly | default(false)"
+
+- name: Restore node data from snapshot
+  ansible.builtin.shell: |
+    bash restore_snapshot_systemd.sh --node {{ item }} --snapshot-url '{{ snapshot_url }}' -y
+  args:
+    chdir: "{{ remote_deploy_dir }}/cluster"
+  loop: "{{ active_nodes }}"
+  when: "item | string == restore_node | string"
