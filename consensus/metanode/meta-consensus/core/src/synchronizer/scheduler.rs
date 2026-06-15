@@ -416,7 +416,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         for batch in authorities.chunks(num_authorities_per_peer) {
             let Some(peer) = peers.next() else {
                 panic!("No more peers left to fetch blocks!");
-                break;
             };
             let peer_hostname = &context.committee.authority(peer).hostname;
             // Fetch from the lowest round missing blocks to ensure progress.
