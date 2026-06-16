@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +16,15 @@ import (
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
+	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -272,6 +277,7 @@ func (app *App) initBlockchain() error {
 	} else {
 		// Use existing last block
 		logger.Info("Using existing block (not init genesis)")
+		originalLastBlock := lastBlock
 		app.startLastBlock = lastBlock
 		logger.Info("lastblock header 2: %v (using existing block)", app.startLastBlock.Header())
 		storage.UpdateLastBlockNumber(app.startLastBlock.Header().BlockNumber())
@@ -630,6 +636,15 @@ func (app *App) initBlockchain() error {
 		}
 		blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
 		blockchain.GetBlockChainInstance().Commit()
+
+		// 🛡️ [STARTUP] NOMT forward catch-up re-execution if state is lagging behind the block database
+		if originalLastBlock != nil && originalLastBlock.Header().BlockNumber() > app.startLastBlock.Header().BlockNumber() {
+			logger.Warn("🛡️ [STARTUP] Mismatch detected: NOMT state is at block #%d, but LevelDB block database has blocks up to #%d. Catching up NOMT trie state...",
+				app.startLastBlock.Header().BlockNumber(), originalLastBlock.Header().BlockNumber())
+			if err := app.reexecuteBlocksToCatchUp(blockDatabase, app.startLastBlock.Header().BlockNumber(), originalLastBlock.Header().BlockNumber()); err != nil {
+				logger.Fatal("🚨 [STARTUP] NOMT catch-up failed: %v", err)
+			}
+		}
 
 		// ═══════════════════════════════════════════════════════════════════
 		// STARTUP MAPPING REBUILD (May 2026): Walk backwards from startLastBlock
@@ -1370,5 +1385,118 @@ func (app *App) repopulateGenesisState() error {
 	}
 	app.storageManager.GetStorageMapping().Put([]byte("blockNumber_0"), app.startLastBlock.Header().Hash().Bytes())
 
+	return nil
+}
+
+// reexecuteBlocksToCatchUp catches up NOMT trie state by re-executing transactions from startBlockNum+1 to targetBlockNum.
+func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, startBlockNum uint64, targetBlockNum uint64) error {
+	logger.Info("🛡️ [STARTUP] Starting NOMT forward catch-up re-execution from block %d to %d...", startBlockNum+1, targetBlockNum)
+	for bn := startBlockNum + 1; bn <= targetBlockNum; bn++ {
+		key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+		data, err := app.storageManager.GetStorageMapping().Get(key)
+		if err != nil || data == nil || len(data) != 32 {
+			return fmt.Errorf("failed to get block hash mapping for block #%d: %v", bn, err)
+		}
+		blockHash := e_common.BytesToHash(data)
+		blk, err := blockDatabase.GetBlockByHash(blockHash)
+		if err != nil || blk == nil {
+			return fmt.Errorf("failed to get block #%d by hash %s: %v", bn, blockHash.Hex(), err)
+		}
+
+		// 1. Align chainState to parent block's roots so EVM execution is consistent
+		var prevHeader types.BlockHeader
+		if bn == 1 {
+			key0 := []byte("blockNumber_0")
+			if data0, err := app.storageManager.GetStorageMapping().Get(key0); err == nil && len(data0) == 32 {
+				hash0 := e_common.BytesToHash(data0)
+				if blk0, err := blockDatabase.GetBlockByHash(hash0); err == nil && blk0 != nil {
+					prevHeader = blk0.Header()
+				}
+			}
+		} else {
+			keyPrev := []byte(fmt.Sprintf("blockNumber_%d", bn - 1))
+			if dataPrev, err := app.storageManager.GetStorageMapping().Get(keyPrev); err == nil && len(dataPrev) == 32 {
+				hashPrev := e_common.BytesToHash(dataPrev)
+				if blkPrev, err := blockDatabase.GetBlockByHash(hashPrev); err == nil && blkPrev != nil {
+					prevHeader = blkPrev.Header()
+				}
+			}
+		}
+		if prevHeader != nil {
+			if err := app.chainState.UpdateStateForNewHeader(prevHeader); err != nil {
+				return fmt.Errorf("failed to align to previous header for block #%d: %v", bn, err)
+			}
+		}
+
+		// 2. Fetch block transactions
+		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blk.Header().TransactionsRoot(), app.storageManager.GetStorageTransaction())
+		if err != nil {
+			return fmt.Errorf("failed to create transaction db for block #%d: %v", bn, err)
+		}
+		txHashes := blk.Transactions()
+		txs := make([]types.Transaction, 0, len(txHashes))
+		for _, h := range txHashes {
+			tx, err := txDB.GetTransaction(h)
+			if err != nil {
+				return fmt.Errorf("failed to load transaction %s in block #%d: %v", h.Hex(), bn, err)
+			}
+			txs = append(txs, tx)
+		}
+
+		// 3. Deterministically group transactions
+		items := make([]grouptxns.Item, 0, len(txs))
+		for i, tx := range txs {
+			items = append(items, grouptxns.Item{
+				ID:      i,
+				Array:   grouptxns.BuildDeterministicGroupAddrs(tx),
+				GroupID: 0,
+				Tx:      tx,
+			})
+		}
+		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+
+		// 4. Process transactions
+		blockTimeSec := blk.Header().TimeStamp() / 1000
+		leaderAddr := blk.Header().LeaderAddress()
+		
+		// Run execution
+		_, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn)
+		if execErr != nil {
+			return fmt.Errorf("failed to execute transactions for block #%d during NOMT catch-up: %v", bn, execErr)
+		}
+
+		// 5. Commit state changes synchronously (updates both MPT/NOMT tries and swaps pointers)
+		if err := app.chainState.GetSmartContractDB().Commit(); err != nil {
+			return fmt.Errorf("failed to commit SmartContractDB for block #%d: %v", bn, err)
+		}
+		newAccountRoot, err := app.chainState.GetAccountStateDB().Commit()
+		if err != nil {
+			return fmt.Errorf("failed to commit AccountStateDB for block #%d: %v", bn, err)
+		}
+		newStakeRoot, err := app.chainState.GetStakeStateDB().Commit()
+		if err != nil {
+			return fmt.Errorf("failed to commit StakeStateDB for block #%d: %v", bn, err)
+		}
+
+		// 6. Invalidate state caches to ensure next block reads fresh data
+		app.chainState.InvalidateAllState()
+		mvm.ClearAllMVMApi()
+		mvm.ClearAllProtectedMVMApi()
+		mvm.CallClearAllStateInstances()
+		trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+
+		// 7. Update in-memory tracking values block-by-block
+		storage.UpdateLastBlockNumber(bn)
+		storage.UpdateLastAssignedBlockNumber(bn)
+		storage.UpdateLastGlobalExecIndex(blk.Header().GlobalExecIndex())
+		storage.UpdateLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+		storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
+		
+		headerCopy := blk.Header()
+		app.chainState.SetcurrentBlockHeader(&headerCopy)
+		app.startLastBlock = blk
+
+		logger.Info("🛡️ [STARTUP] ✅ Successfully re-executed block #%d: accountRoot=%s, stakeRoot=%s", bn, newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+	}
 	return nil
 }
