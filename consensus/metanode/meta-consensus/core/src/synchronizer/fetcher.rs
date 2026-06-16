@@ -57,7 +57,18 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         let mut requests = FuturesUnordered::new();
 
         // Create an in-memory buffer channel for pipelining/prefetching (100 batches max)
-        let (tx_process, mut rx_process) = tokio::sync::mpsc::channel(100);
+        let (tx_process, mut rx_process) = tokio::sync::mpsc::channel::<(
+            Vec<Bytes>,
+            AuthorityIndex,
+            BlocksGuard,
+            Arc<D>,
+            Arc<V>,
+            TransactionCertifier,
+            Arc<CommitVoteMonitor>,
+            Arc<Context>,
+            Sender<Command>,
+            Arc<RwLock<DagState>>,
+        )>(100);
 
         // Spawn consumer task that processes blocks independently of the fetch loop
         tokio::spawn(async move {
