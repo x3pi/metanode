@@ -33,7 +33,22 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
-var firstUdsMetricLogged int32
+var (
+	firstUdsMetricLogged int32
+
+	txListPool = sync.Pool{
+		New: func() interface{} {
+			s := make([]types.Transaction, 0, 1000)
+			return &s
+		},
+	}
+	errListPool = sync.Pool{
+		New: func() interface{} {
+			s := make([]error, 0, 1000)
+			return &s
+		},
+	}
+)
 
 // TransactionResponse represents an internal response struct used during transaction lifecycle.
 type TransactionResponse struct {
@@ -492,62 +507,85 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	if concurrency < 4 {
 		concurrency = 4
 	}
+	if concurrency > len(transactions) {
+		concurrency = len(transactions)
+	}
 
-	processedTransactions := make([]types.Transaction, len(transactions))
-	errorsList := make([]error, len(transactions))
+	txPtr := txListPool.Get().(*[]types.Transaction)
+	processedTransactions := *txPtr
+	if cap(processedTransactions) < len(transactions) {
+		processedTransactions = make([]types.Transaction, len(transactions))
+	} else {
+		processedTransactions = processedTransactions[:len(transactions)]
+	}
+
+	errPtr := errListPool.Get().(*[]error)
+	errorsList := *errPtr
+	if cap(errorsList) < len(transactions) {
+		errorsList = make([]error, len(transactions))
+	} else {
+		errorsList = errorsList[:len(transactions)]
+		for i := range errorsList {
+			errorsList[i] = nil
+		}
+	}
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, concurrency)
+	var nextIdx uint32
 
 	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	fileAbi, _ := file_handler.GetFileAbi()
 	ownerFileStorageAddr := common.HexToAddress(tp.chainState.GetConfig().OwnerFileStorageAddress)
 	predictedFileContractAddr := file_handler.PredictContractAddress(ownerFileStorageAddr)
 
-	for i, tx := range transactions {
-		needsVirtual := true
-		// 1. Account setting TXs
-		if tx.ToAddress() == accountSettingAddr {
-			needsVirtual = false
-		}
-		// 2. Validator staking TXs
-		if tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
-			needsVirtual = false
-		}
-		// 3. Simple value transfers (no call contract, no deploy)
-		if !tx.IsCallContract() && !tx.IsDeployContract() {
-			needsVirtual = false
-		}
-		// 4. File upload chunks
-		if tx.ToAddress() == predictedFileContractAddr {
-			if name, _ := fileAbi.ParseMethodName(tx); name == "uploadChunk" {
-				needsVirtual = false
-			}
-		}
-
-		if !needsVirtual {
-			tx.AddRelatedAddress(tx.FromAddress())
-			tx.AddRelatedAddress(tx.ToAddress())
-			processedTransactions[i] = tx
-			continue
-		}
-
+	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
-		go func(idx int, t types.Transaction) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			for {
+				idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
+				if idx >= len(transactions) {
+					break
+				}
+				tx := transactions[idx]
+				needsVirtual := true
+				// 1. Account setting TXs
+				if tx.ToAddress() == accountSettingAddr {
+					needsVirtual = false
+				}
+				// 2. Validator staking TXs
+				if tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
+					needsVirtual = false
+				}
+				// 3. Simple value transfers (no call contract, no deploy)
+				if !tx.IsCallContract() && !tx.IsDeployContract() {
+					needsVirtual = false
+				}
+				// 4. File upload chunks
+				if tx.ToAddress() == predictedFileContractAddr {
+					if name, _ := fileAbi.ParseMethodName(tx); name == "uploadChunk" {
+						needsVirtual = false
+					}
+				}
 
-			tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution in batch")
-			updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(t)
-			if err != nil {
-				tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
-				errorsList[idx] = err
-			} else {
-				tx_processor.GlobalTxTraceStore.UpdateTrace(t.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution in batch")
-				processedTransactions[idx] = updatedTx
+				if !needsVirtual {
+					tx.AddRelatedAddress(tx.FromAddress())
+					tx.AddRelatedAddress(tx.ToAddress())
+					processedTransactions[idx] = tx
+					continue
+				}
+
+				tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution in batch")
+				updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(tx)
+				if err != nil {
+					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
+					errorsList[idx] = err
+				} else {
+					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution in batch")
+					processedTransactions[idx] = updatedTx
+				}
 			}
-		}(i, tx)
+		}()
 	}
 	wg.Wait()
 
@@ -564,6 +602,19 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 		}
 	}
 	virtualExecDuration := time.Since(t1)
+
+	// Trả memory lại cho Pool để giảm GC pressure
+	for i := range processedTransactions {
+		processedTransactions[i] = nil
+	}
+	*txPtr = processedTransactions
+	txListPool.Put(txPtr)
+
+	for i := range errorsList {
+		errorsList[i] = nil
+	}
+	*errPtr = errorsList
+	errListPool.Put(errPtr)
 
 	queueFullErrs := 0
 
