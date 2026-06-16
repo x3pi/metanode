@@ -143,7 +143,7 @@ type SimpleChainConfig struct {
 	BlsAdminStorage           string   `json:"bls_admin_storage"`
 	OwnerFileStorageAddress   string   `json:"owner_file_storage_address"`
 
-	MinGasPrice               uint64   `json:"min_gas_price,omitempty"`
+	MinGasPrice uint64 `json:"min_gas_price,omitempty"`
 
 	// Cross-chain configuration
 	CrossChain CrossChainConfig `json:"cross_chain"`
@@ -182,16 +182,16 @@ type SimpleChainConfig struct {
 	GoMemLimitGB int `json:"go_mem_limit_gb,omitempty"` // Go soft memory limit in GB (default: 8). Set per-node to prevent OOM when running multiple nodes on same server.
 	GoGCPercent  int `json:"go_gc_percent,omitempty"`   // GC target percentage (default: 800). Lower = more frequent GC = less memory but more CPU.
 
-	Pruning       PruningConfig      `json:"pruning,omitempty"`
-	RpcRateLimit  RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
-	TraceEnabled  bool               `json:"trace_enabled,omitempty"`
-	TraceEndpoint string             `json:"trace_endpoint,omitempty"`
+	Pruning        PruningConfig      `json:"pruning,omitempty"`
+	RpcRateLimit   RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
+	TraceEnabled   bool               `json:"trace_enabled,omitempty"`
+	TraceEndpoint  string             `json:"trace_endpoint,omitempty"`
 	TxTraceEnabled bool               `json:"tx_trace_enabled,omitempty"`
-	TlsCert       string             `json:"tls_cert,omitempty"`
-	TlsKey        string             `json:"tls_key,omitempty"`
-	Databases     DatabasesConfig    `json:"Databases"`
-	Nodes         NodesConfig        `json:"nodes"`
-	Log           LogConfig          `json:"log"`
+	TlsCert        string             `json:"tls_cert,omitempty"`
+	TlsKey         string             `json:"tls_key,omitempty"`
+	Databases      DatabasesConfig    `json:"Databases"`
+	Nodes          NodesConfig        `json:"nodes"`
+	Log            LogConfig          `json:"log"`
 
 	// C++ MVM State cache control
 	MVMCacheEnabled *bool `json:"mvm_cache_enabled,omitempty"`

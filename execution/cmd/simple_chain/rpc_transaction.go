@@ -814,7 +814,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 				}
 				eventLogs = append(eventLogs, evL)
 				logIndex++
-				
+
 				if len(eventLogs) > maxLogsPerRequest {
 					return nil, fmt.Errorf("log result exceeds maximum of %d entries", maxLogsPerRequest)
 				}

@@ -35,9 +35,9 @@ var (
 	flagKillWait    int
 	flagRestoreWait int
 	flagMaxRetries  int
-	flagVictim      int    // -1 = random
-	flagKillTwo     bool   // kill 2 nodes simultaneously
-	flagNoRestore   bool   // skip restore (test permanent partition)
+	flagVictim      int  // -1 = random
+	flagKillTwo     bool // kill 2 nodes simultaneously
+	flagNoRestore   bool // skip restore (test permanent partition)
 )
 
 func init() {

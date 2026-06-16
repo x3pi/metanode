@@ -338,7 +338,7 @@ func (db *SmartContractDB) CommitAllStorage() error {
 					prefixedKey := make([]byte, 20+len(commitBatch[i][0])) // Address is 20 bytes
 					copy(prefixedKey[:20], address.Bytes())
 					copy(prefixedKey[20:], commitBatch[i][0])
-					
+
 					allBatches = append(allBatches, [2][]byte{prefixedKey, commitBatch[i][1]})
 				}
 			}
@@ -362,7 +362,6 @@ func (db *SmartContractDB) CommitAllStorage() error {
 
 	return finalErr
 }
-
 
 // LateBindRoots computes the definitive StorageRoot for all dirty smart contracts
 // and late-binds them into the AccountState before AccountStateDB.IntermediateRoot runs.
@@ -471,7 +470,6 @@ func (db *SmartContractDB) LateBindRoots() error {
 	return finalErr
 }
 
-
 func (db *SmartContractDB) Commit() error {
 	var batch [][2][]byte
 
@@ -546,7 +544,7 @@ func (db *SmartContractDB) Commit() error {
 			}
 			globalEventLogBatch = append(globalEventLogBatch, [2][]byte{log.Hash().Bytes(), eventLogBytes})
 		}
-		
+
 		if eventLogErr != nil {
 			break
 		}

@@ -369,4 +369,3 @@ func (ptm *PendingTransactionManager) GetOldTransactionsForRemoval(duration time
 
 	return oldTxs
 }
-

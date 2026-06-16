@@ -47,10 +47,10 @@ type PeerInfo struct {
 // ─── Default Localnet Configuration ────────────────────────────────────────────
 
 const (
-	defaultScriptDir  = "/home/abc/chain-n/metanode/consensus/metanode/scripts/node"
-	defaultKillWait   = 15  // seconds
+	defaultScriptDir   = "/home/abc/chain-n/metanode/consensus/metanode/scripts/node"
+	defaultKillWait    = 15 // seconds
 	defaultRestoreWait = 30 // seconds
-	defaultMaxRetries = 30  // attempts (x3s = 90s max wait)
+	defaultMaxRetries  = 30 // attempts (x3s = 90s max wait)
 )
 
 // NewDefaultClusterConfig creates the standard 5-node localnet configuration

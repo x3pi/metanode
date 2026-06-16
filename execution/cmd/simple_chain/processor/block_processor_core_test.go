@@ -20,7 +20,6 @@ func TestGetLeaderAddress_Direct20Byte(t *testing.T) {
 	assert.Equal(t, expected, result)
 }
 
-
 // ============================================================================
 // TestGetState_SetState
 // ============================================================================

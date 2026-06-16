@@ -116,7 +116,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		// Key format: namespace:address:blockNumber
 		// We use big-endian for blockNumber so that Pebble iterator sorts blocks correctly (older first)
 		key := c.encodeKey(change.Key, blockNumber)
-		
+
 		// If NewValue is nil, it means it was deleted. We still record it with an empty byte slice to track the deletion event.
 		// For StateChangelog, we care about what the value WAS at this point.
 		// Actually, wait, reverse diff is better. If we want to know what the state was AT block X,
@@ -124,7 +124,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		// But the implementation plan says: `GetStateAt` binary search for `(address, targetBlock)` -> returns value at that block.
 		// So we just append the `NewValue`! This means we store the state AFTER this block execution.
 		// If someone asks for state AT block X, we find the entry <= X.
-		
+
 		val := change.NewValue
 		if len(val) == 0 {
 			// Marker for deletion
@@ -187,7 +187,7 @@ func (c *StateChangelogDB) GetBlockChanges(targetBlock uint64) ([]StateChange, e
 
 	var changes []StateChange
 	prefix := []byte(fmt.Sprintf("%s:", c.namespace))
-	
+
 	opts := &pebble.IterOptions{
 		LowerBound: prefix,
 	}
@@ -205,38 +205,38 @@ func (c *StateChangelogDB) GetBlockChanges(targetBlock uint64) ([]StateChange, e
 		if !bytes.HasPrefix(key, prefix) {
 			break
 		}
-		
+
 		// Key format: namespace:address:blockNumber
 		// blockNumber is the last 8 bytes.
 		if len(key) < len(prefix)+9 {
 			continue
 		}
-		
+
 		keyBlockBytes := key[len(key)-8:]
 		if bytes.Equal(keyBlockBytes, blockBytes) {
 			addr := key[len(prefix) : len(key)-9]
-			
+
 			val := iter.Value()
 			var newValue []byte
 			if !bytes.Equal(val, []byte("DEL")) {
 				newValue = make([]byte, len(val))
 				copy(newValue, val)
 			}
-			
+
 			addrCopy := make([]byte, len(addr))
 			copy(addrCopy, addr)
-			
+
 			changes = append(changes, StateChange{
 				Key:      addrCopy,
 				NewValue: newValue,
 			})
 		}
 	}
-	
+
 	if err := iter.Error(); err != nil {
 		return nil, err
 	}
-	
+
 	return changes, nil
 }
 
@@ -249,18 +249,18 @@ func (c *StateChangelogDB) GetStateAt(address []byte, targetBlock uint64) ([]byt
 	// We want to find the largest blockNumber <= targetBlock
 	// Key format: namespace:address:blockNumber
 	// By creating a prefix iterator up to targetBlock, we can get the value.
-	
+
 	startKey := c.encodeKeyPrefix(address)
 	// targetBlock + 1 because the iterator's upper bound is exclusive, but wait...
 	// If we use seekGE, it finds the first key >= target. But we want <= target.
 	// So we can use SeekLT on (targetBlock + 1).
 
 	searchKey := c.encodeKey(address, targetBlock+1)
-	
+
 	opts := &pebble.IterOptions{
 		LowerBound: startKey,
 	}
-	
+
 	iter, err := c.db.NewIter(opts)
 	if err != nil {
 		return nil, err
@@ -296,11 +296,11 @@ func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
 
 	var addresses [][]byte
 	prefix := []byte(fmt.Sprintf("%s:", c.namespace))
-	
+
 	opts := &pebble.IterOptions{
 		LowerBound: prefix,
 	}
-	
+
 	iter, err := c.db.NewIter(opts)
 	if err != nil {
 		return nil, err
@@ -309,19 +309,19 @@ func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
 
 	searchKey := make([]byte, len(prefix))
 	copy(searchKey, prefix)
-	
+
 	for iter.SeekGE(searchKey); iter.Valid(); {
 		key := iter.Key()
 		if !bytes.HasPrefix(key, prefix) {
 			break
 		}
-		
+
 		// Key format: namespace:address:blockNumber
 		if len(key) < len(prefix)+9 {
 			iter.Next()
 			continue
 		}
-		
+
 		// Extract address With Colon: "address:"
 		addrWithColon := key[len(prefix) : len(key)-8]
 		addr := addrWithColon
@@ -329,11 +329,11 @@ func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
 		if len(addrWithColon) > 0 && addrWithColon[len(addrWithColon)-1] == ':' {
 			addr = addrWithColon[:len(addrWithColon)-1]
 		}
-		
+
 		addrCopy := make([]byte, len(addr))
 		copy(addrCopy, addr)
 		addresses = append(addresses, addrCopy)
-		
+
 		// Optimization: Skip Scan (SeekGE) to the next address instead of iterating all block changes
 		// Since keys are `prefix + addr + : + blockNumber`
 		// We can jump to the next address by seeking to `prefix + addr + ;`
@@ -342,14 +342,14 @@ func (c *StateChangelogDB) GetAllUniqueAddresses() ([][]byte, error) {
 		copy(nextSearchKey, prefix)
 		copy(nextSearchKey[len(prefix):], addr)
 		nextSearchKey[len(nextSearchKey)-1] = ':' + 1 // 0x3B
-		
+
 		iter.SeekGE(nextSearchKey)
 	}
-	
+
 	if err := iter.Error(); err != nil {
 		return nil, err
 	}
-	
+
 	return addresses, nil
 }
 
@@ -408,11 +408,11 @@ func (c *StateChangelogDB) encodeKeyPrefix(address []byte) []byte {
 // encodeKey returns: namespace:address:blockNumber
 func (c *StateChangelogDB) encodeKey(address []byte, blockNumber uint64) []byte {
 	key := c.encodeKeyPrefix(address)
-	
+
 	// Encode blockNumber as 8-byte big endian so it sorts numerically
 	blockBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(blockBytes, blockNumber)
-	
+
 	key = append(key, blockBytes...)
 	return key
 }
@@ -431,7 +431,7 @@ func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock u
 	defer c.mu.RUnlock()
 
 	result := make(map[string]HistoricalState, len(addresses))
-	
+
 	opts := &pebble.IterOptions{}
 	iter, err := c.db.NewIter(opts)
 	if err != nil {
@@ -441,7 +441,7 @@ func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock u
 
 	for _, address := range addresses {
 		state := HistoricalState{}
-		
+
 		startKey := c.encodeKeyPrefix(address)
 		searchKey := c.encodeKey(address, targetBlock+1)
 
@@ -460,14 +460,14 @@ func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock u
 				continue
 			}
 		}
-		
+
 		// 2. If not found, check if it has ANY entry (SeekGE)
 		if iter.SeekGE(startKey) {
 			if bytes.HasPrefix(iter.Key(), startKey) {
 				state.HasAny = true
 			}
 		}
-		
+
 		result[string(address)] = state
 	}
 

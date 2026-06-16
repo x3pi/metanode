@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"errors"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
@@ -17,7 +18,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	mtn_types "github.com/meta-node-blockchain/meta-node/types"
-	"errors"
 )
 
 var ErrDataPruned = errors.New("data has been pruned")
@@ -65,7 +65,7 @@ type BlockChain struct {
 	// Worker control
 	stopCleanup chan struct{}
 	wg          sync.WaitGroup
-	
+
 	// Pruning tracking
 	lastPrunedBlockNumber uint64
 	pruneLock             sync.RWMutex
@@ -496,7 +496,7 @@ func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common
 			if dbErr != nil || dbData == nil || len(dbData) != common.HashLength {
 				// Missing mapping — rebuild it
 				bHash := blk.Header().Hash()
-				bc.storeToDirty(blockNumberPrefix + strconv.FormatUint(bNum, 10), bHash.Bytes())
+				bc.storeToDirty(blockNumberPrefix+strconv.FormatUint(bNum, 10), bHash.Bytes())
 				bc.blockNumberToHashCache.Store(bNum, cachedHash{
 					hash:    bHash,
 					addedAt: time.Now(),
@@ -725,7 +725,6 @@ func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint
 	return 0, false
 }
 
-
 func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.Hash) error {
 	key := ethHashMapBlsHashPrefix + ethHash.Hex()
 	bc.storeToDirty(key, blsHash.Bytes())
@@ -829,7 +828,7 @@ func (bc *BlockChain) SetLastPrunedBlockNumber(blockNumber uint64) error {
 	bc.pruneLock.Lock()
 	defer bc.pruneLock.Unlock()
 	bc.lastPrunedBlockNumber = blockNumber
-	
+
 	// Persist to DB so it survives restarts
 	key := []byte("last_pruned_block_number")
 	blockNumberBytes := make([]byte, 8)
@@ -840,7 +839,7 @@ func (bc *BlockChain) SetLastPrunedBlockNumber(blockNumber uint64) error {
 func (bc *BlockChain) GetLastPrunedBlockNumber() uint64 {
 	bc.pruneLock.RLock()
 	defer bc.pruneLock.RUnlock()
-	
+
 	// Lazy load from DB on first access if it's 0 (assuming node restart)
 	if bc.lastPrunedBlockNumber == 0 {
 		key := []byte("last_pruned_block_number")

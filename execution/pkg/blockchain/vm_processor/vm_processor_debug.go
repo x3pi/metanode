@@ -95,7 +95,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 		}
 	}
 	defer mvm.ClearMVMApi(mvmIdDebug)
-	
+
 	if span != nil { // GUARD
 		span.SetAttribute("debugMvmId", mvmIdDebug.Hex())
 	}
@@ -111,7 +111,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 	}
 	// logger.Error("ClearMVM: 4", mvmIdDebug)
 
-	if span != nil {            // GUARD
+	if span != nil { // GUARD
 		span.AddEvent("ClearedDebugMVMApi", map[string]interface{}{"mvmIdCleared": mvmIdDebug.Hex()})
 	}
 
@@ -714,6 +714,6 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	if span != nil {
 		span.AddEvent("ClearingMVMApiAfterNonceOnly", map[string]interface{}{"mvmIdToClear": vmP.mvmId.Hex()})
 	}
-	
+
 	return rs, nil
 }

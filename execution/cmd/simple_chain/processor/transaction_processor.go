@@ -478,7 +478,7 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpcWithDeviceKey(
 func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Request) error {
 	startTime := time.Now()
 	logger.Info("🔥 ProcessTransactionsFromClient CALLED, cmd_length=%d, body_length=%d", len(request.Message().Command()), len(request.Message().Body()))
-	
+
 	t0 := time.Now()
 	transactions, err := transaction.UnmarshalTransactions(request.Message().Body())
 	if err != nil {

@@ -16,12 +16,12 @@ import (
 	"github.com/tidwall/gjson"
 
 	"fmt"
-	"strconv"
-	"strings"
-	"time"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
+	"strconv"
+	"strings"
+	"time"
 )
 
 func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -170,10 +170,10 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		addressStr := address.String()
-		
+
 		// Decode address to bytes
 		addrBytes := ethCommon.FromHex(addressStr)
-		
+
 		var nonceVal uint64
 		var gotNonce bool
 
@@ -217,19 +217,19 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Fallback to upstream simple_chain Go DB/trie and intercept the response to ensure proper Ethereum hex encoding
 		logger.Info("🔵 [http_handler] eth_getTransactionCount falling back to upstream Go simple_chain DB for address=%s with intercepted capture", addressStr)
-		
+
 		rec := &responseCaptureWriter{
 			ResponseWriter: w,
 			body:           new(bytes.Buffer),
 			headers:        make(http.Header),
 			statusCode:     http.StatusOK,
 		}
-		
+
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		p.ReverseProxy.ServeHTTP(rec, r)
-		
+
 		respBytes := rec.body.Bytes()
-		
+
 		// Copy captured headers to actual ResponseWriter, excluding Content-Length (which will be re-calculated)
 		for k, vv := range rec.headers {
 			if strings.ToLower(k) != "content-length" {
@@ -238,24 +238,24 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		
+
 		resultVal := gjson.GetBytes(respBytes, "result")
 		if resultVal.Exists() && resultVal.Type == gjson.String {
 			rawHex := resultVal.String()
 			sanitizedHex := sanitizeHex(rawHex)
-			
+
 			idVal := gjson.GetBytes(respBytes, "id")
 			var id interface{} = nil
 			if idVal.Exists() {
 				id = idVal.Value()
 			}
-			
+
 			sanitizedResp := rpc_client.JSONRPCResponse{
 				Jsonrpc: "2.0",
 				Result:  sanitizedHex,
 				Id:      id,
 			}
-			
+
 			finalBytes, err := json.Marshal(sanitizedResp)
 			if err == nil {
 				w.Header().Set("Content-Type", "application/json")
@@ -265,7 +265,7 @@ func (p *RpcReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		
+
 		// Fallback if parsing or marshal fails, write raw response with recalculated Content-Length
 		w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
 		w.WriteHeader(rec.statusCode)

@@ -221,7 +221,6 @@ func TestBlock_ProtoRoundtrip(t *testing.T) {
 	assert.Equal(t, len(original.Transactions()), len(restored.Transactions()))
 }
 
-
 func TestBlockHeader_SetAggregateSignature(t *testing.T) {
 	h := makeTestHeader()
 	assert.Nil(t, h.AggregateSignature())
@@ -288,4 +287,3 @@ func TestBlock_ManyTransactions_MarshalRoundtrip(t *testing.T) {
 		assert.Equal(t, txHash, restored.Transactions()[i], "tx hash mismatch at index %d", i)
 	}
 }
-

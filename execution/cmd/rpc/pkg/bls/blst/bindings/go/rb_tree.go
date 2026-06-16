@@ -21,129 +21,130 @@ import "bytes"
 const red, black bool = true, false
 
 type node struct {
-    leafs  [2]*node
-    data   *[]byte
-    colour bool
+	leafs  [2]*node
+	data   *[]byte
+	colour bool
 }
 
 type rbTree struct {
-    root   *node
-    nnodes uint
-    nodes  []node
+	root   *node
+	nnodes uint
+	nodes  []node
 }
 
 func (tree *rbTree) insert(data *[]byte) bool {
-    var nodes [64]*node     /* visited nodes    */
-    var dirs  [64]byte      /* taken directions */
-    var k uint              /* walked distance  */
+	var nodes [64]*node /* visited nodes    */
+	var dirs [64]byte   /* taken directions */
+	var k uint          /* walked distance  */
 
-    for p := tree.root; p != nil; k++ {
-        cmp := bytes.Compare(*data, *p.data)
+	for p := tree.root; p != nil; k++ {
+		cmp := bytes.Compare(*data, *p.data)
 
-        if cmp == 0 {
-            return false    /* already in tree, no insertion */
-        }
+		if cmp == 0 {
+			return false /* already in tree, no insertion */
+		}
 
-        /* record the step */
-        nodes[k] = p
-        if cmp > 0 {
-            dirs[k] = 1
-        } else {
-            dirs[k] = 0
-        }
-        p = p.leafs[dirs[k]]
-    }
+		/* record the step */
+		nodes[k] = p
+		if cmp > 0 {
+			dirs[k] = 1
+		} else {
+			dirs[k] = 0
+		}
+		p = p.leafs[dirs[k]]
+	}
 
-    /* allocate new node */
-    z := &tree.nodes[tree.nnodes]; tree.nnodes++
-    z.data = data
-    z.colour = red
+	/* allocate new node */
+	z := &tree.nodes[tree.nnodes]
+	tree.nnodes++
+	z.data = data
+	z.colour = red
 
-    /* graft |z| */
-    if k > 0 {
-        nodes[k-1].leafs[dirs[k-1]] = z
-    } else {
-        tree.root = z
-    }
+	/* graft |z| */
+	if k > 0 {
+		nodes[k-1].leafs[dirs[k-1]] = z
+	} else {
+		tree.root = z
+	}
 
-    /* re-balance |tree| */
-    for k >= 2 /* && IS_RED(y = nodes[k-1]) */ {
-        y := nodes[k-1]
-        if y.colour == black  {
-            break
-        }
+	/* re-balance |tree| */
+	for k >= 2 /* && IS_RED(y = nodes[k-1]) */ {
+		y := nodes[k-1]
+		if y.colour == black {
+			break
+		}
 
-        ydir := dirs[k-2]
-        x := nodes[k-2]         /* |z|'s grandparent    */
-        s := x.leafs[ydir^1]    /* |z|'s uncle          */
+		ydir := dirs[k-2]
+		x := nodes[k-2]      /* |z|'s grandparent    */
+		s := x.leafs[ydir^1] /* |z|'s uncle          */
 
-        if s != nil && s.colour == red {
-            x.colour = red
-            y.colour = black
-            s.colour = black
-            k -= 2
-        } else {
-            if dirs[k-1] != ydir {
-                /*    |        |
-                 *    x        x
-                 *   / \        \
-                 *  y   s -> z   s
-                 *   \      /
-                 *    z    y
-                 *   /      \
-                 *  ?        ?
-                 */
-                t := y
-                y = y.leafs[ydir^1]
-                t.leafs[ydir^1] = y.leafs[ydir]
-                y.leafs[ydir] = t
-            }
+		if s != nil && s.colour == red {
+			x.colour = red
+			y.colour = black
+			s.colour = black
+			k -= 2
+		} else {
+			if dirs[k-1] != ydir {
+				/*    |        |
+				 *    x        x
+				 *   / \        \
+				 *  y   s -> z   s
+				 *   \      /
+				 *    z    y
+				 *   /      \
+				 *  ?        ?
+				 */
+				t := y
+				y = y.leafs[ydir^1]
+				t.leafs[ydir^1] = y.leafs[ydir]
+				y.leafs[ydir] = t
+			}
 
-            /*      |        |
-             *      x        y
-             *       \      / \
-             *    y   s -> z   x
-             *   / \          / \
-             *  z   ?        ?   s
-             */
-            x.leafs[ydir] = y.leafs[ydir^1]
-            y.leafs[ydir^1] = x
+			/*      |        |
+			 *      x        y
+			 *       \      / \
+			 *    y   s -> z   x
+			 *   / \          / \
+			 *  z   ?        ?   s
+			 */
+			x.leafs[ydir] = y.leafs[ydir^1]
+			y.leafs[ydir^1] = x
 
-            x.colour = red
-            y.colour = black
+			x.colour = red
+			y.colour = black
 
-            if k > 2 {
-                nodes[k-3].leafs[dirs[k-3]] = y
-            } else {
-                tree.root = y
-            }
+			if k > 2 {
+				nodes[k-3].leafs[dirs[k-3]] = y
+			} else {
+				tree.root = y
+			}
 
-            break
-        }
-    }
+			break
+		}
+	}
 
-    tree.root.colour = black
+	tree.root.colour = black
 
-    return true
+	return true
 }
 
 func Uniq(msgs []Message) bool {
-    n := len(msgs)
+	n := len(msgs)
 
-    if n == 1 {
-        return true
-    } else if n == 2 {
-        return bytes.Compare(msgs[0], msgs[1]) != 0
-    }
+	if n == 1 {
+		return true
+	} else if n == 2 {
+		return bytes.Compare(msgs[0], msgs[1]) != 0
+	}
 
-    var tree rbTree
-    tree.nodes = make([]node, n)
+	var tree rbTree
+	tree.nodes = make([]node, n)
 
-    for i := 0; i < n; i++ {
-        if !tree.insert(&msgs[i]) {
-            return false
-        }
-    }
+	for i := 0; i < n; i++ {
+		if !tree.insert(&msgs[i]) {
+			return false
+		}
+	}
 
-    return true
+	return true
 }

@@ -335,7 +335,7 @@ func (bp *BlockProcessor) commitWorker() {
 			for _, logs := range job.ProcessResults.EventLogs {
 				allEventLogs = append(allEventLogs, logs...)
 			}
-			
+
 			go func(wg *sync.WaitGroup, block types.Block, receipts []types.Receipt, events []types.EventLog) {
 				if wg != nil {
 					wg.Wait()
@@ -347,7 +347,6 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
 	}
 }
-
 
 // commitToMemoryParallel performs parallel memory commit operations.
 // PIPELINE COMMIT: AccountStateDB and StakeStateDB use CommitPipeline() (fast, releases locks early)
@@ -380,7 +379,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			bp.chainState.GetSmartContractDB().Discard()
 			bp.chainState.GetStakeStateDB().Discard()
 			trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
-			
+
 			// We only run txDB and Receipts commits
 			totalTasks = 2
 		} else {
@@ -645,7 +644,7 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		MapppingBatch:             job.MappingBatch,
 		StakeState:                job.StakeBatch,
 		TrieDatabaseBatchPut:      job.TrieBatchSnapshot,
-		FullDbLogs:                fullDbLogs, 
+		FullDbLogs:                fullDbLogs,
 	}
 
 	backupBytes, err := storage.SerializeBackupDb(backupData)

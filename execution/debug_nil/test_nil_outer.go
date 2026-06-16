@@ -9,13 +9,13 @@ import (
 
 func main() {
 	type Proto struct {
-		Padding1 [24]byte
+		Padding1  [24]byte
 		ToAddress []byte
 	}
 	type Transaction struct {
 		proto *Proto
 	}
-	
+
 	var t *Transaction = nil
 	fmt.Println("Testing nil struct pointer")
 	addr := common.BytesToAddress(t.proto.ToAddress)

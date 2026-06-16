@@ -467,7 +467,7 @@ func NewServer(app *App) *http.ServeMux {
 	// Enhanced /health endpoint (Liveness)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		status := map[string]interface{}{
 			"status": "ok",
 		}
@@ -477,7 +477,7 @@ func NewServer(app *App) *http.ServeMux {
 			if lastBlock != nil && lastBlock.Header() != nil {
 				status["block"] = lastBlock.Header().BlockNumber()
 				status["epoch"] = lastBlock.Header().Epoch()
-				
+
 				// Calculate block age
 				blockTimeMs := lastBlock.Header().TimeStamp()
 				if blockTimeMs > 0 {
@@ -505,7 +505,7 @@ func NewServer(app *App) *http.ServeMux {
 		}
 
 		status := map[string]interface{}{
-			"ready": ready,
+			"ready":  ready,
 			"checks": checks,
 		}
 

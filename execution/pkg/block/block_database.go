@@ -101,12 +101,12 @@ func (blockDatabase *BlockDatabase) SaveLastBlockSync(block types.Block) error {
 
 // lastBlockBackupData is the JSON structure for the backup file.
 type lastBlockBackupData struct {
-	BlockNumber    uint64 `json:"block_number"`
-	BlockHash      string `json:"block_hash"`
-	AccountRoot    string `json:"account_root"`
-	GlobalExecIdx  uint64 `json:"global_exec_index"`
-	Epoch          uint64 `json:"epoch"`
-	BlockBytes     []byte `json:"block_bytes"`
+	BlockNumber   uint64 `json:"block_number"`
+	BlockHash     string `json:"block_hash"`
+	AccountRoot   string `json:"account_root"`
+	GlobalExecIdx uint64 `json:"global_exec_index"`
+	Epoch         uint64 `json:"epoch"`
+	BlockBytes    []byte `json:"block_bytes"`
 }
 
 // SaveLastBlockBackup writes the last block to a JSON backup file.
@@ -296,7 +296,7 @@ func (blockDatabase *BlockDatabase) GetSystemTransactions(blockNumber uint64) ([
 		return [][]byte{}, nil
 	}
 	var txs [][]byte
-	
+
 	// Fallback to JSON for backward compatibility
 	if len(data) > 0 && data[0] == '[' {
 		err = json.Unmarshal(data, &txs)
@@ -304,7 +304,7 @@ func (blockDatabase *BlockDatabase) GetSystemTransactions(blockNumber uint64) ([
 			return txs, nil
 		}
 	}
-	
+
 	// Default to RLP
 	err = rlp.DecodeBytes(data, &txs)
 	if err != nil {

@@ -8,8 +8,8 @@ const (
 	// transaction
 	TransactionError   = "TransactionError"
 	TransactionSuccess = "TransactionSuccess"
-	ReadTransaction  = "ReadTransaction"
-	EstimateGas      = "EstimateGas"
+	ReadTransaction    = "ReadTransaction"
+	EstimateGas        = "EstimateGas"
 
 	SendTransaction                 = "SendTransaction"
 	SendTransactions                = "SendTransactions"

@@ -26,11 +26,11 @@ func (t *Transaction) ToAddress() []byte {
 func main() {
 	var pbTx *pb.Transaction = nil
 	tx := &Transaction{proto: pbTx}
-	
+
 	fmt.Println("GetNonce:")
 	nonce := tx.GetNonce()
 	fmt.Println("Nonce:", nonce)
-	
+
 	fmt.Println("ToAddress:")
 	addr := tx.ToAddress()
 	fmt.Println("Addr:", addr)

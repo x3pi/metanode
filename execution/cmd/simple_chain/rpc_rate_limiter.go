@@ -33,9 +33,9 @@ type ipEntry struct {
 
 // RPCRateLimiter provides global and per-IP rate limiting for the RPC server.
 type RPCRateLimiter struct {
-	config  *config.RpcRateLimitConfig
-	global  *rate.Limiter
-	
+	config *config.RpcRateLimitConfig
+	global *rate.Limiter
+
 	// PERFORMANCE: use sync.Map for lock-free reads on the hot path
 	// Only cleanup needs a full scan via Range()
 	perIP   sync.Map // map[string]*ipEntry
@@ -51,19 +51,19 @@ func NewRPCRateLimiter(cfg *config.RpcRateLimitConfig) *RPCRateLimiter {
 	if cfg == nil {
 		cfg = &config.RpcRateLimitConfig{Enabled: false}
 	}
-	
+
 	// Allow burst to be slightly larger than rate
 	globalBurst := cfg.GlobalRate * 2
 	if globalBurst < 100 {
 		globalBurst = 100
 	}
-	
+
 	rl := &RPCRateLimiter{
 		config:  cfg,
 		global:  rate.NewLimiter(rate.Limit(cfg.GlobalRate), globalBurst),
 		closeCh: make(chan struct{}),
 	}
-	
+
 	if cfg.Enabled {
 		go rl.cleanupLoop()
 	}
@@ -166,11 +166,11 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 		// Check per-IP limiter
 		if !entry.limiter.Allow() {
 			rl.totalRejected.Add(1)
-			
+
 			// IP exceeds rate, BAN it
 			entry.blockedUntil = time.Now().Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
 			logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
-			
+
 			writeIPBlockedResponse(w, entry.blockedUntil)
 			return
 		}
@@ -223,7 +223,7 @@ func writeIPBlockedResponse(w http.ResponseWriter, blockedUntil time.Time) {
 	if retryAfter < 1 {
 		retryAfter = 1
 	}
-	
+
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 	w.WriteHeader(http.StatusTooManyRequests)
 	resp := map[string]interface{}{

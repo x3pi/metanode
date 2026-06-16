@@ -363,11 +363,11 @@ func (s *ShardelDB) NewBatchWithSize(size int) ethdb.Batch {
 // shardIterator represents an empty iterator since iteration over sharded DB is not fully supported in this context.
 type shardIterator struct{}
 
-func (it *shardIterator) Next() bool   { return false }
-func (it *shardIterator) Error() error { return nil }
-func (it *shardIterator) Key() []byte  { return nil }
+func (it *shardIterator) Next() bool    { return false }
+func (it *shardIterator) Error() error  { return nil }
+func (it *shardIterator) Key() []byte   { return nil }
 func (it *shardIterator) Value() []byte { return nil }
-func (it *shardIterator) Release()     {}
+func (it *shardIterator) Release()      {}
 
 // NewIterator returns a new iterator over the database.
 func (s *ShardelDB) NewIterator(start, end []byte) ethdb.Iterator {

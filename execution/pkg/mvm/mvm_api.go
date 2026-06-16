@@ -207,12 +207,12 @@ func ConfigureXapianBasePath(path string) {
 }
 
 func init() {
-        // Tăng giới hạn xả tự động (flush threshold) của Xapian lên 10 triệu modifications (~1GB)
-        // Điều này ngăn chặn Xapian tự động xả dữ liệu gây block quá trình thực thi,
-        // để dành việc xả đĩa cho Background Worker (chạy mỗi 10s)
-        if os.Getenv("XAPIAN_FLUSH_THRESHOLD") == "" {
-                os.Setenv("XAPIAN_FLUSH_THRESHOLD", "10000000")
-        }
+	// Tăng giới hạn xả tự động (flush threshold) của Xapian lên 10 triệu modifications (~1GB)
+	// Điều này ngăn chặn Xapian tự động xả dữ liệu gây block quá trình thực thi,
+	// để dành việc xả đĩa cho Background Worker (chạy mỗi 10s)
+	if os.Getenv("XAPIAN_FLUSH_THRESHOLD") == "" {
+		os.Setenv("XAPIAN_FLUSH_THRESHOLD", "10000000")
+	}
 }
 
 func GetOrCreateMVMApi(
@@ -262,7 +262,7 @@ func LenApiInstances() int {
 
 func RemoveOldApiInstances() {
 	const targetSize = 2000
-	
+
 	// Lớp bảo vệ 1: Fast-path check với atomic counter
 	// Nếu tổng số instance (bao gồm cả protected) còn nhỏ hơn targetSize,
 	// thì chắc chắn số unprotected cũng nhỏ hơn, không cần quét map.
@@ -356,7 +356,7 @@ func ClearMVMApi(mvmId common.Address) {
 		return
 	}
 	apiInstanceCount.Add(-1)
-	
+
 	mvmApi, ok := instance.(*MVMApi)
 	if !ok || mvmApi == nil {
 		logger.Debug("Removed invalid/nil MVMApi entry from map:", mvmId.Hex())

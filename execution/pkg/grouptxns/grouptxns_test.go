@@ -77,9 +77,9 @@ func TestEmptyInput(t *testing.T) {
 
 type mockTx struct {
 	types.Transaction // embed interface
-	hash  common.Hash
-	from  common.Address
-	nonce uint64
+	hash              common.Hash
+	from              common.Address
+	nonce             uint64
 }
 
 func (m *mockTx) Hash() common.Hash {

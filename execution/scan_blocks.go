@@ -4,10 +4,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
 var (

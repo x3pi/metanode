@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // StakeStateDB quản lý state staking của các validator sử dụng Merkle Patricia Trie.
@@ -28,7 +29,7 @@ type StakeStateDB struct {
 	originRootHash common.Hash
 	db             storage.Storage
 	//cache tránh trie truy vấn nhiều lần
-	dirtyValidators sync.Map
+	dirtyValidators *utils.ShardedAddressMap[state.ValidatorState]
 
 	lockedFlag atomic.Bool
 
@@ -40,7 +41,7 @@ type StakeStateDB struct {
 	// IntermediateRoot(true) waits on this channel before proceeding,
 	// ensuring the trie reference reflects the previous block's committed state.
 	persistReady chan struct{}
-	
+
 	changelogDB           *state_changelog.StateChangelogDB
 	historicalBlockNumber uint64
 }
@@ -61,7 +62,7 @@ func NewStakeStateDB(
 		trie:            trie,
 		db:              db,
 		originRootHash:  trie.Hash(),
-		dirtyValidators: sync.Map{},
+		dirtyValidators: utils.NewShardedAddressMap[state.ValidatorState](),
 		persistReady:    initReady,
 	}
 }
@@ -101,7 +102,8 @@ func (db *StakeStateDB) getOrCreateValidatorState(
 ) (state.ValidatorState, error) {
 	value, ok := db.dirtyValidators.Load(address)
 	if ok {
-		if vs, valid := value.(state.ValidatorState); valid && vs != nil {
+		if value != nil {
+			vs := value
 			return vs, nil
 		}
 	}
@@ -121,7 +123,7 @@ func (db *StakeStateDB) getOrCreateValidatorState(
 	} else {
 		bData, err = trieToUse.Get(address.Bytes())
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("error getting %s from Trie: %w", address.Hex(), err)
 	}
@@ -354,7 +356,6 @@ func (db *StakeStateDB) GetAllValidators() ([]state.ValidatorState, error) {
 	}
 	allData, err := trieToUse.GetAll()
 
-
 	if err != nil {
 		return nil, fmt.Errorf("error getting all data from trie: %w", err)
 	}
@@ -400,7 +401,8 @@ func (db *StakeStateDB) GetValidator(address common.Address) (state.ValidatorSta
 	// 1. Kiểm tra cache trước
 	value, ok := db.dirtyValidators.Load(address)
 	if ok {
-		if vs, valid := value.(state.ValidatorState); valid || vs == nil {
+		if true {
+			vs := value
 			return vs, nil
 		}
 	}
@@ -570,8 +572,8 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 
 		// ═══════════════════════════════════════════════════════════════
 		// DEFERRED PERSIST GATE (MOVED TO CommitPipeline):
-		// For NOMT/FlatTrie, we no longer wait for persistReady here 
-		// because we use BatchUpdateWithCachedOldValues which does not 
+		// For NOMT/FlatTrie, we no longer wait for persistReady here
+		// because we use BatchUpdateWithCachedOldValues which does not
 		// touch C++ or read from DB.
 		// ═══════════════════════════════════════════════════════════════
 
@@ -593,7 +595,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		defer func() {
 			db.lockedFlag.Store(false)
 		}()
-		
+
 		return db.trie.Hash(), nil
 	}
 
@@ -609,8 +611,9 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 	)
 
 	var dirtyAddresses []common.Address
-	db.dirtyValidators.Range(func(key, _ interface{}) bool {
-		if address, ok := key.(common.Address); ok {
+	db.dirtyValidators.Range(func(key common.Address, _ state.ValidatorState) bool {
+		if true {
+			address := key
 			dirtyAddresses = append(dirtyAddresses, address)
 		}
 		return true
@@ -626,7 +629,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		if !ok {
 			continue
 		}
-		
+
 		hasChanges = true
 		var bytesToStore []byte
 		if value != nil {
@@ -634,7 +637,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			fileLogger.Info("IntermediateRoot: vs", vs)
 			if !ok2 {
 				updateErr = fmt.Errorf("invalid value type for address %s", address.Hex())
-				break 
+				break
 			}
 			var err error
 			bytesToStore, err = vs.Marshal()
@@ -672,8 +675,8 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 			} else if err := nomtTrie.BatchUpdate(batchKeys, batchValues); err != nil {
 				updateErr = fmt.Errorf("trie BatchUpdate error: %w", err)
 			}
-		} 
-		
+		}
+
 		if !isNOMT {
 			// For MPT, we MUST wait for the old trie pointer swap to complete
 			waitStart := time.Now()
@@ -749,7 +752,7 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 
 		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
 		if nHash == (common.Hash{}) {
-			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 (no changes). "+
+			logger.Error("🚨 [STAKE-DB] IntermediateRoot returned 0x0 (no changes). " +
 				"NOMT stake_db handle is uninitialized or corrupted.")
 		}
 
@@ -885,12 +888,12 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 // StakePipelineCommitResult holds data needed for async persistence after CommitPipeline.
 // The caller should pass this to PersistAsync() in a background goroutine.
 type StakePipelineCommitResult struct {
-	FinalHash  common.Hash
-	Batch      [][2][]byte // node hash → blob pairs for DB BatchPut
-	StakeBatch []byte      // serialized batch for network transfer to sub-nodes
-	Trie       p_trie.StateTrie // The trie instance after Commit, to be re-used
-	PersistChannel chan struct{}  // Channel created for THIS block's persist async
-	NomtPayload    interface{}    // Extracted NOMT payload for asynchronous block commit
+	FinalHash      common.Hash
+	Batch          [][2][]byte      // node hash → blob pairs for DB BatchPut
+	StakeBatch     []byte           // serialized batch for network transfer to sub-nodes
+	Trie           p_trie.StateTrie // The trie instance after Commit, to be re-used
+	PersistChannel chan struct{}    // Channel created for THIS block's persist async
+	NomtPayload    interface{}      // Extracted NOMT payload for asynchronous block commit
 }
 
 // CommitPipeline performs the fast, synchronous phase of commit:
@@ -973,7 +976,7 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	}
 
 	// Store stakeBatch for network transfer
-	// ALWAYS call SetStakeBatch (even if nil) to clear any leftover batch 
+	// ALWAYS call SetStakeBatch (even if nil) to clear any leftover batch
 	// from the previous block, ensuring we don't leak stale data to Sub nodes.
 	db.SetStakeBatch(stakeBatchData)
 
@@ -993,10 +996,10 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 	db.persistReady = newPersistReady
 
 	return &StakePipelineCommitResult{
-		FinalHash:  committedHash,
-		Batch:      persistBatch,
-		StakeBatch: stakeBatchData,
-		Trie:       db.trie, // Pass the trie along
+		FinalHash:      committedHash,
+		Batch:          persistBatch,
+		StakeBatch:     stakeBatchData,
+		Trie:           db.trie, // Pass the trie along
 		PersistChannel: newPersistReady,
 	}, nil
 }
@@ -1040,8 +1043,6 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	// Step 2: Create new trie and swap reference
 	// ═══════════════════════════════════════════════════════════════
 
-
-
 	db.muCommit.Lock()
 	var newTrieToSet p_trie.StateTrie
 	if result.Trie != nil {
@@ -1055,7 +1056,7 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 		}
 		newTrieToSet = newTrie
 	}
-	
+
 	// Preserve ChangelogDB
 	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
@@ -1073,7 +1074,7 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 			newNomt.SetChangelogDB(changelogDB)
 		}
 	}
-	
+
 	db.trie = newTrieToSet
 	db.originRootHash = result.FinalHash
 	db.muCommit.Unlock()
@@ -1094,7 +1095,7 @@ func (db *StakeStateDB) Discard() error {
 	if err != nil {
 		return fmt.Errorf("failed to reload trie to %s: %w", db.originRootHash, err)
 	}
-	
+
 	// Preserve ChangelogDB
 	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
@@ -1112,7 +1113,7 @@ func (db *StakeStateDB) Discard() error {
 			newNomt.SetChangelogDB(changelogDB)
 		}
 	}
-	
+
 	db.trie = newTrie
 	return nil
 }

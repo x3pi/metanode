@@ -472,7 +472,7 @@ func main() {
 	lastBlockNum := startBlock
 	totalTxsInBlocks := uint64(0)
 	requiredEmptyStreak := 10 // Wait for 10 consecutive polls (20s) with no new blocks → chain truly idle
-	maxRpcErrorStreak := 5   // Exit after 5 consecutive RPC errors (10s) — node is likely down
+	maxRpcErrorStreak := 5    // Exit after 5 consecutive RPC errors (10s) — node is likely down
 
 	for time.Since(processStart) < maxWait {
 		time.Sleep(pollInterval)

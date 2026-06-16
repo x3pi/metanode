@@ -12,7 +12,6 @@ import (
 // --- Hằng số tiền tố cho key block ---
 const blockDataKeyPrefix = common.BlockDataTopic
 
-
 // createBlockDataKey generates the standardized key for block data.
 func createBlockDataKey(blockNumber uint64) string {
 	return fmt.Sprintf("%s-%d", blockDataKeyPrefix, blockNumber)
@@ -50,8 +49,6 @@ func (node *HostNode) GetBlockStorage(blockNumber uint64) ([]byte, error) {
 
 	return nil, fmt.Errorf("block %d not found locally", blockNumber)
 }
-
-
 
 // fetchBlockFromPeersAsync chạy ở chế độ nền để yêu cầu block từ Master qua TCP.
 // Gửi request "BlockRequest" qua MessageSender tới master connections.
@@ -143,5 +140,3 @@ func (node *HostNode) SetStorage(key string, value []byte) {
 func (node *HostNode) DeleteStorage(key string) {
 	node.KeyValueStore.Remove(key)
 }
-
-

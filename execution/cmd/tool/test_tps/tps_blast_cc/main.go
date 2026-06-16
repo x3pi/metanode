@@ -50,7 +50,7 @@ type rawWriter struct {
 	addr         string
 	version      string
 	toAddrHex    string
-	rpcPool      []*rpc.RPCClient // injected for nonce divergence check
+	rpcPool      []*rpc.RPCClient     // injected for nonce divergence check
 	nonceChecker func(addrHex string) // callback khi invalid nonce xảy ra
 }
 

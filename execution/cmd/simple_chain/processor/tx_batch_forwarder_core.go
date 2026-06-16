@@ -11,8 +11,8 @@ import (
 	mt_config "github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/executor"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
@@ -81,9 +81,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		} else {
 			batchAccumulationTimeout = 100 * time.Millisecond // Max throughput for extreme load
 		}
-		
-		const batchAccumulationCheckInterval = 1 * time.Millisecond 
-		const minBatchSize = 20000                
+
+		const batchAccumulationCheckInterval = 1 * time.Millisecond
+		const minBatchSize = 20000
 
 		accumulationStart := time.Now()
 		lastPoolSize := poolSizeBefore
@@ -103,7 +103,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			if currentPoolSize == lastPoolSize {
 				stagnantCycles++
 				// ADAPTIVE BATCHING: If no new TXs arrive for 2ms, flush immediately
-				if stagnantCycles >= 2 { 
+				if stagnantCycles >= 2 {
 					break
 				}
 			} else {

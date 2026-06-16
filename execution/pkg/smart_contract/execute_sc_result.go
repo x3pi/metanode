@@ -335,7 +335,6 @@ func (r *ExecuteSCResult) SetMapFullDbLogs(logs map[string][]byte) {
 	r.mapFullDbLogs = logs
 }
 
-
 func ExecuteSCResultsFromProto(pbData []*pb.ExecuteSCResult) []types.ExecuteSCResult {
 	results := make([]types.ExecuteSCResult, len(pbData))
 	for i, v := range pbData {

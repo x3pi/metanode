@@ -563,5 +563,3 @@ func (h *RobotHandler) broadcastEvent(
 	logger.Info("✅ Broadcasted %s event", eventName)
 	return nil
 }
-
-

@@ -390,7 +390,7 @@ func (node *HostNode) processIncomingData(reader *bufio.Reader) error {
 			logger.Info(fmt.Sprintf("✅ Successfully decompressed split archive '%s' to '%s'.", stateKey, finalExtractDir))
 			processingSuccessful = true
 			storage.UpdateState(2)
-			
+
 			// CLEAR C++ CACHE: C++ cache must be cleared when a snapshot is loaded to prevent stale state reads
 			logger.Info("🧹 [SNAPSHOT LOADED] Clearing C++ State Cache to prevent stale reads...")
 			mvm.ClearAllStateInstances()

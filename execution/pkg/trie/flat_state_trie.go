@@ -130,7 +130,7 @@ func dbCacheKey(db FlatStateDB) string {
 		if ps, ok := rootDB.(interface{ GetPrefix() []byte }); ok {
 			prefixes = append(prefixes, ps.GetPrefix())
 		}
-		
+
 		if uw, ok := rootDB.(interface{ Unwrap() FlatStateDB }); ok {
 			rootDB = uw.Unwrap()
 		} else if uw, ok := rootDB.(interface{ Unwrap() interface{} }); ok {
@@ -139,7 +139,7 @@ func dbCacheKey(db FlatStateDB) string {
 			break
 		}
 	}
-	
+
 	// Join all prefixes in reverse order
 	var buf bytes.Buffer
 	buf.WriteString(fmt.Sprintf("%p", rootDB))
@@ -353,8 +353,8 @@ func (f *FlatStateTrie) Update(key, value []byte) error {
 //
 // OPTIMIZATION: Instead of doing sequential DB reads for old values while holding
 // the lock, this method:
-//   1. Parallelizes hex encoding and old-value DB reads (read-only Phase 1)
-//   2. Acquires the lock ONCE for the entire batch (sequential map updates Phase 2)
+//  1. Parallelizes hex encoding and old-value DB reads (read-only Phase 1)
+//  2. Acquires the lock ONCE for the entire batch (sequential map updates Phase 2)
 //
 // This reduces lock overhead and exploits SSD parallel read bandwidth.
 func (f *FlatStateTrie) BatchUpdate(keys, values [][]byte) error {
@@ -1051,13 +1051,13 @@ func UpdateBucketCacheFromBatch(db FlatStateDB, batch [][2][]byte) {
 			*buckets = *oldBuckets
 		} else {
 			buckets = new([256]e_common.Hash)
-			
+
 			// Resolve prefix if cacheKey corresponds to a prefixed contract database
 			var prefix []byte
 			if len(cacheKey) > len(baseCacheKey)+1 && cacheKey[len(baseCacheKey)] == ':' {
 				prefix = []byte(cacheKey[len(baseCacheKey)+1:])
 			}
-			
+
 			// Read current buckets from DB to initialize
 			for i := 0; i < 256; i++ {
 				bucketKey := makeBucketKey(byte(i))
@@ -1088,4 +1088,3 @@ func UpdateBucketCacheFromBatch(db FlatStateDB, batch [][2][]byte) {
 		globalBucketCache.Store(cacheKey, buckets)
 	}
 }
-

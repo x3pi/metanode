@@ -55,9 +55,9 @@ type Handle struct {
 	sessionsMu      sync.Mutex
 	pendingSessions []*FinishedSession
 
-	closing         bool
-	activeCount     int
-	activeCond      *sync.Cond
+	closing     bool
+	activeCount int
+	activeCond  *sync.Cond
 
 	commitPayloadMu sync.Mutex
 }
@@ -69,7 +69,6 @@ func (h *Handle) LockCommitPayload() {
 func (h *Handle) UnlockCommitPayload() {
 	h.commitPayloadMu.Unlock()
 }
-
 
 // Session wraps the opaque NOMT write session pointer.
 type Session struct {
@@ -165,7 +164,7 @@ func (h *Handle) Close() {
 	}
 	h.UnlockCommitPayload()
 
-	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
+	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding
 	// Arc<Core> references, nomt_close will fully drop the database synchronously.
 	h.mu.Lock()
 	if h.ptr != nil {
@@ -240,7 +239,7 @@ func (h *Handle) CloseForSnapshot() {
 	}
 	h.UnlockCommitPayload()
 
-	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding 
+	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding
 	// Arc<Core> references, nomt_close will fully drop the database synchronously,
 	// flushing all WALs and memory mapped files safely.
 	if h.ptr != nil {
@@ -836,7 +835,7 @@ func (fs *FinishedSession) CommitPayload(h *Handle) error {
 	ret := C.nomt_commit_payload(h.ptr, ptr)
 	fs.ptr = nil
 	fs.mu.Unlock()
-	
+
 	h.sessionsMu.Lock()
 	for i, pfs := range h.pendingSessions {
 		if pfs == fs {

@@ -627,7 +627,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			fmt.Fprintf(w, "   \t%s\t%s\t\t\t\t\t\t\t\t\n", n.Name, bi.Error)
 			continue
 		}
-		
+
 		// Shorten hashes for display if they match, show full if they differ, or maybe just show first/last chars
 		shortHash := func(h string, diff bool) string {
 			if len(h) < 10 {
@@ -638,7 +638,7 @@ func printMismatchDetail(m mismatch, nodes []nodeInfo) {
 			}
 			return h[:10] + "..."
 		}
-		
+
 		fmt.Fprintf(w, "   \t%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
 			n.Name,
 			shortHash(bi.Hash, hashDiff),
@@ -779,7 +779,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 
 	for _, n := range nodes {
 		num, err := getLatestBlockNumber(client, n.URL)
-		
+
 		var gei, epoch uint64
 		if err == nil {
 			// Lấy gei và epoch từ chính block mới nhất thông qua eth_getBlockByNumber
@@ -872,14 +872,18 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		} else {
 			fmt.Printf(" ✅ hash khớp %d blocks (block %d→%d)\n", matched, from, minBlock)
 		}
-		
+
 		if len(emptyBlocks) > 0 {
 			show := len(emptyBlocks)
-			if show > 10 { show = 10 }
+			if show > 10 {
+				show = 10
+			}
 			fmt.Printf("   👻 Có %d block rỗng/nhảy cóc: %v", len(emptyBlocks), emptyBlocks[:show])
-			if len(emptyBlocks) > 10 { fmt.Printf("...") }
+			if len(emptyBlocks) > 10 {
+				fmt.Printf("...")
+			}
 			fmt.Println()
-			
+
 			// Lưu vào file (tránh trùng lặp)
 			if trackedGhosts != nil {
 				f, err := os.OpenFile("ghost_blocks.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -895,7 +899,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 				}
 			}
 		}
-		
+
 		// In hash của block mới nhất (minBlock) từ mỗi node
 		fmt.Printf("   📦 Block %d hashes:\n", minBlock)
 		for _, n := range nodes {
@@ -925,7 +929,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	}
 
 	fmt.Printf("\n🔍 Tự động dò ngược (backtrack) từ block %d để tìm điểm chia nhánh (fork point)...\n", earliestMismatch)
-	
+
 	// Try up to 500 blocks backwards to find the exact fork point
 	forkPoint := earliestMismatch
 	for b := earliestMismatch - 1; b > 0 && b >= earliestMismatch-500; b-- {
@@ -971,7 +975,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 	if len(mismatches) > 0 {
 		firstMismatch := mismatches[0]
 		alertBuf.WriteString(fmt.Sprintf("\n🛑 ĐIỂM CHIA NHÁNH (FORK POINT) - Block %d:\n", firstMismatch.BlockNumber))
-		
+
 		// Find mismatched fields
 		var validBlocks []blockInfo
 		for _, n := range nodes {
@@ -985,31 +989,71 @@ func watchOnce(client *http.Client, nodes []nodeInfo, checkLast int, totalChecks
 		if len(validBlocks) >= 2 {
 			ref := validBlocks[0]
 			for _, b := range validBlocks[1:] {
-				if b.Hash != ref.Hash { hashDiff = true }
-				if b.ParentHash != ref.ParentHash { parentDiff = true }
-				if b.StateRoot != ref.StateRoot { stateDiff = true }
-				if b.StakeStatesRoot != ref.StakeStatesRoot { stakeDiff = true }
-				if b.TransactionsRoot != ref.TransactionsRoot { txDiff = true }
-				if b.ReceiptsRoot != ref.ReceiptsRoot { rcpDiff = true }
-				if b.LeaderAddress != ref.LeaderAddress { leaderDiff = true }
-				if b.Timestamp != ref.Timestamp { timeDiff = true }
-				if b.GlobalExecIndex != ref.GlobalExecIndex { geiDiff = true }
-				if b.Epoch != ref.Epoch { epochDiff = true }
+				if b.Hash != ref.Hash {
+					hashDiff = true
+				}
+				if b.ParentHash != ref.ParentHash {
+					parentDiff = true
+				}
+				if b.StateRoot != ref.StateRoot {
+					stateDiff = true
+				}
+				if b.StakeStatesRoot != ref.StakeStatesRoot {
+					stakeDiff = true
+				}
+				if b.TransactionsRoot != ref.TransactionsRoot {
+					txDiff = true
+				}
+				if b.ReceiptsRoot != ref.ReceiptsRoot {
+					rcpDiff = true
+				}
+				if b.LeaderAddress != ref.LeaderAddress {
+					leaderDiff = true
+				}
+				if b.Timestamp != ref.Timestamp {
+					timeDiff = true
+				}
+				if b.GlobalExecIndex != ref.GlobalExecIndex {
+					geiDiff = true
+				}
+				if b.Epoch != ref.Epoch {
+					epochDiff = true
+				}
 			}
 		}
 
 		var diffs []string
-		if hashDiff { diffs = append(diffs, "hash") }
-		if parentDiff { diffs = append(diffs, "parentHash") }
-		if stateDiff { diffs = append(diffs, "stateRoot") }
-		if stakeDiff { diffs = append(diffs, "stakeStatesRoot") }
-		if txDiff { diffs = append(diffs, "txRoot") }
-		if rcpDiff { diffs = append(diffs, "receiptsRoot") }
-		if leaderDiff { diffs = append(diffs, "leaderAddress") }
-		if timeDiff { diffs = append(diffs, "timestamp") }
-		if geiDiff { diffs = append(diffs, "gei") }
-		if epochDiff { diffs = append(diffs, "epoch") }
-		
+		if hashDiff {
+			diffs = append(diffs, "hash")
+		}
+		if parentDiff {
+			diffs = append(diffs, "parentHash")
+		}
+		if stateDiff {
+			diffs = append(diffs, "stateRoot")
+		}
+		if stakeDiff {
+			diffs = append(diffs, "stakeStatesRoot")
+		}
+		if txDiff {
+			diffs = append(diffs, "txRoot")
+		}
+		if rcpDiff {
+			diffs = append(diffs, "receiptsRoot")
+		}
+		if leaderDiff {
+			diffs = append(diffs, "leaderAddress")
+		}
+		if timeDiff {
+			diffs = append(diffs, "timestamp")
+		}
+		if geiDiff {
+			diffs = append(diffs, "gei")
+		}
+		if epochDiff {
+			diffs = append(diffs, "epoch")
+		}
+
 		if len(diffs) > 0 {
 			alertBuf.WriteString(fmt.Sprintf("   🔍 NGUYÊN NHÂN: Sai lệch ở các trường -> %s\n", strings.Join(diffs, ", ")))
 		}

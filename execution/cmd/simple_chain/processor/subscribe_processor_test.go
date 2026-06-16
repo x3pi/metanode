@@ -232,5 +232,3 @@ func TestSubscribeProcessor_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	// If we got here without race/panic, the test passes
 }
-
-

@@ -5,8 +5,8 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"github.com/cockroachdb/pebble"
+	"log"
 )
 
 func main() {

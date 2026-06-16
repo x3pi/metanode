@@ -9,7 +9,7 @@ import (
 
 func main() {
 	dbPath := "/home/abc/chain-n/metanode/execution/cmd/simple_chain/sample/node3/back_up/backup_db"
-	
+
 	// Open ShardedDB with the exact same parameters as app.go
 	db, err := storage.NewShardelDB(dbPath, 16, 2, storage.TypePebbleDB, dbPath)
 	if err != nil {

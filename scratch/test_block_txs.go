@@ -59,7 +59,7 @@ func main() {
 		input := tx["input"].(string)
 		groupId := tx["groupId"]
 		txIdx := tx["transactionIndex"]
-		
+
 		// If input is long, truncate it
 		if len(input) > 20 {
 			input = input[:20] + "..."

@@ -408,12 +408,12 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 		logger.Info("🔍 [GetProof] Direct trie access failed, falling back to reconstructHistoricalTrie for block %v", blockNrOrHash)
 		verifyCacheMu.Lock()
 		defer verifyCacheMu.Unlock()
-	
+
 		trie, _, _, _, _, errReconstruct := api.reconstructHistoricalTrieLocked(ctx, blockNrOrHash)
 		if errReconstruct != nil {
 			return nil, fmt.Errorf("failed to reconstruct historical trie: %w", errReconstruct)
 		}
-		
+
 		proof, errProof := trie.GenerateProof(address.Bytes())
 		if errProof != nil {
 			return nil, fmt.Errorf("failed to generate proof from reconstructed trie: %w", errProof)
@@ -434,7 +434,7 @@ var (
 
 func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (
 	*mt_trie.NomtStateTrie, uint64, common.Hash, bool, int, error) {
-    
+
 	// 1. Get block and expected state root
 	var blockMap map[string]interface{}
 	var targetBlockNumber uint64

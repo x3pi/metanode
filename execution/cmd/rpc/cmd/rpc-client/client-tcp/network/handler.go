@@ -8,15 +8,15 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/command"
-	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/stats"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/command"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
@@ -31,9 +31,9 @@ type Handler struct {
 	transactionErrorChan chan *transaction.TransactionHashWithError
 	deviceKeyChan        chan types.LastDeviceKey
 	nonceChan            chan uint64
-	pendingRpcRequests   *sync.Map       // map[string]chan *pb.RpcResponse
-	pendingChainRequests *sync.Map       // map[string]chan []byte — chain-direct responses
-	eventCallbacks       sync.Map        // map[subscriptionID]func([]byte)
+	pendingRpcRequests   *sync.Map // map[string]chan *pb.RpcResponse
+	pendingChainRequests *sync.Map // map[string]chan []byte — chain-direct responses
+	eventCallbacks       sync.Map  // map[subscriptionID]func([]byte)
 }
 
 func NewHandler(

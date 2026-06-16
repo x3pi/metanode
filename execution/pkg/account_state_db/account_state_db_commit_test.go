@@ -73,7 +73,6 @@ func TestCommitPipeline_EmptyDirty(t *testing.T) {
 	require.NotNil(t, result)
 }
 
-
 func TestCommitPipeline_PreservesState(t *testing.T) {
 	adb := newTestDB(t)
 	addr := testAddr(0xF3)

@@ -108,7 +108,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	payload, err := abi.Arguments{{Type: mustType("address")}}.Pack(recipient)
 	if err != nil {
 		return nil, exRs, fmt.Errorf("lockAndBridge: pack payload error: %v", err)
-    }
+	}
 	target := common.Address{}
 
 	eventData, err := eventDef.Inputs.NonIndexed().Pack(
@@ -135,7 +135,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 		},
 	)
 
-	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND lockAndBridge: txHash=%s → EMITTING MessageSent\n" +
+	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND lockAndBridge: txHash=%s → EMITTING MessageSent\n"+
 		"        sender=%s recipient=%s amount=%s srcId=%s destId=%s",
 		tx.Hash().Hex(),
 		sender.Hex(), recipient.Hex(), amount.String(),
@@ -254,7 +254,7 @@ func (h *CrossChainHandler) handleSendMessage(
 		},
 	)
 
-	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND sendMessage: txHash=%s → EMITTING MessageSent\n" +
+	logger.Info("[MSGID-TRACE] ⬆️  [1/4] OUTBOUND sendMessage: txHash=%s → EMITTING MessageSent\n"+
 		"        sender=%s target=%s amount=%s srcId=%s destId=%s payloadLen=%d",
 		tx.Hash().Hex(),
 		sender.Hex(), target.Hex(), amount.String(),

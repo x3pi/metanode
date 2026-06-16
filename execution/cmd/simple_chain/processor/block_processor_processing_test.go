@@ -179,7 +179,6 @@ func TestGenerateBlockData_MultipleTransactions(t *testing.T) {
 	}
 }
 
-
 // ============================================================================
 // TestGetLeaderAddress_LeaderOverride
 // Tests the variadic leaderAddressOverride in createBlockFromResults.
@@ -273,7 +272,7 @@ func TestVerifyDraftBlock(t *testing.T) {
 				e_common.Hash{}, e_common.Address{}, 0, e_common.Hash{}, 1,
 			)
 			bl := block.NewBlock(header, nil, nil)
-			
+
 			result := bp.verifyDraftBlock(bl, tt.currentBlockNumber, 1)
 			assert.Equal(t, tt.expected, result)
 		})

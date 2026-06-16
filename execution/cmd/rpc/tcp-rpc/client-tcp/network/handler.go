@@ -31,9 +31,9 @@ type Handler struct {
 	transactionErrorChan chan *transaction.TransactionHashWithError
 	deviceKeyChan        chan types.LastDeviceKey
 	nonceChan            chan uint64
-	pendingRpcRequests   *sync.Map // map[string]chan *pb.RpcResponse
-	pendingChainRequests *sync.Map // map[string]chan []byte — chain-direct responses
-	eventCallbacks       sync.Map  // map[subscriptionID]func([]byte)
+	pendingRpcRequests   *sync.Map    // map[string]chan *pb.RpcResponse
+	pendingChainRequests *sync.Map    // map[string]chan []byte — chain-direct responses
+	eventCallbacks       sync.Map     // map[subscriptionID]func([]byte)
 	receiptCallback      func([]byte) // callback khi nhận receipt forwarded từ RPC server
 }
 

@@ -126,7 +126,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 					} else {
 						logger.Warn("🛡️ [NOMT-MISMATCH-ALIGN] NOMT root mismatch but not ahead (lastNomtCommitted=%d, incoming=%d). Realigning NOMT roots to parent block #%d (account=%s, stake=%s)",
 							lastNomtCommitted, incomingBlockNum, localTipBlockNum, parentStatesRoot.Hex()[:18]+"...", lastBlock.Header().StakeStatesRoot().Hex()[:18]+"...")
-						
+
 						if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
 							logger.Error("❌ [NOMT-MISMATCH-ALIGN] Failed to align/rebuild NOMT: %v", err)
 						}

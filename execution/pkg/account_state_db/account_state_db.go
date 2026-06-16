@@ -16,10 +16,11 @@ import (
 	// Assume these paths are correct for your project structure
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/state" // Assuming AccountState implementation is here
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/types"
-	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 type lockFreeReader interface {
@@ -45,13 +46,13 @@ type AccountStateDB struct {
 	// dirtyAccounts caches account states that have been MODIFIED but not yet committed.
 	// Only setDirtyAccountState() writes to this map.
 	// IntermediateRoot processes ONLY entries in this map → reducing unnecessary trie.Update() calls.
-	dirtyAccounts sync.Map
+	dirtyAccounts *utils.ShardedAddressMap[types.AccountState]
 
 	// loadedAccounts caches account states that have been LOADED (read-only) from trie/LRU.
 	// getOrCreateAccountState and PreloadAccounts store into this map on cache miss.
 	// This separation prevents loaded-but-unmodified accounts from triggering
 	// trie.Update() in IntermediateRoot (each costs ~25µs).
-	loadedAccounts sync.Map
+	loadedAccounts *utils.ShardedAddressMap[types.AccountState]
 
 	// muTrie protects concurrent access to the underlying trie.
 	// RLock is used for reads (getOrCreateAccountState, GetAll) — unlimited concurrent readers.
@@ -135,7 +136,7 @@ func NewAccountStateDB(
 		trie:           trie,
 		db:             db,
 		originRootHash: trie.Hash(),
-		dirtyAccounts:  sync.Map{}, // Initialize sync.Map
+		dirtyAccounts:  utils.NewShardedAddressMap[types.AccountState](), // Initialize sync.Map
 		lruCache:       cacheCurrent,
 		lruCacheOld:    cacheOld,
 		persistReady:   initReady,
@@ -170,7 +171,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 			closer.Close()
 		}
 	}
-	
+
 	if changelogDB != nil {
 		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
 			newNomt.SetChangelogDB(changelogDB)
@@ -226,12 +227,10 @@ func (db *AccountStateDB) SetTrieCommitBlock(blockNumber uint64) {
 	}
 }
 
-
-
 // DirtyAccountCount returns the number of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountCount() int {
 	count := 0
-	db.dirtyAccounts.Range(func(_, _ interface{}) bool {
+	db.dirtyAccounts.Range(func(_ common.Address, _ types.AccountState) bool {
 		count++
 		return true
 	})
@@ -241,8 +240,9 @@ func (db *AccountStateDB) DirtyAccountCount() int {
 // DirtyAccountAddresses returns the list of all dirty account addresses (for debugging).
 func (db *AccountStateDB) DirtyAccountAddresses() []common.Address {
 	var addresses []common.Address
-	db.dirtyAccounts.Range(func(key, value interface{}) bool {
-		if addr, ok := key.(common.Address); ok {
+	db.dirtyAccounts.Range(func(key common.Address, value types.AccountState) bool {
+		if true {
+			addr := key
 			addresses = append(addresses, addr)
 		}
 		return true
@@ -253,10 +253,10 @@ func (db *AccountStateDB) DirtyAccountAddresses() []common.Address {
 // DirtyAccountDetails returns addresses and serialized data hashes/details of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountDetails() []string {
 	var details []string
-	db.dirtyAccounts.Range(func(key, value interface{}) bool {
-		address, ok1 := key.(common.Address)
-		state, ok2 := value.(types.AccountState)
-		if !ok1 || !ok2 || state == nil {
+	db.dirtyAccounts.Range(func(key common.Address, value types.AccountState) bool {
+		address := key
+		state := value
+		if state == nil {
 			details = append(details, fmt.Sprintf("INVALID(%T/%T)", key, value))
 			return true
 		}
@@ -280,10 +280,10 @@ func (db *AccountStateDB) DirtyAccountDetails() []string {
 func (db *AccountStateDB) DirtyContentHash() common.Hash {
 	var keys []common.Address
 	entries := make(map[common.Address][]byte)
-	db.dirtyAccounts.Range(func(key, value interface{}) bool {
-		addr, ok1 := key.(common.Address)
-		state, ok2 := value.(types.AccountState)
-		if !ok1 || !ok2 || state == nil {
+	db.dirtyAccounts.Range(func(key common.Address, value types.AccountState) bool {
+		addr := key
+		state := value
+		if state == nil {
 			return true
 		}
 		b, err := state.Marshal()
@@ -324,14 +324,16 @@ func (db *AccountStateDB) AccountStateReadOnly(address common.Address) (types.Ac
 	}
 	// Check dirty cache first — fast path for existing dirty accounts
 	if value, ok := db.dirtyAccounts.Load(address); ok {
-		if as, valid := value.(types.AccountState); valid && as != nil {
+		if value != nil {
+			as := value
 			return as, nil
 		}
 	}
 
 	// 1.25. Check loaded cache (read-only loaded accounts)
 	if value, ok := db.loadedAccounts.Load(address); ok {
-		if as, valid := value.(types.AccountState); valid && as != nil {
+		if value != nil {
+			as := value
 			return as, nil
 		}
 	}
@@ -594,7 +596,6 @@ func (db *AccountStateDB) PublicSetDirtyAccountStateBatch(accounts []types.Accou
 	}
 }
 
-
 // getOrCreateAccountState retrieves an account state, optimized for concurrency.
 // It first checks the dirty cache (sync.Map). If not found (cache miss),
 // it reads from the underlying trie. If not in the trie, it creates a new state.
@@ -618,7 +619,8 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	// 1. Check dirty cache first (modified accounts — highest priority)
 	value, ok := db.dirtyAccounts.Load(address)
 	if ok {
-		accountState, valid := value.(types.AccountState)
+		accountState := value
+		valid := true
 		if valid && accountState != nil {
 			return accountState, nil
 		}
@@ -632,7 +634,8 @@ func (db *AccountStateDB) getOrCreateAccountState(
 
 	// 1.5. Check loaded cache (read-only loaded accounts — second priority)
 	value, ok = db.loadedAccounts.Load(address)
-	if as, valid := value.(types.AccountState); valid && as != nil {
+	if value != nil {
+		as := value
 		return as, nil
 	}
 
@@ -685,13 +688,12 @@ func (db *AccountStateDB) getOrCreateAccountState(
 		logger.Debug("getOrCreateAccountState: Loaded AccountState from Trie", "address", address.Hex())
 	}
 
-
-
 	// Store into loadedAccounts (not dirtyAccounts) — this account is merely loaded/read.
 	// Only setDirtyAccountState() should put accounts into dirtyAccounts (when actually modified).
 	actualValue, loaded := db.loadedAccounts.LoadOrStore(address, stateToPotentiallyStore)
 
-	finalAs, castOk := actualValue.(types.AccountState)
+	finalAs := actualValue
+	castOk := true
 	if !castOk || finalAs == nil {
 		logger.Error("getOrCreateAccountState: Invalid type/nil found in cache via LoadOrStore",
 			"address", address.Hex(),
@@ -941,9 +943,11 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 	tempDirty := make(map[common.Address]types.AccountState) // Use concrete types for map
 	copyErr := false                                         // Flag for errors during range/copy
 
-	asDB.dirtyAccounts.Range(func(key, value interface{}) bool {
-		addr, okKey := key.(common.Address)
-		stateVal, okVal := value.(types.AccountState)
+	asDB.dirtyAccounts.Range(func(key common.Address, value types.AccountState) bool {
+		addr := key
+		okKey := true
+		stateVal := value
+		okVal := true
 
 		if !okKey || !okVal || stateVal == nil {
 			logger.Error("CopyFrom: Invalid entry found in source dirtyAccounts map during copy",
@@ -1029,7 +1033,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 // the periodic eviction is not working properly.
 func (db *AccountStateDB) LoadedAccountCount() int {
 	count := 0
-	db.loadedAccounts.Range(func(_, _ interface{}) bool {
+	db.loadedAccounts.Range(func(_ common.Address, _ types.AccountState) bool {
 		count++
 		return true
 	})
@@ -1042,8 +1046,8 @@ func (db *AccountStateDB) LoadedAccountCount() int {
 func (db *AccountStateDB) DeterministicDirtyHash() common.Hash {
 	// 1. Collect all dirty accounts
 	var addrs []common.Address
-	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
-		addrs = append(addrs, key.(common.Address))
+	db.dirtyAccounts.Range(func(key common.Address, _ types.AccountState) bool {
+		addrs = append(addrs, key)
 		return true
 	})
 	if len(addrs) == 0 {
@@ -1082,8 +1086,8 @@ func (db *AccountStateDB) DeterministicDirtyHash() common.Hash {
 // Returns sorted list of (address, balance, pendingBalance, nonce) tuples.
 func (db *AccountStateDB) DirtyAccountsSummary() string {
 	var addrs []common.Address
-	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
-		addrs = append(addrs, key.(common.Address))
+	db.dirtyAccounts.Range(func(key common.Address, _ types.AccountState) bool {
+		addrs = append(addrs, key)
 		return true
 	})
 	if len(addrs) == 0 {

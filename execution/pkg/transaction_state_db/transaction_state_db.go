@@ -350,10 +350,10 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 	}
 	db.trie = newTrie
 	db.originRootHash = trie.EmptyRootHash
-	
+
 	// Reset dirtyTransactions AFTER they have been successfully written to the DB
 	db.dirtyTransactions = make(map[common.Hash]types.Transaction)
-	
+
 	logger.Debug(fmt.Sprintf("✅ [Phase 4] Cleanup and Reset completed in %v", time.Since(cleanupTimeStart)))
 
 	logger.Debug(fmt.Sprintf("🚀 Total Commit execution time: %v", time.Since(totalTimeStart)))

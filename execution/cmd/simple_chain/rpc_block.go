@@ -30,10 +30,10 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["number"] = hexutil.EncodeUint64(block.Header().BlockNumber())
 	blockMap["sha3Uncles"] = common.Hash{}
 	blockMap["miner"] = block.Header().LeaderAddress()
-	blockMap["parentHash"] = block.Header().LastBlockHash()          // Hash của khối cha
-	blockMap["stateRoot"] = block.Header().AccountStatesRoot()       // Root của Merkle Patricia Trie chứa trạng thái tài khoản
-	blockMap["receiptsRoot"] = block.Header().ReceiptRoot()          // Root của Merkle Patricia Trie chứa receipts của các giao dịch
-	blockMap["transactionsRoot"] = block.Header().TransactionsRoot() // Root của Merkle Patricia Trie chứa các giao dịch
+	blockMap["parentHash"] = block.Header().LastBlockHash()                    // Hash của khối cha
+	blockMap["stateRoot"] = block.Header().AccountStatesRoot()                 // Root của Merkle Patricia Trie chứa trạng thái tài khoản
+	blockMap["receiptsRoot"] = block.Header().ReceiptRoot()                    // Root của Merkle Patricia Trie chứa receipts của các giao dịch
+	blockMap["transactionsRoot"] = block.Header().TransactionsRoot()           // Root của Merkle Patricia Trie chứa các giao dịch
 	blockMap["logsBloom"] = eth_types.BytesToBloom(block.Header().LogsBloom()) // Bloom filter chứa thông tin về logs
 	blockMap["difficulty"] = hexutil.EncodeUint64(0)
 	blockMap["gasLimit"] = hexutil.EncodeUint64(0)                           // Giới hạn gas của khối

@@ -55,7 +55,7 @@ func (fn *FullNode) Marshal() ([]byte, error) {
 			}
 		}
 	}
-	
+
 	protoFN.Nodes = nodes
 	bFN, err := proto.MarshalOptions{Deterministic: true}.Marshal(protoFN)
 	if err != nil {
@@ -71,12 +71,12 @@ func (fn *FullNode) Marshal() ([]byte, error) {
 	protoNode := mptNodePool.Get().(*pb.MPTNode)
 	protoNode.Type = pb.MPTNODE_TYPE_FULL
 	protoNode.Data = bFN
-	
+
 	res, err := proto.MarshalOptions{Deterministic: true}.Marshal(protoNode)
-	
+
 	protoNode.Data = nil
 	mptNodePool.Put(protoNode)
-	
+
 	return res, err
 }
 

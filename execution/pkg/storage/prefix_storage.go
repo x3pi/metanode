@@ -1,8 +1,6 @@
 package storage
 
-import (
-
-)
+import ()
 
 // PrefixStorage is a wrapper around a shared database (e.g., PebbleDB) that
 // automatically prepends a unique domain prefix to all keys.
@@ -98,7 +96,7 @@ func (ps *PrefixStorage) PrefixScan(prefix []byte) ([][2][]byte, error) {
 	// key := make([]byte, len(iter.Key())-len(prefix))
 	// copy(key, iter.Key()[len(prefix):])
 	// Yes! `rawResults` keys are exactly what the user wants! They are missing `searchPrefix`, which includes `prefix`.
-	
+
 	return rawResults, nil
 }
 
@@ -131,4 +129,3 @@ func (ps *PrefixStorage) GetPrefix() []byte {
 func (ps *PrefixStorage) Unwrap() interface{} {
 	return ps.db
 }
-

@@ -606,23 +606,23 @@ func (c *ClientRPC) BuildDeployTransaction(callDataT []byte, from common.Address
 
 func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 	ethTx *types.Transaction,
-) ([]byte, mt_types.Transaction,func(), error) {
+) ([]byte, mt_types.Transaction, func(), error) {
 
 	sg := types.NewCancunSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("lỗi khi get fromAddress : %w", err)
+		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err)
 	}
 	as, err := c.GetAccountState(fromAddress, rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber))
 	if err != nil {
-		return nil, nil, nil,fmt.Errorf("BuildTransactionWithDeviceKeyFromEthTx lỗi khi get acccount state %v: %v", fromAddress, err)
+		return nil, nil, nil, fmt.Errorf("BuildTransactionWithDeviceKeyFromEthTx lỗi khi get acccount state %v: %v", fromAddress, err)
 	}
 	if ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		if len(as.PublicKeyBls()) == 0 {
-			return nil, nil,nil, fmt.Errorf("lỗi tài khoản chưa đăng ký public key bls trên chain")
+			return nil, nil, nil, fmt.Errorf("lỗi tài khoản chưa đăng ký public key bls trên chain")
 		}
 		if !bytes.Equal(as.PublicKeyBls(), c.KeyPair.BytesPublicKey()) {
-			return nil, nil,nil, fmt.Errorf("lỗi tài khoản chưa đăng ký private key bls với rpc")
+			return nil, nil, nil, fmt.Errorf("lỗi tài khoản chưa đăng ký private key bls với rpc")
 		}
 	}
 
@@ -640,7 +640,7 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 	bRelatedAddresses := make([][]byte, 0)
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
+		return nil, nil, nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
 	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
@@ -654,9 +654,9 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 
 	data, release, err := marshalProtoMessage(transactionWithDeviceKey)
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
 	}
-	return data, transaction,release, err
+	return data, transaction, release, err
 }
 
 func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
@@ -667,12 +667,12 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 	sg := types.NewCancunSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("lỗi khi get fromAddress : %w", err) // Cập nhật thông báo lỗi
+		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err) // Cập nhật thông báo lỗi
 	}
 	as, err := c.GetAccountState(fromAddress, rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber))
 
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey lỗi khi get acccount state: %v", err) // Cập nhật thông báo lỗi
+		return nil, nil, nil, fmt.Errorf("BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey lỗi khi get acccount state: %v", err) // Cập nhật thông báo lỗi
 	}
 
 	deviceKey, err := c.GetDeviceKey(as.LastHash())
@@ -690,7 +690,7 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
-		return nil, nil, nil,fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
+		return nil, nil, nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
 	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
@@ -703,9 +703,9 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 
 	data, release, err := marshalProtoMessage(transactionWithDeviceKey)
 	if err != nil {
-		return nil, nil,nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
 	}
-	return data, transaction,release, nil
+	return data, transaction, release, nil
 }
 
 func marshalProtoMessage(msg proto.Message) ([]byte, func(), error) {

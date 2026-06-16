@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 type ChainState interface {
@@ -22,9 +22,9 @@ type PruningManager struct {
 	chainState ChainState
 	cancel     context.CancelFunc
 	ctx        context.Context
-	
-	lastPrunedEpoch  uint64
-	lastPrunedBlock  uint64
+
+	lastPrunedEpoch uint64
+	lastPrunedBlock uint64
 }
 
 func NewPruningManager(cfg *config.PruningConfig, cs ChainState) *PruningManager {
@@ -77,9 +77,9 @@ func (pm *PruningManager) pruneTick() {
 	if pm.chainState == nil {
 		return
 	}
-	
+
 	currentEpoch := pm.chainState.GetCurrentEpoch()
-	
+
 	// Check if we need to prune old epochs
 	if pm.config.EpochsToKeep > 0 && currentEpoch > uint64(pm.config.EpochsToKeep) {
 		targetPruneEpoch := currentEpoch - uint64(pm.config.EpochsToKeep)
@@ -92,10 +92,10 @@ func (pm *PruningManager) pruneTick() {
 
 func (pm *PruningManager) pruneEpoch(epoch uint64) {
 	logger.Info("🧹 [PRUNING] Triggering prune for data older than epoch %d", epoch)
-	
+
 	// 1. Snapshot / rollback old NOMT namespaces
 	PruneNomtEpoch(epoch)
-	
+
 	// 2. Prune Block and Receipt DB
 	boundaryBlock, ok := pm.chainState.GetEpochBoundaryBlock(epoch)
 	if !ok {
@@ -133,7 +133,7 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 
 	// Init receipts interface for batch deletion
 	var rcpDb interface{ BatchDeleteReceipts([]common.Hash) error }
-	
+
 	if chainState, ok := pm.chainState.(*blockchain.ChainState); ok {
 		storageManager := chainState.GetStorageManager()
 		if storageManager != nil {
@@ -152,7 +152,7 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 		if !ok {
 			continue
 		}
-		
+
 		blk := bc.GetBlock(hash)
 		if blk != nil {
 			// Delete Receipts
@@ -162,18 +162,18 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 					logger.Warn("🧹 [PRUNING] Failed to batch delete receipts for block %d: %v", bNum, err)
 				}
 			}
-			
+
 			// Delete System Transactions
 			blockDB.DeleteSystemTransactions(bNum)
-			
+
 			// Delete Block
 			blockDB.DeleteBlockByHash(hash)
 		}
-		
+
 		// Delete Mapping
 		bc.DeleteBlockHashMapping(bNum)
 		prunedCount++
-		
+
 		// Prevent CPU/IO hogging by sleeping briefly every 100 blocks
 		if prunedCount%100 == 0 {
 			time.Sleep(10 * time.Millisecond)
@@ -184,6 +184,6 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 	if err := bc.SetLastPrunedBlockNumber(boundaryBlock); err != nil {
 		logger.Error("🧹 [PRUNING] Failed to save last pruned block number: %v", err)
 	}
-	
+
 	logger.Info("🧹 [PRUNING] Successfully pruned DB up to block %d (epoch %d) - %d blocks removed", boundaryBlock, epoch, prunedCount)
 }

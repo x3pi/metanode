@@ -252,7 +252,6 @@ func ResetAllBlockCounters(blockNumber uint64) {
 	logger.Info("🛡️ [SNAPSHOT FIX] ResetAllBlockCounters: forced all block counters to %d", blockNumber)
 }
 
-
 // SetBlockCommitCallback đăng ký callback khi block mới commit
 // Dùng để SnapshotManager theo dõi block commits mà không cần sửa từng nơi gọi UpdateLastBlockNumber
 func SetBlockCommitCallback(cb BlockCommitCallback) {

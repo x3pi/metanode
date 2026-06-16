@@ -8,13 +8,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 
+	"github.com/meta-node-blockchain/meta-node/cmd/tool/tool-test-chain/test-tcp/client-tcp/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/cmd/tool/tool-test-chain/test-tcp/client-tcp/command"
 	"google.golang.org/protobuf/proto"
 )
-
 
 // GetNonce lấy nonce cho address.
 // Nếu directClient được set → dùng ChainGetNonce (TCP direct, ID-matching, không tranh channel).
@@ -102,7 +101,6 @@ func (client *Client) ChainGetNonce(address common.Address) (uint64, error) {
 	nonce := binary.BigEndian.Uint64(resp)
 	return nonce, nil
 }
-
 
 // ChainGetTransactionReceipt lấy receipt trực tiếp từ chain theo txHash
 // Trả về raw response bytes — caller tự unmarshal nếu cần

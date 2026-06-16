@@ -97,7 +97,7 @@ func NewStateTrie(root e_common.Hash, db trie_db.DB, isHash bool) (StateTrie, er
 			pg, isPathGetter := db.(pathGetter)
 			if isPathGetter && pg.GetBackupPath() != "" {
 				// Use the base (folder) name of the backup path rather than the full directory path.
-				// This ensures Sub and Master nodes use identical underlying NOMT namespaces 
+				// This ensures Sub and Master nodes use identical underlying NOMT namespaces
 				// even if their backup/storage root paths differ.
 				namespace = filepath.Base(pg.GetBackupPath())
 			} else if prg, ok := db.(prefixGetter); ok {
@@ -149,7 +149,7 @@ func NewStateTrie(root e_common.Hash, db trie_db.DB, isHash bool) (StateTrie, er
 		}
 
 		if namespace == "transaction_state" || namespace == "receipts" {
-			// PERF FIX: NOMT FFI sync for 50,000 fully unique 256-bit hashes (txs/receipts) 
+			// PERF FIX: NOMT FFI sync for 50,000 fully unique 256-bit hashes (txs/receipts)
 			// creates massive tree mutation and takes >3.5s per block.
 			// Revert these two purely append-only databases to FlatStateTrie which has O(1) commit.
 			if flatDB, ok := db.(FlatStateDB); ok {
@@ -229,7 +229,7 @@ func InitNomtDB(dbPath string, commitConcurrency, pageCacheMB, leafCacheMB int) 
 func CloseNomtDB() {
 	globalNomtHandlesMu.Lock()
 	defer globalNomtHandlesMu.Unlock()
-	
+
 	for namespace, handle := range globalNomtHandles {
 		logger.Info("[TRIE] Closing NOMT handle for namespace: %s", namespace)
 		handle.Close() // Properly flush and close via FFI nomt_close()
@@ -253,11 +253,11 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	}
 
 	dbPath := filepath.Join(globalNomtConfig.basePath, namespace)
-	
+
 	// Adjust cache memory based on namespace usage so we don't OOM with 6 NOMT instances
 	pageCache := globalNomtConfig.pageCacheMB
 	leafCache := globalNomtConfig.leafCacheMB
-	
+
 	// If not a memory-heavy trie, down-scale cache
 	if namespace != "account_state" && namespace != "smart_contract_storage" {
 		if pageCache > 64 {
@@ -273,7 +273,7 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	preallocate := true
 	if namespace == "account_state" || namespace == "smart_contract_storage" {
 		hashtableBuckets = 10000000 // 10 million buckets for large tries (was 1,000,000)
-		preallocate = false        // Disable preallocation (use sparse files) to avoid 40GB disk usage per node
+		preallocate = false         // Disable preallocation (use sparse files) to avoid 40GB disk usage per node
 	}
 
 	// Ensure the database directory exists before calling FFI.
@@ -287,7 +287,7 @@ func GetOrInitNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize independent NOMT database at %s: %w", dbPath, err)
 	}
-	logger.Info("🚀 [TRIE] NOMT instance initialized for namespace %s at %s (concurrency=%d, pageCacheMB=%d, leafCacheMB=%d)", 
+	logger.Info("🚀 [TRIE] NOMT instance initialized for namespace %s at %s (concurrency=%d, pageCacheMB=%d, leafCacheMB=%d)",
 		namespace, dbPath, globalNomtConfig.commitConcurrency, pageCache, leafCache)
 	globalNomtHandles[namespace] = newHandle
 	return newHandle, nil
@@ -301,9 +301,9 @@ func ResetNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	handle, exists := globalNomtHandles[namespace]
 	if exists && handle != nil {
 		logger.Info("[TRIE] Closing NOMT handle for namespace %s to reset", namespace)
-		
+
 		handle.Close()
-		
+
 		delete(globalNomtHandles, namespace)
 	}
 
@@ -344,13 +344,13 @@ func ResetNomtHandle(namespace string) (*nomt_ffi.Handle, error) {
 	return newHandle, nil
 }
 
-
 // SnapshotAllNomtDBs coordinates taking a snapshot of all active NOMT databases.
 // Uses the Checkpoint API to copy files while the database remains OPEN —
 // no Close/Reopen needed, eliminating ~700ms overhead and os error 11 lock issues.
 //
 // PREREQUISITE: The caller (SnapshotManager) MUST have already called:
-//   PauseExecution() + WaitForPersistence() to ensure no active sessions or pending I/O.
+//
+//	PauseExecution() + WaitForPersistence() to ensure no active sessions or pending I/O.
 func SnapshotAllNomtDBs(destBasePath string, useReflink bool) error {
 	// Eagerly pre-initialize critical NOMT handles before copying
 	// to ensure their directories exist and they are captured in the snapshot
@@ -502,7 +502,7 @@ var (
 // It opens a temporary NOMT database, queries its initial root, and caches the result.
 func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
 	key := fmt.Sprintf("%d_%t", hashtableBuckets, preallocate)
-	
+
 	emptyNomtRootsMu.RLock()
 	root, exists := emptyNomtRoots[key]
 	emptyNomtRootsMu.RUnlock()
@@ -512,13 +512,13 @@ func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
 
 	emptyNomtRootsMu.Lock()
 	defer emptyNomtRootsMu.Unlock()
-	
+
 	// Double-check
 	if root, exists = emptyNomtRoots[key]; exists {
 		return root
 	}
 
-	tempDir, err := os.MkdirTemp("", "empty_nomt_" + key)
+	tempDir, err := os.MkdirTemp("", "empty_nomt_"+key)
 	if err != nil {
 		logger.Error("❌ [TRIE] Failed to create temp directory for EmptyNomtRoot check (%s): %v", key, err)
 		return e_common.Hash{}
@@ -543,4 +543,3 @@ func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
 	logger.Info("🎯 [TRIE] Dynamically determined EmptyNomtRoot for config %s: %s", key, res.Hex())
 	return res
 }
-

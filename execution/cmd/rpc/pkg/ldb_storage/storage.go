@@ -37,7 +37,7 @@ func NewLevelDBStorageWithRecovery(path string, recoverOnCorrupted bool) (*Level
 	if err != nil {
 		errMsg := strings.ToLower(err.Error())
 		isCorrupted := strings.Contains(errMsg, "corrupted") || strings.Contains(errMsg, "missing")
-		
+
 		// Nếu database bị corrupted và cho phép recover
 		if recoverOnCorrupted && isCorrupted {
 			// Thử recover
