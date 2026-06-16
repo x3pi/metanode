@@ -137,6 +137,7 @@ func NewAccountStateDB(
 		db:             db,
 		originRootHash: trie.Hash(),
 		dirtyAccounts:  utils.NewShardedAddressMap[types.AccountState](), // Initialize sync.Map
+		loadedAccounts: utils.NewShardedAddressMap[types.AccountState](),
 		lruCache:       cacheCurrent,
 		lruCacheOld:    cacheOld,
 		persistReady:   initReady,
