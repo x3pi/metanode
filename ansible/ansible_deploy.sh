@@ -16,8 +16,36 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load environment variables from .env if exists
+load_env_file() {
+    local env_file="$1"
+    if [ -f "$env_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "$line" ]]; then
+                continue
+            fi
+            if [[ "$line" =~ = ]]; then
+                local key=$(echo "${line%%=*}" | xargs)
+                local val=$(echo "${line#*=}" | xargs)
+                val="${val%\"}"
+                val="${val#\"}"
+                val="${val%\'}"
+                val="${val#\'}"
+                export "$key"="$val"
+            fi
+        done < "$env_file"
+    fi
+}
+
+# Auto load configuration from different possible locations
+load_env_file "${SCRIPT_DIR}/.env"
+load_env_file "${SCRIPT_DIR}/../.env"
+load_env_file "${SCRIPT_DIR}/../../metanode-suite/scripts/.env"
+
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
-TELEGRAM_CHAT_ID="-1003867050625"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
 
 send_telegram_notification() {
     local message="$1"
@@ -29,7 +57,6 @@ send_telegram_notification() {
     fi
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVENTORY="${SCRIPT_DIR}/inventory.yml"
 PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
 
