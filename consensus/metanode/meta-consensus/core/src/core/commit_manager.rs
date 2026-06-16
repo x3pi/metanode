@@ -114,7 +114,6 @@ impl Core {
         }
 
         let mut committed_sub_dags = Vec::new();
-        // TODO: Add optimization to abort early without quorum for a round.
         loop {
             // CRITICAL: Sync last_decided_leader with DAG state.
             // If CommitSyncer performs a cold-start fast-forward (restoring from snapshot),
@@ -361,6 +360,16 @@ impl Core {
                 // committer evaluates the EXACT same dense DAG state deterministically, eliminating 
                 // the fork risk without causing cluster deadlocks during cold starts or fast-forwards.
                 // ═══════════════════════════════════════════════════════════════════
+
+                // FAST-PATH REJECTION: Abort early without quorum for a round.
+                // To decide a leader at `next_leader_round`, we need at least some blocks 
+                // in the voting round (`next_leader_round + 1`). If the voting round is completely 
+                // empty, it is impossible to reach a quorum, so we can safely break early to save CPU.
+                let next_leader_round = self.last_decided_leader.round + 1;
+                let voting_round = next_leader_round + 1;
+                if self.dag_state.read().get_uncommitted_blocks_at_round(voting_round).is_empty() {
+                    break;
+                }
 
                 // TODO: limit commits by commits_until_update for efficiency, which may be needed when leader schedule length is reduced.
                 let mut decided_leaders = self.committer.try_decide(self.last_decided_leader);
