@@ -72,7 +72,7 @@ ansible_exit=$?
 set -e
 
 echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
-MONITOR_SCRIPT="/home/abc/chain-n/metanode-suite/scripts/start_monitors.sh"
+MONITOR_SCRIPT="$(realpath "$SCRIPT_DIR/../../metanode-suite/scripts/start_monitors.sh")"
 if [ -f "$MONITOR_SCRIPT" ]; then
     bash "$MONITOR_SCRIPT"
 fi
