@@ -129,6 +129,7 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 
 						if err := bp.chainState.UpdateStateForNewHeader(lastBlock.Header()); err != nil {
 							logger.Error("❌ [NOMT-MISMATCH-ALIGN] Failed to align/rebuild NOMT: %v", err)
+							return fmt.Errorf("failed to align/rebuild NOMT: %w", err)
 						}
 					}
 				}

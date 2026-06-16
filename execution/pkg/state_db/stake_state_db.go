@@ -990,6 +990,11 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 		logger.Debug("➖ [STAKE DB] CommitPipeline: Skipping PebbleDB persistBatch for NOMT (handled by CommitPayload)")
 	}
 
+	var nomtPayload interface{}
+	if nomtTrie, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+		nomtPayload = nomtTrie.ExtractPendingPayload()
+	}
+
 	// FORK-SAFETY: Set new unclosed persistReady channel.
 	// PersistAsync will close it after trie swap completes.
 	newPersistReady := make(chan struct{})
@@ -1001,6 +1006,7 @@ func (db *StakeStateDB) CommitPipeline() (*StakePipelineCommitResult, error) {
 		StakeBatch:     stakeBatchData,
 		Trie:           db.trie, // Pass the trie along
 		PersistChannel: newPersistReady,
+		NomtPayload:    nomtPayload,
 	}, nil
 }
 
@@ -1080,10 +1086,6 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	db.muCommit.Unlock()
 
 	logger.Debug("PersistAsync (StakeStateDB): trie swapped to new root %s, persistReady signaled", result.FinalHash)
-
-	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		result.NomtPayload = nomtTrie.ExtractPendingPayload()
-	}
 
 	return nil
 }
