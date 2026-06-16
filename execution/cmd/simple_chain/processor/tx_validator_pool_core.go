@@ -601,32 +601,10 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	//   (e.g., multiple TXs to same contract) are serialized within a group.
 	// ═══════════════════════════════════════════════════════════════════════════
 	items := make([]grouptxns.Item, 0, len(txs))
-	// Native contract addresses that are shared "dispatch" points, NOT shared state.
-	// TXs to these addresses only modify the SENDER's own account (BLS key, account type,
-	// staking), so they can safely run in parallel across different senders.
-	// Excluding them from grouping Array prevents Union-Find from merging all native TXs
-	// into a single group.
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	nativeParallelAddrs := map[common.Address]struct{}{
-		accountSettingAddr:                   {},
-		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
-		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
-	}
 	for i, tx := range txs {
-		// Build grouping addresses: filter out native dispatch addresses
-		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
-		for _, addr := range tx.RelatedAddresses() {
-			if _, isNative := nativeParallelAddrs[addr]; !isNative {
-				groupAddrs = append(groupAddrs, addr)
-			}
-		}
-		// Safety: always have at least FromAddress
-		if len(groupAddrs) == 0 {
-			groupAddrs = append(groupAddrs, tx.FromAddress())
-		}
 		items = append(items, grouptxns.Item{
 			ID:      i,
-			Array:   groupAddrs,
+			Array:   grouptxns.BuildDeterministicGroupAddrs(tx),
 			GroupID: 0,
 			Tx:      tx,
 		})
@@ -710,7 +688,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	for i, tx := range txs {
 		items = append(items, grouptxns.Item{
 			ID:        i + len(vp.excludedItems),
-			Array:     tx.RelatedAddresses(),
+			Array:     grouptxns.BuildDeterministicGroupAddrs(tx),
 			GroupID:   0,
 			Tx:        tx,
 			TimeStart: time.Now(),
@@ -750,25 +728,10 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	}
 
 	deterministicItems := make([]grouptxns.Item, 0, len(selectedTxs))
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	nativeParallelAddrs := map[common.Address]struct{}{
-		accountSettingAddr:                   {},
-		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
-		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
-	}
 	for i, tx := range selectedTxs {
-		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
-		for _, addr := range tx.RelatedAddresses() {
-			if _, isNative := nativeParallelAddrs[addr]; !isNative {
-				groupAddrs = append(groupAddrs, addr)
-			}
-		}
-		if len(groupAddrs) == 0 {
-			groupAddrs = append(groupAddrs, tx.FromAddress())
-		}
 		deterministicItems = append(deterministicItems, grouptxns.Item{
 			ID:      i,
-			Array:   groupAddrs,
+			Array:   grouptxns.BuildDeterministicGroupAddrs(tx),
 			GroupID: 0,
 			Tx:      tx,
 		})
@@ -957,7 +920,7 @@ func (vp *TxValidatorPool) ProcessAndPartitionTransactions(n int) ([][]grouptxns
 	for i, tx := range txs {
 		items = append(items, grouptxns.Item{
 			ID:        i,
-			Array:     tx.RelatedAddresses(),
+			Array:     grouptxns.BuildDeterministicGroupAddrs(tx),
 			GroupID:   0,
 			Tx:        tx,
 			TimeStart: time.Now(),

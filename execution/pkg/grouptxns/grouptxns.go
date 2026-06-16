@@ -9,6 +9,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -20,6 +22,55 @@ type Item struct {
 	GroupID   int
 	Tx        types.Transaction
 	TimeStart time.Time
+}
+
+// BuildDeterministicGroupAddrs builds the Array for UnionFind grouping
+func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	nativeParallelAddrs := map[common.Address]struct{}{
+		accountSettingAddr:                   {},
+		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
+		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
+	}
+
+	groupAddrs := make([]common.Address, 0)
+	
+	var al e_types.AccessList
+	ethTx := tx.ToEthTransaction()
+	if ethTx != nil {
+		al = ethTx.AccessList()
+	}
+	hasAccessList := len(al) > 0
+	
+	// Value transfer modifies the SC balance, so it MUST NOT be separated from the ToAddress
+	isValueTransfer := false
+	if tx.Amount() != nil && tx.Amount().Sign() > 0 {
+		isValueTransfer = true
+	}
+
+	if hasAccessList && !isValueTransfer {
+		groupAddrs = append(groupAddrs, tx.FromAddress())
+		for _, tuple := range al {
+			if _, isNative := nativeParallelAddrs[tuple.Address]; !isNative {
+				groupAddrs = append(groupAddrs, tuple.Address)
+			}
+			for _, key := range tuple.StorageKeys {
+				pseudoAddr := common.BytesToAddress(key.Bytes()[12:])
+				groupAddrs = append(groupAddrs, pseudoAddr)
+			}
+		}
+	} else {
+		for _, addr := range tx.RelatedAddresses() {
+			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+				groupAddrs = append(groupAddrs, addr)
+			}
+		}
+	}
+	
+	if len(groupAddrs) == 0 {
+		groupAddrs = append(groupAddrs, tx.FromAddress())
+	}
+	return groupAddrs
 }
 
 // UnionFind là cấu trúc dữ liệu Union-Find

@@ -497,40 +497,40 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 
 	if accountPipelineResult != nil {
 		accountBatch = accountPipelineResult.AccountBatch
-		startPersist := time.Now()
-		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
-			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
-		}
 		bp.pendingAccountPayload = accountPipelineResult.NomtPayload
-		accountPersistDuration = time.Since(startPersist)
-		if accountPersistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", accountPersistDuration)
-		}
+		go func(res *account_state_db.PipelineCommitResult) {
+			startPersist := time.Now()
+			if err := bp.chainState.GetAccountStateDB().PersistAsync(res); err != nil {
+				logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
+			}
+			if d := time.Since(startPersist); d > 10*time.Millisecond {
+				logger.Debug("[PERF] AccountStateDB PersistAsync (async): %v", d)
+			}
+		}(accountPipelineResult)
 	}
 	if stakePipelineResult != nil {
 		stakeBatch = stakePipelineResult.StakeBatch
-		startPersist := time.Now()
-		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
-			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
-		}
 		bp.pendingStakePayload = stakePipelineResult.NomtPayload
-		stakePersistDuration = time.Since(startPersist)
-		if stakePersistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", stakePersistDuration)
-		}
+		go func(res *stake_state_db.StakePipelineCommitResult) {
+			startPersist := time.Now()
+			if err := bp.chainState.GetStakeStateDB().PersistAsync(res); err != nil {
+				logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
+			}
+			if d := time.Since(startPersist); d > 10*time.Millisecond {
+				logger.Debug("[PERF] StakeStateDB PersistAsync (async): %v", d)
+			}
+		}(stakePipelineResult)
 	}
 	if receiptPipelineResult != nil {
-		startPersist := time.Now()
-		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
-			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("Receipts PersistAsync failed: %w", err)
-		}
-		receiptPersistDuration = time.Since(startPersist)
-		if receiptPersistDuration > 10*time.Millisecond {
-			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", receiptPersistDuration)
-		}
+		go func(res *types.ReceiptPipelineResult) {
+			startPersist := time.Now()
+			if err := receipts.PersistAsync(res); err != nil {
+				logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
+			}
+			if d := time.Since(startPersist); d > 10*time.Millisecond {
+				logger.Debug("[PERF] Receipts PersistAsync (async): %v", d)
+			}
+		}(receiptPipelineResult)
 	}
 
 	// Capture contract batches while we are sequentially safe inside commitToMemoryParallel
