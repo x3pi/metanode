@@ -61,5 +61,18 @@ if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
 
+echo -e "\n⏸ Tạm dừng Health Monitor trong quá trình Deploy để tránh cảnh báo sai..."
+pkill -f "start_monitors.sh health" || true
+pkill -f "block_hash_checker" || true
+
 cd "$SCRIPT_DIR"
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
+ansible_exit=$?
+
+echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
+MONITOR_SCRIPT="/home/abc/chain-n/metanode-suite/scripts/start_monitors.sh"
+if [ -f "$MONITOR_SCRIPT" ]; then
+    bash "$MONITOR_SCRIPT"
+fi
+
+exit $ansible_exit
