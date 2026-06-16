@@ -56,6 +56,51 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         let peer_hostname = &context.committee.authority(peer_index).hostname;
         let mut requests = FuturesUnordered::new();
 
+        // Create an in-memory buffer channel for pipelining/prefetching (100 batches max)
+        let (tx_process, mut rx_process) = tokio::sync::mpsc::channel(100);
+
+        // Spawn consumer task that processes blocks independently of the fetch loop
+        tokio::spawn(async move {
+            while let Some((
+                blocks,
+                peer_index,
+                blocks_guard,
+                core_dispatcher,
+                block_verifier,
+                transaction_certifier,
+                commit_vote_monitor,
+                context,
+                commands_sender,
+                dag_state,
+            )) = rx_process.recv().await
+            {
+                let peer_hostname = &context.committee.authority(peer_index).hostname;
+                if let Err(err) = Self::process_fetched_blocks(
+                    blocks,
+                    peer_index,
+                    blocks_guard,
+                    core_dispatcher,
+                    block_verifier,
+                    transaction_certifier,
+                    commit_vote_monitor,
+                    context.clone(),
+                    commands_sender,
+                    dag_state,
+                    "live",
+                )
+                .await
+                {
+                    warn!("Error while processing fetched blocks from peer {peer_index} {peer_hostname}: {err}");
+                    context
+                        .metrics
+                        .node_metrics
+                        .synchronizer_process_fetched_failures
+                        .with_label_values(&[peer_hostname, "live"])
+                        .inc();
+                }
+            }
+        });
+
         loop {
             tokio::select! {
                 Some(blocks_guard) = receiver.recv(), if requests.len() < FETCH_BLOCKS_CONCURRENCY => {
@@ -67,7 +112,8 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 Some((response, blocks_guard, retries, _peer, highest_rounds)) = requests.next() => {
                     match response {
                         Ok(blocks) => {
-                            if let Err(err) = Self::process_fetched_blocks(blocks,
+                            let payload = (
+                                blocks,
                                 peer_index,
                                 blocks_guard,
                                 core_dispatcher.clone(),
@@ -77,10 +123,10 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                                 context.clone(),
                                 commands_sender.clone(),
                                 dag_state.clone(),
-                                "live"
-                            ).await {
-                                warn!("Error while processing fetched blocks from peer {peer_index} {peer_hostname}: {err}");
-                                context.metrics.node_metrics.synchronizer_process_fetched_failures.with_label_values(&[peer_hostname, "live"]).inc();
+                            );
+                            if tx_process.send(payload).await.is_err() {
+                                warn!("Process channel closed, exiting fetch loop for peer {peer_index}");
+                                break;
                             }
                         },
                         Err(_) => {
