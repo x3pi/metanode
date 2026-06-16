@@ -517,7 +517,7 @@ func (app *App) initBlockchain() error {
 							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
 								bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
 							app.startLastBlock = blk
-							storage.ForceSetLastBlockNumber(bn)
+							storage.ResetAllBlockCounters(bn)
 							storage.ForceSetLastGlobalExecIndex(correctedGEI)
 							storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
 							storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
@@ -817,8 +817,10 @@ SKIP_GENESIS:
 						logger.Warn("🛡️ [SNAPSHOT FIX] ✅ Found matching fallback block #%d (stateRoot=%s, GEI=%d).",
 							bn, nomtRoot.Hex()[:18]+"...", correctedGEI)
 						app.startLastBlock = blk
-						storage.ForceSetLastBlockNumber(bn)
+						storage.ResetAllBlockCounters(bn)
 						storage.ForceSetLastGlobalExecIndex(correctedGEI)
+						storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+						storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
 						found = true
 						break
 					}
