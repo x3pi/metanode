@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
@@ -17,7 +18,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
-	eth_common "github.com/ethereum/go-ethereum/common"
 )
 
 type shardedSignatureCache struct {

@@ -216,10 +216,12 @@ func (app *App) runStartupIntegrityCheck(checkDepth int) *IntegrityCheckResult {
 //   - parentHash of block N matches hash of block N-1
 //
 // Returns the block number where the chain broke (0 if no break).
-func (app *App) verifyBlockChain(blockDB interface{ GetBlockByHash(common.Hash) (types.Block, error) }, startBlock types.Block, maxBlocks int, result *IntegrityCheckResult) uint64 {
+func (app *App) verifyBlockChain(blockDB interface {
+	GetBlockByHash(common.Hash) (types.Block, error)
+}, startBlock types.Block, maxBlocks int, result *IntegrityCheckResult) uint64 {
 	current := startBlock
 	checked := 0
-	
+
 	lastPrunedBlock := uint64(0)
 	if bc := blockchain.GetBlockChainInstance(); bc != nil {
 		lastPrunedBlock = bc.GetLastPrunedBlockNumber()
@@ -233,7 +235,7 @@ func (app *App) verifyBlockChain(blockDB interface{ GetBlockByHash(common.Hash) 
 			break
 		}
 
-		if blockNum <= lastPrunedBlock + 1 && lastPrunedBlock > 0 {
+		if blockNum <= lastPrunedBlock+1 && lastPrunedBlock > 0 {
 			// Reached pruning boundary - chain before this is already pruned
 			logger.Info("✅ [INTEGRITY] Reached pruned boundary at block #%d (lastPruned=%d). Chain walk complete.", blockNum, lastPrunedBlock)
 			checked++

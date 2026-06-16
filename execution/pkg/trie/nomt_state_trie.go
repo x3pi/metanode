@@ -20,9 +20,9 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -92,10 +92,10 @@ type NomtStateTrie struct {
 	// ─── WRITER-PRIVATE STATE (protected by writerMu) ──────────────────
 	// Only the block-processor goroutine accesses these fields.
 	// writerMu serializes Update/BatchUpdate/Commit calls.
-	writerMu  sync.RWMutex
-	wDirty    map[string]*nomtDirtyEntry // live mutable dirty map
-	wOldValues map[string][]byte         // pre-commit values for replication
-	wOldLoaded map[string]bool           // tracks which old values were loaded
+	writerMu   sync.RWMutex
+	wDirty     map[string]*nomtDirtyEntry // live mutable dirty map
+	wOldValues map[string][]byte          // pre-commit values for replication
+	wOldLoaded map[string]bool            // tracks which old values were loaded
 
 	// knownKeys tracks ALL original keys ever written to this trie instance.
 	knownKeys   map[string][]byte
@@ -112,7 +112,7 @@ type NomtStateTrie struct {
 	// to be asynchronously flushed to disk during CommitPayload
 	pendingChangelog      []state_changelog.StateChange
 	pendingChangelogBlock uint64
-	pendingCommittingMap   map[string]*nomtDirtyEntry
+	pendingCommittingMap  map[string]*nomtDirtyEntry
 
 	// lastCommitBatch for network replication (protected by writerMu)
 	lastCommitBatch [][2][]byte
@@ -351,7 +351,6 @@ func (n *NomtStateTrie) RegisterKnownKey(key []byte) {
 	logger.Debug("[NomtStateTrie] Registered recovered known key: %s", hexKey)
 }
 
-
 // NewNomtStateTrie creates a new NomtStateTrie backed by the given NOMT handle.
 // namespace isolates keys: different callers (AccountState, StakeState) MUST use
 // different namespaces to prevent data corruption.
@@ -466,7 +465,6 @@ func (n *NomtStateTrie) GetChangelogDB() *state_changelog.StateChangelogDB {
 	defer n.writerMu.RUnlock()
 	return n.changelogDB
 }
-
 
 // SetCurrentCommitBlock sets the block number for the upcoming commit.
 func (n *NomtStateTrie) SetCurrentCommitBlock(blockNumber uint64) {
@@ -595,7 +593,6 @@ func (n *NomtStateTrie) getNoLock(key []byte, hexKey string) ([]byte, error) {
 	}
 	return val, nil
 }
-
 
 // GetAll returns all key-value pairs by reading from the knownKeys registry.
 // Each known key is fetched from NOMT individually.
@@ -1040,7 +1037,7 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 	if fs != nil || len(changes) > 0 {
 		startDrain := time.Now()
 		logger.Info("⏳ [NOMT-SYNC-DRAIN] Draining pendingFinishedSession synchronously before BeginSession (namespace=%s)", string(n.namespace))
-		
+
 		if fs != nil {
 			n.handle.LockCommitPayload()
 			err := fs.CommitPayload(n.handle)
@@ -1051,13 +1048,13 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 				storage.UpdateLastNomtCommittedBlock(blockNum)
 			}
 		}
-		
+
 		if n.changelogDB != nil && len(changes) > 0 {
 			if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
 			}
 		}
-		
+
 		logger.Info("✅ [NOMT-SYNC-DRAIN] Successfully drained pendingFinishedSession in %v (namespace=%s)", time.Since(startDrain), string(n.namespace))
 
 		// Clear committing from readView since data is now on disk
@@ -1212,7 +1209,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		n.activeSession.Abort()
 		n.activeSession = nil
 	}
-	
+
 	fsToAbort := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
 	n.sessionMu.Unlock()
@@ -1326,7 +1323,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	return nil
 }
 
-
 // Commit finalizes changes: writes all dirty entries to NOMT via batch session.
 // Returns (rootHash, nil, nil, nil) — NOMT handles its own node management internally.
 //
@@ -1334,11 +1330,16 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 // ATOMIC POINTER SWAP COMMIT (3-Phase Lock-Free Architecture)
 //
 // Phase 1 (writerMu, ~microseconds): Snapshot wDirty → frozen copy, publish
-//   readView with committing = frozen, clear wDirty. Grab session reference.
+//
+//	readView with committing = frozen, clear wDirty. Grab session reference.
+//
 // Phase 2 (NO LOCK, ~milliseconds-seconds): Expensive FFI operations:
-//   RecordRead, BatchWrite, session.Finish. Readers are NEVER blocked.
+//
+//	RecordRead, BatchWrite, session.Finish. Readers are NEVER blocked.
+//
 // Phase 3 (writerMu, ~microseconds): Update rootHash, publish final readView,
-//   clear committing, store session state.
+//
+//	clear committing, store session state.
 //
 // This eliminates the pipeline stall where Commit() held n.mu.Lock() during
 // slow FFI operations, blocking all 64 server workers via Get() → RLock().
@@ -1368,8 +1369,8 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	currentRoot := n.loadReadView().rootHash
 	n.publishReadView(
 		make(map[string]*nomtDirtyEntry), // empty dirty (fresh block)
-		committingSnapshot,                // frozen previous dirty
-		currentRoot,                       // root unchanged until Phase 3
+		committingSnapshot,               // frozen previous dirty
+		currentRoot,                      // root unchanged until Phase 3
 	)
 
 	n.writerMu.Unlock()
@@ -1534,9 +1535,9 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	// concurrent readers to see writer mutations → panic on concurrent map access.
 	frozenDirty := cloneDirtyMap(n.wDirty)
 	n.publishReadView(
-		frozenDirty,         // immutable clone of current writer dirty
-		committingSnapshot,  // keep serving committed entries until disk flush
-		newRoot,             // new Merkle root
+		frozenDirty,        // immutable clone of current writer dirty
+		committingSnapshot, // keep serving committed entries until disk flush
+		newRoot,            // new Merkle root
 	)
 
 	logger.Info("[FORK-DIAG][NOMT-COMMIT] namespace=%s, entries=%d, oldRoot=%s → newRoot=%s",
@@ -1583,7 +1584,7 @@ func (n *NomtStateTrie) HasUncommittedChanges() bool {
 	n.writerMu.RLock()
 	hasWDirty := len(n.wDirty) > 0
 	n.writerMu.RUnlock()
-	
+
 	if hasWDirty {
 		return true
 	}
@@ -1791,7 +1792,7 @@ func (p *NomtPayload) CommitAsync() {
 
 	go func() {
 		defer p.Discard()
-		
+
 		p.trie.handle.LockCommitPayload()
 		defer p.trie.handle.UnlockCommitPayload()
 
@@ -2004,7 +2005,7 @@ func ApplyNomtReplicationBatches(
 					namespace, len(nomtKeys), preRoot[:8])
 
 				trie := NewNomtStateTrie(handle, false, namespace)
-				
+
 				// Set changelogDB based on namespace
 				if namespace == "account_state" {
 					trie.SetChangelogDB(changelogDB)
@@ -2023,7 +2024,7 @@ func ApplyNomtReplicationBatches(
 				if namespace != "stake_db" {
 					trie.SetReplicationSync(true)
 				}
-				
+
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}

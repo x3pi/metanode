@@ -31,7 +31,7 @@ func newTestMemoryDB() *testMemoryDB {
 	return &testMemoryDB{MemoryDB: storage.NewMemoryDb()}
 }
 
-func (t *testMemoryDB) GetBackupPath() string           { return "" }
+func (t *testMemoryDB) GetBackupPath() string { return "" }
 func (db *testMemoryDB) BatchDelete(keys [][]byte) error {
 	return nil
 }

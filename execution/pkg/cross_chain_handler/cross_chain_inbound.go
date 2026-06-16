@@ -265,8 +265,8 @@ func (h *CrossChainHandler) executeConfirmation(
 		eventData,
 		[][]byte{
 			eventDef.ID.Bytes(),
-			conf.MessageId[:],        // indexed[1]: msgId = txHash gốc của user
-			conf.Sender.Bytes(),      // indexed[2]: sender (người gửi trên chain nguồn)
+			conf.MessageId[:],   // indexed[1]: msgId = txHash gốc của user
+			conf.Sender.Bytes(), // indexed[2]: sender (người gửi trên chain nguồn)
 		},
 	)
 	logger.Info("[MSGID-TRACE] ⬇️  [4/4] CONFIRMATION chain=%s EMITTING OutboundResult: msgId=%s (=%x) isSuccess=%v sender=%s amount=%s",

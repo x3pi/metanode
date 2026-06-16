@@ -149,12 +149,12 @@ func (b *BlockHeader) Unmarshal(bData []byte) error {
 }
 
 func (b *BlockHeader) Hash() common.Hash {
-	// TRUE FORK-SAFETY: Hash MUST include LastBlockHash to prevent 
+	// TRUE FORK-SAFETY: Hash MUST include LastBlockHash to prevent
 	// hidden divergence. A block hash cryptographically seals its ancestry.
 	// NOTE: GlobalExecIndex IS included — it acts as a fork-detection canary.
 	// If GEI diverges between nodes, hash mismatch alerts to a problem
 	// that MUST be fixed at the source (Rust commit ordering), not hidden.
-	
+
 	pbHeader := blockHeaderPbPool.Get().(*pb.BlockHeader)
 	defer func() {
 		// Clear fields to avoid memory leaks of byte slices safely
@@ -230,7 +230,6 @@ func (b *BlockHeader) SetStakeStatesRoot(hash common.Hash) {
 func (b *BlockHeader) SetAggregateSignature(sig []byte) {
 	b.aggregateSignature = sig
 }
-
 
 func (b *BlockHeader) String() string {
 	str := fmt.Sprintf(`

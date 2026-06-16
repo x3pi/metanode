@@ -104,7 +104,7 @@ func (tp *TransactionPool) loop() {
 
 			transactions = append(transactions, req.tx)
 			transactionKeys[key] = true
-			
+
 			h := req.tx.Hash()
 			if h != (common.Hash{}) {
 				txHashMap[h] = req.tx
@@ -121,7 +121,7 @@ func (tp *TransactionPool) loop() {
 				if !transactionKeys[key] {
 					transactions = append(transactions, tx)
 					transactionKeys[key] = true
-					
+
 					h := tx.Hash()
 					if h != (common.Hash{}) {
 						txHashMap[h] = tx
@@ -138,12 +138,12 @@ func (tp *TransactionPool) loop() {
 			// Copy transactions to avoid race condition when returned to caller
 			txCopy := make([]types.Transaction, len(transactions))
 			copy(txCopy, transactions)
-			
+
 			// Clear the internal state
 			transactions = make([]types.Transaction, 0)
 			transactionKeys = make(map[txPoolKey]bool)
 			txHashMap = make(map[common.Hash]types.Transaction)
-			
+
 			atomic.StoreInt64(&tp.count, 0)
 			req.reply <- txCopy
 
@@ -208,7 +208,7 @@ func (tp *TransactionPool) loop() {
 				req.reply <- getTxResp{tx: nil, ok: false}
 				continue
 			}
-			
+
 			tx, ok := txHashMap[req.hash]
 			req.reply <- getTxResp{tx: tx, ok: ok}
 		}
@@ -241,7 +241,7 @@ func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byt
 	reply := make(chan []types.Transaction, 1)
 	tp.getTxsCh <- getTxsReq{reply: reply}
 	txs := <-reply
-	
+
 	// Preserving original behavior: aggregate sign returns nil
 	return txs, nil
 }
@@ -252,4 +252,3 @@ func (tp *TransactionPool) GetTransactionByHash(hashToFind common.Hash) (types.T
 	resp := <-reply
 	return resp.tx, resp.ok
 }
-

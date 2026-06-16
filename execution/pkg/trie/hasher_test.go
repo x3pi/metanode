@@ -264,4 +264,3 @@ func Test_newHasherWithDepth(t *testing.T) {
 	}
 	returnHasherToPool(h0)
 }
-

@@ -85,8 +85,6 @@ func InitRoutes(
 	// 	routes[common.TransactionsFromSubTopic] = blockProcessor.TransactionsFromSubTopic
 	// }
 
-
-
 	// State attestation: all nodes receive attestations from peers for fork detection
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
 

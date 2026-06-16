@@ -132,7 +132,7 @@ func main() {
 					break
 				}
 				fmt.Printf("   Đang ở block %d, cần đợi tới %d (Đang bắn Tx để kích block)...\n", latestBlock, blockB)
-				
+
 				// Bắn giao dịch để ép mạng lưới tạo block mới
 				_, errTx := sendTxAndWait(ethCli, privateKey, cfg.ChainID, fromAddress, toAddress)
 				if errTx != nil {

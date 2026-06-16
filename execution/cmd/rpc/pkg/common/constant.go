@@ -23,8 +23,8 @@ const (
 	MAX_TOTAL_GAS    uint64 = 9999999999999999999
 	MAX_GROUP_TIME   uint64 = 9999999999999999999 // Millisecond giây
 	MAX_TOTAL_TIME   uint64 = 9999999999999999999 // Millisecond giây
-	MIN_TX_TIME      = 1                   // Millisecond giây
-	MAX_TIME_PENDING = 5                   // phút
+	MIN_TX_TIME             = 1                   // Millisecond giây
+	MAX_TIME_PENDING        = 5                   // phút
 
 	//Wallet Select
 	ACCOUNT_SETTING_ADDRESS_SELECT = "account"
@@ -46,7 +46,6 @@ var (
 	SLASH_VALIDATOR_AMOUNT          = uint256.NewInt(0).SetBytes(common.FromHex("8ac7230489e80000"))
 	MINIMUM_VALIDATOR_STAKE_AMOUNT  = uint256.NewInt(0)
 	MINIMUM_OPEN_ACCOUNT_AMOUNT     = uint256.NewInt(0).SetBytes(common.FromHex("2386F26FC10000"))
-
 )
 
 const (

@@ -96,9 +96,9 @@ func (t *testDB) PrefixScan(prefix []byte) ([][2][]byte, error) {
 	return results, nil
 }
 
-func (t *testDB) Close() error         { return nil }
-func (t *testDB) Open() error          { return nil }
-func (t *testDB) Flush() error         { return nil }
+func (t *testDB) Close() error          { return nil }
+func (t *testDB) Open() error           { return nil }
+func (t *testDB) Flush() error          { return nil }
 func (t *testDB) GetBackupPath() string { return "/tmp/testdb" }
 
 // Compile-time check

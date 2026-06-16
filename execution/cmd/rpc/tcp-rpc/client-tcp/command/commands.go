@@ -50,18 +50,18 @@ const (
 
 	// Chain-direct commands — gửi thẳng lên chain, không qua RPC proxy
 	// Dùng header ID để match request/response
-	GetChainId           = "GetChainId"
-	ChainId              = "ChainId"
+	GetChainId            = "GetChainId"
+	ChainId               = "ChainId"
 	GetTransactionReceipt = "GetTransactionReceipt"
 	TransactionReceipt    = "TransactionReceipt"
 	GetBlockNumber        = "GetBlockNumber"
 	BlockNumber           = "BlockNumber"
 
-	GetLogs               = "GetLogs"
-	Logs                  = "Logs"
+	GetLogs = "GetLogs"
+	Logs    = "Logs"
 
-	GetTransactionByHash  = "GetTransactionByHash"
-	TransactionByHash     = "TransactionByHash"
+	GetTransactionByHash = "GetTransactionByHash"
+	TransactionByHash    = "TransactionByHash"
 
-	TransactionSuccess    = "TransactionSuccess"
+	TransactionSuccess = "TransactionSuccess"
 )

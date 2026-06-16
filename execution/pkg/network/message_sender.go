@@ -90,7 +90,7 @@ func (s *MessageSender) SendMessage2(
 		logger.Warn("SendMessage2: Gửi lệnh '%s' thất bại lần %d: %v. Đang thử lại...", command, i+1, errS)
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	logger.Error("SendMessage2: Gửi lệnh '%s' thất bại sau %d lần thử: %v", command, maxRetries, errS)
 	return errS
 }
@@ -248,7 +248,7 @@ func SendBytes(
 	}
 
 	message := generateMessage(connection.Address(), command, bytes, version)
-	
+
 	var errS error
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
@@ -259,7 +259,7 @@ func SendBytes(
 		logger.Warn("SendBytes (utility): Gửi lệnh '%s' thất bại lần %d: %v. Đang thử lại...", command, i+1, errS)
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	logger.Error("SendBytes (utility): Gửi lệnh '%s' thất bại sau %d lần thử: %v", command, maxRetries, errS)
 	return errS
 }

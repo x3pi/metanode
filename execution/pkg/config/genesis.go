@@ -15,7 +15,7 @@ type GenesisConfig struct {
 	ChainId              *big.Int `json:"chainId"`
 	Epoch                int      `json:"epoch"`
 	EpochTimestampMs     uint64   `json:"epoch_timestamp_ms,omitempty"`
-	AttestationInterval  uint64   `json:"attestation_interval,omitempty"`  // Blocks between state attestations (default 10)
+	AttestationInterval  uint64   `json:"attestation_interval,omitempty"`   // Blocks between state attestations (default 10)
 	EpochDurationSeconds uint64   `json:"epoch_duration_seconds,omitempty"` // Epoch duration in seconds (default 900 = 15 min)
 }
 

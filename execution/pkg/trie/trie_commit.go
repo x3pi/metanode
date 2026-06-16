@@ -1,13 +1,13 @@
 package trie
 
 import (
-"fmt"
-"sync"
+	"fmt"
+	"sync"
 
-e_common "github.com/ethereum/go-ethereum/common"
-"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	e_common "github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
-"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 )
 
 // PreWarm resolves HashNodes along the trie paths for the given keys in PARALLEL.
@@ -101,6 +101,7 @@ func (t *MerklePatriciaTrie) PreWarm(keys [][]byte) {
 	}
 	wg.Wait()
 }
+
 // BatchUpdate performs parallel trie updates by partitioning keys by first nibble.
 //
 // The MPT root is a FullNode with 16 children (nibbles 0-F). Updates to keys
@@ -465,7 +466,7 @@ func (t *MerklePatriciaTrie) Commit(
 	_ = newCommitter(nodes, t.tracer, collectLeaf).Commit(commitTrie.root) // Use original tracer, run on copy's root
 	logger.Info("✅ [TRIE DEBUG] After committer.Commit! nodes=%d", len(nodes.Nodes))
 
-	// Clear the dirty flag on all nodes in the original trie so that future 
+	// Clear the dirty flag on all nodes in the original trie so that future
 	// commits only process new modifications, keeping commit time constant.
 	t.ClearDirty()
 

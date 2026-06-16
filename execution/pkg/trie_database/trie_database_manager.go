@@ -65,7 +65,7 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 		if !exists {
 			continue // Should not happen in normal flow, but safety check
 		}
-		
+
 		switch snapshot.Status {
 		case Deleted:
 			if err := manager.DeleteTrieDatabase(id); err != nil {
@@ -82,7 +82,7 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 			value := snapshot.BackUpDb
 			// Thêm key-value vào map mới này
 			manager.collectedBatches[key] = value
-			
+
 			// Commit directly from the snapshot copy (or live trie for NOMT)
 			if snapshot.TrieCopy != nil {
 				var root common.Hash
@@ -167,13 +167,13 @@ func (manager *TrieDatabaseManager) SnapshotAllTrieDatabases() map[common.Hash]*
 		if trieDB.trieR != nil {
 			trieCopy = trieDB.trieR.Copy()
 		}
-		
+
 		var backUpDb []byte
 		if trieDB.backUpDb != nil {
 			backUpDb = make([]byte, len(trieDB.backUpDb))
 			copy(backUpDb, trieDB.backUpDb)
 		}
-		
+
 		snapshots[id] = &TrieDatabaseSnapshot{
 			TrieCopy: trieCopy,
 			BackUpDb: backUpDb,
@@ -221,7 +221,7 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 				hasChanges = true
 				return false // stop iteration
 			})
-			
+
 			if !hasChanges {
 				continue // Skip unmodified read-only query databases
 			}
@@ -370,7 +370,7 @@ func (manager *TrieDatabaseManager) GetOrCrateTrieDatabase(id common.Hash, hash 
 	trieDB, exists := manager.trieDatabases[id]
 	if !exists {
 		dbNameHash := crypto.Keccak256Hash([]byte(dbName)).Hex()
-		
+
 		// Map the single TrieDatabase to a PrefixStorage slice on the sharedDB
 		prefixStr := fmt.Sprintf("%s:%s:", address.Hex(), dbNameHash)
 		database := storage.NewPrefixStorage(manager.sharedDB, prefixStr)
@@ -404,5 +404,3 @@ func (manager *TrieDatabaseManager) ListAllIDs() []common.Hash {
 	}
 	return ids
 }
-
-

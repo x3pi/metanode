@@ -54,15 +54,15 @@ type PeerInfo struct {
 // HostNode là đối tượng chứa state cho node networking.
 // Đã loại bỏ libp2p — giờ chỉ giữ: LRU cache, channels, peers, fee addresses.
 type HostNode struct {
-	NodeType            string
-	Peers               map[string]*PeerInfo
-	rootPath            string
-	KeyValueStore       *lru.Cache[string, []byte]
-	wg                  sync.WaitGroup
-	reconnectMutex      sync.Mutex
-	ctx                 context.Context
-	TopicStorageMap     sync.Map
-	fetchingBlocks      sync.Map
+	NodeType        string
+	Peers           map[string]*PeerInfo
+	rootPath        string
+	KeyValueStore   *lru.Cache[string, []byte]
+	wg              sync.WaitGroup
+	reconnectMutex  sync.Mutex
+	ctx             context.Context
+	TopicStorageMap sync.Map
+	fetchingBlocks  sync.Map
 
 	// Kênh chuyên dụng để xử lý block, tách biệt với mạng
 	BlockProcessingQueue chan *storage.BackUpDb

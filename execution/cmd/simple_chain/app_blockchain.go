@@ -26,7 +26,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
-
 // initBlockchain initializes blockchain-related components
 func (app *App) initBlockchain() error {
 	logger.Info("initBlockchain started")
@@ -136,7 +135,7 @@ func (app *App) initBlockchain() error {
 					// GetAccountStateTrie() above lazily initializes the "account_state" NOMT handle.
 					// We must also force "stake_db" handle init so GetNomtHandleRoot works.
 					// ═══════════════════════════════════════════════════════════════
-					
+
 					// Force stake_db NOMT handle initialization by creating a temporary trie.
 					// This ensures GetNomtHandleRoot("stake_db") works before NewChainStateWithGenesis.
 					stakeStorage := app.storageManager.GetStorageStake()
@@ -232,7 +231,7 @@ func (app *App) initBlockchain() error {
 			logger.Error("🚨 [FATAL] REFUSING to re-initialize genesis to prevent wiping all state data.")
 			return fmt.Errorf("CORRUPTED BLOCK DATABASE: lastBlock not found but data exists at %s. Error: %v", dataDir, err)
 		}
-		
+
 		fmt.Printf("No existing block found (fresh start), initializing genesis block\n")
 		// No data directories → genuine fresh start
 		logger.Info("No existing block found (fresh start), initializing genesis block")
@@ -285,7 +284,7 @@ func (app *App) initBlockchain() error {
 		// authoritative source on startup. This guarantees Rust receives the
 		// correct GEI during initialization and can resume epoch transitions.
 		headerGEI := app.startLastBlock.Header().GlobalExecIndex()
-		
+
 		// Attempt to load from BackupDb as well
 		var backupGEI uint64 = 0
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil {
@@ -426,10 +425,10 @@ func (app *App) initBlockchain() error {
 						"STARTUP-SYNC will fetch missing blocks and reconcile.",
 						nomtStakeRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
 				}
-				
+
 				// CRITICAL FIX: Only treat the database as EMPTY (triggering genesis alignment)
-				// if the account state NOMT itself is empty. If only the stake DB is empty but the 
-				// account state is intact, resetting the block tip to 0 while leaving the active 
+				// if the account state NOMT itself is empty. If only the stake DB is empty but the
+				// account state is intact, resetting the block tip to 0 while leaving the active
 				// account trie at block N causes an integrity mismatch and a fatal crash.
 				isEmptyNomt := isEmptyAccountNomt
 
@@ -476,7 +475,7 @@ func (app *App) initBlockchain() error {
 					logger.Warn("⚠️ [STARTUP] NOMT database is EMPTY (account=%s, stake=%s) but header expects (account=%s, stake=%s). "+
 						"Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.",
 						nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex()[:18]+"...", headerStakeRoot.Hex()[:18]+"...")
-					
+
 					// Load block 0 (genesis) from block database
 					key := []byte("blockNumber_0")
 					data, err := app.storageManager.GetStorageMapping().Get(key)
@@ -591,7 +590,7 @@ func (app *App) initBlockchain() error {
 			shouldRepopulateStake := okStake && nomtStakeRoot != headerStakeRoot && headerStakeRoot != (e_common.Hash{})
 
 			if shouldRepopulateAccount || shouldRepopulateStake {
-				logger.Info("⏳ [STARTUP] Mismatch detected at Block 0. Account match: %v, Stake match: %v. Repopulating genesis state.", 
+				logger.Info("⏳ [STARTUP] Mismatch detected at Block 0. Account match: %v, Stake match: %v. Repopulating genesis state.",
 					nomtAccountRoot == headerAccountRoot, nomtStakeRoot == headerStakeRoot)
 				if err := app.repopulateGenesisState(); err != nil {
 					return fmt.Errorf("failed to repopulate genesis state: %v", err)
@@ -1021,10 +1020,10 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 			val.GetWorkerAddress(),
 			val.GetP2PAddress(),
 			hex.EncodeToString(pubkeyBls), // Encode raw bytes to hex string for valid UTF-8
-			pubkeySecp,        // protocol_key []byte
-			networkKey,        // network_key []byte
-			name,              // hostname
-			pubkeyBls,         // authority_key []byte
+			pubkeySecp,                    // protocol_key []byte
+			networkKey,                    // network_key []byte
+			name,                          // hostname
+			pubkeyBls,                     // authority_key []byte
 		)
 
 		// CRITICAL: Set initial stake from delegator_stakes in genesis.json
@@ -1371,4 +1370,3 @@ func (app *App) repopulateGenesisState() error {
 
 	return nil
 }
-

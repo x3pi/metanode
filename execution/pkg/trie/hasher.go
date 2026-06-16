@@ -179,4 +179,3 @@ func (h *hasher) proofHash(original node.Node) (collapsed, hashed node.Node) {
 		return n, n
 	}
 }
-

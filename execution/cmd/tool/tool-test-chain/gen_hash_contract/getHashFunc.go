@@ -16,7 +16,7 @@ func main() {
 		return
 	}
 	signature := os.Args[1]
-	
+
 	// Tự động bổ sung "()" nếu user quên gõ
 	if !strings.Contains(signature, "(") {
 		signature = signature + "()"

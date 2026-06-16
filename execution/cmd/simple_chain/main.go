@@ -59,15 +59,15 @@ func main() {
 			fatal.Exit("Fatal exit from main.go")
 		}
 
-	// PERFORMANCE OPTIMIZATION: Cleanup TrieDB connection pool on shutdown
-	logger.Info("[PERF] Cleaning up TrieDB connection pool on shutdown...")
-	// Note: closeTrieDBPool() is called from processor package
-}()
+		// PERFORMANCE OPTIMIZATION: Cleanup TrieDB connection pool on shutdown
+		logger.Info("[PERF] Cleaning up TrieDB connection pool on shutdown...")
+		// Note: closeTrieDBPool() is called from processor package
+	}()
 
-// CRITICAL FIX: Ignore SIGPIPE. Rust's tokio assumes SIGPIPE is ignored by the process.
-// Because Rust is loaded via CGo, it didn't run its standard OS init hook to ignore SIGPIPE.
-// When Tokio writes to a closed socket, it triggers a SIGPIPE, killing the entire process instantly.
-signal.Ignore(syscall.SIGPIPE)
+	// CRITICAL FIX: Ignore SIGPIPE. Rust's tokio assumes SIGPIPE is ignored by the process.
+	// Because Rust is loaded via CGo, it didn't run its standard OS init hook to ignore SIGPIPE.
+	// When Tokio writes to a closed socket, it triggers a SIGPIPE, killing the entire process instantly.
+	signal.Ignore(syscall.SIGPIPE)
 
 	// KHỞI TẠO CỜ LỆNH
 	// Gọi Parse() sau khi đã định nghĩa TẤT CẢ các flag
@@ -466,8 +466,8 @@ func memoryPressureRelief(memLimitBytes int64) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	warnThreshold := uint64(float64(memLimitBytes) * 0.80)  // 80% → force GC
-	critThreshold := uint64(float64(memLimitBytes) * 0.90)  // 90% → force GC + FreeOSMemory
+	warnThreshold := uint64(float64(memLimitBytes) * 0.80) // 80% → force GC
+	critThreshold := uint64(float64(memLimitBytes) * 0.90) // 90% → force GC + FreeOSMemory
 
 	logger.Info("🛡️ [OOM-GUARD] Memory pressure relief started: limit=%dGB, warn=%dMB, crit=%dMB",
 		memLimitBytes>>30, warnThreshold>>20, critThreshold>>20)

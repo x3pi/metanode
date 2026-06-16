@@ -107,7 +107,7 @@ func (vp *TxValidatorPool) StartMemoryMonitor() {
 				currentCount := vp.transactionPool.CountTransactions()
 				if currentCount > 1000 {
 					evictCount := currentCount / 2 // Evict 50% of mempool
-					logger.Error("🚨 [DDoS PROTECTION] Memory usage high (%d MB > 90%% of limit %d GB). Evicting %d lowest-fee transactions!", 
+					logger.Error("🚨 [DDoS PROTECTION] Memory usage high (%d MB > 90%% of limit %d GB). Evicting %d lowest-fee transactions!",
 						memStats.Alloc/1024/1024, limitGB, evictCount)
 					vp.transactionPool.EvictLowestGasPrice(evictCount)
 				}

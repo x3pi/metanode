@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -115,7 +115,6 @@ func (api *DebugApi) GetTransactionTrace(ctx context.Context, hash common.Hash) 
 	}
 	return trace, nil
 }
-
 
 func (api *DebugApi) TraceTransaction(ctx context.Context, hashEth common.Hash) (types.ExecuteSCResult, error) {
 	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashEth)
@@ -780,7 +779,7 @@ func (api *DebugApi) GetBlockStateDiff(ctx context.Context, blockNumber uint64) 
 	for _, change := range changes {
 		addr := common.BytesToAddress(change.Key)
 		hexAddr := addr.Hex()
-		
+
 		var postBal, postCodeHash, postStorageRoot, postDataHash string
 		var postMapFullDbHash, postSimpleDbHash, postLogsHash string
 		var postTrieDBMap map[string]string

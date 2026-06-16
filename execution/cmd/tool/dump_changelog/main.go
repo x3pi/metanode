@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"log"
-	"bytes"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"

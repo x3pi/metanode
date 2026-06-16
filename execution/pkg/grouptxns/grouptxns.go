@@ -34,14 +34,14 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 	}
 
 	groupAddrs := make([]common.Address, 0)
-	
+
 	var al e_types.AccessList
 	ethTx := tx.ToEthTransaction()
 	if ethTx != nil {
 		al = ethTx.AccessList()
 	}
 	hasAccessList := len(al) > 0
-	
+
 	// Value transfer modifies the SC balance, so it MUST NOT be separated from the ToAddress
 	isValueTransfer := false
 	if tx.Amount() != nil && tx.Amount().Sign() > 0 {
@@ -66,7 +66,7 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 			}
 		}
 	}
-	
+
 	if len(groupAddrs) == 0 {
 		groupAddrs = append(groupAddrs, tx.FromAddress())
 	}

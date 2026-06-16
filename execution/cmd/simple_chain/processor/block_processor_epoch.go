@@ -72,7 +72,7 @@ func (bp *BlockProcessor) updateAndPersistConsensusState(gei uint64, commitIndex
 		if commitIndex > 0 {
 			storage.UpdateLastHandledCommitIndex(commitIndex)
 			batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(commitIndex)})
-			
+
 			geiAuthority := GetGEIAuthority()
 			if geiAuthority != nil {
 				geiAuthority.RecordCommitIndexWithEpoch(commitIndex, blockEpoch)
@@ -152,7 +152,7 @@ func (bp *BlockProcessor) PushAsyncGEIUpdate(index uint64, hash []byte, commitIn
 		geiAuth.AdvanceGEITo(index)
 	}
 	bp.updateAndPersistLastExecutedCommitHash(hash)
-	
+
 	update := AsyncGEIUpdate{
 		GlobalExecIndex: index,
 		CommitIndex:     commitIndex,

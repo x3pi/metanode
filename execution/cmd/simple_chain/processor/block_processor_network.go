@@ -3,7 +3,6 @@
 package processor
 
 import (
-
 	"fmt"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
-
 )
 
 // runUnixSocket starts the Unix socket for Rust queries / or FFI Bridge
@@ -714,4 +712,3 @@ func handleShutdown(listener *executor.Listener) {
 	// This function is kept for backward compatibility
 	// The actual shutdown handling should be implemented in the main application
 }
-

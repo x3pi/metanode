@@ -37,14 +37,14 @@ const (
 )
 
 var (
-	CONFIG_FILE_PATH string
-	DATA_FILE_PATH   string
-	LOG_LEVEL        int
-	LOOP             bool
-	API_URL          string
+	CONFIG_FILE_PATH  string
+	DATA_FILE_PATH    string
+	LOG_LEVEL         int
+	LOOP              bool
+	API_URL           string
 	AUTO_REGISTER_BLS bool
-	ASYNC            bool
-	NODE_URL         string
+	ASYNC             bool
+	NODE_URL          string
 )
 
 // SCData defines a single transaction action (deploy or call)
@@ -217,7 +217,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 	}
 	currentNonce := as.Nonce()
 	pendingBalance := as.PendingBalance()
-	
+
 	// Variables for tracking async hashes
 	var submittedHashes []common.Hash
 	var submittedTxActions []string
@@ -386,7 +386,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 
 		fmt.Printf("  📤 Sending transaction (locally tracked nonce: %d)...\n", currentNonce)
 		txStart := time.Now()
-		
+
 		tx, reqErr := c.GetTransactionController().SendTransaction(
 			fromAddress,
 			toAddress,
@@ -411,7 +411,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 
 		// Update local nonce for sequence on success
 		currentNonce++
-		
+
 		// In async mode, we collect the hashes and wait at the end
 		if ASYNC {
 			fmt.Printf("  ✅ TX sent to node mempool (Hash: %s). Waiting for receipt later...\n", tx.Hash().Hex())
@@ -440,7 +440,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			fmt.Printf("  ❌ Transaction FAILED after 20 attempts: %v\n", errStr)
 			fmt.Printf("  ⏱  Duration: %s\n", txDuration)
 			failCount++
-			
+
 			// Refresh sync from network just in case
 			as, err := c.AccountState(fromAddress)
 			if err == nil {
@@ -481,12 +481,12 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 		fmt.Printf("\n──────────────────────────────────────\n")
 		fmt.Printf("  ⏳ Async mode: Waiting for %d receipts...\n", len(submittedHashes))
 		fmt.Printf("──────────────────────────────────────\n")
-		
+
 		for i, hash := range submittedHashes {
 			action := submittedTxActions[i]
 			fmt.Printf("  🔍 Waiting for TX %s...\n", hash.Hex())
 			startWait := time.Now()
-			
+
 			var receipt types.Receipt
 			var err error
 			for attempt := 1; attempt <= 40; attempt++ {
@@ -497,7 +497,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				time.Sleep(500 * time.Millisecond)
 			}
 			waitDuration := time.Since(startWait)
-			
+
 			if err != nil || receipt == nil {
 				errStr := err
 				if errStr == nil {
@@ -507,12 +507,12 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				failCount++
 				continue
 			}
-			
+
 			status := receipt.Status()
 			fmt.Printf("  ✅ Receipt %d/%d received!\n", i+1, len(submittedHashes))
 			fmt.Printf("  📋 Status:      %s\n", formatStatus(status))
 			fmt.Printf("  ⏱  Wait time:   %s\n", waitDuration)
-			
+
 			if status == pb.RECEIPT_STATUS_RETURNED {
 				successCount++
 				if action == "deploy" {
@@ -632,4 +632,3 @@ func ethCallHTTP(hexTxData string) ([]byte, error) {
 
 	return resultBytes, nil
 }
-

@@ -110,7 +110,7 @@ func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
 	// ProcessTransactions already called IntermediateRoot() sequentially before the parallel commit phase.
 	// Calling it here creates a severe race condition where Commit() steals the dirtyData of Block N+1.
 	trieCopy := trieDatabae.trieR.Copy()
-	
+
 	root, nodeSet, _, err := trieCopy.Commit(true)
 	if err != nil {
 		return common.Hash{}, err
@@ -277,7 +277,7 @@ func (trieDatabae *TrieDatabase) GetAllKeyValues() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for hexKey, vBytes := range allFromTrie {
 		keyBytes, err := hex.DecodeString(hexKey)
 		if err != nil {
@@ -330,7 +330,7 @@ func (trieDatabae *TrieDatabase) SearchByValue(searchValue string) (map[string]s
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for hexKey, vBytes := range allFromTrie {
 		if string(vBytes) == searchValue {
 			keyBytes, err := hex.DecodeString(hexKey)

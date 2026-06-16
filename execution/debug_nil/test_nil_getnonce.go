@@ -7,8 +7,8 @@ import (
 )
 
 type Proto struct {
-	Padding1 [24]byte
-	Nonce []byte
+	Padding1  [24]byte
+	Nonce     []byte
 	ToAddress []byte
 }
 

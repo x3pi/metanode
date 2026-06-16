@@ -4,8 +4,8 @@ package main
 
 import (
 	"fmt"
-	"unsafe"
 	"github.com/ethereum/go-ethereum/common"
+	"unsafe"
 )
 
 func main() {

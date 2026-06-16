@@ -327,7 +327,7 @@ func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error
 
 	// Try to get the proper state roots for the peer's block
 	var localAccountRoot, localStakeRoot common.Hash
-	
+
 	if header.BlockNumber() == peerAtt.BlockNumber {
 		localAccountRoot = header.AccountStatesRoot()
 		localStakeRoot = header.StakeStatesRoot()

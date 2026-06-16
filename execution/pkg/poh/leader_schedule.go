@@ -55,7 +55,6 @@ func NewLeaderSchedule(
 	return ls, nil
 }
 
-
 func (ls *LeaderSchedule) String() string {
 	str := "Slot: \n"
 	for i, v := range ls.slots {

@@ -31,9 +31,9 @@ type ExpectedEvent struct {
 }
 
 type DataPayload struct {
-	Contract  string        `json:"contract"`
-	AbiPath   string        `json:"abi_path"`
-	Action    string        `json:"action"` // "call" hoặc "send" / "deploy"
+	Contract       string          `json:"contract"`
+	AbiPath        string          `json:"abi_path"`
+	Action         string          `json:"action"` // "call" hoặc "send" / "deploy"
 	Method         string          `json:"method"`
 	Args           []interface{}   `json:"args"`
 	InputData      string          `json:"input_data"`
@@ -282,7 +282,7 @@ func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contra
 					if len(outputs) != len(expectedVerify) {
 						log.Fatalf("❌ KẾT QUẢ ĐỌC SAI: Mong đợi %d giá trị trả về, nhưng nhận được %d", len(expectedVerify), len(outputs))
 					}
-					
+
 					method, ok := parsedABI.Methods[methodName]
 					if ok {
 						for i, expectedRaw := range expectedVerify {
@@ -290,10 +290,10 @@ func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contra
 							if err != nil {
 								log.Fatalf("❌ Lỗi chuyển đổi tham số Verify thứ [%d]: %v", i, err)
 							}
-							
+
 							outputStr := fmt.Sprintf("%v", outputs[i])
 							expectedStr := fmt.Sprintf("%v", expectedVal)
-							
+
 							if outputStr != expectedStr {
 								log.Fatalf("❌ KẾT QUẢ ĐỌC SAI ở tham số thứ [%d]: Mong đợi '%s', nhận được '%s'", i, expectedStr, outputStr)
 							}

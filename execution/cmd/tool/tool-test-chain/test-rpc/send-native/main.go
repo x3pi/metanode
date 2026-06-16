@@ -71,12 +71,12 @@ func main() {
 	fmt.Println("\n==================================================")
 	fmt.Println("🔍 KIỂM TRA SỐ DƯ TRƯỚC KHI CHUYỂN")
 	fmt.Println("==================================================")
-	
+
 	balanceFromBefore, err := client.BalanceAt(context.Background(), fromAddress, nil)
 	if err != nil {
 		log.Fatalf("❌ Lỗi lấy số dư người gửi: %v", err)
 	}
-	
+
 	balanceToBefore, err := client.BalanceAt(context.Background(), toAddress, nil)
 	if err != nil {
 		log.Fatalf("❌ Lỗi lấy số dư người nhận: %v", err)
@@ -97,7 +97,7 @@ func main() {
 	}
 
 	// Native transfer tốn chuẩn 21000 gas
-	gasLimit := uint64(21000) 
+	gasLimit := uint64(21000)
 
 	tx := types.NewTransaction(nonce, toAddress, amount, gasLimit, gasPrice, nil)
 
@@ -168,13 +168,13 @@ func main() {
 	fmt.Println("\n==================================================")
 	fmt.Println("📊 ĐỐI CHIẾU SỰ THAY ĐỔI")
 	fmt.Println("==================================================")
-	
+
 	// Thay đổi của người nhận = balanceToAfter - balanceToBefore
 	diffTo := new(big.Int).Sub(balanceToAfter, balanceToBefore)
-	
+
 	// Thay đổi của người gửi = balanceFromBefore - balanceFromAfter
 	diffFrom := new(big.Int).Sub(balanceFromBefore, balanceFromAfter)
-	
+
 	// Tổng tiêu hao dự kiến của người gửi = Amount + GasCost
 	expectedDiffFrom := new(big.Int).Add(amount, gasCost)
 

@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pkgCommon "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
@@ -134,7 +134,7 @@ func (srv *RpcTcpServer) handleGetNonce(request t_network.Request) error {
 	// Trả về byte luôn k cần bọc sendRpcResponse
 	bodyResp := make([]byte, 8)
 	binary.BigEndian.PutUint64(bodyResp, nonce)
-	
+
 	respMsg := network.NewMessage(&pb.Message{
 		Header: &pb.Header{
 			Command:   pkgCommon.Nonce, // Or pkgCommon.Nonce if imported

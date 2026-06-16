@@ -442,21 +442,21 @@ type ExecuteSCResult struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	TransactionHash []byte            `protobuf:"bytes,1,opt,name=TransactionHash,proto3" json:"TransactionHash,omitempty"`
-	MapAddBalance   map[string][]byte `protobuf:"bytes,2,rep,name=MapAddBalance,proto3" json:"MapAddBalance,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`   // addresses with add balance
-	MapSubBalance   map[string][]byte `protobuf:"bytes,3,rep,name=MapSubBalance,proto3" json:"MapSubBalance,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`   // addresses with sub balance
-	MapCodeHash     map[string][]byte `protobuf:"bytes,4,rep,name=MapCodeHash,proto3" json:"MapCodeHash,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`       // address were deployed by this transaction
-	MapStorageRoot  map[string][]byte `protobuf:"bytes,5,rep,name=MapStorageRoot,proto3" json:"MapStorageRoot,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // address were deployed by this transaction
-	LogsHash        []byte            `protobuf:"bytes,6,opt,name=LogsHash,proto3" json:"LogsHash,omitempty"`
-	Status          RECEIPT_STATUS    `protobuf:"varint,8,opt,name=Status,proto3,enum=receipt.RECEIPT_STATUS" json:"Status,omitempty"`  // returns (function had call return) or halted (function run complete with no return ) or threw (err)
-	Exception       EXCEPTION         `protobuf:"varint,9,opt,name=Exception,proto3,enum=receipt.EXCEPTION" json:"Exception,omitempty"` // Exception has been threw
-	Return          []byte            `protobuf:"bytes,10,opt,name=Return,proto3" json:"Return,omitempty"`                              // result after call
-	GasUsed         uint64            `protobuf:"varint,11,opt,name=GasUsed,proto3" json:"GasUsed,omitempty"`
-	MapStorageAddressTouchedAddresses map[string]*TouchedAddresses `protobuf:"bytes,12,rep,name=MapStorageAddressTouchedAddresses,proto3" json:"MapStorageAddressTouchedAddresses,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // storage address => touched address
-	MapStorageAddress                   map[string][]byte        `protobuf:"bytes,13,rep,name=MapStorageAddress,proto3" json:"MapStorageAddress,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // storage address => touched address
-	MapCreatorPubkey                    map[string][]byte        `protobuf:"bytes,14,rep,name=MapCreatorPubkey,proto3" json:"MapCreatorPubkey,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`   // storage address => touched address
-	MapNativeSmartContractUpdateStorage map[string]*StorageDatas `protobuf:"bytes,15,rep,name=MapNativeSmartContractUpdateStorage,proto3" json:"MapNativeSmartContractUpdateStorage,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	EventLogs                           []*EventLog              `protobuf:"bytes,16,rep,name=EventLogs,proto3" json:"EventLogs,omitempty"`
+	TransactionHash                     []byte                       `protobuf:"bytes,1,opt,name=TransactionHash,proto3" json:"TransactionHash,omitempty"`
+	MapAddBalance                       map[string][]byte            `protobuf:"bytes,2,rep,name=MapAddBalance,proto3" json:"MapAddBalance,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`   // addresses with add balance
+	MapSubBalance                       map[string][]byte            `protobuf:"bytes,3,rep,name=MapSubBalance,proto3" json:"MapSubBalance,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`   // addresses with sub balance
+	MapCodeHash                         map[string][]byte            `protobuf:"bytes,4,rep,name=MapCodeHash,proto3" json:"MapCodeHash,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`       // address were deployed by this transaction
+	MapStorageRoot                      map[string][]byte            `protobuf:"bytes,5,rep,name=MapStorageRoot,proto3" json:"MapStorageRoot,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // address were deployed by this transaction
+	LogsHash                            []byte                       `protobuf:"bytes,6,opt,name=LogsHash,proto3" json:"LogsHash,omitempty"`
+	Status                              RECEIPT_STATUS               `protobuf:"varint,8,opt,name=Status,proto3,enum=receipt.RECEIPT_STATUS" json:"Status,omitempty"`  // returns (function had call return) or halted (function run complete with no return ) or threw (err)
+	Exception                           EXCEPTION                    `protobuf:"varint,9,opt,name=Exception,proto3,enum=receipt.EXCEPTION" json:"Exception,omitempty"` // Exception has been threw
+	Return                              []byte                       `protobuf:"bytes,10,opt,name=Return,proto3" json:"Return,omitempty"`                              // result after call
+	GasUsed                             uint64                       `protobuf:"varint,11,opt,name=GasUsed,proto3" json:"GasUsed,omitempty"`
+	MapStorageAddressTouchedAddresses   map[string]*TouchedAddresses `protobuf:"bytes,12,rep,name=MapStorageAddressTouchedAddresses,proto3" json:"MapStorageAddressTouchedAddresses,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // storage address => touched address
+	MapStorageAddress                   map[string][]byte            `protobuf:"bytes,13,rep,name=MapStorageAddress,proto3" json:"MapStorageAddress,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`                                 // storage address => touched address
+	MapCreatorPubkey                    map[string][]byte            `protobuf:"bytes,14,rep,name=MapCreatorPubkey,proto3" json:"MapCreatorPubkey,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`                                   // storage address => touched address
+	MapNativeSmartContractUpdateStorage map[string]*StorageDatas     `protobuf:"bytes,15,rep,name=MapNativeSmartContractUpdateStorage,proto3" json:"MapNativeSmartContractUpdateStorage,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	EventLogs                           []*EventLog                  `protobuf:"bytes,16,rep,name=EventLogs,proto3" json:"EventLogs,omitempty"`
 }
 
 func (x *ExecuteSCResult) Reset() {

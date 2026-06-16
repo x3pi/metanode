@@ -257,7 +257,7 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	var wrappedResponse *pb.Response
-	
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {

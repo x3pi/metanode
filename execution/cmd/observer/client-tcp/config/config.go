@@ -19,7 +19,7 @@ import (
 type RemoteChain struct {
 	Name                    string `json:"name"`
 	NationId                uint64 `json:"nation_id"`
-	ConnectionAddress       string `json:"connection_address"`       // TCP address của remote chain (mới)
+	ConnectionAddress       string `json:"connection_address"` // TCP address của remote chain (mới)
 	LocalContract           string `json:"local_contract"`
 	ParentAddress           string `json:"parent_address"`
 	ParentConnectionAddress string `json:"parent_connection_address"` // backward compat

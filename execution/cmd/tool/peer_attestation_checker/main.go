@@ -9,13 +9,13 @@ import (
 )
 
 type PeerInfoResponse struct {
-	NodeID                int    `json:"node_id"`
-	Epoch                 uint64 `json:"epoch"`
-	LastBlock             uint64 `json:"last_block"`
-	LastGlobalExecIndex   uint64 `json:"last_global_exec_index"`
-	NetworkAddress        string `json:"network_address"`
-	TimestampMs           uint64 `json:"timestamp_ms"`
-	StateRoot             string `json:"state_root"`
+	NodeID              int    `json:"node_id"`
+	Epoch               uint64 `json:"epoch"`
+	LastBlock           uint64 `json:"last_block"`
+	LastGlobalExecIndex uint64 `json:"last_global_exec_index"`
+	NetworkAddress      string `json:"network_address"`
+	TimestampMs         uint64 `json:"timestamp_ms"`
+	StateRoot           string `json:"state_root"`
 }
 
 var ports = []int{19200, 19201, 19202, 19203, 19204}

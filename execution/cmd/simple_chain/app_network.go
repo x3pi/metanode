@@ -95,7 +95,6 @@ func (app *App) initHostNode() error {
 	return nil
 }
 
-
 // ConnectToPeer — legacy function, no longer used after libp2p removal.
 func (app *App) ConnectToPeer(peerAddr string) error {
 	logger.Warn("ConnectToPeer called but libp2p is removed. Use ConnectTo() instead.")
@@ -122,4 +121,3 @@ func ListenForStateChanges() {
 		}
 	}
 }
-

@@ -25,7 +25,7 @@ type TcpSubscription struct {
 // TcpSubscriptionManager quản lý subscriptions qua TCP
 type TcpSubscriptionManager struct {
 	mu            sync.RWMutex
-	subscriptions map[string]*TcpSubscription           // Key: Subscription ID
+	subscriptions map[string]*TcpSubscription                 // Key: Subscription ID
 	connections   map[t_network.Connection][]*TcpSubscription // Key: Connection
 	messageSender t_network.MessageSender
 }
@@ -215,7 +215,6 @@ func getBool(m map[string]interface{}, key string) bool {
 	}
 	return false
 }
-
 
 func generateSubID() string {
 	bytes := make([]byte, 16)

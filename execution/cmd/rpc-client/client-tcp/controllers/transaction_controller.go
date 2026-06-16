@@ -68,7 +68,7 @@ func (tc *TransactionController) SendTransaction(
 	transaction.SetSign(tc.clientContext.KeyPair.PrivateKey())
 
 	fmt.Printf(" [DEBUG] tx_sender Hash(): %x\n", transaction.Hash().Bytes())
-bTransaction, err := transaction.Marshal()
+	bTransaction, err := transaction.Marshal()
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (tc *TransactionController) ReadTransaction(
 	transaction.SetSign(tc.clientContext.KeyPair.PrivateKey())
 	logger.Error("_ReadTransaction: %v", transaction)
 	fmt.Printf(" [DEBUG] tx_sender Hash(): %x\n", transaction.Hash().Bytes())
-bTransaction, err := transaction.Marshal()
+	bTransaction, err := transaction.Marshal()
 	if err != nil {
 		return nil, err
 	}

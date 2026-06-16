@@ -203,10 +203,10 @@ func (vt *VerkleStateTrie) Update(key, value []byte) error {
 //
 // OPTIMIZATION: Instead of calling Update() N times (each acquiring/releasing
 // the lock + doing a DB read + Pedersen insert), this method:
-//   1. Acquires the lock ONCE for the entire batch
-//   2. Parallelizes old-value DB reads (16 workers)
-//   3. Parallelizes Keccak256 hashing (16 workers)
-//   4. Performs Verkle tree inserts sequentially (go-verkle is NOT thread-safe)
+//  1. Acquires the lock ONCE for the entire batch
+//  2. Parallelizes old-value DB reads (16 workers)
+//  3. Parallelizes Keccak256 hashing (16 workers)
+//  4. Performs Verkle tree inserts sequentially (go-verkle is NOT thread-safe)
 //
 // This reduces lock overhead from 30K to 1 and eliminates 30K hex.EncodeToString
 // allocations by pre-computing them in the parallel phase.
@@ -229,10 +229,10 @@ func (vt *VerkleStateTrie) BatchUpdate(keys, values [][]byte) error {
 	// ═══════════════════════════════════════════════════════════════
 	type batchEntry struct {
 		hexKey    string
-		dbKey     []byte   // "vk:" + keyBytes — pre-computed for Commit()
-		verkleKey []byte   // padTo32(key)
-		valueHash []byte   // keccak256(value) for Verkle Insert
-		oldValue  []byte   // old value from DB (nil if new key)
+		dbKey     []byte // "vk:" + keyBytes — pre-computed for Commit()
+		verkleKey []byte // padTo32(key)
+		valueHash []byte // keccak256(value) for Verkle Insert
+		oldValue  []byte // old value from DB (nil if new key)
 	}
 	entries := make([]batchEntry, n)
 

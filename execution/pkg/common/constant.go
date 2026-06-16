@@ -23,8 +23,8 @@ const (
 	MAX_TOTAL_GAS    uint64 = 9999999999999999999
 	MAX_GROUP_TIME   uint64 = 9999999999999999999 // Millisecond giây
 	MAX_TOTAL_TIME   uint64 = 9999999999999999999 // Millisecond giây
-	MIN_TX_TIME      = 1                   // Millisecond giây
-	MAX_TIME_PENDING = 5                   // phút
+	MIN_TX_TIME             = 1                   // Millisecond giây
+	MAX_TIME_PENDING        = 5                   // phút
 
 	//Wallet Select
 	ACCOUNT_SETTING_ADDRESS_SELECT = "account"
@@ -60,8 +60,6 @@ var (
 	// use global
 	CROSS_CHAIN_CONTRACT_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000B429C0B2")
 )
-
-
 
 type FolderBackup int
 

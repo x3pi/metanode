@@ -109,17 +109,17 @@ func (sm *StorageManager) InitSharedDatabase(rootPath string, dbType DBType) err
 	defer sm.mu.Unlock()
 
 	dbPath := filepath.Join(rootPath, "chaindata")
-	
+
 	// Create ShardelDB to use the specified DBType with 1 shard
 	db, err := NewShardelDB(dbPath, 1, 4, dbType, "")
 	if err != nil {
 		return fmt.Errorf("failed to create shared DB: %w", err)
 	}
-	
+
 	if err := db.Open(); err != nil {
 		return fmt.Errorf("failed to open shared DB: %w", err)
 	}
-	
+
 	sm.sharedDB = db
 
 	prefixMap := map[StorageType]string{

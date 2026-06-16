@@ -15,7 +15,7 @@ func main() {
 
 func dumpBlock(nodeName, dbPath string) {
 	fmt.Printf("--- Dumping blocks 200-201 from %s (%s) ---\n", nodeName, dbPath)
-	
+
 	db, err := storage.NewShardelDB(dbPath, 16, 1, storage.TypePebbleDB, "")
 	if err != nil {
 		log.Fatalf("Failed to create ShardedDB for %s: %v", dbPath, err)
@@ -34,7 +34,7 @@ func dumpBlock(nodeName, dbPath string) {
 		if err := b.Unmarshal(val); err != nil {
 			continue // Not a block or parse error
 		}
-		
+
 		h := b.Header()
 		if h.BlockNumber() == 200 || h.BlockNumber() == 201 {
 			fmt.Printf("Block Number: %d\n", h.BlockNumber())

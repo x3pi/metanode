@@ -59,8 +59,6 @@ type CommitJob struct {
 	StakeNomtPayload   interface{}
 }
 
-
-
 // PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs
 // inline in commitToMemoryParallel. WaitForPersistence drains via commitChannel
 // fence + backupDbWg.Wait() directly.

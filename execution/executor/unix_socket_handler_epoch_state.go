@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"google.golang.org/protobuf/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"google.golang.org/protobuf/proto"
 )
 
 // HandleGetLastBlockNumberRequest processes a GetLastBlockNumberRequest and returns a LastBlockNumberResponse.

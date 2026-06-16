@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"

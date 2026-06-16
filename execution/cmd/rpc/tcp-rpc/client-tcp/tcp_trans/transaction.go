@@ -11,13 +11,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ethCom "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	client "github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp"
-	"github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/command"
-	tcp_config "github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/file_handler/abi_file"
 	"github.com/meta-node-blockchain/meta-node/pkg/models/file_model"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils/file_handler_helper"
+	client "github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp"
+	"github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/command"
+	tcp_config "github.com/meta-node-blockchain/meta-node/tcp-rpc/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 

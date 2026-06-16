@@ -31,9 +31,9 @@ type ExpectedEvent struct {
 }
 
 type DataPayload struct {
-	Contract  string        `json:"contract"`
-	AbiPath   string        `json:"abi_path"`
-	Action    string        `json:"action"` // "call" hoặc "send" / "deploy" / "transfer"
+	Contract       string          `json:"contract"`
+	AbiPath        string          `json:"abi_path"`
+	Action         string          `json:"action"` // "call" hoặc "send" / "deploy" / "transfer"
 	Method         string          `json:"method"`
 	Args           []interface{}   `json:"args"`
 	InputData      string          `json:"input_data"`
@@ -109,7 +109,7 @@ func main() {
 		} else if action != "deploy" {
 			log.Fatalf("❌ Task %d không có thuộc tính 'contract' và cũng không có contract nào được deploy trước đó!", idx+1)
 		}
-		
+
 		var txAmount *big.Int
 		if d.Amount != "" {
 			var ok bool
@@ -291,13 +291,13 @@ func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contra
 		} else {
 			if len(outputs) > 0 {
 				fmt.Printf("   ✅ KẾT QUẢ ĐỌC: %+v\n", outputs)
-				
+
 				// Kiểm tra mảng Verify nếu được cung cấp
 				if len(expectedVerify) > 0 {
 					if len(outputs) != len(expectedVerify) {
 						log.Fatalf("❌ KẾT QUẢ ĐỌC SAI: Mong đợi %d giá trị trả về, nhưng nhận được %d", len(expectedVerify), len(outputs))
 					}
-					
+
 					method, ok := parsedABI.Methods[methodName]
 					if ok {
 						for i, expectedRaw := range expectedVerify {
@@ -305,10 +305,10 @@ func executeCallTCP(cli *client_tcp.Client, cfg *tcp_config.ClientConfig, contra
 							if err != nil {
 								log.Fatalf("❌ Lỗi chuyển đổi tham số Verify thứ [%d]: %v", i, err)
 							}
-							
+
 							outputStr := fmt.Sprintf("%v", outputs[i])
 							expectedStr := fmt.Sprintf("%v", expectedVal)
-							
+
 							if outputStr != expectedStr {
 								log.Fatalf("❌ KẾT QUẢ ĐỌC SAI ở tham số thứ [%d]: Mong đợi '%s', nhận được '%s'", i, expectedStr, outputStr)
 							}

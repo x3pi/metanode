@@ -4,9 +4,9 @@ package main
 
 import (
 	"fmt"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 func main() {

@@ -360,6 +360,7 @@ func (t *MerklePatriciaTrie) update(key, value []byte) error {
 	}
 	return nil
 }
+
 // delete returns the new root of the trie with key deleted.
 // It reduces the trie to minimal form by simplifying
 // nodes on the way up after deleting recursively.
@@ -515,6 +516,7 @@ func (t *MerklePatriciaTrie) Hash() e_common.Hash {
 	t.root = cached
 	return e_common.BytesToHash(hash.(node.HashNode))
 }
+
 // resolveAndTrack loads node from the underlying store with the given node hash
 // and path prefix and also tracks the loaded node blob in tracer treated as the
 // node's original value. The rlp-encoded blob is preferred to be loaded from

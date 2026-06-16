@@ -166,17 +166,17 @@ func ConnectionFromTcpConnection(tcpConn net.Conn, config *Config) (network.Conn
 func (c *Connection) run() {
 
 	var (
-		address         common.Address
-		cType           string
-		tcpConn         net.Conn
-		connect         bool
-		realConnAddr    string
-		requestChan     chan network.Request
-		errorChan       chan error
-		sendChan        chan network.Message
-		writeWg         sync.WaitGroup
-		readWg          sync.WaitGroup
-		quitChan        chan struct{}
+		address      common.Address
+		cType        string
+		tcpConn      net.Conn
+		connect      bool
+		realConnAddr string
+		requestChan  chan network.Request
+		errorChan    chan error
+		sendChan     chan network.Message
+		writeWg      sync.WaitGroup
+		readWg       sync.WaitGroup
+		quitChan     chan struct{}
 	)
 
 	cleanup := func() {

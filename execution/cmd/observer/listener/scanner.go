@@ -295,7 +295,7 @@ func (s *CrossChainScanner) scanAndSubmit(
 					return false, fmt.Errorf("submitBatch failed after %d retries: %w", maxRetries, err)
 				}
 			}
-			
+
 			// Đã submit thành công tất cả các chunk cho block này
 			s.enqueueProgressUpdate(rc.NationId, blockNum)
 		}
@@ -348,7 +348,7 @@ func (s *CrossChainScanner) buildInboundEvent(rc tcp_config.RemoteChain, log *pb
 	}
 
 	// msgSent.MsgId đã được parseSentLogRaw parse từ Topics[3] (txHash gốc của user trên chain nguồn)
-	logger.Info("[MSGID-TRACE] 📵 [2/4] SCANNER[%s] READ MessageSent: msgId=0x%x src=%v→dest=%v block=%d sender=%s\n" +
+	logger.Info("[MSGID-TRACE] 📵 [2/4] SCANNER[%s] READ MessageSent: msgId=0x%x src=%v→dest=%v block=%d sender=%s\n"+
 		"        ⇨ sẽ gửi INBOUND vào chain %s",
 		rc.Name,
 		msgSent.MsgId[:], // full 32 bytes
@@ -402,7 +402,7 @@ func (s *CrossChainScanner) buildConfirmationEvent(rc tcp_config.RemoteChain, lo
 	}
 
 	// msgReceived.MsgId đã được parseReceivedLogRaw parse từ Topics[3]
-	logger.Info("[MSGID-TRACE] 📵 [3b/4] SCANNER[%s] READ MessageReceived: msgId=0x%x src=%v→dest=%v block=%d status=%s type=%s\n" +
+	logger.Info("[MSGID-TRACE] 📵 [3b/4] SCANNER[%s] READ MessageReceived: msgId=0x%x src=%v→dest=%v block=%d status=%s type=%s\n"+
 		"        ⇨ sẽ gửi CONFIRMATION về chain %s",
 		rc.Name,
 		msgReceived.MsgId[:], // full 32 bytes
@@ -418,7 +418,7 @@ func (s *CrossChainScanner) buildConfirmationEvent(rc tcp_config.RemoteChain, lo
 	}
 
 	confirmation := cross_chain_contract.ConfirmationParam{
-		MessageId:         msgReceived.MsgId,  // ← từ struct, đã parse từ Topics[3]
+		MessageId:         msgReceived.MsgId, // ← từ struct, đã parse từ Topics[3]
 		SourceBlockNumber: new(big.Int).SetUint64(log.BlockNumber),
 		IsSuccess:         msgReceived.Status == cross_chain_contract.MessageStatusSuccess,
 		ReturnData:        returnData,

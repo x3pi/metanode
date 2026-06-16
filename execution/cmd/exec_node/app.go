@@ -106,7 +106,6 @@ func (app *App) initStorage() error {
 	return nil
 }
 
-
 // initStorageDatabases initializes and opens all required databases
 func (app *App) initStorageDatabases() error {
 	logger.Info("Start initStorageDatabases")

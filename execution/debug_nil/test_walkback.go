@@ -24,7 +24,7 @@ func main() {
 
 	// 2. Open databases
 	rootPath := "../cmd/simple_chain/sample/node0/data/data"
-	
+
 	blockDBStorage, err := storage.NewShardelDB(
 		rootPath+"/history/blocks/",
 		1, 1,
@@ -81,8 +81,8 @@ func main() {
 	for blk != nil && depth < 2000 {
 		bNum := blk.Header().BlockNumber()
 		txHashes := blk.Transactions()
-		
-		if bNum % 100 == 0 {
+
+		if bNum%100 == 0 {
 			fmt.Printf("Walking back... Block #%d\n", bNum)
 		}
 

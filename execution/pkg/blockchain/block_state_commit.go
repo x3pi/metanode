@@ -13,9 +13,9 @@ package blockchain
 
 import (
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -107,7 +107,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// already-committed block's header roots — safe to allow through.
 	// ═══════════════════════════════════════════════════════════════════════
 	lastBlockNum := storage.GetLastBlockNumber()
-	
+
 	// STRICT REJECT: Never allow rewriting strictly older blocks, even with bypass.
 	if blockNum < lastBlockNum && blockNum > 0 {
 		logger.Error("🚨 [SEQUENTIAL GUARD] STRICT REJECT: block #%d is strictly older than last committed #%d (hash: %s) — THIS BLOCK WILL NOT BE PERSISTED!",
@@ -185,7 +185,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	// ─── 6. Update storage block counter (always) ────────────────────────
 	// This is updated LAST among the mappings/counter block metadata to ensure that
-	// if a concurrent reader detects the height has advanced, all the underlying mapping entries 
+	// if a concurrent reader detects the height has advanced, all the underlying mapping entries
 	// and DB/cache records are fully queryable and resolved without returning null.
 	storage.UpdateLastBlockNumber(blockNum)
 	// ─── 7. Rebuild or realign state tries from header roots if out of sync ───
@@ -228,7 +228,6 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt MPT tries from block #%d header roots", blockNum)
 		}
 	}
-
 
 	// ─── 8. Commit mappings to LevelDB (optional) ────────────────────────
 	if cfg.commitMaps {

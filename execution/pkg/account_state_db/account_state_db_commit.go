@@ -17,8 +17,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
 
-	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
 type dirtyAccountEntry struct {
@@ -83,7 +83,6 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 	// ═══════════════════════════════════════════════════════════════
 	// muTrie held — protect trie.Commit + swap
 	// ═══════════════════════════════════════════════════════════════
-
 
 	// 2. Commit the in-memory trie to generate database nodes
 	committedHash, nodeSet, oldKeys, err := db.trie.Commit(true)
@@ -399,7 +398,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	}
 
 	// Store accountBatch for network transfer (same as original Commit)
-	// ALWAYS call SetAccountBatch (even if nil) to clear any leftover batch 
+	// ALWAYS call SetAccountBatch (even if nil) to clear any leftover batch
 	// from the previous block, ensuring we don't leak stale data to Sub nodes.
 	db.SetAccountBatch(accountBatchData)
 
@@ -508,7 +507,7 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 		}
 		newTrieToSet = newTrie
 	}
-	
+
 	// Preserve ChangelogDB
 	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
@@ -526,7 +525,7 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 			newNomt.SetChangelogDB(changelogDB)
 		}
 	}
-	
+
 	db.trie = newTrieToSet
 	db.originRootHash = result.FinalHash
 	db.muTrie.Unlock()
@@ -539,8 +538,6 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 
 	return nil
 }
-
-
 
 // IntermediateRoot computes the state root hash by applying all dirty account
 // changes to the underlying trie.
@@ -662,10 +659,10 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	// Bước 1: Thu thập keys (vì sync.Map.Range không cho biết trước số lượng)
 	collectStart := time.Now()
-	db.dirtyAccounts.Range(func(key, value interface{}) bool {
-		address, ok1 := key.(common.Address)
-		state, ok2 := value.(types.AccountState)
-		if !ok1 || !ok2 || state == nil {
+	db.dirtyAccounts.Range(func(key common.Address, value types.AccountState) bool {
+		address := key
+		state := value
+		if state == nil {
 			logger.Warn("Skipping invalid entry in dirtyAccounts", "keyType", fmt.Sprintf("%T", key), "valueType", fmt.Sprintf("%T", value))
 			return true // continue
 		}
@@ -945,11 +942,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	// ═══════════════════════════════════════════════════════════════
 	// TPS OPT Phase 2: In-place clear instead of reassignment.
-	// `db.dirtyAccounts = sync.Map{}` creates a new map and drops the old one,
+	// `db.dirtyAccounts.Clear()` creates a new map and drops the old one,
 	// causing GC to scan+collect 30K+ interface{} pointers per block.
 	// Range+Delete reuses the same map structure, avoiding the GC spike.
 	clearStart := time.Now()
-	db.dirtyAccounts.Range(func(key, _ interface{}) bool {
+	db.dirtyAccounts.Range(func(key common.Address, _ types.AccountState) bool {
 		db.dirtyAccounts.Delete(key)
 		// CRITICAL FIX: The account was modified and committed to the trie.
 		// If its old (pre-modification) state was cached in loadedAccounts, we MUST evict it!
@@ -964,11 +961,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// After 10 blocks, rotate it generationally to cap memory.
 	// FORK-SAFETY: these are read-only caches — clearing/rotating them only
 	// causes re-reads from trie, which produce identical values.
-	
+
 	// Unconditionally clear loadedAccounts at the end of every block.
 	// FORK-SAFETY FIX: Retaining loadedAccounts across blocks causes pointer
 	// mutation state drift when blocksSinceLoadedClear diverges between nodes.
-	db.loadedAccounts.Range(func(key, _ interface{}) bool {
+	db.loadedAccounts.Range(func(key common.Address, _ types.AccountState) bool {
 		db.loadedAccounts.Delete(key)
 		return true
 	})

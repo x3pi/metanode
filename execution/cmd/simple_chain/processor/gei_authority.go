@@ -231,4 +231,3 @@ func (ga *GEIAuthority) ShouldSkipCommit(commitIndex uint32, epoch uint64) bool 
 
 	return false
 }
-

@@ -38,18 +38,18 @@ func (sn *ShortNode) Marshal() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	protoSN := mptShortNodePool.Get().(*pb.MPTShortNode)
 	protoSN.Key = sn.Key
 	protoSN.Value = valBuf
-	
+
 	bSN, err := proto.MarshalOptions{Deterministic: true}.Marshal(protoSN)
-	
+
 	// Release immediately - wipe pointers
 	protoSN.Key = nil
 	protoSN.Value = nil
 	mptShortNodePool.Put(protoSN)
-	
+
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +57,12 @@ func (sn *ShortNode) Marshal() ([]byte, error) {
 	protoNode := mptNodePool.Get().(*pb.MPTNode)
 	protoNode.Type = pb.MPTNODE_TYPE_SHORT
 	protoNode.Data = bSN
-	
+
 	res, err := proto.MarshalOptions{Deterministic: true}.Marshal(protoNode)
-	
+
 	protoNode.Data = nil
 	mptNodePool.Put(protoNode)
-	
+
 	return res, err
 }
 

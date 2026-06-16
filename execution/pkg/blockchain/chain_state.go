@@ -18,13 +18,13 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // EpochData chứa thông tin epoch để persist vào database
@@ -82,7 +82,7 @@ type ChainState struct {
 	// Sui-style epoch tracking
 	currentEpoch          uint64
 	epochStartTimestampMs uint64
-	epochStartTimestamps  map[uint64]uint64 // epoch -> timestamp_ms mapping
+	epochStartTimestamps  map[uint64]uint64          // epoch -> timestamp_ms mapping
 	epochBoundaryBlocks   map[uint64]uint64          // NEW: epoch -> boundary_block mapping (last block of prev epoch)
 	epochBoundaryGeis     map[uint64]uint64          // NEW: epoch -> boundary_gei mapping
 	epochValidatorsCache  map[uint64]json.RawMessage // EPOCH VALIDATOR PERSISTENCE: serialized ValidatorInfoList per epoch
@@ -224,7 +224,7 @@ func NewChainStateWithGenesis(
 		epochBoundaryGeis:     make(map[uint64]uint64),          // Track epoch boundary GEIs
 		epochValidatorsCache:  make(map[uint64]json.RawMessage), // Validator list per epoch
 		backupPath:            backupPath,                       // CRITICAL: Set BEFORE LoadEpochData()
-		attestationInterval:   10,                      // Default: attestation every 10 blocks
+		attestationInterval:   10,                               // Default: attestation every 10 blocks
 	}
 
 	cs.accountStateDB.Store(asDB)
@@ -348,7 +348,6 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 		return nil
 	}
 
-
 	// ═══════════════════════════════════════════════════════════════════════
 	// FULL REBUILD PATH: For MPT/Flat/Verkle backends
 	// Creates new trie instances from header roots and swaps DB pointers.
@@ -461,7 +460,7 @@ func NewChainStateRemote(
 		asDB)
 
 	cs := &ChainState{
-		freeFeeAddress:  freeFeeAddress,
+		freeFeeAddress: freeFeeAddress,
 	}
 	cs.accountStateDB.Store(asDB)
 	cs.smartContractDB.Store(scDB)
@@ -746,8 +745,8 @@ func (cs *ChainState) InitializeGenesisEpoch(genesisTimestampMs uint64) {
 // ARCHITECTURAL INVARIANT: This function is called BEFORE InitBlockChain(),
 // so GetBlockChainInstance() will return nil. We MUST NOT depend on the
 // BlockChain singleton. Instead, use:
-//   1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
-//   2. BlockDatabase parent-chain traversal (always available)
+//  1. Already-loaded epochBoundaryBlocks map (from LoadEpochData)
+//  2. BlockDatabase parent-chain traversal (always available)
 func (cs *ChainState) ForceAlignEpochFromBlockHeader(blockEpoch uint64, blockTimestamp uint64, blockNumber uint64) {
 	lockStart := time.Now()
 	cs.epochMutex.Lock()
@@ -923,7 +922,7 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 	// The boundary block is exactly the HIGHEST block with epoch < blockEpoch.
 	searchBlock := storage.GetLastBlockNumber()
 	var boundaryBlock uint64 = 0
-	
+
 	for searchBlock > 0 {
 		hash, ok := GetBlockChainInstance().GetBlockHashByNumber(searchBlock)
 		if !ok {
@@ -956,7 +955,7 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 
 	// DOUBLE-CHECK: Ensure no other goroutine advanced the epoch while we were doing I/O
 	if blockEpoch <= cs.currentEpoch {
-		return false 
+		return false
 	}
 
 	var epochTimestampMs uint64
@@ -1032,7 +1031,7 @@ func (cs *ChainState) CheckAndUpdateEpochFromBlock(blockEpoch uint64, blockTimes
 							stakeNormalized = big.NewInt(1)
 						}
 					}
-					
+
 					val := &pb.ValidatorInfo{
 						Address:                    v.Address().Hex(),
 						Stake:                      stakeNormalized.String(),
@@ -1166,9 +1165,9 @@ func (cs *ChainState) SaveEpochData() error {
 		CurrentEpoch:          cs.currentEpoch,
 		EpochStartTimestampMs: cs.epochStartTimestampMs,
 		EpochStartTimestamps:  cs.epochStartTimestamps,
-		EpochBoundaryBlocks:   cs.epochBoundaryBlocks,   // Include epoch boundary blocks
-		EpochBoundaryGeis:     cs.epochBoundaryGeis,     // Include epoch boundary GEIs
-		EpochValidators:       cs.epochValidatorsCache,  // NOMT-independent validator persistence
+		EpochBoundaryBlocks:   cs.epochBoundaryBlocks,  // Include epoch boundary blocks
+		EpochBoundaryGeis:     cs.epochBoundaryGeis,    // Include epoch boundary GEIs
+		EpochValidators:       cs.epochValidatorsCache, // NOMT-independent validator persistence
 	}
 
 	epochDataRLP := EpochDataRLP{
@@ -1280,7 +1279,7 @@ func (cs *ChainState) LoadEpochData() error {
 	}
 
 	var epochData EpochData
-	
+
 	// Fallback logic for backward compatibility
 	if data[0] == '{' { // JSON format starts with {
 		if err := json.Unmarshal(data, &epochData); err != nil {
@@ -1294,7 +1293,7 @@ func (cs *ChainState) LoadEpochData() error {
 			logger.Error("❌ [EPOCH PERSISTENCE] Failed to decode RLP epoch data", "error", err)
 			return err
 		}
-		
+
 		epochData = EpochData{
 			CurrentEpoch:          epochDataRLP.CurrentEpoch,
 			EpochStartTimestampMs: epochDataRLP.EpochStartTimestampMs,
@@ -1303,7 +1302,7 @@ func (cs *ChainState) LoadEpochData() error {
 			EpochBoundaryGeis:     make(map[uint64]uint64),
 			EpochValidators:       make(map[uint64]json.RawMessage),
 		}
-		
+
 		for _, entry := range epochDataRLP.EpochStartTimestamps {
 			epochData.EpochStartTimestamps[entry.Key] = entry.Value
 		}
