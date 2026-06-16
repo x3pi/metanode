@@ -13,10 +13,28 @@
   loop: "{{ active_nodes }}"
   failed_when: false
 
-- name: Force kill any orphaned Consensus processes
+- name: Check if metanode or simple_chain processes are still running
+  ansible.builtin.shell: "pgrep -x metanode || pgrep -x simple_chain"
+  register: process_check
+  failed_when: false
+  changed_when: false
+
+- name: Send SIGTERM to remaining processes to allow graceful shutdown
+  ansible.builtin.shell: |
+    pkill -15 -x metanode || true
+    pkill -15 -x simple_chain || true
+  when: process_check.rc == 0
+  failed_when: false
+
+- name: Wait 10 seconds for graceful database flush
+  ansible.builtin.pause:
+    seconds: 10
+  when: process_check.rc == 0
+
+- name: Force kill any stubborn Consensus processes (SIGKILL)
   ansible.builtin.shell: "pkill -9 -x metanode || true"
   failed_when: false
 
-- name: Force kill any orphaned Execution processes
+- name: Force kill any stubborn Execution processes (SIGKILL)
   ansible.builtin.shell: "pkill -9 -x simple_chain || true"
   failed_when: false
