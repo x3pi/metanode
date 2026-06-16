@@ -156,6 +156,7 @@ impl ConsensusNode {
         .with_storage_path(config.storage_path.clone())
         .with_quorum_commit_index(coordination_hub.get_quorum_commit_index_ref())
         .with_committee_size(storage.validator_eth_addresses.len())
+        .with_lag_thresholds(config.moderate_lag_threshold, config.severe_lag_threshold)
         ;
 
         let digest_verifier_hub = coordination_hub.clone();
