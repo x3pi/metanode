@@ -34,6 +34,8 @@ pub struct CommitProcessorConfig {
     pub digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
     pub digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
+    pub moderate_lag_threshold: u64,
+    pub severe_lag_threshold: u64,
 }
 
 impl Default for CommitProcessorConfig {
@@ -57,6 +59,8 @@ impl Default for CommitProcessorConfig {
             digest_verifier: None,
             digest_data_checker: None,
             peer_commit_attestation: None,
+            moderate_lag_threshold: 100,
+            severe_lag_threshold: 200,
         }
     }
 }
@@ -292,6 +296,12 @@ impl CommitProcessor {
         self
     }
 
+    pub fn with_lag_thresholds(mut self, moderate: u64, severe: u64) -> Self {
+        self.config.moderate_lag_threshold = moderate;
+        self.config.severe_lag_threshold = severe;
+        self
+    }
+
     /// Resolve leader ETH address from committee cache and embed into subdag.
     /// Called once per commit — same immutability pattern as global_exec_index.
     /// After this call, subdag.leader_address is set and MUST NOT be recalculated.
@@ -402,6 +412,8 @@ impl CommitProcessor {
             digest_verifier,
             digest_data_checker,
             peer_commit_attestation,
+            moderate_lag_threshold,
+            severe_lag_threshold,
         } = config;
 
         // Validate required dependencies upfront to avoid bare .unwrap() in hot loop
@@ -507,7 +519,8 @@ impl CommitProcessor {
                 client.clone(),
                 shared_gei.clone(),
                 sender,
-            );
+            )
+            .with_thresholds(moderate_lag_threshold, severe_lag_threshold);
             tokio::spawn(async move {
                 lag_monitor.run().await;
             });

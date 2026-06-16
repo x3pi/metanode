@@ -70,11 +70,7 @@ type AccountStateDB struct {
 
 	accountBatch []byte // Batch of account data prepared for network transfer during commit (used by master nodes)
 
-	// lruCache caches serialized []byte of account states from trie.Get() to eliminate LevelDB I/O latency
-	// TPS OPT: Option B - Replacing lru.Cache with a map to avoid pointer-heavy doubly-linked lists.
-	lruCache    map[common.Address][]byte
-	lruCacheOld map[common.Address][]byte
-	lruMu       sync.RWMutex
+
 
 	// FORK-SAFETY: persistReady is closed by PersistAsync after trie swap completes.
 	// IntermediateRoot(true) waits on this channel before acquiring muTrie.Lock,
@@ -115,10 +111,7 @@ func NewAccountStateDB(
 		return nil // Or return an error
 	}
 
-	// Generate double-generation maps instead of doubly-linked list lru.Cache.
-	// This reduces GC scan time by ~80% as each byte slice acts as an opaque buffer without pointers.
-	cacheCurrent := make(map[common.Address][]byte, 200000)
-	cacheOld := make(map[common.Address][]byte)
+
 
 	// Initialize persistReady as an already-closed channel.
 	// This means the first block won't wait (no prior PersistAsync to complete).
@@ -138,8 +131,6 @@ func NewAccountStateDB(
 		originRootHash: trie.Hash(),
 		dirtyAccounts:  utils.NewShardedAddressMap[types.AccountState](), // Initialize sync.Map
 		loadedAccounts: utils.NewShardedAddressMap[types.AccountState](),
-		lruCache:       cacheCurrent,
-		lruCacheOld:    cacheOld,
 		persistReady:   initReady,
 		isFlatTrie:     isThreadSafeRead,
 	}
@@ -187,12 +178,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 	db.dirtyAccounts.Clear()  // Clear dirty accounts under lock
 	db.loadedAccounts.Clear() // Clear loaded accounts too
 	db.cacheEpoch.Add(2)      // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
-	if db.lruCache != nil {
-		db.lruMu.Lock()
-		db.lruCache = make(map[common.Address][]byte, 200000)
-		db.lruCacheOld = make(map[common.Address][]byte)
-		db.lruMu.Unlock()
-	}
+
 	db.muTrie.Unlock()
 
 	return nil
@@ -461,12 +447,7 @@ func (db *AccountStateDB) InvalidateAllCaches() {
 
 	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
-	if db.lruCache != nil {
-		db.lruMu.Lock()
-		db.lruCache = make(map[common.Address][]byte, 200000)
-		db.lruCacheOld = make(map[common.Address][]byte)
-		db.lruMu.Unlock()
-	}
+
 	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe, persistReady waited)")
 }
 
@@ -481,12 +462,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	db.dirtyAccounts.Clear()
 	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
-	if db.lruCache != nil {
-		db.lruMu.Lock()
-		db.lruCache = make(map[common.Address][]byte, 200000)
-		db.lruCacheOld = make(map[common.Address][]byte)
-		db.lruMu.Unlock()
-	}
+
 
 	// Reload trie from the original hash
 	originHash := db.originRootHash
@@ -1016,13 +992,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 		db.dirtyAccounts.Store(key, value) // Populate the new map
 	}
 
-	if db.lruCache != nil {
-		db.lruMu.Lock()
-		db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
-		db.lruCache = make(map[common.Address][]byte, 200000)
-		db.lruCacheOld = make(map[common.Address][]byte)
-		db.lruMu.Unlock()
-	}
+	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 	logger.Info("CopyFrom completed successfully")
 	// Locks will be released by defers

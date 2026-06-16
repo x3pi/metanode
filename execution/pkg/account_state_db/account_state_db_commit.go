@@ -966,15 +966,6 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	db.blocksSinceLoadedClear++
 	if db.blocksSinceLoadedClear >= 10 {
 		db.blocksSinceLoadedClear = 0
-
-		// Rotate lruCache generationally to prevent OOM
-		if db.lruCache != nil {
-			db.lruMu.Lock()
-			db.lruCacheOld = db.lruCache
-			db.lruCache = make(map[common.Address][]byte, 200000)
-			db.lruMu.Unlock()
-			logger.Debug("[TPS-OPT] Rotated lruCache (bounded eviction double-generation swap)")
-		}
 	}
 	clearDuration = time.Since(clearStart)
 

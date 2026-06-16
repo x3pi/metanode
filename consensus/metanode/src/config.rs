@@ -177,6 +177,12 @@ pub struct NodeConfig {
     /// Logger configuration
     #[serde(default)]
     pub log: Option<LogConfig>,
+    /// Moderate lag threshold for Go execution engine (default: 100)
+    #[serde(default = "default_moderate_lag_threshold")]
+    pub moderate_lag_threshold: u64,
+    /// Severe lag threshold for Go execution engine (default: 200)
+    #[serde(default = "default_severe_lag_threshold")]
+    pub severe_lag_threshold: u64,
 }
 
 fn default_max_clock_drift_seconds() -> u64 {
@@ -257,6 +263,14 @@ fn default_fetch_timeout_secs() -> u64 {
 
 fn default_epochs_to_keep() -> usize {
     5 // Default: keep 5 most recent epochs (current + 4 previous)
+}
+
+fn default_moderate_lag_threshold() -> u64 {
+    100
+}
+
+fn default_severe_lag_threshold() -> u64 {
+    200
 }
 
 impl NodeConfig {
@@ -344,6 +358,8 @@ impl NodeConfig {
                 peer_discovery_refresh_secs: default_peer_discovery_refresh_secs(),
                 rust_tx_socket_path: Some(format!("/tmp/metanode-tx-{}.sock", idx)),
                 log: Some(LogConfig::default()),
+                moderate_lag_threshold: default_moderate_lag_threshold(),
+                severe_lag_threshold: default_severe_lag_threshold(),
             };
 
             // Save keys - use private_key_bytes and public key bytes
