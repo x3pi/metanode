@@ -69,6 +69,20 @@ impl ConsensusNode {
 
             if block_num == 0 {
                 warn!("⚠️ [STARTUP] Go reporting block=0 natively (is_ready=true). This is a fresh node.");
+                // Desync protection: If Go has been reset to block 0 (genesis),
+                // but Rust consensus database still contains old epoch data,
+                // we must automatically wipe the Rust consensus database to prevent a permanent deadlock.
+                let epochs_dir = config.storage_path.join("epochs");
+                if epochs_dir.exists() {
+                    warn!("🗑️ [STARTUP] Go is at block 0, but Rust consensus has DAG history. Clearing ALL local epoch data to prevent deadlock.");
+                    if let Ok(entries) = std::fs::read_dir(&epochs_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            info!("🗑️ [STARTUP] Removing stale consensus epoch path: {:?}", path);
+                            let _ = std::fs::remove_dir_all(path);
+                        }
+                    }
+                }
             }
 
             block_num
