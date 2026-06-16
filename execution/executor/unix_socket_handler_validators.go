@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"google.golang.org/protobuf/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -314,7 +315,14 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 			if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
 				cachedList := &pb.ValidatorInfoList{}
-				if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+				if unmarshalErr := proto.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					addrs := make([]string, 0, len(cachedList.Validators))
+					for _, v := range cachedList.Validators {
+						addrs = append(addrs, v.Address)
+					}
+					rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+				} else if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					// Fallback to JSON for backward compatibility with old DB
 					addrs := make([]string, 0, len(cachedList.Validators))
 					for _, v := range cachedList.Validators {
 						addrs = append(addrs, v.Address)
@@ -340,8 +348,12 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 		if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
 			if cachedData, err := blockStorage.Get(validatorCacheKey); err == nil && len(cachedData) > 0 {
 				cachedList := &pb.ValidatorInfoList{}
-				if err := json.Unmarshal(cachedData, cachedList); err == nil {
+				if err := proto.Unmarshal(cachedData, cachedList); err == nil {
 					logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache (Crucial for NOMT)", blockNumber)
+					return cachedList, nil
+				} else if err := json.Unmarshal(cachedData, cachedList); err == nil {
+					// Fallback to JSON for backward compatibility with old DB
+					logger.Info("✅ [EPOCH] Loaded historical validators for block %d from cache using JSON fallback", blockNumber)
 					return cachedList, nil
 				}
 			}
@@ -352,7 +364,14 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 			if currentEpochData := rh.chainState.GetEpochValidators(rh.chainState.GetCurrentEpoch()); currentEpochData != nil {
 				cachedList := &pb.ValidatorInfoList{}
-				if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+				if unmarshalErr := proto.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					addrs := make([]string, 0, len(cachedList.Validators))
+					for _, v := range cachedList.Validators {
+						addrs = append(addrs, v.Address)
+					}
+					rh.chainState.GetStakeStateDB().RebuildKnownKeysFromValidatorList(addrs)
+				} else if unmarshalErr := json.Unmarshal(currentEpochData, cachedList); unmarshalErr == nil {
+					// Fallback to JSON for backward compatibility with old DB
 					addrs := make([]string, 0, len(cachedList.Validators))
 					for _, v := range cachedList.Validators {
 						addrs = append(addrs, v.Address)
@@ -510,12 +529,14 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 
 	// Cache the validators to storage
 	if blockStorage := rh.storageManager.GetStorageBlock(); blockStorage != nil {
-		if serializedData, err := json.Marshal(validatorInfoList); err == nil {
+		if serializedData, err := proto.Marshal(validatorInfoList); err == nil {
 			if err := blockStorage.Put(validatorCacheKey, serializedData); err != nil {
 				logger.Warn("⚠️ [EPOCH] Failed to cache validators to storage: %v", err)
 			} else {
 				logger.Debug("💾 [EPOCH] Cached historical validators for block %d to storage", blockNumber)
 			}
+		} else {
+			logger.Warn("⚠️ [EPOCH] Failed to serialize validators to protobuf: %v", err)
 		}
 	}
 
