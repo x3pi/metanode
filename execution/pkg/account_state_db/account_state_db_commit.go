@@ -402,6 +402,11 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 	// from the previous block, ensuring we don't leak stale data to Sub nodes.
 	db.SetAccountBatch(accountBatchData)
 
+	var nomtPayload interface{}
+	if nomtTrie, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+		nomtPayload = nomtTrie.ExtractPendingPayload()
+	}
+
 	// ═══════════════════════════════════════════════════════════════
 	// Phase 4: RELEASE muTrie IMMEDIATELY
 	// The original trie is still valid for Get() — trie.Commit() only
@@ -433,6 +438,7 @@ func (db *AccountStateDB) CommitPipeline() (*PipelineCommitResult, error) {
 		OldKeys:        oldKeys,
 		Trie:           db.trie, // Pass the trie along
 		PersistChannel: newPersistReady,
+		NomtPayload:    nomtPayload,
 	}, nil
 }
 
@@ -531,10 +537,6 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	db.muTrie.Unlock()
 
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
-
-	if nomtTrie, isNomt := result.Trie.(*p_trie.NomtStateTrie); isNomt {
-		result.NomtPayload = nomtTrie.ExtractPendingPayload()
-	}
 
 	return nil
 }
