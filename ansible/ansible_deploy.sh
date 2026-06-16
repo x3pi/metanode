@@ -131,9 +131,21 @@ ansible_exit=$?
 set -e
 
 if [ $ansible_exit -eq 0 ]; then
-    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) hoàn tất thành công!"
+    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) hoàn tất thành công!
+
+🔍 *Lệnh lấy log hữu ích (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
+• *Consensus logs:*
+\`sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager\`
+• *Execution logs:*
+\`tail -n 100 /opt/metanode/node-X/logs/execution/execution.log\`"
 else
-    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) thất bại với mã lỗi \`${ansible_exit}\`!"
+    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) thất bại với mã lỗi \`${ansible_exit}\`!
+
+🔍 *Lệnh lấy log kiểm tra lỗi:*
+• *Consensus logs:*
+\`sudo journalctl -u \"metanode-consensus-*\" -n 100 --no-pager\`
+• *Execution logs:*
+\`tail -n 100 /opt/metanode/node-X/logs/execution/execution.log\`"
 fi
 
 echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
