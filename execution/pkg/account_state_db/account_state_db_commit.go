@@ -942,19 +942,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 
 	// ═══════════════════════════════════════════════════════════════
 	// TPS OPT Phase 2: In-place clear instead of reassignment.
-	// `db.dirtyAccounts.Clear()` creates a new map and drops the old one,
-	// causing GC to scan+collect 30K+ interface{} pointers per block.
-	// Range+Delete reuses the same map structure, avoiding the GC spike.
 	clearStart := time.Now()
-	db.dirtyAccounts.Range(func(key common.Address, _ types.AccountState) bool {
-		db.dirtyAccounts.Delete(key)
-		// CRITICAL FIX: The account was modified and committed to the trie.
-		// If its old (pre-modification) state was cached in loadedAccounts, we MUST evict it!
-		// Otherwise, subsequent reads in the next block will hit the stale loadedAccounts
-		// cache instead of reading the new state from the trie, causing infinite nonce loops.
-		db.loadedAccounts.Delete(key)
-		return true
-	})
+	
+	// CRITICAL FIX: The account was modified and committed to the trie.
+	// If its old (pre-modification) state was cached in loadedAccounts, we MUST evict it!
+	// We cannot do `Delete` inside `Range` on ShardedAddressMap as it causes deadlocks.
+	// We just clear both maps entirely, which achieves the exact same fork-safety guarantees.
+	db.dirtyAccounts.Clear()
 
 	// TPS OPT Phase 1: Bounded eviction for lruCache.
 	// lruCache grows unbounded across blocks (~10-30K new entries/block).
@@ -965,10 +959,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// Unconditionally clear loadedAccounts at the end of every block.
 	// FORK-SAFETY FIX: Retaining loadedAccounts across blocks causes pointer
 	// mutation state drift when blocksSinceLoadedClear diverges between nodes.
-	db.loadedAccounts.Range(func(key common.Address, _ types.AccountState) bool {
-		db.loadedAccounts.Delete(key)
-		return true
-	})
+	db.loadedAccounts.Clear()
 
 	db.blocksSinceLoadedClear++
 	if db.blocksSinceLoadedClear >= 10 {
