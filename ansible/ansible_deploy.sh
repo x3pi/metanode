@@ -47,6 +47,11 @@ load_env_file "${SCRIPT_DIR}/../../metanode-suite/scripts/.env"
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
 
+if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+    echo -e "\033[0;31m❌ [ERROR] TELEGRAM_BOT_TOKEN is not set! Telegram notifications will not be sent.\033[0m"
+    echo -e "   Please configure it in a \`.env\` file or export it to your environment.\n"
+fi
+
 send_telegram_notification() {
     local message="$1"
     if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
