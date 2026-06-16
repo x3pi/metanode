@@ -250,28 +250,30 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 let total_requested = missing_blocks.len();
 
                 fail_point_async!("consensus-delay");
-                // Fetch blocks from peers
-                let results = Self::fetch_blocks_from_authorities(
-                    context.clone(),
-                    blocks_to_fetch.clone(),
-                    network_client,
-                    missing_blocks,
-                    dag_state.clone(),
-                )
-                .await;
-                context
-                    .metrics
-                    .node_metrics
-                    .fetch_blocks_scheduler_inflight
-                    .dec();
-                if results.is_empty() {
-                    return;
-                }
+                
+                let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+                let fetch_context = context.clone();
+                let fetch_network_client = network_client.clone();
+                let fetch_dag_state = dag_state.clone();
+                let fetch_blocks_to_fetch = blocks_to_fetch.clone();
+                
+                // Fetch blocks from peers concurrently
+                tokio::spawn(async move {
+                    Self::fetch_blocks_from_authorities(
+                        fetch_context,
+                        fetch_blocks_to_fetch,
+                        fetch_network_client,
+                        missing_blocks,
+                        fetch_dag_state,
+                        tx,
+                    )
+                    .await;
+                });
 
-                // Now process the returned results
+                // Now process the returned results immediately as they stream in
                 let mut total_fetched = 0;
                 let mut any_success = false;
-                for (blocks_guard, fetched_blocks, peer) in results {
+                while let Some((blocks_guard, fetched_blocks, peer)) = rx.recv().await {
                     total_fetched += fetched_blocks.len();
 
                     if let Err(err) = Self::process_fetched_blocks(
@@ -305,6 +307,12 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                         any_success = true;
                     }
                 }
+
+                context
+                    .metrics
+                    .node_metrics
+                    .fetch_blocks_scheduler_inflight
+                    .dec();
 
                 // Track consecutive failures for exponential backoff.
                 // When all syncs fail (e.g., lagging node fetching wrong-epoch blocks),
@@ -342,7 +350,8 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         network_client: Arc<C>,
         missing_blocks: BTreeSet<BlockRef>,
         dag_state: Arc<RwLock<DagState>>,
-    ) -> Vec<(BlocksGuard, Vec<Bytes>, AuthorityIndex)> {
+        tx_process: tokio::sync::mpsc::Sender<(BlocksGuard, Vec<Bytes>, AuthorityIndex)>,
+    ) {
         // Preliminary truncation of missing blocks to fetch. Since each peer can have different
         // number of missing blocks and the fetching is batched by peer, so keep more than max_blocks_per_sync
         // per peer on average.
@@ -454,7 +463,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             }
         }
 
-        let mut results = Vec::new();
         let fetcher_timeout = sleep(FETCH_FROM_PEERS_TIMEOUT);
 
         tokio::pin!(fetcher_timeout);
@@ -465,7 +473,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     let peer_hostname = &context.committee.authority(peer_index).hostname;
                     match response {
                         Ok(fetched_blocks) => {
-                            results.push((blocks_guard, fetched_blocks, peer_index));
+                            let _ = tx_process.send((blocks_guard, fetched_blocks, peer_index)).await;
 
                             // no more pending requests are left, just break the loop
                             if request_futures.is_empty() {
@@ -512,8 +520,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 }
             }
         }
-
-        results
     }
 
 }
