@@ -16,6 +16,19 @@
 
 set -euo pipefail
 
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
+TELEGRAM_CHAT_ID="-1003867050625"
+
+send_telegram_notification() {
+    local message="$1"
+    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${message}" \
+            -d "parse_mode=Markdown" > /dev/null 2>&1 || true
+    fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVENTORY="${SCRIPT_DIR}/inventory.yml"
 PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
@@ -55,6 +68,13 @@ echo "   Keep Data:     $KEEP_DATA"
 echo "   Restore Node:  $RESTORE_NODE"
 echo "   Open Ports:    $OPEN_PORTS"
 
+send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
+- Action: \`${ACTION}\`
+- Target Node: \`${TARGET_NODE}\`
+- Keep Data: \`${KEEP_DATA}\`
+- Restore Node: \`${RESTORE_NODE}\`
+- Open Ports: \`${OPEN_PORTS}\`"
+
 # Prepare extra vars
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS}"
 if [ -n "$SNAPSHOT_URL" ]; then
@@ -70,6 +90,12 @@ set +e
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
 ansible_exit=$?
 set -e
+
+if [ $ansible_exit -eq 0 ]; then
+    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) hoàn tất thành công!"
+else
+    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) thất bại với mã lỗi \`${ansible_exit}\`!"
+fi
 
 echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
 MONITOR_SCRIPT="$(realpath "$SCRIPT_DIR/../../metanode-suite/scripts/start_monitors.sh")"
