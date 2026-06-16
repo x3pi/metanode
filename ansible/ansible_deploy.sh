@@ -66,8 +66,10 @@ pkill -f "start_monitors.sh health" || true
 pkill -f "block_hash_checker" || true
 
 cd "$SCRIPT_DIR"
+set +e
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
 ansible_exit=$?
+set -e
 
 echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
 MONITOR_SCRIPT="/home/abc/chain-n/metanode-suite/scripts/start_monitors.sh"
