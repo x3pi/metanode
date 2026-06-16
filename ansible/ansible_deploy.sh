@@ -49,7 +49,14 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
 
 if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
     echo -e "\033[0;31m❌ [ERROR] TELEGRAM_BOT_TOKEN is not set! Telegram notifications will not be sent.\033[0m"
-    echo -e "   Please configure it in a \`.env\` file or export it to your environment.\n"
+    echo -e "   To enable notifications, please create a \`.env\` file in one of these locations:"
+    echo -e "     📍 \033[0;36m${SCRIPT_DIR}/.env\033[0m"
+    echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/..")/.env\033[0m"
+    echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/../../metanode-suite/scripts" 2>/dev/null || echo "../../metanode-suite/scripts")/.env\033[0m"
+    echo -e "   With the following structure:"
+    echo -e "     \033[0;33mTELEGRAM_BOT_TOKEN=your_bot_token_here\033[0m"
+    echo -e "     \033[0;33mTELEGRAM_CHAT_ID=your_chat_id_here\033[0m"
+    echo -e "   Or export them directly to your environment.\n"
 fi
 
 send_telegram_notification() {
