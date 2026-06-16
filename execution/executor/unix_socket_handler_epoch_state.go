@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"google.golang.org/protobuf/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -326,7 +327,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	// which survives snapshot restore even when NOMT knownKeys is empty.
 	// ═══════════════════════════════════════════════════════════════════
 	if validators, vErr := rh.GetValidatorsAtBlockInternal(request.BoundaryBlock); vErr == nil && len(validators.Validators) > 0 {
-		if serialized, sErr := json.Marshal(validators); sErr == nil {
+		if serialized, sErr := proto.Marshal(validators); sErr == nil {
 			rh.chainState.SetEpochValidators(request.NewEpoch, serialized)
 			logger.Info("💾 [EPOCH VALIDATORS] Cached %d validators for epoch %d at boundary block %d",
 				len(validators.Validators), request.NewEpoch, request.BoundaryBlock)
@@ -335,7 +336,7 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 				logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to persist epoch data with validators: %v", pErr)
 			}
 		} else {
-			logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to serialize validators: %v", sErr)
+			logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to serialize validators to protobuf: %v", sErr)
 		}
 	} else {
 		logger.Warn("⚠️ [EPOCH VALIDATORS] Could not cache validators for epoch %d at boundary %d: vErr=%v",
@@ -478,11 +479,17 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 	// PRIORITY 1: Check epoch validator cache
 	if cachedValidators := rh.chainState.GetEpochValidators(epoch); cachedValidators != nil {
 		cachedList := &pb.ValidatorInfoList{}
-		if jErr := json.Unmarshal(cachedValidators, cachedList); jErr == nil && len(cachedList.Validators) > 0 {
+		if jErr := proto.Unmarshal(cachedValidators, cachedList); jErr == nil && len(cachedList.Validators) > 0 {
 			validators = cachedList
 			logger.Info("✅ [EPOCH BOUNDARY] PRIORITY 1: Loaded %d validators from epoch cache (NOMT-independent) for epoch %d",
 				len(validators.Validators), epoch)
 			// Skip NOMT query — cache is authoritative
+			goto epochBoundaryResponse
+		} else if jErr := json.Unmarshal(cachedValidators, cachedList); jErr == nil && len(cachedList.Validators) > 0 {
+			// Fallback to JSON for backward compatibility with old DB
+			validators = cachedList
+			logger.Info("✅ [EPOCH BOUNDARY] PRIORITY 1: Loaded %d validators from epoch cache using JSON fallback for epoch %d",
+				len(validators.Validators), epoch)
 			goto epochBoundaryResponse
 		} else {
 			logger.Warn("⚠️ [EPOCH BOUNDARY] Epoch validator cache exists but failed to deserialize or is empty for epoch %d: %v",
@@ -538,12 +545,14 @@ epochBoundaryResponse:
 
 	// Opportunistically cache validators if they came from NOMT (for future use/snapshots)
 	if rh.chainState.GetEpochValidators(epoch) == nil && len(validators.Validators) > 0 {
-		if serialized, sErr := json.Marshal(validators); sErr == nil {
+		if serialized, sErr := proto.Marshal(validators); sErr == nil {
 			rh.chainState.SetEpochValidators(epoch, serialized)
 			logger.Info("💾 [EPOCH BOUNDARY] Opportunistically cached %d validators for epoch %d", len(validators.Validators), epoch)
 			if pErr := rh.chainState.SaveEpochDataSafe(); pErr != nil {
 				logger.Warn("⚠️ [EPOCH BOUNDARY] Failed to persist opportunistic cache: %v", pErr)
 			}
+		} else {
+			logger.Warn("⚠️ [EPOCH BOUNDARY] Failed to serialize validators to protobuf for opportunistic cache: %v", sErr)
 		}
 	}
 

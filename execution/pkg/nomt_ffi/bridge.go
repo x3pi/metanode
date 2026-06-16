@@ -16,6 +16,27 @@ import (
 	"unsafe"
 )
 
+var (
+	keysBufPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, 1024*32)
+			return &b
+		},
+	}
+	valsBufPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, 1024*1024)
+			return &b
+		},
+	}
+	valLensPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]C.size_t, 0, 1024)
+			return &b
+		},
+	}
+)
+
 // maxValueSize is the maximum expected value size for account state data.
 // MetaNode AccountState is typically ~200-500 bytes. Using 64KB as safe upper bound.
 const maxValueSize = 64 * 1024
@@ -523,28 +544,40 @@ func (s *Session) BatchRecordRead(keys [][32]byte, values [][]byte) error {
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
-	// Flatten keys into contiguous byte array (N × 32 bytes)
-	flatKeys := make([]byte, n*32)
+	keysBufPtr := keysBufPool.Get().(*[]byte)
+	keysBuf := *keysBufPtr
+	if cap(keysBuf) < n*32 {
+		keysBuf = make([]byte, n*32)
+	}
+	flatKeys := keysBuf[:n*32]
 	for i, k := range keys {
 		copy(flatKeys[i*32:], k[:])
 	}
 
-	// Calculate total values size
 	totalValsLen := 0
 	for _, v := range values {
 		totalValsLen += len(v)
 	}
 
-	// Flatten values and collect lengths
 	var flatValsPtr *C.uint8_t
-	var flatValues []byte
+	valsBufPtr := valsBufPool.Get().(*[]byte)
+	valsBuf := *valsBufPtr
+	if cap(valsBuf) < totalValsLen {
+		valsBuf = make([]byte, totalValsLen)
+	}
+	flatValues := valsBuf[:totalValsLen]
 
 	if totalValsLen > 0 {
-		flatValues = make([]byte, totalValsLen)
 		flatValsPtr = (*C.uint8_t)(&flatValues[0])
 	}
 
-	valLens := make([]C.size_t, n)
+	valLensPtr := valLensPool.Get().(*[]C.size_t)
+	valLens := *valLensPtr
+	if cap(valLens) < n {
+		valLens = make([]C.size_t, n)
+	}
+	valLens = valLens[:n]
+
 	offset := 0
 	for i, v := range values {
 		l := len(v)
@@ -562,6 +595,14 @@ func (s *Session) BatchRecordRead(keys [][32]byte, values [][]byte) error {
 		(*C.size_t)(&valLens[0]),
 		C.size_t(n),
 	)
+
+	*keysBufPtr = keysBuf
+	keysBufPool.Put(keysBufPtr)
+	*valsBufPtr = valsBuf
+	valsBufPool.Put(valsBufPtr)
+	*valLensPtr = valLens
+	valLensPool.Put(valLensPtr)
+
 	if ret != 0 {
 		return fmt.Errorf("nomt_ffi: batch_record_read error for %d entries", n)
 	}
@@ -623,28 +664,40 @@ func (s *Session) BatchWrite(keys [][32]byte, values [][]byte) error {
 		return fmt.Errorf("nomt_ffi: handle closed")
 	}
 
-	// Flatten keys into contiguous byte array (N × 32 bytes) — single Go buffer, no nested pointers
-	flatKeys := make([]byte, n*32)
+	keysBufPtr := keysBufPool.Get().(*[]byte)
+	keysBuf := *keysBufPtr
+	if cap(keysBuf) < n*32 {
+		keysBuf = make([]byte, n*32)
+	}
+	flatKeys := keysBuf[:n*32]
 	for i, k := range keys {
 		copy(flatKeys[i*32:], k[:])
 	}
 
-	// Calculate total values size
 	totalValsLen := 0
 	for _, v := range values {
 		totalValsLen += len(v)
 	}
 
-	// Flatten values and collect lengths
 	var flatValsPtr *C.uint8_t
-	var flatValues []byte
+	valsBufPtr := valsBufPool.Get().(*[]byte)
+	valsBuf := *valsBufPtr
+	if cap(valsBuf) < totalValsLen {
+		valsBuf = make([]byte, totalValsLen)
+	}
+	flatValues := valsBuf[:totalValsLen]
 
 	if totalValsLen > 0 {
-		flatValues = make([]byte, totalValsLen)
 		flatValsPtr = (*C.uint8_t)(&flatValues[0])
 	}
 
-	valLens := make([]C.size_t, n)
+	valLensPtr := valLensPool.Get().(*[]C.size_t)
+	valLens := *valLensPtr
+	if cap(valLens) < n {
+		valLens = make([]C.size_t, n)
+	}
+	valLens = valLens[:n]
+
 	offset := 0
 	for i, v := range values {
 		l := len(v)
@@ -662,6 +715,14 @@ func (s *Session) BatchWrite(keys [][32]byte, values [][]byte) error {
 		(*C.size_t)(&valLens[0]),
 		C.size_t(n),
 	)
+
+	*keysBufPtr = keysBuf
+	keysBufPool.Put(keysBufPtr)
+	*valsBufPtr = valsBuf
+	valsBufPool.Put(valsBufPtr)
+	*valLensPtr = valLens
+	valLensPool.Put(valLensPtr)
+
 	if ret != 0 {
 		return fmt.Errorf("nomt_ffi: batch_write error for %d entries", n)
 	}
