@@ -17,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
+	eth_common "github.com/ethereum/go-ethereum/common"
 )
 
 type shardedSignatureCache struct {
@@ -38,6 +39,8 @@ func (s *shardedSignatureCache) getShard(key interface{}) *sync.Map {
 		hash = byte(k)
 	case int:
 		hash = byte(k)
+	case eth_common.Hash:
+		hash = k[0]
 	default:
 		// Fallback hash
 	}
@@ -178,7 +181,7 @@ func VerifyTransaction(
 	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
 
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		txHashHex := tx.Hash().Hex()
+		txHash := tx.Hash()
 
 		if isSubNodeLagging {
 			logger.Warn("⚠️ [BLS-LAG-DEBUG] account=%s | as.Nonce=%d | tx.Nonce=%d | blsKeyLen=%d | stateIsPreloaded=%v | tx=%s",
@@ -192,7 +195,7 @@ func VerifyTransaction(
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
 			if !isCrossChainBatchSubmit {
-				if _, ok := verifiedSignaturesCache.Load(txHashHex); !ok {
+				if _, ok := verifiedSignaturesCache.Load(txHash); !ok {
 					request := transaction.NewVerifyTransactionRequest(
 						tx.Hash(),
 						common.PubkeyFromBytes(as.PublicKeyBls()),
@@ -200,7 +203,7 @@ func VerifyTransaction(
 					)
 					if !request.Valid() {
 						logger.Error("BLS Verification Failed!")
-						logger.Error("  txHashHex: %s", txHashHex)
+						logger.Error("  txHashHex: %s", txHash.Hex())
 						logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
 						logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
 						logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
@@ -212,7 +215,7 @@ func VerifyTransaction(
 						}
 					}
 					// Only cache on successful validation
-					verifiedSignaturesCache.Store(txHashHex, true)
+					verifiedSignaturesCache.Store(txHash, true)
 					if atomic.AddInt64(&verifiedSignaturesCacheCount, 1) >= maxVerifiedSignaturesCacheSize {
 						verifiedSignaturesCache.Clear()
 						atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
@@ -241,12 +244,12 @@ func VerifyTransaction(
 
 		switch {
 		case as.Nonce() == 0 && isSetBls:
-			txHashHex := tx.Hash().Hex()
-			if _, ok := verifiedSignaturesCache.Load(txHashHex); !ok {
+			txHash := tx.Hash()
+			if _, ok := verifiedSignaturesCache.Load(txHash); !ok {
 				if !tx.ValidEthSign() {
 					return transaction.InvalidSignSecp
 				}
-				verifiedSignaturesCache.Store(txHashHex, true)
+				verifiedSignaturesCache.Store(txHash, true)
 				if atomic.AddInt64(&verifiedSignaturesCacheCount, 1) >= maxVerifiedSignaturesCacheSize {
 					verifiedSignaturesCache.Clear()
 					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)

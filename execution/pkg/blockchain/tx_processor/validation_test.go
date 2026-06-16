@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -184,7 +185,8 @@ func TestStartSignatureCacheCleanup_StopsOnSignal(t *testing.T) {
 	StartSignatureCacheCleanup(stopCh)
 
 	// Store something in cache
-	verifiedSignaturesCache.Store("test_hash_1", true)
+	hash := common.BytesToHash([]byte("test_hash_1"))
+	verifiedSignaturesCache.Store(hash, true)
 	atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 
 	// Signal stop
@@ -204,12 +206,14 @@ func TestSignatureCache_AutoResetOnOverflow(t *testing.T) {
 
 	// Simulate cache reaching max size
 	for i := int64(0); i < 10; i++ {
-		verifiedSignaturesCache.Store(i, true)
+		hashI := common.BytesToHash([]byte{byte(i)})
+		verifiedSignaturesCache.Store(hashI, true)
 	}
 	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxVerifiedSignaturesCacheSize)
 
 	// Next addition should trigger reset
-	verifiedSignaturesCache.Store("overflow_trigger", true)
+	overflowHash := common.BytesToHash([]byte("overflow_trigger"))
+	verifiedSignaturesCache.Store(overflowHash, true)
 	newCount := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 
 	if newCount > maxVerifiedSignaturesCacheSize+1 {

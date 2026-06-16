@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -279,7 +280,7 @@ func (blockDatabase *BlockDatabase) SaveSystemTransactions(blockNumber uint64, t
 		return nil
 	}
 	key := fmt.Sprintf("system_txs_%d", blockNumber)
-	data, err := json.Marshal(txs)
+	data, err := rlp.EncodeToBytes(txs)
 	if err != nil {
 		return err
 	}
@@ -295,7 +296,17 @@ func (blockDatabase *BlockDatabase) GetSystemTransactions(blockNumber uint64) ([
 		return [][]byte{}, nil
 	}
 	var txs [][]byte
-	err = json.Unmarshal(data, &txs)
+	
+	// Fallback to JSON for backward compatibility
+	if len(data) > 0 && data[0] == '[' {
+		err = json.Unmarshal(data, &txs)
+		if err == nil {
+			return txs, nil
+		}
+	}
+	
+	// Default to RLP
+	err = rlp.DecodeBytes(data, &txs)
 	if err != nil {
 		return nil, err
 	}

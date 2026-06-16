@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -38,7 +39,26 @@ type EpochData struct {
 	// EPOCH VALIDATOR PERSISTENCE: Validator list per epoch, decoupled from NOMT.
 	// Key = epoch number, Value = JSON-serialized pb.ValidatorInfoList.
 	// This ensures validators survive snapshot restore even when NOMT knownKeys is empty.
-	EpochValidators map[uint64]json.RawMessage `json:"epoch_validators,omitempty"`
+	EpochValidators map[uint64]json.RawMessage `json:"epoch_validators"`
+}
+
+type EpochMapEntry struct {
+	Key   uint64
+	Value uint64
+}
+
+type EpochValidatorEntry struct {
+	Key   uint64
+	Value []byte
+}
+
+type EpochDataRLP struct {
+	CurrentEpoch          uint64
+	EpochStartTimestampMs uint64
+	EpochStartTimestamps  []EpochMapEntry
+	EpochBoundaryBlocks   []EpochMapEntry
+	EpochBoundaryGeis     []EpochMapEntry
+	EpochValidators       []EpochValidatorEntry
 }
 
 // ChainState quản lý trạng thái toàn cục của blockchain
@@ -1151,10 +1171,32 @@ func (cs *ChainState) SaveEpochData() error {
 		EpochValidators:       cs.epochValidatorsCache,  // NOMT-independent validator persistence
 	}
 
-	data, err := json.Marshal(epochData)
+	epochDataRLP := EpochDataRLP{
+		CurrentEpoch:          epochData.CurrentEpoch,
+		EpochStartTimestampMs: epochData.EpochStartTimestampMs,
+		EpochStartTimestamps:  make([]EpochMapEntry, 0, len(epochData.EpochStartTimestamps)),
+		EpochBoundaryBlocks:   make([]EpochMapEntry, 0, len(epochData.EpochBoundaryBlocks)),
+		EpochBoundaryGeis:     make([]EpochMapEntry, 0, len(epochData.EpochBoundaryGeis)),
+		EpochValidators:       make([]EpochValidatorEntry, 0, len(epochData.EpochValidators)),
+	}
+
+	for k, v := range epochData.EpochStartTimestamps {
+		epochDataRLP.EpochStartTimestamps = append(epochDataRLP.EpochStartTimestamps, EpochMapEntry{k, v})
+	}
+	for k, v := range epochData.EpochBoundaryBlocks {
+		epochDataRLP.EpochBoundaryBlocks = append(epochDataRLP.EpochBoundaryBlocks, EpochMapEntry{k, v})
+	}
+	for k, v := range epochData.EpochBoundaryGeis {
+		epochDataRLP.EpochBoundaryGeis = append(epochDataRLP.EpochBoundaryGeis, EpochMapEntry{k, v})
+	}
+	for k, v := range epochData.EpochValidators {
+		epochDataRLP.EpochValidators = append(epochDataRLP.EpochValidators, EpochValidatorEntry{k, []byte(v)})
+	}
+
+	data, err := rlp.EncodeToBytes(epochDataRLP)
 	if err != nil {
-		logger.Error("❌ [EPOCH PERSISTENCE] Failed to marshal epoch data", "error", err)
-		return fmt.Errorf("failed to marshal epoch data: %w", err)
+		logger.Error("❌ [EPOCH PERSISTENCE] Failed to rlp encode epoch data", "error", err)
+		return fmt.Errorf("failed to rlp encode epoch data: %w", err)
 	}
 
 	logger.Info("📦 [EPOCH PERSISTENCE] Marshaled epoch data", "data_size", len(data), "key", epochDataKey.Hex())
@@ -1233,11 +1275,51 @@ func (cs *ChainState) LoadEpochData() error {
 		}
 	}
 
-	var epochData EpochData
-	if err := json.Unmarshal(data, &epochData); err != nil {
-		logger.Error("❌ [EPOCH PERSISTENCE] Failed to unmarshal epoch data", "error", err, "source", source, "raw_data", string(data))
-		return fmt.Errorf("failed to unmarshal epoch data from %s: %w", source, err)
+	if len(data) == 0 {
+		return fmt.Errorf("empty epoch data")
 	}
+
+	var epochData EpochData
+	
+	// Fallback logic for backward compatibility
+	if data[0] == '{' { // JSON format starts with {
+		if err := json.Unmarshal(data, &epochData); err != nil {
+			logger.Error("❌ [EPOCH PERSISTENCE] Failed to unmarshal JSON epoch data", "error", err)
+			return err
+		}
+	} else {
+		// RLP format
+		var epochDataRLP EpochDataRLP
+		if err := rlp.DecodeBytes(data, &epochDataRLP); err != nil {
+			logger.Error("❌ [EPOCH PERSISTENCE] Failed to decode RLP epoch data", "error", err)
+			return err
+		}
+		
+		epochData = EpochData{
+			CurrentEpoch:          epochDataRLP.CurrentEpoch,
+			EpochStartTimestampMs: epochDataRLP.EpochStartTimestampMs,
+			EpochStartTimestamps:  make(map[uint64]uint64),
+			EpochBoundaryBlocks:   make(map[uint64]uint64),
+			EpochBoundaryGeis:     make(map[uint64]uint64),
+			EpochValidators:       make(map[uint64]json.RawMessage),
+		}
+		
+		for _, entry := range epochDataRLP.EpochStartTimestamps {
+			epochData.EpochStartTimestamps[entry.Key] = entry.Value
+		}
+		for _, entry := range epochDataRLP.EpochBoundaryBlocks {
+			epochData.EpochBoundaryBlocks[entry.Key] = entry.Value
+		}
+		for _, entry := range epochDataRLP.EpochBoundaryGeis {
+			epochData.EpochBoundaryGeis[entry.Key] = entry.Value
+		}
+		for _, entry := range epochDataRLP.EpochValidators {
+			epochData.EpochValidators[entry.Key] = json.RawMessage(entry.Value)
+		}
+	}
+
+	cs.epochMutex.Lock()
+	defer cs.epochMutex.Unlock()
 
 	// Restore epoch state - preserve exact millisecond precision without rounding
 	cs.currentEpoch = epochData.CurrentEpoch
