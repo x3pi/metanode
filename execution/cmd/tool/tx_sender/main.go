@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math/big"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -285,11 +282,8 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 
 		case "read_call":
 			// ═══════════════════════════════════════════════════════════════
-			// OFF-CHAIN READ: Uses HTTP eth_call with MetaNode protobuf TX.
+			// OFF-CHAIN READ: Uses TCP ReadTransaction.
 			// Does NOT go on-chain, does NOT increment nonce, does NOT consume gas.
-			//
-			// The node's eth_call expects a protobuf-marshalled MetaNode
-			// Transaction as input (not standard Ethereum TransactionArgs).
 			// ═══════════════════════════════════════════════════════════════
 			if data.Address == "0" || data.Address == "" {
 				toAddress = lastDeployedAddress
@@ -299,7 +293,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			}
 			fmt.Printf("  📋 From:    %s\n", fromAddress.Hex())
 			fmt.Printf("  📋 To:      %s\n", toAddress.Hex())
-			fmt.Printf("  📖 Mode:    OFF-CHAIN READ (eth_call via HTTP)\n")
+			fmt.Printf("  📖 Mode:    OFF-CHAIN READ (via TCP)\n")
 
 			// Build CallData proto wrapper
 			readCallData := transaction.NewCallData(inputBytes)
@@ -310,34 +304,34 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				continue
 			}
 
-			// Build a MetaNode Transaction for eth_call
-			readTx := transaction.NewTransaction(
+			// Build related addresses
+			readRelatedMap := make(map[common.Address]bool)
+			readRelatedMap[fromAddress] = true
+			if toAddress != (common.Address{}) {
+				readRelatedMap[toAddress] = true
+			}
+			readRelatedMap[bls.NewKeyPair(config.PrivateKey()).Address()] = true
+			for _, v := range data.RelatedAddress {
+				readRelatedMap[common.HexToAddress(v)] = true
+			}
+
+			var readRelatedAddresses []common.Address
+			for addr := range readRelatedMap {
+				readRelatedAddresses = append(readRelatedAddresses, addr)
+			}
+
+			fmt.Printf("  📤 Sending ReadTransaction (off-chain via TCP)...\n")
+			readStart := time.Now()
+			receipt, readErr := c.ReadTransaction(
 				fromAddress,
 				toAddress,
 				big.NewInt(0),
+				readBData,
+				readRelatedAddresses,
 				10000000,
 				uint64(p_common.MINIMUM_BASE_FEE),
 				0,
-				readBData,
-				nil,
-				common.Hash{},
-				common.Hash{},
-				currentNonce,
-				config.ChainId,
 			)
-
-			// Marshal TX to protobuf bytes
-			readTxBytes, readTxErr := readTx.Marshal()
-			if readTxErr != nil {
-				fmt.Printf("  ❌ Marshal TX failed: %v\n", readTxErr)
-				failCount++
-				continue
-			}
-
-			// Send via HTTP eth_call
-			fmt.Printf("  📤 Sending eth_call (off-chain)...\n")
-			readStart := time.Now()
-			returnData, readErr := ethCallHTTP("0x" + hex.EncodeToString(readTxBytes))
 			readDuration := time.Since(readStart)
 
 			if readErr != nil {
@@ -347,8 +341,16 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				continue
 			}
 
+			if receipt == nil {
+				fmt.Printf("  ❌ read_call FAILED: receipt is nil\n")
+				fmt.Printf("  ⏱  Duration: %s\n", readDuration)
+				failCount++
+				continue
+			}
+
 			fmt.Printf("  ✅ Read result received!\n")
 			fmt.Printf("  ⏱  Duration:    %s\n", readDuration)
+			returnData := receipt.Return()
 			if len(returnData) > 0 {
 				fmt.Printf("  📋 Return data: %s\n", hex.EncodeToString(returnData))
 				// Try to decode as uint256
@@ -370,11 +372,22 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 		}
 
 		// Build related addresses
-		relatedAddresses := make([]common.Address, len(data.RelatedAddress)+1)
-		for k, v := range data.RelatedAddress {
-			relatedAddresses[k] = common.HexToAddress(v)
+		relatedMap := make(map[common.Address]bool)
+		relatedMap[fromAddress] = true
+		if data.Action == "deploy" {
+			relatedMap[lastDeployedAddress] = true
+		} else if toAddress != (common.Address{}) {
+			relatedMap[toAddress] = true
 		}
-		relatedAddresses[len(data.RelatedAddress)] = bls.NewKeyPair(config.PrivateKey()).Address()
+		relatedMap[bls.NewKeyPair(config.PrivateKey()).Address()] = true
+		for _, v := range data.RelatedAddress {
+			relatedMap[common.HexToAddress(v)] = true
+		}
+
+		var relatedAddresses []common.Address
+		for addr := range relatedMap {
+			relatedAddresses = append(relatedAddresses, addr)
+		}
 
 		bRelatedAddresses := make([][]byte, len(relatedAddresses))
 		for k, v := range relatedAddresses {
@@ -457,6 +470,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 		fmt.Printf("  ✅ Receipt received!\n")
 		fmt.Printf("  📋 TX Hash:     %s\n", txHash.Hex())
 		fmt.Printf("  📋 Status:      %s\n", formatStatus(status))
+		fmt.Printf("  📋 Exception:   %s\n", receipt.Exception().String())
 		fmt.Printf("  ⏱  Duration:    %s\n", txDuration)
 
 		if status == pb.RECEIPT_STATUS_RETURNED {
@@ -511,6 +525,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			status := receipt.Status()
 			fmt.Printf("  ✅ Receipt %d/%d received!\n", i+1, len(submittedHashes))
 			fmt.Printf("  📋 Status:      %s\n", formatStatus(status))
+			fmt.Printf("  📋 Exception:   %s\n", receipt.Exception().String())
 			fmt.Printf("  ⏱  Wait time:   %s\n", waitDuration)
 
 			if status == pb.RECEIPT_STATUS_RETURNED {
@@ -564,71 +579,4 @@ func formatStatus(status pb.RECEIPT_STATUS) string {
 	}
 }
 
-// ethCallHTTP sends an eth_call JSON-RPC request via HTTP POST.
-// The input is a hex-encoded protobuf MetaNode Transaction (e.g. "0x0a14...").
-// The node's eth_call expects hexutil.Bytes (protobuf TX), not standard Ethereum TransactionArgs.
-// Returns the decoded return data bytes, or an error.
-func ethCallHTTP(hexTxData string) ([]byte, error) {
-	type jsonRPCRequest struct {
-		Jsonrpc string        `json:"jsonrpc"`
-		Method  string        `json:"method"`
-		Params  []interface{} `json:"params"`
-		Id      int           `json:"id"`
-	}
-	type jsonRPCError struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	type jsonRPCResponse struct {
-		Jsonrpc string        `json:"jsonrpc"`
-		Result  interface{}   `json:"result"`
-		Error   *jsonRPCError `json:"error"`
-		Id      int           `json:"id"`
-	}
 
-	reqBody := jsonRPCRequest{
-		Jsonrpc: "2.0",
-		Method:  "eth_call",
-		Params:  []interface{}{hexTxData, "latest"},
-		Id:      1,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	resp, err := http.Post(API_URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("HTTP POST to %s: %w", API_URL, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
-	var rpcResp jsonRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w (body: %s)", err, string(respBody))
-	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error (code %d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	// Result is a hex-encoded string like "0x000...08ae"
-	resultStr, ok := rpcResp.Result.(string)
-	if !ok {
-		return nil, fmt.Errorf("unexpected result type: %T", rpcResp.Result)
-	}
-
-	resultStr = strings.TrimPrefix(resultStr, "0x")
-	resultBytes, err := hex.DecodeString(resultStr)
-	if err != nil {
-		return nil, fmt.Errorf("decode hex result: %w", err)
-	}
-
-	return resultBytes, nil
-}

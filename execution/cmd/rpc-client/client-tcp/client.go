@@ -189,7 +189,9 @@ func (client *Client) runReceiptRouter() {
 			}
 
 			txHash := receipt.TransactionHash()
+			rHash := receipt.RHash()
 
+			// Check waiters by TransactionHash
 			if chans, ok := waiters[txHash]; ok {
 				delete(waiters, txHash)
 				for _, ch := range chans {
@@ -202,9 +204,28 @@ func (client *Client) runReceiptRouter() {
 				continue
 			}
 
+			// Check waiters by RHash
+			if chans, ok := waiters[rHash]; ok {
+				delete(waiters, rHash)
+				for _, ch := range chans {
+					select {
+					case ch <- receipt:
+					default:
+						logger.Warn("Receipt waiter channel full, dropping receipt for RHash %v", rHash.Hex())
+					}
+				}
+				continue
+			}
+
 			pendingReceipts[txHash] = pendingReceipt{
 				value:     receipt,
 				expiresAt: time.Now().Add(pendingReceiptTTL),
+			}
+			if rHash != (common.Hash{}) && rHash != txHash {
+				pendingReceipts[rHash] = pendingReceipt{
+					value:     receipt,
+					expiresAt: time.Now().Add(pendingReceiptTTL),
+				}
 			}
 
 		case req := <-client.receiptRequests:
@@ -506,7 +527,7 @@ func (client *Client) ReadTransaction(
 		return nil, err
 	}
 	logger.Info("[Client] Tx Hash : %s", tx.Hash().Hex())
-	receipt, err := client.FindReceiptByHash(tx.Hash())
+	receipt, err := client.FindReceiptByHash(tx.RHash())
 	if err != nil {
 		return nil, err
 	}
