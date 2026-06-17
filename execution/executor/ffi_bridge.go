@@ -123,7 +123,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 	data := C.GoBytes(unsafe.Pointer(payload), C.int(length))
 
 	var subDag pb.ExecutableBlock
-	err := proto.Unmarshal(data, &subDag)
+	err := subDag.UnmarshalVT(data)
 	if err != nil {
 		logger.Error("[FFI Bridge] Failed to unmarshal ExecutableBlock: %v", err)
 		return C.bool(false)
@@ -242,7 +242,7 @@ func cgo_process_rpc_request(reqPayload *C.uint8_t, reqLen C.size_t, outPayload 
 
 	data := C.GoBytes(unsafe.Pointer(reqPayload), C.int(reqLen))
 	var request pb.Request
-	if err := proto.Unmarshal(data, &request); err != nil {
+	if err := request.UnmarshalVT(data); err != nil {
 		logger.Error("[FFI Bridge] Failed to unmarshal Request: %v", err)
 		return C.bool(false)
 	}

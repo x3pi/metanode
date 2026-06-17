@@ -182,13 +182,13 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	// Pre-fetch both sender and recipient into trie LRU cache now,
 	// while we are in the async injection worker. This saves disk I/O
 	// later during the critical block processing phase.
-	_, _ = vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+	as, _ := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
 	if !tx.IsDeployContract() {
 		_, _ = vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.ToAddress())
 	}
 
 	if !skipVerification {
-		if err := tx_processor.VerifyTransaction(tx, vp.chainState, nil); err != nil {
+		if err := tx_processor.VerifyTransaction(tx, vp.chainState, as); err != nil {
 			logger.Error("Transaction verification failed: %v", err)
 			return transaction.VerifyTransactionError.Code, fmt.Errorf(err.Description)
 		}
@@ -312,8 +312,9 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		tx.AddRelatedAddress(tx.ToAddress())
 		preloadSet[tx.FromAddress()] = struct{}{}
 	}
+	var preloadAddrs []common.Address
 	if len(preloadSet) > 0 {
-		preloadAddrs := make([]common.Address, 0, len(preloadSet))
+		preloadAddrs = make([]common.Address, 0, len(preloadSet))
 		for addr := range preloadSet {
 			preloadAddrs = append(preloadAddrs, addr)
 		}
@@ -322,9 +323,13 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	cacheWarmingDuration := time.Since(t0)
 
 	t1 := time.Now()
-	// Phase 1.6 (TPS Optimization): Bypassed redundant slice preload
-	// Accounts are already fully warmed in loadedAccounts by PreloadAccounts above.
-	// We pass nil as preloadedState to VerifyTransaction, which queries the lock-free loadedAccounts cache.
+	// Warm the local states map to pass directly to VerifyTransaction, avoiding concurrent sync.Map lookups.
+	senderStates := make(map[common.Address]types.AccountState, len(preloadAddrs))
+	for _, addr := range preloadAddrs {
+		if as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr); err == nil && as != nil {
+			senderStates[addr] = as
+		}
+	}
 	statePreloadDuration := time.Since(t1)
 
 	t2 := time.Now()
@@ -364,7 +369,11 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 						errorsList[i] = fmt.Errorf("[code:%d] transaction gas price (%d) is below node minimum (%d)", transaction.InvalidTransaction.Code, txs[i].MaxGasPrice(), minGasPrice)
 						continue
 					}
-					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, nil); err != nil {
+					var senderState types.AccountState
+					if senderStates != nil {
+						senderState = senderStates[txs[i].FromAddress()]
+					}
+					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, senderState); err != nil {
 						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
 					}
 				}

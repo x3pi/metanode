@@ -12,8 +12,6 @@ import (
 
 	// Protobuf generated types for IPC protocol
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-
-	"google.golang.org/protobuf/proto"
 )
 
 var bufferPool = sync.Pool{
@@ -200,7 +198,7 @@ func (l *Listener) handleConnection(conn net.Conn) {
 
 		// Decode buffer via Protobuf
 		var epochData pb.ExecutableBlock
-		if err := proto.Unmarshal(buf, &epochData); err != nil {
+		if err := epochData.UnmarshalVT(buf); err != nil {
 			log.Printf("❌ [LISTENER] Error unmarshaling Protobuf (%d bytes): %v. Dump: %x", msgLen, err, buf[:min(len(buf), 50)])
 			putBuffer(buf)
 			continue // Continue loop to read next message
