@@ -1201,6 +1201,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	// Lock session creation to prevent concurrent BeginSession FFI calls during reset,
 	// and abort any active/pending sessions that were bound to the old handle.
 	n.sessionInitMu.Lock()
+	defer n.sessionInitMu.Unlock()
 	n.sessionMu.Lock()
 	if n.activeSession != nil {
 		logger.Warn("⚠️ [NomtStateTrie] Aborting active session before ResetNomtHandle for namespace=%s", string(n.namespace))
@@ -1230,7 +1231,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	// 2. Reset the NOMT handle (closes, wipes, and reopens)
 	newHandle, err := ResetNomtHandle(string(n.namespace))
 	if err != nil {
-		n.sessionInitMu.Unlock()
 		return fmt.Errorf("failed to reset NOMT handle: %w", err)
 	}
 
@@ -1264,14 +1264,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 
 	// 5. Populate keys/values into NOMT
 	if len(kvs) > 0 {
-		// Begin the session for rebuild while still holding sessionInitMu
-		rebuildSession := nomt_ffi.BeginSession(newHandle)
-		n.sessionMu.Lock()
-		n.activeSession = rebuildSession
-		n.sessionMu.Unlock()
-
-		n.sessionInitMu.Unlock()
-
 		keys := make([][]byte, len(kvs))
 		values := make([][]byte, len(kvs))
 		for i, kv := range kvs {
@@ -1281,12 +1273,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 
 		// BatchUpdate will acquire n.writerMu
 		if err := n.BatchUpdate(keys, values); err != nil {
-			n.sessionMu.Lock()
-			if n.activeSession == rebuildSession {
-				rebuildSession.Abort()
-				n.activeSession = nil
-			}
-			n.sessionMu.Unlock()
 			return fmt.Errorf("failed to batch update in rebuilt trie: %w", err)
 		}
 
@@ -1306,8 +1292,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		}
 		logger.Info("✅ [NOMT-ALIGN-REBUILD] Rebuilt NOMT successfully aligned to expected root: %s", expectedRoot.Hex()[:18])
 	} else {
-		n.sessionInitMu.Unlock()
-
 		// Empty database
 		n.writerMu.Lock()
 		n.publishReadView(make(map[string]*nomtDirtyEntry), nil, e_common.Hash{})

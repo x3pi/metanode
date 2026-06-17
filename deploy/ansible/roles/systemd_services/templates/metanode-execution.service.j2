@@ -23,7 +23,7 @@ RestartSec=15s
 # Environment
 Environment=GOTRACEBACK=all
 # Default to validator, but synconly logic can be injected here based on variables
-Environment=NODE_TYPE={% if item in btrfs_nodes|default([]) %}synconly{% else %}validator{% endif %}
+Environment=NODE_TYPE={% if is_synconly | default(false) %}synconly{% else %}validator{% endif %}
 
 LimitNOFILE=100000
 
