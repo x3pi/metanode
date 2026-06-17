@@ -102,15 +102,31 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+# Detect Deployer Server IP dynamically
+DEPLOY_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
+if [ -z "$DEPLOY_IP" ]; then
+    DEPLOY_IP=$(hostname -I | awk '{print $1}')
+fi
+
+# Resolve Target Node IPs dynamically from inventory.yml
+TARGET_NODES_IPS=""
+if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
+    TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE" || echo "")
+fi
+
 echo -e "\n🚀 Starting Ansible Deployment with:"
-echo "   Source:        $DEPLOY_SOURCE"
-echo "   Action:        $ACTION"
-echo "   Target Node:   $TARGET_NODE"
-echo "   Keep Data:     $KEEP_DATA"
-echo "   Restore Node:  $RESTORE_NODE"
-echo "   Open Ports:    $OPEN_PORTS"
+echo "   Deployer Server IP: $DEPLOY_IP"
+echo "   Target Node IPs:    $TARGET_NODES_IPS"
+echo "   Source:             $DEPLOY_SOURCE"
+echo "   Action:             $ACTION"
+echo "   Target Node:        $TARGET_NODE"
+echo "   Keep Data:          $KEEP_DATA"
+echo "   Restore Node:       $RESTORE_NODE"
+echo "   Open Ports:         $OPEN_PORTS"
 
 send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
+- Deployer Server IP: \`${DEPLOY_IP}\`
+- Target Node IPs: \`${TARGET_NODES_IPS}\`
 - Source: \`${DEPLOY_SOURCE}\`
 - Action: \`${ACTION}\`
 - Target Node: \`${TARGET_NODE}\`
