@@ -62,8 +62,14 @@ func ReadMessage(reader io.Reader, msg proto.Message) error {
 		return fmt.Errorf("could not read message body: %w", err)
 	}
 	// 4. Unmarshal the bytes into the provided protobuf message struct.
-	if err := proto.Unmarshal(msgBuf, msg); err != nil {
-		return fmt.Errorf("could not unmarshal message: %w", err)
+	if vt, ok := msg.(interface{ UnmarshalVT([]byte) error }); ok {
+		if err := vt.UnmarshalVT(msgBuf); err != nil {
+			return fmt.Errorf("could not unmarshal message (VT): %w", err)
+		}
+	} else {
+		if err := proto.Unmarshal(msgBuf, msg); err != nil {
+			return fmt.Errorf("could not unmarshal message: %w", err)
+		}
 	}
 
 	return nil
