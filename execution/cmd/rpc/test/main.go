@@ -39,7 +39,7 @@ func BuildMessageForDispatch(sessionId [32]byte, actionId [32]byte, data []byte,
 
 func main() {
 	// 1. KẾT NỐI
-	client, err := ethclient.Dial("ws://192.168.1.234:8545/interceptor")
+	client, err := ethclient.Dial("ws://192.168.1.231:8545/interceptor")
 	if err != nil {
 		log.Fatal("Lỗi kết nối:", err)
 	}

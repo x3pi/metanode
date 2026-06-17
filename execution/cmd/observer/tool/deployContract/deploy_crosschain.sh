@@ -41,7 +41,7 @@ export DEST_NATION_ID="$DEST_NATION_ID"
 print_info "🚀 Deploying Cross-Chain Gateway Contract..."
 print_info "   Source Nation ID: $SOURCE_NATION_ID"
 print_info "   Dest Nation ID: $DEST_NATION_ID"
-print_info "   RPC URL: ${RPC_URL:-http://192.168.1.234:8545}"
+print_info "   RPC URL: ${RPC_URL:-http://192.168.1.231:8545}"
 echo ""
 
 # Build and run the deployment

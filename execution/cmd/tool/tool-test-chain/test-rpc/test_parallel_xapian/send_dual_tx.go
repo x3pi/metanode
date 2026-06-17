@@ -128,7 +128,7 @@ type txResult struct {
 
 func main() {
 	contractFlag := flag.String("contract", "", "Contract address của DualTxXapianTest (bắt buộc)")
-	rpcFlag := flag.String("rpc", "http://192.168.1.234:8545", "RPC URL")
+	rpcFlag := flag.String("rpc", "http://192.168.1.231:8545", "RPC URL")
 	chainFlag := flag.Int64("chain", 991, "Chain ID")
 	workersFlag := flag.Int("workers", 5, "Số luồng song song (1-10, dùng key index 0..N-1)")
 	flag.Parse()
