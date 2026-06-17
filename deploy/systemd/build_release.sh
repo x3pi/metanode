@@ -38,10 +38,14 @@ mkdir -p "$RELEASE_DIR/bin"
 mkdir -p "$RELEASE_DIR/configs"
 mkdir -p "$RELEASE_DIR/cluster"
 
-# ─── 1. Build Rust (Consensus) ──────────────────────────────────────────────
-log_step "Building Rust Consensus Engine"
+# ─── 1. Build Rust (Consensus & FFI) ──────────────────────────────────────────
+log_step "Building Rust Consensus Engine & FFI"
+cd "$PROJECT_ROOT"
+# Build the FFI library first so Go execution engine can link against it
+cargo build --release -p mtn-nomt-ffi
+
 cd "$PROJECT_ROOT/consensus/metanode"
-# Cần export RUSTFLAGS nếu cần, hoặc mặc định
+# Build the consensus engine
 cargo build --release
 
 # FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
