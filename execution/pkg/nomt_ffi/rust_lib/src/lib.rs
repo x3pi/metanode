@@ -36,7 +36,7 @@ macro_rules! ffi_catch_unwind {
 /// Opaque handle to the NOMT database instance.
 /// Wrapped in Mutex to safely share between Go goroutines.
 pub struct NomtHandle {
-    db: Nomt<Blake3Hasher>,
+    pub db: std::sync::Arc<Nomt<Blake3Hasher>>,
 }
 
 /// Opaque handle to a write session.
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn nomt_open(
 
     match Nomt::<Blake3Hasher>::open(opts) {
         Ok(db) => {
-            let handle = Box::new(NomtHandle { db });
+            let handle = Box::new(NomtHandle { db: std::sync::Arc::new(db) });
             Box::into_raw(handle)
         }
         Err(e) => {
@@ -1009,6 +1009,33 @@ pub unsafe extern "C" fn state_db_open(
         }
     })
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_open_from_handle(
+    handle: *mut NomtHandle,
+    path: *const c_char,
+) -> *mut RustStateDBHandle {
+    ffi_catch_unwind!(ptr::null_mut(), {
+        if handle.is_null() || path.is_null() {
+            return ptr::null_mut();
+        }
+        let handle = &*handle;
+        let c_str = CStr::from_ptr(path);
+        let path_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        let db = handle.db.clone();
+        Box::into_raw(Box::new(RustStateDBHandle {
+            db: RustStateDB {
+                db,
+                path: path_str.to_string(),
+            }
+        }))
+    })
+}
+
 
 #[no_mangle]
 pub unsafe extern "C" fn state_db_close(handle: *mut RustStateDBHandle) {

@@ -105,7 +105,7 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB, hashtableBuc
 		return nil, fmt.Errorf("nomt_ffi: failed to open database at %s", path)
 	}
 
-	stateDbPtr := C.state_db_open(cPath, C.int(commitConcurrency), C.int(pageCacheMB), C.int(leafCacheMB), C.int(hashtableBuckets), C.int(preallocVal))
+	stateDbPtr := C.state_db_open_from_handle(ptr, cPath)
 	if stateDbPtr == nil {
 		C.nomt_close(ptr)
 		return nil, fmt.Errorf("nomt_ffi: failed to open state_db at %s", path)
@@ -294,7 +294,7 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	for i := 0; i < 10; i++ {
 		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB), C.int(h.hashtableBuckets), C.int(preallocVal))
 		if ptr != nil {
-			stateDbPtr = C.state_db_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB), C.int(h.hashtableBuckets), C.int(preallocVal))
+			stateDbPtr = C.state_db_open_from_handle(ptr, cPath)
 			if stateDbPtr != nil {
 				if i > 0 {
 					fmt.Printf("nomt_ffi: successfully reopened database at %s after %d retries\n", h.path, i)
