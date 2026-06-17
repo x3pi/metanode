@@ -25,13 +25,19 @@ git checkout "$BRANCH" 2>/dev/null || true
 while true; do
     # Fetch from remote without merging
     if git fetch "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
-        LOCAL_HASH=$(git rev-parse HEAD)
         REMOTE_HASH=$(git rev-parse "${REMOTE}/${BRANCH}")
         
-        if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
+        # Read the last deployed commit hash
+        LAST_DEPLOYED_FILE="${ANSIBLE_DIR}/.last_deployed_commit"
+        LAST_DEPLOYED=""
+        if [ -f "$LAST_DEPLOYED_FILE" ]; then
+            LAST_DEPLOYED=$(cat "$LAST_DEPLOYED_FILE" | xargs)
+        fi
+        
+        if [ "$REMOTE_HASH" != "$LAST_DEPLOYED" ]; then
             echo -e "\n🔔 [$(date '+%Y-%m-%d %H:%M:%S')] New commit detected on remote!"
-            echo "   Local:  $LOCAL_HASH"
-            echo "   Remote: $REMOTE_HASH"
+            echo "   Last Deployed: $LAST_DEPLOYED"
+            echo "   Remote Commit: $REMOTE_HASH"
             
             echo "🔄 Pulling updates..."
             git pull "$REMOTE" "$BRANCH"
@@ -48,7 +54,7 @@ while true; do
             
             # Go back to root
             cd "$PROJECT_ROOT"
-            echo "✅ Auto-deploy completed successfully. Resuming watch..."
+            echo "✅ Auto-deploy task finished. Resuming watch..."
         fi
     else
         echo "⚠️ [$(date '+%Y-%m-%d %H:%M:%S')] Failed to fetch from git remote. Will retry..."

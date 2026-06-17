@@ -135,6 +135,10 @@ ansible_exit=$?
 set -e
 
 if [ $ansible_exit -eq 0 ]; then
+    # Update last deployed commit file
+    if git rev-parse HEAD >/dev/null 2>&1; then
+        git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" || true
+    fi
     send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
 
 🔍 *Lệnh lấy log hữu ích:*
