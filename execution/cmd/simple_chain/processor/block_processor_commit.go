@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -180,6 +181,7 @@ func (bp *BlockProcessor) commitWorker() {
 			}
 		}
 		saveDuration := time.Since(startSave)
+		pipeline.GlobalBlockTraceStore.UpdateSaveDBTime(blockNum, saveDuration.Milliseconds())
 
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.
 		// Ensures block data is safely on disk before GEI advances,
@@ -344,7 +346,22 @@ func (bp *BlockProcessor) commitWorker() {
 			}(job.MappingWg, job.Block, job.ProcessResults.Receipts, allEventLogs)
 		}
 
-		logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, time.Since(start), txCount)
+		totalDuration := time.Since(start)
+		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Milliseconds())
+		
+		if txCount > 0 {
+			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | Rust: %dms | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
+				trace.BlockNumber, trace.TxCount,
+				trace.ConsensusDurationMs,
+				trace.ProcessTxsDurationMs,
+				trace.Phase1TotalDurationMs - trace.ProcessTxsDurationMs,
+				trace.CommitMemoryDurationMs,
+				trace.SaveDBDurationMs,
+				trace.TotalBlockDurationMs,
+			)
+		} else {
+			logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, totalDuration, txCount)
+		}
 	}
 }
 

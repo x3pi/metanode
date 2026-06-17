@@ -23,6 +23,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -293,6 +294,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Record phase times
 	phase1Elapsed := time.Since(overallStart)
+	pipeline.GlobalBlockTraceStore.AddPhase1Time(currentBlockNumber, 0, receiptsRootDuration.Milliseconds(), txsRootDuration.Milliseconds(), phase1Elapsed.Milliseconds())
 
 	// Phase 2: Create Block Data
 	phase2Start := time.Now()
@@ -482,6 +484,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		codeBatchPut = retCodeBatchPut
 	}
 	phase32Elapsed := time.Since(phase32Start)
+	pipeline.GlobalBlockTraceStore.UpdateCommitMemoryTime(currentBlockNumber, phase32Elapsed.Milliseconds())
 
 	phase4Start := time.Now()
 	// TPS OPTIMIZATION: SetCommitLock(false) removed — CommitLock is now a no-op

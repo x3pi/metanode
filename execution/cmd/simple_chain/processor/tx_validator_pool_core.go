@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
@@ -653,6 +654,8 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	if len(txs) > 0 {
 		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | RealExec=%v",
 			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
+			
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(txs), consensusDuration.Milliseconds(), execDuration.Milliseconds())
 	}
 
 	if execDuration.Milliseconds() > 100 {
