@@ -458,3 +458,9 @@ metanode.code-workspace
 metanode-deploy/
 deploy/genesis.json
 deploy/ansible/.last_deployed_commit
+
+# Decoupled monitors outputs
+deploy/ansible/monitors/block_hash_checker/block_hash_checker
+deploy/ansible/monitors/logs_crash/
+deploy/ansible/monitors/block_hash_checker/mismatches_*.csv
+
