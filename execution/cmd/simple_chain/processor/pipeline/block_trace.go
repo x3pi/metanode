@@ -4,7 +4,7 @@ import (
 	"sync"
 )
 
-const MaxBlockTraces = 10000
+const MaxBlockTraces = 100
 
 type BlockTrace struct {
 	BlockNumber uint64 `json:"block_number"`
