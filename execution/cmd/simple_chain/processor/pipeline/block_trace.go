@@ -11,7 +11,13 @@ type BlockTrace struct {
 	TxCount     int    `json:"tx_count"`
 
 	// Rust Consensus
-	ConsensusDurationMs int64 `json:"consensus_duration_ms"`
+	ConsensusDurationMs          int64 `json:"consensus_duration_ms"`
+	RustMempoolProposeDurationMs int64 `json:"rust_mempool_propose_duration_ms"`
+	RustDagConsensusDurationMs   int64 `json:"rust_dag_consensus_duration_ms"`
+	RustDeliveryFFIDurationMs    int64 `json:"rust_delivery_ffi_duration_ms"`
+
+	// Pre-mempool
+	ClientBatchProcessingMs      int64 `json:"client_batch_processing_ms"`
 
 	// Phase 1: Execution & Processing
 	ProcessTxsDurationMs   int64 `json:"process_txs_duration_ms"`
@@ -69,6 +75,22 @@ func (s *BlockTraceStore) AddConsensusAndExecTime(blockNum uint64, txCount int, 
 	t.TxCount = txCount
 	t.ConsensusDurationMs = consensusMs
 	t.ProcessTxsDurationMs = execMs
+}
+
+func (s *BlockTraceStore) SetRustConsensusDetailedTime(blockNum uint64, rustMempoolProposeMs, rustDagConsensusMs, rustDeliveryFFIMs int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.getOrCreateTrace(blockNum)
+	t.RustMempoolProposeDurationMs = rustMempoolProposeMs
+	t.RustDagConsensusDurationMs = rustDagConsensusMs
+	t.RustDeliveryFFIDurationMs = rustDeliveryFFIMs
+}
+
+func (s *BlockTraceStore) SetClientBatchProcessingTime(blockNum uint64, ms int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.getOrCreateTrace(blockNum)
+	t.ClientBatchProcessingMs = ms
 }
 
 func (s *BlockTraceStore) AddPhase1Time(blockNum uint64, processTxsMs, receiptsRootMs, txsRootMs, phase1TotalMs int64) {
