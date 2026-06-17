@@ -576,3 +576,22 @@ epochBoundaryResponse:
 		EpochDurationSeconds:  epochDurationSeconds,
 	}, nil
 }
+
+// HandleSetLastExecutedCommitHashRequest processes a SetLastExecutedCommitHashRequest and updates the Go database
+func (rh *RequestHandler) HandleSetLastExecutedCommitHashRequest(request *pb.SetLastExecutedCommitHashRequest) (*pb.SetLastExecutedCommitHashResponse, error) {
+	hash := request.GetLastExecutedCommitHash()
+	if len(hash) == 32 {
+		storage.UpdateLastExecutedCommitHash(hash)
+		if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
+			err := rh.storageManager.GetStorageBackupDb().Put(storage.LastExecutedCommitHashKey.Bytes(), hash)
+			if err != nil {
+				logger.Error("❌ [RPC] Failed to persist LastExecutedCommitHash to BackupDb: %v", err)
+				return &pb.SetLastExecutedCommitHashResponse{Success: false}, err
+			}
+		}
+		logger.Info("✅ [RPC] Aligned LastExecutedCommitHash to: %x", hash)
+		return &pb.SetLastExecutedCommitHashResponse{Success: true}, nil
+	}
+	return &pb.SetLastExecutedCommitHashResponse{Success: false}, fmt.Errorf("invalid hash length: %d", len(hash))
+}
+

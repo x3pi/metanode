@@ -130,6 +130,9 @@ impl ExecutorClient {
             Some(proto::response::Payload::GetLastHandledCommitIndexResponse(_)) => {
                 warn!("🔍 [EXECUTOR-REQ] Payload is GetLastHandledCommitIndexResponse (not expected for this request)");
             }
+            Some(proto::response::Payload::SetLastExecutedCommitHashResponse(_)) => {
+                warn!("🔍 [EXECUTOR-REQ] Payload is SetLastExecutedCommitHashResponse (not expected for this request)");
+            }
             None => {
                 warn!("🔍 [EXECUTOR-REQ] Payload is None - response structure may be incorrect");
                 warn!("🔍 [EXECUTOR-REQ] Full response debug: {:?}", response);
@@ -222,6 +225,11 @@ impl ExecutorClient {
                 Some(proto::response::Payload::GetLastHandledCommitIndexResponse(_)) => {
                     Err(anyhow::anyhow!(
                         "Unexpected GetLastHandledCommitIndexResponse (expected ValidatorInfoList)"
+                    ))
+                }
+                Some(proto::response::Payload::SetLastExecutedCommitHashResponse(_)) => {
+                    Err(anyhow::anyhow!(
+                        "Unexpected SetLastExecutedCommitHashResponse (expected ValidatorInfoList)"
                     ))
                 }
                 None => {
@@ -457,6 +465,49 @@ impl ExecutorClient {
                 Err(anyhow::anyhow!("Go returned error for GetLastHandledCommitIndex: {}", error_msg))
             }
             _ => Err(anyhow::anyhow!("Unexpected response type for GetLastHandledCommitIndex")),
+        }
+    }
+
+    /// Set last executed commit hash in Go to align startup consensus metadata
+    pub async fn set_last_executed_commit_hash(&self, hash: [u8; 32]) -> Result<()> {
+        if !self.is_enabled() {
+            return Err(anyhow::anyhow!("Executor client is not enabled"));
+        }
+
+        // Circuit breaker check
+        if let Err(reason) = self.rpc_circuit_breaker.check("set_last_executed_commit_hash") {
+            return Err(anyhow::anyhow!("Circuit breaker: {}", reason));
+        }
+
+        let request = Request {
+            payload: Some(proto::request::Payload::SetLastExecutedCommitHashRequest(
+                proto::SetLastExecutedCommitHashRequest {
+                    last_executed_commit_hash: hash.to_vec(),
+                },
+            )),
+        };
+
+        let mut request_buf = Vec::new();
+        request.encode(&mut request_buf)?;
+
+        let response_buf = self.execute_rpc_request(&request_buf).await?;
+
+        let response = Response::decode(&response_buf[..])
+            .map_err(|e| anyhow::anyhow!("Failed to decode response from Go: {}", e))?;
+
+        match response.payload {
+            Some(proto::response::Payload::SetLastExecutedCommitHashResponse(res)) => {
+                if res.success {
+                    info!("✅ [EXECUTOR-REQ] SetLastExecutedCommitHash successful");
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Go returned failure to set hash"))
+                }
+            }
+            Some(proto::response::Payload::Error(error_msg)) => {
+                Err(anyhow::anyhow!("Go returned error: {}", error_msg))
+            }
+            _ => Err(anyhow::anyhow!("Unexpected response type for SetLastExecutedCommitHash")),
         }
     }
 }

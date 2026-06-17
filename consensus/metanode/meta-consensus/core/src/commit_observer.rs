@@ -219,6 +219,9 @@ impl CommitObserver {
                             replay_after_commit_index,
                             local_digest
                         );
+                        if let Some(callback) = &commit_consumer.align_executed_commit_hash {
+                            callback(local_digest);
+                        }
                     } else {
                         tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
                     }
