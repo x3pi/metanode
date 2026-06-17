@@ -56,7 +56,7 @@ func main() {
 		log.Printf("⚠️  .env not found, using environment variables")
 	}
 
-	httpURL := getEnv("HTTP_URL", "http://192.168.1.234:8545")
+	httpURL := getEnv("HTTP_URL", "http://192.168.1.231:8545")
 	privateKeyHex := getEnv("PRIVATE_KEY", "")
 	ccContractStr := getEnv("CC_CONTRACT", "")
 	payloadCCHex := getEnv("PAYLOAD_CC", "")

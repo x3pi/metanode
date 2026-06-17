@@ -107,7 +107,7 @@ func callView(client *ethclient.Client, contractAddr common.Address, parsedABI a
 
 func main() {
 	godotenv.Load()
-	httpURL := getEnv("HTTP_URL", "http://192.168.1.234:8545")
+	httpURL := getEnv("HTTP_URL", "http://192.168.1.231:8545")
 	privateKeyHex := getEnv("PRIVATE_KEY", "")
 	if privateKeyHex == "" {
 		log.Fatal("❌ PRIVATE_KEY is required in .env")

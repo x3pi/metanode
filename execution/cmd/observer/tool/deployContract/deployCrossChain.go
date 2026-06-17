@@ -167,7 +167,7 @@ func main() {
 	}
 
 	config := &Config{
-		RPCUrl:             getEnv("RPC_URL", "http://192.168.1.234:8545"),
+		RPCUrl:             getEnv("RPC_URL", "http://192.168.1.231:8545"),
 		WSUrl:              getEnv("WS_URL", ""),
 		RemoteRPCUrl:       getEnv("REMOTE_WS_URL", ""),
 		DeployerPrivateKey: getEnv("PRIVATE_KEY", ""),
