@@ -118,7 +118,7 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE" || echo "")
 fi
 
-echo -e "\n🚀 Starting Ansible Deployment with:"
+echo -e "\n🚀 Starting Ansible Operation with:"
 echo "   Deployer Server IP: $DEPLOY_IP"
 echo "   Target Node IPs:    $TARGET_NODES_IPS"
 echo "   Source:             $DEPLOY_SOURCE"
@@ -128,7 +128,8 @@ echo "   Keep Data:          $KEEP_DATA"
 echo "   Restore Node:       $RESTORE_NODE"
 echo "   Open Ports:         $OPEN_PORTS"
 
-send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
+ACTION_UPPER=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
+send_telegram_notification "🚀 *[${ACTION_UPPER}]* Bắt đầu quá trình Ansible ${ACTION}:
 - Deployer Server IP: \`${DEPLOY_IP}\`
 - Target Node IPs: \`${TARGET_NODES_IPS}\`
 - Source: \`${DEPLOY_SOURCE}\`
@@ -169,7 +170,7 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n⚙️ Cấu hình kết nối client:"
     echo "$RPC_CONFIG"
 
-    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
+    send_telegram_notification "✅ *[${ACTION_UPPER}]* Quá trình Ansible (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
 
 ⚙️ *Cấu hình kết nối client:*
 \`\`\`json
@@ -188,7 +189,7 @@ ${RPC_CONFIG}
   - *Execution logs:*
     \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
 else
-    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` thất bại với mã lỗi \`${ansible_exit}\`!
+    send_telegram_notification "❌ *[${ACTION_UPPER}]* Quá trình Ansible (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` thất bại với mã lỗi \`${ansible_exit}\`!
 
 🔍 *Lệnh lấy log kiểm tra lỗi:*
 • *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
@@ -204,7 +205,7 @@ else
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
-if [ -f "$MONITOR_SCRIPT" ]; then
+if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
     echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
     bash "$MONITOR_SCRIPT"
 fi

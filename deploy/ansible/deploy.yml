@@ -54,6 +54,7 @@
   gather_facts: false
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
+      when: "ansible_action in ['start', 'setup']"
       ansible.builtin.shell: |
         RPC_JSON_PATH="/tmp/rpc_nodes.json"
         JSON_NODES=()
