@@ -784,6 +784,10 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 			return allTxs
 		}
 
+		var validTxs []types.Transaction
+		var futureTxs []types.Transaction
+		nonceMap := make(map[common.Address]uint64)
+
 		// Preload accounts in batch to warm cache and avoid synchronous DB I/O inside loop
 		preloadSet := make(map[common.Address]struct{}, len(allTxs))
 		for _, tx := range allTxs {
@@ -795,6 +799,14 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				preloadAddrs = append(preloadAddrs, addr)
 			}
 			vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
+			for _, addr := range preloadAddrs {
+				as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr)
+				if err == nil && as != nil {
+					nonceMap[addr] = as.Nonce()
+				} else {
+					nonceMap[addr] = 0
+				}
+			}
 		}
 
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
@@ -806,20 +818,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 			return allTxs[i].GetNonce() < allTxs[j].GetNonce()
 		})
 
-		var validTxs []types.Transaction
-		var futureTxs []types.Transaction
-		nonceMap := make(map[common.Address]uint64)
-
 		for _, tx := range allTxs {
 			from := tx.FromAddress()
-			if _, ok := nonceMap[from]; !ok {
-				as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(from)
-				if err == nil && as != nil {
-					nonceMap[from] = as.Nonce()
-				} else {
-					nonceMap[from] = 0
-				}
-			}
 
 			expected := nonceMap[from]
 			actual := tx.GetNonce()
