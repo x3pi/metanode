@@ -161,7 +161,22 @@ if [ $ansible_exit -eq 0 ]; then
     if git rev-parse HEAD >/dev/null 2>&1; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" || true
     fi
+
+    # Read and pretty-print /tmp/rpc_nodes.json
+    RPC_CONFIG=""
+    if [ -f "/tmp/rpc_nodes.json" ]; then
+        RPC_CONFIG=$(jq . /tmp/rpc_nodes.json 2>/dev/null || cat /tmp/rpc_nodes.json)
+    fi
+
+    echo -e "\n⚙️ Cấu hình kết nối client:"
+    echo "$RPC_CONFIG"
+
     send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
+
+⚙️ *Cấu hình kết nối client:*
+\`\`\`json
+${RPC_CONFIG}
+\`\`\`
 
 🔍 *Lệnh lấy log hữu ích:*
 • *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
