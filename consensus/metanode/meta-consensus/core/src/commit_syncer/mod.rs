@@ -2567,16 +2567,18 @@ impl<C: NetworkClient> Inner<C> {
         // ═══════════════════════════════════════════════════════════════════
         let is_dag_empty = self.dag_state.read().last_commit.is_none();
         let is_mismatched_epoch = vote_blocks.iter().any(|b| b.epoch() != self.context.committee.epoch());
+        let local_dag_commit = self.dag_state.read().last_commit_index();
+        let is_historical_for_us = commit_range.end() <= local_dag_commit;
         if is_dag_empty {
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for empty DAG (cold-start / snapshot recovery). \
                  Trusting commit sequence from single peer {} based on cryptographic chaining.",
                 peer
             );
-        } else if _is_epoch_boundary || is_catching_up || is_historical || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
+        } else if _is_epoch_boundary || is_catching_up || is_historical || is_historical_for_us || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
-                 (historical / epoch boundary / catching up sync / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
+                 (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
                 end_commit_ref,
                 peer
             );
