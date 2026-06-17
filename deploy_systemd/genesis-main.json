@@ -8,8 +8,8 @@
   },
   "validators": [
     {
-      "address": "0x85cdbdf91a09a99e77854c00f0e8056e773ec56a",
-      "eth_private_key": "0x0ae2d7bab6efd7b084e84aa0da11a7191f384cc8b14238e1cef2a600eeb1efa1",
+      "address": "0xa6da218aa4bb2ba04892c9d36ee78a2e057ab4b0",
+      "eth_private_key": "0xea4460d23eb829cf1e27568a3b5e50a0de97530ccbd0e6612915769c5902ab9f",
       "primary_address": "192.168.1.234:6200",
       "worker_address": "192.168.1.234:4012",
       "p2p_address": "/ip4/192.168.1.234/tcp/9100",
@@ -21,19 +21,19 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x85cdbdf91a09a99e77854c00f0e8056e773ec56a",
+          "address": "0xa6da218aa4bb2ba04892c9d36ee78a2e057ab4b0",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "/FNVc9x5L3rd2IjD20ufL0q/Ey0VebHoJYeOg6jx0fs=",
+      "network_key": "xv4iKSsNuwc6RDXP0ZjV8yW96+BLVz6bc1nIsLse89Q=",
       "hostname": "node-0",
-      "authority_key": "jwQa812NqLU70tzed9LH0VP7wbf25SQK7txnnM2S8Br/kTGGuUdhAL6Wj/F0Nu6UCcqAAUZAGZ90snKPT1U5WpvYRePNlJ3W+LmExs90dn7Kezdh3P0u0b5P/1e65T+p",
-      "protocol_key": "Ahr4llw4ICb/OFrvMRfXUHe3pefq+BJ15x4TH4J9X+A="
+      "authority_key": "q40P9QJy6cehX5AyZy8iuOrEGjd6p4RLE5wuC5G5Trx0kY9LQEcyaa1X2kKGqgwKF+4yuMlz4TMcrozAAjH6KBqVzK6qFZCqJyjWfLJv2rQ+WrCakZ9G4bNavHlBlyEe",
+      "protocol_key": "4hWvUgJngcl5u/hTBjqt8ZSw5xNhLmWyGLZHZSzZHVE="
     },
     {
-      "address": "0x663079442ff1825be493d0f0ed54d20e51094f32",
-      "eth_private_key": "0xb46b125fef8883b8bdc3faa82c8d443b735e186e23cdb07e7a1e20103adf4f49",
+      "address": "0xf617e291103905d288e89e129d0cdbe942c82a56",
+      "eth_private_key": "0xcad229f04607b6cafe4239aab998497339101e502584e65b523a883b8abed831",
       "primary_address": "192.168.1.233:6201",
       "worker_address": "192.168.1.233:4013",
       "p2p_address": "/ip4/192.168.1.233/tcp/9101",
@@ -45,19 +45,19 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x663079442ff1825be493d0f0ed54d20e51094f32",
+          "address": "0xf617e291103905d288e89e129d0cdbe942c82a56",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "TJB1RrfVxCTPMMuzwd0kbej5WIaImHSAEb+5eJZcbu4=",
+      "network_key": "qYEwraCdKzd7N9X8ZBW6t8Eav5BIPwWmv2EF5QXnFXw=",
       "hostname": "node-1",
-      "authority_key": "i/W3PkHgFCPKSCcWx6iRpY3CNUZt/nVe5vZ5retJCGA7rA2YR1qUWjN09p2JLoVuDaYUsBScJH0IsswK1dUl1nvstGWoPsdXkGWVhHpi5aAq4YSP5K3MSG3HjvL86Jjp",
-      "protocol_key": "tqk6yn9OGPZhp4yaM0IfLBQBrqYZoBvCnq+Xz+N4rNo="
+      "authority_key": "k3q7bvr7Ikcj4tgk/skpO6lTrWG2npDrzCA9WzV+kJtXmhqXEv1oh7sJbSveYK43AWrhOjd71OKdkiI4gbRm4yijND9yE9nqUqwT80JFAT/iqSjCRiENIrbBfK0aB22t",
+      "protocol_key": "6Caq/cLuDy6Bo9QYvjp6kIFjRjNkoHuthy8Jl1XsgLc="
     },
     {
-      "address": "0x348e81920a2073decf11035b5e3487381339a6fa",
-      "eth_private_key": "0xc64a884d10566af0c4cec5b951c89276b5422159555e6202bb2f9e7d63f88003",
+      "address": "0xe907ff16fd70af4ded64b49bc9ff3ad10fd7520d",
+      "eth_private_key": "0xe760ad460ac51b2cd240e9bd26c976ee15991ef5ab70925b2d50d3154a98b92a",
       "primary_address": "192.168.1.232:6202",
       "worker_address": "192.168.1.232:4014",
       "p2p_address": "/ip4/192.168.1.232/tcp/9102",
@@ -69,22 +69,22 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x348e81920a2073decf11035b5e3487381339a6fa",
+          "address": "0xe907ff16fd70af4ded64b49bc9ff3ad10fd7520d",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "kZ8DutqFi98O40WKyuTQbu3Gw07TG1Du4Hg39fUskoE=",
+      "network_key": "FXH2ZNzFqeizlhJ1Eh+Hi1UattzdnqQ0GVUFGYqUlv4=",
       "hostname": "node-2",
-      "authority_key": "paR8532BPlNpUgBlBwoHu0W2xtYt4FAkTUcxLzVMVGVeIloJ+w3ZpGqRPlCS+PXRDGJP/uSpwQru5jwzVEdzY/ccDmKG0/XQeW3YhGSUT75cmYbTnUM7qmhUIaDa9Jy6",
-      "protocol_key": "3lToZJ9F3j5xBPHeIH3yUFeW0TDgm0i3bUPv96yEhd0="
+      "authority_key": "r+EuKhqgAzwdZicOWf4TFGQNUNW3lOPBtc3jOCbauw4W5UeDE4Mv+7/+aVNhM7rHAeXXAc5NFVn1mdCuuKK6UKLZ7M+ePOTnzYsDo89VMzga4yjFfnDznePu7sL562Sl",
+      "protocol_key": "+hdqYcY8fuhCIfIbm0Zd1j13BQKc/5mFgnQqcvn7JQM="
     },
     {
-      "address": "0x48a1d6309c83a82a5d094434687eca67b20046aa",
-      "eth_private_key": "0x955a99621475709e09159ac6780fae93611960ac721dbeb68ff6594ad4760400",
-      "primary_address": "192.168.1.231:6203",
-      "worker_address": "192.168.1.231:4015",
-      "p2p_address": "/ip4/192.168.1.231/tcp/9103",
+      "address": "0x8d192fb92f36037984d05950fff6e98bb36af464",
+      "eth_private_key": "0xcc28b9027f61e0d9e4a9fef43cecb548b1d48efe791961dae79a45157f662995",
+      "primary_address": "192.168.1.232:6203",
+      "worker_address": "192.168.1.232:4015",
+      "p2p_address": "/ip4/192.168.1.232/tcp/9103",
       "description": "Validator node-3",
       "website": "",
       "image": "",
@@ -93,15 +93,15 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x48a1d6309c83a82a5d094434687eca67b20046aa",
+          "address": "0x8d192fb92f36037984d05950fff6e98bb36af464",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "3ZK2tcc5E75smV6DoCycCAGx9eXytPd5t0ShRYtkEfo=",
+      "network_key": "ytgiBig8r/6Yj0o82tw4xaPyRGR3W9bFck7uUfuExBQ=",
       "hostname": "node-3",
-      "authority_key": "hncybdHxGnH2wwilO1dXdiIWJTbEbErA7u0WjFnqQxxZiMbMyDU9MBObYZMc+DpyE7T2EV1omeoWO10ACZjaH/xcgc85xv/oMqKnoyInNjKUhh23EhMN+TGhNC/mCMTn",
-      "protocol_key": "LeWAPEtRW0y8Ju8dyGdOtctI6tCfmWxSv6tKxcl3sBs="
+      "authority_key": "lCZvWLca5iqybZpd5MT/2Ee4CfxSh+825il+Rz7EfoI8QhH5iAi6bEYSKtGJAzOGGNkYBeUi3f1tQYKNBvbrJu3P+ubWacFtFNpbHEQZEIqgGvu4nhFEUxAcscrfjitz",
+      "protocol_key": "wvJm5Nrgoyqr4HtbJQIVnZJjipyMtSsZ4zOhZEh+Jr8="
     },
     {
       "address": "0x42e067b0ceb410a585f24fead248dc9ce18abd3c",
