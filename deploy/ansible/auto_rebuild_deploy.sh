@@ -9,8 +9,8 @@ set -u
 REMOTE="origin"
 BRANCH="dev"
 CHECK_INTERVAL=5
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ANSIBLE_DIR="${PROJECT_ROOT}/ansible"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ANSIBLE_DIR="${PROJECT_ROOT}/deploy/ansible"
 
 echo "👀 Starting Git Auto-Deploy Watcher..."
 echo "📍 Project Root: $PROJECT_ROOT"

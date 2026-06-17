@@ -8,7 +8,9 @@
 
 ```
 metanode/
-├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
+├── deploy/                 ← Deployment configurations and scripts parent folder
+│   ├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
+│   └── systemd/            ← Systemd deployment scripts, key generator, and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
 ├── consensus/          ← Rust consensus engine (BFT/DAG-based)
@@ -19,7 +21,6 @@ metanode/
 │           ├── config/ ← Consensus configuration types
 │           └── types/  ← Shared consensus types
 ├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
-├── deploy/             ← Deployment scripts, key generator, and environment templates
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
