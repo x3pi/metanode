@@ -51,6 +51,7 @@
     group: metanode
     mode: '0644'
   loop: "{{ active_nodes | product(['protocol_key.json', 'network_key.json', 'authority_key.json', 'eth_key.json']) | list }}"
+  when: ansible_action == 'setup'
 
 - name: Copy genesis file
   ansible.builtin.copy:
@@ -61,6 +62,7 @@
     group: metanode
     mode: '0644'
   loop: "{{ active_nodes }}"
+  when: ansible_action == 'setup'
 
 - name: Generate systemd service for Execution
   ansible.builtin.template:

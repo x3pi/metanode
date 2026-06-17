@@ -34,5 +34,6 @@
     group: "{{ ansible_user }}"
     mode: '0755'
   loop: "{{ active_nodes }}"
+  when: ansible_action == 'setup'
 
 
