@@ -53,5 +53,5 @@ tempfile = "3.8"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
