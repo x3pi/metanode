@@ -6,8 +6,8 @@ use nomt::{KeyReadWrite, Nomt, Options, SessionParams};
 /// The unified State Database managed in Rust, wrapping NOMT and providing
 /// high-level, simplified methods for block commit, snapshotting, and pruning.
 pub struct RustStateDB {
-    db: Nomt<Blake3Hasher>,
-    path: String,
+    pub db: std::sync::Arc<Nomt<Blake3Hasher>>,
+    pub path: String,
 }
 
 impl RustStateDB {
@@ -36,7 +36,7 @@ impl RustStateDB {
 
         match Nomt::<Blake3Hasher>::open(opts) {
             Ok(db) => Ok(RustStateDB {
-                db,
+                db: std::sync::Arc::new(db),
                 path: path_str.to_string(),
             }),
             Err(e) => Err(format!("failed to open NOMT: {}", e)),
