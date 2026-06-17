@@ -86,7 +86,7 @@ Kiểm tra tmux sessions/tiến trình đang chạy hay không + peek log cuối
 Theo dõi Go Master, Go Sub, Rust, hay C++ EVM logs.
 
 ```bash
-# Log của Rust node 0 (trên máy 192.168.1.234)
+# Log của Rust node 0 (trên máy 192.168.1.231)
 ./deploy_logs.sh --env deploy-3machines.env 0 rust
 
 # Log của Go Master node 0
