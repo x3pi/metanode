@@ -8,6 +8,8 @@
 //! - Multiple concurrent readers are supported via `nomt_read`.
 //! - Writes are batched: `nomt_session_begin` → N × `nomt_session_write` → `nomt_session_commit`.
 //! - Only one write session may be active at a time (enforced by NOMT internally).
+pub mod state_db;
+pub use state_db::RustStateDB;
 
 use libc::{c_char, c_int, size_t};
 use nomt::hasher::Blake3Hasher;
@@ -961,5 +963,230 @@ pub unsafe extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
         }
     }
 
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFIED STATE DB FFI APIs (SIMPLIFIED BRIDGE)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Opaque wrapper for RustStateDB
+pub struct RustStateDBHandle {
+    pub db: RustStateDB,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_open(
+    path: *const c_char,
+    commit_concurrency: c_int,
+    page_cache_mb: c_int,
+    leaf_cache_mb: c_int,
+    hashtable_buckets: c_int,
+    preallocate_ht: c_int,
+) -> *mut RustStateDBHandle {
+    ffi_catch_unwind!(ptr::null_mut(), {
+        if path.is_null() {
+            return ptr::null_mut();
+        }
+        let c_str = CStr::from_ptr(path);
+        let path_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        let concurrency = if commit_concurrency > 0 { commit_concurrency as usize } else { 4 };
+        let page_cache = if page_cache_mb > 0 { page_cache_mb as usize } else { 256 };
+        let leaf_cache = if leaf_cache_mb > 0 { leaf_cache_mb as usize } else { 256 };
+        let buckets = if hashtable_buckets > 0 { hashtable_buckets as u32 } else { 0 };
+        let preallocate = preallocate_ht != 0;
+
+        match RustStateDB::open(path_str, concurrency, page_cache, leaf_cache, buckets, preallocate) {
+            Ok(db) => Box::into_raw(Box::new(RustStateDBHandle { db })),
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_open failed: {}", e);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_close(handle: *mut RustStateDBHandle) {
+    ffi_catch_unwind!((), {
+        if !handle.is_null() {
+            let _ = Box::from_raw(handle);
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_root(handle: *const RustStateDBHandle, root_out: *mut u8) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || root_out.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let r = handle.db.root();
+        ptr::copy_nonoverlapping(r.as_ptr(), root_out, 32);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_get(
+    handle: *const RustStateDBHandle,
+    key: *const u8,
+    val_out: *mut u8,
+    val_max_len: size_t,
+    val_actual_len: *mut size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || key.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let mut key_path = [0u8; 32];
+        ptr::copy_nonoverlapping(key, key_path.as_mut_ptr(), 32);
+
+        match handle.db.read(key_path) {
+            Ok(Some(value)) => {
+                if val_out.is_null() || val_actual_len.is_null() {
+                    return -1;
+                }
+                let len = value.len().min(val_max_len);
+                ptr::copy_nonoverlapping(value.as_ptr(), val_out, len);
+                *val_actual_len = value.len();
+                0
+            }
+            Ok(None) => {
+                if !val_actual_len.is_null() {
+                    *val_actual_len = 0;
+                }
+                1 // not found
+            }
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_get failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_commit(
+    handle: *mut RustStateDBHandle,
+    // Flattened writes: N * 32-byte keys, followed by values
+    write_keys: *const u8,
+    write_vals: *const u8,
+    write_val_lens: *const size_t,
+    write_count: size_t,
+    // Flattened reads: M * 32-byte keys, followed by values (read-before-write)
+    read_keys: *const u8,
+    read_vals: *const u8,
+    read_val_lens: *const size_t,
+    read_count: size_t,
+    root_out: *mut u8,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() {
+            return -1;
+        }
+        let handle = &mut *handle;
+
+        // Parse writes
+        let mut writes = Vec::with_capacity(write_count);
+        if write_count > 0 && !write_keys.is_null() && !write_val_lens.is_null() {
+            let mut val_offset = 0;
+            for i in 0..write_count {
+                let mut kp = [0u8; 32];
+                ptr::copy_nonoverlapping(write_keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+                let val_len = *write_val_lens.add(i);
+                let value = if write_vals.is_null() || val_len == 0 {
+                    None
+                } else {
+                    let v = slice::from_raw_parts(write_vals.add(val_offset), val_len).to_vec();
+                    val_offset += val_len;
+                    Some(v)
+                };
+                writes.push((kp, value));
+            }
+        }
+
+        // Parse reads
+        let mut reads = Vec::with_capacity(read_count);
+        if read_count > 0 && !read_keys.is_null() && !read_val_lens.is_null() {
+            let mut val_offset = 0;
+            for i in 0..read_count {
+                let mut kp = [0u8; 32];
+                ptr::copy_nonoverlapping(read_keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+                let val_len = *read_val_lens.add(i);
+                let value = if read_vals.is_null() || val_len == 0 {
+                    None
+                } else {
+                    let v = slice::from_raw_parts(read_vals.add(val_offset), val_len).to_vec();
+                    val_offset += val_len;
+                    Some(v)
+                };
+                reads.push((kp, value));
+            }
+        }
+
+        match handle.db.commit(writes, reads) {
+            Ok(new_root) => {
+                if !root_out.is_null() {
+                    ptr::copy_nonoverlapping(new_root.as_ptr(), root_out, 32);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_commit failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_checkpoint(
+    handle: *const RustStateDBHandle,
+    dest_path: *const c_char,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || dest_path.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let c_str = CStr::from_ptr(dest_path);
+        let dest_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        match handle.db.checkpoint(dest_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_checkpoint failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_prune(handle: *mut RustStateDBHandle, old_epoch: u64) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        match handle.db.prune(old_epoch) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_prune failed: {}", e);
+                -1
+            }
+        }
     })
 }

@@ -1,12 +1,10 @@
 package trie
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -377,7 +375,7 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		// Backward compatibility: if no file-based registry, try loading from NOMT
 		if len(knownKeys) == 0 {
 			regKey := registryKeyPath([]byte(namespace))
-			regData, found, readErr := handle.Read(regKey)
+			regData, found, readErr := handle.StateDbGet(regKey)
 			if readErr == nil && found && len(regData) > 0 {
 				offset := 0
 				for offset < len(regData) {
@@ -520,7 +518,7 @@ func (n *NomtStateTrie) Get(key []byte) ([]byte, error) {
 
 	// Read from NOMT (thread-safe, no lock needed)
 	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
-	val, found, err := n.handle.Read(keyPath)
+	val, found, err := n.handle.StateDbGet(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("nomt read error for key %x: %w", key, err)
 	}
@@ -553,7 +551,7 @@ func (n *NomtStateTrie) GetLockFree(key []byte) ([]byte, error) {
 
 	// Read from NOMT (thread-safe, no lock needed)
 	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
-	val, found, err := n.handle.Read(keyPath)
+	val, found, err := n.handle.StateDbGet(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("nomt read error for key %x: %w", key, err)
 	}
@@ -584,7 +582,7 @@ func (n *NomtStateTrie) getNoLock(key []byte, hexKey string) ([]byte, error) {
 	}
 
 	keyPath := addressToKeyPathWithNamespace(n.namespace, key)
-	val, found, err := n.handle.Read(keyPath)
+	val, found, err := n.handle.StateDbGet(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("nomt read error for key %x: %w", key, err)
 	}
@@ -661,7 +659,7 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 		}
 		// Read from NOMT
 		keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
-		val, found, err := n.handle.Read(keyPath)
+		val, found, err := n.handle.StateDbGet(keyPath)
 		if err == nil && found && len(val) > 0 {
 			results[hexKey] = val
 		}
@@ -706,7 +704,7 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 		}
 		if !prefetchedLoaded {
 			// Thread-safe FFI read — NO lock held
-			oldVal, found, err := n.handle.Read(keyPath)
+			oldVal, found, err := n.handle.StateDbGet(keyPath)
 			if err == nil && found && len(oldVal) > 0 {
 				prefetchedOldVal = oldVal
 			}
@@ -1175,7 +1173,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 			} else {
 				// Fallback to reading from the old C++ handle if not found in storage
 				keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
-				val, found, readErr := n.handle.Read(keyPath)
+				val, found, readErr := n.handle.StateDbGet(keyPath)
 				if readErr == nil && found && len(val) > 0 {
 					kvs = append(kvs, [2][]byte{origKey, val})
 					readFromHandleCount++
@@ -1345,9 +1343,6 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 // slow FFI operations, blocking all 64 server workers via Get() → RLock().
 // ═══════════════════════════════════════════════════════════════════════════════
 func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, [][]byte, error) {
-	// ═══════════════════════════════════════════════════════════════════════
-	// PHASE 1: Snapshot dirty state under writerMu (microseconds)
-	// ═══════════════════════════════════════════════════════════════════════
 	n.writerMu.Lock()
 
 	if len(n.wDirty) == 0 {
@@ -1356,230 +1351,88 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		return rootHash, nil, nil, nil
 	}
 
-	// Freeze the dirty map — this becomes the immutable "committing" snapshot.
-	// Create a new wDirty for any concurrent Update() calls during Phase 2.
 	committingSnapshot := n.wDirty
 	oldValuesSnapshot := n.wOldValues
 	n.wDirty = make(map[string]*nomtDirtyEntry)
 	n.wOldValues = make(map[string][]byte)
 	n.wOldLoaded = make(map[string]bool)
 
-	// Publish readView: readers see committing entries via lock-free atomic load.
-	// wDirty is empty, so readView.dirty is empty (new writes go to fresh wDirty).
 	currentRoot := n.loadReadView().rootHash
 	n.publishReadView(
-		make(map[string]*nomtDirtyEntry), // empty dirty (fresh block)
-		committingSnapshot,               // frozen previous dirty
-		currentRoot,                      // root unchanged until Phase 3
+		make(map[string]*nomtDirtyEntry),
+		committingSnapshot,
+		currentRoot,
 	)
 
 	n.writerMu.Unlock()
-	// ← writerMu released! Get() calls from server workers proceed instantly.
 
-	// Grab session (thread-safe, handles its own lock-free fast path)
-	session := n.getOrCreateSession()
-
-	if session == nil {
-		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: failed to begin session")
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════
-	// PHASE 2: Expensive FFI operations (NO LOCK — readers never blocked)
-	// ═══════════════════════════════════════════════════════════════════════
-
-	// FORK-SAFE: Registry is NO LONGER injected into the dirty map.
-
-	// Build key/value arrays for batch write
 	dirtyCount := len(committingSnapshot)
-	nomtKeys := make([][32]byte, 0, dirtyCount)
-	nomtVals := make([][]byte, 0, dirtyCount)
+	writes := make([][32]byte, 0, dirtyCount)
+	writeVals := make([][]byte, 0, dirtyCount)
 	replicationBatch := make([][2][]byte, 0, dirtyCount)
 
-	// CRITICAL FORK-SAFETY: Sort dirty entries by hex key for deterministic order.
 	sortedDirtyKeys := make([]string, 0, dirtyCount)
 	for hexKey := range committingSnapshot {
 		sortedDirtyKeys = append(sortedDirtyKeys, hexKey)
 	}
 	sort.Strings(sortedDirtyKeys)
 
-	// FORK-DIAG: Hash the dirty snapshot + old values for cross-node comparison
-	if strings.HasPrefix(string(n.namespace), "smart_contract_storage") && len(sortedDirtyKeys) > 0 {
-		diagHash := sha256.New()
-		for _, hexKey := range sortedDirtyKeys {
-			entry := committingSnapshot[hexKey]
-			diagHash.Write([]byte(hexKey))
-			diagHash.Write(entry.value)
-			if oldVal, ok := oldValuesSnapshot[hexKey]; ok {
-				diagHash.Write(oldVal)
-			}
-		}
-		digestHex := hex.EncodeToString(diagHash.Sum(nil)[:16])
-		logger.Warn("[FORK-DIAG] Commit namespace=%s dirtyCount=%d oldCount=%d digest=%s",
-			string(n.namespace), len(committingSnapshot), len(oldValuesSnapshot), digestHex)
-
-		// FORK-DIAG: Per-key fingerprints for pinpointing exact divergence
-		for i, hexKey := range sortedDirtyKeys {
-			entry := committingSnapshot[hexKey]
-			newHash := sha256.Sum256(entry.value)
-			newFP := hex.EncodeToString(newHash[:8])
-			keyPathHex := hex.EncodeToString(entry.keyPath[:8])
-
-			oldFP := "nil"
-			oldLen := 0
-			if oldVal, ok := oldValuesSnapshot[hexKey]; ok && len(oldVal) > 0 {
-				oldHash := sha256.Sum256(oldVal)
-				oldFP = hex.EncodeToString(oldHash[:8])
-				oldLen = len(oldVal)
-			}
-
-			logger.Warn("[FORK-DIAG][KEY-%d] ns=%s key=%s kpath=%s oldFP=%s(%d) newFP=%s(%d)",
-				i, string(n.namespace), hexKey[:16], keyPathHex,
-				oldFP, oldLen, newFP, len(entry.value))
-		}
-	}
+	reads := make([][32]byte, 0, dirtyCount)
+	readVals := make([][]byte, 0, dirtyCount)
 
 	for _, hexKey := range sortedDirtyKeys {
 		entry := committingSnapshot[hexKey]
-		nomtKeys = append(nomtKeys, entry.keyPath)
-		nomtVals = append(nomtVals, entry.value)
+		writes = append(writes, entry.keyPath)
+		writeVals = append(writeVals, entry.value)
+		replicationBatch = append(replicationBatch, [2][]byte{entry.keyPath[:], entry.value})
 
-		replicationBatch = append(replicationBatch, [2][]byte{
-			append([]byte("nomt:"), entry.originalKey...),
-			entry.value,
-		})
-	}
-
-	// CRITICAL FORK-SAFETY FIX: Record old values BEFORE writing.
-	// We optimize this by batching all record reads to minimize FFI boundary crossing overhead.
-	nomtReadKeys := make([][32]byte, 0, dirtyCount)
-	nomtReadVals := make([][]byte, 0, dirtyCount)
-	var insertCount, updateCount int
-	for _, hexKey := range sortedDirtyKeys {
-		entry := committingSnapshot[hexKey]
-		nomtReadKeys = append(nomtReadKeys, entry.keyPath)
-		if oldVal, ok := oldValuesSnapshot[hexKey]; ok && len(oldVal) > 0 {
-			nomtReadVals = append(nomtReadVals, oldVal)
-			updateCount++
-		} else {
-			nomtReadVals = append(nomtReadVals, nil)
-			insertCount++
+		if oldVal, ok := oldValuesSnapshot[hexKey]; ok {
+			reads = append(reads, entry.keyPath)
+			readVals = append(readVals, oldVal)
 		}
 	}
 
-	if len(nomtReadKeys) > 0 {
-		if err := session.BatchRecordRead(nomtReadKeys, nomtReadVals); err != nil {
-			logger.Warn("[NomtStateTrie] BatchRecordRead failed: %v", err)
-		}
-	}
-
-	if insertCount > 0 || updateCount > 0 {
-		logger.Info("[FORK-DIAG][RECORD-READ] namespace=%s, inserts=%d, updates=%d, total=%d",
-			string(n.namespace), insertCount, updateCount, insertCount+updateCount)
-	}
-
-	// Batch write to the session (single FFI call for all entries)
-	if err := session.BatchWrite(nomtKeys, nomtVals); err != nil {
-		session.Abort()
-		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie Commit: batch write failed: %w", err)
-	}
-	// Finish the session in-memory — computes the Merkle root atomically
-	newRootBytes, fs, err := session.Finish(n.handle)
+	newRoot, err := n.handle.StateDbCommit(writes, writeVals, reads, readVals)
 	if err != nil {
-		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie Commit: session finish failed: %w", err)
+		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: StateDbCommit failed: %w", err)
 	}
 
-	newRoot := e_common.BytesToHash(newRootBytes[:])
+	newRootHash := e_common.BytesToHash(newRoot[:])
 
-	// STATE CHANGELOG
-	var changes []state_changelog.StateChange
-	if n.changelogDB != nil && n.currentCommitBlock > 0 {
-		for _, hexKey := range sortedDirtyKeys {
-			entry := committingSnapshot[hexKey]
-			changes = append(changes, state_changelog.StateChange{
-				Key:      entry.originalKey,
-				OldValue: oldValuesSnapshot[hexKey],
-				NewValue: entry.value,
-			})
-		}
-		// ═══════════════════════════════════════════════════════════════
-		// FIX: Move changelog disk I/O out of the execution critical path.
-		// Queue the changes to be asynchronously flushed to disk during CommitPayload.
-		// ═══════════════════════════════════════════════════════════════
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════
-	// PHASE 3: Publish new root hash atomically (writerMu, ~microseconds)
-	// ═══════════════════════════════════════════════════════════════════════
 	n.writerMu.Lock()
-
-	// Store session state
-	n.sessionMu.Lock()
-	n.pendingFinishedSession = fs
-	n.activeSession = nil
-	if len(changes) > 0 {
-		n.pendingChangelog = changes
-		n.pendingChangelogBlock = n.currentCommitBlock
-	}
-	n.pendingCommittingMap = committingSnapshot
-	n.sessionMu.Unlock()
-
+	n.publishReadView(
+		make(map[string]*nomtDirtyEntry),
+		nil, // committing cleared
+		newRootHash,
+	)
 	n.lastCommitBatch = replicationBatch
 
-	// Publish final readView: new rootHash, committing still visible for reads
-	// until CommitPayload() flushes to disk and clears it.
-	// NOTE: We keep committingSnapshot in readView so Get() can still serve
-	// these values during the async disk flush. CommitPayload() will clear it.
-	//
-	// CRITICAL: We must clone wDirty before publishing — readView maps are
-	// immutable after Store(). Publishing the live wDirty pointer would allow
-	// concurrent readers to see writer mutations → panic on concurrent map access.
-	frozenDirty := cloneDirtyMap(n.wDirty)
-	n.publishReadView(
-		frozenDirty,        // immutable clone of current writer dirty
-		committingSnapshot, // keep serving committed entries until disk flush
-		newRoot,            // new Merkle root
-	)
-
-	logger.Info("[FORK-DIAG][NOMT-COMMIT] namespace=%s, entries=%d, oldRoot=%s → newRoot=%s",
-		string(n.namespace), dirtyCount, currentRoot.Hex()[:18], newRoot.Hex()[:18])
-
-	// FORK-SAFE: Persist knownKeys to file OUTSIDE the Merkle trie.
 	if n.registryChanged {
 		n.updateRegistryCache()
 		n.persistRegistryToFile()
 		n.registryChanged = false
 	}
-
 	n.writerMu.Unlock()
 
-	return newRoot, nil, nil, nil
+	return newRootHash, nil, nil, nil
 }
 
-// Close releases any resources held by the trie, specifically the NOMT write session.
-// This is critical to prevent session leaks when a trie is discarded or replaced
-// (e.g., on Sub nodes that never call Commit, or during state reorgs/reloads).
 func (n *NomtStateTrie) Close() {
 	n.sessionMu.Lock()
 	defer n.sessionMu.Unlock()
 
 	if n.activeSession != nil {
-		logger.Warn("⚠️ [NomtStateTrie] Aborting leaked active session for namespace=%s", string(n.namespace))
 		n.activeSession.Abort()
 		n.activeSession = nil
 	}
-
 	if n.pendingFinishedSession != nil {
-		logger.Warn("⚠️ [NomtStateTrie] Aborting leaked finished session for namespace=%s", string(n.namespace))
 		n.pendingFinishedSession.Abort()
 		n.pendingFinishedSession = nil
 	}
-
 	n.pendingChangelog = nil
 	n.pendingCommittingMap = nil
 }
 
-// HasUncommittedChanges returns true if there are dirty changes pending commit.
-// LOCK-FREE: reads from atomic readView and safely checks writer dirty under RLock.
 func (n *NomtStateTrie) HasUncommittedChanges() bool {
 	n.writerMu.RLock()
 	hasWDirty := len(n.wDirty) > 0
@@ -1593,10 +1446,7 @@ func (n *NomtStateTrie) HasUncommittedChanges() bool {
 	return len(view.dirty) > 0 || len(view.committing) > 0
 }
 
-// Copy creates a shallow copy with independent dirty map.
-// Used by PreloadAccounts for thread-safe parallel reads.
 func (n *NomtStateTrie) Copy() StateTrie {
-	// Read immutable view for dirty/committing
 	view := n.loadReadView()
 
 	newDirty := make(map[string]*nomtDirtyEntry, len(view.dirty))
@@ -1612,7 +1462,6 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		}
 	}
 
-	// Copy writer-private state under writerMu
 	n.writerMu.Lock()
 	newOldValues := make(map[string][]byte, len(n.wOldValues))
 	for k, v := range n.wOldValues {
@@ -1632,7 +1481,7 @@ func (n *NomtStateTrie) Copy() StateTrie {
 	n.knownKeysMu.RUnlock()
 
 	t := &NomtStateTrie{
-		handle:            n.handle, // shared handle (NOMT is thread-safe for reads)
+		handle:            n.handle,
 		namespace:         n.namespace,
 		wDirty:            newDirty,
 		wOldValues:        newOldValues,
@@ -1642,7 +1491,6 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		registryChanged:   n.registryChanged,
 		isHash:            n.isHash,
 	}
-	// Initialize readView for the copy
 	t.readView.Store(&nomtReadView{
 		dirty:      newDirty,
 		committing: newCommitting,
@@ -1652,184 +1500,31 @@ func (n *NomtStateTrie) Copy() StateTrie {
 }
 
 func (n *NomtStateTrie) CommitPayload() error {
-	n.handle.LockCommitPayload()
-	defer n.handle.UnlockCommitPayload()
-
-	n.sessionMu.Lock()
-	fs := n.pendingFinishedSession
-	n.pendingFinishedSession = nil
-	changes := n.pendingChangelog
-	blockNum := n.pendingChangelogBlock
-	n.pendingChangelog = nil
-	n.pendingChangelogBlock = 0
-	committingMap := n.pendingCommittingMap
-	n.pendingCommittingMap = nil
-	n.sessionMu.Unlock()
-
-	if fs == nil && len(changes) == 0 {
-		return nil // Nothing to commit to disk
-	}
-
-	if fs != nil {
-		if err := fs.CommitPayload(n.handle); err != nil {
-			return fmt.Errorf("NomtStateTrie CommitPayload failed: %w", err)
-		}
-		if string(n.namespace) == "account_state" && blockNum > 0 {
-			storage.UpdateLastNomtCommittedBlock(blockNum)
-		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════
-	// ASYNC CHANGELOG FLUSH
-	// ═══════════════════════════════════════════════════════════════
-	if n.changelogDB != nil && len(changes) > 0 {
-		if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
-			logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB asynchronously: %v", err)
-		}
-	}
-
-	// Data is now on disk. Clear committing from readView so Get() reads
-	// directly from NOMT. This is safe because:
-	// 1. writerMu prevents concurrent Commit Phase 1/3 from racing
-	// 2. We re-read the latest readView under writerMu to avoid clobbering
-	//    a newer commit's readView that may have been published during disk flush
-	n.writerMu.Lock()
-	view := n.loadReadView()
-	if view.committing != nil && committingMap != nil &&
-		reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(committingMap).Pointer() {
-		n.publishReadView(
-			view.dirty,    // preserve current dirty (already immutable)
-			nil,           // committing cleared — data is on disk
-			view.rootHash, // rootHash unchanged
-		)
-	} else if committingMap == nil {
-		n.publishReadView(
-			view.dirty,
-			nil,
-			view.rootHash,
-		)
-	}
-	n.writerMu.Unlock()
-
 	return nil
 }
 
-// NomtPayload holds the extracted pending finished session and changelog
-// to be committed asynchronously.
 type NomtPayload struct {
-	trie          *NomtStateTrie
-	fs            *nomt_ffi.FinishedSession
-	changes       []state_changelog.StateChange
-	blockNum      uint64
-	committingMap interface{}
-	doneOnce      sync.Once
+	trie     *NomtStateTrie
+	doneOnce sync.Once
 }
 
-// Discard decrements the WaitGroup counter. Safe for concurrent/repeated calls.
 func (p *NomtPayload) Discard() {
-	if p == nil {
-		return
+	if p != nil {
+		p.doneOnce.Do(func() {
+			p.trie.commitWg.Done()
+		})
 	}
-	p.doneOnce.Do(func() {
-		p.trie.commitWg.Done()
-	})
 }
 
-// ExtractPendingPayload extracts the pending payload synchronously.
 func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
-	n.sessionMu.Lock()
-	defer n.sessionMu.Unlock()
-
-	fs := n.pendingFinishedSession
-	n.pendingFinishedSession = nil
-	changes := n.pendingChangelog
-	blockNum := n.pendingChangelogBlock
-	n.pendingChangelog = nil
-	n.pendingChangelogBlock = 0
-	committingMap := n.pendingCommittingMap
-	n.pendingCommittingMap = nil
-
-	if fs == nil && len(changes) == 0 {
-		return nil
-	}
-
-	n.commitWg.Add(1)
-
-	payload := &NomtPayload{
-		trie:          n,
-		fs:            fs,
-		changes:       changes,
-		blockNum:      blockNum,
-		committingMap: committingMap,
-	}
-
-	runtime.SetFinalizer(payload, func(p *NomtPayload) {
-		p.Discard()
-	})
-
-	return payload
+	return nil
 }
 
-// WriteChangelog writes the changes to the StateChangelogDB synchronously.
-func (p *NomtPayload) WriteChangelog() {
-	if p == nil || len(p.changes) == 0 || p.trie.changelogDB == nil {
-		return
-	}
-	if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
-		logger.Error("[NomtStateTrie] Failed to write to StateChangelogDB: %v", err)
-	}
-}
+func (p *NomtPayload) WriteChangelog() {}
 
-// CommitAsync flushes the extracted payload to disk asynchronously in a background goroutine.
-func (p *NomtPayload) CommitAsync() {
-	if p == nil {
-		return
-	}
-	if p.fs == nil && p.committingMap == nil {
-		p.Discard()
-		return
-	}
+func (p *NomtPayload) CommitAsync() {}
 
-	go func() {
-		defer p.Discard()
-
-		p.trie.handle.LockCommitPayload()
-		defer p.trie.handle.UnlockCommitPayload()
-
-		if p.fs != nil {
-			if err := p.fs.CommitPayload(p.trie.handle); err != nil {
-				logger.Error("[NomtStateTrie] CommitPayload failed in background: %v", err)
-				p.trie.setAsyncError(fmt.Errorf("background CommitPayload failed for block #%d: %w", p.blockNum, err))
-			}
-			if string(p.trie.namespace) == "account_state" && p.blockNum > 0 {
-				storage.UpdateLastNomtCommittedBlock(p.blockNum)
-			}
-		}
-
-		p.trie.writerMu.Lock()
-		view := p.trie.loadReadView()
-		if view.committing != nil && p.committingMap != nil &&
-			reflect.ValueOf(view.committing).Pointer() == reflect.ValueOf(p.committingMap).Pointer() {
-			p.trie.publishReadView(
-				view.dirty,
-				nil,
-				view.rootHash,
-			)
-		}
-		p.trie.writerMu.Unlock()
-	}()
-}
-
-// CommitPayloadAsync extracts pending finished session and changelogs synchronously
-// to prevent subsequent block commits from overwriting them, and then flushes
-// the payload to disk asynchronously in a background goroutine.
-func (n *NomtStateTrie) CommitPayloadAsync() {
-	payload := n.ExtractPendingPayload()
-	if payload != nil {
-		payload.WriteChangelog()
-		payload.CommitAsync()
-	}
-}
+func (n *NomtStateTrie) CommitPayloadAsync() {}
 
 func (n *NomtStateTrie) setAsyncError(err error) {
 	if err == nil {
