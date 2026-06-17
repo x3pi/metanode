@@ -1,8 +1,8 @@
 {
     "version": "0.0.1.0",
     "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-    "parent_connection_address": "192.168.1.234:6200",
-    "parent_address": "0xa6da218aa4bb2ba04892c9d36ee78a2e057ab4b0",
+    "parent_connection_address": "192.168.1.231:6200",
+    "parent_address": "0x62f47fe18aefc37e08791e5dcecf22b049d0c440",
     "chain_id": 991,
     "parent_connection_type": "client"
 }
