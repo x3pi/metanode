@@ -448,11 +448,15 @@ def main():
         json.dump(entry, f, indent=2)
         f.write("\n")
 
-    # Auto merge into genesis-main.json if it exists and env_type is validator
+    # Auto merge into genesis.json if genesis-main.json exists and env_type is validator
     genesis_main_path = "genesis-main.json"
+    genesis_target_path = "genesis.json"
     if os.path.exists(genesis_main_path) and env_type == "validator":
         try:
-            with open(genesis_main_path, "r") as gf:
+            if not os.path.exists(genesis_target_path):
+                shutil.copy2(genesis_main_path, genesis_target_path)
+                
+            with open(genesis_target_path, "r") as gf:
                 g_data = json.load(gf)
             
             if "validators" in g_data:
@@ -466,26 +470,26 @@ def main():
                 if not updated:
                     g_data["validators"].append(entry)
                 
-                with open(genesis_main_path, "w") as gf:
+                with open(genesis_target_path, "w") as gf:
                     json.dump(g_data, gf, indent=2)
                     gf.write("\n")
                 
-                print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_main_path}")))
+                print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_target_path}")))
                 
                 # Copy to simple_chain folder if it exists (source mode)
                 target_dir = os.path.join("..", "execution", "cmd", "simple_chain")
                 target_genesis = os.path.join(target_dir, "genesis.json")
                 if os.path.exists(target_dir):
-                    shutil.copy2(genesis_main_path, target_genesis)
+                    shutil.copy2(genesis_target_path, target_genesis)
                     print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
                 else:
                     # In standalone release mode, we just copy to configs/genesis.json if configs/ exists
                     configs_dir = "configs"
                     if os.path.exists(configs_dir):
-                        shutil.copy2(genesis_main_path, os.path.join(configs_dir, "genesis.json"))
+                        shutil.copy2(genesis_target_path, os.path.join(configs_dir, "genesis.json"))
                         print(bold(green(f"  ✅ Automatically copied to {configs_dir}/genesis.json")))
         except Exception as e:
-            print(f"\n  ❌ Failed to auto-merge into {genesis_main_path}: {e}")
+            print(f"\n  ❌ Failed to auto-merge into {genesis_target_path}: {e}")
 
     os.chmod(keys_dir, 0o700)
 

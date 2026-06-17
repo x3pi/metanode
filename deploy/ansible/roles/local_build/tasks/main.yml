@@ -23,13 +23,6 @@
   loop: "{{ cluster_nodes }}"
   when: cluster_nodes is defined and ansible_action == 'setup'
 
-- name: Copy genesis-main.json to genesis.json on localhost
-  ansible.builtin.copy:
-    src: "{{ deploy_dir }}/genesis-main.json"
-    dest: "{{ deploy_dir }}/genesis.json"
-    remote_src: yes
-  when: ansible_action == 'setup'
-
 # Note: For full automation, `cluster_nodes` and `peers_map` should be constructed dynamically from the inventory
 # using set_fact before running these tasks.
 
