@@ -457,3 +457,4 @@ metanode.code-workspace
 # Standalone Deploy folder
 metanode-deploy/
 deploy/genesis.json
+ansible/.last_deployed_commit
