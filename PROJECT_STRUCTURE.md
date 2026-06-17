@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-11
+> **Last updated:** 2026-06-17
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -8,6 +8,7 @@
 
 ```
 metanode/
+├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
 ├── consensus/          ← Rust consensus engine (BFT/DAG-based)
