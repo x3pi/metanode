@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -1102,6 +1103,34 @@ PROCESS_BLOCK:
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
 	leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
+
+	// ================= DETAILED CONSENSUS TRACE =================
+	goSendBatchTime := pipeline.LastSendBatchTimeNano.Load()
+	if goSendBatchTime > 0 && epochData.GetCommitTimestampMs() > 0 && epochData.GetRustDispatchTimestampMs() > 0 && epochData.GetRustFfiDeliveryTimestampMs() > 0 {
+		commitMs := epochData.GetCommitTimestampMs()
+		dispatchMs := epochData.GetRustDispatchTimestampMs()
+
+		goSendBatchTimeMs := uint64(goSendBatchTime / 1000000)
+		var rustMempoolProposeMs uint64
+		if commitMs > goSendBatchTimeMs {
+			rustMempoolProposeMs = commitMs - goSendBatchTimeMs
+		}
+		var rustDagConsensusMs uint64
+		if dispatchMs > commitMs {
+			rustDagConsensusMs = dispatchMs - commitMs
+		}
+		goReceiveMs := uint64(time.Now().UnixMilli())
+		var rustDeliveryFFIMs uint64
+		if goReceiveMs > dispatchMs {
+			rustDeliveryFFIMs = goReceiveMs - dispatchMs
+		}
+		
+		pipeline.GlobalBlockTraceStore.SetRustConsensusDetailedTime(*currentBlockNumber, int64(rustMempoolProposeMs), int64(rustDagConsensusMs), int64(rustDeliveryFFIMs))
+		
+		clientBatchMs := pipeline.LastClientBatchProcessingMs.Load()
+		pipeline.GlobalBlockTraceStore.SetClientBatchProcessingTime(*currentBlockNumber, clientBatchMs)
+	}
+
 	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, leaderAddr, preloadChan, *currentBlockNumber)
 	processTxDuration := time.Since(processTxStart)
 	if err != nil {

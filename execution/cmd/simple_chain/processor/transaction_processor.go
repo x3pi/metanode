@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 
@@ -656,9 +657,13 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	logger.Info("🔥 ProcessTransactionsFromClient: Added batch to pool. Total errors: %d", queueFullErrs)
 
 	elapsed := time.Since(startTime)
+	pipeline.LastClientBatchProcessingMs.Store(elapsed.Milliseconds())
 	if elapsed > 10*time.Millisecond {
 		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual_exec=%v, add_to_pool=%v) for %d txs", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration, len(transactions))
 	}
+	// else {
+	// 	logger.Info("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual_exec=%v, add_to_pool=%v) for %d txs", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration, len(transactions))
+	// }
 
 	if queueFullErrs > 0 {
 		logger.Warn("Dropped %d transactions from batch due to pool rejection", queueFullErrs)
