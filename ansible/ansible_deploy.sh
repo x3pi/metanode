@@ -80,6 +80,8 @@ RESTORE_NODE="none"
 SNAPSHOT_URL=""
 OPEN_PORTS="false"
 
+DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
+
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -101,6 +103,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 echo -e "\n🚀 Starting Ansible Deployment with:"
+echo "   Source:        $DEPLOY_SOURCE"
 echo "   Action:        $ACTION"
 echo "   Target Node:   $TARGET_NODE"
 echo "   Keep Data:     $KEEP_DATA"
@@ -108,6 +111,7 @@ echo "   Restore Node:  $RESTORE_NODE"
 echo "   Open Ports:    $OPEN_PORTS"
 
 send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
+- Source: \`${DEPLOY_SOURCE}\`
 - Action: \`${ACTION}\`
 - Target Node: \`${TARGET_NODE}\`
 - Keep Data: \`${KEEP_DATA}\`
@@ -131,7 +135,7 @@ ansible_exit=$?
 set -e
 
 if [ $ansible_exit -eq 0 ]; then
-    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) hoàn tất thành công!
+    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
 
 🔍 *Lệnh lấy log hữu ích:*
 • *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
@@ -145,7 +149,7 @@ if [ $ansible_exit -eq 0 ]; then
   - *Execution logs:*
     \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
 else
-    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) thất bại với mã lỗi \`${ansible_exit}\`!
+    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` thất bại với mã lỗi \`${ansible_exit}\`!
 
 🔍 *Lệnh lấy log kiểm tra lỗi:*
 • *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
