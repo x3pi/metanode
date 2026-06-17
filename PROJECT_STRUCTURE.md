@@ -10,7 +10,8 @@
 metanode/
 ├── deploy/                 ← Deployment configurations and scripts parent folder
 │   ├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
-│   │   └── monitors/       ← Decoupled health and block hash monitors
+│   │   ├── monitors/       ← Decoupled health and block hash monitors
+│   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   └── systemd/            ← Systemd deployment scripts, key generator, and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
