@@ -1,6 +1,6 @@
 ---
-project_root: "{{ playbook_dir }}/.."
-deploy_dir: "{{ project_root }}/deploy_systemd"
+project_root: "{{ playbook_dir }}/../.."
+deploy_dir: "{{ project_root }}/deploy/systemd"
 remote_deploy_dir: "/opt/metanode-deploy"
 metanode_install_dir: "/opt/metanode"
 

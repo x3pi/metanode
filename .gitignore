@@ -314,10 +314,10 @@ pkg/storage/coverage.out
 **/*.profraw
 # Project specific
 *.py
-!deploy_systemd/**/*.py
-deploy_systemd/*_keys/
-deploy_systemd/*.env
-!deploy_systemd/*.env.example
+!deploy/systemd/**/*.py
+deploy/systemd/*_keys/
+deploy/systemd/*.env
+!deploy/systemd/*.env.example
 **/*.pyc
 **/__pycache__/
 __pycache__/
@@ -457,4 +457,4 @@ metanode.code-workspace
 # Standalone Deploy folder
 metanode-deploy/
 deploy/genesis.json
-ansible/.last_deployed_commit
+deploy/ansible/.last_deployed_commit
