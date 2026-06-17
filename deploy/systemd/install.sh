@@ -170,7 +170,7 @@ log_ok "Directories created under $INSTALL_DIR"
 # ──────────────────────────────────────────────────────────────────────────
 log_step "Step 2: Preparing and building binaries"
 
-LOCAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOCAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_USER="${SUDO_USER:-$(whoami)}"
 
 if [ -n "$BIN_CONSENSUS" ] && [ -n "$BIN_EXECUTION" ] && [ "$SKIP_BUILD" == "true" ]; then

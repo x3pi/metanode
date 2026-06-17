@@ -42,7 +42,6 @@ load_env_file() {
 # Auto load configuration from different possible locations
 load_env_file "${SCRIPT_DIR}/.env"
 load_env_file "${SCRIPT_DIR}/../.env"
-load_env_file "${SCRIPT_DIR}/../../metanode-suite/scripts/.env"
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
@@ -52,7 +51,6 @@ if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
     echo -e "   To enable notifications, please create a \`.env\` file in one of these locations:"
     echo -e "     📍 \033[0;36m${SCRIPT_DIR}/.env\033[0m"
     echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/..")/.env\033[0m"
-    echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/../../metanode-suite/scripts" 2>/dev/null || echo "../../metanode-suite/scripts")/.env\033[0m"
     echo -e "   With the following structure:"
     echo -e "     \033[0;33mTELEGRAM_BOT_TOKEN=your_bot_token_here\033[0m"
     echo -e "     \033[0;33mTELEGRAM_CHAT_ID=your_chat_id_here\033[0m"
@@ -205,9 +203,9 @@ else
     \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
 fi
 
-echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
-MONITOR_SCRIPT="$(realpath "$SCRIPT_DIR/../../metanode-suite/scripts/start_monitors.sh")"
+MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
 if [ -f "$MONITOR_SCRIPT" ]; then
+    echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
     bash "$MONITOR_SCRIPT"
 fi
 
