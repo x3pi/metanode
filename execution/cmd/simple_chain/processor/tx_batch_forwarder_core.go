@@ -222,11 +222,16 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				LastSendBatchTimeNano.Store(time.Now().UnixNano())
 				LastSendBatchTxCount.Store(int64(totalTxs))
 				// ─────────────────────────────────────────────────────────────────
-				// PACING: Add a small delay to prevent overflowing the Rust consensus with too many transactions at once.
-				// TPS OPTIMIZATION: Pacing logic to avoid choking Mysten's mempool with massive TX bursts.
-				// 1000 TXs / 20ms * 4 nodes = 200,000 TPS theoretical max injection rate.
-				// In a 200ms round, Mysten will receive exactly 40000 TXs, keeping block sizes highly optimal!
-				time.Sleep(20 * time.Millisecond)
+				// PACING: Add an adaptive delay proportional to batch size to prevent overflowing Rust consensus.
+				// For small batches, sleep less (proportional to size) to avoid artificially bottlenecking TPS.
+				// Capped at 20ms to prevent excessive delays for large batches.
+				pacingDelay := time.Duration(len(batchTxs)) * 20 * time.Microsecond
+				if pacingDelay > 20*time.Millisecond {
+					pacingDelay = 20 * time.Millisecond
+				}
+				if pacingDelay > 0 {
+					time.Sleep(pacingDelay)
+				}
 			}
 		}
 	}

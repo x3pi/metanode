@@ -26,16 +26,35 @@ START_TIME=$(date +%s)
 # ─── Parse args ───────────────────────────────────────────────────
 BUILD_GO=true
 BUILD_RUST=true
+RELEASE=true
 
-case "${1:-}" in
-    --go-only)   BUILD_RUST=false ;;
-    --rust-only) BUILD_GO=false ;;
-    --all|"")    ;; # default: build both
-    *)
-        echo "Usage: $0 [--go-only | --rust-only | --all]"
-        exit 1
-        ;;
-esac
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --go-only)
+            BUILD_RUST=false
+            shift
+            ;;
+        --rust-only)
+            BUILD_GO=false
+            shift
+            ;;
+        --debug|--fast)
+            RELEASE=false
+            shift
+            ;;
+        --release)
+            RELEASE=true
+            shift
+            ;;
+        --all)
+            shift
+            ;;
+        *)
+            echo "Usage: $0 [--go-only | --rust-only | --all] [--debug | --fast | --release]"
+            exit 1
+            ;;
+    esac
+done
 
 echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
 echo -e "${CYAN}  🔨 Build Check — $(date '+%Y-%m-%d %H:%M:%S')${NC}"
@@ -96,27 +115,44 @@ if [ $GO_JOBS -gt 8 ]; then GO_JOBS=8; fi
 if [ "$BUILD_RUST" = true ]; then
     echo -e "${CYAN}─── Rust Builds (Dùng ${RUST_JOBS}/${NUM_CORES} cores) ──────────────────${NC}"
 
+    CARGO_FLAGS="--release --locked"
+    if [ "$RELEASE" = false ]; then
+        CARGO_FLAGS="--locked"
+    fi
+
     # Consensus (metanode binary)
-    run_step "Consensus metanode (cargo build --release --locked)" \
-        bash -c "cd '$RUST_ROOT' && cargo build --release --locked -j $RUST_JOBS"
+    run_step "Consensus metanode (cargo build $CARGO_FLAGS)" \
+        bash -c "cd '$RUST_ROOT' && cargo build $CARGO_FLAGS -j $RUST_JOBS"
 
     # Rust NOMT FFI
-    run_step "Rust NOMT FFI (cargo build --release -p mtn-nomt-ffi)" \
-        bash -c "cd '$REPO_ROOT' && cargo build --release -p mtn-nomt-ffi -j $RUST_JOBS"
+    run_step "Rust NOMT FFI (cargo build $CARGO_FLAGS -p mtn-nomt-ffi)" \
+        bash -c "cd '$REPO_ROOT' && cargo build $CARGO_FLAGS -p mtn-nomt-ffi -j $RUST_JOBS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════
 # 3. GO BUILDS
 # ═══════════════════════════════════════════════════════════════════
 if [ "$BUILD_GO" = true ]; then
-    # Ensure Go links against the newly compiled static library by copying it to the sub-package target dir
-    mkdir -p "$RUST_ROOT/target/release"
-    cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
-    echo -e "${CYAN}─── Go Builds (Dùng ${GO_JOBS}/${NUM_CORES} cores) ────────────────────${NC}"
+    if [ "$FAIL" -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Skipping Go build because preceding Rust compilation failed.${NC}"
+        FAIL=$((FAIL + 1))
+    else
+        # Ensure Go links against the newly compiled static library by copying it to the sub-package target dir
+        mkdir -p "$RUST_ROOT/target/release"
+        mkdir -p "$REPO_ROOT/target/release"
+        
+        if [ "$RELEASE" = false ]; then
+            cp "$REPO_ROOT/target/debug/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
+            cp "$REPO_ROOT/target/debug/libmtn_nomt.a" "$REPO_ROOT/target/release/libmtn_nomt.a" 2>/dev/null || true
+        else
+            cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
+        fi
+        echo -e "${CYAN}─── Go Builds (Dùng ${GO_JOBS}/${NUM_CORES} cores) ────────────────────${NC}"
 
-    # Go simple_chain binary
-    run_step "Go simple_chain (go build)" \
-        bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain ."
+        # Go simple_chain binary
+        run_step "Go simple_chain (go build)" \
+            bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain ."
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════
