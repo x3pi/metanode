@@ -54,6 +54,7 @@ void nomt_free_proof(uint8_t* proof_ptr, size_t proof_len);
 typedef struct RustStateDBHandle RustStateDBHandle;
 
 RustStateDBHandle* state_db_open(const char* path, int commit_concurrency, int page_cache_mb, int leaf_cache_mb, int hashtable_buckets, int preallocate_ht);
+RustStateDBHandle* state_db_open_from_handle(NomtHandle* handle, const char* path);
 void state_db_close(RustStateDBHandle* handle);
 int state_db_root(const RustStateDBHandle* handle, uint8_t* root_out);
 int state_db_get(const RustStateDBHandle* handle, const uint8_t* key, uint8_t* val_out, size_t val_max_len, size_t* val_actual_len);
