@@ -52,7 +52,7 @@ def bold(s):   return f"\033[1m{s}\033[0m"
 
 # ─── Auto-detect paths ────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent.resolve()
-REPO_ROOT   = SCRIPT_DIR.parent  # metanode/
+REPO_ROOT   = SCRIPT_DIR.parent.parent  # metanode/
 
 METANODE_BIN_CANDIDATES = [
     SCRIPT_DIR / "bin" / "metanode",

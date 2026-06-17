@@ -17,7 +17,7 @@
       --peers-map "{{ peers_map }}" \
       --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
       --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
-      --metanode-bin "{{ deploy_dir }}/../target/release/metanode"
+      --metanode-bin "{{ deploy_dir }}/../../target/release/metanode"
   args:
     chdir: "{{ deploy_dir }}"
   loop: "{{ cluster_nodes }}"

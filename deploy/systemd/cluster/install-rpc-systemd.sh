@@ -21,7 +21,7 @@ if [ -f "$SCRIPT_DIR/../bin/rpc-client-bin" ]; then
 elif [ -d "/opt/metanode/rpc-proxy" ] && [ -f "/opt/metanode/rpc-proxy/rpc-client-bin" ]; then
     RPC_DIR="/opt/metanode/rpc-proxy"
 else
-    RPC_DIR="$(realpath "$SCRIPT_DIR/../../execution/cmd/rpc/cmd/rpc-client")"
+    RPC_DIR="$(realpath "$SCRIPT_DIR/../../../execution/cmd/rpc/cmd/rpc-client")"
 fi
 
 
