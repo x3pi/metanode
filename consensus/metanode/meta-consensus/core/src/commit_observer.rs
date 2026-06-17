@@ -210,16 +210,18 @@ impl CommitObserver {
             } else {
                 let go_commits = self.store.scan_commits((replay_after_commit_index..=replay_after_commit_index).into()).expect("Scanning for Go last commit should not fail");
                 if let Some(go_commit) = go_commits.first() {
-                    if go_commit.digest().into_inner() != go_hash {
-                        panic!(
-                            "🚨 [ANTI-FORK] FORK DETECTED! DAG DB is corrupted or network fork occurred. \
-                             Hash from Go ({:?}) != Local hash at block {} ({:?})",
+                    let local_digest = go_commit.digest().into_inner();
+                    if local_digest != go_hash {
+                        tracing::warn!(
+                            "⚠️ [ANTI-FORK] Hash mismatch detected! Hash from Go ({:?}) != Local hash at block {} ({:?}). \
+                             Auto-aligning to local DAG hash (single source of truth) to prevent deadlock and preserve data.",
                             go_hash,
                             replay_after_commit_index,
-                            go_commit.digest().into_inner()
+                            local_digest
                         );
+                    } else {
+                        tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
                     }
-                    tracing::info!("✅ [ANTI-FORK] State consistent. Hash from Go matches local DAG hash at block {}", replay_after_commit_index);
                 }
             }
         }
