@@ -337,8 +337,10 @@ impl CommitObserver {
                         committed_sub_dag.commit_ref.index, last_commit_index
                     );
                     committed_sub_dag.recovered_rejected_transactions = true;
-                    committed_sub_dag.decided_with_local_blocks = true;
                 }
+                // Historical recovery commits must not enter DIGEST-GATE in CommitProcessor (Go side)
+                // because they are already committed/finalized and the live network has moved past them.
+                committed_sub_dag.decided_with_local_blocks = false;
 
                 if !committed_sub_dag.recovered_rejected_transactions && !seen_unfinalized_commit {
                     info!(

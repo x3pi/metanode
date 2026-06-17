@@ -9,9 +9,11 @@ all:
         192.168.1.230:
           node_ids: [4]
           is_synconly: true
-        192.168.1.231:
+        192.168.1.232_node3:
+          ansible_host: 192.168.1.232
           node_ids: [3]
-        192.168.1.232:
+        192.168.1.232_node2:
+          ansible_host: 192.168.1.232
           node_ids: [2]
         192.168.1.233:
           node_ids: [1]
