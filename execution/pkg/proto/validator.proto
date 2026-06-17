@@ -352,6 +352,7 @@ message Request {
         // Thêm các loại request khác ở đây trong tương lai
         ForceCommitRequest force_commit_request = 30; // NEW: Event-driven forced commit
         GetLastHandledCommitIndexRequest get_last_handled_commit_index_request = 31; // GO-AUTH GEI: Recovery
+        SetLastExecutedCommitHashRequest set_last_executed_commit_hash_request = 32; // NEW: Align Go startup commit hash
     }
 }
 message Response {
@@ -374,5 +375,14 @@ message Response {
         // Thêm các loại response khác ở đây
         ForceCommitResponse force_commit_response = 30; // NEW: Event-driven forced commit response
         GetLastHandledCommitIndexResponse get_last_handled_commit_index_response = 31; // GO-AUTH GEI: Recovery
+        SetLastExecutedCommitHashResponse set_last_executed_commit_hash_response = 32; // NEW: Align Go startup commit hash response
     }
+}
+
+message SetLastExecutedCommitHashRequest {
+    bytes last_executed_commit_hash = 1;
+}
+
+message SetLastExecutedCommitHashResponse {
+    bool success = 1;
 }

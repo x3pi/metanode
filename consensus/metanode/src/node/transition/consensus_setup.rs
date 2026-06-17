@@ -42,7 +42,7 @@ pub(super) async fn setup_validator_consensus(
         }
     }
     // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
-    let (commit_consumer, commit_receiver, mut block_receiver) =
+    let (mut commit_consumer, commit_receiver, mut block_receiver) =
         CommitConsumerArgs::new(go_replay_after, go_replay_after, last_executed_commit_hash, epoch_timestamp);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
@@ -70,7 +70,18 @@ pub(super) async fn setup_validator_consensus(
         None
     };
 
-
+    if let Some(ref client) = exec_client_proc {
+        let client_clone = client.clone();
+        commit_consumer = commit_consumer.with_align_executed_commit_hash(move |hash: [u8; 32]| {
+            let client_inner = client_clone.clone();
+            tokio::spawn(async move {
+                tracing::info!("🔄 [ANTI-FORK] Aligner callback triggered, calling Go to set hash to: {}", hex::encode(hash));
+                if let Err(e) = client_inner.set_last_executed_commit_hash(hash).await {
+                    tracing::error!("❌ [ANTI-FORK] Failed to align Go last executed commit hash: {:?}", e);
+                }
+            });
+        });
+    }
 
     // FORK-SAFETY FIX v5: New epoch always starts from commit 1.
     let next_expected_commit_index = 1u32;
@@ -233,7 +244,7 @@ pub(super) async fn setup_synconly_sync(
         }
     }
     // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
-    let (_commit_consumer, commit_receiver, mut block_receiver) =
+    let (mut commit_consumer, commit_receiver, mut block_receiver) =
         CommitConsumerArgs::new(go_replay_after_sync, go_replay_after_sync, last_executed_commit_hash, epoch_timestamp);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
@@ -261,6 +272,19 @@ pub(super) async fn setup_synconly_sync(
         None
     };
 
+    if let Some(ref client) = exec_client_proc {
+        let client_clone = client.clone();
+        commit_consumer = commit_consumer.with_align_executed_commit_hash(move |hash: [u8; 32]| {
+            let client_inner = client_clone.clone();
+            tokio::spawn(async move {
+                tracing::info!("🔄 [ANTI-FORK] Aligner callback triggered, calling Go to set hash to: {}", hex::encode(hash));
+                if let Err(e) = client_inner.set_last_executed_commit_hash(hash).await {
+                    tracing::error!("❌ [ANTI-FORK] Failed to align Go last executed commit hash: {:?}", e);
+                }
+            });
+        });
+    }
+
     // FORK-SAFETY FIX v5: New epoch always starts from commit 1.
     let next_expected_commit_index = 1u32;
     info!(
@@ -271,7 +295,7 @@ pub(super) async fn setup_synconly_sync(
         .with_commit_index_callback(
             crate::consensus::commit_callbacks::create_commit_index_callback(
                 node.current_commit_index.clone(),
-                _commit_consumer.monitor(),
+                commit_consumer.monitor(),
             ),
         )
         .with_global_exec_index_callback(

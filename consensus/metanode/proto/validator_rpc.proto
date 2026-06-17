@@ -280,6 +280,7 @@ message Request {
         SyncBlocksRequest sync_blocks_request = 22;  // SYNC: Push blocks for local sync
         ForceCommitRequest force_commit_request = 30; // NEW: Event-driven forced commit
         GetLastHandledCommitIndexRequest get_last_handled_commit_index_request = 31; // GO-AUTH GEI: Recovery
+        SetLastExecutedCommitHashRequest set_last_executed_commit_hash_request = 32; // NEW: Align Go startup commit hash
     }
 }
 
@@ -304,6 +305,7 @@ message Response {
         SyncBlocksResponse sync_blocks_response = 22;  // SYNC: Sync blocks response
         ForceCommitResponse force_commit_response = 30; // NEW: Event-driven forced commit response
         GetLastHandledCommitIndexResponse get_last_handled_commit_index_response = 31; // GO-AUTH GEI: Recovery
+        SetLastExecutedCommitHashResponse set_last_executed_commit_hash_response = 32; // NEW: Align Go startup commit hash response
     }
 }
 
@@ -317,4 +319,13 @@ message ServerStatus {
     string status_message = 1;
     uint64 uptime_seconds = 2;
 }
+
+message SetLastExecutedCommitHashRequest {
+    bytes last_executed_commit_hash = 1;
+}
+
+message SetLastExecutedCommitHashResponse {
+    bool success = 1;
+}
+
 

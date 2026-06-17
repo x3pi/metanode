@@ -26,6 +26,9 @@ pub struct CommitConsumerArgs {
     /// The timestamp of the last executed block from Go Master state, used for recovery.
     pub(crate) last_block_timestamp_ms: u64,
 
+    /// Callback to align the last executed commit hash in Go state.
+    pub(crate) align_executed_commit_hash: Option<Arc<dyn Fn([u8; 32]) + Send + Sync>>,
+
     /// A channel to output the committed sub dags.
     pub(crate) commit_sender: UnboundedSender<CommittedSubDag>,
     /// A channel to output blocks for processing, separated from consensus commits.
@@ -59,6 +62,7 @@ impl CommitConsumerArgs {
                 consumer_last_processed_commit_index,
                 last_executed_commit_hash,
                 last_block_timestamp_ms,
+                align_executed_commit_hash: None,
                 commit_sender,
                 block_sender,
                 monitor,
@@ -67,6 +71,15 @@ impl CommitConsumerArgs {
             block_receiver,
         )
     }
+
+    pub fn with_align_executed_commit_hash<F>(mut self, cb: F) -> Self
+    where
+        F: Fn([u8; 32]) + Send + Sync + 'static,
+    {
+        self.align_executed_commit_hash = Some(Arc::new(cb));
+        self
+    }
+
 
     pub fn monitor(&self) -> Arc<CommitConsumerMonitor> {
         self.monitor.clone()

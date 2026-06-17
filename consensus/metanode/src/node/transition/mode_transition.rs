@@ -235,7 +235,7 @@ pub async fn transition_mode_only(
         }
     }
     // Phase 1 Handshake - Retrieve last_executed_commit_hash from Go to prevent fork.
-    let (commit_consumer, commit_receiver, mut block_receiver) =
+    let (mut commit_consumer, commit_receiver, mut block_receiver) =
         CommitConsumerArgs::new(go_replay_after, go_replay_after, last_executed_commit_hash, epoch_timestamp_to_use);
     let epoch_cb = crate::consensus::commit_callbacks::create_epoch_transition_callback(
         node.epoch_transition_sender.clone(),
@@ -257,6 +257,19 @@ pub async fn transition_mode_only(
     } else {
         None
     };
+
+    if let Some(ref client) = exec_client_proc {
+        let client_clone = client.clone();
+        commit_consumer = commit_consumer.with_align_executed_commit_hash(move |hash: [u8; 32]| {
+            let client_inner = client_clone.clone();
+            tokio::spawn(async move {
+                tracing::info!("🔄 [ANTI-FORK] Aligner callback triggered, calling Go to set hash to: {}", hex::encode(hash));
+                if let Err(e) = client_inner.set_last_executed_commit_hash(hash).await {
+                    tracing::error!("❌ [ANTI-FORK] Failed to align Go last executed commit hash: {:?}", e);
+                }
+            });
+        });
+    }
 
     let mut processor = crate::consensus::commit_processor::CommitProcessor::new(commit_receiver)
         .with_commit_index_callback(

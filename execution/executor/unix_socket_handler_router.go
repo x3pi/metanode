@@ -300,6 +300,23 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 				},
 			}
 		}
+	case *pb.Request_SetLastExecutedCommitHashRequest:
+		logger.Info("[Go Server] 📥 Received SetLastExecutedCommitHashRequest")
+		res, err := se.HandleSetLastExecutedCommitHashRequest(req.SetLastExecutedCommitHashRequest)
+		if err != nil {
+			logger.Error("[Go Server] ❌ Error handling SetLastExecutedCommitHashRequest: %v", err)
+			wrappedResponse = &pb.Response{
+				Payload: &pb.Response_Error{
+					Error: err.Error(),
+				},
+			}
+		} else {
+			wrappedResponse = &pb.Response{
+				Payload: &pb.Response_SetLastExecutedCommitHashResponse{
+					SetLastExecutedCommitHashResponse: res,
+				},
+			}
+		}
 	default:
 		logger.Error("[Go Server] Unknown request type: %T", req)
 		// Send error response instead of continue

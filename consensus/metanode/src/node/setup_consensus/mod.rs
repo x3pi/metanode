@@ -217,6 +217,17 @@ impl ConsensusNode {
             ))
         };
 
+        let client_clone = executor_client_for_proc.clone();
+        commit_consumer = commit_consumer.with_align_executed_commit_hash(move |hash: [u8; 32]| {
+            let client_inner = client_clone.clone();
+            tokio::spawn(async move {
+                tracing::info!("🔄 [ANTI-FORK] Aligner callback triggered, calling Go to set hash to: {}", hex::encode(hash));
+                if let Err(e) = client_inner.set_last_executed_commit_hash(hash).await {
+                    tracing::error!("❌ [ANTI-FORK] Failed to align Go last executed commit hash: {:?}", e);
+                }
+            });
+        });
+
         let (startup_total_synced_blocks, startup_local_block) = Self::perform_startup_sync(
             config,
             storage,
