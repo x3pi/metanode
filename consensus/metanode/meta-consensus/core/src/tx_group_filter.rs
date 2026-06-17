@@ -5,7 +5,7 @@ use prost::Message;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 
-pub const MAX_TRANSACTION_GROUP_SIZE: usize = 2;
+pub const MAX_TRANSACTION_GROUP_SIZE: usize = 5;
 
 #[allow(dead_code)]
 pub mod proto {
