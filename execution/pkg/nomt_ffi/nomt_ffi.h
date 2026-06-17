@@ -50,4 +50,15 @@ int nomt_checkpoint(const NomtHandle* handle, const char* src_path, const char* 
 int nomt_generate_proof(const NomtHandle* handle, const uint8_t* key, uint8_t** proof_out, size_t* proof_len);
 void nomt_free_proof(uint8_t* proof_ptr, size_t proof_len);
 
+/* Unified State DB FFI APIs (Simplified Bridge) */
+typedef struct RustStateDBHandle RustStateDBHandle;
+
+RustStateDBHandle* state_db_open(const char* path, int commit_concurrency, int page_cache_mb, int leaf_cache_mb, int hashtable_buckets, int preallocate_ht);
+void state_db_close(RustStateDBHandle* handle);
+int state_db_root(const RustStateDBHandle* handle, uint8_t* root_out);
+int state_db_get(const RustStateDBHandle* handle, const uint8_t* key, uint8_t* val_out, size_t val_max_len, size_t* val_actual_len);
+int state_db_commit(RustStateDBHandle* handle, const uint8_t* write_keys, const uint8_t* write_vals, const size_t* write_val_lens, size_t write_count, const uint8_t* read_keys, const uint8_t* read_vals, const size_t* read_val_lens, size_t read_count, uint8_t* root_out);
+int state_db_checkpoint(const RustStateDBHandle* handle, const char* dest_path);
+int state_db_prune(RustStateDBHandle* handle, uint64_t old_epoch);
+
 #endif /* MTN_NOMT_FFI_H */

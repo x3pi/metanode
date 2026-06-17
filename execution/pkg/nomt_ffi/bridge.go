@@ -44,6 +44,7 @@ const maxValueSize = 64 * 1024
 // Handle wraps the opaque NOMT database pointer.
 type Handle struct {
 	ptr               *C.NomtHandle
+	stateDbPtr        *C.RustStateDBHandle // Added for simplified FFI
 	mu                sync.RWMutex // protects ptr lifecycle (open/close)
 	path              string       // stores the path for snapshotting
 	commitConcurrency int
@@ -104,8 +105,15 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB, hashtableBuc
 		return nil, fmt.Errorf("nomt_ffi: failed to open database at %s", path)
 	}
 
+	stateDbPtr := C.state_db_open(cPath, C.int(commitConcurrency), C.int(pageCacheMB), C.int(leafCacheMB), C.int(hashtableBuckets), C.int(preallocVal))
+	if stateDbPtr == nil {
+		C.nomt_close(ptr)
+		return nil, fmt.Errorf("nomt_ffi: failed to open state_db at %s", path)
+	}
+
 	h := &Handle{
 		ptr:               ptr,
+		stateDbPtr:        stateDbPtr,
 		path:              path,
 		commitConcurrency: commitConcurrency,
 		pageCacheMB:       pageCacheMB,
@@ -123,13 +131,8 @@ func Open(path string, commitConcurrency, pageCacheMB, leafCacheMB, hashtableBuc
 // It pauses new session creation, waits for all active sessions to finish or abort,
 // aborts any pending finished sessions to release their memory, and then closes the handle.
 func (h *Handle) Close() {
-	// 1. Prevent new sessions from starting
-	h.sessionsMu.Lock()
-	h.closing = true
-
-	// 2. Wait for all active sessions to either Abort() or turn into FinishedSessions
-	waitStart := time.Now()
 	diagDone := make(chan struct{})
+	waitStart := time.Now()
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -146,6 +149,12 @@ func (h *Handle) Close() {
 			}
 		}
 	}()
+
+	// 1. Prevent new sessions from starting
+	h.sessionsMu.Lock()
+	h.closing = true
+
+	// 2. Wait for all active sessions to either Abort() or turn into FinishedSessions
 	for h.activeCount > len(h.pendingSessions) {
 		h.activeCond.Wait()
 	}
@@ -167,6 +176,10 @@ func (h *Handle) Close() {
 	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding
 	// Arc<Core> references, nomt_close will fully drop the database synchronously.
 	h.mu.Lock()
+	if h.stateDbPtr != nil {
+		C.state_db_close(h.stateDbPtr)
+		h.stateDbPtr = nil
+	}
 	if h.ptr != nil {
 		C.nomt_close(h.ptr)
 		h.ptr = nil
@@ -183,14 +196,8 @@ func (h *Handle) GetPath() string {
 // It pauses new session creation and waits for all active sessions to finish
 // mutating memory-mapped files before invoking nomt_close().
 func (h *Handle) CloseForSnapshot() {
-	// 1. Prevent new sessions from starting
-	h.sessionsMu.Lock()
-	h.closing = true
-
-	// 2. Wait for all active sessions to either Close() or turn into FinishedSessions
-	// DIAGNOSTIC (May 2026): Background goroutine logs stuck state every 2s
-	waitStart := time.Now()
 	diagDone := make(chan struct{})
+	waitStart := time.Now()
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -207,6 +214,12 @@ func (h *Handle) CloseForSnapshot() {
 			}
 		}
 	}()
+
+	// 1. Prevent new sessions from starting
+	h.sessionsMu.Lock()
+	h.closing = true
+
+	// 2. Wait for all active sessions to either Close() or turn into FinishedSessions
 	for h.activeCount > len(h.pendingSessions) {
 		h.activeCond.Wait()
 	}
@@ -242,6 +255,10 @@ func (h *Handle) CloseForSnapshot() {
 	// 4. Forcefully close NOMT. Since there are NO active Go Sessions holding
 	// Arc<Core> references, nomt_close will fully drop the database synchronously,
 	// flushing all WALs and memory mapped files safely.
+	if h.stateDbPtr != nil {
+		C.state_db_close(h.stateDbPtr)
+		h.stateDbPtr = nil
+	}
 	if h.ptr != nil {
 		C.nomt_close(h.ptr)
 		h.ptr = nil
@@ -268,6 +285,7 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	_ = os.Remove(lockFile)
 
 	var ptr *C.NomtHandle
+	var stateDbPtr *C.RustStateDBHandle
 	preallocVal := 0
 	if h.preallocate {
 		preallocVal = 1
@@ -276,20 +294,26 @@ func (h *Handle) ReopenAfterSnapshot() error {
 	for i := 0; i < 10; i++ {
 		ptr = C.nomt_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB), C.int(h.hashtableBuckets), C.int(preallocVal))
 		if ptr != nil {
-			if i > 0 {
-				fmt.Printf("nomt_ffi: successfully reopened database at %s after %d retries\n", h.path, i)
+			stateDbPtr = C.state_db_open(cPath, C.int(h.commitConcurrency), C.int(h.pageCacheMB), C.int(h.leafCacheMB), C.int(h.hashtableBuckets), C.int(preallocVal))
+			if stateDbPtr != nil {
+				if i > 0 {
+					fmt.Printf("nomt_ffi: successfully reopened database at %s after %d retries\n", h.path, i)
+				}
+				break
 			}
-			break
+			C.nomt_close(ptr)
+			ptr = nil
 		}
 		// Try removing lock file again in case it was recreated
 		_ = os.Remove(lockFile)
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if ptr == nil {
+	if ptr == nil || stateDbPtr == nil {
 		return fmt.Errorf("nomt_ffi: failed to reopen database after snapshot at %s even after retries", h.path)
 	}
 	h.ptr = ptr
+	h.stateDbPtr = stateDbPtr
 
 	// Reset closing state to allow new sessions
 	h.sessionsMu.Lock()
@@ -929,4 +953,199 @@ func (h *Handle) GenerateProof(key [32]byte) ([]byte, error) {
 	defer C.nomt_free_proof(proofPtr, proofLen)
 
 	return C.GoBytes(unsafe.Pointer(proofPtr), C.int(proofLen)), nil
+}
+
+// ─── UNIFIED STATE DB METHODS (SIMPLIFIED BRIDGE) ────────────────────────────
+
+// StateDbRoot returns the current Merkle root of the state database.
+func (h *Handle) StateDbRoot() ([32]byte, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.stateDbPtr == nil {
+		return [32]byte{}, fmt.Errorf("state_db not open")
+	}
+	var root [32]byte
+	ret := C.state_db_root(h.stateDbPtr, (*C.uint8_t)(unsafe.Pointer(&root[0])))
+	if ret != 0 {
+		return root, fmt.Errorf("state_db_root failed")
+	}
+	return root, nil
+}
+
+// StateDbGet reads a value from the state database for a key.
+func (h *Handle) StateDbGet(key [32]byte) ([]byte, bool, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.stateDbPtr == nil {
+		return nil, false, fmt.Errorf("state_db not open")
+	}
+	bufPtr := readBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer readBufPool.Put(bufPtr)
+
+	var actualLen C.size_t
+	ret := C.state_db_get(
+		h.stateDbPtr,
+		(*C.uint8_t)(unsafe.Pointer(&key[0])),
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		C.size_t(len(buf)),
+		&actualLen,
+	)
+
+	if ret == 0 && int(actualLen) > len(buf) {
+		buf = make([]byte, int(actualLen))
+		ret = C.state_db_get(
+			h.stateDbPtr,
+			(*C.uint8_t)(unsafe.Pointer(&key[0])),
+			(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+			C.size_t(len(buf)),
+			&actualLen,
+		)
+	}
+
+	switch ret {
+	case 0:
+		if int(actualLen) > len(buf) {
+			return nil, false, fmt.Errorf("state_db_get: buffer still too small")
+		}
+		res := make([]byte, actualLen)
+		copy(res, buf[:actualLen])
+		return res, true, nil
+	case 1:
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("state_db_get error for key %x", key[:8])
+	}
+}
+
+// StateDbCommit batch commits writes and reads to the trie, returning the new Merkle root.
+func (h *Handle) StateDbCommit(writes [][32]byte, writeVals [][]byte, reads [][32]byte, readVals [][]byte) ([32]byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stateDbPtr == nil {
+		return [32]byte{}, fmt.Errorf("state_db not open")
+	}
+
+	// Flatten writes
+	writeCount := len(writes)
+	var flatWriteKeys []byte
+	var flatWriteVals []byte
+	var writeValLens []C.size_t
+
+	if writeCount > 0 {
+		flatWriteKeys = make([]byte, writeCount*32)
+		for i, k := range writes {
+			copy(flatWriteKeys[i*32:], k[:])
+		}
+		totalValsLen := 0
+		for _, v := range writeVals {
+			totalValsLen += len(v)
+		}
+		flatWriteVals = make([]byte, totalValsLen)
+		writeValLens = make([]C.size_t, writeCount)
+		offset := 0
+		for i, v := range writeVals {
+			l := len(v)
+			if l > 0 {
+				copy(flatWriteVals[offset:], v)
+				offset += l
+			}
+			writeValLens[i] = C.size_t(l)
+		}
+	}
+
+	// Flatten reads
+	readCount := len(reads)
+	var flatReadKeys []byte
+	var flatReadVals []byte
+	var readValLens []C.size_t
+
+	if readCount > 0 {
+		flatReadKeys = make([]byte, readCount*32)
+		for i, k := range reads {
+			copy(flatReadKeys[i*32:], k[:])
+		}
+		totalValsLen := 0
+		for _, v := range readVals {
+			totalValsLen += len(v)
+		}
+		flatReadVals = make([]byte, totalValsLen)
+		readValLens = make([]C.size_t, readCount)
+		offset := 0
+		for i, v := range readVals {
+			l := len(v)
+			if l > 0 {
+				copy(flatReadVals[offset:], v)
+				offset += l
+			}
+			readValLens[i] = C.size_t(l)
+		}
+	}
+
+	var root [32]byte
+	var writeKeysPtr, writeValsPtr, readKeysPtr, readValsPtr *C.uint8_t
+	var writeLensPtr, readLensPtr *C.size_t
+
+	if writeCount > 0 {
+		writeKeysPtr = (*C.uint8_t)(unsafe.Pointer(&flatWriteKeys[0]))
+		if len(flatWriteVals) > 0 {
+			writeValsPtr = (*C.uint8_t)(unsafe.Pointer(&flatWriteVals[0]))
+		}
+		writeLensPtr = (*C.size_t)(unsafe.Pointer(&writeValLens[0]))
+	}
+	if readCount > 0 {
+		readKeysPtr = (*C.uint8_t)(unsafe.Pointer(&flatReadKeys[0]))
+		if len(flatReadVals) > 0 {
+			readValsPtr = (*C.uint8_t)(unsafe.Pointer(&flatReadVals[0]))
+		}
+		readLensPtr = (*C.size_t)(unsafe.Pointer(&readValLens[0]))
+	}
+
+	ret := C.state_db_commit(
+		h.stateDbPtr,
+		writeKeysPtr,
+		writeValsPtr,
+		writeLensPtr,
+		C.size_t(writeCount),
+		readKeysPtr,
+		readValsPtr,
+		readLensPtr,
+		C.size_t(readCount),
+		(*C.uint8_t)(unsafe.Pointer(&root[0])),
+	)
+
+	if ret != 0 {
+		return root, fmt.Errorf("state_db_commit failed")
+	}
+	return root, nil
+}
+
+// StateDbCheckpoint checkpoints the database to a destination path.
+func (h *Handle) StateDbCheckpoint(destPath string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stateDbPtr == nil {
+		return fmt.Errorf("state_db not open")
+	}
+	cDest := C.CString(destPath)
+	defer C.free(unsafe.Pointer(cDest))
+	ret := C.state_db_checkpoint(h.stateDbPtr, cDest)
+	if ret != 0 {
+		return fmt.Errorf("state_db_checkpoint failed")
+	}
+	return nil
+}
+
+// StateDbPrune prunes database history older than epoch.
+func (h *Handle) StateDbPrune(oldEpoch uint64) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stateDbPtr == nil {
+		return fmt.Errorf("state_db not open")
+	}
+	ret := C.state_db_prune(h.stateDbPtr, C.uint64_t(oldEpoch))
+	if ret != 0 {
+		return fmt.Errorf("state_db_prune failed")
+	}
+	return nil
 }
