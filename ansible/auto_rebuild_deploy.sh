@@ -8,7 +8,7 @@ set -u
 
 REMOTE="origin"
 BRANCH="dev"
-CHECK_INTERVAL=30
+CHECK_INTERVAL=5
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANSIBLE_DIR="${PROJECT_ROOT}/ansible"
 
