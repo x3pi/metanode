@@ -81,6 +81,12 @@ SNAPSHOT_URL=""
 OPEN_PORTS="false"
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [[ ! "$DEPLOY_SOURCE" =~ "Branch:" ]] && [[ ! "$DEPLOY_SOURCE" =~ "$GIT_BRANCH" ]]; then
+        DEPLOY_SOURCE="$DEPLOY_SOURCE (Branch: $GIT_BRANCH)"
+    fi
+fi
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do

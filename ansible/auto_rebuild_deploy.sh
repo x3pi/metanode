@@ -46,7 +46,7 @@ while true; do
             NEW_LOCAL_HASH=$(git rev-parse HEAD)
             COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1)
             COMMIT_AUTHOR=$(git log -1 --pretty=%an)
-            export DEPLOY_SOURCE="Auto-Deploy (Git Commit ${NEW_LOCAL_HASH::8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
+            export DEPLOY_SOURCE="Auto-Deploy (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH::8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
             
             echo "🚀 Triggering build & deploy for $DEPLOY_SOURCE..."
             cd "$ANSIBLE_DIR"
