@@ -543,3 +543,14 @@ func GetEmptyNomtRoot(hashtableBuckets int, preallocate bool) e_common.Hash {
 	logger.Info("🎯 [TRIE] Dynamically determined EmptyNomtRoot for config %s: %s", key, res.Hex())
 	return res
 }
+
+// GetActiveNomtHandles returns a copy of all currently opened NOMT handles.
+func GetActiveNomtHandles() map[string]*nomt_ffi.Handle {
+	globalNomtHandlesMu.Lock()
+	defer globalNomtHandlesMu.Unlock()
+	res := make(map[string]*nomt_ffi.Handle, len(globalNomtHandles))
+	for k, v := range globalNomtHandles {
+		res[k] = v
+	}
+	return res
+}
