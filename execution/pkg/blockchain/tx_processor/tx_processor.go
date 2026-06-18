@@ -70,6 +70,12 @@ var (
 			return &m
 		},
 	}
+	failedSendersPool = sync.Pool{
+		New: func() interface{} {
+			m := make(map[common.Address]bool, 16)
+			return &m
+		},
+	}
 )
 
 type ProcessResult struct {
@@ -663,7 +669,11 @@ func processSingleGroup(
 	startGroup := time.Now()
 	totalGasFee := big.NewInt(0)
 
-	failedSenders := make(map[common.Address]bool) // Đánh dấu nếu sender đã bị lỗi trong group này
+	failedSendersPtr := failedSendersPool.Get().(*map[common.Address]bool)
+	failedSenders := *failedSendersPtr
+	clear(failedSenders) // Go 1.21+ fast clear
+	defer failedSendersPool.Put(failedSendersPtr)
+
 	// blockTime is now passed from Rust consensus for deterministic execution across all nodes
 	for _, item := range groupItems {
 		tx := item.Tx
