@@ -58,15 +58,15 @@ log_ok "Metanode binary copied to release."
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
 log_step "Building Go Execution Engine"
 cd "$PROJECT_ROOT/execution/cmd/simple_chain"
-go clean -cache
-go build -a -o simple_chain .
+
+go build -o simple_chain .
 cp simple_chain "$RELEASE_DIR/bin/"
 log_ok "simple_chain binary copied to release."
 
 # ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
 log_step "Building Go RPC Proxy Client"
 cd "$PROJECT_ROOT/execution/cmd/rpc/cmd/rpc-client"
-go build -o rpc-client-bin .
+go mod tidy && go build -o rpc-client-bin .
 if [ ! -f certificate.pem ]; then
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
 fi
