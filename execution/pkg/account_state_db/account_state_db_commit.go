@@ -994,9 +994,9 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// ═══════════════════════════════════════════════════════════════
 		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
 			// TPS OPT Phase 6: UNLOCK BEFORE EXPENSIVE FFI CALL!
-			// db.muTrie.Unlock()
+			db.muTrie.Unlock()
 			committedHash, _, _, commitErr := db.trie.Commit(true)
-			// db.muTrie.Lock()
+			db.muTrie.Lock()
 
 			if commitErr != nil {
 				logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during IntermediateRoot failed: %v", commitErr)

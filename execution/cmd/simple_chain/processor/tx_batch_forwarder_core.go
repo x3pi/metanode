@@ -215,6 +215,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				}
 				for _, tx := range batchTxs {
 					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "FORWARDED_TO_RUST", "Transaction batch forwarded to Rust consensus engine via FFI")
+					if entry, ok := bf.transactionProcessor.env.GetTxHashConnEntry(tx.Hash()); ok {
+						entry.SentToRustAt = time.Now()
+						bf.transactionProcessor.env.StoreTxHashConnEntry(tx.Hash(), entry)
+					}
 				}
 				// Pipeline stats: track TXs forwarded to Rust
 				GlobalPipelineStats.IncrTxsForwarded(int64(len(batchTxs)))

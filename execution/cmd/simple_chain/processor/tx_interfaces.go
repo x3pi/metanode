@@ -12,9 +12,10 @@ import (
 // TxHashConnEntry stores connection metadata allowing the RPC client
 // to match an asynchronously delivered receipt to its pending request.
 type TxHashConnEntry struct {
-	Conn      network.Connection
-	MsgID     string
-	CreatedAt time.Time
+	Conn         network.Connection
+	MsgID        string
+	CreatedAt    time.Time
+	SentToRustAt time.Time
 }
 
 // IReceiptBroadcaster abstracts the BlockProcessor's capability to send receipts.
@@ -31,6 +32,7 @@ type IConnectionManager interface {
 // ITxHashConnMapper abstracts the mapping of transaction hashes to network connections.
 type ITxHashConnMapper interface {
 	StoreTxHashConnEntry(txHash common.Hash, entry TxHashConnEntry)
+	GetTxHashConnEntry(txHash common.Hash) (TxHashConnEntry, bool)
 }
 
 // ISystemConfig abstracts the system configuration context provided by BlockProcessor.

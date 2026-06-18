@@ -514,6 +514,38 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		storage.SetCommitLock(true)
 	}
 
+	var totalWaitGoUs int64
+	var totalWaitRustUs int64
+	var waitCount int64
+
+	now := time.Now()
+	if vp.env != nil {
+		for _, tx := range txs {
+			if entry, ok := vp.env.GetTxHashConnEntry(tx.Hash()); ok {
+				waitCount++
+				waitGoUs := entry.SentToRustAt.Sub(entry.CreatedAt).Microseconds()
+				if waitGoUs < 0 {
+					waitGoUs = 0
+				}
+				totalWaitGoUs += waitGoUs
+
+				waitRustUs := now.Sub(entry.SentToRustAt).Microseconds()
+				if waitRustUs < 0 {
+					waitRustUs = 0
+				}
+				totalWaitRustUs += waitRustUs
+			}
+		}
+	}
+
+	avgWaitGoUs := int64(0)
+	avgWaitRustUs := int64(0)
+	if waitCount > 0 {
+		avgWaitGoUs = totalWaitGoUs / waitCount
+		avgWaitRustUs = totalWaitRustUs / waitCount
+	}
+	pipeline.GlobalBlockTraceStore.SetWaitTime(blockNum, avgWaitGoUs, avgWaitRustUs)
+
 	var processedTxs []types.Transaction
 	processedTxs = append(processedTxs, txs...)
 	ev := mt_filters.NewTxsEvent{

@@ -29,3 +29,12 @@ func NewReceiptTracker() *ReceiptTracker {
 func (rt *ReceiptTracker) StoreTxHashConnEntry(txHash common.Hash, entry TxHashConnEntry) {
 	rt.txHashConnectionMap.Store(txHash, entry)
 }
+
+// GetTxHashConnEntry retrieves the connection metadata for a transaction hash.
+func (rt *ReceiptTracker) GetTxHashConnEntry(txHash common.Hash) (TxHashConnEntry, bool) {
+	val, ok := rt.txHashConnectionMap.Load(txHash)
+	if !ok {
+		return TxHashConnEntry{}, false
+	}
+	return val.(TxHashConnEntry), true
+}
