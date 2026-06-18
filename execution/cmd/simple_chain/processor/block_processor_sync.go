@@ -4,6 +4,7 @@ package processor
 
 // Go build cache invalidation comment: Force relink of Rust FFI library
 import (
+	runtime_debug "runtime/debug"
 	"fmt"
 	"time"
 
@@ -1100,6 +1101,8 @@ PROCESS_BLOCK:
 		return nil
 	}
 
+	var startGC runtime_debug.GCStats
+	runtime_debug.ReadGCStats(&startGC)
 	processTxStart := time.Now()
 	// bp.transactionProcessor.logBackendStartMs()
 	leaderAddr := bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
@@ -1107,28 +1110,28 @@ PROCESS_BLOCK:
 	// ================= DETAILED CONSENSUS TRACE =================
 	goSendBatchTime := pipeline.LastSendBatchTimeNano.Load()
 	if goSendBatchTime > 0 && epochData.GetCommitTimestampMs() > 0 && epochData.GetRustDispatchTimestampMs() > 0 && epochData.GetRustFfiDeliveryTimestampMs() > 0 {
-		commitMs := epochData.GetCommitTimestampMs()
-		dispatchMs := epochData.GetRustDispatchTimestampMs()
+		commitUs := epochData.GetCommitTimestampMs() * 1000
+		dispatchUs := epochData.GetRustDispatchTimestampMs() * 1000
 
-		goSendBatchTimeMs := uint64(goSendBatchTime / 1000000)
-		var rustMempoolProposeMs uint64
-		if commitMs > goSendBatchTimeMs {
-			rustMempoolProposeMs = commitMs - goSendBatchTimeMs
+		goSendBatchTimeUs := uint64(goSendBatchTime / 1000)
+		var rustMempoolProposeUs uint64
+		if commitUs > goSendBatchTimeUs {
+			rustMempoolProposeUs = commitUs - goSendBatchTimeUs
 		}
-		var rustDagConsensusMs uint64
-		if dispatchMs > commitMs {
-			rustDagConsensusMs = dispatchMs - commitMs
+		var rustDagConsensusUs uint64
+		if dispatchUs > commitUs {
+			rustDagConsensusUs = dispatchUs - commitUs
 		}
-		goReceiveMs := uint64(time.Now().UnixMilli())
-		var rustDeliveryFFIMs uint64
-		if goReceiveMs > dispatchMs {
-			rustDeliveryFFIMs = goReceiveMs - dispatchMs
+		goReceiveUs := uint64(time.Now().UnixMicro())
+		var rustDeliveryFFIUs uint64
+		if goReceiveUs > dispatchUs {
+			rustDeliveryFFIUs = goReceiveUs - dispatchUs
 		}
 		
-		pipeline.GlobalBlockTraceStore.SetRustConsensusDetailedTime(*currentBlockNumber, int64(rustMempoolProposeMs), int64(rustDagConsensusMs), int64(rustDeliveryFFIMs))
+		pipeline.GlobalBlockTraceStore.SetRustConsensusDetailedTime(*currentBlockNumber, int64(rustMempoolProposeUs), int64(rustDagConsensusUs), int64(rustDeliveryFFIUs))
 		
-		clientBatchMs := pipeline.LastClientBatchProcessingMs.Load()
-		pipeline.GlobalBlockTraceStore.SetClientBatchProcessingTime(*currentBlockNumber, clientBatchMs)
+		clientBatchUs := pipeline.LastClientBatchProcessingMs.Swap(0) * 1000 // Convert ms to us and reset
+		pipeline.GlobalBlockTraceStore.SetClientBatchProcessingTime(*currentBlockNumber, clientBatchUs)
 	}
 
 	accumulatedResults, err := bp.transactionProcessor.ProcessTransactions(allTransactions, blockTimeSec, leaderAddr, preloadChan, *currentBlockNumber)
@@ -1248,6 +1251,11 @@ PROCESS_BLOCK:
 
 	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
+
+	var endGC runtime_debug.GCStats
+	runtime_debug.ReadGCStats(&endGC)
+	gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
+	pipeline.GlobalBlockTraceStore.AddGCPause(*currentBlockNumber, gcPauseUs)
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// REVERT GATE HANDLER: If createBlockFromResults returned nil, the draft
