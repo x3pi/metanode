@@ -116,8 +116,12 @@ func (r *Receipts) GetReceipt(hash common.Hash) (types.Receipt, error) {
 	}
 
 	data, err := r.trie.Get(hash.Bytes())
-	if err != nil {
-		return nil, ErrorReceiptNotFound
+	if err != nil || len(data) == 0 {
+		// Fall back to reading receipt bytes directly from DB
+		data, _ = r.db.Get(hash.Bytes())
+		if len(data) == 0 {
+			return nil, ErrorReceiptNotFound
+		}
 	}
 	var receipt = &Receipt{}
 
