@@ -4,7 +4,6 @@
   "address": "9065e2caaa4bf6533ded0b2a763e4ee81cd31bd2",
   "backup_path": "./other",
   "log_path": "./logs",
-  "service_type": "EXEC-NODE",
   "connection_address": "0.0.0.0:4202",
   "genesis_file_path": "genesis.json",
   "db_type": 2,

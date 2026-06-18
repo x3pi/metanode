@@ -145,7 +145,7 @@ func NewChainStateWithGenesis(
 	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string) *state_changelog.StateChangelogDB {
 		isRPC := false
 		if config != nil {
-			if config.IsRPCNode || config.ServiceType == "synconly" || os.Getenv("NODE_TYPE") == "synconly" {
+			if config.IsRPCNode || os.Getenv("NODE_TYPE") == "synconly" {
 				isRPC = true
 			}
 		}

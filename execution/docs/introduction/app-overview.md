@@ -235,96 +235,32 @@ func (app *App) initProcessors() {
 
 ```go
 func (app *App) Run() {
-    // Start các processors dựa trên node type
+    // Start transaction processor (Write queries)
+    go app.blockProcessor.TxsProcessor()
     
-    if app.config.ServiceType == "MASTER" {
-        // Master node: Generate blocks
-        go app.blockProcessor.GenerateBlock()
-        go app.transactionProcessor.ProcessTransactionsFromSub()
-    }
-    
-    if app.config.ServiceType == "WRITE" || app.config.ServiceType == "MASTER" {
-        // Write nodes: Process incoming transactions
-        go app.blockProcessor.TxsProcessor()
-    }
-    
-    // All nodes: Process read queries
+    // Start API read queries processor
     go app.blockProcessor.TxsProcessor2()
     
-    // Connect to other nodes
+    // Connect to other nodes / components
     app.connectToNodes()
 }
 ```
 
 ---
 
-## 🏛️ Các loại Node
+## 🏛️ Kiến trúc Node Hợp nhất (Unified Architecture)
 
-### **1️⃣ MASTER NODE** (`ServiceType = "MASTER"`)
+Hệ thống MetaNode hiện tại sử dụng kiến trúc **Unified Node**, loại bỏ hoàn toàn việc phân biệt cứng giữa các vai trò `MASTER`, `SUB-WRITE`, hay `READONLY`. Mọi execution node đều có khả năng thực thi giao dịch, đồng bộ trạng thái, và phục vụ RPC. 
 
-**Chức năng chính**:
-- ✅ **Generate blocks** mới mỗi N giây (block time)
-- ✅ **Process transactions** từ transaction pool
-- ✅ **Execute smart contracts** và update state
-- ✅ **Broadcast blocks** đến các sub nodes
-- ✅ **Validate validator signatures** (BLS consensus)
-- ✅ **Handle read/write queries**
+Mọi logic định tuyến khối (block production, consensus) đều do tầng **Rust Consensus** quyết định. Go Execution Engine chỉ đóng vai trò nhận request từ Rust thông qua Unix Domain Sockets (FFI) để thực thi và trả về kết quả (State Root).
 
-**Goroutines chạy**:
-```go
-go app.blockProcessor.GenerateBlock()           // Tạo block mới
-go app.transactionProcessor.ProcessTransactionsFromSub() // Xử lý txs
-go app.blockProcessor.TxsProcessor()            // Xử lý write queries
-go app.blockProcessor.TxsProcessor2()           // Xử lý read queries
-```
+**Chức năng chính của Go Execution Node**:
+- ✅ **Process transactions**: Thực thi EVM/MVM khi Rust yêu cầu.
+- ✅ **Sync blocks**: Đồng bộ trạng thái (blocks) do Rust fetch từ mạng P2P.
+- ✅ **Answer read queries**: Phục vụ các API RPC `eth_call`, `eth_getBalance`, `eth_getLogs`.
+- ✅ **Forward transactions**: Tự động chuyển tiếp giao dịch tới Validator Node nếu bản thân đang là SyncOnly.
 
-**Kết nối**:
-- Không kết nối tới node nào khác (standalone hoặc accept connections)
-- Các sub nodes kết nối tới master
-
----
-
-### **2️⃣ WRITE NODE** (`ServiceType = "WRITE"`)
-
-**Chức năng chính**:
-- ✅ **Receive transactions** từ clients
-- ✅ **Validate transactions** locally
-- ✅ **Forward transactions** to master node
-- ✅ **Sync blocks** from master
-- ✅ **Answer read queries** using local state
-- ❌ **KHÔNG generate blocks** (chỉ master mới generate)
-
-**Goroutines chạy**:
-```go
-go app.ConnectTo(masterAddress, MASTER_CONNECTION_TYPE, true)
-go app.blockProcessor.TxsProcessor()            // Xử lý write queries
-go app.blockProcessor.TxsProcessor2()           // Xử lý read queries
-```
-
-**Kết nối**:
-- Kết nối tới Master node (nhận blocks + forward txs)
-- Clients kết nối tới Write node (gửi transactions)
-
----
-
-### **3️⃣ READ-ONLY NODE** (`ServiceType = "READONLY"`)
-
-**Chức năng chính**:
-- ✅ **Sync blocks** from master (read-only)
-- ✅ **Answer read queries**: `eth_call`, `eth_getBalance`, `eth_getLogs`
-- ❌ **KHÔNG nhận transactions**
-- ❌ **KHÔNG generate blocks**
-- ❌ **KHÔNG forward transactions**
-
-**Goroutines chạy**:
-```go
-go app.ConnectTo(masterReadOnlyAddress, MASTER_READ_ONLY_CONNECTION_TYPE, false)
-go app.blockProcessor.TxsProcessor2()           // CHỈ xử lý read queries
-```
-
-**Kết nối**:
-- Kết nối tới Master node (read-only endpoint)
-- Clients kết nối tới Read node (chỉ queries)
+**Lưu ý**: Cấu hình `ServiceType` ("MASTER", "SUB", v.v.) đã **BỊ LOẠI BỎ** để tránh nhầm lẫn.
 
 ---
 
