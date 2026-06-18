@@ -3,11 +3,9 @@ package tx_processor
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -100,6 +98,8 @@ type groupResultExt struct {
 	Error         error
 	DirtyAccounts []types.AccountState
 	TotalGasFee   *big.Int
+	readAccounts  map[common.Address]types.AccountState
+	readStorage   map[common.Address][]string
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -366,6 +366,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	// Consider if sending on the channel should happen outside the lock if it blocks
 	// Return results
 	return processResult, nil
+}
 func processSingleGroup(
 	ctx context.Context,
 	chainState *blockchain.ChainState,

@@ -726,3 +726,34 @@ func (db *SmartContractDB) InvalidateAllCaches() {
 		return true
 	})
 }
+
+func (db *SmartContractDB) GetSmartContractUpdateDatas() map[common.Address]types.SmartContractUpdateData {
+	return nil
+}
+
+func (db *SmartContractDB) ClearSmartContractUpdateDatas() {
+}
+
+func (db *SmartContractDB) DeleteAddress(address common.Address) {
+	db.smartContractStorageTries.Delete(address)
+	db.pendingEventLogs.Delete(address)
+	db.lastAccessTime.Delete(address)
+}
+
+func (db *SmartContractDB) NewTrieStorage(address common.Address) common.Hash {
+	emptyRoot := common.Hash{}
+	t, err := db.loadStorageTrie(address, &emptyRoot)
+	if err == nil && t != nil {
+		db.smartContractStorageTries.Store(address, t)
+		return t.Hash()
+	}
+	return emptyRoot
+}
+
+func (db *SmartContractDB) SetAccountStateDB(asdb types.AccountStateDB) {
+	db.accountStateDB = asdb
+}
+
+func (db *SmartContractDB) SetBlockNumber(blockNumber uint64) {
+}
+

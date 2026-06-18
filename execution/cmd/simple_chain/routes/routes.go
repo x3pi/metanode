@@ -68,9 +68,11 @@ func InitRoutes(
 
 	// block routes
 	routes[command.GetBlockNumber] = blockProcessor.GetBlockNumber
-	routes[command.BlockNumber] = blockProcessor.ProcessBlockNumber
+	// Đã bỏ: API giao tiếp nội bộ giữa master/sub cũ
+	// routes[command.BlockNumber] = blockProcessor.ProcessBlockNumber
 	routes[command.GetLastBlockHeader] = blockProcessor.GetLastBlockHeader
-	routes[command.SendProcessedVirtualTransaction] = blockProcessor.ProcessedVirtualTransaction
+	// Đã bỏ: API giao tiếp nội bộ giữa master/sub cũ
+	// routes[command.SendProcessedVirtualTransaction] = blockProcessor.ProcessedVirtualTransaction
 	routes[command.GetLogs] = blockProcessor.GetLogs
 	routes[command.GetTransactionReceipt] = blockProcessor.GetTransactionReceipt
 	routes[command.GetTransactionByHash] = blockProcessor.GetTransactionByHash
@@ -82,10 +84,12 @@ func InitRoutes(
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
 
 	// transaction routes
-	routes[command.RemoteDeviceKeyDB] = transactionProcessor.HandleDeviceKeyRequest
+	// Đã bỏ: API giao tiếp nội bộ DB key từ thời master/sub
+	// routes[command.RemoteDeviceKeyDB] = transactionProcessor.HandleDeviceKeyRequest
 	routes[command.SendTransaction] = transactionProcessor.ProcessTransactionFromClient
 	routes[command.SendTransactions] = transactionProcessor.ProcessTransactionsFromClient
-	routes[common.TransactionsFromSubTopic] = transactionProcessor.ProcessTransactionsFromClient
+	// Đã bỏ: Topic cũ cho sub node
+	// routes[common.TransactionsFromSubTopic] = transactionProcessor.ProcessTransactionsFromClient
 
 	// subscribe routes
 	routes[command.SubscribeToAddress] = subscribeProcessor.ProcessSubscribeToAddress

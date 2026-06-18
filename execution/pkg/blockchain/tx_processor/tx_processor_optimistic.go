@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"runtime"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
@@ -85,9 +86,7 @@ func ProcessTransactionsOptimistic(
 		speculativeResults := make(map[int]groupResultExt)
 		var resultsMutex sync.Mutex
 
-		// Thread-local maps to track failed senders within this phase
-		// (Avoids non-deterministic cross-thread failures during execution phase)
-		failedSendersSyncMap := &sync.Map{}
+		numWorkers := runtime.NumCPU()
 
 		// Phase 2.1: Execute all txs in txsToExecute concurrently
 		for w := 0; w < numWorkers; w++ {

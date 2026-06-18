@@ -40,6 +40,7 @@ type Receipt interface {
 	SetTransactionIndex(txIndex uint64)
 	GroupIndex() uint64
 	SetGroupIndex(groupIndex uint64)
+	SetBlockTransactionIndex(uint64)
 	// setter
 	UpdateExecuteResult(
 		status pb.RECEIPT_STATUS,

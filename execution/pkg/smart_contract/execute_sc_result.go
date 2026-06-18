@@ -35,6 +35,12 @@ type ExecuteSCResult struct {
 	mapNativeSmartContractUpdateStorage map[common.Address][][2][]byte
 	eventLogs                           []types.EventLog
 	mapFullDbLogs                       map[string][]byte
+
+	mapStorageChange map[string]map[string][]byte
+}
+
+func (rs *ExecuteSCResult) MapStorageChange() map[string]map[string][]byte {
+	return rs.mapStorageChange
 }
 
 func NewExecuteSCResult(
