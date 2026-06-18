@@ -1369,10 +1369,10 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		writes = append(writes, entry.keyPath)
 		writeVals = append(writeVals, entry.value)
 
-		// Prepend "nomt:" prefix to key for replication/SyncOnly node routing
-		nomtKey := make([]byte, 37)
+		// Prepend "nomt:" prefix to original key for replication/SyncOnly node routing
+		nomtKey := make([]byte, 5+len(entry.originalKey))
 		copy(nomtKey[:5], "nomt:")
-		copy(nomtKey[5:], entry.keyPath[:])
+		copy(nomtKey[5:], entry.originalKey)
 		replicationBatch = append(replicationBatch, [2][]byte{nomtKey, entry.value})
 
 		if oldVal, ok := oldValuesSnapshot[hexKey]; ok {
