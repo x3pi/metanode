@@ -25,6 +25,24 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RELEASE_DIR="$PROJECT_ROOT/metanode-deploy"
 TARBALL_NAME="metanode-deploy.tar.gz"
 
+# ─── Parse arguments ─────────────────────────────────────────────────────────
+BUILD_FAST=false
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --fast) BUILD_FAST=true ;;
+        *) log_err "Unknown parameter: $1" ;;
+    esac
+    shift
+done
+
+CARGO_FLAGS="--release"
+TARGET_DIR="release"
+if [ "$BUILD_FAST" = true ]; then
+    CARGO_FLAGS=""
+    TARGET_DIR="debug"
+    log_info "Building in FAST (debug) mode!"
+fi
+
 log_step "Checking Dependencies"
 command -v go &>/dev/null || log_err "Go compiler is not installed."
 command -v cargo &>/dev/null || log_err "Rust (cargo) is not installed."
@@ -42,17 +60,17 @@ mkdir -p "$RELEASE_DIR/cluster"
 log_step "Building Rust Consensus Engine & FFI"
 cd "$PROJECT_ROOT"
 # Build the FFI library first so Go execution engine can link against it
-cargo build --release -p mtn-nomt-ffi
+cargo build $CARGO_FLAGS -p mtn-nomt-ffi
 
 cd "$PROJECT_ROOT/consensus/metanode"
 # Build the consensus engine
-cargo build --release
+cargo build $CARGO_FLAGS
 
 # FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
-mkdir -p "$PROJECT_ROOT/consensus/metanode/target/release"
-cp -p "$PROJECT_ROOT/target/release/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/release/libmetanode.a" 2>/dev/null || true
+mkdir -p "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR"
+cp -p "$PROJECT_ROOT/target/$TARGET_DIR/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR/libmetanode.a" 2>/dev/null || true
 
-cp "$PROJECT_ROOT/target/release/metanode" "$RELEASE_DIR/bin/"
+cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────

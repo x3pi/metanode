@@ -50,7 +50,7 @@ while true; do
             
             echo "🚀 Triggering build & deploy for $DEPLOY_SOURCE..."
             cd "$ANSIBLE_DIR"
-            ./ansible_deploy.sh --start
+            ./ansible_deploy.sh --start --fast
             
             # Go back to root
             cd "$PROJECT_ROOT"
