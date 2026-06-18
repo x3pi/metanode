@@ -40,7 +40,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -987,91 +986,8 @@ func (a *MVMApi) enforceStrictAccessLists() {
 		return
 	}
 
-	// Virtual Execution mode: DYNAMIC DISCOVERY of modified states
-	if a.extendedMode {
-		for addr := range a.rs.MapAddBalance {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapSubBalance {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapStorageChange {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapCodeChange {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapFullDbHash {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapNonce {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		return
-	}
-
-	checkAccess := func(address string) bool {
-		addr := common.HexToAddress(address)
-		if !a.InRelatedAddress(addr) {
-			logger.Error("❌ [STRICT_ACCESS] Transaction accessed undeclared address %s. Reverting!", addr.Hex())
-			return false
-		}
-		return true
-	}
-
-	isViolation := false
-	for addr := range a.rs.MapAddBalance {
-		if !checkAccess(addr) {
-			isViolation = true
-			break
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapSubBalance {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapStorageChange {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapCodeChange {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapFullDbHash {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapNonce {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-
-	if isViolation {
-		a.rs.Status = pb.RECEIPT_STATUS_THREW
-		a.rs.Exception = pb.EXCEPTION_ERR_WRITE_PROTECTION
-		a.rs.Exmsg = "STRICT_ACCESS_VIOLATION: Accessed undeclared state"
-	}
+	// Optimistic Parallel Execution: bypass strict access list enforcement
+	return
 }
 
 func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {

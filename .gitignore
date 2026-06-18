@@ -464,3 +464,7 @@ deploy/ansible/monitors/block_hash_checker/block_hash_checker
 deploy/ansible/monitors/logs_crash/
 deploy/ansible/monitors/block_hash_checker/mismatches_*.csv
 
+
+# Local RPC client binaries
+execution/cmd/rpc-client/rpc-client
+execution/cmd/rpc-client/rpc-client-bin

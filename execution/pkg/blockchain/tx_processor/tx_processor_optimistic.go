@@ -108,6 +108,7 @@ func ProcessTransactionsOptimistic(
 						chainState.GetStorageManager().GetStorageSmartContract(),
 						localAccountDB,
 					)
+					validationCache.ApplyAcceptedWritesTo(localAccountDB, localSmartContractDB)
 
 					var ethAddressBytes [20]byte
 					ethAddressBytes[0] = 0xFE
