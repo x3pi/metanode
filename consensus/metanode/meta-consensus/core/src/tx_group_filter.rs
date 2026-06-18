@@ -21,53 +21,45 @@ fn get_address_selector(signature: &str) -> Vec<u8> {
     addr
 }
 
-// Union-Find structure for grouping transactions
 #[derive(Clone)]
-struct UnionFind {
-    parent: Vec<usize>,
+pub struct RelativeGroup {
+    pub items: Vec<Item>,
 }
 
-impl UnionFind {
-    fn new(n: usize) -> Self {
+impl RelativeGroup {
+    pub fn new() -> Self {
         Self {
-            parent: (0..n).collect(),
+            items: Vec::new(),
         }
     }
 
-    fn find(&mut self, i: usize) -> usize {
-        let mut root = i;
-        while self.parent[root] != root {
-            root = self.parent[root];
-        }
-        let mut curr = i;
-        while curr != root {
-            let next = self.parent[curr];
-            self.parent[curr] = root;
-            curr = next;
-        }
-        root
+    pub fn merge(&mut self, mut other: RelativeGroup) {
+        self.items.append(&mut other.items);
     }
 
-    fn union(&mut self, i: usize, j: usize) {
-        let root_i = self.find(i);
-        let root_j = self.find(j);
-        if root_i != root_j {
-            self.parent[root_i] = root_j;
-        }
+    pub fn process_tx(&mut self, tx: &crate::block::Transaction) {
+        self.items.push(Item {
+            tx: tx.clone(),
+        });
     }
+
+    pub fn contains_related(&self, _tx: &crate::block::Transaction) -> bool {
+        // Optimistic Parallel Execution: no longer groups by address.
+        // Return false to let each tx have its own group if needed, or true to put all in one group.
+        // Since TxGroupFilter creates a new group when this returns false, returning false puts each tx in its own group.
+        false
+    }
+}
+
+#[derive(Clone)]
+pub struct Item {
+    pub tx: crate::block::Transaction,
 }
 
 pub fn get_group_addresses(tx_data: &[u8]) -> Vec<Vec<u8>> {
-    let account_setting_addr = get_address_selector("account");
-    let validator_contract_addr = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x01];
-
     if let Ok(proto_tx) = ProtoTx::decode(tx_data) {
         let mut group_addrs = Vec::new();
-        for addr in &proto_tx.related_addresses {
-            if addr != &account_setting_addr && addr != &validator_contract_addr {
-                group_addrs.push(addr.clone());
-            }
-        }
+        // Removed usage of related_addresses
         if group_addrs.is_empty() {
             group_addrs.push(proto_tx.from_address.clone());
         }
@@ -121,6 +113,41 @@ pub fn verify_group_limit(txs: &[crate::block::Transaction], max_group_size: usi
     }
 
     true
+}
+
+#[derive(Clone)]
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, i: usize) -> usize {
+        let mut root = i;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut curr = i;
+        while curr != root {
+            let next = self.parent[curr];
+            self.parent[curr] = root;
+            curr = next;
+        }
+        root
+    }
+
+    fn union(&mut self, i: usize, j: usize) {
+        let root_i = self.find(i);
+        let root_j = self.find(j);
+        if root_i != root_j {
+            self.parent[root_i] = root_j;
+        }
+    }
 }
 
 #[derive(Clone)]

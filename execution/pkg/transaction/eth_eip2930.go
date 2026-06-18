@@ -199,7 +199,6 @@ func FromEthEIP2930Tx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 
 	// Các trường không có trong EIP-2930 tiêu chuẩn sẽ là giá trị mặc định của chúng
 	pTx.MaxTimeUse = 0
-	pTx.RelatedAddresses = nil
 	pTx.LastDeviceKey = nil
 	pTx.NewDeviceKey = nil
 	pTx.ReadOnly = false
