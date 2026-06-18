@@ -166,11 +166,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// block 470's root → new consensus blocks get wrong state_root → FORK.
 	// ═══════════════════════════════════════════════════════════════════════════
 	isPreConsensusSync := request.GetExecuteMode()
-	if rh.chainState != nil && rh.chainState.GetConfig() != nil && rh.chainState.GetConfig().ServiceType == "MASTER" {
-		if !isPreConsensusSync {
-			logger.Info("🛡️ [SYNC-SAFETY] Forcing execute_mode=true for Master/Validator node to prevent state root freeze")
-			isPreConsensusSync = true
-		}
+	if !isPreConsensusSync {
+		logger.Info("🛡️ [SYNC-SAFETY] Forcing execute_mode=true to prevent state root freeze")
+		isPreConsensusSync = true
 	}
 	storage.SetPreConsensusSyncActive(isPreConsensusSync)
 	defer storage.SetPreConsensusSyncActive(false)
