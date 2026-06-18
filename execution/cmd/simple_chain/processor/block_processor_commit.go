@@ -3,6 +3,7 @@
 package processor
 
 import (
+	runtime_debug "runtime/debug"
 	"fmt"
 	"sync"
 	"time"
@@ -41,7 +42,9 @@ func (bp *BlockProcessor) commitWorker() {
 			continue
 		}
 
-		start := time.Now()
+		var startGC runtime_debug.GCStats
+			runtime_debug.ReadGCStats(&startGC)
+			start := time.Now()
 		blockNum := job.Block.Header().BlockNumber()
 		txCount := len(job.Block.Transactions())
 
@@ -181,7 +184,7 @@ func (bp *BlockProcessor) commitWorker() {
 			}
 		}
 		saveDuration := time.Since(startSave)
-		pipeline.GlobalBlockTraceStore.UpdateSaveDBTime(blockNum, saveDuration.Milliseconds())
+		pipeline.GlobalBlockTraceStore.UpdateSaveDBTime(blockNum, saveDuration.Microseconds())
 
 		// CRITICAL CRASH-SAFETY FIX: Update GEI after block save.
 		// Ensures block data is safely on disk before GEI advances,
@@ -347,17 +350,21 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		totalDuration := time.Since(start)
-		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Milliseconds())
+			var endGC runtime_debug.GCStats
+			runtime_debug.ReadGCStats(&endGC)
+			gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
+			pipeline.GlobalBlockTraceStore.AddGCPause(blockNum, gcPauseUs)
+		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Microseconds())
 		
 		if txCount > 0 {
 			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | Rust: %dms | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
 				trace.BlockNumber, trace.TxCount,
-				trace.ConsensusDurationMs,
-				trace.ProcessTxsDurationMs,
-				trace.Phase1TotalDurationMs - trace.ProcessTxsDurationMs,
-				trace.CommitMemoryDurationMs,
-				trace.SaveDBDurationMs,
-				trace.TotalBlockDurationMs,
+				trace.ConsensusDurationUs / 1000,
+				trace.ProcessTxsDurationUs / 1000,
+				trace.Phase1TotalDurationUs / 1000, // already removed ProcessTxs subtraction
+				trace.CommitMemoryDurationUs / 1000,
+				trace.SaveDBDurationUs / 1000,
+				trace.TotalBlockDurationUs / 1000,
 			)
 		} else {
 			logger.Debug("[PERF] COMMIT_WORKER: Block %v critical path: %v, txs: %v", blockNum, totalDuration, txCount)

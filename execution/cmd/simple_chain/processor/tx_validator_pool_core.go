@@ -655,10 +655,10 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | RealExec=%v",
 			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
 			
-		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(txs), consensusDuration.Milliseconds(), execDuration.Milliseconds())
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(txs), consensusDuration.Microseconds(), execDuration.Microseconds())
 	}
 
-	if execDuration.Milliseconds() > 100 {
+	if execDuration.Microseconds() > 100 {
 		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v", len(txs), execDuration)
 	}
 
