@@ -719,12 +719,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	if totalDirty > 0 {
 		startMarshal := time.Now()
 		var wg sync.WaitGroup
-		// TPS OPT Phase 5: Use runtime.NumCPU() instead of hardcoded 32.
-		// 32 goroutines cause scheduling overhead when data chunks < 32.
-		// Cap at 24 to avoid hyperthreading contention on most servers.
+		// TPS OPT Phase 5: Use runtime.NumCPU().
+		// Cap at 128 to fully utilize high-end servers without excessive context switching.
 		numWorkers := runtime.NumCPU()
-		if numWorkers > 24 {
-			numWorkers = 24
+		if numWorkers > 128 {
+			numWorkers = 128
 		}
 		if totalDirty < numWorkers {
 			numWorkers = totalDirty

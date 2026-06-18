@@ -61,10 +61,56 @@ func (s *shardedSignatureCache) Clear() {
 	}
 }
 
+type rotatingSignatureCache struct {
+	active *shardedSignatureCache
+	old    *shardedSignatureCache
+}
+
 var (
-	verifiedSignaturesCache      shardedSignatureCache
+	currentRotatingCache         atomic.Pointer[rotatingSignatureCache]
 	verifiedSignaturesCacheCount int64 // atomic counter for cache size
 )
+
+func init() {
+	currentRotatingCache.Store(&rotatingSignatureCache{
+		active: new(shardedSignatureCache),
+		old:    new(shardedSignatureCache),
+	})
+}
+
+func loadVerifiedSignature(key interface{}) bool {
+	rc := currentRotatingCache.Load()
+	if rc == nil {
+		return false
+	}
+	if _, ok := rc.active.Load(key); ok {
+		return true
+	}
+	if rc.old != nil {
+		if _, ok := rc.old.Load(key); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func storeVerifiedSignature(key interface{}) {
+	rc := currentRotatingCache.Load()
+	if rc != nil {
+		rc.active.Store(key, true)
+	}
+}
+
+func rotateVerifiedSignatures() {
+	rc := currentRotatingCache.Load()
+	if rc != nil {
+		newRc := &rotatingSignatureCache{
+			active: new(shardedSignatureCache),
+			old:    rc.active,
+		}
+		currentRotatingCache.Store(newRc)
+	}
+}
 
 const (
 	// Maximum cache entries before forced reset (safety valve)
@@ -86,9 +132,9 @@ func StartSignatureCacheCleanup(stopCh <-chan struct{}) {
 			case <-ticker.C:
 				count := atomic.LoadInt64(&verifiedSignaturesCacheCount)
 				if count > 0 {
-					verifiedSignaturesCache.Clear()
+					rotateVerifiedSignatures()
 					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-					logger.Info("🧹 [MEMORY] Reset verifiedSignaturesCache (%d entries cleared)", count)
+					logger.Info("🧹 [MEMORY] Periodic rotation of verifiedSignaturesCache (%d entries)", count)
 				}
 			case <-stopCh:
 				return
@@ -195,7 +241,7 @@ func VerifyTransaction(
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
 			if !isCrossChainBatchSubmit {
-				if _, ok := verifiedSignaturesCache.Load(txHash); !ok {
+				if !loadVerifiedSignature(txHash) {
 					request := transaction.NewVerifyTransactionRequest(
 						tx.Hash(),
 						common.PubkeyFromBytes(as.PublicKeyBls()),
@@ -215,9 +261,10 @@ func VerifyTransaction(
 						}
 					}
 					// Only cache on successful validation
-					verifiedSignaturesCache.Store(txHash, true)
-					if atomic.AddInt64(&verifiedSignaturesCacheCount, 1) >= maxVerifiedSignaturesCacheSize {
-						verifiedSignaturesCache.Clear()
+					storeVerifiedSignature(txHash)
+					count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+					if count == maxVerifiedSignaturesCacheSize {
+						rotateVerifiedSignatures()
 						atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
 					}
 				}
@@ -245,13 +292,14 @@ func VerifyTransaction(
 		switch {
 		case as.Nonce() == 0 && isSetBls:
 			txHash := tx.Hash()
-			if _, ok := verifiedSignaturesCache.Load(txHash); !ok {
+			if !loadVerifiedSignature(txHash) {
 				if !tx.ValidEthSign() {
 					return transaction.InvalidSignSecp
 				}
-				verifiedSignaturesCache.Store(txHash, true)
-				if atomic.AddInt64(&verifiedSignaturesCacheCount, 1) >= maxVerifiedSignaturesCacheSize {
-					verifiedSignaturesCache.Clear()
+				storeVerifiedSignature(txHash)
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
 					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
 				}
 			}
