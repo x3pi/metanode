@@ -1093,3 +1093,14 @@ func (db *AccountStateDB) CommitPayload() error {
 	}
 	return nil
 }
+
+// GetLoadedAccounts returns all accounts that were loaded (read) by this DB instance.
+// This is used for speculative execution validation (ReadSet extraction).
+func (db *AccountStateDB) GetLoadedAccounts() map[common.Address]types.AccountState {
+res := make(map[common.Address]types.AccountState)
+	db.loadedAccounts.Range(func(address common.Address, state types.AccountState) bool {
+		res[address] = state
+		return true
+	})
+return res
+}

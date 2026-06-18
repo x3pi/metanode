@@ -542,7 +542,6 @@ func ToProtoRelativeGroup(rg *RelativeGroup) *pb.RelativeGroup {
 	return &pb.RelativeGroup{
 		GroupId:   int32(rg.GroupID),
 		Items:     protoItems,
-		Relatives: addressesToBytes(rg.Relatives),
 	}
 }
 
@@ -560,7 +559,6 @@ func FromProtoRelativeGroup(protoRg *pb.RelativeGroup) *RelativeGroup {
 	return &RelativeGroup{
 		GroupID:   int(protoRg.GroupId),
 		Items:     goItems,
-		Relatives: bytesToAddresses(protoRg.Relatives),
 	}
 }
 
@@ -571,7 +569,6 @@ func toProtoItem(item *Item) *pb.Item {
 	}
 	return &pb.Item{
 		Id:        int32(item.ID),
-		Array:     addressesToBytes(item.Array),
 		GroupId:   int32(item.GroupID),
 		Tx:        toProtoTransaction(item.Tx),
 		TimeStart: item.TimeStart.Unix(),
@@ -585,7 +582,6 @@ func fromProtoItem(protoItem *pb.Item) *Item {
 	}
 	return &Item{
 		ID:        int(protoItem.Id),
-		Array:     bytesToAddresses(protoItem.Array),
 		GroupID:   int(protoItem.GroupId),
 		Tx:        fromProtoTransaction(protoItem.Tx),
 		TimeStart: time.Unix(protoItem.TimeStart, 0),

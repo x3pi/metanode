@@ -1,7 +1,7 @@
 syntax = "proto3";
 package account_state;
 
-option go_package = "/proto";
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
 option java_package = "com.meta_node.protos.compiled.account_state";
 
 enum STAKE_TYPE {

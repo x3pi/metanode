@@ -144,7 +144,7 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		}
 		for address := range mvmRs.MapStorageChange {
 			addr := common.HexToAddress(address)
-			as := vmP.chainState.GetAccountStateDB()
+			as := vmP.accountStateDB
 			if as != nil {
 				accountState, err := as.AccountState(addr)
 				if err != nil {
@@ -219,8 +219,8 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		if span != nil { // GUARD
 			span.SetAttribute("eventLogSummaries", logSummaries)
 		}
-		if vmP.chainState != nil && vmP.chainState.GetSmartContractDB() != nil {
-			vmP.chainState.GetSmartContractDB().AddEventLogs(eventLogs) // DB Add happens regardless of trace
+		if vmP.chainState != nil && vmP.smartContractDB != nil {
+			vmP.smartContractDB.AddEventLogs(eventLogs) // DB Add happens regardless of trace
 		} else {
 			logger.Warn("Smart contract DB is nil, cannot add event logs")
 		}
@@ -239,7 +239,7 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		if span != nil { // GUARD
 			span.AddEvent("ExtractingDeployInfo", map[string]interface{}{"addresses": codeHashAddresses})
 		}
-		as := vmP.chainState.GetAccountStateDB()
+		as := vmP.accountStateDB
 		if as != nil {
 			for a := range mvmRs.MapCodeHash {
 				addr := common.HexToAddress(a)
@@ -471,11 +471,11 @@ func (vmP *VmProcessor) updateStateDB(
 				// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
 				// when transactions from the same sender are routed to different workers.
 				if fmtAddress == transaction.FromAddress() {
-					err = vmP.chainState.GetAccountStateDB().PlusOneNonce(fmtAddress)
+					err = vmP.accountStateDB.PlusOneNonce(fmtAddress)
 					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
 					newNonce = 0 // Just for logging details below
 				} else {
-					err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
+					err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
 					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 				}
 				if err != nil {
@@ -516,7 +516,7 @@ func (vmP *VmProcessor) updateStateDB(
 			gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
 			gasPriceBig := new(big.Int).SetUint64(transaction.MaxGasPrice())
 			gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
-			errSub := vmP.chainState.GetAccountStateDB().SubTotalBalance(fromAddr, gasFee)
+			errSub := vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
 			if errSub != nil {
 				logger.Error("failed to subtract gas fee for reverted tx %s (amount: %s): %v", transaction.Hash().Hex(), gasFee.String(), errSub)
 			}
@@ -554,7 +554,7 @@ func (vmP *VmProcessor) updateStateDB(
 			addAmountBytes := mvmRs.MapAddBalance[address]
 			fmtAddress := common.HexToAddress(address)
 			addAmount := big.NewInt(0).SetBytes(addAmountBytes)
-			vmP.chainState.GetAccountStateDB().AddPendingBalance(fmtAddress, addAmount)
+			vmP.accountStateDB.AddPendingBalance(fmtAddress, addAmount)
 			details[address] = addAmount.String()
 		}
 		if span != nil { // GUARD
@@ -579,9 +579,9 @@ func (vmP *VmProcessor) updateStateDB(
 			fmtAddress := common.HexToAddress(address)
 			subAmount := big.NewInt(0).SetBytes(subAmountBytes)
 
-			err := vmP.chainState.GetAccountStateDB().SubTotalBalance(fmtAddress, subAmount)
+			err := vmP.accountStateDB.SubTotalBalance(fmtAddress, subAmount)
 			if err != nil {
-				acc, _ := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
+				acc, _ := vmP.accountStateDB.AccountState(fmtAddress)
 				logger.Error("balance %s (amount: %s): %w", acc.Balance().String(), err)
 				finalErr = fmt.Errorf("failed to subtract total balance for %s (amount: %s): %w", address, subAmount.String(), err)
 				if span != nil { // GUARD
@@ -643,11 +643,11 @@ func (vmP *VmProcessor) updateStateDB(
 			// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
 			// when transactions from the same sender are routed to different workers.
 			if fmtAddress == transaction.FromAddress() {
-				err = vmP.chainState.GetAccountStateDB().PlusOneNonce(fmtAddress)
+				err = vmP.accountStateDB.PlusOneNonce(fmtAddress)
 				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
 				newNonce = 0 // Just for logging details below
 			} else {
-				err = vmP.chainState.GetAccountStateDB().SetNonce(fmtAddress, newNonce)
+				err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
 				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 			}
 			if err != nil {
@@ -697,7 +697,7 @@ func (vmP *VmProcessor) updateStateDB(
 			storageAddress = transaction.DeployData().StorageAddress()
 			determinedDeployInfo = true
 		} else if transaction.IsCallContract() {
-			originSmartContractAs, err := vmP.chainState.GetAccountStateDB().AccountState(transaction.ToAddress())
+			originSmartContractAs, err := vmP.accountStateDB.AccountState(transaction.ToAddress())
 			if err != nil {
 				finalErr = fmt.Errorf("failed to get origin contract state %s for internal deploy: %w", transaction.ToAddress().Hex(), err)
 				fatalError = true
@@ -761,7 +761,7 @@ func (vmP *VmProcessor) updateStateDB(
 			newCodeHash := common.BytesToHash(newCodeHashBytes)
 			addrDetails["codeHash"] = newCodeHash.Hex()
 			logger.Debug("[DEPLOY-STATE] Getting AccountState for %s", fmtAddress.Hex())
-			asState, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
+			asState, err := vmP.accountStateDB.AccountState(fmtAddress)
 			if err != nil {
 				finalErr = fmt.Errorf("error getting account state for new contract %s: %w", address, err)
 				fatalError = true
@@ -798,8 +798,8 @@ func (vmP *VmProcessor) updateStateDB(
 				addrDetails["storageRootSet"] = "(Deferred)"
 			}
 			logger.Debug("[DEPLOY-STATE] Calling SetState for %s, scState=%v", fmtAddress.Hex(), asState.SmartContractState() != nil)
-			vmP.chainState.GetAccountStateDB().SetState(asState)
-			logger.Debug("[DEPLOY-STATE] SetState done for %s, dirty=%d", fmtAddress.Hex(), vmP.chainState.GetAccountStateDB().DirtyAccountCount())
+			vmP.accountStateDB.SetState(asState)
+			logger.Debug("[DEPLOY-STATE] SetState done for %s, dirty=%d", fmtAddress.Hex(), vmP.accountStateDB.DirtyAccountCount())
 			details[address] = addrDetails
 		}
 		if span != nil { // GUARD
@@ -848,7 +848,7 @@ func (vmP *VmProcessor) updateStateDB(
 				continue
 			}
 			codeHash := common.BytesToHash(codeHashBytes)
-			vmP.chainState.GetSmartContractDB().SetCode(fmtAddress, codeHash, code)
+			vmP.smartContractDB.SetCode(fmtAddress, codeHash, code)
 			addrDetails["codeHash"] = codeHash.Hex()
 			addrDetails["codeSize"] = strconv.Itoa(len(code))
 			details[address] = addrDetails
@@ -914,7 +914,7 @@ func (vmP *VmProcessor) updateStateDB(
 			}
 
 			// Single batch update: 1 loadStorageTrie + 1 mutex lock + parallel DB reads
-			if err := vmP.chainState.GetSmartContractDB().BatchSetStorageValues(fmtAddress, keys, vals); err != nil {
+			if err := vmP.smartContractDB.BatchSetStorageValues(fmtAddress, keys, vals); err != nil {
 				errMsg := fmt.Sprintf("failed to batch set storage for %s: %v", address, err)
 				logger.Error(errMsg)
 				updateErrors = append(updateErrors, errMsg)
@@ -947,8 +947,8 @@ func (vmP *VmProcessor) updateStateDB(
 		sort.Strings(sortedStorageRootAddrs)
 		for _, address := range sortedStorageRootAddrs {
 			fmtAddress := common.HexToAddress(address)
-			newStorageRoot := vmP.chainState.GetSmartContractDB().StorageRoot(fmtAddress)
-			err := vmP.chainState.GetAccountStateDB().SetStorageRoot(fmtAddress, newStorageRoot)
+			newStorageRoot := vmP.smartContractDB.StorageRoot(fmtAddress)
+			err := vmP.accountStateDB.SetStorageRoot(fmtAddress, newStorageRoot)
 			if err != nil {
 				finalErr = fmt.Errorf("failed to set storage root %s for %s: %w", newStorageRoot.Hex(), address, err)
 				if span != nil { // GUARD
@@ -993,7 +993,7 @@ func (vmP *VmProcessor) updateStateDB(
 			newHashBytes := mvmRs.MapFullDbHash[addressHex]
 			addrDetails := map[string]string{"newPartialHash": common.Bytes2Hex(newHashBytes)}
 			fmtAddress := common.HexToAddress(addressHex)
-			accountState, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddress)
+			accountState, err := vmP.accountStateDB.AccountState(fmtAddress)
 			if err != nil {
 				errMsg := fmt.Sprintf("error getting account state for %s during MapFullDbHash update: %v", addressHex, err)
 				dbHashUpdateErrors = append(dbHashUpdateErrors, errMsg)
@@ -1015,7 +1015,7 @@ func (vmP *VmProcessor) updateStateDB(
 			newMapFullDbHash := common.BytesToHash(newHashBytes)
 			combinedHash := combineHashes(currentMapFullDbHash, newMapFullDbHash)
 			smartContractState.SetMapFullDbHash(combinedHash)
-			vmP.chainState.GetAccountStateDB().SetState(accountState)
+			vmP.accountStateDB.SetState(accountState)
 			addrDetails["previousHash"] = currentMapFullDbHash.Hex()
 			addrDetails["combinedHash"] = combinedHash.Hex()
 			details[addressHex] = addrDetails
@@ -1037,7 +1037,7 @@ func (vmP *VmProcessor) updateStateDB(
 		gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
 		gasPriceBig := new(big.Int).SetUint64(transaction.MaxGasPrice())
 		gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
-		vmP.chainState.GetAccountStateDB().SubTotalBalance(fromAddr, gasFee)
+		vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
 	}
 
 	// --- Final Return ---
@@ -1089,7 +1089,7 @@ func (vmP *VmProcessor) logDirtyFingerprint(transaction types.Transaction, mvmRs
 	fingerprint := ""
 	for _, addrHex := range sortedAddrs {
 		fmtAddr := common.HexToAddress(addrHex)
-		as, err := vmP.chainState.GetAccountStateDB().AccountState(fmtAddr)
+		as, err := vmP.accountStateDB.AccountState(fmtAddr)
 		if err != nil || as == nil {
 			fingerprint += fmt.Sprintf(" %s=ERR", addrHex[:10])
 			continue

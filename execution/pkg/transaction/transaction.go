@@ -1,7 +1,6 @@
 package transaction
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/hex"
@@ -304,7 +303,6 @@ func NewTransaction(
 		MaxGasPrice:      maxGasPrice,
 		MaxTimeUse:       maxTimeUse,
 		Data:             data,
-		RelatedAddresses: relatedAddresses,
 		LastDeviceKey:    lastDeviceKey.Bytes(),
 		NewDeviceKey:     newDeviceKey.Bytes(),
 		Nonce:            nonceBytes,
@@ -337,7 +335,6 @@ func NewTransactionWithoutNonce(
 		MaxGasPrice:      maxGasPrice,
 		MaxTimeUse:       maxTimeUse,
 		Data:             data,
-		RelatedAddresses: relatedAddresses,
 		LastDeviceKey:    lastDeviceKey.Bytes(),
 		NewDeviceKey:     newDeviceKey.Bytes(),
 		ChainID:          chainId,
@@ -372,7 +369,6 @@ func NewTransactionOffChain(
 		MaxGasPrice:      maxGasPrice,
 		MaxTimeUse:       maxTimeUse,
 		Data:             data,
-		RelatedAddresses: relatedAddresses,
 		LastDeviceKey:    lastDeviceKey.Bytes(),
 		NewDeviceKey:     newDeviceKey.Bytes(),
 		Nonce:            nonceBytes,
@@ -572,14 +568,6 @@ func (t *Transaction) String() (str string) {
 	}
 	// Thêm phần hiển thị related addresses
 	relatedAddressesStr := "nil"
-	if len(t.proto.RelatedAddresses) > 0 {
-		var raBuilder strings.Builder
-		raBuilder.WriteString("\n")
-		for i, addr := range t.proto.RelatedAddresses {
-			raBuilder.WriteString(fmt.Sprintf("    %d: %s\n", i, common.BytesToAddress(addr).Hex()))
-		}
-		relatedAddressesStr = raBuilder.String()
-	}
 
 	str = fmt.Sprintf(`Transaction Details:
   Hash:               %v
@@ -828,27 +816,6 @@ func (t *Transaction) Amount() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.Amount)
 }
 
-func (t *Transaction) BRelatedAddresses() [][]byte {
-	return t.proto.RelatedAddresses
-}
-
-func (t *Transaction) UpdateRelatedAddresses(relatedAddresses [][]byte) {
-	t.proto.RelatedAddresses = relatedAddresses
-	t.ClearCacheHash()
-}
-
-func (t *Transaction) AddRelatedAddress(address common.Address) {
-	// Kiểm tra xem địa chỉ đã tồn tại trong mảng chưa
-	for _, existingAddr := range t.proto.RelatedAddresses {
-		if bytes.Equal(existingAddr, address.Bytes()) {
-			return // Địa chỉ đã tồn tại, không thêm nữa
-		}
-	}
-
-	// Thêm địa chỉ mới vào mảng
-	t.proto.RelatedAddresses = append(t.proto.RelatedAddresses, address.Bytes())
-	t.ClearCacheHash()
-}
 
 func (t *Transaction) UpdateDeriver(LastDeviceKey, NewDeviceKey common.Hash) {
 	t.proto.LastDeviceKey = LastDeviceKey.Bytes()
@@ -878,68 +845,19 @@ func (t *Transaction) GetType() uint64 {
 	return t.proto.Type
 }
 
-// func (t *Transaction) RelatedAddresses() []common.Address {
-// 	// Virtual selector addresses used for routing (not shared mutable state).
-// 	// Excluding them allows independent transactions (e.g., BLS registration for
-// 	// different accounts) to be placed in separate groups for parallel execution.
-// 	accountSettingSelector := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-// 	stakeSelector := utils.GetAddressSelector(p_common.IDENTIFIER_STAKE)
-
-// 	relatedAddresses := make([]common.Address, 0, len(t.proto.RelatedAddresses)+1)
-// 	for _, v := range t.proto.RelatedAddresses {
-// 		addr := common.BytesToAddress(v)
-// 		if addr == accountSettingSelector || addr == stakeSelector {
-// 			continue // skip virtual selector — not real shared state
-// 		}
-// 		relatedAddresses = append(relatedAddresses, addr)
-// 	}
-
-// 	// Append ToAddress only if it is NOT a virtual selector
-// 	// CRITICAL: CROSS_CHAIN_CONTRACT_ADDRESS must be included — lockAndBridge TXs share
-// 	// mutable contract state and MUST be grouped for sequential execution (not parallel).
-// 	toAddr := t.ToAddress()
-// 	if toAddr != accountSettingSelector && toAddr != stakeSelector {
-// 		relatedAddresses = append(relatedAddresses, toAddr)
-// 	}
-// 	return relatedAddresses
-// }
-
-func (t *Transaction) RelatedAddresses() []common.Address {
-	// Virtual selector addresses used for routing (not shared mutable state).
-	// Excluding them allows independent transactions (e.g., BLS registration for
-	// different accounts) to be placed in separate groups for parallel execution.
-	accountSettingSelector := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	stakeSelector := utils.GetAddressSelector(p_common.IDENTIFIER_STAKE)
-
-	relatedAddresses := make([]common.Address, 0, len(t.proto.RelatedAddresses)+2)
-	for _, v := range t.proto.RelatedAddresses {
-		addr := common.BytesToAddress(v)
-		//
-		if addr == accountSettingSelector || addr == stakeSelector || addr == p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-			continue // skip virtual selector — not real shared state
-		}
-		relatedAddresses = append(relatedAddresses, addr)
-	}
-
-	// Append ToAddress only if it is NOT a virtual selector || toAddr == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS
+func (t *Transaction) GetRelatedAddresses() []common.Address {
+	var relatedAddresses []common.Address
+	
+	// With optimistic execution, we only include the sender and receiver
+	// as base related addresses. Additional dependencies will be resolved dynamically.
+	fromAddr := t.FromAddress()
 	toAddr := t.ToAddress()
-	if toAddr != accountSettingSelector && toAddr != stakeSelector && toAddr != p_common.CROSS_CHAIN_CONTRACT_ADDRESS {
+	
+	relatedAddresses = append(relatedAddresses, fromAddr)
+	if toAddr != fromAddr {
 		relatedAddresses = append(relatedAddresses, toAddr)
 	}
-
-	// Append FromAddress (sender) to prevent concurrent state mutation of the same account
-	fromAddr := t.FromAddress()
-	hasFrom := false
-	for _, addr := range relatedAddresses {
-		if addr == fromAddr {
-			hasFrom = true
-			break
-		}
-	}
-	if !hasFrom {
-		relatedAddresses = append(relatedAddresses, fromAddr)
-	}
-
+	
 	return relatedAddresses
 }
 
@@ -1455,7 +1373,6 @@ func (t *Transaction) MarshalJSON() ([]byte, error) {
 		"MaxGasPrice":      t.proto.MaxGasPrice,
 		"MaxTimeUse":       t.proto.MaxTimeUse,
 		"Data":             hex.EncodeToString(t.proto.Data),
-		"RelatedAddresses": t.proto.RelatedAddresses,
 		"LastDeviceKey":    hex.EncodeToString(t.proto.LastDeviceKey),
 		"NewDeviceKey":     hex.EncodeToString(t.proto.NewDeviceKey),
 		"Nonce":            t.GetNonce(),
@@ -1545,4 +1462,19 @@ func TransactionToJSONString(tx types.Transaction) string {
 		return t.ToJSONString()
 	}
 	return "Unknown transaction type"
+}
+func (t *Transaction) AddRelatedAddress(address common.Address) {
+	// No-op: RelatedAddresses is deprecated in favor of dynamic resolution
+}
+
+func (t *Transaction) UpdateRelatedAddresses(relatedAddresses [][]byte) {
+	// No-op
+}
+
+func (t *Transaction) BRelatedAddresses() [][]byte {
+	return nil
+}
+
+func (t *Transaction) RelatedAddresses() []common.Address {
+	return t.GetRelatedAddresses()
 }

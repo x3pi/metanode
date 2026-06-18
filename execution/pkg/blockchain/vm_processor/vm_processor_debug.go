@@ -44,7 +44,7 @@ func (vmP *VmProcessor) IsValidSmartContractCall(toAccountState types.AccountSta
 		logger.Error("IsValidSmartContractCall FAILED! scState is nil for address: %s", tx.ToAddress().Hex())
 		return false
 	}
-	expectedStorageRoot := vmP.chainState.GetSmartContractDB().StorageRoot(tx.ToAddress())
+	expectedStorageRoot := vmP.smartContractDB.StorageRoot(tx.ToAddress())
 	actualStorageRoot := scState.StorageRoot()
 	isValid := actualStorageRoot == expectedStorageRoot
 	if !isValid {
@@ -100,7 +100,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 		span.SetAttribute("debugMvmId", mvmIdDebug.Hex())
 	}
 
-	mvmDebug := mvm.GetOrCreateMVMApi(mvmIdDebug, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+	mvmDebug := mvm.GetOrCreateMVMApi(mvmIdDebug, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmDebug.SetRelatedAddresses(tx.RelatedAddresses())
 
 	result := vmP.callDebug(debugCtx, tx, mvmDebug) // Truyền debugCtx
@@ -303,7 +303,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSub(
 		}() // Defer có điều kiện
 	}
 
-	mvmSub := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+	mvmSub := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmSub.SetRelatedAddresses(tx.RelatedAddresses())
 	rs, status := vmP.onlyCall(subCtx, tx, mvmSub) // Truyền subCtx
 	if span != nil {                               // GUARD
@@ -497,7 +497,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSubDeploy(
 		}() // Defer có điều kiện
 	}
 
-	mvmSubDeploy := mvm.GetOrCreateMVMApi(mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+	mvmSubDeploy := mvm.GetOrCreateMVMApi(mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmSubDeploy.SetRelatedAddresses(tx.RelatedAddresses())
 
 	rs, status := vmP.onlyDeploy(subDeployCtx, tx, mvmSubDeploy) // Truyền subDeployCtx
@@ -640,7 +640,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 		mvm.ProtectMVMApi(vmP.mvmId)
 	}
 	// Lấy hoặc tạo MVM API instance
-	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), false)
+	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, false)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses()) // Đặt các địa chỉ liên quan cho tính nhất quán
 	if isCache {
 		defer mvm.UnprotectMVMApi(vmP.mvmId)

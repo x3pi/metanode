@@ -175,17 +175,8 @@ func NewClient(
 		clientContext.SocketServer.OnConnect(parentConn)
 		go clientContext.SocketServer.HandleConnection(parentConn)
 		go clientContext.SocketServer.Listen("0.0.0.0:8080")
-		client.startKeepAliveLoop()
-		client.clientContext.SocketServer.AddOnDisconnectedCallBack(
-			client.handleParentDisconnectWithResubscribe,
-		)
-		// Register auto-reconnect callback
 
 	}
-	client.transactionController = controllers.NewTransactionController(
-		clientContext,
-	)
-	return &client, nil
 }
 
 func (client *Client) GetClientContext() *client_context.ClientContext {
@@ -1048,7 +1039,7 @@ func (client *Client) AddAccountForClient(privateKey string, chainId string) (ty
 	fmt.Println(string(txByte))
 	logger.Info(transaction)
 
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
+
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(client.clientContext.KeyPair.PrivateKey())
 
@@ -1085,7 +1076,7 @@ func (client *Client) BuildTransactionTx0(
 		return nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
 
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
+
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(client.clientContext.KeyPair.PrivateKey())
 

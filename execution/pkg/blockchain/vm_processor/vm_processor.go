@@ -21,22 +21,34 @@ import (
 
 // VmProcessor struct now includes a flag to control tracing internally.
 type VmProcessor struct {
-	chainState     *blockchain.ChainState
-	mvmId          common.Address // Consider if this is still needed here or managed by the caller.
-	tracingEnabled bool
-	blockTime      uint64
-	leaderAddr     common.Address
+	chainState      *blockchain.ChainState
+	accountStateDB  types.AccountStateDB
+	smartContractDB types.SmartContractDB
+	mvmId           common.Address // Consider if this is still needed here or managed by the caller.
+	tracingEnabled  bool
+	blockTime       uint64
+	leaderAddr      common.Address
 }
 
 // NewVmProcessor tạo một thực thể VmProcessor mới và thiết lập trạng thái trace.
 func NewVmProcessor(cs *blockchain.ChainState, mvmId common.Address, enableTrace bool, blockTime uint64, leaderAddr common.Address) *VmProcessor {
 	return &VmProcessor{
-		chainState:     cs,
-		mvmId:          mvmId,
-		tracingEnabled: enableTrace,
-		blockTime:      blockTime,
-		leaderAddr:     leaderAddr,
+		chainState:      cs,
+		accountStateDB:  cs.GetAccountStateDB(),
+		smartContractDB: cs.GetSmartContractDB(),
+		mvmId:           mvmId,
+		tracingEnabled:  enableTrace,
+		blockTime:       blockTime,
+		leaderAddr:      leaderAddr,
 	}
+}
+
+func (vmP *VmProcessor) SetAccountStateDB(db types.AccountStateDB) {
+	vmP.accountStateDB = db
+}
+
+func (vmP *VmProcessor) SetSmartContractDB(db types.SmartContractDB) {
+	vmP.smartContractDB = db
 }
 
 func (vmP *VmProcessor) getLeaderAddress(lastBlockHeader types.BlockHeader) common.Address {
@@ -96,7 +108,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
-		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
 		result := vmP.readOnlyCall(execCtx, tx, mvmROnly)
@@ -114,7 +126,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	if isCache {
 		mvm.ProtectMVMApi(vmP.mvmId)
 	}
-	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.chainState.GetSmartContractDB(), vmP.chainState.GetAccountStateDB(), extendedMode)
+	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses())
 	if isCache {
 		defer mvm.UnprotectMVMApi(vmP.mvmId)

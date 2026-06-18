@@ -1,10 +1,10 @@
-// grouptxns.proto
+// test_grouptxns.proto
 
 syntax = "proto3";
-package grouptxns;
+package test_grouptxns;
 
 // Thay "your_module_name" bằng tên module trong file go.mod của bạn
-option go_package = "/proto";
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
 
 // Import message Transaction từ file transaction.proto
 import "transaction.proto";

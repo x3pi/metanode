@@ -130,7 +130,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	var funcCtx context.Context
 	var funcSpan *trace.Span
 	if enableTrace {
-		tracedCtx, actualSpan := trace.StartSpan(ctx, "TxProcessor.processGroupsConcurrently", map[string]interface{}{
+		tracedCtx, actualSpan := trace.StartSpan(ctx, "TxProcessor.ProcessTransactionsOptimistic", map[string]interface{}{
 			"groupCount": len(groupedGroups),
 		})
 		funcCtx = tracedCtx
@@ -143,7 +143,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// *** Call the new function for concurrent processing ***
 	startExec := time.Now()
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 	execDuration := time.Since(startExec)
 	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
@@ -270,7 +270,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	var funcCtx context.Context
 	var funcSpan *trace.Span
 	if enableTrace {
-		tracedCtx, actualSpan := trace.StartSpan(ctx, "TxProcessor.processGroupsConcurrently", map[string]interface{}{
+		tracedCtx, actualSpan := trace.StartSpan(ctx, "TxProcessor.ProcessTransactionsOptimistic", map[string]interface{}{
 			"groupCount": len(groupedGroups),
 		})
 		funcCtx = tracedCtx
@@ -282,7 +282,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// *** Call the new function for concurrent processing ***
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := processGroupsConcurrently(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -366,277 +366,11 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	// Consider if sending on the channel should happen outside the lock if it blocks
 	// Return results
 	return processResult, nil
-}
-
-func processGroupsConcurrently(
-	ctx context.Context,
-	chainState *blockchain.ChainState,
-	groupedGroups []grouptxns.RelativeGroup,
-	lastBlockHeader types.BlockHeader,
-	enableTrace bool,
-	isCache bool,
-	blockTime uint64,
-	leaderAddr common.Address,
-) (
-	[]types.Transaction,
-	[]types.Receipt,
-	[]types.ExecuteSCResult,
-	map[common.Hash]common.Address,
-) {
-
-	var funcCtx context.Context
-	var funcSpan *trace.Span
-
-	// Bắt đầu span cho hàm này (nếu được bật)
-	if enableTrace {
-		tracedCtx, actualSpan := trace.StartSpan(ctx, "TxProcessor.processGroupsConcurrently", map[string]interface{}{
-			"groupCount": len(groupedGroups),
-		})
-		funcCtx = tracedCtx
-		funcSpan = actualSpan
-		defer funcSpan.End() // Kết thúc span khi hàm này thoát
-	} else {
-		funcCtx = ctx // Sử dụng context gốc (có thể là blockCtx)
-		funcSpan = nil
-	}
-
-	// Pre-fetch ALL required state objects before parallel execution.
-	// OPTIMIZATION: Collect unique addresses, then batch-load via PreloadAccounts()
-	// which acquires muTrie.Lock() ONCE instead of N times (329ms → ~100ms for 11k addrs).
-	if enableTrace {
-		funcSpan.AddEvent("PreFetchingStateDBs", map[string]interface{}{"count": len(groupedGroups)})
-	}
-	startPreload := time.Now()
-
-	// Step 1: Collect unique addresses (O(n) with map, then convert to slice)
-	// FORK-SAFETY + PERF: Build addrSlice in deterministic order to avoid sorting overhead.
-	// We iterate through groupedGroups (which are deterministically ordered) and append
-	// new addresses to addrSlice, using uniqueMap to track seen ones.
-	uniqueMap := make(map[common.Address]struct{}, len(groupedGroups)*2)
-	addrSlice := make([]common.Address, 0, len(groupedGroups)*2)
-	for _, group := range groupedGroups {
-		for _, item := range group.Items {
-			fromAddr := item.Tx.FromAddress()
-			if _, seen := uniqueMap[fromAddr]; !seen {
-				uniqueMap[fromAddr] = struct{}{}
-				addrSlice = append(addrSlice, fromAddr)
-			}
-			if !item.Tx.IsDeployContract() {
-				toAddr := item.Tx.ToAddress()
-				if _, seen := uniqueMap[toAddr]; !seen {
-					uniqueMap[toAddr] = struct{}{}
-					addrSlice = append(addrSlice, toAddr)
-				}
-			}
-		}
-	}
-
-	// NO SORT NEEDED: addrSlice is already deterministically ordered based on groupedGroups.
-	chainState.GetAccountStateDB().PreloadAccounts(addrSlice)
-
-	preloadDuration := time.Since(startPreload)
-	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses (from %d groups) via BATCH in %v",
-		len(addrSlice), len(groupedGroups), preloadDuration)
-
-	// CRITICAL FORK-SAFETY: Use indexed slice instead of channel to collect results.
-	// Goroutines write to results[i] (by group index), ensuring deterministic merge order
-	// regardless of which goroutine finishes first. This prevents receipt ordering differences
-	// between nodes that cause receiptsRoot divergence → fork.
-	results := make([]groupResultExt, len(groupedGroups))
-
-	// ═══════════════════════════════════════════════════════════════
-	// WORKER POOL: Use bounded goroutines instead of 1-per-group.
-	// For 30K BLS TXs, this reduces goroutine count from 30K to NumCPU.
-	// Each worker pulls the next group index via atomic counter.
-	//
-	// FORK-SAFETY: Results are written to results[idx] by group index,
-	// so merge order is deterministic regardless of worker assignment.
-	// ═══════════════════════════════════════════════════════════════
-
-	// Pre-compute mvmIds for all groups (deterministic, no goroutine needed)
-	type groupMeta struct {
-		mvmId    common.Address
-		groupCtx context.Context
-		span     *trace.Span
-	}
-	groupMetas := make([]groupMeta, len(groupedGroups))
-	for i, group := range groupedGroups {
-		id := group.GroupID
-		// PERF: Replace slow fmt.Sprintf + SHA256 with fast deterministic address generation
-		// BUGFIX: Use a static 0xFE prefix to guarantee it NEVER overlaps with Xapian DB contract addresses
-		var ethAddressBytes [20]byte
-		ethAddressBytes[0] = 0xFE
-		copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
-		binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(id))
-		mvmId := common.Address(ethAddressBytes)
-
-		var gCtx context.Context
-		var gSpan *trace.Span
-		if enableTrace {
-			tracedGroupCtx, actualGroupSpan := trace.StartSpan(funcCtx, fmt.Sprintf("TxProcessor.ProcessGroup-%d", i), map[string]interface{}{
-				"groupID":   group.GroupID,
-				"itemCount": len(group.Items),
-			})
-			gCtx = tracedGroupCtx
-			gSpan = actualGroupSpan
-		} else {
-			gCtx = funcCtx
-			gSpan = nil
-		}
-		groupMetas[i] = groupMeta{mvmId: mvmId, groupCtx: gCtx, span: gSpan}
-	}
-
-	// ═══════════════════════════════════════════════════════════════
-	// PARALLEL GROUP EXECUTION
-	//
-	// Groups with different relatedAddresses run in parallel.
-	// TXs within the same group run sequentially (processSingleGroup).
-	//
-	// This is SAFE because GroupTransactionsDeterministic uses
-	// Union-Find to merge all TXs sharing any address into the
-	// same group — no cross-group state conflicts possible.
-	//
-	// FORK NOTE: Fork root cause is NOT parallel groups. Evidence:
-	// 113 TXs to same contract = 1 group (sequential), fork persists.
-	// Real suspect: NomtStateTrie.BatchUpdate internal parallel workers.
-	// ═══════════════════════════════════════════════════════════════
-	// ═══════════════════════════════════════════════════════════════
-	// PARALLEL GROUP EXECUTION
-	//
-	// Groups with different relatedAddresses run in parallel.
-	// TXs within the same group run sequentially (processSingleGroup).
-	//
-	// This is SAFE because GroupTransactionsDeterministic uses
-	// Union-Find to merge all TXs sharing any address into the
-	// same group — no cross-group state conflicts possible.
-	// ═══════════════════════════════════════════════════════════════
-	var wg sync.WaitGroup
-	numWorkers := runtime.GOMAXPROCS(0)
-	if numWorkers > len(groupedGroups) {
-		numWorkers = len(groupedGroups)
-	}
-
-	var nextIdx uint32
-
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				groupIdx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-				if groupIdx >= len(groupedGroups) {
-					break
-				}
-				meta := groupMetas[groupIdx]
-				result := processSingleGroup(meta.groupCtx, chainState, groupedGroups[groupIdx].Items, meta.mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
-				results[groupIdx] = result // Write to indexed position — deterministic order
-				if enableTrace && meta.span != nil {
-					meta.span.End()
-				}
-			}
-		}()
-	}
-
-	// ── EVM EXECUTION (pure parallel wall-clock) ──────────────────
-	startEVM := time.Now()
-	if enableTrace {
-		funcSpan.AddEvent("AllGoroutinesLaunched", map[string]interface{}{"groupCount": len(groupedGroups)})
-	}
-	wg.Wait()
-	evmDuration := time.Since(startEVM)
-	// ─────────────────────────────────────────────────────────────
-
-	// ═══════════════════════════════════════════════════════════════
-	// BATCH MUTATIONS: Apply deferred dirty accounts from all groups.
-	// This runs single-threaded (no sync.Map contention) and in indexed
-	// order (deterministic across all nodes).
-	// ═══════════════════════════════════════════════════════════════
-	startDirty := time.Now()
-	totalBlockGasFee := big.NewInt(0)
-	var allDirtyAccounts []types.AccountState
-	for _, gRs := range results {
-		if gRs.TotalGasFee != nil && gRs.TotalGasFee.Sign() > 0 {
-			totalBlockGasFee.Add(totalBlockGasFee, gRs.TotalGasFee)
-		}
-		allDirtyAccounts = append(allDirtyAccounts, gRs.DirtyAccounts...)
-	}
-	chainState.GetAccountStateDB().PublicSetDirtyAccountStateBatch(allDirtyAccounts)
-	if totalBlockGasFee.Sign() > 0 && leaderAddr != (common.Address{}) {
-		chainState.GetAccountStateDB().AddPendingBalance(leaderAddr, totalBlockGasFee)
-	}
-	dirtyDuration := time.Since(startDirty)
-
-	// FORK-DEBUG: DeterministicDirtyHash removed from production path (expensive: marshals all dirty accounts).
-	// Re-enable only when actively debugging forks.
-	// dirtyHash := chainState.GetAccountStateDB().DeterministicDirtyHash()
-	// logger.Warn("🔍 [FORK-DEBUG] Block #%d: POST-EVM dirtyHash=%s ...", ...)
-
-	// FORK-SAFETY: Merge results in deterministic order (by group index)
-	startMerge := time.Now()
-
-	// PRE-ALLOCATE: Calculate total transactions to prevent slice growth (GC overhead)
-	var totalTxs int
-	var totalSCResults int
-	for _, gRs := range results {
-		totalTxs += len(*gRs.txPtr)
-		totalSCResults += len(*gRs.exPtr)
-	}
-
-	allTransactions := make([]types.Transaction, 0, totalTxs)
-	allReceipts := make([]types.Receipt, 0, totalTxs)
-	allExecuteSCResults := make([]types.ExecuteSCResult, 0, totalSCResults)
-	allMvmIdMap := make(map[common.Hash]common.Address, totalTxs)
-
-	// blockTxIndex is the running transaction position in the final block (deterministic).
-	// It increments across groups in sorted group order (GroupID 0, 1, 2, ...).
-	blockTxIndex := uint64(0)
-	for groupIdx, gRs := range results {
-		// Stamp GroupIndex + TransactionIndex onto every receipt in this group
-		// before appending so the trie encodes deterministic ordering info.
-		for _, rcp := range *gRs.rcpPtr {
-			rcp.SetGroupIndex(uint64(groupIdx))
-			rcp.SetTransactionIndex(blockTxIndex)
-			blockTxIndex++
-		}
-		allTransactions = append(allTransactions, *gRs.txPtr...)
-		allReceipts = append(allReceipts, *gRs.rcpPtr...)
-		allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
-		for h, addr := range *gRs.mvmPtr {
-			allMvmIdMap[h] = addr
-		}
-
-		// Return slices and maps to pools to prevent GC overhead
-		txSlicePool.Put(gRs.txPtr)
-		receiptSlicePool.Put(gRs.rcpPtr)
-		scResultSlicePool.Put(gRs.exPtr)
-		mvmIdMapPool.Put(gRs.mvmPtr)
-	}
-	mergeDuration := time.Since(startMerge)
-
-	// ── SUMMARY ───────────────────────────────────────────────────
-	txCount := len(allTransactions)
-	groupCount := len(groupedGroups)
-	var avgPerGroup time.Duration
-	if groupCount > 0 {
-		avgPerGroup = evmDuration / time.Duration(groupCount)
-	}
-	logger.Info("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
-		groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
-	// ─────────────────────────────────────────────────────────────
-
-	if enableTrace {
-		funcSpan.AddEvent("ResultsCollected", map[string]interface{}{
-			"totalTxs":      len(allTransactions),
-			"totalReceipts": len(allReceipts),
-		})
-	}
-
-	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap
-}
-
 func processSingleGroup(
 	ctx context.Context,
 	chainState *blockchain.ChainState,
+	localAccountDB types.AccountStateDB,
+	localSmartContractDB types.SmartContractDB,
 	groupItems []grouptxns.Item,
 	mvmId common.Address,
 	lastBlockHeader types.BlockHeader,
@@ -715,7 +449,7 @@ func processSingleGroup(
 		// Skipping saves signature verification + nonce check per TX.
 
 		// Phần xử lý bình thường
-		as, _ := chainState.GetAccountStateDB().AccountState(tx.FromAddress())
+		as, _ := localAccountDB.AccountState(tx.FromAddress())
 		var err error
 
 		// CRITICAL SECURITY FIX: Validate nonce strictly before processing.
@@ -808,7 +542,11 @@ func processSingleGroup(
 			// ReadOnly=false (mặc định) → gọi HandleTransaction để execute đầy đủ.
 			if tx.GetReadOnly() {
 				logger.Info("[CC SIG_ACK] TX %s readOnly=true → nonce-only", tx.Hash().Hex())
+				// vm_processor handles VM interactions per transaction
 				vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, leaderAddr)
+				vmP.SetAccountStateDB(localAccountDB)
+				vmP.SetSmartContractDB(localSmartContractDB)
+				
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
@@ -977,7 +715,7 @@ func processSingleGroup(
 					}
 					continue
 				}
-				err = chainState.GetAccountStateDB().SetAccountType(fromAddr, acType)
+				err = localAccountDB.SetAccountType(fromAddr, acType)
 				if err != nil {
 					logger.Error("SetAccountType failed for tx %s: %v", tx.Hash().Hex(), err)
 					rcp := createErrorReceipt(tx, toAddress, err)
@@ -990,11 +728,11 @@ func processSingleGroup(
 					continue
 				}
 				// CRITICAL FORK-FIX: Create deterministic success receipt + nonce increment HERE.
-				chainState.GetAccountStateDB().SetNonce(fromAddr, as.Nonce()+1)
+				localAccountDB.SetNonce(fromAddr, as.Nonce()+1)
 				logger.Debug("[NONCE-TRACE] setAccountType-SetNonce: addr=%s, nonce=%d, txHash=%s", fromAddr.Hex(), as.Nonce()+1, tx.Hash().Hex())
 				// 🔒 NONCE-FIX: Sync C++ State cache to prevent stale nonce for subsequent EVM TXs
 				mvm.CallUpdateStateNonce(fromAddr, as.Nonce()+1)
-				chainState.GetAccountStateDB().SetLastHash(fromAddr, tx.Hash())
+				localAccountDB.SetLastHash(fromAddr, tx.Hash())
 				rcp := receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
@@ -1053,8 +791,8 @@ func processSingleGroup(
 				continue
 			}
 			rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
-			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+			localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
+			localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
 			gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, exRs)
 			gRs.Receipts = append(gRs.Receipts, rcp)
@@ -1091,7 +829,7 @@ func processSingleGroup(
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
 			// Mutate sender (thread-safe)
-			err = chainState.GetAccountStateDB().SubTotalBalance(tx.FromAddress(), totalCost)
+			err = localAccountDB.SubTotalBalance(tx.FromAddress(), totalCost)
 			if err != nil {
 				GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", "Insufficient balance for transfer")
 				// Thread-safe check: if err is returned, it means insufficient balance (or lock issue)
@@ -1104,12 +842,12 @@ func processSingleGroup(
 				}
 				continue
 			}
-			chainState.GetAccountStateDB().PlusOneNonce(tx.FromAddress())
-			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
-			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+			localAccountDB.PlusOneNonce(tx.FromAddress())
+			localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
+			localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
 			// Mutate receiver (thread-safe)
-			chainState.GetAccountStateDB().AddBalance(tx.ToAddress(), tx.Amount())
+			localAccountDB.AddBalance(tx.ToAddress(), tx.Amount())
 
 			// Accumulate gas fee for later batch update to coinbase
 			totalGasFee.Add(totalGasFee, gasFee)
@@ -1123,12 +861,12 @@ func processSingleGroup(
 			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce()+1)
 
 			// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
-			asSender, _ := chainState.GetAccountStateDB().AccountState(tx.FromAddress())
+			asSender, _ := localAccountDB.AccountState(tx.FromAddress())
 			if asSender != nil {
 				mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
 			}
 
-			asReceiver, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
+			asReceiver, _ := localAccountDB.AccountState(tx.ToAddress())
 			if asReceiver != nil {
 				mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())
 			}
@@ -1171,12 +909,12 @@ func processSingleGroup(
 			}
 			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_SUCCESS", fmt.Sprintf("EVM contract execution completed, status: %d, gasUsed: %d", exRs.ReceiptStatus(), exRs.GasUsed()))
 			logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
-			chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
-			chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+			localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
+			localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 		}
 		rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-		chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
-		chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+		localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
+		localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
 		gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, exRs)
 
