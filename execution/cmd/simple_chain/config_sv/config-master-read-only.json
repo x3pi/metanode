@@ -6,7 +6,6 @@
   "backup_path": "./sample/simple/back_up_write",
   "connection_address": "0.0.0.0:4101",
   "version": "0.0.1.0",
-  "service_type": "MASTER",
   "rpc_port": ":8646",
   "db_type": 2,
   "genesis_file_path": "genesis.json",

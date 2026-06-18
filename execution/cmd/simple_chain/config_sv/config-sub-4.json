@@ -9,7 +9,6 @@
   "is_explorer": true,
   "version": "0.0.1.0",
   "node_type": "child_node",
-  "service_type": "SUB-WRITE",
   "rpc_port": ":8646",
   "db_type": 2,
   "genesis_file_path": "genesis.json",

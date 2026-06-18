@@ -100,8 +100,6 @@
   "meta_node_rpc_address": "127.0.0.1:10102",
   "peer_rpc_port": 19202,
   "version": "0.0.1.0",
-  "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
-  "service_type": "MASTER",
   "rpc_port": ":10749",
   "securepassword": "mysecretpassword",
   "db_type": 2,

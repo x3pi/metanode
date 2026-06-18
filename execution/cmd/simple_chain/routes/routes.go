@@ -76,14 +76,7 @@ func InitRoutes(
 	routes[command.GetTransactionByHash] = blockProcessor.GetTransactionByHash
 	routes[command.GetChainId] = blockProcessor.GetChainId
 
-	// TransactionsFromSubTopic:
-	// - MODE_SINGLE: MASTER cũng cần route này để nhận TX từ SUB-WRITE qua TCP
-	//   (SUB-WRITE gọi TxsProcessor2 → gửi đến MASTER_CONNECTION_TYPE via TCP)
-	// - MODE_MULTI:  MASTER nhận TX từ Rust consensus qua UDS, không qua TCP
-	//   (chỉ Sub nodes cần route này để nhận từ các node khác)
-	// if serviceType != common.ServiceTypeMaster || mode == common.MODE_SINGLE {
-	// 	routes[common.TransactionsFromSubTopic] = blockProcessor.TransactionsFromSubTopic
-	// }
+
 
 	// State attestation: all nodes receive attestations from peers for fork detection
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
