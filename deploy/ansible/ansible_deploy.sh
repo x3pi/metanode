@@ -112,6 +112,13 @@ if [ -z "$DEPLOY_IP" ]; then
     DEPLOY_IP=$(hostname -I | awk '{print $1}')
 fi
 
+# Check if Git Auto-Deploy Watcher daemon is running
+if pgrep -f "auto_rebuild_deploy.sh" >/dev/null 2>&1; then
+    WATCHER_STATUS="Đang hoạt động (Active) 🟢"
+else
+    WATCHER_STATUS="Đã tắt (Inactive) 🔴"
+fi
+
 # Resolve Target Node IPs dynamically from inventory.yml
 TARGET_NODES_IPS=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
@@ -127,6 +134,7 @@ echo "   Target Node:        $TARGET_NODE"
 echo "   Keep Data:          $KEEP_DATA"
 echo "   Restore Node:       $RESTORE_NODE"
 echo "   Open Ports:         $OPEN_PORTS"
+echo "   Watcher:            $WATCHER_STATUS"
 
 send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
 - Deployer Server IP: \`${DEPLOY_IP}\`
@@ -136,7 +144,8 @@ send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Dep
 - Target Node: \`${TARGET_NODE}\`
 - Keep Data: \`${KEEP_DATA}\`
 - Restore Node: \`${RESTORE_NODE}\`
-- Open Ports: \`${OPEN_PORTS}\`"
+- Open Ports: \`${OPEN_PORTS}\`
+- Watcher Daemon: \`${WATCHER_STATUS}\`"
 
 # Prepare extra vars
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS}"
@@ -170,6 +179,7 @@ if [ $ansible_exit -eq 0 ]; then
     echo "$RPC_CONFIG"
 
     send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
+- Watcher Daemon: \`${WATCHER_STATUS}\`
 
 ⚙️ *Cấu hình kết nối client:*
 \`\`\`json
@@ -189,6 +199,7 @@ ${RPC_CONFIG}
     \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
 else
     send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` thất bại với mã lỗi \`${ansible_exit}\`!
+- Watcher Daemon: \`${WATCHER_STATUS}\`
 
 🔍 *Lệnh lấy log kiểm tra lỗi:*
 • *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
