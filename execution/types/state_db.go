@@ -6,10 +6,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 type AccountStateDB interface {
 	AccountState(common.Address) (AccountState, error)
+
+	PlusOneNonce(common.Address) error
+	SetNonce(common.Address, uint64) error
+	SetAccountType(common.Address, pb.ACCOUNT_TYPE) error
 
 	SubPendingBalance(common.Address, *big.Int) error
 	AddPendingBalance(common.Address, *big.Int) error
@@ -23,6 +28,8 @@ type AccountStateDB interface {
 	SetNewDeviceKey(common.Address, common.Hash) error
 
 	SetState(AccountState)
+	PublicSetDirtyAccountState(AccountState)
+	DirtyAccountCount() int
 
 	IntermediateRoot(isLockProcess ...bool) (common.Hash, error)
 	Commit() (common.Hash, error)
@@ -41,7 +48,7 @@ type AccountStateDB interface {
 
 type SmartContractDB interface {
 	Code(address common.Address) []byte
-	StorageValue(address common.Address, key []byte) ([]byte, bool)
+	StorageValue(address common.Address, key []byte, customRoot ...*common.Hash) ([]byte, bool)
 	SetAccountStateDB(asdb AccountStateDB)
 	SetBlockNumber(blockNumber uint64)
 	SetCode(
@@ -50,9 +57,10 @@ type SmartContractDB interface {
 		code []byte,
 	)
 	SetStorageValue(address common.Address, key []byte, value []byte) error
+	BatchSetStorageValues(address common.Address, keys, values [][]byte) error
 	AddEventLogs(eventLogs []EventLog)
 	StorageRoot(
-		address common.Address,
+		address common.Address, customRoot ...*common.Hash,
 	) common.Hash
 	NewTrieStorage(
 		address common.Address,
