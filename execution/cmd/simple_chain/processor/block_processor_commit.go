@@ -357,9 +357,10 @@ func (bp *BlockProcessor) commitWorker() {
 		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Microseconds())
 		
 		if txCount > 0 {
-			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | Rust: %dms | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
+			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | Rust: %dms (FFI: %dms) | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
 				trace.BlockNumber, trace.TxCount,
 				trace.ConsensusDurationUs / 1000,
+				trace.RustDeliveryFFIDurationUs / 1000,
 				trace.ProcessTxsDurationUs / 1000,
 				trace.Phase1TotalDurationUs / 1000, // already removed ProcessTxs subtraction
 				trace.CommitMemoryDurationUs / 1000,

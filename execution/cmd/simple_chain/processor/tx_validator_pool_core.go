@@ -645,21 +645,24 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		rootSpan = nil
 	}
 
-	startExecution := time.Now()
+	waitLockStart := time.Now()
 	vp.blockProcessingLock.Lock()
+	lockWaitDuration := time.Since(waitLockStart)
+
+	startExecution := time.Now()
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
 	if len(txs) > 0 {
-		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | RealExec=%v",
-			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
+		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | LockWait=%v | RealExec=%v",
+			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), lockWaitDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
 			
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(txs), consensusDuration.Microseconds(), execDuration.Microseconds())
 	}
 
 	if execDuration.Microseconds() > 100 {
-		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v", len(txs), execDuration)
+		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v (WaitLock: %v)", len(txs), execDuration, lockWaitDuration)
 	}
 
 	return res, execErr
