@@ -243,6 +243,7 @@ impl TxSocketServer {
                                         transactions_to_submit.len()
                                     );
                                     let mut forwarded = false;
+                                    let mut explicitly_rejected = false;
                                     for peer_addr in &targets {
                                         match crate::network::peer_rpc::forward_transactions_to_peer(
                                             peer_addr,
@@ -264,6 +265,7 @@ impl TxSocketServer {
                                                         "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
                                                         peer_addr, resp.error
                                                     );
+                                                    explicitly_rejected = true;
                                                 }
                                             }
                                             Err(e) => {
@@ -274,16 +276,17 @@ impl TxSocketServer {
                                             }
                                         }
                                     }
-                                    if forwarded {
-                                        return; // Successfully forwarded, exit thread.
+                                    if forwarded || explicitly_rejected {
+                                        return; // Exit thread. If rejected, drop it permanently so client can retry/fail.
                                     }
                                 }
 
-                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally.", transactions_to_submit.len());
+                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/5).", transactions_to_submit.len(), attempt + 1);
                                 drop(node_guard);
                                 attempt += 1;
-                                if attempt % 60 == 0 {
-                                    tracing::warn!("⚠️ [FFI TX FLOW] [DEADLOCK-MONITOR] Backpressure: Rust FFI transaction channel is full (50K capacity)!");
+                                if attempt >= 5 {
+                                    error!("🚨 [FFI TX FLOW] Dropping {} TXs after 5 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
+                                    return;
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                                 continue;
