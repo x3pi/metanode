@@ -1014,11 +1014,6 @@ func (a *MVMApi) RevertFullDb() bool {
 	return status != 0
 }
 
-var (
-	// Biến này không còn được sử dụng và có thể xóa.
-	processingPointers []unsafe.Pointer
-)
-
 //export GlobalStateGet
 func GlobalStateGet(
 	mvmId *C.uchar,
