@@ -614,8 +614,8 @@ func processGroupsConcurrently(
 	if groupCount > 0 {
 		avgPerGroup = evmDuration / time.Duration(groupCount)
 	}
-	logger.Info("🧮 [PERF-EVM] groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
-		groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
+	logger.Info("🧮 [PERF-EVM] Block #%d | groups=%d | txCount=%d | EVM(parallel)=%v | dirty=%v | merge=%v | avg/group=%v | preload=%v",
+		lastBlockHeader.BlockNumber()+1, groupCount, txCount, evmDuration, dirtyDuration, mergeDuration, avgPerGroup, preloadDuration)
 	// ─────────────────────────────────────────────────────────────
 
 	if enableTrace {
@@ -662,7 +662,6 @@ func processSingleGroup(
 	}
 	startGroup := time.Now()
 	totalGasFee := big.NewInt(0)
-
 	failedSenders := make(map[common.Address]bool) // Đánh dấu nếu sender đã bị lỗi trong group này
 	// blockTime is now passed from Rust consensus for deterministic execution across all nodes
 	for _, item := range groupItems {
@@ -719,7 +718,8 @@ func processSingleGroup(
 
 		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...)
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
-		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
+		errVerify := VerifyTransaction(tx, chainState, as)
+		if errVerify != nil {
 			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
 
@@ -1026,6 +1026,7 @@ func processSingleGroup(
 			vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, leaderAddr)
 
 			exRs, err = vmP.ExecuteNonceOnly(txCtx, tx, true)
+
 			if err != nil {
 				rcp = createErrorReceipt(tx, toAddress, err)
 				if exRs != nil {

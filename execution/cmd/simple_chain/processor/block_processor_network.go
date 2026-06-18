@@ -292,23 +292,6 @@ PROCESS_LOOP:
 		// 🔍 DIAGNOSTIC: Log EVERY block received from Rust
 		incomingTxCount := len(epochData.Transactions)
 		incomingGEI := epochData.GetGlobalExecIndex()
-		if incomingTxCount > 0 {
-			logger.Info("📥 [DIAG-RECV] Block from Rust: GEI=%d, txs=%d, epoch=%d, nextExpected=%d, currentBlock=%d",
-				incomingGEI, incomingTxCount, epochData.GetEpoch(), nextExpectedGlobalExecIndex, currentBlockNumber)
-
-			// 🔍 DIAGNOSTIC: Log TX order from Rust
-			for i, txData := range epochData.Transactions {
-				if i < 5 || i == incomingTxCount-1 { // Log 5 first and 1 last tx to avoid spam
-					txHash := txData.GetDigest()
-					hashStr := fmt.Sprintf("%x", txHash)
-					if len(hashStr) > 16 {
-						hashStr = hashStr[:16] + "..."
-					}
-					logger.Info("  |_ [RUST-TX-ORDER] GEI=%d, pos[%d/%d]: hash=%s, worker=%d",
-						incomingGEI, i, incomingTxCount-1, hashStr, txData.GetWorkerId())
-				}
-			}
-		}
 
 		// NOTE: Network Sync cancellation logic removed (Feb 2026)
 		// Rust P2P now handles block sync for SyncOnly nodes via rust_sync_node.rs
