@@ -100,8 +100,6 @@
   "connection_address": "0.0.0.0:4201",
   "dns_server_address": "0.0.0.0:7081",
   "version": "0.0.1.0",
-  "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
-  "service_type": "MASTER",
   "rpc_port": ":8757",
   "securepassword": "mysecretpassword",
   "peer_rpc_port": 19200,
