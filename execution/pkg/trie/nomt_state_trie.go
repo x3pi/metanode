@@ -779,8 +779,8 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 
 	// Restore high-performance parallel reads (dynamic CPU-based workers)
 	numWorkers := runtime.NumCPU()
-	if numWorkers > 32 {
-		numWorkers = 32 // Cap at 32 to prevent excessive goroutine scheduling overhead
+	if numWorkers > 128 {
+		numWorkers = 128 // Cap at 128 to fully utilize high-end servers
 	}
 	if count < numWorkers {
 		numWorkers = count
@@ -903,8 +903,8 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 
 	// Restore high-performance parallel workers (dynamic CPU-based workers)
 	numWorkers := runtime.NumCPU()
-	if numWorkers > 32 {
-		numWorkers = 32 // Cap at 32 to prevent excessive goroutine scheduling overhead
+	if numWorkers > 128 {
+		numWorkers = 128 // Cap at 128 to fully utilize high-end servers
 	}
 	if count < numWorkers {
 		numWorkers = count
