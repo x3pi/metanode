@@ -230,14 +230,14 @@ func VerifyTransaction(
 		txHash := tx.Hash()
 
 		if isSubNodeLagging {
-			logger.Warn("⚠️ [BLS-LAG-DEBUG] account=%s | as.Nonce=%d | tx.Nonce=%d | blsKeyLen=%d | stateIsPreloaded=%v | tx=%s",
-				tx.FromAddress().String(),
-				as.Nonce(),
-				tx.GetNonce(),
-				len(as.PublicKeyBls()),
-				preloadedState != nil,
-				tx.Hash().Hex()[:16]+"...",
-			)
+			// logger.Warn("⚠️ [BLS-LAG-DEBUG] account=%s | as.Nonce=%d | tx.Nonce=%d | blsKeyLen=%d | stateIsPreloaded=%v | tx=%s",
+			// 	tx.FromAddress().String(),
+			// 	as.Nonce(),
+			// 	tx.GetNonce(),
+			// 	len(as.PublicKeyBls()),
+			// 	preloadedState != nil,
+			// 	tx.Hash().Hex()[:16]+"...",
+			// )
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
 			if !isCrossChainBatchSubmit {

@@ -18,6 +18,8 @@ type BlockTrace struct {
 
 	// Pre-mempool
 	ClientBatchProcessingUs int64 `json:"client_batch_processing_ms"`
+	WaitGoUs                int64 `json:"wait_go_us"`
+	WaitRustUs              int64 `json:"wait_rust_us"`
 
 	// Phase 1: Execution & Processing (Root Calc)
 	ProcessTxsDurationUs   int64 `json:"process_txs_duration_ms"`
@@ -102,6 +104,14 @@ func (s *BlockTraceStore) SetClientBatchProcessingTime(blockNum uint64, ms int64
 	defer s.mu.Unlock()
 	t := s.getOrCreateTrace(blockNum)
 	t.ClientBatchProcessingUs = ms
+}
+
+func (s *BlockTraceStore) SetWaitTime(blockNum uint64, waitGoUs int64, waitRustUs int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.getOrCreateTrace(blockNum)
+	t.WaitGoUs = waitGoUs
+	t.WaitRustUs = waitRustUs
 }
 
 func (s *BlockTraceStore) AddPhase1Time(blockNum uint64, processTxsUs, receiptsRootUs, txsRootUs, phase1TotalUs int64) {
