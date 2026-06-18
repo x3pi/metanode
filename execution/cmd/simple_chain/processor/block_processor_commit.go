@@ -604,7 +604,10 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 	}
 
 	var receiptBatchSerialized []byte
-	if job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
+	if job.Receipts != nil {
+		receiptBatchSerialized = job.Receipts.GetReceiptBatchPut()
+	}
+	if len(receiptBatchSerialized) == 0 && job.ProcessResults != nil && len(job.ProcessResults.Receipts) > 0 {
 		var rb [][2][]byte
 		for _, r := range job.ProcessResults.Receipts {
 			b, err := r.Marshal()
