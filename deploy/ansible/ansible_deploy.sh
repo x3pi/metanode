@@ -77,6 +77,7 @@ TARGET_NODE="all"
 RESTORE_NODE="none"
 SNAPSHOT_URL=""
 OPEN_PORTS="false"
+BUILD_FAST="false"
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -97,6 +98,7 @@ while [[ "$#" -gt 0 ]]; do
         --restore-node) RESTORE_NODE="$2"; shift ;;
         --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
         --open-ports) OPEN_PORTS="true" ;;
+        --fast) BUILD_FAST="true" ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             exit 0
@@ -134,6 +136,7 @@ echo "   Target Node:        $TARGET_NODE"
 echo "   Keep Data:          $KEEP_DATA"
 echo "   Restore Node:       $RESTORE_NODE"
 echo "   Open Ports:         $OPEN_PORTS"
+echo "   Build Fast:         $BUILD_FAST"
 echo "   Watcher:            $WATCHER_STATUS"
 
 send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
@@ -148,7 +151,7 @@ send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Dep
 - Watcher Daemon: \`${WATCHER_STATUS}\`"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS}"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi

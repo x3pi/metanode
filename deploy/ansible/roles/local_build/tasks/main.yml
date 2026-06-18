@@ -1,7 +1,11 @@
 ---
 - name: Build Standalone Release Package
   ansible.builtin.shell: |
+    {% if ansible_build_fast | default(false) | bool %}
+    bash build_release.sh --fast
+    {% else %}
     bash build_release.sh
+    {% endif %}
   args:
     chdir: "{{ deploy_dir }}"
   register: build_result
