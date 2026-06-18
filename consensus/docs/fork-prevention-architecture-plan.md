@@ -104,7 +104,7 @@ This requires three guarantees:
 
 **Changes**:
 - File: `executor/unix_socket_handler_epoch.go`
-- When `ServiceType == "MASTER"`, always force `execute_mode = true` regardless of the request flag
+- Always force `execute_mode = true` regardless of the request flag (Unified Architecture)
 - The store-only path should only remain for Sub nodes (read-only replicas)
 
 ```

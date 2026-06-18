@@ -447,9 +447,8 @@ func (app *App) Run() error {
 		peerCount = len(app.node.Peers)
 	}
 	lastBlock := storage.GetLastBlockNumber()
-	logger.Info("✅ [READY] %s fully operational: block=%d, peers=%d, service=%s",
-		app.config.ServiceType,
-		lastBlock, peerCount, app.config.ServiceType)
+	logger.Info("✅ [READY] Node fully operational: block=%d, peers=%d",
+		lastBlock, peerCount)
 
 	return nil
 }

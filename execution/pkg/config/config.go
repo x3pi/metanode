@@ -124,8 +124,6 @@ type SimpleChainConfig struct {
 	ConnectionAddress                  string         `json:"connection_address"`
 	DNSServerAddress                   string         `json:"dns_server_address"`
 	Version                            string         `json:"version"`
-	ListTypeService                    string         `json:"list_type_service"`
-	ServiceType                        string         `json:"service_type"`
 	RpcPort                            string         `json:"rpc_port"`
 	DBType                             storage.DBType `json:"db_type"`
 	GenesisFilePath                    string         `json:"genesis_file_path"`
