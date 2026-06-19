@@ -115,7 +115,7 @@ func (v *ValidationStateCache) FlushToGlobal() error {
 // ApplyAcceptedWritesTo copies all accepted overlay writes to another DB instance.
 func (v *ValidationStateCache) ApplyAcceptedWritesTo(targetAccountDB types.AccountStateDB, targetSCDB types.SmartContractDB) {
 	for _, acc := range v.acceptedAccounts {
-		targetAccountDB.SetState(acc.Copy())
+		targetAccountDB.InjectLoadedAccount(acc.Copy())
 	}
 	for addr, keysMap := range v.acceptedStorage {
 		for kStr, val := range keysMap {

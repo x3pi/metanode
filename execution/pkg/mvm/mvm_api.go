@@ -52,6 +52,7 @@ var (
 
 type AccountStateDB interface {
 	AccountState(address common.Address) (types.AccountState, error)
+	InjectLoadedAccount(types.AccountState)
 	PublicSetDirtyAccountState(as types.AccountState)
 }
 

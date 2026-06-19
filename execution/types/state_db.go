@@ -28,6 +28,7 @@ type AccountStateDB interface {
 	SetNewDeviceKey(common.Address, common.Hash) error
 
 	SetState(AccountState)
+	InjectLoadedAccount(AccountState)
 	PublicSetDirtyAccountState(AccountState)
 	DirtyAccountCount() int
 
