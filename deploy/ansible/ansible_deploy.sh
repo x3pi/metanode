@@ -157,7 +157,7 @@ if [ -n "$SNAPSHOT_URL" ]; then
 fi
 
 echo -e "\n⏸ Tạm dừng Health Monitor trong quá trình Deploy để tránh cảnh báo sai..."
-pkill -f "start_monitors.sh health" || true
+pkill -f "start_monitors.sh" || true
 pkill -f "block_hash_checker" || true
 
 cd "$SCRIPT_DIR"
