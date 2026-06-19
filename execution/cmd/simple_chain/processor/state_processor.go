@@ -320,19 +320,9 @@ func (sp *StateProcessor) GetExecuteSCResultsHashCore(ctx context.Context, block
 		txs = append(txs, tx)
 	}
 
-	for i, tx := range txs {
+	for _, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
-		if tx.IsCallContract() || tx.IsDeployContract() {
-			if sp.blockProcessor != nil && sp.blockProcessor.transactionProcessor != nil {
-				updatedTx, err, _ := sp.blockProcessor.transactionProcessor.ProcessSingleTransactionVirtual(tx)
-				if err == nil && updatedTx != nil {
-					txs[i] = updatedTx
-				} else {
-					logger.Warn("⚠️ [FORK-SAFETY] Virtual execution failed during state verification for tx %s: %v", tx.Hash().Hex(), err)
-				}
-			}
-		}
 	}
 
 	freeFeeMap := sp.blockProcessor.chainState.GetFreeFeeAddress()
