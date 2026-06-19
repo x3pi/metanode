@@ -125,6 +125,7 @@ fi
 TARGET_NODES_IPS=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE" || echo "")
+    python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" json > "/tmp/rpc_nodes.json" 2>/dev/null || true
 fi
 
 echo -e "\n🚀 Starting Ansible Deployment with:"
