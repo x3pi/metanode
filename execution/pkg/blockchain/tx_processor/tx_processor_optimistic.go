@@ -35,26 +35,25 @@ func ProcessTransactionsOptimistic(
 	[]types.ExecuteSCResult,
 	map[common.Hash]common.Address,
 ) {
-	var allTxs []types.Transaction
+	var totalTxs int
 	for _, group := range groupedGroups {
-		for _, item := range group.Items {
-			allTxs = append(allTxs, item.Tx)
-		}
+		totalTxs += len(group.Items)
 	}
-	if len(allTxs) == 0 {
+	if totalTxs == 0 {
 		return nil, nil, nil, nil
 	}
 
 	startPreload := time.Now()
-	uniqueAddrMap := make(map[common.Address]struct{}, len(allTxs)*2)
-	addrSlice := make([]common.Address, 0, len(allTxs)*2)
-	for _, tx := range allTxs {
-		fromAddr := tx.FromAddress()
-		if _, seen := uniqueAddrMap[fromAddr]; !seen {
-			uniqueAddrMap[fromAddr] = struct{}{}
-			addrSlice = append(addrSlice, fromAddr)
-		}
-		if tx.IsCallContract() {
+	uniqueAddrMap := make(map[common.Address]struct{}, totalTxs*2)
+	addrSlice := make([]common.Address, 0, totalTxs*2)
+	for _, group := range groupedGroups {
+		for _, item := range group.Items {
+			tx := item.Tx
+			fromAddr := tx.FromAddress()
+			if _, seen := uniqueAddrMap[fromAddr]; !seen {
+				uniqueAddrMap[fromAddr] = struct{}{}
+				addrSlice = append(addrSlice, fromAddr)
+			}
 			toAddr := tx.ToAddress()
 			if _, seen := uniqueAddrMap[toAddr]; !seen {
 				uniqueAddrMap[toAddr] = struct{}{}
@@ -69,19 +68,19 @@ func ProcessTransactionsOptimistic(
 	// 2. Iterative Parallel Group Block-STM (Union-Find Conflict Resolution)
 	// -------------------------------------------------------------------------
 
-	finalResults := make([]groupResultExt, len(allTxs))
+	finalResults := make([]groupResultExt, len(groupedGroups))
 	validationCache := account_state_db.NewValidationStateCache(chainState.GetAccountStateDB(), chainState.GetSmartContractDB())
 
-	// txsToExecute contains the indices of all transactions that need to be executed/re-executed
-	txsToExecute := make([]int, len(allTxs))
-	for i := range allTxs {
-		txsToExecute[i] = i
+	// groupsToExecute contains the indices of all groups that need to be executed/re-executed
+	groupsToExecute := make([]int, len(groupedGroups))
+	for i := range groupedGroups {
+		groupsToExecute[i] = i
 	}
 
 	speculativeResults := make(map[int]groupResultExt)
 	isFirstRound := true
 
-	for len(txsToExecute) > 0 {
+	for len(groupsToExecute) > 0 {
 		var wg sync.WaitGroup
 		var resultsMutex sync.Mutex
 
@@ -91,7 +90,7 @@ func ProcessTransactionsOptimistic(
 		}
 
 		if isFirstRound {
-			// Round 1: Flat parallel execution of all transactions
+			// Round 1: Flat parallel execution of all static groups
 			var nextIdx uint32
 			for w := 0; w < numWorkers; w++ {
 				wg.Add(1)
@@ -99,11 +98,11 @@ func ProcessTransactionsOptimistic(
 					defer wg.Done()
 					for {
 						idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-						if idx >= len(txsToExecute) {
+						if idx >= len(groupsToExecute) {
 							break
 						}
-						realIdx := txsToExecute[idx]
-						tx := allTxs[realIdx]
+						realIdx := groupsToExecute[idx]
+						group := groupedGroups[realIdx]
 
 						var localTrie p_trie.StateTrie
 						baseTrie := validationCache.Trie()
@@ -130,7 +129,7 @@ func ProcessTransactionsOptimistic(
 
 						res := processSingleGroup(
 							ctx, chainState, localAccountDB, localSmartContractDB,
-							[]grouptxns.Item{{Tx: tx}}, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+							group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
 						)
 						res.readAccounts = localAccountDB.GetLoadedAccounts()
 						res.readStorage = localSmartContractDB.GetReadStorageKeys()
@@ -148,23 +147,23 @@ func ProcessTransactionsOptimistic(
 			isFirstRound = false
 
 		} else {
-			// Subsequent Rounds: Group-level parallel execution of conflicting transactions using Union-Find
-			numConflicting := len(txsToExecute)
+			// Subsequent Rounds: Group-level parallel execution of conflicting groups using Union-Find
+			numConflicting := len(groupsToExecute)
 			uf := grouptxns.NewUnionFind(numConflicting)
 
-			txIdxMap := make(map[int]int, numConflicting) // realIdx -> index in txsToExecute
-			for i, realIdx := range txsToExecute {
-				txIdxMap[realIdx] = i
+			groupIdxMap := make(map[int]int, numConflicting) // realIdx -> index in groupsToExecute
+			for i, realIdx := range groupsToExecute {
+				groupIdxMap[realIdx] = i
 			}
 
 			addressToIndices := make(map[common.Address][]int)
 			registerAccess := func(addr common.Address, realIdx int) {
-				if idxInConflicting, ok := txIdxMap[realIdx]; ok {
+				if idxInConflicting, ok := groupIdxMap[realIdx]; ok {
 					addressToIndices[addr] = append(addressToIndices[addr], idxInConflicting)
 				}
 			}
 
-			for _, realIdx := range txsToExecute {
+			for _, realIdx := range groupsToExecute {
 				res := speculativeResults[realIdx]
 				// Read accounts
 				for addr := range res.readAccounts {
@@ -190,16 +189,16 @@ func ProcessTransactionsOptimistic(
 				}
 			}
 
-			// Union transactions accessing same addresses
+			// Union groups accessing same addresses
 			for _, indices := range addressToIndices {
 				for i := 1; i < len(indices); i++ {
 					uf.Union(indices[0], indices[i])
 				}
 			}
 
-			// Collect transaction indices into groups
+			// Collect group indices into execution groups
 			rootToItems := make(map[int][]int)
-			for i, realIdx := range txsToExecute {
+			for i, realIdx := range groupsToExecute {
 				root := uf.Find(i)
 				rootToItems[root] = append(rootToItems[root], realIdx)
 			}
@@ -245,9 +244,9 @@ func ProcessTransactionsOptimistic(
 
 						groupResults := make(map[int]groupResultExt)
 
-						// Execute sequentially within this group
+						// Execute sequentially within this meta-group
 						for _, realIdx := range groupRealIndices {
-							tx := allTxs[realIdx]
+							group := groupedGroups[realIdx]
 
 							var ethAddressBytes [20]byte
 							ethAddressBytes[0] = 0xFE
@@ -257,7 +256,7 @@ func ProcessTransactionsOptimistic(
 
 							res := processSingleGroup(
 								ctx, chainState, localAccountDB, localSmartContractDB,
-								[]grouptxns.Item{{Tx: tx}}, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+								group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
 							)
 							res.readAccounts = localAccountDB.GetLoadedAccounts()
 							res.readStorage = localSmartContractDB.GetReadStorageKeys()
@@ -285,15 +284,15 @@ func ProcessTransactionsOptimistic(
 		}
 
 		// --- Sequential Validation & Conflict Check ---
-		var nextRoundTxs []int
+		var nextRoundGroups []int
 		currentPassCache := account_state_db.NewValidationStateCache(nil, nil)
-		for _, realIdx := range txsToExecute {
+		for _, realIdx := range groupsToExecute {
 			res := speculativeResults[realIdx]
 
 			hasConflict := currentPassCache.CheckConflict(res.readAccounts, res.readStorage)
 			if hasConflict {
-				logger.Info("🔄 [BLOCK-STM] Conflict detected for TX %d, re-queueing", realIdx)
-				nextRoundTxs = append(nextRoundTxs, realIdx)
+				logger.Info("🔄 [BLOCK-STM] Conflict detected for GROUP %d, re-queueing", realIdx)
+				nextRoundGroups = append(nextRoundGroups, realIdx)
 			} else {
 				// Apply writes to the validation cache overlay
 				storageWrites := make(map[string]map[string][]byte)
@@ -319,7 +318,7 @@ func ProcessTransactionsOptimistic(
 		}
 
 		// Set up for next round
-		txsToExecute = nextRoundTxs
+		groupsToExecute = nextRoundGroups
 	}
 
 	validationCache.FlushToGlobal()
@@ -334,10 +333,10 @@ func ProcessTransactionsOptimistic(
 		chainState.GetAccountStateDB().AddPendingBalance(leaderAddr, totalBlockGasFee)
 	}
 
-	allTransactions := make([]types.Transaction, 0, len(allTxs))
-	allReceipts := make([]types.Receipt, 0, len(allTxs))
-	allExecuteSCResults := make([]types.ExecuteSCResult, 0, len(allTxs))
-	allMvmIdMap := make(map[common.Hash]common.Address, len(allTxs))
+	allTransactions := make([]types.Transaction, 0, totalTxs)
+	allReceipts := make([]types.Receipt, 0, totalTxs)
+	allExecuteSCResults := make([]types.ExecuteSCResult, 0, totalTxs)
+	allMvmIdMap := make(map[common.Hash]common.Address, totalTxs)
 
 	blockTxIndex := uint64(0)
 	for _, gRs := range finalResults {

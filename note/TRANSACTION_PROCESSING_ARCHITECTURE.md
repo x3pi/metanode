@@ -19,34 +19,30 @@ Tài liệu này mô tả chi tiết cơ chế phân luồng xử lý giao dịc
 
 ---
 
-## 2. Phân Chia Luồng Đồng Bộ (Sync) và Song Song (Parallel)
+## 2. Phân Chia Luồng Tối Ưu Lạc Quan (Optimistic Block-STM & Union-Find)
+Nơi diễn ra: `ProcessTransactionsOptimistic` (trong `tx_processor_optimistic.go`)
 
-Kiến trúc xử lý block (được đặt trong `ProcessTransactions`) chia làm 2 giai đoạn (Phase) rõ rệt:
+Kiến trúc xử lý block sử dụng mô hình kết hợp (Hybrid Model) giữa **Phân Tích Nhóm Tĩnh (Static Grouping)** và **Thực Thi Lạc Quan (Optimistic Block-STM)**. Quá trình chia làm các vòng lặp (Rounds) và pha xác thực (Validation):
 
-### Phase 1: Thực Thi Song Song (Parallel Execution Phase)
-Nơi diễn ra: `executeGroupsParallel` (trong `tx_processor.go`)
+### Round 1: Thực Thi Song Song Đầu Tiên (Parallel Speculative Execution)
+- Hệ thống duyệt qua danh sách các nhóm tĩnh (`RelativeGroup`) đã được `grouptxns` phân tích từ trước. Thay vì chạy từng giao dịch lẻ, đơn vị thực thi là toàn bộ một **Group**. Điều này giúp các giao dịch chắc chắn conflict (ví dụ: 1000 lệnh chuyển native coin từ cùng 1 ví Funder) sẽ chạy tuần tự với nhau trong cùng 1 group ở 1 worker, ngăn ngừa thảm hoạ conflict ảo gây lãng phí CPU.
+- **Preload Tối Ưu:** Toàn bộ địa chỉ liên quan (cả `FromAddress` và `ToAddress` của mọi loại giao dịch) đều được quét và đưa vào State Cache ngay từ đầu, xóa bỏ điểm thắt cổ chai Disk I/O.
+- Các worker (giới hạn bằng `runtime.NumCPU()` hoặc max 16) bốc các group ra chạy song song một cách "lạc quan" (Speculative). Chúng ghi nhận Read Set và Write Set (`readAccounts`, `readStorage`, `DirtyAccounts`) thông qua `ValidationStateCache`.
 
-- **Worker Pool:** Metanode sử dụng một pool các goroutines thay vì tạo mới liên tục (Zero-allocation parallel processing qua `sync.Pool`). Các `RelativeGroup` độc lập được đẩy vào các channel để các worker xử lý.
-- **Thực thi cô lập (Isolated Execution):** 
-  - Trong quá trình chạy EVM, các worker chỉ **đọc** (Read) dữ liệu từ State Trie (trie chung).
-  - Khi cần **ghi** (Write), thay vì ghi đè trực tiếp lên DB gây lock contention, dữ liệu mới sẽ được ghi vào một bản ghi tạm thời (`DirtyAccounts` / `ValidatorState` nội bộ của group).
-- **Nguyên lý song song (Địa chỉ liên quan quyết định):** Việc chạy song song hay tuần tự **hoàn toàn phụ thuộc vào địa chỉ liên quan (Related Addresses) của giao dịch chứ không phụ thuộc vào loại giao dịch (Transfer hay EVM)**:
-  - Bất kỳ giao dịch nào (Transfer, Smart Contract, hay System) nếu không chia sẻ địa chỉ liên quan với các giao dịch khác sẽ được Union-Find xếp vào các nhóm khác nhau và chạy song song.
-  - Ngược lại, nếu có chung địa chỉ liên quan (ví dụ: cùng địa chỉ gửi `From`, nhận `To`, hoặc ví gọi hợp đồng), chúng sẽ bị gộp vào cùng một nhóm để thực thi tuần tự nhằm bảo toàn tính toàn vẹn trạng thái.
-  - **Trường hợp ngoại lệ (Địa chỉ hệ thống dùng chung / Dispatch point):** Các địa chỉ ảo đóng vai trò định tuyến hoặc đăng ký hệ thống nhưng không thay đổi trạng thái nội bộ của chính địa chỉ đó (ví dụ: `ACCOUNT_SETTING_ADDRESS_SELECT` dùng đăng ký BLS, hay `VALIDATOR_CONTRACT_ADDRESS` dùng stake) sẽ được **loại bỏ (exclude) khỏi mảng gom nhóm của Union-Find**. Điều này ngăn việc toàn bộ giao dịch hệ thống bị dồn về một luồng tuần tự duy nhất, cho phép chúng chạy song song an toàn (do chỉ thay đổi trạng thái trên tài khoản riêng của sender).
-- **Xử lý đặc biệt trong pha song song:**
-  - **Giao dịch Read-Only:** Được tách vào các nhóm riêng biệt để tối ưu hóa đọc song song.
-  - **Giao dịch Cross-Chain / System (Ví dụ: SetBlsPublicKey):** Áp dụng kỹ thuật "Batch Mutation". Việc cập nhật DB thực tế được trì hoãn và tổng hợp ghi nhận ở Phase 2 (Dirty State Merge).
+### Pha Xác Thực Tuần Tự (Sequential Validation & Conflict Check)
+- Đây là bước chốt chặn **Đảm bảo 100% Zero-Fork Determinism**. Hệ thống duyệt tuần tự mảng gốc `groupsToExecute` (đã được thống nhất thứ tự tĩnh trên toàn mạng).
+- Thuật toán `CheckConflict` đối chiếu Read Set của group hiện tại với Write Set của tất cả các group chạy trước nó trong block. Nếu phát hiện đọc dữ liệu cũ (stale read) do group trước đó vừa thay đổi, giao dịch sẽ bị huỷ (Abort) và đưa vào hàng đợi chạy lại (re-queue).
+- Các group vượt qua vòng xác thực sẽ được chấp nhận (Accepted), kết quả ghi đè (Write) được áp dụng vào Validation Cache để làm nền tảng cho các vòng sau.
 
-### Phase 2: Tổng Hợp Đồng Bộ (Deterministic Merge Phase)
-Nơi diễn ra: Nửa sau của `ProcessTransactions` (Sau `wg.Wait()`)
+### Các Vòng Lặp Sau & Khắc Phục Xung Đột Bằng Union-Find (Subsequent Rounds)
+- Những group bị huỷ ở vòng trước sẽ đi vào quá trình hợp nhất (Union-Find Conflict Resolution). Các group nào xung đột dữ liệu động (ví dụ: cùng chọc vào 1 ô Storage EVM mà tĩnh học không dò ra) sẽ được `Union-Find` gom lại thành một "siêu nhóm" (Meta-group).
+- Ở Round tiếp theo, các siêu nhóm này lại được các worker lấy ra chạy song song. Tuy nhiên, các giao dịch *bên trong* siêu nhóm sẽ được thực thi tuần tự hoàn toàn để đảm bảo đọc đúng trạng thái mới nhất từ những giao dịch xung đột.
+- Quá trình cứ lặp lại đến khi danh sách `groupsToExecute` trống trơn (100% giao dịch hoàn tất).
 
-Đây là pha **bắt buộc chạy đồng bộ (Synchronous)** để đảm bảo State Root sinh ra là hoàn toàn giống nhau (Deterministic) trên mọi node.
-
-- **Thu thập kết quả (Gathering):** Duyệt tuần tự qua mảng kết quả của các nhóm (array order). Gộp tất cả `Transactions`, `Receipts`, và `ExecuteSCResults`.
-- **Apply Dirty States:** Các trạng thái (State) bị thay đổi trong quá trình tính toán song song (nằm ở `gRs.DirtyAccounts`) giờ mới được cập nhật thực sự vào `AccountStateDB` và `StakeStateDB`.
-- **Cập nhật Trie (IntermediateRoot):** Sau khi các thay đổi được map vào bộ nhớ, `AccountStateDB.IntermediateRoot(true)` và `StakeStateDB.IntermediateRoot(true)` sẽ tính toán mã băm Merkle (Hash).
-  > **Tối ưu hóa (Perf Optimization):** Mặc dù bước tổng hợp là đồng bộ, nhưng việc tính toán mã băm cho AccountTrie và StakeTrie có thể được chạy song song với nhau (`irWg.Add(2)`), do chúng lưu trữ ở hai cơ sở dữ liệu/trie hoàn toàn độc lập.
+### Phase Cuối: Tổng Hợp Đồng Bộ (Deterministic Merge Phase)
+- **Thu thập kết quả (Gathering):** Duyệt tuần tự qua mảng kết quả cuối cùng (array order). Gộp tất cả `Transactions`, `Receipts`, và `ExecuteSCResults`.
+- **Áp Dụng Trie (IntermediateRoot):** `ValidationStateCache` đẩy dữ liệu Dirty State cuối cùng xuống Global DB. Sau đó tính toán mã băm Merkle `AccountStateDB.IntermediateRoot(true)` và `StakeStateDB.IntermediateRoot(true)` một cách song song.
+  > **Tối ưu hóa (Perf Optimization):** `SmartContractDB.LateBindRoots()` bắt buộc được gọi để chốt StateRoot cục bộ của Storage trước khi Trie chính thức hash.
 
 ---
 
