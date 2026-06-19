@@ -286,10 +286,11 @@ func ProcessTransactionsOptimistic(
 
 		// --- Sequential Validation & Conflict Check ---
 		var nextRoundTxs []int
+		currentPassCache := account_state_db.NewValidationStateCache(nil, nil)
 		for _, realIdx := range txsToExecute {
 			res := speculativeResults[realIdx]
 
-			hasConflict := validationCache.CheckConflict(res.readAccounts, res.readStorage)
+			hasConflict := currentPassCache.CheckConflict(res.readAccounts, res.readStorage)
 			if hasConflict {
 				logger.Info("🔄 [BLOCK-STM] Conflict detected for TX %d, re-queueing", realIdx)
 				nextRoundTxs = append(nextRoundTxs, realIdx)
@@ -312,6 +313,7 @@ func ProcessTransactionsOptimistic(
 				}
 
 				validationCache.ApplyWrites(dirtyAccountsMap, storageWrites)
+				currentPassCache.ApplyWrites(dirtyAccountsMap, storageWrites)
 				finalResults[realIdx] = res
 			}
 		}
