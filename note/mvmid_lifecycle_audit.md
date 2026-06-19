@@ -81,7 +81,7 @@ func ClearMVMApi(mvmId common.Address) {
 
 | File | Hàm | Create | Protect | Clear | C++ Cancel | Verdict |
 |------|-----|--------|---------|-------|------------|---------|
-| `transaction_virtual_processor.go:68` | `ProcessSingleTransactionVirtual` | `GetOrCreateMVMApi` (L303, implicit via vmP) | `ProtectMVMApi` (L112) | `UnprotectMVMApi`(L189) + `ClearMVMApi` (L190) | Qua ClearMVMApi | ✅ |
+| `transaction_virtual_processor.go` | `ProcessSingleTransactionVirtual` (DELETED) | - | - | - | - | ✅ |
 | `transaction_virtual_processor.go:427/441` | batchSubmit dry-run | `GetOrCreateMVMApi` (via vmP) | KHÔNG | `ClearMVMApi` (L427/441) | Qua ClearMVMApi | ✅ |
 
 ### Off-chain Execution
@@ -204,7 +204,7 @@ if tx.IsRegularTransaction() || tx.ToAddress() == ACCOUNT_SETTING {
 ```
 → `sendNative` luôn được gọi từ `ExecuteTransactionWithMvmId`, nơi mà khi `isCache=true`, `ProtectMVMApi + defer UnprotectMVMApi` đã được gọi trước đó (L114+119). CommitWorker sẽ clear.
 
-→ Khi `isCache=false` (Virtual Execution): `sendNative` return → `ExecuteTransactionWithMvmId` return → caller (`ProcessSingleTransactionVirtual`) sẽ gọi `ClearMVMApi` (L190).
+→ Khi `isCache=false` (Virtual Execution): `sendNative` return → `ExecuteTransactionWithMvmId` return → caller (Virtual Executor) sẽ gọi `ClearMVMApi`.
 
 **Kết luận BUG #1:** ⚠️ **Không nghiêm trọng trực tiếp** vì caller luôn clear, nhưng code **không tự chủ** (phụ thuộc caller), vi phạm nguyên tắc "resource owner cleans up". Nếu tương lai có caller mới quên clear → leak thật.
 
@@ -269,9 +269,9 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(...) (types.ExecuteSCResult, error
 
 ---
 
-### BUG #4: Early return paths thiếu ClearMVMApi
+### BUG #4: Early return paths thiếu ClearMVMApi (RESOLVED/DEFUNCT)
 
-**File:** [transaction_virtual_processor.go:142-175](../execution/cmd/simple_chain/processor/transaction_virtual_processor.go#L142-L175)
+**Vấn đề:** Đã được giải quyết triệt để. Hàm `ProcessSingleTransactionVirtual` đã bị xóa bỏ hoàn toàn khỏi codebase.
 
 ```go
 // Nếu TX revert:
