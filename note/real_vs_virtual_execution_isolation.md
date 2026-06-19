@@ -12,7 +12,7 @@ Metanode splits transaction execution into two distinct lanes depending on wheth
 
 | Dimension | Real Execution (Chạy Thật) | Virtual Execution (Chạy Giả) |
 | :--- | :--- | :--- |
-| **Trigger** | Rust BFT Consensus consensus commits ($2f+1$ Quorum verified) delivered via Unix Domain Sockets (UDS) stream. | Mempool submissions (`ProcessSingleTransactionVirtual`), Cross-Chain inbound simulations, or Debug RPCs (`eth_call`, `estimateGas`). |
+| **Trigger** | Rust BFT Consensus consensus commits ($2f+1$ Quorum verified) delivered via Unix Domain Sockets (UDS) stream. | Cross-Chain inbound simulations, or Debug RPCs (`eth_call`, `estimateGas`). |
 | **State Context** | Writes directly to the active `ChainState` and authoritative `AccountStateDB`. | Creates a localized, read-only sandboxed `ChainState` pointing to a specific parent block header's `stateRoot`. |
 | **Storage Interaction** | Mutates active PebbleDB/NOMT storage, generating a persistent `stateRoot` committed upon block seal. | Read-only access to storage. All mutations are localized to an ephemeral memory cache. |
 | **Lifecycle** | State mutations persist forever. | Discarded and garbage-collected immediately upon completion. **0% persistent writes**. |
