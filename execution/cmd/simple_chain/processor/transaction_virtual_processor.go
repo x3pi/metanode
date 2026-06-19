@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -21,53 +19,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/proxy_tx"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ProcessSingleTransactionVirtual
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (v *TxVirtualExecutor) ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte) {
-	if tx == nil {
-		return nil, fmt.Errorf("transaction cannot be nil"), nil
-	}
-	logger.Debug("_virtual_ %v", tx.Hash())
-	if tx.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
-		updatedTx := tx
-		updatedTx.AddRelatedAddress(tx.FromAddress())
-		return updatedTx, nil, nil
-	}
-
-	// ─── CROSS_CHAIN_CONTRACT_ADDRESS (0x1002) ───────────────────────────────
-	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-		updatedTx := tx
-		updatedTx.AddRelatedAddress(tx.FromAddress())
-		updatedTx.AddRelatedAddress(tx.ToAddress())
-
-		inputData := tx.CallData().Input()
-
-		// ── batchSubmit: vote accumulation ──────────────────────────────────
-		// Dùng cross_chain_handler.IsBatchSubmitTx để check selector qua ABI.
-		ccHandler, handlerErr := cross_chain_handler.GetCrossChainHandler()
-		if handlerErr == nil && ccHandler != nil && ccHandler.IsBatchSubmitTx(inputData) {
-			return v.processBatchSubmitVirtual(updatedTx, inputData)
-		}
-
-		// ── lockAndBridge / other: chỉ cần from+to ─────────────────────────
-		return updatedTx, nil, nil
-	}
-
-	// For all standard EVM transactions, skip EVM dry-run completely
-	updatedTx := tx
-	updatedTx.AddRelatedAddress(tx.FromAddress())
-	updatedTx.AddRelatedAddress(tx.ToAddress())
-	return updatedTx, nil, nil
-}
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // processBatchSubmitVirtual — Xác thực + vote accumulation cho batchSubmit

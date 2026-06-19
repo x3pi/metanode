@@ -29,7 +29,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -551,36 +550,10 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		vp.excludedItems = nil
 	}
 
-	// CRITICAL FORK-SAFETY: Ensure RelatedAddresses are populated for all TXs.
-	// TXs committed via Rust consensus arrive WITHOUT RelatedAddresses because Rust
-	// does not track/forward this field. Without addresses, the EVM's isAddressAllowed
-	// check will fail for native TXs (BLS registration) causing receipt status=0x0
-	// on some nodes but 0x1 on others → receiptsRoot divergence → FORK.
-	// We run virtual execution to dynamically recover the same RelatedAddresses as the proposer.
-	type virtualExecutor interface {
-		ProcessSingleTransactionVirtual(tx types.Transaction) (types.Transaction, error, []byte)
-	}
-	ve, isVe := vp.offChainProcessor.(virtualExecutor)
-
-	accountSettingAddrV := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-
 	startVirtual := time.Now()
-	for i, tx := range txs {
+	for _, tx := range txs {
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
-		// OPTIMIZATION: Skip full VirtualExec for TXs that don't need EVM.
-		// AccountSetting TXs (BLS registration) only need from+to addresses (already set above).
-		// Non-contract TXs (simple transfers) also skip.
-		// Only invoke ProcessSingleTransactionVirtual for actual smart contract calls
-		// to non-native addresses where EVM is needed to discover RelatedAddresses.
-		if isVe && (tx.IsCallContract() || tx.IsDeployContract()) && tx.ToAddress() != accountSettingAddrV {
-			updatedTx, err, _ := ve.ProcessSingleTransactionVirtual(tx)
-			if err == nil && updatedTx != nil {
-				txs[i] = updatedTx
-			} else {
-				logger.Warn("⚠️ [FORK-SAFETY] Virtual execution failed during validation for tx %s: %v", tx.Hash().Hex(), err)
-			}
-		}
 	}
 	virtualDuration := time.Since(startVirtual)
 

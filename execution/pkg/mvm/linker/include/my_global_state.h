@@ -46,11 +46,7 @@ namespace mvm
         }
         bool isAddressAllowed(const Address &addr) const
         {
-            if (allowedAddresses.empty())
-            {
-                return true;
-            }
-            return allowedAddresses.find(addr) != allowedAddresses.end();
+            return true;
         }
         bool is_cache() override;
         virtual void remove(const Address &addr) override;
