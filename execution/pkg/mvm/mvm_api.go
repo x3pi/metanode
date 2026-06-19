@@ -1069,11 +1069,6 @@ func GlobalStateGet(
 		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
 			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
 		}
-	} else {
-		if !mvmApi.InRelatedAddress(fAddress) {
-			logger.Error("❌ [DEBUG Exception 15] Address not in RelatedAddresses: %s for mvmId: %s", fAddress.Hex(), fmvmId.Hex())
-			return C.int(2), nil, nil, nil, 0
-		}
 	}
 
 	accountState, err := mvmApi.accountStateDb.AccountState(fAddress)
@@ -1153,11 +1148,6 @@ func GetStorageValue(
 	if mvmApi.extendedMode {
 		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
 			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
-		}
-	} else {
-		if !mvmApi.InRelatedAddress(fAddress) {
-			logger.Error("❌ [DEBUG SLOAD Exception] Address not in RelatedAddresses: %s for mvmId: %s", fAddress.Hex(), fmvmId.Hex())
-			return nil, false
 		}
 	}
 

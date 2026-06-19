@@ -87,6 +87,9 @@ func ProcessTransactionsOptimistic(
 		var resultsMutex sync.Mutex
 
 		numWorkers := runtime.NumCPU()
+		if numWorkers > 16 {
+			numWorkers = 16
+		}
 
 		// Phase 2.1: Execute all txs in txsToExecute concurrently
 		for w := 0; w < numWorkers; w++ {
