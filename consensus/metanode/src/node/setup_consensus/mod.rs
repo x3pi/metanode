@@ -262,11 +262,16 @@ impl ConsensusNode {
 
         coordination_hub.set_startup_go_sync_completed(true);
 
-        Self::perform_post_gate_verification(
-            config,
-            &coordination_hub,
-            &executor_client_for_proc,
-        ).await;
+        let verify_config = config.clone();
+        let verify_hub = coordination_hub.clone();
+        let verify_client = executor_client_for_proc.clone();
+        tokio::spawn(async move {
+            Self::perform_post_gate_verification(
+                &verify_config,
+                &verify_hub,
+                &verify_client,
+            ).await;
+        });
 
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;

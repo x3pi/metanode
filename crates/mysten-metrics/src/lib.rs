@@ -621,10 +621,16 @@ pub fn start_prometheus_server(addr: SocketAddr) -> RegistryService {
         .layer(Extension(registry_service.clone()));
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        axum::serve(listener, app.into_make_service())
-            .await
-            .unwrap();
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+                    tracing::warn!("Prometheus server stopped: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start prometheus server on {}: {}", addr, e);
+            }
+        }
     });
 
     registry_service

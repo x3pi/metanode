@@ -10,18 +10,25 @@ scrape_configs:
   - job_name: "metanode-go-execution"
     static_configs:
       - targets: 
-        - "localhost:8757"  # Master Node 0
-        - "localhost:10747" # Master Node 1
-        - "localhost:10749" # Master Node 2
-        - "localhost:10750" # Master Node 3
-        - "localhost:10748" # Master Node 4
+        - "192.168.1.233:8757" # Node 0
+        - "192.168.1.232:8757" # Node 1
+        - "192.168.1.231:8757" # Node 2
+        - "192.168.1.230:8757" # Node 3
 
   # MetaNode Rust Consensus Metrics
   - job_name: "metanode-rust-consensus"
     static_configs:
       - targets:
-        - "localhost:9100" # Node 0
-        - "localhost:9101" # Node 1
-        - "localhost:9102" # Node 2
-        - "localhost:9103" # Node 3
-        - "localhost:9104" # Node 4
+        - "192.168.1.233:9100" # Node 0
+        - "192.168.1.232:9100" # Node 1
+        - "192.168.1.231:9100" # Node 2
+        - "192.168.1.230:9100" # Node 3
+
+  # Hardware Node Exporter Metrics
+  - job_name: "node_exporter"
+    static_configs:
+      - targets:
+        - "192.168.1.233:9105" # Node 0
+        - "192.168.1.232:9105" # Node 1
+        - "192.168.1.231:9105" # Node 2
+        - "192.168.1.230:9105" # Node 3
