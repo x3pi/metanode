@@ -471,3 +471,4 @@ execution/cmd/rpc-client/rpc-client-bin
 
 # Ignore local inventory configurations
 deploy/ansible/inventory.yml
+deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
