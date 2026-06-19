@@ -14,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -79,8 +80,11 @@ func ProcessTransactionsOptimistic(
 
 	speculativeResults := make(map[int]groupResultExt)
 	isFirstRound := true
+	numRounds := 0
+	conflictsInBlock := 0
 
 	for len(groupsToExecute) > 0 {
+		numRounds++
 		var wg sync.WaitGroup
 		var resultsMutex sync.Mutex
 
@@ -292,6 +296,7 @@ func ProcessTransactionsOptimistic(
 			hasConflict := currentPassCache.CheckConflict(res.readAccounts, res.readStorage)
 			if hasConflict {
 				logger.Info("🔄 [BLOCK-STM] Conflict detected for GROUP %d, re-queueing", realIdx)
+				conflictsInBlock++
 				nextRoundGroups = append(nextRoundGroups, realIdx)
 			} else {
 				// Apply writes to the validation cache overlay
@@ -319,6 +324,11 @@ func ProcessTransactionsOptimistic(
 
 		// Set up for next round
 		groupsToExecute = nextRoundGroups
+	}
+
+	metrics.BlockStmRounds.Observe(float64(numRounds))
+	if conflictsInBlock > 0 {
+		metrics.BlockStmConflictsTotal.Add(float64(conflictsInBlock))
 	}
 
 	validationCache.FlushToGlobal()

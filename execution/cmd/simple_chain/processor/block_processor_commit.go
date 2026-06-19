@@ -239,6 +239,7 @@ func (bp *BlockProcessor) commitWorker() {
 		GlobalPipelineStats.IncrTxsCommitted(int64(txCount))
 		GlobalPipelineStats.SetLastBlock(int64(blockNum))
 		GlobalPipelineStats.SetLastCommitTimeUs(time.Since(start).Microseconds())
+		GlobalPipelineStats.UpdateBlockStats(int64(txCount), time.Now().UnixMicro())
 
 		// ══════════════════════════════════════════════════════════════════
 		// BLS BLOCK SIGNING: Sign block hash BEFORE DoneChan signal.

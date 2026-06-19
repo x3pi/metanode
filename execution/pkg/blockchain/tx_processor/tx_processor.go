@@ -21,6 +21,7 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
@@ -208,10 +209,12 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		logger.Info("  [PERF]   TX Execution (Parallel): %v", execDuration)
 		logger.Info("  [PERF]   IntermediateRoot (TrieDB): %v", trieDBIRDuration)
 		logger.Info("  [PERF]   IntermediateRoot (AccountDB): %v (Parallel)", accountIRDuration)
-		logger.Info("  [PERF]   IntermediateRoot (StakeDB): %v (Parallel)", stakeIRDuration)
-		logger.Info("  [PERF]   TOTAL IR (Wall Clock): %v", trieDBIRDuration+utils.MaxDuration(accountIRDuration, stakeIRDuration))
+		totalIR := trieDBIRDuration + utils.MaxDuration(accountIRDuration, stakeIRDuration)
+		logger.Info("  [PERF]   TOTAL IR (Wall Clock): %v", totalIR)
+		metrics.TrieIRDuration.Observe(totalIR.Seconds())
 	} else {
 		logger.Debug("[PERF] IntermediateRoot (StakeState): %v, block: %v", stakeIRDuration, blockNum)
+		metrics.TrieIRDuration.Observe(stakeIRDuration.Seconds())
 	}
 	// logger.Info("🔍 [FORK-DEBUG] Block #%d: POST-IR stakeRoot=%s", blockNum, stakeRoot.Hex())
 
@@ -298,6 +301,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	// They operate on completely independent state databases (different tries, different storage).
 	// FORK-SAFETY: Both are deterministic pure computations on their respective dirty state.
 	// The ordering constraint (TrieDBManager before AccountStateDB) is preserved above.
+	startRemoteIR := time.Now()
 	var root common.Hash
 	var stakeRoot common.Hash
 	var accountErr, stakeErr error
@@ -335,6 +339,8 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		logger.Error("Failed to get IntermediateRoot for StakeStateDB (Remote): %v", stakeErr)
 		return ProcessResult{Error: stakeErr}, fmt.Errorf("IntermediateRoot StakeStateDB failed: %w", stakeErr)
 	}
+
+	metrics.TrieIRDuration.Observe(time.Since(startRemoteIR).Seconds())
 
 	// Prepare and send the final result
 	var modifiedAccounts []common.Address
