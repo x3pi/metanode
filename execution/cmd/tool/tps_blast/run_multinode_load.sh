@@ -156,9 +156,9 @@ echo -e "${YELLOW}⏳ Chain is processing... Waiting until idle (no new blocks f
 LAST_BLOCK=$BLOCK_BEFORE
 STAGNANT=0
 ACTUAL_END_MS=$START_MS
-# Stagnant detection: 20s (200 × 0.1s) to tolerate epoch transition freezes
+# Stagnant detection: 60s (600 × 0.1s) to tolerate epoch transition freezes and long Block-STM execution
 # while accurately tracking host wall clock end time at the last block height increase.
-while [ $STAGNANT -lt 200 ]; do
+while [ $STAGNANT -lt 600 ]; do
     sleep 0.1
     CURRENT_BLOCK=$(get_block_number "${RPCS[0]}")
     if [ "$CURRENT_BLOCK" -gt "$LAST_BLOCK" ]; then
@@ -185,12 +185,20 @@ fi
 echo -e "${GREEN}✅ Chain idle (10s no new blocks). Block height after test: ${BOLD}#${BLOCK_AFTER}${NC}"
 
 
-# ── PARSE LOG ─────────────────────────────────────────────────────
 # Strategy: grep ALL createBlockFromResults lines from ALL log files,
 # filter by block number range, then DEDUPLICATE by taking the LAST
 # occurrence of each block number (handles log rotation correctly —
 # the latest App.log has the most recent run's data).
 echo -e "${GREEN}✅ Generating report...${NC}"
+
+# If running remotely via Ansible inventory, fetch the master log
+MASTER_LOG_PATH="$MTN_CONSENSUS_ROOT/metanode/logs/node_0/go-master-stdout.log"
+if [ -n "$INVENTORY" ]; then
+    MASTER_IP=$(echo "${NODES[0]}" | cut -d: -f1)
+    echo -e "${YELLOW}⏳ Fetching performance logs from Master Node ($MASTER_IP)...${NC}"
+    sshpass -p "1234@abcd" scp -o StrictHostKeyChecking=no "abc@$MASTER_IP:/opt/metanode/node-0/logs/execution/execution.log" /tmp/master_execution.log >/dev/null 2>&1 || true
+    MASTER_LOG_PATH="/tmp/master_execution.log"
+fi
 
 BLOCK_START=$((BLOCK_BEFORE + 1))
 BLOCK_END=$BLOCK_AFTER
@@ -253,7 +261,7 @@ for (( b=BLOCK_START; b<=BLOCK_END; b++ )); do
         fi
         
         # Get performance stats from master node logs
-        PERF_LINE=$(grep -a "\[BLOCK-PERF\] Block #${b}:" "/home/abc/chain-n/metanode/consensus/metanode/logs/node_0/go-master-stdout.log" | tail -1)
+        PERF_LINE=$(grep -a "\[BLOCK-PERF\] Block #${b}:" "$MASTER_LOG_PATH" | tail -1)
         if [ -n "$PERF_LINE" ]; then
             V_EXEC=$(echo "$PERF_LINE" | grep -oP 'VirtualExec=[^|]+' | cut -d= -f2 | xargs)
             CONSENSUS=$(echo "$PERF_LINE" | grep -oP 'Consensus=[^|]+' | cut -d= -f2 | xargs)
