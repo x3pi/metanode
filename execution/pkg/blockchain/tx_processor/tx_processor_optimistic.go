@@ -66,25 +66,22 @@ func ProcessTransactionsOptimistic(
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
 	// -------------------------------------------------------------------------
-	// 2. Iterative Block-STM Worker Pool
+	// 2. Iterative Block-STM Worker Pool (Group-Level)
 	// -------------------------------------------------------------------------
 
-	finalResults := make([]groupResultExt, len(allTxs))
-	failedSendersMap := make(map[common.Address]bool)
-
-	// txsToExecute contains the indices of the transactions that need to be executed in this round.
-	txsToExecute := make([]int, len(allTxs))
-	for i := range allTxs {
-		txsToExecute[i] = i
+	finalGroupResults := make([]groupResultExt, len(groupedGroups))
+	groupsToExecute := make([]int, len(groupedGroups))
+	for i := range groupedGroups {
+		groupsToExecute[i] = i
 	}
 
 	validationCache := account_state_db.NewValidationStateCache(chainState.GetAccountStateDB(), chainState.GetSmartContractDB())
 
-	for len(txsToExecute) > 0 {
+	for len(groupsToExecute) > 0 {
 		var nextIdx uint32
 		var wg sync.WaitGroup
 
-		speculativeResults := make(map[int]groupResultExt)
+		speculativeGroupResults := make(map[int]groupResultExt)
 		var resultsMutex sync.Mutex
 
 		numWorkers := runtime.NumCPU()
@@ -92,18 +89,18 @@ func ProcessTransactionsOptimistic(
 			numWorkers = 16
 		}
 
-		// Phase 2.1: Execute all txs in txsToExecute concurrently
+		// Phase 2.1: Execute all groups in groupsToExecute concurrently
 		for w := 0; w < numWorkers; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for {
 					idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-					if idx >= len(txsToExecute) {
+					if idx >= len(groupsToExecute) {
 						break
 					}
-					realIdx := txsToExecute[idx]
-					tx := allTxs[realIdx]
+					realGroupIdx := groupsToExecute[idx]
+					group := &groupedGroups[realGroupIdx]
 
 					var localTrie p_trie.StateTrie
 					baseTrie := validationCache.Trie()
@@ -125,23 +122,20 @@ func ProcessTransactionsOptimistic(
 					var ethAddressBytes [20]byte
 					ethAddressBytes[0] = 0xFE
 					copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
-					binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realIdx))
+					binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realGroupIdx))
 					mvmId := common.Address(ethAddressBytes)
 
 					res := processSingleGroup(
 						ctx, chainState, localAccountDB, localSmartContractDB,
-						[]grouptxns.Item{{Tx: tx}}, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+						group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
 					)
 					res.readAccounts = localAccountDB.GetLoadedAccounts()
 					res.readStorage = localSmartContractDB.GetReadStorageKeys()
 
 					resultsMutex.Lock()
-					speculativeResults[realIdx] = res
+					speculativeGroupResults[realGroupIdx] = res
 					resultsMutex.Unlock()
 
-					// Not sharing failure map deterministically during concurrent phase, 
-					// will process sequentially in Phase 2.2
-					
 					localSmartContractDB.Discard()
 					localAccountDB.Discard()
 				}
@@ -149,38 +143,16 @@ func ProcessTransactionsOptimistic(
 		}
 		wg.Wait()
 
-		// Phase 2.2: Validate sequentially in the original order of txsToExecute
-		var nextRoundTxs []int
-		for _, realIdx := range txsToExecute {
-			tx := allTxs[realIdx]
-			res := speculativeResults[realIdx]
-
-			senderFailed := failedSendersMap[tx.FromAddress()]
-			if senderFailed {
-				logger.Warn("❌ [BLOCK-STM] TX %s skipped due to previous sender error", tx.Hash().Hex())
-				finalResults[realIdx] = groupResultExt{
-					txPtr:   &[]types.Transaction{tx},
-					mvmPtr:  &map[common.Hash]common.Address{},
-					rcpPtr:  &[]types.Receipt{},
-					exPtr:   &[]types.ExecuteSCResult{},
-				}
-				continue
-			}
+		// Phase 2.2: Validate sequentially in the original order of groupsToExecute
+		var nextRoundGroups []int
+		for _, realGroupIdx := range groupsToExecute {
+			res := speculativeGroupResults[realGroupIdx]
 
 			hasConflict := validationCache.CheckConflict(res.readAccounts, res.readStorage)
 			if hasConflict {
-				logger.Info("🔄 [BLOCK-STM] Conflict detected for TX %s, re-queueing", tx.Hash().Hex())
-				nextRoundTxs = append(nextRoundTxs, realIdx)
+				logger.Info("🔄 [BLOCK-STM] Conflict detected for Group %d, re-queueing", realGroupIdx)
+				nextRoundGroups = append(nextRoundGroups, realGroupIdx)
 			} else {
-				// Record potential sender failure
-				if res.rcpPtr != nil && len(*res.rcpPtr) > 0 {
-					for _, rcp := range *res.rcpPtr {
-						if rcp.Status() == 0 { // TX failed
-							failedSendersMap[tx.FromAddress()] = true
-						}
-					}
-				}
-
 				// Apply speculative writes to the sequential overlay
 				storageWrites := make(map[string]map[string][]byte)
 				if res.exPtr != nil {
@@ -199,18 +171,18 @@ func ProcessTransactionsOptimistic(
 				}
 
 				validationCache.ApplyWrites(dirtyAccountsMap, storageWrites)
-				finalResults[realIdx] = res
+				finalGroupResults[realGroupIdx] = res
 			}
 		}
 
-		// Prepare for the next round with only conflicting transactions
-		txsToExecute = nextRoundTxs
+		// Prepare for the next round with only conflicting groups
+		groupsToExecute = nextRoundGroups
 	}
 
 	validationCache.FlushToGlobal()
 
 	var totalBlockGasFee *big.Int = big.NewInt(0)
-	for _, gRs := range finalResults {
+	for _, gRs := range finalGroupResults {
 		if gRs.TotalGasFee != nil && gRs.TotalGasFee.Sign() > 0 {
 			totalBlockGasFee.Add(totalBlockGasFee, gRs.TotalGasFee)
 		}
@@ -225,18 +197,28 @@ func ProcessTransactionsOptimistic(
 	allMvmIdMap := make(map[common.Hash]common.Address, len(allTxs))
 
 	blockTxIndex := uint64(0)
-	for _, gRs := range finalResults {
-		for i, rcp := range *gRs.rcpPtr {
-			rcp.SetTransactionIndex(0) // TODO: actual index
-			rcp.SetBlockTransactionIndex(blockTxIndex)
-			blockTxIndex++
-			(*gRs.rcpPtr)[i] = rcp
+	for _, gRs := range finalGroupResults {
+		if gRs.rcpPtr != nil {
+			for i, rcp := range *gRs.rcpPtr {
+				rcp.SetTransactionIndex(0) // TODO: actual index
+				rcp.SetBlockTransactionIndex(blockTxIndex)
+				blockTxIndex++
+				(*gRs.rcpPtr)[i] = rcp
+			}
 		}
-		allTransactions = append(allTransactions, *gRs.txPtr...)
-		allReceipts = append(allReceipts, *gRs.rcpPtr...)
-		allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
-		for k, v := range *gRs.mvmPtr {
-			allMvmIdMap[k] = v
+		if gRs.txPtr != nil {
+			allTransactions = append(allTransactions, *gRs.txPtr...)
+		}
+		if gRs.rcpPtr != nil {
+			allReceipts = append(allReceipts, *gRs.rcpPtr...)
+		}
+		if gRs.exPtr != nil {
+			allExecuteSCResults = append(allExecuteSCResults, *gRs.exPtr...)
+		}
+		if gRs.mvmPtr != nil {
+			for k, v := range *gRs.mvmPtr {
+				allMvmIdMap[k] = v
+			}
 		}
 	}
 
