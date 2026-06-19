@@ -66,22 +66,23 @@ func ProcessTransactionsOptimistic(
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
 	// -------------------------------------------------------------------------
-	// 2. Iterative Block-STM Worker Pool (Group-Level)
+	// 2. Iterative Parallel Group Block-STM (Union-Find Conflict Resolution)
 	// -------------------------------------------------------------------------
 
-	finalGroupResults := make([]groupResultExt, len(groupedGroups))
-	groupsToExecute := make([]int, len(groupedGroups))
-	for i := range groupedGroups {
-		groupsToExecute[i] = i
-	}
-
+	finalResults := make([]groupResultExt, len(allTxs))
 	validationCache := account_state_db.NewValidationStateCache(chainState.GetAccountStateDB(), chainState.GetSmartContractDB())
 
-	for len(groupsToExecute) > 0 {
-		var nextIdx uint32
-		var wg sync.WaitGroup
+	// txsToExecute contains the indices of all transactions that need to be executed/re-executed
+	txsToExecute := make([]int, len(allTxs))
+	for i := range allTxs {
+		txsToExecute[i] = i
+	}
 
-		speculativeGroupResults := make(map[int]groupResultExt)
+	speculativeResults := make(map[int]groupResultExt)
+	isFirstRound := true
+
+	for len(txsToExecute) > 0 {
+		var wg sync.WaitGroup
 		var resultsMutex sync.Mutex
 
 		numWorkers := runtime.NumCPU()
@@ -89,71 +90,211 @@ func ProcessTransactionsOptimistic(
 			numWorkers = 16
 		}
 
-		// Phase 2.1: Execute all groups in groupsToExecute concurrently
-		for w := 0; w < numWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-					if idx >= len(groupsToExecute) {
-						break
+		if isFirstRound {
+			// Round 1: Flat parallel execution of all transactions
+			var nextIdx uint32
+			for w := 0; w < numWorkers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
+						if idx >= len(txsToExecute) {
+							break
+						}
+						realIdx := txsToExecute[idx]
+						tx := allTxs[realIdx]
+
+						var localTrie p_trie.StateTrie
+						baseTrie := validationCache.Trie()
+						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+							localTrie = baseTrie
+						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+							localTrie = baseTrie
+						} else {
+							localTrie = baseTrie.Copy()
+						}
+						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+						localSmartContractDB := smart_contract_db.NewSmartContractDB(
+							chainState.GetStorageManager().GetStorageCode(),
+							chainState.GetStorageManager().GetStorageSmartContract(),
+							localAccountDB,
+						)
+
+						// In Round 1, execute from the base state without previous writes
+						var ethAddressBytes [20]byte
+						ethAddressBytes[0] = 0xFE
+						copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
+						binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realIdx))
+						mvmId := common.Address(ethAddressBytes)
+
+						res := processSingleGroup(
+							ctx, chainState, localAccountDB, localSmartContractDB,
+							[]grouptxns.Item{{Tx: tx}}, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+						)
+						res.readAccounts = localAccountDB.GetLoadedAccounts()
+						res.readStorage = localSmartContractDB.GetReadStorageKeys()
+
+						resultsMutex.Lock()
+						speculativeResults[realIdx] = res
+						resultsMutex.Unlock()
+
+						localSmartContractDB.Discard()
+						localAccountDB.Discard()
 					}
-					realGroupIdx := groupsToExecute[idx]
-					group := &groupedGroups[realGroupIdx]
+				}()
+			}
+			wg.Wait()
+			isFirstRound = false
 
-					var localTrie p_trie.StateTrie
-					baseTrie := validationCache.Trie()
-					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
-						localTrie = baseTrie
-					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
-						localTrie = baseTrie
-					} else {
-						localTrie = baseTrie.Copy()
-					}
-					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-					localSmartContractDB := smart_contract_db.NewSmartContractDB(
-						chainState.GetStorageManager().GetStorageCode(),
-						chainState.GetStorageManager().GetStorageSmartContract(),
-						localAccountDB,
-					)
-					validationCache.ApplyAcceptedWritesTo(localAccountDB, localSmartContractDB)
+		} else {
+			// Subsequent Rounds: Group-level parallel execution of conflicting transactions using Union-Find
+			numConflicting := len(txsToExecute)
+			uf := grouptxns.NewUnionFind(numConflicting)
 
-					var ethAddressBytes [20]byte
-					ethAddressBytes[0] = 0xFE
-					copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
-					binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realGroupIdx))
-					mvmId := common.Address(ethAddressBytes)
+			txIdxMap := make(map[int]int, numConflicting) // realIdx -> index in txsToExecute
+			for i, realIdx := range txsToExecute {
+				txIdxMap[realIdx] = i
+			}
 
-					res := processSingleGroup(
-						ctx, chainState, localAccountDB, localSmartContractDB,
-						group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
-					)
-					res.readAccounts = localAccountDB.GetLoadedAccounts()
-					res.readStorage = localSmartContractDB.GetReadStorageKeys()
-
-					resultsMutex.Lock()
-					speculativeGroupResults[realGroupIdx] = res
-					resultsMutex.Unlock()
-
-					localSmartContractDB.Discard()
-					localAccountDB.Discard()
+			addressToIndices := make(map[common.Address][]int)
+			registerAccess := func(addr common.Address, realIdx int) {
+				if idxInConflicting, ok := txIdxMap[realIdx]; ok {
+					addressToIndices[addr] = append(addressToIndices[addr], idxInConflicting)
 				}
-			}()
-		}
-		wg.Wait()
+			}
 
-		// Phase 2.2: Validate sequentially in the original order of groupsToExecute
-		var nextRoundGroups []int
-		for _, realGroupIdx := range groupsToExecute {
-			res := speculativeGroupResults[realGroupIdx]
+			for _, realIdx := range txsToExecute {
+				res := speculativeResults[realIdx]
+				// Read accounts
+				for addr := range res.readAccounts {
+					registerAccess(addr, realIdx)
+				}
+				// Written accounts
+				for _, acc := range res.DirtyAccounts {
+					registerAccess(acc.Address(), realIdx)
+				}
+				// Read storage
+				for addr := range res.readStorage {
+					registerAccess(addr, realIdx)
+				}
+				// Written storage
+				if res.exPtr != nil {
+					for _, ex := range *res.exPtr {
+						if ex != nil && ex.MapStorageChange() != nil {
+							for addrStr := range ex.MapStorageChange() {
+								registerAccess(common.HexToAddress(addrStr), realIdx)
+							}
+						}
+					}
+				}
+			}
+
+			// Union transactions accessing same addresses
+			for _, indices := range addressToIndices {
+				for i := 1; i < len(indices); i++ {
+					uf.Union(indices[0], indices[i])
+				}
+			}
+
+			// Collect transaction indices into groups
+			rootToItems := make(map[int][]int)
+			for i, realIdx := range txsToExecute {
+				root := uf.Find(i)
+				rootToItems[root] = append(rootToItems[root], realIdx)
+			}
+
+			var executionGroups [][]int
+			for _, groupRealIndices := range rootToItems {
+				executionGroups = append(executionGroups, groupRealIndices)
+			}
+
+			// Execute groups in parallel, sequentially within each group
+			var nextGroupIdx uint32
+			speculativeGroupResults := make(map[int]map[int]groupResultExt) // groupIdx -> realIdx -> result
+
+			for w := 0; w < numWorkers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						gIdx := int(atomic.AddUint32(&nextGroupIdx, 1) - 1)
+						if gIdx >= len(executionGroups) {
+							break
+						}
+						groupRealIndices := executionGroups[gIdx]
+
+						var localTrie p_trie.StateTrie
+						baseTrie := validationCache.Trie()
+						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+							localTrie = baseTrie
+						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+							localTrie = baseTrie
+						} else {
+							localTrie = baseTrie.Copy()
+						}
+						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+						localSmartContractDB := smart_contract_db.NewSmartContractDB(
+							chainState.GetStorageManager().GetStorageCode(),
+							chainState.GetStorageManager().GetStorageSmartContract(),
+							localAccountDB,
+						)
+
+						// Apply all accepted writes so far to the local execution DB
+						validationCache.ApplyAcceptedWritesTo(localAccountDB, localSmartContractDB)
+
+						groupResults := make(map[int]groupResultExt)
+
+						// Execute sequentially within this group
+						for _, realIdx := range groupRealIndices {
+							tx := allTxs[realIdx]
+
+							var ethAddressBytes [20]byte
+							ethAddressBytes[0] = 0xFE
+							copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
+							binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realIdx))
+							mvmId := common.Address(ethAddressBytes)
+
+							res := processSingleGroup(
+								ctx, chainState, localAccountDB, localSmartContractDB,
+								[]grouptxns.Item{{Tx: tx}}, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+							)
+							res.readAccounts = localAccountDB.GetLoadedAccounts()
+							res.readStorage = localSmartContractDB.GetReadStorageKeys()
+
+							groupResults[realIdx] = res
+						}
+
+						resultsMutex.Lock()
+						speculativeGroupResults[gIdx] = groupResults
+						resultsMutex.Unlock()
+
+						localSmartContractDB.Discard()
+						localAccountDB.Discard()
+					}
+				}()
+			}
+			wg.Wait()
+
+			// Merge speculativeGroupResults back to speculativeResults
+			for _, groupResults := range speculativeGroupResults {
+				for realIdx, res := range groupResults {
+					speculativeResults[realIdx] = res
+				}
+			}
+		}
+
+		// --- Sequential Validation & Conflict Check ---
+		var nextRoundTxs []int
+		for _, realIdx := range txsToExecute {
+			res := speculativeResults[realIdx]
 
 			hasConflict := validationCache.CheckConflict(res.readAccounts, res.readStorage)
 			if hasConflict {
-				logger.Info("🔄 [BLOCK-STM] Conflict detected for Group %d, re-queueing", realGroupIdx)
-				nextRoundGroups = append(nextRoundGroups, realGroupIdx)
+				logger.Info("🔄 [BLOCK-STM] Conflict detected for TX %d, re-queueing", realIdx)
+				nextRoundTxs = append(nextRoundTxs, realIdx)
 			} else {
-				// Apply speculative writes to the sequential overlay
+				// Apply writes to the validation cache overlay
 				storageWrites := make(map[string]map[string][]byte)
 				if res.exPtr != nil {
 					for _, ex := range *res.exPtr {
@@ -171,18 +312,18 @@ func ProcessTransactionsOptimistic(
 				}
 
 				validationCache.ApplyWrites(dirtyAccountsMap, storageWrites)
-				finalGroupResults[realGroupIdx] = res
+				finalResults[realIdx] = res
 			}
 		}
 
-		// Prepare for the next round with only conflicting groups
-		groupsToExecute = nextRoundGroups
+		// Set up for next round
+		txsToExecute = nextRoundTxs
 	}
 
 	validationCache.FlushToGlobal()
 
 	var totalBlockGasFee *big.Int = big.NewInt(0)
-	for _, gRs := range finalGroupResults {
+	for _, gRs := range finalResults {
 		if gRs.TotalGasFee != nil && gRs.TotalGasFee.Sign() > 0 {
 			totalBlockGasFee.Add(totalBlockGasFee, gRs.TotalGasFee)
 		}
@@ -197,7 +338,7 @@ func ProcessTransactionsOptimistic(
 	allMvmIdMap := make(map[common.Hash]common.Address, len(allTxs))
 
 	blockTxIndex := uint64(0)
-	for _, gRs := range finalGroupResults {
+	for _, gRs := range finalResults {
 		if gRs.rcpPtr != nil {
 			for i, rcp := range *gRs.rcpPtr {
 				rcp.SetTransactionIndex(0) // TODO: actual index
