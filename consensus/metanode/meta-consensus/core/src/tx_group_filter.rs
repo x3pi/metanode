@@ -14,47 +14,6 @@ pub mod proto {
 
 use proto::Transaction as ProtoTx;
 
-fn get_address_selector(signature: &str) -> Vec<u8> {
-    let hash = Keccak256::digest(signature.as_bytes());
-    let mut addr = vec![0u8; 20];
-    addr[16..20].copy_from_slice(&hash[0..4]);
-    addr
-}
-
-#[derive(Clone)]
-pub struct RelativeGroup {
-    pub items: Vec<Item>,
-}
-
-impl RelativeGroup {
-    pub fn new() -> Self {
-        Self {
-            items: Vec::new(),
-        }
-    }
-
-    pub fn merge(&mut self, mut other: RelativeGroup) {
-        self.items.append(&mut other.items);
-    }
-
-    pub fn process_tx(&mut self, tx: &crate::block::Transaction) {
-        self.items.push(Item {
-            tx: tx.clone(),
-        });
-    }
-
-    pub fn contains_related(&self, _tx: &crate::block::Transaction) -> bool {
-        // Optimistic Parallel Execution: no longer groups by address.
-        // Return false to let each tx have its own group if needed, or true to put all in one group.
-        // Since TxGroupFilter creates a new group when this returns false, returning false puts each tx in its own group.
-        false
-    }
-}
-
-#[derive(Clone)]
-pub struct Item {
-    pub tx: crate::block::Transaction,
-}
 
 pub fn get_group_addresses(tx_data: &[u8]) -> Vec<Vec<u8>> {
     if let Ok(proto_tx) = ProtoTx::decode(tx_data) {
