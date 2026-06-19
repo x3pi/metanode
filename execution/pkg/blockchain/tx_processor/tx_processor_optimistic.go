@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -104,7 +105,15 @@ func ProcessTransactionsOptimistic(
 					realIdx := txsToExecute[idx]
 					tx := allTxs[realIdx]
 
-					localTrie := validationCache.Trie().Copy()
+					var localTrie p_trie.StateTrie
+					baseTrie := validationCache.Trie()
+					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+						localTrie = baseTrie
+					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+						localTrie = baseTrie
+					} else {
+						localTrie = baseTrie.Copy()
+					}
 					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
 					localSmartContractDB := smart_contract_db.NewSmartContractDB(
 						chainState.GetStorageManager().GetStorageCode(),
