@@ -159,6 +159,8 @@ fi
 echo -e "\n⏸ Tạm dừng Health Monitor trong quá trình Deploy để tránh cảnh báo sai..."
 pkill -f "start_monitors.sh" || true
 pkill -f "block_hash_checker" || true
+ansible all -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true" >/dev/null 2>&1
+ansible all -i "$INVENTORY" -m shell -a "pkill -f 'block_hash_checker' || true" >/dev/null 2>&1
 
 cd "$SCRIPT_DIR"
 set +e

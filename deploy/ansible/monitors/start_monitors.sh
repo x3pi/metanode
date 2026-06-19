@@ -45,6 +45,13 @@ send_tele() {
 if [ "${1:-}" == "health" ]; then
     echo "Starting health monitor loop..."
     declare -A dead_nodes
+    
+    # Lấy IP local của máy monitor để chèn vào báo cáo
+    MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
+    if [ -z "$MONITOR_IP" ]; then
+        MONITOR_IP=$(hostname -I | awk '{print $1}')
+    fi
+
     while true; do
         if [ -f "$RPC_JSON_PATH" ]; then
             while read -r node_key node_url; do
@@ -66,16 +73,14 @@ if [ "${1:-}" == "health" ]; then
                         # Xóa các thư mục cũ, chỉ giữ lại 4 thư mục mới nhất
                         ls -dt "${SCRIPT_DIR}/logs_crash"/* 2>/dev/null | tail -n +5 | xargs rm -rf
 
-                        # Lấy IP local của máy monitor
-                        MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-                        if [ -z "$MONITOR_IP" ]; then
-                            MONITOR_IP=$(hostname -I | awk '{print $1}')
-                        fi
+                        # Xóa các thư mục cũ, chỉ giữ lại 4 thư mục mới nhất
+                        ls -dt "${SCRIPT_DIR}/logs_crash"/* 2>/dev/null | tail -n +5 | xargs rm -rf
 
                         send_tele "🚨🚨🚨 [Health Monitor] PHÁT HIỆN NODE CHẾT!
 Node: $node_key
 IP: $ip
 URL: $node_url
+Máy chủ báo cáo: $MONITOR_IP
 
 🛠 Lệnh kéo thư mục Logs về máy tính của bạn:
 sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}"
@@ -83,7 +88,8 @@ sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_cra
                 else
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then
                         dead_nodes[$node_key]=0
-                        send_tele "🟢 [Health Monitor] Node $node_key ($node_url) đã hoạt động lại!"
+                        send_tele "🟢 [Health Monitor] Node $node_key ($node_url) đã hoạt động lại!
+(Báo cáo từ máy chủ: $MONITOR_IP)"
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
