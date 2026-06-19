@@ -8,7 +8,6 @@ all:
       hosts:
         192.168.1.230:
           node_ids: [3]
-          is_synconly: true
         192.168.1.231:
           node_ids: [2]
         192.168.1.232:
