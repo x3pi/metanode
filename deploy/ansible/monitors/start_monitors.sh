@@ -47,6 +47,11 @@ if [ "${1:-}" == "health" ]; then
     echo "Starting health monitor loop..."
     declare -A dead_nodes
     while true; do
+        # Luôn luôn tạo lại rpc_nodes.json trực tiếp từ inventory.yml để thống nhất cấu hình
+        if [ -f "${SCRIPT_DIR}/../parse_inventory.py" ] && [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
+            python3 "${SCRIPT_DIR}/../parse_inventory.py" "${SCRIPT_DIR}/../inventory.yml" json > "$RPC_JSON_PATH" 2>/dev/null || true
+        fi
+        
         if [ -f "$RPC_JSON_PATH" ]; then
             while read -r node_key node_url; do
                 if ! curl -s -m 2 "$node_url" >/dev/null 2>&1; then
