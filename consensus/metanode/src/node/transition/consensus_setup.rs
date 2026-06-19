@@ -56,8 +56,6 @@ pub(super) async fn setup_validator_consensus(
         let client = Arc::new(ExecutorClient::new_with_initial_index(
             true,
             true,
-            config.executor_send_socket_path.clone(),
-            config.executor_receive_socket_path.clone(),
             initial_next_expected,
             Some(node.storage_path.clone()),
         ));
@@ -260,8 +258,6 @@ pub(super) async fn setup_synconly_sync(
         let client = Arc::new(ExecutorClient::new_with_initial_index(
             true,
             true,
-            config.executor_send_socket_path.clone(),
-            config.executor_receive_socket_path.clone(),
             initial_next_expected,
             Some(node.storage_path.clone()),
         ));
@@ -390,8 +386,6 @@ pub(super) async fn setup_synconly_sync(
     let rust_sync_executor = Arc::new(ExecutorClient::new(
         true,
         true,
-        config.executor_send_socket_path.clone(),
-        config.executor_receive_socket_path.clone(),
         None,
     ));
 

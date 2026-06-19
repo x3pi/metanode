@@ -372,8 +372,37 @@ impl ExecutorClient {
                     self.record_send_failure().await;
                 }
             } else {
-                warn!("⚠️  [PHASE-B DIRECT] FFI execute_block not registered");
-                self.record_send_failure().await;
+                // Socket fallback
+                use tokio::io::AsyncWriteExt;
+                let mut conn_guard = self.connection.lock().await;
+                if let Some(ref mut stream) = *conn_guard {
+                    let mut buf = Vec::new();
+                    super::persistence::write_uvarint(&mut buf, epoch_data_bytes.len() as u64)?;
+                    buf.extend_from_slice(&epoch_data_bytes);
+
+                    let result = async {
+                        stream.write_all(&buf).await?;
+                        stream.flush().await?;
+                        Ok::<(), anyhow::Error>(())
+                    }.await;
+
+                    if let Err(e) = result {
+                        warn!("⚠️  [PHASE-B DIRECT] Socket write failed: {}, resetting connection", e);
+                        *conn_guard = None;
+                        self.record_send_failure().await;
+                    } else {
+                        self.record_send_success().await;
+                        trace!(
+                            "✅ [PHASE-B DIRECT] Sent commit_index={} to Go Socket (epoch={}, tx={})",
+                            commit_index,
+                            epoch,
+                            total_tx
+                        );
+                    }
+                } else {
+                    warn!("⚠️  [PHASE-B DIRECT] Socket connection is None");
+                    self.record_send_failure().await;
+                }
             }
             return Ok(());
         }
@@ -628,8 +657,50 @@ impl ExecutorClient {
                     }
                 }
             } else {
-                warn!("⚠️  [BLOCK-SEND] FFI execute_block not registered");
-                self.record_send_failure().await;
+                // Socket fallback
+                use tokio::io::AsyncWriteExt;
+                let mut conn_guard = self.connection.lock().await;
+                if let Some(ref mut stream) = *conn_guard {
+                    let mut write_err = false;
+                    for (idx, data, _, _) in &batch {
+                        debug!(
+                            "🚀 [TX-FLOW-TRACE] ▶ PHASE 4 SOCKET: send block | gei={}, payload_size={} bytes",
+                            idx, data.len()
+                        );
+                        let mut buf = Vec::new();
+                        if let Err(e) = super::persistence::write_uvarint(&mut buf, data.len() as u64) {
+                            warn!("⚠️  [BLOCK-SEND] Failed to write uvarint: {}", e);
+                            write_err = true;
+                            break;
+                        }
+                        buf.extend_from_slice(data);
+
+                        let result = async {
+                            stream.write_all(&buf).await?;
+                            stream.flush().await?;
+                            Ok::<(), anyhow::Error>(())
+                        }.await;
+
+                        if let Err(e) = result {
+                            warn!("⚠️  [BLOCK-SEND] Socket write failed at GEI={}: {}, resetting connection", idx, e);
+                            *conn_guard = None;
+                            write_err = true;
+                            break;
+                        }
+
+                        debug!(
+                            "✅ [TX-FLOW-TRACE] ▶ PHASE 4 SOCKET DONE: Go accepted block | gei={}",
+                            idx
+                        );
+                        sent_count += 1;
+                    }
+                    if write_err {
+                        self.record_send_failure().await;
+                    }
+                } else {
+                    warn!("⚠️  [BLOCK-SEND] Socket connection is None");
+                    self.record_send_failure().await;
+                }
             }
 
             if sent_count > 0 {
@@ -920,9 +991,36 @@ impl ExecutorClient {
                 Err(anyhow::anyhow!("Go FFI execute_block returned false"))
             }
         } else {
-            warn!("⚠️  [EXECUTOR] FFI GO_CALLBACKS not registered or execute_block is null");
-            self.record_send_failure().await;
-            Err(anyhow::anyhow!("FFI execute_block not registered"))
+            // Socket fallback
+            use tokio::io::AsyncWriteExt;
+            self.connect().await?;
+            let mut conn_guard = self.connection.lock().await;
+            if let Some(ref mut stream) = *conn_guard {
+                let mut buf = Vec::new();
+                super::persistence::write_uvarint(&mut buf, epoch_data_bytes.len() as u64)?;
+                buf.extend_from_slice(epoch_data_bytes);
+
+                let result = async {
+                    stream.write_all(&buf).await?;
+                    stream.flush().await?;
+                    Ok::<(), anyhow::Error>(())
+                }.await;
+
+                if let Err(e) = result {
+                    warn!("⚠️  [EXECUTOR] Socket write failed: {}, resetting connection", e);
+                    *conn_guard = None;
+                    self.record_send_failure().await;
+                    return Err(e);
+                }
+
+                trace!("📤 [TX FLOW] Sent committed sub-DAG to Go executor via Socket: global_exec_index={}, commit_index={}, epoch={}, data_size={} bytes", 
+                    global_exec_index, commit_index, epoch, epoch_data_bytes.len());
+                self.record_send_success().await;
+                Ok(())
+            } else {
+                self.record_send_failure().await;
+                Err(anyhow::anyhow!("Socket connection is None"))
+            }
         }
     }
 

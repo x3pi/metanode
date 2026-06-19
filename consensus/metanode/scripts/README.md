@@ -127,8 +127,6 @@ Các field quan trọng:
 |-------|--------|
 | `network_address` | `127.0.0.1:900N` |
 | `executor_commit_enabled` | `true` (bắt buộc) |
-| `executor_send_socket_path` | `/tmp/executorN.sock` |
-| `executor_receive_socket_path` | `/tmp/rust-go-nodeN-master.sock` |
 
 ### Go (JSON)
 

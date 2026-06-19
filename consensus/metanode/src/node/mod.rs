@@ -32,7 +32,6 @@ pub mod epoch_checkpoint;
 pub mod epoch_monitor;
 pub mod epoch_transition_manager;
 pub mod executor_client;
-pub mod notification_server;
 pub mod peer_go_client;
 pub mod peer_health;
 pub mod health_check;
@@ -154,7 +153,6 @@ pub struct ConsensusNode {
     /// Centralized controller for sync task lifecycle
     pub(crate) sync_controller: Arc<crate::node::sync_controller::SyncController>,
     pub(crate) epoch_monitor_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) notification_server_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     pub(crate) executor_client: Option<Arc<ExecutorClient>>,
     /// Transactions submitted in current epoch that may need recovery during epoch transition
     pub(crate) epoch_pending_transactions: Arc<tokio::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>>,

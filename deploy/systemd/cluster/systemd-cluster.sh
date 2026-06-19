@@ -51,7 +51,6 @@ NODE_START_DELAY=3
 
 # ─── Helper: tên service theo NODE_ID ────────────────────────────
 svc_exec()      { echo "metanode-execution-${1}"; }
-svc_consensus() { echo "metanode-consensus-${1}"; }
 
 # ─── Helper: lấy index của NODE_ID trong NODE_IDS ────────────────
 node_index() {
@@ -80,8 +79,7 @@ cmd_status() {
         local nid="${NODE_IDS[$i]}"
         local ntype="${NODE_TYPES[$i]}"
         local se=$(svc_exec $nid)
-        local sc=$(svc_consensus $nid)
-
+        
         # Bỏ qua nếu service chưa được cài đặt trên máy này
         if ! systemctl list-unit-files | grep -q "^${se}.service"; then
             continue
@@ -94,7 +92,7 @@ cmd_status() {
         [ "$exec_status" = "active" ] && exec_color=$GREEN
         [ "$cons_status" = "active" ] && cons_color=$GREEN
 
-        printf "  Node %-2s %-11s │ execution: ${exec_color}%-8s${NC} │ consensus: ${cons_color}%-8s${NC}\n" \
+        printf "  Node %-2s %-11s │ execution: ${exec_color}%-8s${NC} \n" \
             "$nid" "($ntype)" "$exec_status" "$cons_status"
     done
     echo ""
@@ -114,7 +112,6 @@ cmd_start() {
         [ "$only_node" != "all" ] && [ "$only_node" != "$nid" ] && continue
 
         local se=$(svc_exec $nid)
-        local sc=$(svc_consensus $nid)
         log_info "Node ${nid}: starting ${se}..."
 
         if ! systemctl list-units --full --all 2>/dev/null | grep -q "$se.service"; then
@@ -153,10 +150,8 @@ cmd_stop() {
         [ "$only_node" != "all" ] && [ "$only_node" != "$nid" ] && continue
 
         local se=$(svc_exec $nid)
-        local sc=$(svc_consensus $nid)
         log_info "Node ${nid}: stopping..."
 
-        systemctl stop "$sc" 2>/dev/null || true
         systemctl stop "$se" 2>/dev/null || true
         log_ok "  Node ${nid} stopped"
     done
@@ -185,9 +180,7 @@ cmd_reset_failed() {
     for i in "${!NODE_IDS[@]}"; do
         local nid="${NODE_IDS[$i]}"
         local se=$(svc_exec $nid)
-        local sc=$(svc_consensus $nid)
         systemctl reset-failed "$se" 2>/dev/null && log_ok "$se: reset" || true
-        systemctl reset-failed "$sc" 2>/dev/null && log_ok "$sc: reset" || true
     done
     log_info "Xong. Giờ bạn có thể start lại."
 }

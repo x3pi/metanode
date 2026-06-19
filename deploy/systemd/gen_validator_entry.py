@@ -241,9 +241,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "cross_chain": {
             "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
         },
-        "rust_send_socket_path": f"/tmp/executor{node_id}.sock",
-        "rust_receive_socket_path": f"/tmp/rust-go-node{node_id}-master.sock",
-        "rust_tx_socket_path": f"/tmp/metanode-tx-{node_id}.sock",
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",
         "dns_server_address": f"0.0.0.0:{dns_port}",
@@ -300,7 +297,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         json.dump(exec_json, f, indent=4)
 
     consensus_toml = f"""node_id = {node_id}
-rust_tx_socket_path = "/tmp/metanode-tx-{node_id}.sock"
 network_address = "0.0.0.0:{consensus_port}"
 protocol_key_path = "{install_dir}/keys/protocol_key.json"
 network_key_path = "{install_dir}/keys/network_key.json"
@@ -318,8 +314,6 @@ ntp_servers = [
 ntp_sync_interval_seconds = 300
 executor_read_enabled = true
 executor_commit_enabled = {str(is_validator).lower()}
-executor_send_socket_path = "/tmp/executor{node_id}.sock"
-executor_receive_socket_path = "/tmp/rust-go-node{node_id}-master.sock"
 commit_sync_batch_size = {commit_batch_size}
 commit_sync_parallel_fetches = 32
 commit_sync_batches_ahead = {commit_batches_ahead}

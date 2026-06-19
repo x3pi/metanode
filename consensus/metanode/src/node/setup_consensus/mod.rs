@@ -200,8 +200,6 @@ impl ConsensusNode {
             let mut client = ExecutorClient::new_with_initial_index(
                 true,
                 config.executor_commit_enabled,
-                config.executor_send_socket_path.clone(),
-                config.executor_receive_socket_path.clone(),
                 initial_next_expected,
                 Some(config.storage_path.clone()),
             );
@@ -211,8 +209,6 @@ impl ConsensusNode {
             Arc::new(ExecutorClient::new(
                 false,
                 false,
-                "".to_string(),
-                "".to_string(),
                 None,
             ))
         };

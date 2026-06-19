@@ -9,8 +9,6 @@ Tài liệu này mô tả cách cấu hình executor để control việc trao �
 # Node 0 có thể đọc committee state và commit blocks
 executor_read_enabled = true
 executor_commit_enabled = true
-executor_send_socket_path = "/tmp/executor0.sock"
-executor_receive_socket_path = "/tmp/rust-go.sock_1"
 ```
 
 ### Node 1,2,3 (Read-Only)
@@ -18,8 +16,6 @@ executor_receive_socket_path = "/tmp/rust-go.sock_1"
 # Các node khác chỉ đọc committee state, không commit blocks
 executor_read_enabled = true
 executor_commit_enabled = false
-executor_send_socket_path = "/tmp/executor1.sock"  # Vẫn cần define nhưng không sử dụng
-executor_receive_socket_path = "/tmp/rust-go.sock_1"  # All nodes read from same socket
 ```
 
 ### Node Test (No Executor)
@@ -48,12 +44,10 @@ executor_commit_enabled = true
 [node_1]
 executor_read_enabled = true
 executor_commit_enabled = false
-executor_receive_socket_path = "/tmp/rust-go.sock_1"  # Same as node 0
 
 [node_2]
 executor_read_enabled = true
 executor_commit_enabled = false
-executor_receive_socket_path = "/tmp/rust-go.sock_1"  # Same as node 0
 ```
 
 ### 3. Light Nodes (Chỉ Consensus)

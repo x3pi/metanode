@@ -109,32 +109,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 	}
 }
 
-// runSocketExecutor starts the socket executor for Rust communication
-func (bp *BlockProcessor) runSocketExecutor(path string) {
-	time.Sleep(5 * time.Second)
 
-	// 1. Initialize listener from module
-	listener := executor.NewListener(path)
-
-	// 2. Start listening (non-blocking)
-	if err := listener.Start(); err != nil {
-		logger.Error("Could not start listener: %v", err)
-		fatal.Exit("Fatal exit from block_processor_network.go")
-	}
-
-	// Create a goroutine to handle safe program shutdown
-	handleShutdown(listener)
-
-	// Log readiness — executor socket is now accepting Rust connections
-	lastBlock := storage.GetLastBlockNumber()
-	fmt.Printf("✅ [READY] Go Master executor socket listening: path=%s, block=%d", path, lastBlock)
-
-	// 3. Listen for data from listener channel
-	logger.Info("Main program waiting for data from module Listener...")
-	dataChan := listener.DataChannel()
-
-	bp.processRustEpochData(dataChan)
-}
 
 // processRustEpochData processes epoch data from Rust
 func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlock) {

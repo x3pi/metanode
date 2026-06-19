@@ -109,7 +109,6 @@ REPO_BRANCH="main"
 BUILD_DIR="${BUILD_DIR:-/opt/metanode/node-${NODE_ID}/src}"
 
 SVC_EXECUTION="metanode-execution-${NODE_ID}"
-SVC_CONSENSUS="metanode-consensus-${NODE_ID}"
 
 
 # ─── Print summary ─────────────────────────────────────────────────────────
