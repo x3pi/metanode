@@ -98,8 +98,6 @@
   "securepassword": "mysecretpassword",
   "db_type": 2,
   "genesis_file_path": "genesis.json",
-  "rust_send_socket_path": "/tmp/executor0.sock",
-  "rust_receive_socket_path": "/tmp/rust-go.sock_1",
   "Databases": {
     "RootPath": "./sample/simple/data/data",
     "DBEngine": "sharded",

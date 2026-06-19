@@ -50,9 +50,7 @@ use std::collections::BTreeMap;
 /// Client to send committed blocks to Go executor via Unix Domain Socket or TCP Socket
 /// Supports both local (Unix) and network (TCP) deployment
 pub struct ExecutorClient {
-    _socket_address: SocketAddress, // Changed from socket_path: String
     pub(crate) connection: Arc<Mutex<Option<SocketStream>>>, // Changed from UnixStream
-    _request_socket_address: SocketAddress, // Changed from request_socket_path: String
     pub(crate) request_connection: Arc<Mutex<Option<SocketStream>>>, // Changed from UnixStream
     enabled: bool,
     can_commit: bool, // Only node 0 can actually commit transactions to Go state
@@ -95,21 +93,15 @@ impl ExecutorClient {
     /// Create new executor client
     /// enabled: whether executor is enabled (check config file exists)
     /// can_commit: whether this node can actually commit transactions (only node 0)
-    /// send_socket_path: socket path for sending data to Go executor
-    /// receive_socket_path: socket path for receiving data from Go executor
     /// initial_next_expected: initial value for next_expected_index (default: 1)
     pub fn new(
         enabled: bool,
         can_commit: bool,
-        send_socket_path: String,
-        receive_socket_path: String,
         storage_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self::new_with_initial_index(
             enabled,
             can_commit,
-            send_socket_path,
-            receive_socket_path,
             1,
             storage_path,
         )
@@ -121,8 +113,6 @@ impl ExecutorClient {
     pub fn new_with_initial_index(
         enabled: bool,
         can_commit: bool,
-        send_socket_path: String,
-        receive_socket_path: String,
         initial_next_expected: u64,
         storage_path: Option<std::path::PathBuf>,
     ) -> Self {
@@ -131,27 +121,15 @@ impl ExecutorClient {
         // buffer should be empty to avoid conflicts with old commits
         let send_buffer = Arc::new(Mutex::new(BTreeMap::new()));
 
-        // Parse socket addresses with auto-detection
-        let socket_address = SocketAddress::parse(&send_socket_path)
-            .unwrap_or_else(|e| {
-                warn!("⚠️ [EXECUTOR CLIENT] Failed to parse send socket '{}': {}. Defaulting to Unix socket.", send_socket_path, e);
-                SocketAddress::Unix(send_socket_path.clone())
-            });
-
-        let request_socket_address = SocketAddress::parse(&receive_socket_path)
-            .unwrap_or_else(|e| {
-                warn!("⚠️ [EXECUTOR CLIENT] Failed to parse receive socket '{}': {}. Defaulting to Unix socket.", receive_socket_path, e);
-                SocketAddress::Unix(receive_socket_path.clone())
-            });
-
-        info!("🔧 [EXECUTOR CLIENT] Creating executor client: send={}, receive={}, initial_next_expected={}, storage_path={:?}", 
-            socket_address.as_str(), request_socket_address.as_str(), initial_next_expected, storage_path);
+        info!("🔧 [EXECUTOR CLIENT] Creating executor client: initial_next_expected={}, storage_path={:?}", 
+            initial_next_expected, storage_path);
 
         let is_ffi_mode = crate::ffi::GO_CALLBACKS.get().is_some();
         let request_pool = if is_ffi_mode {
             Arc::new(ConnectionPool::new_noop())
         } else {
-            Arc::new(ConnectionPool::new(request_socket_address.clone(), 4, 30))
+            // TCP/UDS socket fallback not supported since we removed paths, just use Noop
+            Arc::new(ConnectionPool::new_noop())
         };
 
         let connection: Arc<Mutex<Option<SocketStream>>> = Arc::new(Mutex::new(None));
@@ -185,9 +163,7 @@ impl ExecutorClient {
         }
 
         Self {
-            _socket_address: socket_address,
             connection,
-            _request_socket_address: request_socket_address,
             request_connection,
             enabled,
             can_commit,
@@ -598,8 +574,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         assert!(client.is_enabled());
@@ -611,8 +585,6 @@ mod tests {
         let client = ExecutorClient::new(
             false,
             false,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         assert!(!client.is_enabled());
@@ -625,9 +597,7 @@ mod tests {
         // (can_commit guard was removed — executor_commit_enabled config controls creation)
         let client = ExecutorClient::new(
             true,
-            true, // All enabled clients commit
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
+            true,
             None,
         );
         assert!(client.is_enabled());
@@ -639,8 +609,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         let buffer = client.send_buffer.lock().await;
@@ -653,8 +621,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         let idx = client.next_expected_index.lock().await;
@@ -666,8 +632,6 @@ mod tests {
         let client = ExecutorClient::new_with_initial_index(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             42,
             None,
         );
@@ -684,8 +648,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         // Circuit breaker should be accessible and in closed state
@@ -698,8 +660,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         // Reset should not panic even without active connections
@@ -717,8 +677,6 @@ mod tests {
         let client = ExecutorClient::new(
             true,
             true,
-            "/tmp/test_send.sock".to_string(),
-            "/tmp/test_recv.sock".to_string(),
             None,
         );
         let sent = client.sent_indices.lock().await;

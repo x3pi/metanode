@@ -25,8 +25,6 @@ impl ConsensusNode {
         let executor_client = Arc::new(ExecutorClient::new(
             true,
             false,
-            config.executor_send_socket_path.clone(),
-            config.executor_receive_socket_path.clone(),
             Some(config.storage_path.clone()),
         ));
 
@@ -147,7 +145,7 @@ impl ConsensusNode {
             (
                 epoch,
                 latest_block_number,
-                config.executor_receive_socket_path.clone(),
+                String::new(),
             )
         };
 
@@ -217,7 +215,7 @@ impl ConsensusNode {
         );
 
         // Fetch committee from the best Go Master source
-        let peer_executor_client = if best_socket != config.executor_receive_socket_path {
+        let peer_executor_client = if !best_socket.is_empty() {
             info!(
                 "🔄 [PEER SYNC] Using peer Go Master {} for validators (has correct epoch {})",
                 best_socket, go_epoch
@@ -225,8 +223,6 @@ impl ConsensusNode {
             Arc::new(ExecutorClient::new(
                 true,
                 false,
-                String::new(),
-                best_socket.clone(),
                 None,
             ))
         } else {

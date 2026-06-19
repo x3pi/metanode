@@ -85,21 +85,29 @@ if [ "$i" -eq 1 ]; then
         sleep 1
     fi
     
-    # Run the test and capture the output to a temporary file
-    CMD="./run_multinode_load.sh 10 10000 4000"
+    # Run the spam test
     if [ -n "$INVENTORY" ]; then
-        CMD="$CMD --inventory \"$INVENTORY\""
+        ./tps_spam.sh 10 10000 4000 --inventory "$INVENTORY" > "run_output_raw_${i}.log"
+    else
+        ./tps_spam.sh 10 10000 4000 > "run_output_raw_${i}.log"
     fi
-    eval $CMD > "run_output_raw_${i}.log"
+    
+    # Wait for chain to become idle and analyze
+    if [ -n "$INVENTORY" ]; then
+        ./tps_analyze.sh --wait-idle --inventory "$INVENTORY" >> "run_output_raw_${i}.log"
+    else
+        ./tps_analyze.sh --wait-idle >> "run_output_raw_${i}.log"
+    fi
+
     sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "run_output_raw_${i}.log" > "run_output_${i}.log"
     rm -f "run_output_raw_${i}.log"
     
     # Extract important metrics
     TPS=$(grep "SYSTEM TPS:" "run_output_${i}.log" | awk -F'~' '{print $2}' | awk '{print $1}')
-    TOTAL_SENT=$(grep "Tổng TX gửi:" "run_output_${i}.log" | awk -F':' '{print $2}' | xargs)
+    TOTAL_SENT=$(grep "Injected" "run_output_${i}.log" | awk '{print $4}' | xargs)
     TOTAL_IN_BLOCKS=$(grep "TX trong blocks:" "run_output_${i}.log" | awk -F':' '{print $2}' | xargs)
     MAX_TX=$(grep "Max TXs/block:" "run_output_${i}.log" | awk -F':' '{print $2}' | xargs)
-    SUCCESS_RATE=$(grep "Success Rate:" "run_output_${i}.log" | awk -F':' '{print $2}' | xargs)
+    SUCCESS_RATE="N/A (No Verify Mode)"
     TIME=$(grep "Thời gian xử lý:" "run_output_${i}.log" | awk -F':' '{print $2}' | xargs)
     FORK_SAFE=$(grep "HỆ THỐNG KHÔNG FORK" "run_output_${i}.log" | wc -l)
     

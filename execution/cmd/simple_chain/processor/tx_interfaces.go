@@ -35,7 +35,6 @@ type ITxHashConnMapper interface {
 
 // ISystemConfig abstracts the system configuration context provided by BlockProcessor.
 type ISystemConfig interface {
-	GetRustTxSocketPath() string
 }
 
 // ITxClientProvider abstracts the UDS client provider used to forward transactions to Rust.

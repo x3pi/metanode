@@ -21,7 +21,6 @@ Rust consensus layer (`mtn-consensus`).
 |---|---|---|---|
 | gRPC (consensus) | TCP + TLS | Mysticeti DAG consensus | tonic TLS |
 | `peer_rpc_port` | TCP | Custom peer RPC (TX forward, peer discovery) | None |
-| `rust_tx_socket_path` | UDS | Transaction submission from Go | Filesystem perms |
 
 ### Peer RPC
 

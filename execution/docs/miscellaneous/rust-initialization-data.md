@@ -24,23 +24,15 @@ Rust Client (socket-rust/) <--- Unix Socket ---> Go Server (executor/)
 ```rust
 fn main() {
     // Đọc socket paths từ environment variable
-    let socket_paths_str = env::var("RUST_SOCKET_PATHS").unwrap_or_else(|_| {
-        eprintln!("ERROR: Environment variable RUST_SOCKET_PATHS is required");
-        eprintln!("Usage: RUST_SOCKET_PATHS=\"/tmp/rust-go.sock_1,/tmp/rust-go.sock_2\" ./rust-executor");
-        eprintln!("Example: RUST_SOCKET_PATHS=\"/tmp/rust-go.sock_1\" ./rust-executor");
         process::exit(1);
     });
 
     // Parse socket paths từ string (comma-separated)
-    let socket_paths: Vec<String> = socket_paths_str
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    if socket_paths.is_empty() {
-        eprintln!("ERROR: No socket paths provided in RUST_SOCKET_PATHS");
-        eprintln!("Usage: RUST_SOCKET_PATHS=\"/tmp/rust-go.sock_1,/tmp/rust-go.sock_2\" ./rust-executor");
         process::exit(1);
     }
     // ...
@@ -50,10 +42,8 @@ fn main() {
 ### Dữ liệu Cần Thiết
 | Dữ liệu | Giá Trị | Nguồn Gốc | Mô Tả |
 |---------|---------|------------|---------|
-| `RUST_SOCKET_PATHS` | Environment variable | **Bắt buộc config** | Danh sách đường dẫn socket ngăn cách bởi dấu phẩy |
 
 ### Đặc Điểm
-- **Bắt buộc config**: Không có giá trị mặc định, phải cung cấp `RUST_SOCKET_PATHS`
 - **Environment-driven**: Đọc từ biến môi trường thay vì hardcoded
 - **Validation**: Kiểm tra và validate input trước khi chạy
 - **Flexible**: Hỗ trợ số lượng socket bất kỳ (không giới hạn 2 như trước)
@@ -63,24 +53,18 @@ fn main() {
 
 ```bash
 # Cấu hình 1 socket
-export RUST_SOCKET_PATHS="/tmp/rust-go.sock_1"
 ./target/debug/socket
 
 # Cấu hình nhiều socket (comma-separated)
-export RUST_SOCKET_PATHS="/tmp/rust-go.sock_1,/tmp/rust-go.sock_2,/tmp/rust-go.sock_3"
 ./target/debug/socket
 
 # Inline command
-RUST_SOCKET_PATHS="/tmp/rust-go.sock_1" ./target/debug/socket
 ```
 
 ### Lỗi Nếu Thiếu Config
 
 ```bash
 $ ./target/debug/socket
-ERROR: Environment variable RUST_SOCKET_PATHS is required
-Usage: RUST_SOCKET_PATHS="/tmp/rust-go.sock_1,/tmp/rust-go.sock_2" ./rust-executor
-Example: RUST_SOCKET_PATHS="/tmp/rust-go.sock_1" ./rust-executor
 ```
 
 ---
@@ -89,15 +73,11 @@ Example: RUST_SOCKET_PATHS="/tmp/rust-go.sock_1" ./rust-executor
 
 ### Mã Nguồn
 ```rust
-pub fn start_connector(socket_path: &'static str) {
     loop {
-        println!("[Rust Client] Đang thử kết nối tới {}...", socket_path);
-        match UnixStream::connect(socket_path) {
             Ok(mut stream) => {
                 // Xử lý kết nối thành công
             }
             Err(e) => {
-                eprintln!("[Rust Client] Không thể kết nối tới {}: {}. Thử lại sau 2 giây.", socket_path, e);
                 thread::sleep(Duration::from_secs(2));
             }
         }
@@ -145,7 +125,6 @@ func (se *SocketExecutor) listenAndServe() error {
 ```rust
 pub fn handle_status_request(
     stream: &mut UnixStream,
-    socket_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wrapped_request = Request {
         payload: Some(request::Payload::StatusRequest(StatusRequest {})),
@@ -188,10 +167,8 @@ case *pb.Request_StatusRequest:
 ```rust
 pub fn handle_block_request(
     stream: &mut UnixStream,
-    socket_path: &str,
     block_number: u64,  // <- Dữ liệu đầu vào
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[{}] Gửi BlockRequest cho block {}", socket_path, block_number);
 
     let block_req = BlockRequest { block_number };
     let wrapped_request = Request {
@@ -323,7 +300,6 @@ Ngoài StatusRequest và BlockRequest, hệ thống còn hỗ trợ:
 ### Tóm Tắt Nguồn Gốc Dữ Liệu
 
 1. **Từ Environment Variables:**
-   - `RUST_SOCKET_PATHS` - đường dẫn socket (bắt buộc)
 
 2. **Hardcoded trong Rust:**
    - Block number khởi tạo (0)

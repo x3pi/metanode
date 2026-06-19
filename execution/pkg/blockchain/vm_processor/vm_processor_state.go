@@ -468,12 +468,11 @@ func (vmP *VmProcessor) updateStateDB(
 					details[address] = fmt.Sprintf("ConversionError: %s", newNonceBig.String())
 					continue
 				}
-				// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
-				// when transactions from the same sender are routed to different workers.
+				// 🔒 NONCE-FIX: The sender's nonce is already incremented in tx_processor BEFORE EVM execution.
+				// If the MVM returns the sender's nonce, we MUST IGNORE IT to prevent double-incrementing.
 				if fmtAddress == transaction.FromAddress() {
-					err = vmP.accountStateDB.PlusOneNonce(fmtAddress)
-					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
-					newNonce = 0 // Just for logging details below
+					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+					continue
 				} else {
 					err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
 					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
@@ -640,12 +639,11 @@ func (vmP *VmProcessor) updateStateDB(
 				details[address] = fmt.Sprintf("ConversionError: %s", newNonceBig.String())
 				continue
 			}
-			// 🔒 NONCE-FIX: For sender address, use thread-safe PlusOneNonce to avoid Data Races
-			// when transactions from the same sender are routed to different workers.
+			// 🔒 NONCE-FIX: The sender's nonce is already incremented in tx_processor BEFORE EVM execution.
+			// If the MVM returns the sender's nonce, we MUST IGNORE IT to prevent double-incrementing.
 			if fmtAddress == transaction.FromAddress() {
-				err = vmP.accountStateDB.PlusOneNonce(fmtAddress)
-				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, PlusOneNonce called, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
-				newNonce = 0 // Just for logging details below
+				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+				continue
 			} else {
 				err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
 				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())

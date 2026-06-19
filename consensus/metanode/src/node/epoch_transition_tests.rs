@@ -736,7 +736,6 @@ use crate::node::committee_source::CommitteeSource;
 #[test]
 fn test_committee_source_validate_epoch_match() {
     let source = CommitteeSource {
-        socket_path: "/dev/null".to_string(),
         epoch: 5,
         last_block: 1000,
         is_peer: false,
@@ -749,7 +748,6 @@ fn test_committee_source_validate_epoch_match() {
 #[test]
 fn test_committee_source_validate_epoch_mismatch() {
     let source = CommitteeSource {
-        socket_path: "/dev/null".to_string(),
         epoch: 5,
         last_block: 1000,
         is_peer: false,
@@ -763,7 +761,6 @@ fn test_committee_source_validate_epoch_mismatch() {
 #[test]
 fn test_committee_source_create_executor_client() {
     let source = CommitteeSource {
-        socket_path: "/tmp/test_recv.sock".to_string(),
         epoch: 1,
         last_block: 0,
         is_peer: true,

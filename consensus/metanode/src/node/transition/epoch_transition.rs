@@ -117,7 +117,7 @@ pub async fn transition_to_epoch_from_system_tx(
     }
 
     let executor_client =
-        committee_source.create_executor_client(&config.executor_send_socket_path);
+        committee_source.create_executor_client();
 
     // SINGLE SOURCE OF TRUTH: Rust provides the exact timestamp of the commit that contained
     // the EndOfEpoch system transaction. Go MUST NOT use time.Now() or header fallback.
@@ -320,11 +320,11 @@ pub async fn transition_to_epoch_from_system_tx(
 
     // Fetch committee with unified timestamp
     info!(
-        "📋 [COMMITTEE] Fetching for epoch {} from {}",
-        new_epoch, committee_source.socket_path
+        "📋 [COMMITTEE] Fetching for epoch {}",
+        new_epoch
     );
     let (committee, epoch_timestamp_to_use, eth_addresses) = committee_source
-        .fetch_committee_with_timestamp(&config.executor_send_socket_path, new_epoch)
+        .fetch_committee_with_timestamp(new_epoch)
         .await?;
 
     info!(

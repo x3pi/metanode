@@ -27,27 +27,17 @@ executor_commit_enabled = true
 # Socket addresses can be specified in multiple formats:
 #
 # 1. UNIX DOMAIN SOCKET (local only):
-#    executor_send_socket_path = "/tmp/executor0.sock"
-#    executor_receive_socket_path = "/tmp/rust-go-master.sock"
 #
 # 2. TCP SOCKET with explicit prefix (local or network):
-#    executor_send_socket_path = "tcp://127.0.0.1:19100"
-#    executor_receive_socket_path = "tcp://127.0.0.1:19101"
 #
 # 3. TCP SOCKET without prefix (auto-detected):
-#    executor_send_socket_path = "192.168.1.200:19100"
-#    executor_receive_socket_path = "192.168.1.200:19101"
 #
 # Use TCP sockets when running Rust and Go on different machines!
 # ============================================================================
 
 # Example: Go Master running on a different machine (192.168.1.200)
-executor_send_socket_path = "tcp://192.168.1.200:19100"
-executor_receive_socket_path = "tcp://192.168.1.200:19101"
 
 # Example: Local deployment with Unix sockets (default)
-# executor_send_socket_path = "/tmp/executor0.sock"
-# executor_receive_socket_path = "/tmp/rust-go-standard-master.sock"
 
 commit_sync_batch_size = 200
 commit_sync_parallel_fetches = 16

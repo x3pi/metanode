@@ -159,6 +159,7 @@ func main() {
 	skipVerify := flag.Bool("skip-verify", false, "Skip per-account verification (faster exit for blast scripts)")
 	rpcAddr := flag.String("rpc", "", "Target RPC URL for verification (default: auto from config IP:8757)")
 	waitFile := flag.String("wait-file", "", "Wait for this file to exist before starting blast (for syncing multi-clients)")
+noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not poll chain for completion")
 	flag.Parse()
 
 	logger.SetConfig(&logger.LoggerConfig{Flag: 0})
@@ -457,6 +458,12 @@ func main() {
 
 	fmt.Printf("\n\n  📤 Injected: %d TXs in %s\n", len(allTxs), blastDuration.Round(time.Millisecond))
 	fmt.Printf("  🚀 Injection TPS: %.0f tx/s\n", injectionTPS)
+
+	if *noWait {
+		fmt.Printf("\n  🚀 Injection complete. Waiting 1s to ensure TCP flush, then exiting due to -no-wait.\n")
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}
 
 	// ─── Poll for completion using block-based monitoring ────
 	// Wait until chain stops producing blocks with TXs (mempool empty)
