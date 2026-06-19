@@ -46,6 +46,7 @@
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
+    - { role: node_exporter, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
 
 - name: Post-deployment actions
@@ -107,3 +108,14 @@
       args:
         executable: /bin/bash
 
+    - name: Generate prometheus.yml dynamically for monitoring
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
+        dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
+        
+    - name: Restart local Prometheus service
+      become: yes
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+      ignore_errors: true

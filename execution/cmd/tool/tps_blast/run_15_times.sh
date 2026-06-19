@@ -1,9 +1,38 @@
 #!/bin/bash
 
 # Script to run multinode load test N times and collect results
-RUNS=${1:-15}
+
+RUNS=15
+INVENTORY=""
+NO_REBUILD=0
+RAMDISK_OPTION=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --inventory|-i)
+      INVENTORY="$2"
+      shift 2
+      ;;
+    --no-rebuild|no-build|no-rebuild)
+      NO_REBUILD=1
+      shift
+      ;;
+    --ramdisk)
+      RAMDISK_OPTION="--ramdisk"
+      shift
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+         RUNS="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
 OUTPUT_REPORT="${RUNS}_runs_report.txt"
 echo "=== ${RUNS} RUNS REPORT ===" > $OUTPUT_REPORT
+
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MTN_CONSENSUS_ROOT="$(cd "$SCRIPT_DIR/../../../../consensus" && pwd)"
@@ -24,29 +53,44 @@ done
 for ((i=1; i<=RUNS; i++)); do
     echo "Starting Run $i/$RUNS..."
     
-    if [ "$i" -eq 1 ]; then
-        BUILD_OPTION="--build-all"
-        RAMDISK_OPTION=""
-        if [[ "${2:-}" == "--no-rebuild" || "${2:-}" == "no-build" || "${2:-}" == "no-rebuild" ]]; then
-            echo "▶️ Run 1: Restarting nodes without rebuilding..."
-            BUILD_OPTION=""
+if [ "$i" -eq 1 ]; then
+        if [ -n "$INVENTORY" ]; then
+            echo "▶️ Run 1: Restarting REMOTE nodes using Ansible inventory $INVENTORY..."
+            if [ "$NO_REBUILD" -eq 0 ]; then
+                echo "  (Rebuilding and wiping data)"
+                ansible-playbook -i "$INVENTORY" "$MTN_CONSENSUS_ROOT/../deploy/ansible/deploy.yml" -e "ansible_action=start keep_data=false"
+            else
+                echo "  (Restarting without wiping data)"
+                ansible-playbook -i "$INVENTORY" "$MTN_CONSENSUS_ROOT/../deploy/ansible/deploy.yml" -e "ansible_action=start keep_data=true"
+            fi
+            echo "⏳ Waiting 15s for remote nodes to stabilize..."
+            sleep 15
         else
-            echo "▶️ Run 1: Rebuilding and fresh restarting nodes..."
+            BUILD_OPTION="--build-all"
+            if [ "$NO_REBUILD" -eq 1 ]; then
+                echo "▶️ Run 1: Restarting nodes without rebuilding..."
+                BUILD_OPTION=""
+            else
+                echo "▶️ Run 1: Rebuilding and fresh restarting nodes..."
+            fi
+            if [ -n "$RAMDISK_OPTION" ]; then
+                echo "▶️ Sử dụng RAM Disk cho Database..."
+            fi
+            "$MTN_CONSENSUS_ROOT/metanode/scripts/mtn-orchestrator.sh" restart --fresh $BUILD_OPTION $RAMDISK_OPTION
+            echo "⏳ Waiting 10s for nodes to stabilize..."
+            sleep 10
         fi
-        if [[ "${3:-}" == "--ramdisk" || "${2:-}" == "--ramdisk" ]]; then
-            echo "▶️ Sử dụng RAM Disk cho Database để chống Disk I/O bottleneck..."
-            RAMDISK_OPTION="--ramdisk"
-        fi
-        "$MTN_CONSENSUS_ROOT/metanode/scripts/mtn-orchestrator.sh" restart --fresh $BUILD_OPTION $RAMDISK_OPTION
-        echo "⏳ Waiting 10s for nodes to stabilize..."
-        sleep 10
     else
         echo "▶️ Run $i: Running load test without restarting nodes..."
         sleep 1
     fi
     
     # Run the test and capture the output to a temporary file
-    ./run_multinode_load.sh 10 10000 > "run_output_raw_${i}.log"
+    CMD="./run_multinode_load.sh 10 10000 4000"
+    if [ -n "$INVENTORY" ]; then
+        CMD="$CMD --inventory \"$INVENTORY\""
+    fi
+    eval $CMD > "run_output_raw_${i}.log"
     sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "run_output_raw_${i}.log" > "run_output_${i}.log"
     rm -f "run_output_raw_${i}.log"
     

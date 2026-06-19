@@ -38,6 +38,7 @@ RPC_JSON_PATH="/tmp/rpc_nodes.json"
 send_tele() {
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d parse_mode="HTML" \
         --data-urlencode text="$1" >/dev/null
 }
 
@@ -72,18 +73,21 @@ if [ "${1:-}" == "health" ]; then
                             MONITOR_IP=$(hostname -I | awk '{print $1}')
                         fi
 
-                        send_tele "🚨🚨🚨 [Health Monitor] PHÁT HIỆN NODE CHẾT!
-Node: $node_key
-IP: $ip
-URL: $node_url
+                        send_tele "🚨 <b>[FIRING: Node Crash] Metanode Execution Engine</b> 🚨
+<b>Node:</b> <code>$node_key</code>
+<b>IP:</b> <code>$ip</code>
+<b>URL:</b> $node_url
+<b>Severity:</b> Critical
 
-🛠 Lệnh kéo thư mục Logs về máy tính của bạn:
-sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}"
+Hệ thống đã tự động backup Crash Logs thành công!
+🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
+<code>sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                     fi
                 else
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then
                         dead_nodes[$node_key]=0
-                        send_tele "🟢 [Health Monitor] Node $node_key ($node_url) đã hoạt động lại!"
+                        send_tele "✅ <b>[RESOLVED: Node Crash] Metanode Execution Engine</b> ✅
+<b>Node:</b> <code>$node_key</code> ($node_url) đã phản hồi RPC trở lại bình thường."
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
