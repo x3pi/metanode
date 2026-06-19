@@ -691,7 +691,10 @@ func processSingleGroup(
 				// 🔒 NONCE-FIX: Sync C++ State cache to prevent stale nonce for subsequent EVM TXs
 				mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce())
 				as.SetLastHash(tx.Hash())
-				gRs.DirtyAccounts = append(gRs.DirtyAccounts, as)
+				
+				// Standardize Dirty Marking: Delegate to localAccountDB instead of manual gRs.DirtyAccounts slice
+				localAccountDB.PublicSetDirtyAccountState(as)
+
 				rcp := receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
@@ -947,13 +950,25 @@ func processSingleGroup(
 	*exPtr = gRs.ExecuteSCResults
 	*mvmMapPtr = gRs.MvmIdMap
 
+	// Standardize extraction of DirtyAccounts for Block-STM
+	var dirtyAccounts []types.AccountState
+	if adb, ok := localAccountDB.(interface{ GetDirtyAccounts() map[common.Address]types.AccountState }); ok {
+		dirtyMap := adb.GetDirtyAccounts()
+		for _, as := range dirtyMap {
+			dirtyAccounts = append(dirtyAccounts, as)
+		}
+	} else {
+		// Fallback
+		dirtyAccounts = gRs.DirtyAccounts
+	}
+
 	return groupResultExt{
 		txPtr:         txPtr,
 		rcpPtr:        rcpPtr,
 		exPtr:         exPtr,
 		mvmPtr:        mvmMapPtr,
 		Error:         gRs.Error,
-		DirtyAccounts: gRs.DirtyAccounts,
+		DirtyAccounts: dirtyAccounts,
 		TotalGasFee:   totalGasFee,
 	}
 }
