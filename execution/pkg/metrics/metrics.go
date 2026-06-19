@@ -51,6 +51,12 @@ var (
 		Name: "master_epoch_transitions_total",
 		Help: "Total epoch transitions completed",
 	})
+
+	// BlockStmConflictsTotal counts transactions/groups aborted during Block-STM parallel execution.
+	BlockStmConflictsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_block_stm_conflicts_total",
+		Help: "Total number of conflicts resolved by Block-STM Union-Find",
+	})
 )
 
 // ─── Gauges ──────────────────────────────────────────────────────────────────
@@ -124,6 +130,20 @@ var (
 		Name:    "master_epoch_transition_seconds",
 		Help:    "Epoch transition duration in seconds",
 		Buckets: []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0},
+	})
+
+	// BlockStmRounds observes the number of iterative rounds Block-STM required to finish.
+	BlockStmRounds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_block_stm_rounds_total",
+		Help:    "Number of iterative rounds to resolve a block",
+		Buckets: []float64{1, 2, 3, 4, 5, 8, 10, 20},
+	})
+
+	// TrieIRDuration observes Trie Intermediate Root calculation latency.
+	TrieIRDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_trie_ir_seconds",
+		Help:    "Trie Intermediate Root calculation latency in seconds",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0},
 	})
 )
 
