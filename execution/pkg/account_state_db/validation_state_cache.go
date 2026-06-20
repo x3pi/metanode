@@ -131,6 +131,24 @@ func (v *ValidationStateCache) ApplyAcceptedWritesTo(targetAccountDB types.Accou
 	}
 }
 
+// InjectTargetedAcceptedWrites injects only the specific accounts and storage slots into the target DBs
+func (v *ValidationStateCache) InjectTargetedAcceptedWrites(targetAccountDB types.AccountStateDB, targetSCDB types.SmartContractDB, readAccounts map[common.Address]types.AccountState, readStorage map[common.Address][]string) {
+	for addr := range readAccounts {
+		if acc, ok := v.acceptedAccounts[addr]; ok {
+			targetAccountDB.InjectLoadedAccount(acc.Copy())
+		}
+	}
+	for addr, keys := range readStorage {
+		if keysMap, ok := v.acceptedStorage[addr]; ok {
+			for _, kStr := range keys {
+				if val, exists := keysMap[kStr]; exists {
+					targetSCDB.SetStorageValue(addr, []byte(kStr), val)
+				}
+			}
+		}
+	}
+}
+
 
 // -----------------------------------------------------------------------------
 // Write Methods (Mutate the overlay directly during fallback re-execution)

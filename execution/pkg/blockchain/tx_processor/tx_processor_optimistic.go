@@ -87,6 +87,7 @@ func ProcessTransactionsOptimistic(
 		numRounds++
 		var wg sync.WaitGroup
 		var resultsMutex sync.Mutex
+		var executionGroups [][]int
 
 		numWorkers := runtime.NumCPU()
 		if numWorkers > 16 {
@@ -96,6 +97,9 @@ func ProcessTransactionsOptimistic(
 		if isFirstRound {
 			// Round 1: Flat parallel execution of all static groups
 			var nextIdx uint32
+			for _, realIdx := range groupsToExecute {
+				executionGroups = append(executionGroups, []int{realIdx})
+			}
 			for w := 0; w < numWorkers; w++ {
 				wg.Add(1)
 				go func() {
@@ -161,14 +165,34 @@ func ProcessTransactionsOptimistic(
 				groupIdxMap[realIdx] = i
 			}
 
-			addressToIndices := make(map[common.Address][]int)
+			readToIndices := make(map[string][]int)
+			writeToIndices := make(map[string][]int)
+
 			conflictFreeAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
-			registerAccess := func(addr common.Address, realIdx int) {
+			
+			registerAccess := func(addr common.Address, isWrite bool, realIdx int) {
 				if addr == conflictFreeAddr {
-					return // Không gộp các transaction đọc/ghi vào địa chỉ này (tránh sequential bottleneck)
+					return
 				}
-				if idxInConflicting, ok := groupIdxMap[realIdx]; ok {
-					addressToIndices[addr] = append(addressToIndices[addr], idxInConflicting)
+				key := addr.String()
+				idx := groupIdxMap[realIdx]
+				if isWrite {
+					writeToIndices[key] = append(writeToIndices[key], idx)
+				} else {
+					readToIndices[key] = append(readToIndices[key], idx)
+				}
+			}
+			
+			registerStorageAccess := func(addr common.Address, kStr string, isWrite bool, realIdx int) {
+				if addr == conflictFreeAddr {
+					return
+				}
+				key := addr.String() + kStr
+				idx := groupIdxMap[realIdx]
+				if isWrite {
+					writeToIndices[key] = append(writeToIndices[key], idx)
+				} else {
+					readToIndices[key] = append(readToIndices[key], idx)
 				}
 			}
 
@@ -176,32 +200,46 @@ func ProcessTransactionsOptimistic(
 				res := speculativeResults[realIdx]
 				// Read accounts
 				for addr := range res.readAccounts {
-					registerAccess(addr, realIdx)
+					registerAccess(addr, false, realIdx)
 				}
 				// Written accounts
 				for _, acc := range res.DirtyAccounts {
-					registerAccess(acc.Address(), realIdx)
+					registerAccess(acc.Address(), true, realIdx)
 				}
 				// Read storage
-				for addr := range res.readStorage {
-					registerAccess(addr, realIdx)
+				for addr, keys := range res.readStorage {
+					for _, kStr := range keys {
+						registerStorageAccess(addr, kStr, false, realIdx)
+					}
 				}
 				// Written storage
 				if res.exPtr != nil {
 					for _, ex := range *res.exPtr {
 						if ex != nil && ex.MapStorageChange() != nil {
-							for addrStr := range ex.MapStorageChange() {
-								registerAccess(common.HexToAddress(addrStr), realIdx)
+							for addrStr, kvs := range ex.MapStorageChange() {
+								addr := common.HexToAddress(addrStr)
+								for kStr := range kvs {
+									registerStorageAccess(addr, kStr, true, realIdx)
+								}
 							}
 						}
 					}
 				}
 			}
 
-			// Union groups accessing same addresses
-			for _, indices := range addressToIndices {
-				for i := 1; i < len(indices); i++ {
-					uf.Union(indices[0], indices[i])
+			// Union groups accessing same addresses (Write-Write and Read-Write ONLY)
+			for key, wIndices := range writeToIndices {
+				rIndices := readToIndices[key]
+				
+				// All writers of this key conflict with each other
+				for i := 1; i < len(wIndices); i++ {
+					uf.Union(wIndices[0], wIndices[i])
+				}
+				// All readers of this key conflict with the writers
+				if len(wIndices) > 0 {
+					for _, rIdx := range rIndices {
+						uf.Union(wIndices[0], rIdx)
+					}
 				}
 			}
 
@@ -212,7 +250,6 @@ func ProcessTransactionsOptimistic(
 				rootToItems[root] = append(rootToItems[root], realIdx)
 			}
 
-			var executionGroups [][]int
 			for _, groupRealIndices := range rootToItems {
 				executionGroups = append(executionGroups, groupRealIndices)
 			}
@@ -249,8 +286,11 @@ func ProcessTransactionsOptimistic(
 						}
 						groupRealIndices := executionGroups[gIdx]
 
-						// Apply all accepted writes so far to the local execution DB
-						validationCache.ApplyAcceptedWritesTo(localAccountDB, localSmartContractDB)
+						// Inject only the targeted accounts and storage slots that were read by these groups in the previous round
+						for _, realIdx := range groupRealIndices {
+							prevRes := speculativeResults[realIdx]
+							validationCache.InjectTargetedAcceptedWrites(localAccountDB, localSmartContractDB, prevRes.readAccounts, prevRes.readStorage)
+						}
 
 						groupResults := make(map[int]groupResultExt)
 
@@ -296,35 +336,45 @@ func ProcessTransactionsOptimistic(
 		// --- Sequential Validation & Conflict Check ---
 		var nextRoundGroups []int
 		currentPassCache := account_state_db.NewValidationStateCache(nil, nil)
-		for _, realIdx := range groupsToExecute {
-			res := speculativeResults[realIdx]
-
-			hasConflict := currentPassCache.CheckConflict(res.readAccounts, res.readStorage)
+		
+		// Validate meta-groups as atomic units
+		for _, groupRealIndices := range executionGroups {
+			hasConflict := false
+			for _, realIdx := range groupRealIndices {
+				res := speculativeResults[realIdx]
+				if currentPassCache.CheckConflict(res.readAccounts, res.readStorage) {
+					hasConflict = true
+					break
+				}
+			}
+			
 			if hasConflict {
-				logger.Info("🔄 [BLOCK-STM] Conflict detected for GROUP %d, re-queueing", realIdx)
-				conflictsInBlock++
-				nextRoundGroups = append(nextRoundGroups, realIdx)
+				for _, realIdx := range groupRealIndices {
+					logger.Info("🔄 [BLOCK-STM] Conflict detected for GROUP %d, re-queueing", realIdx)
+					conflictsInBlock++
+					nextRoundGroups = append(nextRoundGroups, realIdx)
+				}
 			} else {
-				// Apply writes to the validation cache overlay
-				storageWrites := make(map[string]map[string][]byte)
-				if res.exPtr != nil {
-					for _, ex := range *res.exPtr {
-						if ex != nil && ex.MapStorageChange() != nil {
-							for k, v := range ex.MapStorageChange() {
-								storageWrites[k] = v
+				for _, realIdx := range groupRealIndices {
+					res := speculativeResults[realIdx]
+					storageWrites := make(map[string]map[string][]byte)
+					if res.exPtr != nil {
+						for _, ex := range *res.exPtr {
+							if ex != nil && ex.MapStorageChange() != nil {
+								for k, v := range ex.MapStorageChange() {
+									storageWrites[k] = v
+								}
 							}
 						}
 					}
+					dirtyAccountsMap := make(map[common.Address]types.AccountState)
+					for _, acc := range res.DirtyAccounts {
+						dirtyAccountsMap[acc.Address()] = acc
+					}
+					validationCache.ApplyWrites(dirtyAccountsMap, storageWrites)
+					currentPassCache.ApplyWrites(dirtyAccountsMap, storageWrites)
+					finalResults[realIdx] = res
 				}
-
-				dirtyAccountsMap := make(map[common.Address]types.AccountState)
-				for _, acc := range res.DirtyAccounts {
-					dirtyAccountsMap[acc.Address()] = acc
-				}
-
-				validationCache.ApplyWrites(dirtyAccountsMap, storageWrites)
-				currentPassCache.ApplyWrites(dirtyAccountsMap, storageWrites)
-				finalResults[realIdx] = res
 			}
 		}
 
