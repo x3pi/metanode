@@ -31,7 +31,6 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 		accountSettingAddr:                   {},
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
 		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
-		common.HexToAddress("0x00000000000000000000000000000000D844bb55"): {}, // Staking/BLS Contract for parallel TPS blasting
 	}
 
 	groupAddrs := make([]common.Address, 0)
