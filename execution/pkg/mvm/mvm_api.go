@@ -174,10 +174,14 @@ func CallClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
 
+var mvmUpdateMutex sync.Mutex
+
 // CallUpdateStateNonce updates the C++ State::instances cache nonce for a specific address.
 // This MUST be called when Go changes nonce directly (e.g., BLS SetPublicKey, setAccountType)
 // to keep C++ cache in sync with Go state.
 func CallUpdateStateNonce(address common.Address, nonce uint64) {
+	mvmUpdateMutex.Lock()
+	defer mvmUpdateMutex.Unlock()
 	addrBytes := address.Bytes()
 	C.updateStateNonce((*C.uchar)(unsafe.Pointer(&addrBytes[0])), C.ulonglong(nonce))
 }
@@ -186,6 +190,8 @@ func CallUpdateStateNonce(address common.Address, nonce uint64) {
 // This MUST be called when Go changes balance directly (e.g., Native Transfer)
 // to keep C++ cache in sync with Go state.
 func CallUpdateStateBalance(address common.Address, balance *big.Int) {
+	mvmUpdateMutex.Lock()
+	defer mvmUpdateMutex.Unlock()
 	addrBytes := address.Bytes()
 	var balanceBytes [32]byte
 	balance.FillBytes(balanceBytes[:])

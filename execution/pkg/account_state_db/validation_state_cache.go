@@ -83,12 +83,19 @@ func (v *ValidationStateCache) ApplyWrites(dirtyAccounts map[common.Address]type
 }
 
 func (v *ValidationStateCache) CheckConflict(readAccounts map[common.Address]types.AccountState, readStorage map[common.Address][]string) bool {
+	conflictFreeAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
 	for addr := range readAccounts {
+		if addr == conflictFreeAddr {
+			continue // Skip conflict check for the special contract
+		}
 		if _, ok := v.acceptedAccounts[addr]; ok {
 			return true // Conflict: Another accepted TX wrote to an account we read
 		}
 	}
 	for addr, keys := range readStorage {
+		if addr == conflictFreeAddr {
+			continue // Skip conflict check for the special contract
+		}
 		if keysMap, ok := v.acceptedStorage[addr]; ok {
 			for _, k := range keys {
 				if _, exists := keysMap[k]; exists {
