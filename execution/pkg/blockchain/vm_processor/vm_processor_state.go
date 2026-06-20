@@ -375,8 +375,8 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 	return rs, nil
 }
 
-// updateStateDB cập nhật trạng thái DB dựa trên kết quả MVM.
-func (vmP *VmProcessor) updateStateDB(
+// UpdateStateDB cập nhật trạng thái DB dựa trên kết quả MVM.
+func (vmP *VmProcessor) UpdateStateDB(
 	ctx context.Context,
 	transaction types.Transaction,
 	mvmRs *mvm.MVMExecuteResult,
@@ -388,7 +388,7 @@ func (vmP *VmProcessor) updateStateDB(
 
 	if vmP.tracingEnabled { // Chỉ tạo span nếu flag processor bật
 		var actualSpan *trace.Span
-		_, actualSpan = trace.StartSpan(ctx, "VmProcessor.updateStateDB", map[string]interface{}{
+		_, actualSpan = trace.StartSpan(ctx, "VmProcessor.UpdateStateDB", map[string]interface{}{
 			"txHash":       transaction.Hash().Hex(),
 			"mvmStatus":    mvmRs.Status.String(),
 			"mvmException": mvmRs.Exception.String(),
@@ -471,11 +471,11 @@ func (vmP *VmProcessor) updateStateDB(
 				// 🔒 NONCE-FIX: The sender's nonce is already incremented in tx_processor BEFORE EVM execution.
 				// If the MVM returns the sender's nonce, we MUST IGNORE IT to prevent double-incrementing.
 				if fmtAddress == transaction.FromAddress() {
-					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+					logger.Debug("[NONCE-TRACE] UpdateStateDB-REVERT: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
 					continue
 				} else {
 					err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
-					logger.Debug("[NONCE-TRACE] updateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
+					logger.Debug("[NONCE-TRACE] UpdateStateDB-REVERT: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 				}
 				if err != nil {
 					finalErr = fmt.Errorf("failed to set nonce %d for %s: %w", newNonce, address, err)
@@ -642,11 +642,11 @@ func (vmP *VmProcessor) updateStateDB(
 			// 🔒 NONCE-FIX: The sender's nonce is already incremented in tx_processor BEFORE EVM execution.
 			// If the MVM returns the sender's nonce, we MUST IGNORE IT to prevent double-incrementing.
 			if fmtAddress == transaction.FromAddress() {
-				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
+				logger.Debug("[NONCE-TRACE] UpdateStateDB-SUCCESS: addr=%s, ignoring sender nonce from MVM to prevent double-increment, txHash=%s", fmtAddress.Hex(), transaction.Hash().Hex())
 				continue
 			} else {
 				err = vmP.accountStateDB.SetNonce(fmtAddress, newNonce)
-				logger.Debug("[NONCE-TRACE] updateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
+				logger.Debug("[NONCE-TRACE] UpdateStateDB-SUCCESS: addr=%s, newNonce=%d, txHash=%s", fmtAddress.Hex(), newNonce, transaction.Hash().Hex())
 			}
 			if err != nil {
 				finalErr = fmt.Errorf("failed to set nonce %d for %s: %w", newNonce, address, err)
