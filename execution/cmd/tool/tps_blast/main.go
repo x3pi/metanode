@@ -252,8 +252,8 @@ noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not 
 		parsedABI, _ := abi.JSON(strings.NewReader(abiJSON))
 		dataTx, _ := parsedABI.Pack("setBlsPublicKey", blsPubKeyBytes)
 		
-		// Gửi đến CHÍNH ĐỊA CHỈ NGƯỜI GỬI (Self-Transfer có mang theo Data)
-		toAddr := common.HexToAddress(acc.Address)
+		// Gửi đến ACCOUNT_SETTING_ADDRESS_SELECT
+		toAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
 		
 		tx := e_types.NewTransaction(0, toAddr, big.NewInt(0), 1000000000, big.NewInt(100000), dataTx)
 		signer := e_types.LatestSignerForChainID(bigChainId)
