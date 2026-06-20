@@ -22,15 +22,18 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
-	client "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
+
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/command"
 	c_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/cmd/tool/tps_blast/rpc"
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 )
 
 type AccountInfo struct {
@@ -237,8 +240,24 @@ noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not 
 	var buildErrors int
 
 	for _, acc := range toSend {
-		// 1. Create signed EthTx for setBlsPublicKey
-		ethTx, err := client.CreateSignedSetBLSPublicKeyTx(acc.PrivateKey, blsPubKey, bigChainId, 0)
+		// 1. Create a BLS Registration transaction, but send to ITSELF to avoid shared state
+		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(acc.PrivateKey, "0x"))
+		if err != nil {
+			buildErrors++
+			continue
+		}
+		
+		blsPubKeyBytes, _ := hex.DecodeString(strings.TrimPrefix(blsPubKey, "0x"))
+		abiJSON := `[{"inputs":[{"internalType":"bytes","name":"publicKey","type":"bytes"}],"name":"setBlsPublicKey","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`
+		parsedABI, _ := abi.JSON(strings.NewReader(abiJSON))
+		dataTx, _ := parsedABI.Pack("setBlsPublicKey", blsPubKeyBytes)
+		
+		// Gửi đến CHÍNH ĐỊA CHỈ NGƯỜI GỬI (Self-Transfer có mang theo Data)
+		toAddr := common.HexToAddress(acc.Address)
+		
+		tx := e_types.NewTransaction(0, toAddr, big.NewInt(0), 1000000000, big.NewInt(100000), dataTx)
+		signer := e_types.LatestSignerForChainID(bigChainId)
+		ethTx, err := e_types.SignTx(tx, signer, privateKey)
 		if err != nil {
 			buildErrors++
 			continue
