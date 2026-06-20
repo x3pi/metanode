@@ -115,7 +115,7 @@ for (( i=1; i<=CLIENTS; i++ )); do
     TARGET_RPC=${RPCS[$NODE_INDEX]}
     
     echo "  → Client $i connecting to node $TARGET_NODE"
-    /tmp/tps_blast -config ./cmd/tool/tps_blast/config.json -node "$TARGET_NODE" -count "$TX_PER_CLIENT" -batch "$BATCH_SIZE" -sleep 3 -wait 60 -rpc "$TARGET_RPC" -wait-file "/tmp/blast_start_signal" -accounts_file "/tmp/blast_accounts_${i}.json" -skip-verify > "/tmp/multinode_blast_${i}.log" 2>&1 &
+    /tmp/tps_blast -config ./cmd/tool/tps_blast/config.json -node "$TARGET_NODE" -count "$TX_PER_CLIENT" -batch "$BATCH_SIZE" -sleep 3 -wait 300 -rpc "$TARGET_RPC" -wait-file "/tmp/blast_start_signal" -accounts_file "/tmp/blast_accounts_${i}.json" -skip-verify > "/tmp/multinode_blast_${i}.log" 2>&1 &
     CLIENT_PIDS+=($!)
 done
 
