@@ -100,6 +100,23 @@ func ProcessTransactionsOptimistic(
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+					
+					var localTrie p_trie.StateTrie
+					baseTrie := validationCache.Trie()
+					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+						localTrie = baseTrie
+					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+						localTrie = baseTrie
+					} else {
+						localTrie = baseTrie.Copy()
+					}
+					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+					localSmartContractDB := smart_contract_db.NewSmartContractDB(
+						chainState.GetStorageManager().GetStorageCode(),
+						chainState.GetStorageManager().GetStorageSmartContract(),
+						localAccountDB,
+					)
+
 					for {
 						idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
 						if idx >= len(groupsToExecute) {
@@ -107,22 +124,6 @@ func ProcessTransactionsOptimistic(
 						}
 						realIdx := groupsToExecute[idx]
 						group := groupedGroups[realIdx]
-
-						var localTrie p_trie.StateTrie
-						baseTrie := validationCache.Trie()
-						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
-							localTrie = baseTrie
-						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
-							localTrie = baseTrie
-						} else {
-							localTrie = baseTrie.Copy()
-						}
-						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-						localSmartContractDB := smart_contract_db.NewSmartContractDB(
-							chainState.GetStorageManager().GetStorageCode(),
-							chainState.GetStorageManager().GetStorageSmartContract(),
-							localAccountDB,
-						)
 
 						// In Round 1, execute from the base state without previous writes
 						var ethAddressBytes [20]byte
@@ -220,28 +221,29 @@ func ProcessTransactionsOptimistic(
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+
+					var localTrie p_trie.StateTrie
+					baseTrie := validationCache.Trie()
+					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+						localTrie = baseTrie
+					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+						localTrie = baseTrie
+					} else {
+						localTrie = baseTrie.Copy()
+					}
+					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+					localSmartContractDB := smart_contract_db.NewSmartContractDB(
+						chainState.GetStorageManager().GetStorageCode(),
+						chainState.GetStorageManager().GetStorageSmartContract(),
+						localAccountDB,
+					)
+
 					for {
 						gIdx := int(atomic.AddUint32(&nextGroupIdx, 1) - 1)
 						if gIdx >= len(executionGroups) {
 							break
 						}
 						groupRealIndices := executionGroups[gIdx]
-
-						var localTrie p_trie.StateTrie
-						baseTrie := validationCache.Trie()
-						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
-							localTrie = baseTrie
-						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
-							localTrie = baseTrie
-						} else {
-							localTrie = baseTrie.Copy()
-						}
-						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-						localSmartContractDB := smart_contract_db.NewSmartContractDB(
-							chainState.GetStorageManager().GetStorageCode(),
-							chainState.GetStorageManager().GetStorageSmartContract(),
-							localAccountDB,
-						)
 
 						// Apply all accepted writes so far to the local execution DB
 						validationCache.ApplyAcceptedWritesTo(localAccountDB, localSmartContractDB)
