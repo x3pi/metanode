@@ -162,7 +162,11 @@ func ProcessTransactionsOptimistic(
 			}
 
 			addressToIndices := make(map[common.Address][]int)
+			conflictFreeAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
 			registerAccess := func(addr common.Address, realIdx int) {
+				if addr == conflictFreeAddr {
+					return // Không gộp các transaction đọc/ghi vào địa chỉ này (tránh sequential bottleneck)
+				}
 				if idxInConflicting, ok := groupIdxMap[realIdx]; ok {
 					addressToIndices[addr] = append(addressToIndices[addr], idxInConflicting)
 				}
