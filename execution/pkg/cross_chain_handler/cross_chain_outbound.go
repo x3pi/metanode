@@ -85,9 +85,17 @@ func (h *CrossChainHandler) handleLockAndBridge(
 		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
-		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("lockAndBridge: burn failed: %v", err)
+		}
+		_, err = vmP.UpdateStateDB(ctx, tx, mvmResult, mvmId, false, false)
+		if err != nil {
+			return nil, exRs, fmt.Errorf("lockAndBridge: update state db failed: %v", err)
+		}
+		exRs, err = vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
+		if err != nil {
+			return nil, exRs, fmt.Errorf("lockAndBridge: convert result failed: %v", err)
 		}
 		if exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED {
 			return nil, exRs, fmt.Errorf("lockAndBridge: burn reverted")
@@ -211,9 +219,17 @@ func (h *CrossChainHandler) handleSendMessage(
 		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
-		exRs, err = vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("sendMessage: burn msg.value failed: %v", err)
+		}
+		_, err = vmP.UpdateStateDB(ctx, tx, mvmResult, mvmId, false, false)
+		if err != nil {
+			return nil, exRs, fmt.Errorf("sendMessage: update state db failed: %v", err)
+		}
+		exRs, err = vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
+		if err != nil {
+			return nil, exRs, fmt.Errorf("sendMessage: convert result failed: %v", err)
 		}
 		if exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED {
 			return nil, exRs, fmt.Errorf("sendMessage: burn msg.value reverted")
