@@ -69,9 +69,9 @@ func CreateErrorReceipt(tx types.Transaction, toAddress common.Address, err erro
 // Đây là phần logic chung bắt buộc sau mỗi transaction thành công hoặc revert có tăng nonce
 func ExecuteNonceAndFinalize(
 	ctx context.Context, chainState *blockchain.ChainState,
-	tx types.Transaction, enableTrace bool, blockTime uint64,
+	tx types.Transaction, mvmId common.Address, enableTrace bool, blockTime uint64,
 ) (types.ExecuteSCResult, error) {
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
+	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 	if err != nil {
 		return exRs, err
@@ -86,7 +86,7 @@ func ExecuteNonceAndFinalize(
 // Returns: (receipt, executeSCResult, hasFailed=true)
 func HandleRevertedTx(
 	ctx context.Context, chainState *blockchain.ChainState,
-	tx types.Transaction, toAddress common.Address,
+	tx types.Transaction, toAddress common.Address, mvmId common.Address,
 	blockTime uint64, enableTrace bool, revertReason string,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	revertData := []byte(revertReason)
@@ -98,7 +98,7 @@ func HandleRevertedTx(
 		nil, 0, common.Hash{}, 0,
 	)
 
-	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime)
+	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, mvmId, enableTrace, blockTime)
 	if err != nil {
 		errorReceipt := CreateErrorReceipt(tx, toAddress, fmt.Errorf("ExecuteNonceOnly failed during revert: %w", err))
 		if exRs != nil {
@@ -117,7 +117,7 @@ func HandleRevertedTx(
 // Returns: (receipt, executeSCResult, hasFailed=false)
 func HandleSuccessTx(
 	ctx context.Context, chainState *blockchain.ChainState,
-	tx types.Transaction, toAddress common.Address,
+	tx types.Transaction, toAddress common.Address, mvmId common.Address,
 	blockTime uint64, enableTrace bool,
 	eventLogs []types.EventLog, returnData []byte,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
@@ -127,7 +127,7 @@ func HandleSuccessTx(
 		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
-	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, enableTrace, blockTime)
+	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, mvmId, enableTrace, blockTime)
 	if err != nil {
 		rcp := CreateErrorReceipt(tx, toAddress, err)
 		if exRs != nil {

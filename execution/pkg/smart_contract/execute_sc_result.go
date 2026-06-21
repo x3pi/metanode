@@ -37,10 +37,38 @@ type ExecuteSCResult struct {
 	mapFullDbLogs                       map[string][]byte
 
 	mapStorageChange map[string]map[string][]byte
+
+	mapPublicKeyBls map[string][]byte
+	mapAccountType  map[string]uint8
+	mapNewDeviceKey map[string][]byte
+}
+
+func (rs *ExecuteSCResult) MapPublicKeyBls() map[string][]byte {
+	return rs.mapPublicKeyBls
+}
+func (rs *ExecuteSCResult) SetMapPublicKeyBls(m map[string][]byte) {
+	rs.mapPublicKeyBls = m
+}
+
+func (rs *ExecuteSCResult) MapAccountType() map[string]uint8 {
+	return rs.mapAccountType
+}
+func (rs *ExecuteSCResult) SetMapAccountType(m map[string]uint8) {
+	rs.mapAccountType = m
+}
+
+func (rs *ExecuteSCResult) MapNewDeviceKey() map[string][]byte {
+	return rs.mapNewDeviceKey
+}
+func (rs *ExecuteSCResult) SetMapNewDeviceKey(m map[string][]byte) {
+	rs.mapNewDeviceKey = m
 }
 
 func (rs *ExecuteSCResult) MapStorageChange() map[string]map[string][]byte {
 	return rs.mapStorageChange
+}
+func (rs *ExecuteSCResult) SetMapStorageChange(m map[string]map[string][]byte) {
+	rs.mapStorageChange = m
 }
 
 func NewExecuteSCResult(
@@ -277,12 +305,24 @@ func (r *ExecuteSCResult) MapAddBalance() map[string][]byte {
 	return r.mapAddBalance
 }
 
+func (r *ExecuteSCResult) SetMapAddBalance(m map[string][]byte) {
+	r.mapAddBalance = m
+}
+
 func (r *ExecuteSCResult) MapSubBalance() map[string][]byte {
 	return r.mapSubBalance
 }
 
+func (r *ExecuteSCResult) SetMapSubBalance(m map[string][]byte) {
+	r.mapSubBalance = m
+}
+
 func (r *ExecuteSCResult) MapNonce() map[string][]byte {
 	return r.mapNonce
+}
+
+func (r *ExecuteSCResult) SetMapNonce(m map[string][]byte) {
+	r.mapNonce = m
 }
 
 func (r *ExecuteSCResult) MapStorageRoot() map[string][]byte {
