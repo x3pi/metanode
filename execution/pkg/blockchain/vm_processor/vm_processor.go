@@ -162,18 +162,6 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	}
 
 	if mvmRs != nil {
-		if !tx.GetReadOnly() {
-			_, isFree := vmP.chainState.GetFreeFeeAddress()[tx.ToAddress()]
-			_, updateErr := vmP.UpdateStateDB(execCtx, tx, mvmRs, vmP.mvmId, isFree, isCache)
-			if updateErr != nil {
-				execErr = fmt.Errorf("failed to update state DB after execute: %w", updateErr)
-				if span != nil {
-					span.SetError(execErr)
-					span.AddEvent("StateDBUpdateAfterExecuteFailed", map[string]interface{}{"error": execErr.Error()})
-				}
-			}
-		}
-
 		rs, _ := vmP.MvmResultToExecuteResult(execCtx, tx, mvmRs)
 		if span != nil {
 			span.SetAttribute("executeResultStatus", rs.ReceiptStatus().String())

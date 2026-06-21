@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"math/big"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
-	"runtime"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -160,56 +161,40 @@ func ProcessTransactionsOptimistic(
 			numConflicting := len(groupsToExecute)
 			uf := grouptxns.NewUnionFind(numConflicting)
 
-			groupIdxMap := make(map[int]int, numConflicting) // realIdx -> index in groupsToExecute
-			for i, realIdx := range groupsToExecute {
-				groupIdxMap[realIdx] = i
-			}
-
-			readToIndices := make(map[string][]int)
-			writeToIndices := make(map[string][]int)
-
-			conflictFreeAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
-			
-			registerAccess := func(addr common.Address, isWrite bool, realIdx int) {
-				if addr == conflictFreeAddr {
-					return
-				}
-				key := addr.String()
-				idx := groupIdxMap[realIdx]
-				if isWrite {
-					writeToIndices[key] = append(writeToIndices[key], idx)
-				} else {
-					readToIndices[key] = append(readToIndices[key], idx)
-				}
-			}
-			
-			registerStorageAccess := func(addr common.Address, kStr string, isWrite bool, realIdx int) {
-				if addr == conflictFreeAddr {
-					return
-				}
-				key := addr.String() + kStr
-				idx := groupIdxMap[realIdx]
-				if isWrite {
-					writeToIndices[key] = append(writeToIndices[key], idx)
-				} else {
-					readToIndices[key] = append(readToIndices[key], idx)
-				}
-			}
+			cd := NewConflictDetector(groupsToExecute)
 
 			for _, realIdx := range groupsToExecute {
 				res := speculativeResults[realIdx]
 				// Read accounts
 				for addr := range res.readAccounts {
-					registerAccess(addr, false, realIdx)
+					cd.RegisterAccess(addr, false, realIdx)
 				}
 				// Written accounts
-				for _, acc := range res.DirtyAccounts {
-					registerAccess(acc.Address(), true, realIdx)
+				if res.exPtr != nil {
+					for _, ex := range *res.exPtr {
+						if ex != nil {
+							if ex.MapAddBalance() != nil {
+								for addrStr := range ex.MapAddBalance() { cd.RegisterAccess(common.HexToAddress(addrStr), true, realIdx) }
+							}
+							if ex.MapSubBalance() != nil {
+								for addrStr := range ex.MapSubBalance() { cd.RegisterAccess(common.HexToAddress(addrStr), true, realIdx) }
+							}
+							if ex.MapNonce() != nil {
+								for addrStr := range ex.MapNonce() { cd.RegisterAccess(common.HexToAddress(addrStr), true, realIdx) }
+							}
+							if ex.MapPublicKeyBls() != nil {
+								for addrStr := range ex.MapPublicKeyBls() { cd.RegisterAccess(common.HexToAddress(addrStr), true, realIdx) }
+							}
+							if ex.MapAccountType() != nil {
+								for addrStr := range ex.MapAccountType() { cd.RegisterAccess(common.HexToAddress(addrStr), true, realIdx) }
+							}
+						}
+					}
 				}
 				// Read storage
 				for addr, keys := range res.readStorage {
 					for _, kStr := range keys {
-						registerStorageAccess(addr, kStr, false, realIdx)
+						cd.RegisterStorageAccess(addr, kStr, false, realIdx)
 					}
 				}
 				// Written storage
@@ -219,7 +204,7 @@ func ProcessTransactionsOptimistic(
 							for addrStr, kvs := range ex.MapStorageChange() {
 								addr := common.HexToAddress(addrStr)
 								for kStr := range kvs {
-									registerStorageAccess(addr, kStr, true, realIdx)
+									cd.RegisterStorageAccess(addr, kStr, true, realIdx)
 								}
 							}
 						}
@@ -227,32 +212,7 @@ func ProcessTransactionsOptimistic(
 				}
 			}
 
-			// Union groups accessing same addresses (Write-Write and Read-Write ONLY)
-			for key, wIndices := range writeToIndices {
-				rIndices := readToIndices[key]
-				
-				// All writers of this key conflict with each other
-				for i := 1; i < len(wIndices); i++ {
-					uf.Union(wIndices[0], wIndices[i])
-				}
-				// All readers of this key conflict with the writers
-				if len(wIndices) > 0 {
-					for _, rIdx := range rIndices {
-						uf.Union(wIndices[0], rIdx)
-					}
-				}
-			}
-
-			// Collect group indices into execution groups
-			rootToItems := make(map[int][]int)
-			for i, realIdx := range groupsToExecute {
-				root := uf.Find(i)
-				rootToItems[root] = append(rootToItems[root], realIdx)
-			}
-
-			for _, groupRealIndices := range rootToItems {
-				executionGroups = append(executionGroups, groupRealIndices)
-			}
+			executionGroups = cd.BuildExecutionGroups(groupsToExecute, uf)
 
 			// Execute groups in parallel, sequentially within each group
 			var nextGroupIdx uint32
@@ -303,6 +263,11 @@ func ProcessTransactionsOptimistic(
 							copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
 							binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(realIdx))
 							mvmId := common.Address(ethAddressBytes)
+
+							// 🔒 FIX STALE C++ CACHE: Clear the old MVMApi instance from Phase 1.
+							// Without this, the re-execution uses stale cached state, leading to non-determinism,
+							// forks, and infinite EVM loops that cause 27GB+ memory OOM crashes.
+							mvm.ClearMVMApi(mvmId)
 
 							res := processSingleGroup(
 								ctx, chainState, localAccountDB, localSmartContractDB,
@@ -428,6 +393,15 @@ func ProcessTransactionsOptimistic(
 				allMvmIdMap[k] = v
 			}
 		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════
+	// MERGE & APPLY GLOBALLY
+	// ═══════════════════════════════════════════════════════════════
+	mergedRs := mergeMvmResults(allExecuteSCResults, leaderAddr)
+	err := applyMergedExecuteResult(chainState, mergedRs)
+	if err != nil {
+		logger.Error("Failed to apply merged ExecuteSCResult to global DB: %v", err)
 	}
 
 	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap
