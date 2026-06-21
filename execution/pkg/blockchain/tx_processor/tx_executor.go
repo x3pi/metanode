@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -588,6 +589,19 @@ func processSingleGroup(
 				}
 				continue
 			}
+			
+			// 🔒 NONCE-FIX PREVENT DOUBLE-INCREMENT: 
+			// We already incremented the sender's nonce in Go (localAccountDB.PlusOneNonce).
+			// If the C++ EVM also increments it internally and returns it in MapNonce, 
+			// we MUST strip it out to prevent double-incrementing the global state.
+			if exRs != nil && exRs.MapNonce() != nil {
+				fromStr := hex.EncodeToString(tx.FromAddress().Bytes())
+				if _, exists := exRs.MapNonce()[fromStr]; exists {
+					// Remove the sender's nonce from the C++ EVM result
+					delete(exRs.MapNonce(), fromStr)
+				}
+			}
+
 			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_SUCCESS", fmt.Sprintf("EVM contract execution completed, status: %d, gasUsed: %d", exRs.ReceiptStatus(), exRs.GasUsed()))
 			logger.Debug("executeTransactionWithMvmId success for tx %s, exRs: %v", tx.Hash().Hex(), exRs)
 			localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
