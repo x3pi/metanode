@@ -573,21 +573,6 @@ func processSingleGroup(
 		} else {
 			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_START", "Executing EVM smart contract call")
 
-			// 🔒 NONCE-FIX: Increment the sender's nonce BEFORE executing the EVM transaction.
-			// This ensures the Go state is updated.
-			localAccountDB.PlusOneNonce(tx.FromAddress())
-			localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
-			localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-
-			asSenderEVM, _ := localAccountDB.AccountState(tx.FromAddress())
-			if asSenderEVM != nil {
-				// CRITICAL FIX: Pass the EXACT transaction nonce to the C++ EVM.
-				// If we pass the incremented nonce (asSenderEVM.Nonce()), the EVM will
-				// create contracts at `nonce+1`, causing mismatches with RPC receipts
-				// and reverting subsequent calls to the deployed contract.
-				mvm.CallUpdateStateNonce(tx.FromAddress(), tx.GetNonce())
-			}
-
 			// CRITICAL FORK FIX: We removed `tx.ToAddress()` as the cache key and ALWAYS use `mvmId` (Group ID).
 			// This prevents cross-block C++ EVM dirty state leaks and concurrency corruption.
 			gRs.MvmIdMap[tx.Hash()] = usedMvmId
