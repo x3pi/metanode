@@ -637,6 +637,38 @@ func processSingleGroup(
 		localAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
 		localAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
+		// 🔒 [STATE-LEAK-FIX / BLOCK-STM DESIGN FIX]
+		// Apply EVM/Native state changes back to the Go state cache (localAccountDB).
+		// This guarantees that the Block-STM conflict detector and subsequent TXs in the same block
+		// see the correct updated balances and nonces, maintaining deterministic local write-sets.
+		if exRs != nil {
+			// Nonce must be updated unconditionally (even on revert) as sender still pays gas.
+			if exRs.MapNonce() != nil {
+				for addrHex, newNonceBytes := range exRs.MapNonce() {
+					addr := common.HexToAddress(addrHex)
+					newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+					localAccountDB.SetNonce(addr, newNonce)
+				}
+			}
+			// Balances are only updated if the execution didn't revert.
+			if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+				if exRs.MapAddBalance() != nil {
+					for addrHex, addAmtBytes := range exRs.MapAddBalance() {
+						addr := common.HexToAddress(addrHex)
+						addAmt := big.NewInt(0).SetBytes(addAmtBytes)
+						localAccountDB.AddBalance(addr, addAmt)
+					}
+				}
+				if exRs.MapSubBalance() != nil {
+					for addrHex, subAmtBytes := range exRs.MapSubBalance() {
+						addr := common.HexToAddress(addrHex)
+						subAmt := big.NewInt(0).SetBytes(subAmtBytes)
+						localAccountDB.SubTotalBalance(addr, subAmt)
+					}
+				}
+			}
+		}
+
 		gRs.ExecuteSCResults = append(gRs.ExecuteSCResults, exRs)
 
 		// ✅ Đảm bảo receipt luôn được đưa vào list, kể cả khi giao dịch bị revert (THREW/HALTED)
