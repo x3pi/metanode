@@ -1094,7 +1094,7 @@ func GlobalStateGet(
 	var bCode []byte
 	if smartContractState := accountState.SmartContractState(); smartContractState != nil {
 		bCode = mvmApi.smartContractDb.Code(fAddress)
-		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded, codeLen=%d", len(bCode))
+		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded for %s, codeLen=%d, codeHash=%s, code=%s", fAddress.Hex(), len(bCode), smartContractState.CodeHash().Hex(), hex.EncodeToString(bCode))
 	}
 
 	cBCode := C.CBytes(bCode)
