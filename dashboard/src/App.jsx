@@ -49,7 +49,7 @@ function App() {
 
   const handleSearch = async (e) => {
     e.preventDefault();
-    if (!searchValue && searchType !== 'latestBlock') return;
+    if (!searchValue && !['latestBlock', 'chainId', 'netVersion'].includes(searchType)) return;
     
     setSearchLoading(true);
     setSearchError('');
@@ -61,12 +61,30 @@ function App() {
         result = await getBlockByNumber(rpcUrl, searchValue);
       } else if (searchType === 'transaction') {
         result = await getTransactionByHash(rpcUrl, searchValue);
+      } else if (searchType === 'txReceipt') {
+        const { getTransactionReceipt } = await import('./rpcClient');
+        result = await getTransactionReceipt(rpcUrl, searchValue);
       } else if (searchType === 'account') {
         result = await getAccountState(rpcUrl, searchValue);
       } else if (searchType === 'latestBlock') {
         const { getLatestBlockNumber } = await import('./rpcClient');
         const blockHex = await getLatestBlockNumber(rpcUrl);
         result = await getBlockByNumber(rpcUrl, blockHex);
+      } else if (searchType === 'balance') {
+        const { getBalance } = await import('./rpcClient');
+        result = await getBalance(rpcUrl, searchValue);
+      } else if (searchType === 'nonce') {
+        const { getTransactionCount } = await import('./rpcClient');
+        result = await getTransactionCount(rpcUrl, searchValue);
+      } else if (searchType === 'chainId') {
+        const { getChainId } = await import('./rpcClient');
+        result = await getChainId(rpcUrl);
+      } else if (searchType === 'netVersion') {
+        const { getNetworkVersion } = await import('./rpcClient');
+        result = await getNetworkVersion(rpcUrl);
+      } else if (searchType === 'txHistory') {
+        const { getTransactionHistoryByAddress } = await import('./rpcClient');
+        result = await getTransactionHistoryByAddress(rpcUrl, searchValue);
       }
       setSearchResult(result);
     } catch (err) {
@@ -234,17 +252,23 @@ function App() {
                   >
                     <option value="block">Block by Number</option>
                     <option value="latestBlock">Latest Block</option>
-                    <option value="transaction">Transaction Hash</option>
-                    <option value="account">Account Address</option>
+                    <option value="transaction">Transaction Details</option>
+                    <option value="txReceipt">Transaction Receipt</option>
+                    <option value="account">Account State (Mtn)</option>
+                    <option value="balance">Get Balance</option>
+                    <option value="nonce">Get Nonce</option>
+                    <option value="txHistory">Tx History by Address</option>
+                    <option value="chainId">Chain ID</option>
+                    <option value="netVersion">Network Version</option>
                   </select>
                 </div>
                 
                 <div className="input-group" style={{ flex: 3, marginBottom: 0 }}>
                   <label className="input-label">
                     {searchType === 'block' && 'Enter Block Number (e.g., 100)'}
-                    {searchType === 'latestBlock' && 'No input required'}
-                    {searchType === 'transaction' && 'Enter Tx Hash (0x...)'}
-                    {searchType === 'account' && 'Enter Account Address (0x...)'}
+                    {['latestBlock', 'chainId', 'netVersion'].includes(searchType) && 'No input required'}
+                    {['transaction', 'txReceipt'].includes(searchType) && 'Enter Tx Hash (0x...)'}
+                    {['account', 'balance', 'nonce', 'txHistory'].includes(searchType) && 'Enter Account Address (0x...)'}
                   </label>
                   <input 
                     type="text" 
@@ -252,7 +276,7 @@ function App() {
                     value={searchValue}
                     onChange={(e) => setSearchValue(e.target.value)}
                     placeholder={searchType === 'block' ? '12345' : '0x...'}
-                    disabled={searchType === 'latestBlock'}
+                    disabled={['latestBlock', 'chainId', 'netVersion'].includes(searchType)}
                   />
                 </div>
                 
@@ -274,11 +298,39 @@ function App() {
                   <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     {(searchType === 'block' || searchType === 'latestBlock') && <><Box color="var(--accent-cyan)" /> Block Details</>}
                     {searchType === 'transaction' && <><FileText color="var(--accent-purple)" /> Transaction Details</>}
+                    {searchType === 'txReceipt' && <><FileText color="var(--accent-orange)" /> Transaction Receipt</>}
                     {searchType === 'account' && <><User color="var(--accent-orange)" /> Account State</>}
+                    {searchType === 'balance' && <><Activity color="var(--accent-green)" /> Balance Result</>}
+                    {searchType === 'nonce' && <><Activity color="var(--accent-cyan)" /> Nonce Result</>}
+                    {searchType === 'chainId' && <><Activity color="var(--accent-purple)" /> Chain ID Result</>}
+                    {searchType === 'netVersion' && <><Activity color="var(--accent-orange)" /> Network Version</>}
+                    {searchType === 'txHistory' && <><FileText color="var(--accent-cyan)" /> Transaction History</>}
                   </h3>
                 </div>
 
                 <div className="data-table-container">
+                  {/* Basic Value Results */}
+                  {['balance', 'nonce', 'chainId', 'netVersion'].includes(searchType) && searchResult && (
+                    <div>
+                      <div className="data-row">
+                        <span className="data-key">Result</span>
+                        <span className="data-value highlight">
+                          {typeof searchResult === 'object' ? JSON.stringify(searchResult) : String(searchResult)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Transaction History Result */}
+                  {searchType === 'txHistory' && searchResult && (
+                    <div>
+                      <div className="data-row">
+                        <span className="data-key">Total Transactions</span>
+                        <span className="data-value highlight">{searchResult.total || 0}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {(searchType === 'block' || searchType === 'latestBlock') && searchResult && (
                     <div>
                       <div className="data-row">
@@ -308,11 +360,11 @@ function App() {
                     <div>
                       <div className="data-row">
                         <span className="data-key">Hash</span>
-                        <span className="data-value">{searchResult.hash}</span>
+                        <span className="data-value highlight">{searchResult.hash}</span>
                       </div>
                       <div className="data-row">
                         <span className="data-key">Block Number</span>
-                        <span className="data-value">{searchResult.blockNumber ? parseInt(searchResult.blockNumber, 16) : 'Pending'}</span>
+                        <span className="data-value">{parseInt(searchResult.blockNumber, 16)}</span>
                       </div>
                       <div className="data-row">
                         <span className="data-key">From</span>
@@ -324,7 +376,28 @@ function App() {
                       </div>
                       <div className="data-row">
                         <span className="data-key">Value</span>
-                        <span className="data-value">{parseInt(searchResult.value, 16)} wei</span>
+                        <span className="data-value">{parseInt(searchResult.value, 16)} Wei</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {searchType === 'txReceipt' && searchResult && (
+                    <div>
+                      <div className="data-row">
+                        <span className="data-key">Transaction Hash</span>
+                        <span className="data-value highlight">{searchResult.transactionHash}</span>
+                      </div>
+                      <div className="data-row">
+                        <span className="data-key">Block Number</span>
+                        <span className="data-value">{parseInt(searchResult.blockNumber, 16)}</span>
+                      </div>
+                      <div className="data-row">
+                        <span className="data-key">Gas Used</span>
+                        <span className="data-value">{parseInt(searchResult.gasUsed, 16)}</span>
+                      </div>
+                      <div className="data-row">
+                        <span className="data-key">Status</span>
+                        <span className="data-value">{parseInt(searchResult.status, 16) === 1 ? 'Success (1)' : 'Failed (0)'}</span>
                       </div>
                     </div>
                   )}

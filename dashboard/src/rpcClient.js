@@ -46,3 +46,27 @@ export async function getAccountState(url = defaultRpcUrl, address) {
 export async function getLatestBlockNumber(url = defaultRpcUrl) {
   return await callRpc("eth_blockNumber", [], url);
 }
+
+export async function getBalance(url = defaultRpcUrl, address) {
+  return await callRpc("eth_getBalance", [address, "latest"], url);
+}
+
+export async function getTransactionCount(url = defaultRpcUrl, address) {
+  return await callRpc("eth_getTransactionCount", [address, "latest"], url);
+}
+
+export async function getChainId(url = defaultRpcUrl) {
+  return await callRpc("eth_chainId", [], url);
+}
+
+export async function getNetworkVersion(url = defaultRpcUrl) {
+  return await callRpc("net_version", [], url);
+}
+
+export async function getTransactionHistoryByAddress(url = defaultRpcUrl, address, offset = 0, limit = 10) {
+  return await callRpc("mtn_getTransactionHistoryByAddress", [address, offset, limit], url);
+}
+
+export async function getTransactionReceipt(url = defaultRpcUrl, txHash) {
+  return await callRpc("eth_getTransactionReceipt", [txHash], url);
+}
