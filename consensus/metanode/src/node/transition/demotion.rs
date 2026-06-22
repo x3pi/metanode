@@ -173,7 +173,7 @@ use tracing::{info, warn};
 
 //     // Fetch committee for current epoch
 //     let (committee, _eth_addresses) = committee_source
-//         .fetch_committee(&config.executor_send_socket_path, network_epoch)
+//         .fetch_committee("", network_epoch)
 //         .await?;
 
 //     // Check if we're in the committee
@@ -235,7 +235,7 @@ pub async fn determine_role_for_epoch(
 
     // Step 2: Fetch committee for this epoch
     let (committee, _eth_addresses) = match committee_source
-        .fetch_committee(&config.executor_send_socket_path, epoch)
+        .fetch_committee(epoch)
         .await
     {
         Ok(c) => c,

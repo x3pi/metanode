@@ -13,13 +13,11 @@ import "transaction.proto";
 message RelativeGroup {
     int32 group_id = 1;
     repeated Item items = 2;
-    repeated bytes relatives = 3;
 }
 
 // Định nghĩa cho message Item
 message Item {
     int32 id = 1;
-    repeated bytes array = 2;
     int32 group_id = 3;
     // Sử dụng message Transaction đã được import
     transaction.Transaction tx = 4;

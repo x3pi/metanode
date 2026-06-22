@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::config::NodeConfig;
 use crate::node::tx_submitter::TransactionSubmitter;
 
-use super::{epoch_monitor, epoch_transition_manager, notification_server, queue, sync};
+use super::{epoch_monitor, epoch_transition_manager, queue, sync};
 use super::{ConsensusNode, NodeMode};
 
 impl ConsensusNode {
@@ -307,54 +307,13 @@ impl ConsensusNode {
     }
 
     pub async fn start_sync_task(&mut self, config: &NodeConfig) -> Result<()> {
-        // Start notification server for event-driven transitions
-        if let Err(e) = self.start_notification_server(config).await {
-            warn!("⚠️ Failed to start notification server: {}", e);
-        }
         sync::start_sync_task(self, config).await
     }
 
     pub async fn stop_sync_task(&mut self) -> Result<()> {
-        // Stop notification server as well when stopping sync
-        if let Some(handle) = self.notification_server_handle.take() {
-            info!("🛑 [NOTIFICATION SERVER] Stopping...");
-            handle.abort();
-        }
         sync::stop_sync_task(self).await
     }
 
-    pub async fn start_notification_server(&mut self, config: &NodeConfig) -> Result<()> {
-        // Only start if not already running
-        if self.notification_server_handle.is_some() {
-            return Ok(());
-        }
-
-        let socket_path = std::path::PathBuf::from(&config.executor_receive_socket_path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("/tmp"))
-            .join(format!("metanode-notification-{}.sock", config.node_id));
-        let sender = self.epoch_transition_sender.clone();
-
-        let server = notification_server::EpochNotificationServer::new(
-            socket_path,
-            move |epoch, timestamp, boundary| {
-                // Forward to transition handler
-                if let Err(e) = sender.try_send((epoch, timestamp, boundary, 0)) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to forward epoch notification: {}",
-                        e
-                    ));
-                }
-                Ok(())
-            },
-        );
-
-        let handle = tokio::spawn(async move { server.start().await });
-
-        self.notification_server_handle = Some(handle);
-        info!("🚀 [NOTIFICATION SERVER] Started background task");
-        Ok(())
-    }
 
     /// Flush all buffered blocks to Go Master before shutdown
     /// This ensures no blocks are lost during shutdown
@@ -432,9 +391,6 @@ impl Drop for ConsensusNode {
 
         // Abort background handles to prevent Tokio task leaks.
         if let Some(ref handle) = self.epoch_monitor_handle {
-            handle.abort();
-        }
-        if let Some(ref handle) = self.notification_server_handle {
             handle.abort();
         }
         if let Some(mut handle) = self.sync_task_handle.take() {

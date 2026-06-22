@@ -4,9 +4,15 @@ package pipeline
 
 import (
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type blockStat struct {
+	txCount int64
+	timeUs  int64
+}
 
 // PipelineStats tracks atomic counters at each stage of the TX pipeline.
 // Thread-safe via sync/atomic — no locks needed.
@@ -40,6 +46,10 @@ type PipelineStats struct {
 
 	// Node role (sub/master)
 	NodeRole string
+
+	// Sliding window for CurrentTPS calculation
+	mu           sync.Mutex
+	blockHistory []blockStat
 }
 
 // PipelineSnapshot is the JSON-serializable snapshot of pipeline stats.
@@ -54,6 +64,7 @@ type PipelineSnapshot struct {
 	TxsCommitted   int64   `json:"txs_committed"`
 	LastBlock      int64   `json:"last_block"`
 	LastCommitUs   int64   `json:"last_commit_us"`
+	CurrentTPS     float64 `json:"current_tps"`
 	Timestamp      string  `json:"timestamp"`
 }
 
@@ -79,6 +90,23 @@ func (ps *PipelineStats) SetNodeRole(role string) {
 
 // Snapshot returns a JSON-serializable snapshot of the current pipeline state.
 func (ps *PipelineStats) Snapshot() PipelineSnapshot {
+	ps.mu.Lock()
+	var currentTps float64
+	if len(ps.blockHistory) >= 2 {
+		first := ps.blockHistory[0]
+		last := ps.blockHistory[len(ps.blockHistory)-1]
+		dt := float64(last.timeUs-first.timeUs) / 1e6 // convert us to seconds
+		if dt > 0 {
+			var totalTxs int64
+			// Start from 1 because the first block's time marks the start of the interval
+			for i := 1; i < len(ps.blockHistory); i++ {
+				totalTxs += ps.blockHistory[i].txCount
+			}
+			currentTps = float64(totalTxs) / dt
+		}
+	}
+	ps.mu.Unlock()
+
 	return PipelineSnapshot{
 		NodeRole:       ps.NodeRole,
 		UptimeSeconds:  time.Since(ps.StartTime).Seconds(),
@@ -90,6 +118,7 @@ func (ps *PipelineStats) Snapshot() PipelineSnapshot {
 		TxsCommitted:   ps.TxsCommitted.Load(),
 		LastBlock:      ps.LastBlock.Load(),
 		LastCommitUs:   ps.LastCommitTimeUs.Load(),
+		CurrentTPS:     currentTps,
 		Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
@@ -111,6 +140,10 @@ func (ps *PipelineStats) Reset() {
 	ps.LastBlock.Store(0)
 	ps.LastCommitTimeUs.Store(0)
 	ps.StartTime = time.Now()
+
+	ps.mu.Lock()
+	ps.blockHistory = nil
+	ps.mu.Unlock()
 }
 
 // --- Convenience increment methods ---
@@ -123,3 +156,14 @@ func (ps *PipelineStats) SetPoolSize(n int64)          { ps.PoolSize.Store(n) }
 func (ps *PipelineStats) SetPendingSize(n int64)       { ps.PendingSize.Store(n) }
 func (ps *PipelineStats) SetLastBlock(n int64)         { ps.LastBlock.Store(n) }
 func (ps *PipelineStats) SetLastCommitTimeUs(us int64) { ps.LastCommitTimeUs.Store(us) }
+
+// UpdateBlockStats records block tx count and timestamp to calculate real-time TPS.
+func (ps *PipelineStats) UpdateBlockStats(txCount int64, timeUs int64) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.blockHistory = append(ps.blockHistory, blockStat{txCount: txCount, timeUs: timeUs})
+	if len(ps.blockHistory) > 10 { // keep last 10 blocks for sliding window
+		ps.blockHistory = ps.blockHistory[1:]
+	}
+}

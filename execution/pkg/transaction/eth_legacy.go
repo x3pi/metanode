@@ -167,7 +167,6 @@ func FromEthLegacyTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 
 	// Các trường khác
 	pTx.MaxTimeUse = 0
-	pTx.RelatedAddresses = nil
 	pTx.LastDeviceKey = nil
 	pTx.NewDeviceKey = nil
 	pTx.ReadOnly = false

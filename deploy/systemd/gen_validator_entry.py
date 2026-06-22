@@ -15,7 +15,7 @@ Usage:
     --output    my_validator.json
 
   # Then merge into genesis:
-  python3 update_genesis.py genesis-main.json my_validator.json
+  python3 update_genesis.py genesis.json my_validator.json
 
 Options:
   --hostname    NAME      Validator hostname, e.g. node-0 (required)
@@ -241,9 +241,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "cross_chain": {
             "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
         },
-        "rust_send_socket_path": f"/tmp/executor{node_id}.sock",
-        "rust_receive_socket_path": f"/tmp/rust-go-node{node_id}-master.sock",
-        "rust_tx_socket_path": f"/tmp/metanode-tx-{node_id}.sock",
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",
         "dns_server_address": f"0.0.0.0:{dns_port}",
@@ -300,7 +297,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         json.dump(exec_json, f, indent=4)
 
     consensus_toml = f"""node_id = {node_id}
-rust_tx_socket_path = "/tmp/metanode-tx-{node_id}.sock"
 network_address = "0.0.0.0:{consensus_port}"
 protocol_key_path = "{install_dir}/keys/protocol_key.json"
 network_key_path = "{install_dir}/keys/network_key.json"
@@ -318,8 +314,6 @@ ntp_servers = [
 ntp_sync_interval_seconds = 300
 executor_read_enabled = true
 executor_commit_enabled = {str(is_validator).lower()}
-executor_send_socket_path = "/tmp/executor{node_id}.sock"
-executor_receive_socket_path = "/tmp/rust-go-node{node_id}-master.sock"
 commit_sync_batch_size = {commit_batch_size}
 commit_sync_parallel_fetches = 32
 commit_sync_batches_ahead = {commit_batches_ahead}
@@ -448,44 +442,52 @@ def main():
         json.dump(entry, f, indent=2)
         f.write("\n")
 
-    # Auto merge into genesis-main.json if it exists and env_type is validator
-    genesis_main_path = "genesis-main.json"
-    if os.path.exists(genesis_main_path) and env_type == "validator":
-        try:
-            with open(genesis_main_path, "r") as gf:
-                g_data = json.load(gf)
-            
-            if "validators" in g_data:
-                updated = False
-                for i, v in enumerate(g_data["validators"]):
-                    if v.get("hostname") == args.hostname:
-                        g_data["validators"][i] = entry
-                        updated = True
-                        break
+    # Auto merge into genesis.json if we are creating a validator
+    if env_type == "validator":
+        genesis_target = "genesis.json"
+        genesis_template = "genesis.json.example"
+        
+        # Read from genesis.json if it exists, otherwise start from the example template
+        genesis_source = genesis_target if os.path.exists(genesis_target) else genesis_template
+        
+        if os.path.exists(genesis_source):
+            try:
+                with open(genesis_source, "r") as gf:
+                    g_data = json.load(gf)
                 
-                if not updated:
-                    g_data["validators"].append(entry)
-                
-                with open(genesis_main_path, "w") as gf:
-                    json.dump(g_data, gf, indent=2)
-                    gf.write("\n")
-                
-                print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_main_path}")))
-                
-                # Copy to simple_chain folder if it exists (source mode)
-                target_dir = os.path.join("..", "execution", "cmd", "simple_chain")
-                target_genesis = os.path.join(target_dir, "genesis.json")
-                if os.path.exists(target_dir):
-                    shutil.copy2(genesis_main_path, target_genesis)
-                    print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
-                else:
-                    # In standalone release mode, we just copy to configs/genesis.json if configs/ exists
-                    configs_dir = "configs"
-                    if os.path.exists(configs_dir):
-                        shutil.copy2(genesis_main_path, os.path.join(configs_dir, "genesis.json"))
-                        print(bold(green(f"  ✅ Automatically copied to {configs_dir}/genesis.json")))
-        except Exception as e:
-            print(f"\n  ❌ Failed to auto-merge into {genesis_main_path}: {e}")
+                if "validators" in g_data:
+                    updated = False
+                    for i, v in enumerate(g_data["validators"]):
+                        if v.get("hostname") == args.hostname:
+                            g_data["validators"][i] = entry
+                            updated = True
+                            break
+                    
+                    if not updated:
+                        g_data["validators"].append(entry)
+                    
+                    with open(genesis_target, "w") as gf:
+                        json.dump(g_data, gf, indent=2)
+                        gf.write("\n")
+                    
+                    print(bold(green(f"\n  ✅ Successfully auto-merged entry into {genesis_target} (source: {genesis_source})")))
+                    
+                    # Copy to simple_chain folder if it exists (source mode)
+                    target_dir = os.path.join("..", "execution", "cmd", "simple_chain")
+                    target_genesis = os.path.join(target_dir, "genesis.json")
+                    if os.path.exists(target_dir):
+                        shutil.copy2(genesis_target, target_genesis)
+                        print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
+                    else:
+                        # In standalone release mode, we just copy to configs/genesis.json if configs/ exists
+                        configs_dir = "configs"
+                        if os.path.exists(configs_dir):
+                            shutil.copy2(genesis_target, os.path.join(configs_dir, "genesis.json"))
+                            print(bold(green(f"  ✅ Automatically copied to {configs_dir}/genesis.json")))
+            except Exception as e:
+                print(f"\n  ❌ Failed to auto-merge into {genesis_target}: {e}")
+        else:
+            print(f"\n  ⚠️ Warning: Neither {genesis_target} nor {genesis_template} found. Could not auto-merge.")
 
     os.chmod(keys_dir, 0o700)
 

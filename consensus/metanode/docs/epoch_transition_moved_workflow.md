@@ -122,7 +122,6 @@ Rust tải danh sách Ủy ban (Committee) chính thức. Nó kiểm tra xem `Pu
 ```rust
 // Cập nhật committee
 let (committee, epoch_timestamp_to_use, eth_addresses) = committee_source
-    .fetch_committee_with_timestamp(&config.executor_send_socket_path, new_epoch)
     .await?;
 
 // Kiểm tra và đổi NodeMode (Validator / SyncOnly)

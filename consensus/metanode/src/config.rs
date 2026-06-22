@@ -84,10 +84,7 @@ pub struct NodeConfig {
     /// This allows flexible testing with different commit node configurations
     #[serde(default)]
     pub executor_commit_enabled: bool,
-    /// Socket path for sending blocks from Rust to Go executor (default: /tmp/executor{N}.sock)
-    pub executor_send_socket_path: String,
-    /// Socket path for receiving responses from Go executor (default: /tmp/rust-go.sock_{N+1})
-    pub executor_receive_socket_path: String,
+
     /// Commit sync batch size for catch-up (default: 200, higher = faster catch-up but more memory)
     /// When node is lagging, larger batch size allows fetching more commits in parallel
     #[serde(default = "default_commit_sync_batch_size")]
@@ -171,9 +168,7 @@ pub struct NodeConfig {
     /// Controls legacy epoch store retention and startup epoch cleanup
     #[serde(default = "default_epochs_to_keep")]
     pub epochs_to_keep: usize,
-    /// Unix Domain Socket path for transaction submission (overrides default /tmp/metanode-tx-{node_id}.sock)
-    #[serde(default)]
-    pub rust_tx_socket_path: Option<String>,
+
     /// Logger configuration
     #[serde(default)]
     pub log: Option<LogConfig>,
@@ -332,8 +327,7 @@ impl NodeConfig {
                 ntp_sync_interval_seconds: 300,
                 executor_read_enabled: true, // All nodes can read committee state from Go
                 executor_commit_enabled: true, // All validators commit blocks to their local Go Master
-                executor_send_socket_path: format!("/tmp/executor{}.sock", idx), // Rust -> Go
-                executor_receive_socket_path: "/tmp/rust-go.sock_1".to_string(), // Go -> Rust (all nodes read from same socket)
+
                 commit_sync_batch_size: default_commit_sync_batch_size(),
                 commit_sync_parallel_fetches: default_commit_sync_parallel_fetches(),
                 commit_sync_batches_ahead: default_commit_sync_batches_ahead(),
@@ -356,7 +350,7 @@ impl NodeConfig {
                 go_rpc_url: None,           // Configure when enable_peer_discovery is true
                 epochs_to_keep: default_epochs_to_keep(),
                 peer_discovery_refresh_secs: default_peer_discovery_refresh_secs(),
-                rust_tx_socket_path: Some(format!("/tmp/metanode-tx-{}.sock", idx)),
+
                 log: Some(LogConfig::default()),
                 moderate_lag_threshold: default_moderate_lag_threshold(),
                 severe_lag_threshold: default_severe_lag_threshold(),

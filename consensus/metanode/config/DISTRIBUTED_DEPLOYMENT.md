@@ -19,8 +19,6 @@ node_id = 0
 network_address = "192.168.1.100:9000"
 
 # Local Rust ↔ Go: Unix sockets (same machine)
-executor_send_socket_path = "/tmp/executor0.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Peer Discovery: TCP to OTHER nodes
 peer_go_master_sockets = [
@@ -41,8 +39,6 @@ node_id = 1
 network_address = "192.168.1.101:9001"
 
 # Local Rust ↔ Go: Unix sockets
-executor_send_socket_path = "/tmp/executor1.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Peer Discovery: TCP to OTHER nodes
 peer_go_master_sockets = [
@@ -61,8 +57,6 @@ node_id = 2
 network_address = "192.168.1.102:9002"
 
 # Local Rust ↔ Go: Unix sockets
-executor_send_socket_path = "/tmp/executor2.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Peer Discovery: TCP to OTHER nodes
 peer_go_master_sockets = [

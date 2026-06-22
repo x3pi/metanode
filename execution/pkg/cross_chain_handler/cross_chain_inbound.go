@@ -68,7 +68,14 @@ func (h *CrossChainHandler) executeMintForInbound(
 		}
 		if val.Sign() > 0 {
 			fakeTx := proxy_tx.New(tx, tx.FromAddress(), recipient, val, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			exRs, err := vmP.ProcessNativeMintBurn(ctx, fakeTx, mvmE, 0) // 0 = MINT
+			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeTx, mvmE, 0) // 0 = MINT
+			var exRs types.ExecuteSCResult
+			if err == nil {
+				_, err = vmP.UpdateStateDB(ctx, fakeTx, mvmResult, mvmId, false, false)
+				if err == nil {
+					exRs, err = vmP.MvmResultToExecuteResult(ctx, fakeTx, mvmResult)
+				}
+			}
 			if err != nil || (exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
 				logger.Error("[BatchSubmit] ❌ INBOUND MINT failed: recipient=%s, value=%s, err=%v", recipient.Hex(), val.String(), err)
 				mintStatus = 1
@@ -89,7 +96,14 @@ func (h *CrossChainHandler) executeMintForInbound(
 		// 2.a. Nếu có value → mint tiền cho tx.FromAddress()
 		if val.Sign() > 0 {
 			fakeMintTx := proxy_tx.New(tx, tx.FromAddress(), tx.FromAddress(), val, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			mintRs, err := vmP.ProcessNativeMintBurn(ctx, fakeMintTx, mvmE, 0) // 0 = MINT
+			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeMintTx, mvmE, 0) // 0 = MINT
+			var mintRs types.ExecuteSCResult
+			if err == nil {
+				_, err = vmP.UpdateStateDB(ctx, fakeMintTx, mvmResult, mvmId, false, false)
+				if err == nil {
+					mintRs, err = vmP.MvmResultToExecuteResult(ctx, fakeMintTx, mvmResult)
+				}
+			}
 			if err != nil || (mintRs != nil && mintRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
 				logger.Error("[BatchSubmit] ❌ INBOUND pre-mint failed: from=%s, err=%v", tx.FromAddress().Hex(), err)
 				mintStatus = 1
@@ -116,7 +130,14 @@ func (h *CrossChainHandler) executeMintForInbound(
 				failReason = []byte(fmt.Sprintf("contract call reverted: %v + %s", err, string(exRs.Return())))
 				if val.Sign() > 0 {
 					fakeBurnTx := proxy_tx.New(tx, tx.FromAddress(), tx.FromAddress(), val, gasFree, 0 /* free gas */, nil)
-					burnRs, errBurn := vmP.ProcessNativeMintBurn(ctx, fakeBurnTx, mvmE, 1) // 1 = BURN
+					burnMvmResult, errBurn := vmP.ProcessNativeMintBurn(ctx, fakeBurnTx, mvmE, 1) // 1 = BURN
+					var burnRs types.ExecuteSCResult
+					if errBurn == nil {
+						_, errBurn = vmP.UpdateStateDB(ctx, fakeBurnTx, burnMvmResult, mvmId, false, false)
+						if errBurn == nil {
+							burnRs, errBurn = vmP.MvmResultToExecuteResult(ctx, fakeBurnTx, burnMvmResult)
+						}
+					}
 					if errBurn != nil || (burnRs != nil && burnRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
 						logger.Error("[BatchSubmit] ❌ Failed to burn reverted minted money %v", errBurn)
 					} else {
@@ -222,7 +243,14 @@ func (h *CrossChainHandler) executeConfirmation(
 			mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
 
 			fakeRefundTx := proxy_tx.New(tx, tx.FromAddress(), conf.Sender, refundAmount, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			mintRs, errMint := vmP.ProcessNativeMintBurn(ctx, fakeRefundTx, mvmE, 0) // 0 = MINT
+			mvmResult, errMint := vmP.ProcessNativeMintBurn(ctx, fakeRefundTx, mvmE, 0) // 0 = MINT
+			var mintRs types.ExecuteSCResult
+			if errMint == nil {
+				_, errMint = vmP.UpdateStateDB(ctx, fakeRefundTx, mvmResult, mvmId, false, false)
+				if errMint == nil {
+					mintRs, errMint = vmP.MvmResultToExecuteResult(ctx, fakeRefundTx, mvmResult)
+				}
+			}
 			if errMint != nil || (mintRs != nil && mintRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
 				logger.Error("[BatchSubmit] ❌ Failed to refund (mint) back to sender %s: %v", conf.Sender.Hex(), errMint)
 				refundFailed = true

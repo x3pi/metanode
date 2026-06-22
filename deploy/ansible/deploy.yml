@@ -31,13 +31,38 @@
   become: yes
   gather_facts: true
   pre_tasks:
-    - name: Filter active nodes
+    - name: Filter active nodes by target
       set_fact:
-        active_nodes: >-
+        target_active_nodes: >-
           {%- set nodes = [] -%}
           {%- for nid in node_ids -%}
             {%- if target_node == 'all' or target_node | string == nid | string -%}
               {%- set _ = nodes.append(nid) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ nodes }}
+
+    - name: Check if node key directory exists locally
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ deploy_dir }}/node-{{ item }}_keys"
+      loop: "{{ target_active_nodes }}"
+      register: local_node_keys_stat
+      become: no
+
+    - name: Check if node key directory exists remotely
+      ansible.builtin.stat:
+        path: "{{ remote_deploy_dir }}/node-{{ item }}_keys"
+      loop: "{{ target_active_nodes }}"
+      register: remote_node_keys_stat
+
+    - name: Refine active nodes based on deployment availability
+      set_fact:
+        active_nodes: >-
+          {%- set nodes = [] -%}
+          {%- for res in (local_node_keys_stat.results if ansible_action == 'setup' else remote_node_keys_stat.results) -%}
+            {%- if res.stat is defined and res.stat.exists -%}
+              {%- set _ = nodes.append(res.item) -%}
             {%- endif -%}
           {%- endfor -%}
           {{ nodes }}
@@ -46,6 +71,7 @@
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
+    - { role: node_exporter, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
 
 - name: Post-deployment actions
@@ -55,55 +81,17 @@
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
       ansible.builtin.shell: |
-        RPC_JSON_PATH="/tmp/rpc_nodes.json"
-        JSON_NODES=()
-        JSON_RPC_PROXIES=()
-        JSON_TCP_NODES=()
-
-        {% for node in cluster_nodes | sort(attribute='node_id') %}
-        id={{ node.node_id }}
-        ip="{{ node.ip }}"
-        local_cfg_dir="{{ deploy_dir }}/node-${id}_keys"
-        
-        port=""
-        tcp_port=""
-        if [ -f "$local_cfg_dir/execution.json" ]; then
-            port=$(jq -r '.rpc_port' "$local_cfg_dir/execution.json" | tr -d ':')
-            conn_addr=$(jq -r '.connection_address' "$local_cfg_dir/execution.json")
-            if [ "$conn_addr" != "null" ]; then
-                tcp_port="${conn_addr##*:}"
-            fi
-        fi
-        
-        if [ -z "$port" ] || [ "$port" == "null" ] || [ -z "$tcp_port" ]; then
-            echo "Cannot read rpc_port or connection_address from $local_cfg_dir/execution.json" >&2
-            exit 1
-        fi
-        
-        proxy_http=$((8650 + id))
-        
-        JSON_NODES+=("\"m${id}\": \"http://${ip}:${port}\"")
-        JSON_RPC_PROXIES+=("\"m${id}\": \"http://${ip}:${proxy_http}\"")
-        JSON_TCP_NODES+=("\"m${id}\": \"${ip}:${tcp_port}\"")
-        {% endfor %}
-
-        JOINED_NODES=$(IFS=, ; echo "${JSON_NODES[*]}")
-        JOINED_RPC=$(IFS=, ; echo "${JSON_RPC_PROXIES[*]}")
-        JOINED_TCP=$(IFS=, ; echo "${JSON_TCP_NODES[*]}")
-
-        cat > "$RPC_JSON_PATH" <<EOF
-        {
-          "nodes": {
-            $JOINED_NODES
-          },
-          "rpc_proxies": {
-            $JOINED_RPC
-          },
-          "tcp_nodes": {
-            $JOINED_TCP
-          }
-        }
-        EOF
+        python3 "{{ playbook_dir }}/parse_inventory.py" "{{ playbook_dir }}/inventory.yml" json > /tmp/rpc_nodes.json
       args:
         executable: /bin/bash
 
+    - name: Generate prometheus.yml dynamically for monitoring
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
+        dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
+        
+    - name: Restart local Prometheus service
+      ansible.builtin.shell: echo "1234@abcd" | sudo -S systemctl restart prometheus || true
+      args:
+        executable: /bin/bash
+      ignore_errors: true

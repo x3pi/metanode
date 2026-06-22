@@ -5,7 +5,7 @@ use prost::Message;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 
-pub const MAX_TRANSACTION_GROUP_SIZE: usize = 5;
+pub const MAX_TRANSACTION_GROUP_SIZE: usize = 100_000;
 
 #[allow(dead_code)]
 pub mod proto {
@@ -14,60 +14,11 @@ pub mod proto {
 
 use proto::Transaction as ProtoTx;
 
-fn get_address_selector(signature: &str) -> Vec<u8> {
-    let hash = Keccak256::digest(signature.as_bytes());
-    let mut addr = vec![0u8; 20];
-    addr[16..20].copy_from_slice(&hash[0..4]);
-    addr
-}
-
-// Union-Find structure for grouping transactions
-#[derive(Clone)]
-struct UnionFind {
-    parent: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-        }
-    }
-
-    fn find(&mut self, i: usize) -> usize {
-        let mut root = i;
-        while self.parent[root] != root {
-            root = self.parent[root];
-        }
-        let mut curr = i;
-        while curr != root {
-            let next = self.parent[curr];
-            self.parent[curr] = root;
-            curr = next;
-        }
-        root
-    }
-
-    fn union(&mut self, i: usize, j: usize) {
-        let root_i = self.find(i);
-        let root_j = self.find(j);
-        if root_i != root_j {
-            self.parent[root_i] = root_j;
-        }
-    }
-}
 
 pub fn get_group_addresses(tx_data: &[u8]) -> Vec<Vec<u8>> {
-    let account_setting_addr = get_address_selector("account");
-    let validator_contract_addr = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x01];
-
     if let Ok(proto_tx) = ProtoTx::decode(tx_data) {
         let mut group_addrs = Vec::new();
-        for addr in &proto_tx.related_addresses {
-            if addr != &account_setting_addr && addr != &validator_contract_addr {
-                group_addrs.push(addr.clone());
-            }
-        }
+        // Removed usage of related_addresses
         if group_addrs.is_empty() {
             group_addrs.push(proto_tx.from_address.clone());
         }
@@ -121,6 +72,41 @@ pub fn verify_group_limit(txs: &[crate::block::Transaction], max_group_size: usi
     }
 
     true
+}
+
+#[derive(Clone)]
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, i: usize) -> usize {
+        let mut root = i;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut curr = i;
+        while curr != root {
+            let next = self.parent[curr];
+            self.parent[curr] = root;
+            curr = next;
+        }
+        root
+    }
+
+    fn union(&mut self, i: usize, j: usize) {
+        let root_i = self.find(i);
+        let root_j = self.find(j);
+        if root_i != root_j {
+            self.parent[root_i] = root_j;
+        }
+    }
 }
 
 #[derive(Clone)]

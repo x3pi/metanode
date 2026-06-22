@@ -34,6 +34,9 @@ type SmartContractDB struct {
 	smartContractStorageBatch []byte
 	codeBatchPut              []byte
 	smartContractBatch        []byte
+
+	// Track read storage keys for speculative execution (Block-STM)
+	readStorageKeys sync.Map // map[common.Address]*sync.Map (map[string]struct{})
 }
 
 func (db *SmartContractDB) CodeStorage() storage.Storage {
@@ -131,11 +134,36 @@ func (db *SmartContractDB) StorageValue(address common.Address, key []byte, cust
 	}
 
 	if len(value) == 0 {
-		// Ghi log thời gian trước khi return
+		// Track read
+		db.trackStorageRead(address, key)
 		return common.Hash{}.Bytes(), true
 	}
-	// Kết thúc đo thời gian và ghi log
+	// Track read
+	db.trackStorageRead(address, key)
 	return value, true
+}
+
+func (db *SmartContractDB) trackStorageRead(address common.Address, key []byte) {
+	keysMapIface, _ := db.readStorageKeys.LoadOrStore(address, &sync.Map{})
+	keysMap := keysMapIface.(*sync.Map)
+	keysMap.Store(string(key), struct{}{})
+}
+
+// GetReadStorageKeys returns the storage slots read by this DB instance (for validation).
+func (db *SmartContractDB) GetReadStorageKeys() map[common.Address][]string {
+	res := make(map[common.Address][]string)
+	db.readStorageKeys.Range(func(key, value interface{}) bool {
+		address := key.(common.Address)
+		keysMap := value.(*sync.Map)
+		var keys []string
+		keysMap.Range(func(k, _ interface{}) bool {
+			keys = append(keys, k.(string))
+			return true
+		})
+		res[address] = keys
+		return true
+	})
+	return res
 }
 
 func (db *SmartContractDB) SetCode(address common.Address, codeHash common.Hash, code []byte) {
@@ -698,3 +726,34 @@ func (db *SmartContractDB) InvalidateAllCaches() {
 		return true
 	})
 }
+
+func (db *SmartContractDB) GetSmartContractUpdateDatas() map[common.Address]types.SmartContractUpdateData {
+	return nil
+}
+
+func (db *SmartContractDB) ClearSmartContractUpdateDatas() {
+}
+
+func (db *SmartContractDB) DeleteAddress(address common.Address) {
+	db.smartContractStorageTries.Delete(address)
+	db.pendingEventLogs.Delete(address)
+	db.lastAccessTime.Delete(address)
+}
+
+func (db *SmartContractDB) NewTrieStorage(address common.Address) common.Hash {
+	emptyRoot := common.Hash{}
+	t, err := db.loadStorageTrie(address, &emptyRoot)
+	if err == nil && t != nil {
+		db.smartContractStorageTries.Store(address, t)
+		return t.Hash()
+	}
+	return emptyRoot
+}
+
+func (db *SmartContractDB) SetAccountStateDB(asdb types.AccountStateDB) {
+	db.accountStateDB = asdb
+}
+
+func (db *SmartContractDB) SetBlockNumber(blockNumber uint64) {
+}
+

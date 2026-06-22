@@ -1,7 +1,11 @@
 ---
 - name: Build Standalone Release Package
   ansible.builtin.shell: |
+    {% if ansible_build_fast | default(false) | bool %}
+    bash build_release.sh --fast
+    {% else %}
     bash build_release.sh
+    {% endif %}
   args:
     chdir: "{{ deploy_dir }}"
   register: build_result
@@ -22,13 +26,6 @@
     chdir: "{{ deploy_dir }}"
   loop: "{{ cluster_nodes }}"
   when: cluster_nodes is defined and ansible_action == 'setup'
-
-- name: Copy genesis-main.json to genesis.json on localhost
-  ansible.builtin.copy:
-    src: "{{ deploy_dir }}/genesis-main.json"
-    dest: "{{ deploy_dir }}/genesis.json"
-    remote_src: yes
-  when: ansible_action == 'setup'
 
 # Note: For full automation, `cluster_nodes` and `peers_map` should be constructed dynamically from the inventory
 # using set_fact before running these tasks.

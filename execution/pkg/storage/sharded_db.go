@@ -100,6 +100,19 @@ func (s *ShardelDB) Open() error {
 	return nil
 }
 
+// MemTableSize returns the combined memtable size of all shards.
+func (s *ShardelDB) MemTableSize() uint64 {
+	var total uint64
+	for _, shard := range s.shards {
+		if shard != nil {
+			if lp, ok := shard.(*LazyPebbleDB); ok {
+				total += lp.MemTableSize()
+			}
+		}
+	}
+	return total
+}
+
 // Flush forces all shards to write pending memtable buffers to disk.
 func (s *ShardelDB) Flush() error {
 	if s.numShards == 1 {

@@ -298,7 +298,7 @@ func (h *CrossChainHandler) HandleTransaction(
 	// Tự động load config nếu chưa có (dùng globalOffChainProcessor + nil check explorer)
 	if err := h.EnsureConfigLoaded(chainState, tx); err != nil {
 		logger.Error("CrossChain %s: EnsureConfigLoaded error: %v", method.Name, err)
-		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, err.Error())
+		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, mvmId, blockTime, enableTrace, err.Error())
 	}
 
 	var eventLogs []types.EventLog
@@ -318,13 +318,13 @@ func (h *CrossChainHandler) HandleTransaction(
 
 	if logicErr != nil {
 		logger.Error("CrossChain %s error: %v", method.Name, logicErr)
-		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, logicErr.Error())
+		return receipt_helper.HandleRevertedTx(ctx, chainState, tx, toAddress, mvmId, blockTime, enableTrace, logicErr.Error())
 	}
 	if exRs != nil {
 		logger.Info("cc_exRs: %v", exRs)
 		return receipt_helper.HandleSuccessTxWithExRs(chainState, tx, toAddress, eventLogs, exRs)
 	}
-	return receipt_helper.HandleSuccessTx(ctx, chainState, tx, toAddress, blockTime, enableTrace, eventLogs, nil)
+	return receipt_helper.HandleSuccessTx(ctx, chainState, tx, toAddress, mvmId, blockTime, enableTrace, eventLogs, nil)
 }
 
 // mustType parse ABI type, panic nếu lỗi

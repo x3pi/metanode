@@ -1,6 +1,6 @@
 syntax = "proto3";
 package smart_contract;
-option go_package = "/proto";
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
 option java_package = "com.meta_node.protos.compiled.smart_contract";
 
 import "receipt.proto";
@@ -69,6 +69,14 @@ message ExecuteSCResult {
 
   map<string, account_state.StorageDatas> MapNativeSmartContractUpdateStorage = 15;
   repeated event_log.EventLog EventLogs = 16;
+
+  map<string, bytes> MapNonce = 17;
+  map<string, bytes> MapFullDbLogs = 18;
+  map<string, account_state.StorageDatas> MapStorageChange = 19;
+  map<string, bytes> MapPublicKeyBls = 20;
+  map<string, uint32> MapAccountType = 21;
+  map<string, bytes> MapNewDeviceKey = 22;
+  map<string, bytes> MapCodeChange = 23;
 }   
 
 message ExecuteSCResults {

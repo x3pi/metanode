@@ -17,12 +17,22 @@ type ExecuteSCResult interface {
 	// getter
 	TransactionHash() common.Hash
 	MapAddBalance() map[string][]byte
+	SetMapAddBalance(map[string][]byte)
 	MapSubBalance() map[string][]byte
+	SetMapSubBalance(map[string][]byte)
 	MapNonce() map[string][]byte
+	SetMapNonce(map[string][]byte)
 	MapStorageRoot() map[string][]byte
 	MapCodeHash() map[string][]byte
+	MapCodeChange() map[string][]byte
+	SetMapCodeChange(map[string][]byte)
 	MapStorageAddress() map[string]common.Address
 	MapCreatorPubkey() map[string][]byte
+	MapPublicKeyBls() map[string][]byte
+	MapAccountType() map[string]uint8
+	MapNewDeviceKey() map[string][]byte
+	MapStorageChange() map[string]map[string][]byte
+	SetMapStorageChange(map[string]map[string][]byte)
 	MarshalJSON() ([]byte, error)
 	MapStorageAddressTouchedAddresses() map[common.Address][]common.Address
 	MapNativeSmartContractUpdateStorage() map[common.Address][][2][]byte

@@ -40,7 +40,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -53,6 +52,7 @@ var (
 
 type AccountStateDB interface {
 	AccountState(address common.Address) (types.AccountState, error)
+	InjectLoadedAccount(types.AccountState)
 	PublicSetDirtyAccountState(as types.AccountState)
 }
 
@@ -987,91 +987,8 @@ func (a *MVMApi) enforceStrictAccessLists() {
 		return
 	}
 
-	// Virtual Execution mode: DYNAMIC DISCOVERY of modified states
-	if a.extendedMode {
-		for addr := range a.rs.MapAddBalance {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapSubBalance {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapStorageChange {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapCodeChange {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapFullDbHash {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		for addr := range a.rs.MapNonce {
-			a.currentRelatedAddresses.Store(common.HexToAddress(addr), struct{}{})
-		}
-		return
-	}
-
-	checkAccess := func(address string) bool {
-		addr := common.HexToAddress(address)
-		if !a.InRelatedAddress(addr) {
-			logger.Error("❌ [STRICT_ACCESS] Transaction accessed undeclared address %s. Reverting!", addr.Hex())
-			return false
-		}
-		return true
-	}
-
-	isViolation := false
-	for addr := range a.rs.MapAddBalance {
-		if !checkAccess(addr) {
-			isViolation = true
-			break
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapSubBalance {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapStorageChange {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapCodeChange {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapFullDbHash {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-	if !isViolation {
-		for addr := range a.rs.MapNonce {
-			if !checkAccess(addr) {
-				isViolation = true
-				break
-			}
-		}
-	}
-
-	if isViolation {
-		a.rs.Status = pb.RECEIPT_STATUS_THREW
-		a.rs.Exception = pb.EXCEPTION_ERR_WRITE_PROTECTION
-		a.rs.Exmsg = "STRICT_ACCESS_VIOLATION: Accessed undeclared state"
-	}
+	// Optimistic Parallel Execution: bypass strict access list enforcement
+	return
 }
 
 func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
@@ -1097,11 +1014,6 @@ func (a *MVMApi) RevertFullDb() bool {
 	status := C.revert_full_db((*C.uchar)(cBBmvmId))
 	return status != 0
 }
-
-var (
-	// Biến này không còn được sử dụng và có thể xóa.
-	processingPointers []unsafe.Pointer
-)
 
 //export GlobalStateGet
 func GlobalStateGet(
@@ -1158,11 +1070,6 @@ func GlobalStateGet(
 		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
 			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
 		}
-	} else {
-		if !mvmApi.InRelatedAddress(fAddress) {
-			logger.Error("❌ [DEBUG Exception 15] Address not in RelatedAddresses: %s for mvmId: %s", fAddress.Hex(), fmvmId.Hex())
-			return C.int(2), nil, nil, nil, 0
-		}
 	}
 
 	accountState, err := mvmApi.accountStateDb.AccountState(fAddress)
@@ -1187,7 +1094,7 @@ func GlobalStateGet(
 	var bCode []byte
 	if smartContractState := accountState.SmartContractState(); smartContractState != nil {
 		bCode = mvmApi.smartContractDb.Code(fAddress)
-		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded, codeLen=%d", len(bCode))
+		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded for %s, codeLen=%d, codeHash=%s, code=%s", fAddress.Hex(), len(bCode), smartContractState.CodeHash().Hex(), hex.EncodeToString(bCode))
 	}
 
 	cBCode := C.CBytes(bCode)
@@ -1242,11 +1149,6 @@ func GetStorageValue(
 	if mvmApi.extendedMode {
 		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
 			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
-		}
-	} else {
-		if !mvmApi.InRelatedAddress(fAddress) {
-			logger.Error("❌ [DEBUG SLOAD Exception] Address not in RelatedAddresses: %s for mvmId: %s", fAddress.Hex(), fmvmId.Hex())
-			return nil, false
 		}
 	}
 

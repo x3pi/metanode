@@ -98,8 +98,8 @@ pub async fn transition_mode_only(
     // and use Go's authoritative value instead. This ensures ALL nodes use the same
     // timestamp even if EndOfEpoch SystemTx had different precision.
     // =============================================================================
-    let (committee, go_authoritative_timestamp, eth_addresses) = committee_source
-        .fetch_committee_with_timestamp(&config.executor_send_socket_path, epoch)
+    let (committee, epoch_timestamp_to_use, eth_addresses) = committee_source
+        .fetch_committee_with_timestamp(epoch)
         .await?;
 
     // Update epoch_eth_addresses cache with new epoch's committee atomically
@@ -117,7 +117,7 @@ pub async fn transition_mode_only(
 
     info!(
         "✅ [MODE TRANSITION] Got UNIFIED committee+timestamp from Go: epoch={}, timestamp={} ms",
-        epoch, go_authoritative_timestamp
+        epoch, epoch_timestamp_to_use
     );
 
     // CRITICAL FIX (2026-03-22): Query Go for the correct epoch boundary GEI.
@@ -125,8 +125,7 @@ pub async fn transition_mode_only(
     // synced_global_exec_index is WRONG because it points to the tip of synced state,
     // not the ACTUAL base GEI of the epoch.
     let epoch_base_gei_from_go = {
-        let boundary_client =
-            committee_source.create_executor_client(&config.executor_send_socket_path);
+        let boundary_client = committee_source.create_executor_client();
         match boundary_client
             .get_safe_epoch_boundary_data(epoch, &config.peer_rpc_addresses)
             .await
@@ -213,7 +212,6 @@ pub async fn transition_mode_only(
     //
     // Note: _boundary_block_unused parameter is prefixed with _ to suppress unused warning
     // =============================================================================
-    let epoch_timestamp_to_use = go_authoritative_timestamp;
 
     info!(
         "✅ [MODE TRANSITION] Using UNIFIED timestamp={} ms from Go boundary block (ignoring EndOfEpoch tx timestamp)",
@@ -246,8 +244,6 @@ pub async fn transition_mode_only(
         let client = Arc::new(ExecutorClient::new_with_initial_index(
             true,
             true,
-            config.executor_send_socket_path.clone(),
-            config.executor_receive_socket_path.clone(),
             synced_global_exec_index + 1,
             Some(node.storage_path.clone()),
         ));
@@ -419,9 +415,7 @@ pub(super) async fn handle_synconly_upgrade_wait(
     // Create FRESH executor client for reliable communication
     let fresh_executor_client = ExecutorClient::new(
         true,
-        false, // Don't need commit capability for just checking block number
-        config.executor_send_socket_path.clone(),
-        config.executor_receive_socket_path.clone(),
+        false,
         None,
     );
 
