@@ -90,9 +90,6 @@ func ProcessTransactionsOptimistic(
 		var executionGroups [][]int
 
 		numWorkers := runtime.NumCPU()
-		if numWorkers > 16 {
-			numWorkers = 16
-		}
 
 		if isFirstRound {
 			// Round 1: Flat parallel execution of all static groups
