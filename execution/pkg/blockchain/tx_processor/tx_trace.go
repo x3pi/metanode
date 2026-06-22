@@ -98,3 +98,35 @@ func (s *TxTraceStore) GetTrace(hash common.Hash) (*TxTrace, bool) {
 		Steps:     stepsCopy,
 	}, true
 }
+
+// GetLatestTraces retrieves the most recent transaction traces up to the specified limit.
+func (s *TxTraceStore) GetLatestTraces(limit int) []*TxTrace {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var traces []*TxTrace
+	// head is the index where the next new item will be inserted.
+	// We want to go backwards from head-1 to get the most recent ones.
+	for i := 1; i <= s.maxSize; i++ {
+		idx := (s.head - i + s.maxSize) % s.maxSize
+		hash := s.hashes[idx]
+		if hash == (common.Hash{}) {
+			break // No more traces
+		}
+		if t, exists := s.traces[hash]; exists {
+			stepsCopy := make([]TxTraceStep, len(t.Steps))
+			copy(stepsCopy, t.Steps)
+			traces = append(traces, &TxTrace{
+				Hash:      t.Hash,
+				Step:      t.Step,
+				Timestamp: t.Timestamp,
+				Details:   t.Details,
+				Steps:     stepsCopy,
+			})
+			if len(traces) >= limit {
+				break
+			}
+		}
+	}
+	return traces
+}
