@@ -12,9 +12,6 @@
   "rpc_port": ":8646",
   "db_type": 2,
   "genesis_file_path": "genesis.json",
-  "rust_send_socket_path": "/tmp/executor2.sock",
-  "rust_receive_socket_path": "/tmp/rust-go.sock_3",
-  "rust_tx_socket_path": "/tmp/metanode-tx-2.sock",
   "Databases": {
     "RootPath": "./sample/simple/data-write/data",
     "DBEngine": "sharded",

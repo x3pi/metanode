@@ -32,8 +32,6 @@ node_id = 0
 network_address = "192.168.1.100:9000"
 
 # Giao tiếp local Rust ↔ Go qua Unix Domain Sockets (nội bộ máy)
-executor_send_socket_path = "/tmp/executor0.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Khám phá Peer: Kết nối TCP tới Go Master của các Node khác
 peer_go_master_sockets = [
@@ -49,8 +47,6 @@ node_id = 1
 network_address = "192.168.1.101:9001"
 
 # Giao tiếp local
-executor_send_socket_path = "/tmp/executor1.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Khám phá Peer
 peer_go_master_sockets = [
@@ -66,8 +62,6 @@ node_id = 2
 network_address = "192.168.1.102:9002"
 
 # Giao tiếp local
-executor_send_socket_path = "/tmp/executor2.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Khám phá Peer
 peer_go_master_sockets = [

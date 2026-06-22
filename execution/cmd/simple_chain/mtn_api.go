@@ -671,3 +671,95 @@ func (api *MtnAPI) RegisterBlsKeyWithSignature(ctx context.Context, params Regis
 	logger.Info("[RegisterBlsKey] BLS key registered for %s", signerAddress.Hex())
 	return "BLS private key successfully registered.", nil
 }
+
+// GetPerformanceMetrics returns the current system performance metrics, including average latencies based on recent transaction traces.
+func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[string]interface{}, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	traces := tx_processor.GlobalTxTraceStore.GetLatestTraces(limit)
+
+	var totalMempool, totalConsensus, totalExecution, totalEndToEnd int64
+	var countMempool, countConsensus, countExecution, countEndToEnd int
+
+	var earliestReceipt int64 = -1
+	var latestReceipt int64 = -1
+
+	// Calculate average latencies
+	for _, traceObj := range traces {
+		var tInjection, tForward, tConsensus, tReceipt int64
+		for _, step := range traceObj.Steps {
+			switch step.Step {
+			case "INJECTION_RECEIVED":
+				tInjection = step.Timestamp
+			case "FORWARDED_TO_RUST":
+				tForward = step.Timestamp
+			case "CONSENSUS_COMMITTED":
+				tConsensus = step.Timestamp
+			case "BLOCK_RECEIPT_CREATED":
+				tReceipt = step.Timestamp
+			}
+		}
+
+		if tInjection > 0 && tForward >= tInjection {
+			totalMempool += (tForward - tInjection)
+			countMempool++
+		}
+		if tForward > 0 && tConsensus >= tForward {
+			totalConsensus += (tConsensus - tForward)
+			countConsensus++
+		}
+		if tConsensus > 0 && tReceipt >= tConsensus {
+			totalExecution += (tReceipt - tConsensus)
+			countExecution++
+		}
+		if tInjection > 0 && tReceipt >= tInjection {
+			totalEndToEnd += (tReceipt - tInjection)
+			countEndToEnd++
+			
+			if earliestReceipt == -1 || tReceipt < earliestReceipt {
+				earliestReceipt = tReceipt
+			}
+			if latestReceipt == -1 || tReceipt > latestReceipt {
+				latestReceipt = tReceipt
+			}
+		}
+	}
+
+	avgMempool := 0.0
+	if countMempool > 0 {
+		avgMempool = float64(totalMempool) / float64(countMempool)
+	}
+
+	avgConsensus := 0.0
+	if countConsensus > 0 {
+		avgConsensus = float64(totalConsensus) / float64(countConsensus)
+	}
+
+	avgExecution := 0.0
+	if countExecution > 0 {
+		avgExecution = float64(totalExecution) / float64(countExecution)
+	}
+
+	avgEndToEnd := 0.0
+	if countEndToEnd > 0 {
+		avgEndToEnd = float64(totalEndToEnd) / float64(countEndToEnd)
+	}
+
+	tps := 0.0
+	if latestReceipt > earliestReceipt && countEndToEnd > 1 {
+		diffSecs := float64(latestReceipt - earliestReceipt) / 1000.0
+		if diffSecs > 0 {
+			tps = float64(countEndToEnd) / diffSecs
+		}
+	}
+
+	return map[string]interface{}{
+		"analyzedTxCount": len(traces),
+		"tps":             tps,
+		"avgMempoolMs":    avgMempool,
+		"avgConsensusMs":  avgConsensus,
+		"avgExecutionMs":  avgExecution,
+		"avgEndToEndMs":   avgEndToEnd,
+	}, nil
+}

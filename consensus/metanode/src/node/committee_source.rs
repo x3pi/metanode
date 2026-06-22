@@ -48,8 +48,6 @@ pub fn calculate_committee_hash(committee: &Committee) -> [u8; 32] {
 /// Ensures fork-safe committee fetching by always using the best available source
 #[derive(Debug, Clone)]
 pub struct CommitteeSource {
-    /// Best Go Master socket (either local or peer)
-    pub socket_path: String,
     /// Epoch from the best source
     pub epoch: u64,
     /// Last committed block from best source
@@ -73,8 +71,6 @@ impl CommitteeSource {
         let local_client = ExecutorClient::new(
             true,
             false,
-            config.executor_send_socket_path.clone(),
-            config.executor_receive_socket_path.clone(),
             None,
         );
 
@@ -94,7 +90,6 @@ impl CommitteeSource {
         if config.peer_rpc_addresses.is_empty() {
             info!("ℹ️ [COMMITTEE SOURCE] No peer RPC addresses configured, using local Go Master");
             return Ok(Self {
-                socket_path: config.executor_receive_socket_path.clone(),
                 epoch: local_epoch,
                 last_block: local_block,
                 is_peer: false,
@@ -105,7 +100,8 @@ impl CommitteeSource {
         // Query TCP peers to find the best source
         let mut best_epoch = local_epoch;
         let mut best_block = local_block;
-        let best_socket = config.executor_receive_socket_path.clone();
+        // We used to probe IPC sockets here.
+        // Now, FFI is the only valid connection to local Go for ExecutorClient.
         let mut is_peer = false;
 
         // Use TCP RPC to query peer nodes over network
@@ -146,12 +142,11 @@ impl CommitteeSource {
         }
 
         info!(
-            "✅ [COMMITTEE SOURCE] Selected source: {} (epoch={}, block={}, is_peer={})",
-            best_socket, best_epoch, best_block, is_peer
+            "✅ [COMMITTEE SOURCE] Selected source: (epoch={}, block={}, is_peer={})",
+            best_epoch, best_block, is_peer
         );
 
         Ok(Self {
-            socket_path: best_socket.clone(),
             epoch: best_epoch,
             last_block: best_block,
             is_peer,
@@ -159,13 +154,10 @@ impl CommitteeSource {
         })
     }
 
-    /// Create an executor client connected to this source
-    pub fn create_executor_client(&self, send_socket: &str) -> Arc<ExecutorClient> {
+    pub fn create_executor_client(&self) -> Arc<ExecutorClient> {
         Arc::new(ExecutorClient::new(
             true,
             false,
-            send_socket.to_string(),
-            self.socket_path.clone(),
             None,
         ))
     }
@@ -190,10 +182,9 @@ impl CommitteeSource {
     /// SIMPLIFIED: Go now returns data even when boundary block not fully synced.
     pub async fn fetch_committee(
         &self,
-        send_socket: &str,
         target_epoch: u64,
     ) -> Result<(Committee, Vec<Vec<u8>>)> {
-        let client = self.create_executor_client(send_socket);
+        let client = self.create_executor_client();
 
         info!(
             "📋 [COMMITTEE SOURCE] Fetching committee for epoch {} from local Go",
@@ -329,10 +320,9 @@ impl CommitteeSource {
     /// Using this timestamp ensures ALL nodes have identical genesis blocks = NO FORK!
     pub async fn fetch_committee_with_timestamp(
         &self,
-        send_socket: &str,
         target_epoch: u64,
     ) -> Result<(Committee, u64, Vec<Vec<u8>>)> {
-        let client = self.create_executor_client(send_socket);
+        let client = self.create_executor_client();
 
         info!(
             "📋 [COMMITTEE SOURCE] Fetching committee+timestamp for epoch {} from LOCAL Go (unified source)",
@@ -494,7 +484,6 @@ mod tests {
 
     fn make_source(epoch: u64, last_block: u64, is_peer: bool) -> CommitteeSource {
         CommitteeSource {
-            socket_path: "/tmp/test_recv.sock".to_string(),
             epoch,
             last_block,
             is_peer,
@@ -534,7 +523,7 @@ mod tests {
     #[test]
     fn test_create_executor_client() {
         let source = make_source(1, 50, false);
-        let client = source.create_executor_client("/tmp/test_send.sock");
+        let client = source.create_executor_client();
         assert!(client.is_enabled());
         assert!(!client.can_commit());
     }
@@ -542,7 +531,6 @@ mod tests {
     #[test]
     fn test_committee_source_with_peer_addresses() {
         let source = CommitteeSource {
-            socket_path: "/tmp/test.sock".to_string(),
             epoch: 2,
             last_block: 200,
             is_peer: true,

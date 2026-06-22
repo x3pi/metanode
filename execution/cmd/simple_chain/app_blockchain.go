@@ -899,27 +899,7 @@ SKIP_GENESIS:
 		}
 	}
 
-	// EVENT-DRIVEN NOTIFICATION SETUP
-	// Derive notification socket path from RustSendSocketPath (e.g. metanode-rpc-1.sock -> metanode-notification-1.sock)
-	if app.config.RustSendSocketPath != "" {
-		notificationSocketPath := strings.Replace(app.config.RustSendSocketPath, "rpc", "notification", 1)
-		logger.Info("🔧 [EPOCH NOTIFIER] Configured notification socket path: %s", notificationSocketPath)
 
-		notifier := executor.GetCommitteeNotifier()
-		notifier.SetSocketPath(notificationSocketPath)
-
-		// Wire up ChainState callback to Notifier
-		if app.chainState != nil {
-			app.chainState.SetEpochNotificationCallback(func(epoch, ts, boundary uint64) {
-				logger.Info("📣 [EPOCH NOTIFIER] Callback triggered for epoch %d. Sending to Rust...", epoch)
-				if err := notifier.NotifyEpochChange(epoch, ts, boundary); err != nil {
-					logger.Warn("⚠️ [EPOCH NOTIFIER] Failed to send notification: %v", err)
-				}
-			})
-		}
-	} else {
-		logger.Warn("⚠️ [EPOCH NOTIFIER] RustSendSocketPath is empty. Notification system disabled.")
-	}
 
 	return nil
 }

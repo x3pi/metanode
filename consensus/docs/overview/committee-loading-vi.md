@@ -179,7 +179,6 @@ async fn transition_to_epoch_from_system_tx(
     
     // 4. Fetch new committee (retry với MAX_ATTEMPTS=60)
     let committee = committee_source.fetch_committee(
-        &config.executor_send_socket_path,
         new_epoch
     ).await?;
     
@@ -265,7 +264,6 @@ loop {
 // File: metanode/src/node/committee_source.rs
 
 pub struct CommitteeSource {
-    pub socket_path: String,       // Go Master socket 
     pub epoch: u64,                // Epoch từ nguồn này
     pub last_block: u64,           // Last committed block
     pub is_peer: bool,             // Từ peer hay local
@@ -295,7 +293,6 @@ async fn discover(config: &NodeConfig) -> Result<Self> {
     }
     
     // 3. Sử dụng nguồn có epoch cao nhất (nhưng luôn dùng local socket cho data)
-    Ok(Self { socket_path: local_socket, epoch: best_epoch, ... })
 }
 ```
 

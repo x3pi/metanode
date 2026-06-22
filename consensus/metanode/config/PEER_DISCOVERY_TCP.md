@@ -41,8 +41,6 @@ peer_go_master_sockets = [
 **Machine 1 (192.168.1.100) - Node 0:**
 ```toml
 # Local Rust-Go communication
-executor_send_socket_path = "/tmp/executor0.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 # Peer discovery to OTHER nodes
 peer_go_master_sockets = [
@@ -54,8 +52,6 @@ peer_rpc_port = 19200  # This node listens on 19200 for peer queries
 
 **Machine 2 (192.168.1.101) - Node 1:**
 ```toml
-executor_send_socket_path = "/tmp/executor1.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 peer_go_master_sockets = [
     "tcp://192.168.1.100:19200",  # Node 0
@@ -66,8 +62,6 @@ peer_rpc_port = 19201
 
 **Machine 3 (192.168.1.102) - Node 2:**
 ```toml
-executor_send_socket_path = "/tmp/executor2.sock"
-executor_receive_socket_path = "/tmp/rust-go-master.sock"
 
 peer_go_master_sockets = [
     "tcp://192.168.1.100:19200",  # Node 0

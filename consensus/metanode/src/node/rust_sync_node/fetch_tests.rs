@@ -44,8 +44,6 @@ fn make_test_sync_node(
     let executor_client = Arc::new(ExecutorClient::new(
         false, // disabled — won't actually connect
         false,
-        "/dev/null".to_string(),
-        "/dev/null".to_string(),
         None,
     ));
     let (tx, rx) = mpsc::channel(100);

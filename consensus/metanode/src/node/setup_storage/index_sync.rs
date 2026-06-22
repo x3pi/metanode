@@ -69,7 +69,7 @@ impl ConsensusNode {
             crate::node::executor_client::load_persisted_last_index(storage_path).unwrap_or((0, 0));
 
         let peer_last_block =
-            if best_socket != config.executor_receive_socket_path && peer_last_block > 0 {
+            if !best_socket.is_empty() && peer_last_block > 0 {
                 peer_last_block
             } else {
                 0

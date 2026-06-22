@@ -16,7 +16,7 @@ import (
 )
 
 func HandleRevertedTransaction(
-	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address,
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address, mvmId common.Address,
 	blockTime uint64, enableTrace bool, revertReason string,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	// 1. Mã hóa lý do revert
@@ -30,7 +30,7 @@ func HandleRevertedTransaction(
 	)
 	// 3. Tăng nonce và cập nhật các thông tin tài khoản khác
 	// Đây là phần code được tái sử dụng
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
+	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 	if err != nil {
 		errorReceipt := createErrorReceipt(tx, toAddress, fmt.Errorf("ExecuteNonceOnly failed during revert: %w", err))
@@ -52,7 +52,7 @@ func HandleRevertedTransaction(
 }
 
 func HandleSuccessTransaction(
-	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address,
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, toAddress common.Address, mvmId common.Address,
 	blockTime uint64, enableTrace bool, eventLogs []types.EventLog, returnData []byte,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	rcp := receipt.NewReceipt(
@@ -61,7 +61,7 @@ func HandleSuccessTransaction(
 		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
-	vmP := vm_processor.NewVmProcessor(chainState, tx.ToAddress(), enableTrace, blockTime, common.Address{})
+	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
 	exRs, err := vmP.ExecuteNonceOnly(ctx, tx, true)
 
 	if err != nil {

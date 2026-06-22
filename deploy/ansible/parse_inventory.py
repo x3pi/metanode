@@ -62,6 +62,17 @@ if __name__ == '__main__':
         print(node_map)
         sys.exit(1)
         
+    if target == 'json':
+        import json
+        out = {"nodes": {}, "rpc_proxies": {}, "tcp_nodes": {}}
+        for nid, ip in node_map.items():
+            key = f"m{nid}"
+            out["nodes"][key] = f"http://{ip}:{10746 + nid}"
+            out["rpc_proxies"][key] = f"http://{ip}:{8650 + nid}"
+            out["tcp_nodes"][key] = f"{ip}:{6200 + nid}"
+        print(json.dumps(out, indent=2))
+        sys.exit(0)
+        
     if target == 'all':
         # format: Node 0 (IP), Node 1 (IP)... sorted by node_id
         sorted_nodes = sorted(node_map.keys())

@@ -8,24 +8,62 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_PROJECT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MTN_CONSENSUS_ROOT="$(cd "$GO_PROJECT/../consensus" && pwd)"
 
-CLIENTS=${1:-5}
-TX_PER_CLIENT=${2:-20000}
-BATCH_SIZE=${3:-4000}
+CLIENTS=5
+TX_PER_CLIENT=20000
+BATCH_SIZE=4000
+INVENTORY=""
+
+CLIENTS_SET=0
+TX_SET=0
+BATCH_SET=0
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --inventory|-i)
+      INVENTORY="$2"
+      shift 2
+      ;;
+    *)
+      if [ "$CLIENTS_SET" -eq 0 ]; then CLIENTS=$1; CLIENTS_SET=1;
+      elif [ "$TX_SET" -eq 0 ]; then TX_PER_CLIENT=$1; TX_SET=1;
+      elif [ "$BATCH_SET" -eq 0 ]; then BATCH_SIZE=$1; BATCH_SET=1;
+      fi
+      shift
+      ;;
+  esac
+done
+
 LOG_DIR="$MTN_CONSENSUS_ROOT/metanode/logs/node_0/go-master"
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+GREEN='[0;32m'
+YELLOW='[1;33m'
+RED='[0;31m'
+CYAN='[0;36m'
+BOLD='[1m'
+NC='[0m'
 
 TOTAL_TX=$((CLIENTS * TX_PER_CLIENT))
 
-# Sub-node TCP ports for TX injection
+# Default local nodes
 NODES=("127.0.0.1:4201" "127.0.0.1:6201" "127.0.0.1:6211" "127.0.0.1:6221")
-# Use MASTER node RPC ports for verification (must use real IPs for remote nodes)
 RPCS=("127.0.0.1:8757" "127.0.0.1:10747" "127.0.0.1:10749" "127.0.0.1:10750")
+
+if [ -n "$INVENTORY" ] && [ -f "/tmp/rpc_nodes.json" ]; then
+    echo -e "${YELLOW}🌍 Using Remote Configuration from /tmp/rpc_nodes.json${NC}"
+    NODES=()
+    RPCS=()
+    
+    for i in {0..4}; do
+        NODE_ADDR=$(jq -r ".tcp_nodes.m${i}" /tmp/rpc_nodes.json 2>/dev/null)
+        RPC_ADDR=$(jq -r ".nodes.m${i}" /tmp/rpc_nodes.json 2>/dev/null | sed 's/http:\/\///')
+        
+        if [ "$NODE_ADDR" != "null" ] && [ -n "$NODE_ADDR" ]; then
+            NODES+=("$NODE_ADDR")
+            RPCS+=("$RPC_ADDR")
+        fi
+    done
+fi
+
 NUM_NODES=${#NODES[@]}
 
 # Helper: get current block number from RPC
@@ -118,9 +156,9 @@ echo -e "${YELLOW}⏳ Chain is processing... Waiting until idle (no new blocks f
 LAST_BLOCK=$BLOCK_BEFORE
 STAGNANT=0
 ACTUAL_END_MS=$START_MS
-# Stagnant detection: 20s (200 × 0.1s) to tolerate epoch transition freezes
+# Stagnant detection: 60s (600 × 0.1s) to tolerate epoch transition freezes and long Block-STM execution
 # while accurately tracking host wall clock end time at the last block height increase.
-while [ $STAGNANT -lt 200 ]; do
+while [ $STAGNANT -lt 600 ]; do
     sleep 0.1
     CURRENT_BLOCK=$(get_block_number "${RPCS[0]}")
     if [ "$CURRENT_BLOCK" -gt "$LAST_BLOCK" ]; then
@@ -147,12 +185,20 @@ fi
 echo -e "${GREEN}✅ Chain idle (10s no new blocks). Block height after test: ${BOLD}#${BLOCK_AFTER}${NC}"
 
 
-# ── PARSE LOG ─────────────────────────────────────────────────────
 # Strategy: grep ALL createBlockFromResults lines from ALL log files,
 # filter by block number range, then DEDUPLICATE by taking the LAST
 # occurrence of each block number (handles log rotation correctly —
 # the latest App.log has the most recent run's data).
 echo -e "${GREEN}✅ Generating report...${NC}"
+
+# If running remotely via Ansible inventory, fetch the master log
+MASTER_LOG_PATH="$MTN_CONSENSUS_ROOT/metanode/logs/node_0/go-master-stdout.log"
+if [ -n "$INVENTORY" ]; then
+    MASTER_IP=$(echo "${NODES[0]}" | cut -d: -f1)
+    echo -e "${YELLOW}⏳ Fetching performance logs from Master Node ($MASTER_IP)...${NC}"
+    sshpass -p "1234@abcd" scp -o StrictHostKeyChecking=no "abc@$MASTER_IP:/opt/metanode/node-0/logs/execution/execution.log" /tmp/master_execution.log >/dev/null 2>&1 || true
+    MASTER_LOG_PATH="/tmp/master_execution.log"
+fi
 
 BLOCK_START=$((BLOCK_BEFORE + 1))
 BLOCK_END=$BLOCK_AFTER
@@ -215,7 +261,7 @@ for (( b=BLOCK_START; b<=BLOCK_END; b++ )); do
         fi
         
         # Get performance stats from master node logs
-        PERF_LINE=$(grep -a "\[BLOCK-PERF\] Block #${b}:" "/home/abc/chain-n/metanode/consensus/metanode/logs/node_0/go-master-stdout.log" | tail -1)
+        PERF_LINE=$(grep -a "\[BLOCK-PERF\] Block #${b}:" "$MASTER_LOG_PATH" | tail -1)
         if [ -n "$PERF_LINE" ]; then
             V_EXEC=$(echo "$PERF_LINE" | grep -oP 'VirtualExec=[^|]+' | cut -d= -f2 | xargs)
             CONSENSUS=$(echo "$PERF_LINE" | grep -oP 'Consensus=[^|]+' | cut -d= -f2 | xargs)
@@ -367,8 +413,10 @@ echo -e "${BOLD}╠════════════════════�
 # to avoid flagging pre-existing divergences from prior runs.
 CHECK_FROM=$BLOCK_START
 CHECK_TO=$((BLOCK_AFTER > 0 ? BLOCK_AFTER : LAST_BNUM))
+MASTER_RPC="http://${RPCS[0]}"
+NODE3_RPC="http://${RPCS[-1]}"
 HASH_OUT=$(/tmp/block_hash_checker \
-    --nodes "master=http://127.0.0.1:8757,node3=http://127.0.0.1:10750" \
+    --nodes "master=$MASTER_RPC,node3=$NODE3_RPC" \
     --from $CHECK_FROM --to $CHECK_TO 2>&1)
 
 LAST_LINE=$(echo "$HASH_OUT" | tail -1)

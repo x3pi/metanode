@@ -180,9 +180,9 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 	txHash := tx.Hash()
 
 	startExec := time.Now()
-	exRs, err := v.executeTransactionOffChain(tx)
+	exRs, err := v.ProcessTransactionOffChain(tx)
 	execDuration := time.Since(startExec)
-	logger.Info("[PERF] Read/Estimate TX executeTransactionOffChain: %v, hash: %v", execDuration, txHash.Hex())
+	logger.Info("[PERF] Read/Estimate TX ProcessTransactionOffChain: %v, hash: %v", execDuration, txHash.Hex())
 	if err != nil {
 		logger.Error("Error executing read/estimate transaction off-chain: %v", err)
 		v.sendTransactionError(req.conn, tx.RHash(), -1, err.Error(), nil, req.msgID)

@@ -6,6 +6,26 @@
 
 set -u
 
+# Check for daemon flag
+DAEMON_MODE=false
+args=()
+for arg in "$@"; do
+    if [ "$arg" = "-d" ] || [ "$arg" = "--daemon" ]; then
+        DAEMON_MODE=true
+    else
+        args+=("$arg")
+    fi
+done
+
+if [ "$DAEMON_MODE" = true ]; then
+    echo "🚀 Starting Git Auto-Deploy Watcher in background daemon mode..."
+    nohup "$0" "${args[@]}" > auto_deploy.log 2>&1 &
+    echo "✅ Watcher is now running in the background (PID: $!)."
+    echo "📜 To view logs, run: tail -f auto_deploy.log"
+    echo "🛑 To stop it, run: kill $!"
+    exit 0
+fi
+
 REMOTE="origin"
 BRANCH="dev"
 CHECK_INTERVAL=5
@@ -21,6 +41,23 @@ cd "$PROJECT_ROOT"
 
 # Ensure we are tracking the branch correctly
 git checkout "$BRANCH" 2>/dev/null || true
+
+echo "🚀 Performing initial deployment before watching..."
+cd "$ANSIBLE_DIR"
+export DEPLOY_SOURCE="Auto-Deploy (Initial Run)"
+if ! ./ansible_deploy.sh "$@"; then
+    echo "❌ Initial deploy failed! Exiting auto-deploy watcher."
+    exit 1
+fi
+echo "✅ Initial deploy successful."
+
+# Update the hash so the watcher doesn't immediately re-trigger
+if git fetch "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+    git rev-parse "${REMOTE}/${BRANCH}" > "${ANSIBLE_DIR}/.last_deployed_commit"
+fi
+
+cd "$PROJECT_ROOT"
+echo "👀 Entering Watcher mode. Polling every ${CHECK_INTERVAL}s..."
 
 while true; do
     # Fetch from remote without merging
@@ -50,7 +87,7 @@ while true; do
             
             echo "🚀 Triggering build & deploy for $DEPLOY_SOURCE..."
             cd "$ANSIBLE_DIR"
-            ./ansible_deploy.sh --start
+            ./ansible_deploy.sh --start --fast
             
             # Go back to root
             cd "$PROJECT_ROOT"

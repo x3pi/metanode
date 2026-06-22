@@ -377,13 +377,7 @@ func (bp *BlockProcessor) ConnectionsByType(connType int) map[common.Address]net
 	return nil
 }
 
-// GetRustTxSocketPath implements the ISystemConfig interface for TransactionProcessor.
-func (bp *BlockProcessor) GetRustTxSocketPath() string {
-	if bp.config != nil {
-		return bp.config.RustTxSocketPath
-	}
-	return ""
-}
+
 
 // NewBlockProcessor creates a new block processor
 func NewBlockProcessor(

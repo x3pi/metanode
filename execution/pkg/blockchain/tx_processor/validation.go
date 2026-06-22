@@ -328,6 +328,14 @@ func VerifyTransaction(
 		if !tx.ValidCallData() {
 			return transaction.InvalidCallData
 		}
+
+		if tx.IsCallContract() {
+			toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.ToAddress())
+			if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
+				logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())
+				return transaction.InvalidCallSmartContractToAccount
+			}
+		}
 	}
 
 	// Thêm kiểm tra kích thước Call Data

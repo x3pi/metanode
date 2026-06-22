@@ -21,7 +21,6 @@ Rust (`mtn-consensus`).
 |---|---|---|---|
 | gRPC (consensus) | TCP + TLS | Consensus Mysticeti DAG | TLS qua tonic |
 | `peer_rpc_port` | TCP | RPC ngang hàng tùy chỉnh (chuyển tiếp TX, khám phá peer) | Không |
-| `rust_tx_socket_path` | UDS | Nhận giao dịch từ Go | Quyền filesystem |
 
 ### RPC Ngang Hàng
 

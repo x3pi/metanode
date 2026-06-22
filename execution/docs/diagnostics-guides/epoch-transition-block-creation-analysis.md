@@ -132,8 +132,6 @@ let next_expected = last_global_exec_index + 1;
 let executor_client = ExecutorClient::new_with_initial_index(
     enabled,
     can_commit,
-    send_socket_path,
-    receive_socket_path,
     next_expected, // CRITICAL: Use Go's last block number + 1
 );
 ```

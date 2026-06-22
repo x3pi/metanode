@@ -35,6 +35,49 @@ type ExecuteSCResult struct {
 	mapNativeSmartContractUpdateStorage map[common.Address][][2][]byte
 	eventLogs                           []types.EventLog
 	mapFullDbLogs                       map[string][]byte
+
+	mapStorageChange map[string]map[string][]byte
+
+	mapPublicKeyBls map[string][]byte
+	mapAccountType  map[string]uint8
+	mapNewDeviceKey map[string][]byte
+	
+	mapCodeChange map[string][]byte
+}
+
+func (rs *ExecuteSCResult) MapCodeChange() map[string][]byte {
+	return rs.mapCodeChange
+}
+func (rs *ExecuteSCResult) SetMapCodeChange(m map[string][]byte) {
+	rs.mapCodeChange = m
+}
+
+func (rs *ExecuteSCResult) MapPublicKeyBls() map[string][]byte {
+	return rs.mapPublicKeyBls
+}
+func (rs *ExecuteSCResult) SetMapPublicKeyBls(m map[string][]byte) {
+	rs.mapPublicKeyBls = m
+}
+
+func (rs *ExecuteSCResult) MapAccountType() map[string]uint8 {
+	return rs.mapAccountType
+}
+func (rs *ExecuteSCResult) SetMapAccountType(m map[string]uint8) {
+	rs.mapAccountType = m
+}
+
+func (rs *ExecuteSCResult) MapNewDeviceKey() map[string][]byte {
+	return rs.mapNewDeviceKey
+}
+func (rs *ExecuteSCResult) SetMapNewDeviceKey(m map[string][]byte) {
+	rs.mapNewDeviceKey = m
+}
+
+func (rs *ExecuteSCResult) MapStorageChange() map[string]map[string][]byte {
+	return rs.mapStorageChange
+}
+func (rs *ExecuteSCResult) SetMapStorageChange(m map[string]map[string][]byte) {
+	rs.mapStorageChange = m
 }
 
 func NewExecuteSCResult(
@@ -189,6 +232,29 @@ func (r *ExecuteSCResult) Proto() protoreflect.ProtoMessage {
 			Datas: datas,
 		}
 	}
+
+	mapStorageChange := make(
+		map[string]*pb.StorageDatas,
+		len(r.mapStorageChange),
+	)
+	for k, v := range r.mapStorageChange {
+		datas := make([]*pb.StorageData, 0, len(v))
+		for k2, v2 := range v {
+			datas = append(datas, &pb.StorageData{
+				Key:   []byte(k2),
+				Value: v2,
+			})
+		}
+		mapStorageChange[k] = &pb.StorageDatas{
+			Datas: datas,
+		}
+	}
+
+	mapAccountType := make(map[string]uint32, len(r.mapAccountType))
+	for k, v := range r.mapAccountType {
+		mapAccountType[k] = uint32(v)
+	}
+
 	eventLogs := make([]*pb.EventLog, len(r.eventLogs))
 	for k, v := range r.eventLogs {
 		eventLogs[k] = v.Proto()
@@ -213,6 +279,14 @@ func (r *ExecuteSCResult) Proto() protoreflect.ProtoMessage {
 		MapNativeSmartContractUpdateStorage: mapNativeSmartContractUpdateStorage,
 
 		EventLogs: eventLogs,
+
+		MapNonce:         r.mapNonce,
+		MapFullDbLogs:    r.mapFullDbLogs,
+		MapStorageChange: mapStorageChange,
+		MapPublicKeyBls:  r.mapPublicKeyBls,
+		MapAccountType:   mapAccountType,
+		MapNewDeviceKey:  r.mapNewDeviceKey,
+		MapCodeChange:    r.mapCodeChange,
 	}
 	return protoData
 }
@@ -261,6 +335,30 @@ func (r *ExecuteSCResult) FromProto(pbData *pb.ExecuteSCResult) {
 		r.eventLogs[idx].FromProto(eventLog)
 	}
 
+	r.mapNonce = pbData.MapNonce
+	r.mapFullDbLogs = pbData.MapFullDbLogs
+	r.mapPublicKeyBls = pbData.MapPublicKeyBls
+	r.mapNewDeviceKey = pbData.MapNewDeviceKey
+	r.mapCodeChange = pbData.MapCodeChange
+
+	if len(pbData.MapAccountType) > 0 {
+		r.mapAccountType = make(map[string]uint8, len(pbData.MapAccountType))
+		for k, v := range pbData.MapAccountType {
+			r.mapAccountType[k] = uint8(v)
+		}
+	}
+
+	if len(pbData.MapStorageChange) > 0 {
+		r.mapStorageChange = make(map[string]map[string][]byte, len(pbData.MapStorageChange))
+		for k, v := range pbData.MapStorageChange {
+			inner := make(map[string][]byte, len(v.Datas))
+			for _, data := range v.Datas {
+				inner[string(data.Key)] = data.Value
+			}
+			r.mapStorageChange[k] = inner
+		}
+	}
+
 }
 
 func (r *ExecuteSCResult) TransactionHash() common.Hash {
@@ -271,12 +369,24 @@ func (r *ExecuteSCResult) MapAddBalance() map[string][]byte {
 	return r.mapAddBalance
 }
 
+func (r *ExecuteSCResult) SetMapAddBalance(m map[string][]byte) {
+	r.mapAddBalance = m
+}
+
 func (r *ExecuteSCResult) MapSubBalance() map[string][]byte {
 	return r.mapSubBalance
 }
 
+func (r *ExecuteSCResult) SetMapSubBalance(m map[string][]byte) {
+	r.mapSubBalance = m
+}
+
 func (r *ExecuteSCResult) MapNonce() map[string][]byte {
 	return r.mapNonce
+}
+
+func (r *ExecuteSCResult) SetMapNonce(m map[string][]byte) {
+	r.mapNonce = m
 }
 
 func (r *ExecuteSCResult) MapStorageRoot() map[string][]byte {

@@ -81,7 +81,6 @@ func ClearMVMApi(mvmId common.Address) {
 
 | File | Hàm | Create | Protect | Clear | C++ Cancel | Verdict |
 |------|-----|--------|---------|-------|------------|---------|
-| `transaction_virtual_processor.go:68` | `ProcessSingleTransactionVirtual` | `GetOrCreateMVMApi` (L303, implicit via vmP) | `ProtectMVMApi` (L112) | `UnprotectMVMApi`(L189) + `ClearMVMApi` (L190) | Qua ClearMVMApi | ✅ |
 | `transaction_virtual_processor.go:427/441` | batchSubmit dry-run | `GetOrCreateMVMApi` (via vmP) | KHÔNG | `ClearMVMApi` (L427/441) | Qua ClearMVMApi | ✅ |
 
 ### Off-chain Execution
@@ -204,7 +203,7 @@ if tx.IsRegularTransaction() || tx.ToAddress() == ACCOUNT_SETTING {
 ```
 → `sendNative` luôn được gọi từ `ExecuteTransactionWithMvmId`, nơi mà khi `isCache=true`, `ProtectMVMApi + defer UnprotectMVMApi` đã được gọi trước đó (L114+119). CommitWorker sẽ clear.
 
-→ Khi `isCache=false` (Virtual Execution): `sendNative` return → `ExecuteTransactionWithMvmId` return → caller (`ProcessSingleTransactionVirtual`) sẽ gọi `ClearMVMApi` (L190).
+→ Khi `isCache=false` (Virtual Execution): `sendNative` return → `ExecuteTransactionWithMvmId` return → caller (Virtual Executor) sẽ gọi `ClearMVMApi`.
 
 **Kết luận BUG #1:** ⚠️ **Không nghiêm trọng trực tiếp** vì caller luôn clear, nhưng code **không tự chủ** (phụ thuộc caller), vi phạm nguyên tắc "resource owner cleans up". Nếu tương lai có caller mới quên clear → leak thật.
 
@@ -267,47 +266,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(...) (types.ExecuteSCResult, error
 
 **Kết luận:** Cùng BUG #2 — phụ thuộc `commitWorker` để clear.
 
----
 
-### BUG #4: Early return paths thiếu ClearMVMApi
-
-**File:** [transaction_virtual_processor.go:142-175](../execution/cmd/simple_chain/processor/transaction_virtual_processor.go#L142-L175)
-
-```go
-// Nếu TX revert:
-if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_THREW || ... {
-    return nil, fmt.Errorf("..."), exRs.Return()
-    // ❌ KHÔNG CÓ ClearMVMApi(mvmId)!
-    // ❌ KHÔNG CÓ UnprotectMVMApi(mvmId)!
-}
-// Nếu err != nil:
-if err != nil {
-    return nil, err, nil
-    // ❌ KHÔNG CÓ ClearMVMApi(mvmId)!
-}
-// Nếu exRs == nil:
-if exRs == nil {
-    return nil, fmt.Errorf("..."), nil
-    // ❌ KHÔNG CÓ ClearMVMApi(mvmId)!
-}
-
-// Chỉ clear ở happy path (L189-190):
-mvm.UnprotectMVMApi(mvmId)
-mvm.ClearMVMApi(mvmId)
-```
-
-**Vấn đề:**
-- `ProtectMVMApi(mvmId)` được gọi ở L112.
-- Nếu TX revert (L142) hoặc error (L168) hoặc exRs nil (L172) → return sớm → **KHÔNG gọi `UnprotectMVMApi` và `ClearMVMApi`**.
-- Instance bị **PROTECTED + không clear** = **permanent leak** (GC `RemoveOldApiInstances` skip protected instances!).
-
-**Mức độ nghiêm trọng:** 🐛 **NGHIÊM TRỌNG**
-- Protected instance **KHÔNG BAO GIỜ** được clear bởi GC (`RemoveOldApiInstances` skip protected).
-- C++ `MVM_cancelTransaction` không được gọi → dirty Xapian state.
-- Nếu cùng mvmId (= random address) được reuse (rất khó vì random) → không lệch hash.
-- Nhưng **bộ nhớ leak vĩnh viễn** cho mỗi failed virtual TX.
-
-**Tần suất:** Mỗi khi một virtual TX fail (revert, error, nil result) → +1 leaked entry.
 
 ---
 
@@ -328,23 +287,7 @@ mvm.ClearMVMApi(mvmId)
 
 ## 6. Khuyến nghị
 
-### 🔴 Priority 1 — Fix BUG #4 (Virtual Execution early return leak)
-
-**File:** `transaction_virtual_processor.go`
-
-Thêm `defer` cleanup ngay sau `ProtectMVMApi`:
-
-```go
-mvm.ProtectMVMApi(mvmId)
-defer func() {
-    mvm.UnprotectMVMApi(mvmId)
-    mvm.ClearMVMApi(mvmId)
-}()
-```
-
-Hoặc sử dụng pattern `defer cleanup` tại chỗ ProtectMVMApi (L112), xóa bỏ explicit clear ở L189-190.
-
-### 🟡 Priority 2 — Thêm defensive ClearMVMApi cho cross-chain handlers
+### 🔴 Priority 1 — Thêm defensive ClearMVMApi cho cross-chain handlers
 
 **Files:** `cross_chain_outbound.go`, `cross_chain_inbound.go`
 
@@ -356,7 +299,7 @@ defer mvm.ClearMVMApi(mvmId)
 
 ở cuối mỗi hàm handler, hoặc ở caller `HandleTransaction`.
 
-### 🟢 Priority 3 — Uncomment ClearMVMApi trong sendNative
+### 🟡 Priority 2 — Uncomment ClearMVMApi trong sendNative
 
 **File:** `vm_processor.go:687`
 
@@ -369,7 +312,7 @@ defer mvm.ClearMVMApi(mvmId)
 
 Giống pattern đã dùng ở `executeSmartContract` (L473-475) và `ExecuteNonceOnly` (L704-706).
 
-### 🔵 Priority 4 — Monitoring
+### 🟢 Priority 3 — Monitoring
 
 Thêm metric cho `apiInstanceCount` và `protectedApiInstances` count để phát hiện leak sớm.
 
@@ -379,9 +322,9 @@ Thêm metric cho `apiInstanceCount` và `protectedApiInstances` count để phá
 
 | Loại vấn đề | Số lượng | Nghiêm trọng nhất |
 |-------------|----------|--------------------|
-| Rò rỉ bộ nhớ (Go side) | 3 | BUG #4 — protected leak vĩnh viễn |
-| Rò rỉ C++ state | 1 | BUG #4 — MVM_cancelTransaction bị skip |
+| Rò rỉ bộ nhớ (Go side) | 2 | BUG #2 — rò rỉ bộ nhớ nhẹ |
+| Rò rỉ C++ state | 0 | Không có |
 | Lệch hash trực tiếp | 0 | Không tìm thấy fork risk trực tiếp |
 | Thiếu defensive cleanup | 4 hàm | Cross-chain handlers |
 
-> **Kết luận:** Code hiện tại **KHÔNG có bug gây fork trực tiếp** — C++ side (`processResult`) tự commit/cancel Xapian đúng. Vấn đề chính là **rò rỉ bộ nhớ Go** do thiếu `ClearMVMApi` ở error paths, đặc biệt BUG #4 gây **permanent protected leak** khi virtual TX fail.
+> **Kết luận:** Code hiện tại **KHÔNG có bug gây fork trực tiếp** — C++ side (`processResult`) tự commit/cancel Xapian đúng.

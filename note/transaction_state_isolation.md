@@ -11,7 +11,7 @@ In the Metanode Go execution engine, the validator node drives state changes via
 ### The Vulnerability
 
 When transactions are submitted to the node:
-1. The mempool validator performs **Virtual Execution** via `ProcessSingleTransactionVirtual` (or debug RPC via `ProcessTransactionDebug`) to validate balances, gas estimations, nonces, and collect `relatedAddresses` for sequential processing.
+1. The mempool validator performs **Virtual Execution** (or debug RPC via `ProcessTransactionDebug`) to validate balances, gas estimations, nonces, and collect `relatedAddresses` for sequential processing.
 2. In the vulnerable design, these dry-runs instantiated `VmProcessor` using the **live** `v.chainState` reference directly.
 3. During execution, if a smart contract calls custom database extension callbacks (e.g., calling `getOrCreateSimpleDb` or `deleteDb` registered under `extension.go`), the Go callback handlers retrieve the active `MVMApi` instance, obtain the bound `AccountStateDB`, and mark the account states as **dirty** using `mvmApi.accountStateDb.PublicSetDirtyAccountState(as)`.
 4. Because the live `AccountStateDB` was passed to the MVM instance, these dirty mock states contaminated the validator node's active memory trie cache.
@@ -21,7 +21,7 @@ When transactions are submitted to the node:
 ```
    [Contamination Flow (Vulnerable)]
    
-   Mempool / RPC Tx ──► ProcessSingleTransactionVirtual ──► VmProcessor
+   Mempool / RPC Tx ──► Virtual Execution ──► VmProcessor
                                                                 │ (Uses live chainState)
                                                                 ▼
    Active Tri Root ◄── Commit Block ◄── Mark Dirty ◄── PublicSetDirtyAccountState()
@@ -40,7 +40,7 @@ Instead of passing the active `v.chainState` directly to the `VmProcessor`, the 
 ```
                          [Isolated Sandbox Flow]
    
-   Mempool / RPC Tx ──► ProcessSingleTransactionVirtual
+   Mempool / RPC Tx ──► Virtual Execution
                                 │
                                 ├─► Fetch currentBlockHeader (Parent Root)
                                 ├─► blockchain.NewChainState(isolated clone)
@@ -106,9 +106,8 @@ sequenceDiagram
 
 ## 4. Specific Module Integration
 
-### A. Mempool Verification (`ProcessSingleTransactionVirtual`)
-* **Path**: `execution/cmd/simple_chain/processor/transaction_virtual_processor.go`
-* **Action**: Dynamically fetches the current header `v.chainState.GetcurrentBlockHeader()`, initializes an ephemeral `blockchain.NewChainState` with it, and feeds this sandboxed instance to the transaction processor.
+### A. Mempool Verification (Bypassed)
+* **Status**: Bypassed/Defunct. Standard EVM dry-runs for mempool validation have been removed because Block-STM parallel execution dynamically tracks read/write sets, eliminating the need for pre-computed static related addresses lists.
 
 ### B. Cross-Chain Target Simulations (`processBatchSubmitVirtual`)
 * **Path**: `execution/cmd/simple_chain/processor/transaction_virtual_processor.go`

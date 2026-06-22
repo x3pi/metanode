@@ -130,10 +130,6 @@ type SimpleChainConfig struct {
 	Securepassword                     string         `json:"securepassword"`
 	//
 	PkAdminFileStorage string `json:"pk_admin_file_storage"`
-	// Unix Domain Socket paths for communication with Rust MetaNode
-	RustSendSocketPath        string   `json:"rust_send_socket_path"`       // Socket để Go gửi data cho Rust
-	RustReceiveSocketPath     string   `json:"rust_receive_socket_path"`    // Socket để Go nhận data từ Rust
-	RustTxSocketPath          string   `json:"rust_tx_socket_path"`         // UDS path cho Go Sub gửi TX đến Rust consensus (mỗi node có path riêng)
 	RustConfigPath            string   `json:"rust_config_path,omitempty"`  // FFI: Path to Rust node-X.toml
 	ValidatorForwardAddresses []string `json:"validator_forward_addresses"` // TCP addresses of validator Go Subs for sync-only nodes (e.g., ["192.168.1.1:4200"])
 	MetaNodeRPCAddress        string   `json:"meta_node_rpc_address"`       // Address of Rust MetaNode RPC (fallback for TX)

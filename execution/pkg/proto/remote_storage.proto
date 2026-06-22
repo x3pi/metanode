@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package remote_storage;
 
-option go_package = "/proto"; // As per your provided file
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto"; // As per your provided file
 option java_package = "com.meta_node.protos.compiled.messages"; // As per your provided file
 
 // Messages for Remote Storage operations

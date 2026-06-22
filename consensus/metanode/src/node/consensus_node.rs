@@ -155,7 +155,6 @@ impl ConsensusNode {
             sync_task_handle: None,
             sync_controller: Arc::new(crate::node::sync_controller::SyncController::new(coordination_hub.clone())),
             epoch_monitor_handle: None,
-            notification_server_handle: None,
             executor_client: Some(consensus.executor_client_for_proc),
             epoch_pending_transactions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             committed_transaction_hashes: consensus.committed_transaction_hashes,

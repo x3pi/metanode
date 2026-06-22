@@ -1093,3 +1093,35 @@ func (db *AccountStateDB) CommitPayload() error {
 	}
 	return nil
 }
+
+// GetLoadedAccounts returns all accounts that were loaded (read) by this DB instance.
+// This is used for speculative execution validation (ReadSet extraction).
+func (db *AccountStateDB) GetLoadedAccounts() map[common.Address]types.AccountState {
+	res := make(map[common.Address]types.AccountState)
+	db.loadedAccounts.Range(func(address common.Address, state types.AccountState) bool {
+		res[address] = state
+		return true
+	})
+	return res
+}
+
+// GetDirtyAccounts returns all accounts that were marked as dirty by this DB instance.
+// This is used for speculative execution validation (WriteSet extraction).
+func (db *AccountStateDB) GetDirtyAccounts() map[common.Address]types.AccountState {
+	res := make(map[common.Address]types.AccountState)
+	db.dirtyAccounts.Range(func(address common.Address, state types.AccountState) bool {
+		res[address] = state
+		return true
+	})
+	return res
+}
+
+// InjectLoadedAccount injects a speculative account state directly into the loadedAccounts cache.
+// This is critical for Block-STM so that accepted writes from earlier transactions in the block
+// can be passed to subsequent transactions as read-only state without polluting their dirty (write) sets.
+func (db *AccountStateDB) InjectLoadedAccount(as types.AccountState) {
+	if as != nil {
+		db.loadedAccounts.Store(as.Address(), as)
+	}
+}
+

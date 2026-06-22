@@ -302,6 +302,15 @@ func (sm *StorageManager) GetStorageStake() Storage {
 
 }
 
+func (sm *StorageManager) GetMemTableSize() uint64 {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.sharedDB != nil {
+		return sm.sharedDB.MemTableSize()
+	}
+	return 0
+}
+
 // CloseAll đóng tất cả các database trong StorageManager
 func (sm *StorageManager) CloseAll() error {
 	sm.mu.Lock()

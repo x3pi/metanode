@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-17
+> **Last updated:** 2026-06-19
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -290,23 +290,23 @@ metanode/
 
 | Crate | Role |
 |-------|------|
-| `meta-protocol-config` | [DELETED] | ❌ OBSOLETE 
+| `meta-protocol-config` | Protocol version configuration |
 | `meta-protocol-config-macros` | Procedural macros for protocol config |
-| `meta-macros` | [DELETED] | ❌ OBSOLETE 
+| `meta-macros` | Shared macro utilities |
 | `meta-proc-macros` | Procedural macros |
 | `meta-http` | Shared HTTP client/server utilities |
 | `meta-tls` | TLS configuration |
-| `meta-enum-compat-util` | [DELETED] | ❌ OBSOLETE 
+| `meta-enum-compat-util` | Compatibility utilities for enums |
 | `mysten-common` | Common utilities (origin: Sui/Mysten Labs) |
-| `mysten-metrics` | [DELETED] | ❌ OBSOLETE 
+| `mysten-metrics` | Prometheus metrics integration |
 | `mysten-network` | Network types (origin: Sui/Mysten Labs) |
-| `shared-crypto` | [DELETED] | ❌ OBSOLETE 
+| `shared-crypto` | Cryptographic primitives (BLS12-381/Ed25519) |
 | `typed-store` | Type-safe RocksDB wrapper |
-| `typed-store-derive` | [DELETED] | ❌ OBSOLETE 
+| `typed-store-derive` | Derive macros for typed-store |
 | `typed-store-error` | Error types for typed-store |
-| `typed-store-workspace-hack` | [DELETED] | ❌ OBSOLETE 
+| `typed-store-workspace-hack` | Cargo workspace hack utility crate |
 | `telemetry-subscribers` | Tracing/telemetry subscribers |
-| `prometheus-closure-metric` | [DELETED] | ❌ OBSOLETE 
+| `prometheus-closure-metric` | Prometheus closure helper metrics library |
 | `metanode-keytool` | **Library & CLI tool** — generate BLS12-381/Ed25519/ETH keys for validators. Also integrated as a subcommand under the main `metanode` CLI. |
 
 ---

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,12 +16,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 
@@ -492,139 +488,34 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 
 	for _, tx := range transactions {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BATCH_UNMARSHALED", "Transaction received in batch from client")
-		
-		// Always save txHash → connection mapping for txHash-based receipt delivery and timing traces
-		if tp.env != nil {
-			tp.env.StoreTxHashConnEntry(tx.Hash(), TxHashConnEntry{
-				Conn:      request.Connection(),
-				MsgID:     request.Message().ID(),
-				CreatedAt: time.Now(),
-			})
-		}
 	}
 
 	t1 := time.Now()
-	// ═══════════════════════════════════════════════════════════════════════
-	// OPTIMIZED PARALLEL VIRTUAL EXECUTION WITH EVM SERIALIZATION:
-	//
-	// Previously: Sequentially evaluated virtual execution to avoid C++ State::instances races.
-	// Now: Run non-EVM transactions (quick path) in parallel with no locks.
-	// Any EVM transactions (contract calls) still acquire the internal virtualEvmMutex
-	// in ProcessSingleTransactionVirtual, keeping them safe from concurrent MVM calls.
-	// This yields 10x-50x speedups for simple/BLS transaction batches under stress loads.
-	// ═══════════════════════════════════════════════════════════════════════
-	concurrency := runtime.NumCPU()
-	if concurrency < 4 {
-		concurrency = 4
-	}
-	if concurrency > len(transactions) {
-		concurrency = len(transactions)
-	}
-
-	txPtr := txListPool.Get().(*[]types.Transaction)
-	processedTransactions := *txPtr
-	if cap(processedTransactions) < len(transactions) {
-		processedTransactions = make([]types.Transaction, len(transactions))
-	} else {
-		processedTransactions = processedTransactions[:len(transactions)]
-	}
-
-	errPtr := errListPool.Get().(*[]error)
-	errorsList := *errPtr
-	if cap(errorsList) < len(transactions) {
-		errorsList = make([]error, len(transactions))
-	} else {
-		errorsList = errorsList[:len(transactions)]
-		for i := range errorsList {
-			errorsList[i] = nil
-		}
-	}
-
-	var wg sync.WaitGroup
-	var nextIdx uint32
-
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	fileAbi, _ := file_handler.GetFileAbi()
-	ownerFileStorageAddr := common.HexToAddress(tp.chainState.GetConfig().OwnerFileStorageAddress)
-	predictedFileContractAddr := file_handler.PredictContractAddress(ownerFileStorageAddr)
-
-	for w := 0; w < concurrency; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-				if idx >= len(transactions) {
-					break
-				}
-				tx := transactions[idx]
-				needsVirtual := true
-				// 1. Account setting TXs
-				if tx.ToAddress() == accountSettingAddr {
-					needsVirtual = false
-				}
-				// 2. Validator staking TXs
-				if tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
-					needsVirtual = false
-				}
-				// 3. Simple value transfers (no call contract, no deploy)
-				if !tx.IsCallContract() && !tx.IsDeployContract() {
-					needsVirtual = false
-				}
-				// 4. File upload chunks
-				if tx.ToAddress() == predictedFileContractAddr {
-					if name, _ := fileAbi.ParseMethodName(tx); name == "uploadChunk" {
-						needsVirtual = false
-					}
-				}
-
-				if !needsVirtual {
-					tx.AddRelatedAddress(tx.FromAddress())
-					tx.AddRelatedAddress(tx.ToAddress())
-					processedTransactions[idx] = tx
-					continue
-				}
-
-				tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution in batch")
-				updatedTx, err, _ := tp.ProcessSingleTransactionVirtual(tx)
-				if err != nil {
-					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
-					errorsList[idx] = err
-				} else {
-					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution in batch")
-					processedTransactions[idx] = updatedTx
-				}
-			}
-		}()
-	}
-	wg.Wait()
-
 	var processedTxs []types.Transaction
 	var droppedVirtualCount int
-	for i, pTx := range processedTransactions {
-		if errorsList[i] != nil {
-			err := errorsList[i]
-			// Disabled my_debug.log writing
-			logger.Warn("Dropped transaction from batch during virtual execution: hash=%s, err=%v", transactions[i].Hash().Hex(), err)
-			droppedVirtualCount++
-		} else if pTx != nil {
-			processedTxs = append(processedTxs, pTx)
+
+	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
+
+	for _, tx := range transactions {
+		tx.AddRelatedAddress(tx.FromAddress())
+		tx.AddRelatedAddress(tx.ToAddress())
+
+		// Check cross-chain batchSubmit
+		if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
+			inputData := tx.CallData().Input()
+			if ccHandler.IsBatchSubmitTx(inputData) {
+				updatedTx, err, _ := tp.processBatchSubmitVirtual(tx, inputData)
+				if err != nil {
+					logger.Warn("Dropped transaction from batch during virtual execution: hash=%s, err=%v", tx.Hash().Hex(), err)
+					droppedVirtualCount++
+					continue
+				}
+				tx = updatedTx
+			}
 		}
+		processedTxs = append(processedTxs, tx)
 	}
 	virtualExecDuration := time.Since(t1)
-
-	// Trả memory lại cho Pool để giảm GC pressure
-	for i := range processedTransactions {
-		processedTransactions[i] = nil
-	}
-	*txPtr = processedTransactions
-	txListPool.Put(txPtr)
-
-	for i := range errorsList {
-		errorsList[i] = nil
-	}
-	*errPtr = errorsList
-	errListPool.Put(errPtr)
 
 	queueFullErrs := 0
 
@@ -666,26 +557,10 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	logger.Info("🔥 ProcessTransactionsFromClient: Added batch to pool. Total errors: %d", queueFullErrs)
 
 	elapsed := time.Since(startTime)
-	pipeline.LastClientBatchProcessingMs.Store(elapsed.Milliseconds())
 	if elapsed > 10*time.Millisecond {
-		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual_exec=%v, add_to_pool=%v) for %d txs", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration, len(transactions))
+		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual=%v, pool=%v)", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration)
 	}
-	// else {
-	// 	logger.Info("⏱️  [PERF-CLIENT-BATCH] ProcessTransactionsFromClient took %v (unmarshal=%v, virtual_exec=%v, add_to_pool=%v) for %d txs", elapsed, unmarshalDuration, virtualExecDuration, addToPoolDuration, len(transactions))
-	// }
-
-	if queueFullErrs > 0 {
-		logger.Warn("Dropped %d transactions from batch due to pool rejection", queueFullErrs)
-		return fmt.Errorf("dropped %d txs", queueFullErrs)
-	}
-
 	return nil
-}
-
-// `ProcessReadTransactionsFromSub` (Producer) gửi kết quả vào channel
-func (tp *TransactionProcessor) ProcessReadTransactionsFromSub() {
-	// NOT USED ANYMORE IN ITransactionProcessorEnvironment
-	// It will be separated. Currently disabled for Sub Node fast sync optimization.
 }
 
 func (tp *TransactionProcessor) processTransactionFromClient(
@@ -705,55 +580,24 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
 
-	// ═══════════════════════════════════════════════════════════════════
-	// FAST PATH: Skip expensive virtual EVM execution for simple TXs.
-	// ProcessSingleTransactionVirtual takes ~10ms per TX, which is the
-	// main bottleneck for injection throughput. These TX types don't
-	// need virtual execution:
-	//   1. Account setting TXs (BLS registration, account type changes)
-	//   2. Validator staking TXs
-	//   3. Simple value transfers (no contract call, no deploy)
-	// ═══════════════════════════════════════════════════════════════════
-	needsVirtualExecution := true
+	tx.AddRelatedAddress(tx.FromAddress())
+	tx.AddRelatedAddress(tx.ToAddress())
 
-	// Skip for account setting TXs (BLS key registration, etc.)
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	if tx.ToAddress() == accountSettingAddr {
-		needsVirtualExecution = false
-	}
-
-	// Skip for validator staking TXs
-	if tx.ToAddress() == mt_common.VALIDATOR_CONTRACT_ADDRESS {
-		needsVirtualExecution = false
-	}
-
-	// Skip for simple value transfers (not a contract call, not a deploy)
-	if !tx.IsCallContract() && !tx.IsDeployContract() {
-		needsVirtualExecution = false
-	}
-
-	// Skip for file upload chunks (existing logic)
-	fileAbi, _ := file_handler.GetFileAbi()
-	name, _ := fileAbi.ParseMethodName(tx)
-	if tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(tp.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk" {
-		needsVirtualExecution = false
-	}
-
-	if needsVirtualExecution {
-		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_START", "Starting off-chain virtual EVM execution")
-		updatedTx, err, output := tp.ProcessSingleTransactionVirtual(tx)
-		if err != nil {
-			tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_FAILED", err.Error())
-			logger.Error("ProcessSingleTransactionVirtual failed: ", err)
-			tp.sendTransactionError(conn, tx.Hash(), -1, err.Error(), output, msgID)
-			return err
+	// Check cross-chain batchSubmit
+	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
+	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
+		inputData := tx.CallData().Input()
+		if ccHandler.IsBatchSubmitTx(inputData) {
+			updatedTx, err, output := tp.processBatchSubmitVirtual(tx, inputData)
+			if err != nil {
+				logger.Error("processBatchSubmitVirtual failed: ", err)
+				tp.sendTransactionError(conn, tx.Hash(), -1, err.Error(), output, msgID)
+				return err
+			}
+			tx = updatedTx
 		}
-		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "VIRTUAL_EXECUTION_DONE", "Finished off-chain virtual execution")
-		tx = updatedTx
-	} else {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
 	}
+
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
 	code, err := tp.AddTransactionToPool(tx)
 	if err != nil {
@@ -768,21 +612,27 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	tp.sendTransactionResult(conn, tx.Hash(), msgID)
 	return nil
 }
+
 func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) ([]byte, error) {
 	var output []byte
-	fileAbi, _ := file_handler.GetFileAbi()
-	name, _ := fileAbi.ParseMethodName(tx)
-	if !(tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(tp.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk") {
-		updatedTx, err, output := tp.ProcessSingleTransactionVirtual(tx)
-		if err != nil {
-			logger.Error("ProcessSingleTransactionVirtual failed: ", err)
-			return output, err
+	tx.AddRelatedAddress(tx.FromAddress())
+	tx.AddRelatedAddress(tx.ToAddress())
+
+	// Check cross-chain batchSubmit
+	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
+	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
+		inputData := tx.CallData().Input()
+		if ccHandler.IsBatchSubmitTx(inputData) {
+			updatedTx, err, out := tp.processBatchSubmitVirtual(tx, inputData)
+			if err != nil {
+				logger.Error("processBatchSubmitVirtual failed: ", err)
+				return out, err
+			}
+			tx = updatedTx
+			output = out
 		}
-		tx = updatedTx
-	} else {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
 	}
+
 	_, err := tp.AddTransactionToPool(tx)
 	if err != nil {
 		logger.Error("AddTransactionToPool failed: ", err)

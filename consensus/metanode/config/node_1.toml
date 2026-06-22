@@ -1,5 +1,4 @@
 node_id = 1
-rust_tx_socket_path = "/tmp/metanode-tx-1.sock"
 network_address = "127.0.0.1:9001"
 protocol_key_path = "../../../consensus/metanode/config/node_1_protocol_key.json"
 network_key_path = "../../../consensus/metanode/config/node_1_network_key.json"
@@ -17,8 +16,6 @@ ntp_servers = [
 ntp_sync_interval_seconds = 300
 executor_read_enabled = true
 executor_commit_enabled = true
-executor_send_socket_path = "/tmp/executor1.sock"
-executor_receive_socket_path = "/tmp/rust-go-node1-master.sock"
 commit_sync_batch_size = 500
 commit_sync_parallel_fetches = 32
 commit_sync_batches_ahead = 128

@@ -22,15 +22,19 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
-	client "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
+
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/command"
 	c_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/cmd/tool/tps_blast/rpc"
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 )
 
 type AccountInfo struct {
@@ -159,6 +163,7 @@ func main() {
 	skipVerify := flag.Bool("skip-verify", false, "Skip per-account verification (faster exit for blast scripts)")
 	rpcAddr := flag.String("rpc", "", "Target RPC URL for verification (default: auto from config IP:8757)")
 	waitFile := flag.String("wait-file", "", "Wait for this file to exist before starting blast (for syncing multi-clients)")
+noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not poll chain for completion")
 	flag.Parse()
 
 	logger.SetConfig(&logger.LoggerConfig{Flag: 0})
@@ -236,8 +241,24 @@ func main() {
 	var buildErrors int
 
 	for _, acc := range toSend {
-		// 1. Create signed EthTx for setBlsPublicKey
-		ethTx, err := client.CreateSignedSetBLSPublicKeyTx(acc.PrivateKey, blsPubKey, bigChainId, 0)
+		// 1. Create a BLS Registration transaction, but send to ITSELF to avoid shared state
+		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(acc.PrivateKey, "0x"))
+		if err != nil {
+			buildErrors++
+			continue
+		}
+		
+		blsPubKeyBytes, _ := hex.DecodeString(strings.TrimPrefix(blsPubKey, "0x"))
+		abiJSON := `[{"inputs":[{"internalType":"bytes","name":"publicKey","type":"bytes"}],"name":"setBlsPublicKey","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`
+		parsedABI, _ := abi.JSON(strings.NewReader(abiJSON))
+		dataTx, _ := parsedABI.Pack("setBlsPublicKey", blsPubKeyBytes)
+		
+		// Gửi đến ACCOUNT_SETTING_ADDRESS_SELECT
+		toAddr := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+		
+		tx := e_types.NewTransaction(0, toAddr, big.NewInt(0), 1000000000, big.NewInt(100000), dataTx)
+		signer := e_types.LatestSignerForChainID(bigChainId)
+		ethTx, err := e_types.SignTx(tx, signer, privateKey)
 		if err != nil {
 			buildErrors++
 			continue
@@ -457,6 +478,12 @@ func main() {
 
 	fmt.Printf("\n\n  📤 Injected: %d TXs in %s\n", len(allTxs), blastDuration.Round(time.Millisecond))
 	fmt.Printf("  🚀 Injection TPS: %.0f tx/s\n", injectionTPS)
+
+	if *noWait {
+		fmt.Printf("\n  🚀 Injection complete. Waiting 1s to ensure TCP flush, then exiting due to -no-wait.\n")
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}
 
 	// ─── Poll for completion using block-based monitoring ────
 	// Wait until chain stops producing blocks with TXs (mempool empty)
