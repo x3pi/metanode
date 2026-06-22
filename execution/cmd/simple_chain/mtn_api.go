@@ -682,6 +682,9 @@ func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[st
 	var totalMempool, totalConsensus, totalExecution, totalEndToEnd int64
 	var countMempool, countConsensus, countExecution, countEndToEnd int
 
+	var earliestReceipt int64 = -1
+	var latestReceipt int64 = -1
+
 	// Calculate average latencies
 	for _, traceObj := range traces {
 		var tInjection, tForward, tConsensus, tReceipt int64
@@ -713,6 +716,13 @@ func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[st
 		if tInjection > 0 && tReceipt >= tInjection {
 			totalEndToEnd += (tReceipt - tInjection)
 			countEndToEnd++
+			
+			if earliestReceipt == -1 || tReceipt < earliestReceipt {
+				earliestReceipt = tReceipt
+			}
+			if latestReceipt == -1 || tReceipt > latestReceipt {
+				latestReceipt = tReceipt
+			}
 		}
 	}
 
@@ -736,8 +746,17 @@ func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[st
 		avgEndToEnd = float64(totalEndToEnd) / float64(countEndToEnd)
 	}
 
+	tps := 0.0
+	if latestReceipt > earliestReceipt && countEndToEnd > 1 {
+		diffSecs := float64(latestReceipt - earliestReceipt) / 1000.0
+		if diffSecs > 0 {
+			tps = float64(countEndToEnd) / diffSecs
+		}
+	}
+
 	return map[string]interface{}{
 		"analyzedTxCount": len(traces),
+		"tps":             tps,
 		"avgMempoolMs":    avgMempool,
 		"avgConsensusMs":  avgConsensus,
 		"avgExecutionMs":  avgExecution,
