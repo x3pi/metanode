@@ -473,3 +473,50 @@ func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock u
 
 	return result
 }
+
+// PruneBeforeBlock deletes all changelog entries strictly BEFORE targetBlock,
+// except block 0 which contains the genesis state marker.
+// targetBlock should be the boundary block of the epoch we want to keep.
+func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
+	addresses, err := c.GetAllUniqueAddresses()
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	batch := c.db.NewBatch()
+	defer batch.Close()
+
+	count := 0
+	for _, addr := range addresses {
+		// startKey for block 1 (block 0 is preserved)
+		startKey := c.encodeKey(addr, 1)
+		// endKey for targetBlock (DeleteRange is exclusive, so it deletes < targetBlock)
+		endKey := c.encodeKey(addr, targetBlock)
+
+		// Pebble DeleteRange handles the range deletion efficiently
+		if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
+			return err
+		}
+		count++
+		
+		// Periodically commit the batch to prevent memory blowup
+		if count%10000 == 0 {
+			if err := batch.Commit(pebble.Sync); err != nil {
+				return err
+			}
+			batch.Reset()
+		}
+	}
+
+	if count%10000 != 0 {
+		if err := batch.Commit(pebble.Sync); err != nil {
+			return err
+		}
+	}
+
+	logger.Info("🧹 [CHANGELOG] Pruned history before block %d for %d unique addresses in namespace %s", targetBlock, count, c.namespace)
+	return nil
+}
