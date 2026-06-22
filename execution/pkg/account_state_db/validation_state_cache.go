@@ -5,6 +5,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -83,7 +84,7 @@ func (v *ValidationStateCache) ApplyWrites(dirtyAccounts map[common.Address]type
 }
 
 func (v *ValidationStateCache) CheckConflict(readAccounts map[common.Address]types.AccountState, readStorage map[common.Address][]string) bool {
-	conflictFreeAddr := common.HexToAddress("0x00000000000000000000000000000000D844bb55")
+	conflictFreeAddr := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	for addr := range readAccounts {
 		if addr == conflictFreeAddr {
 			continue // Skip conflict check for the special contract
@@ -108,9 +109,23 @@ func (v *ValidationStateCache) CheckConflict(readAccounts map[common.Address]typ
 }
 
 func (v *ValidationStateCache) FlushToGlobal() error {
+	accs := make([]types.AccountState, 0, len(v.acceptedAccounts))
 	for _, acc := range v.acceptedAccounts {
-		v.parentAccountDB.SetState(acc)
+		accs = append(accs, acc)
 	}
+	
+	// Atomic batch memory write if the implementation supports it
+	if accountDB, ok := v.parentAccountDB.(interface{
+		PublicSetDirtyAccountStateBatch([]types.AccountState)
+	}); ok {
+		accountDB.PublicSetDirtyAccountStateBatch(accs)
+	} else {
+		for _, acc := range accs {
+			v.parentAccountDB.SetState(acc)
+		}
+	}
+
+	// Flush storage
 	for addr, keysMap := range v.acceptedStorage {
 		for kStr, val := range keysMap {
 			v.parentSmartContractDB.SetStorageValue(addr, []byte(kStr), val)
