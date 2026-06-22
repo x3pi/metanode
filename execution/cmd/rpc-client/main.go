@@ -1156,6 +1156,18 @@ func main() {
 		}
 	}
 
+	modifyResponse := func(resp *http.Response) error {
+		resp.Header.Del("Access-Control-Allow-Origin")
+		resp.Header.Del("Access-Control-Allow-Methods")
+		resp.Header.Del("Access-Control-Allow-Headers")
+		resp.Header.Del("Access-Control-Allow-Credentials")
+		return nil
+	}
+	defaultProxy.ModifyResponse = modifyResponse
+	if readonlyProxy != nil {
+		readonlyProxy.ModifyResponse = modifyResponse
+	}
+
 	clientRpc, err := rpc_client.NewClientRPC(cfg.RPCServerURL, cfg.WSSServerURL, cfg.PrivateKey, cfg.ChainId)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to create NewClientRPC: %v", err)
@@ -1493,7 +1505,12 @@ func logRequestResponseMiddleware(next http.Handler) http.Handler {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, HEAD")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
