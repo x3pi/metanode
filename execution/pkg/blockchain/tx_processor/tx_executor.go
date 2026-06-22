@@ -107,6 +107,28 @@ func processSingleGroup(
 			continue
 		}
 
+		// EARLY-ABORT SIGNAL CHECK
+		// ---------------------------------------------------------------------
+		// If the context is canceled (e.g., from Block-STM detecting a conflict
+		// in a concurrent group), we abort processing this group immediately.
+		select {
+		case <-ctx.Done():
+			logger.Debug("🛑 [EARLY-ABORT] Group aborted due to context cancellation")
+			*txPtr = gRs.Transactions
+			*rcpPtr = gRs.Receipts
+			*exPtr = gRs.ExecuteSCResults
+			*mvmMapPtr = gRs.MvmIdMap
+			return groupResultExt{
+				txPtr:         txPtr,
+				rcpPtr:        rcpPtr,
+				exPtr:         exPtr,
+				mvmPtr:        mvmMapPtr,
+				Error:         ctx.Err(),
+			}
+		default:
+		}
+		// ---------------------------------------------------------------------
+
 		// NOTE: VerifyTransaction skipped here — TXs from Rust consensus were already
 		// verified by go-sub (AddTransactionToPool) before entering the pool.
 		// Skipping saves signature verification + nonce check per TX.

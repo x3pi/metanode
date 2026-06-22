@@ -289,6 +289,15 @@ func NewChainStateWithGenesis(
 	headerCopy := currentBlockHeader
 	cs.currentBlockHeader.Store(&headerCopy)
 
+	// START SCRUBBER (Priority 3)
+	if accountDB := cs.GetAccountStateDB(); accountDB != nil {
+		if trieDB := accountDB.Trie(); trieDB != nil {
+			// Run a deep integrity check every 24 hours
+			scrubber := NewScrubber(trieDB, 24*time.Hour)
+			scrubber.Start()
+		}
+	}
+
 	return cs, nil // Trả về ChainState đã tạo và nil error
 }
 
