@@ -98,12 +98,11 @@ log_ok "rpc-client-bin and TLS certs copied to release."
 log_step "Collecting Scripts & Configurations"
 cd "$SCRIPT_DIR"
 
-# Copy genesis
-if [ -f "genesis-main.json" ]; then
-    cp genesis-main.json "$RELEASE_DIR/configs/genesis.json"
-    log_ok "Genesis file copied."
+# Copy genesis template
+if [ -f "genesis.json.example" ]; then
+    cp genesis.json.example "$RELEASE_DIR/configs/genesis.json"
 else
-    log_info "Warning: genesis-main.json not found in deploy/, skipping."
+    log_info "Warning: genesis.json.example not found in deploy/, skipping."
 fi
 
 # Copy RPC config templates

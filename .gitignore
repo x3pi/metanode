@@ -200,7 +200,6 @@ consensus/metanode/scripts/node/setup_node_*.sh
 # GCP service accounts and secrets
 /gen_bls
 # Generic secrets files
-# ===== Genesis (large generated file, use genesis-main.json for source) =====
 # Go binaries
 # Go binary (built separately, should not be in Rust repo)
 **/*.gz
@@ -475,4 +474,3 @@ deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
 
 # Genesis dynamically generated files
 deploy/systemd/genesis.json
-deploy/systemd/genesis-main.json
