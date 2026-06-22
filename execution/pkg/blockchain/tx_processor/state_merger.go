@@ -19,6 +19,7 @@ func mergeMvmResults(results []types.ExecuteSCResult, coinbase common.Address) t
 	mapSubBalance := make(map[string][]byte)
 	mapNonce := make(map[string][]byte)
 	mapCodeHash := make(map[string][]byte)
+	mapCodeChange := make(map[string][]byte)
 	mapStorageRoot := make(map[string][]byte)
 	mapStorageAddress := make(map[string]common.Address)
 	mapCreatorPubkey := make(map[string][]byte)
@@ -36,6 +37,7 @@ func mergeMvmResults(results []types.ExecuteSCResult, coinbase common.Address) t
 		
 		for k, v := range res.MapNonce() { mapNonce[k] = v }
 		for k, v := range res.MapCodeHash() { mapCodeHash[k] = v }
+		for k, v := range res.MapCodeChange() { mapCodeChange[k] = v }
 		for k, v := range res.MapStorageRoot() { mapStorageRoot[k] = v }
 		for k, v := range res.MapStorageAddress() { mapStorageAddress[k] = v }
 		for k, v := range res.MapCreatorPubkey() { mapCreatorPubkey[k] = v }
@@ -69,6 +71,7 @@ func mergeMvmResults(results []types.ExecuteSCResult, coinbase common.Address) t
 	)
 	
 	merged.SetMapStorageChange(mapStorageChange)
+	merged.SetMapCodeChange(mapCodeChange)
 	merged.SetMapPublicKeyBls(mapPublicKeyBls)
 	merged.SetMapAccountType(mapAccountType)
 	merged.SetMapNewDeviceKey(mapNewDeviceKey)
@@ -184,6 +187,12 @@ func applyMergedExecuteResult(
 				asState.SetStorageAddress(storageAddr)
 				asState.SetCodeHash(common.BytesToHash(codeHashBytes))
 				accDB.SetState(asState)
+			}
+			
+			if mapCodeChange := exRs.MapCodeChange(); mapCodeChange != nil {
+				if code, ok := mapCodeChange[address]; ok {
+					scDB.SetCode(fmtAddress, common.BytesToHash(codeHashBytes), code)
+				}
 			}
 		}
 	}

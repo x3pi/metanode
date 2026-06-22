@@ -121,6 +121,29 @@ func main() {
 	datas := loadTransactionData()
 	fmt.Printf("📄 Loaded %d transaction(s) from %s\n", len(datas), DATA_FILE_PATH)
 
+	// Validate transaction addresses
+	addressError := false
+	for i, data := range datas {
+		if !validateEthAddress(data.FromAddress, "from_address", i) {
+			addressError = true
+		}
+		if !validateEthAddress(data.Address, "address", i) {
+			addressError = true
+		}
+		if !validateEthAddress(data.StorageAddress, "storage_address", i) {
+			addressError = true
+		}
+		for j, relAddr := range data.RelatedAddress {
+			if !validateEthAddress(relAddr, fmt.Sprintf("related_address[%d]", j), i) {
+				addressError = true
+			}
+		}
+	}
+	if addressError {
+		fmt.Println("❌ [CRITICAL] Dừng thực thi do phát hiện địa chỉ không đúng chuẩn Ethereum (Severe Address Format Error).")
+		os.Exit(1)
+	}
+
 	// Initialize client
 	fmt.Printf("🔌 Connecting to node at %s...\n", config.ParentConnectionAddress)
 	c, err := client.NewClient(config)
@@ -199,6 +222,27 @@ func loadTransactionData() []SCData {
 	return datas
 }
 
+func validateEthAddress(addr string, fieldName string, index int) bool {
+	// For "address" and "storage_address", empty or "0" is acceptable as placeholders.
+	if (fieldName == "address" || fieldName == "storage_address") && (addr == "" || addr == "0") {
+		return true
+	}
+
+	isStandard := strings.HasPrefix(addr, "0x") || strings.HasPrefix(addr, "0X")
+	if isStandard {
+		isStandard = len(addr) == 42 && common.IsHexAddress(addr)
+	}
+
+	if isStandard {
+		fmt.Printf("✅ [SUCCESS] Address %s (%s ở index %d) đúng chuẩn địa chỉ Ethereum.\n", addr, fieldName, index)
+		return true
+	} else {
+		fmt.Printf("⚠️  [WARNING] Address %s (%s ở index %d) KHÔNG đúng chuẩn địa chỉ Ethereum!\n", addr, fieldName, index)
+		fmt.Printf("🚨 [SEVERE ERROR] Invalid Ethereum address format: %s. Đây là lỗi nghiêm trọng!\n", addr)
+		return false
+	}
+}
+
 func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCData) {
 	var lastDeployedAddress common.Address
 	totalStart := time.Now()
@@ -218,6 +262,8 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 	// Variables for tracking async hashes
 	var submittedHashes []common.Hash
 	var submittedTxActions []string
+	expectedDeployAddresses := make(map[common.Hash]common.Address)
+	ethStdDeployAddresses := make(map[common.Hash]common.Address)
 
 	for i, data := range datas {
 		fmt.Printf("\n──────────────────────────────────────\n")
@@ -239,13 +285,19 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 
 		var toAddress common.Address
 		var bData []byte
+		var deployedAddr common.Address
 
 		// Process input bytes
 		inputBytes := common.FromHex(data.Input)
 
 		switch data.Action {
 		case "deploy":
-			deployedAddr := crypto.CreateAddress(fromAddress, currentNonce)
+			if len(inputBytes) == 0 {
+				fmt.Printf("  ❌ Deploy failed: bytecode (input) is empty or invalid hex!\n")
+				failCount++
+				continue
+			}
+			deployedAddr = crypto.CreateAddress(fromAddress, currentNonce+1)
 			lastDeployedAddress = deployedAddr
 			fmt.Printf("  📋 From:              %s\n", fromAddress.Hex())
 			fmt.Printf("  📋 Predicted address:  %s\n", deployedAddr.Hex())
@@ -422,6 +474,11 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			continue
 		}
 
+		if data.Action == "deploy" {
+			expectedDeployAddresses[tx.Hash()] = deployedAddr
+			ethStdDeployAddresses[tx.Hash()] = crypto.CreateAddress(fromAddress, currentNonce)
+		}
+
 		// Update local nonce for sequence on success
 		currentNonce++
 
@@ -476,9 +533,33 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 		if status == pb.RECEIPT_STATUS_RETURNED {
 			successCount++
 			if data.Action == "deploy" {
-				fmt.Printf("  📋 Deployed to: %s\n", lastDeployedAddress.Hex())
+				expectedAddr := expectedDeployAddresses[tx.Hash()]
+				ethStdAddr := ethStdDeployAddresses[tx.Hash()]
+				if len(receipt.Return()) == 20 {
+					actualAddr := common.BytesToAddress(receipt.Return())
+					fmt.Printf("  📋 Actually Deployed to (from receipt): %s\n", actualAddr.Hex())
+					fmt.Printf("  📋 Predicted (Metanode Standard):       %s\n", expectedAddr.Hex())
+					fmt.Printf("  📋 Ethereum Standard Calculated:        %s\n", ethStdAddr.Hex())
+					if actualAddr != expectedAddr {
+						fmt.Printf("  ❌ ERROR: Address mismatch! Receipt address does not match predicted address!\n")
+					} else {
+						fmt.Printf("  ✅ SUCCESS: Address matches predicted calculation!\n")
+					}
+					lastDeployedAddress = actualAddr
+				} else {
+					fmt.Printf("  ⚠️  WARNING: Receipt returned data length is %d (expected 20 bytes for contract address). Using predicted address: %s\n", len(receipt.Return()), expectedAddr.Hex())
+					lastDeployedAddress = expectedAddr
+				}
 				fmt.Printf("  ⏳ Waiting 500ms for state propagation...\n")
 				time.Sleep(500 * time.Millisecond)
+
+				// Verify deployment
+				asContract, _ := c.AccountState(lastDeployedAddress)
+				if asContract != nil {
+					fmt.Printf("  🔍 Contract Nonce at predicted addr: %v\n", asContract.Nonce())
+				} else {
+					fmt.Printf("  ❌ Contract AccountState is NIL!\n")
+				}
 			} else if len(receipt.Return()) > 0 {
 				fmt.Printf("  📋 Return data: %s\n", hex.EncodeToString(receipt.Return()))
 			}
@@ -531,7 +612,23 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			if status == pb.RECEIPT_STATUS_RETURNED {
 				successCount++
 				if action == "deploy" {
-					fmt.Printf("  📋 Deployed to: %s\n", lastDeployedAddress.Hex())
+					expectedAddr := expectedDeployAddresses[hash]
+					ethStdAddr := ethStdDeployAddresses[hash]
+					if len(receipt.Return()) == 20 {
+						actualAddr := common.BytesToAddress(receipt.Return())
+						fmt.Printf("  📋 Actually Deployed to (from receipt): %s\n", actualAddr.Hex())
+						fmt.Printf("  📋 Predicted (Metanode Standard):       %s\n", expectedAddr.Hex())
+						fmt.Printf("  📋 Ethereum Standard Calculated:        %s\n", ethStdAddr.Hex())
+						if actualAddr != expectedAddr {
+							fmt.Printf("  ❌ ERROR: Address mismatch! Receipt address does not match predicted address!\n")
+						} else {
+							fmt.Printf("  ✅ SUCCESS: Address matches predicted calculation!\n")
+						}
+						lastDeployedAddress = actualAddr
+					} else {
+						fmt.Printf("  ⚠️  WARNING: Receipt returned data length is %d (expected 20 bytes for contract address). Using predicted address: %s\n", len(receipt.Return()), expectedAddr.Hex())
+						lastDeployedAddress = expectedAddr
+					}
 				} else if len(receipt.Return()) > 0 {
 					fmt.Printf("  📋 Return data: %s\n", hex.EncodeToString(receipt.Return()))
 				}

@@ -41,6 +41,15 @@ type ExecuteSCResult struct {
 	mapPublicKeyBls map[string][]byte
 	mapAccountType  map[string]uint8
 	mapNewDeviceKey map[string][]byte
+	
+	mapCodeChange map[string][]byte
+}
+
+func (rs *ExecuteSCResult) MapCodeChange() map[string][]byte {
+	return rs.mapCodeChange
+}
+func (rs *ExecuteSCResult) SetMapCodeChange(m map[string][]byte) {
+	rs.mapCodeChange = m
 }
 
 func (rs *ExecuteSCResult) MapPublicKeyBls() map[string][]byte {

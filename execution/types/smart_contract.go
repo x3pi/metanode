@@ -24,6 +24,8 @@ type ExecuteSCResult interface {
 	SetMapNonce(map[string][]byte)
 	MapStorageRoot() map[string][]byte
 	MapCodeHash() map[string][]byte
+	MapCodeChange() map[string][]byte
+	SetMapCodeChange(map[string][]byte)
 	MapStorageAddress() map[string]common.Address
 	MapCreatorPubkey() map[string][]byte
 	MapPublicKeyBls() map[string][]byte

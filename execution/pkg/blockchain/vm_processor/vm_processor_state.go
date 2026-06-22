@@ -319,6 +319,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
 		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
 	}
+	if mvmRs != nil && mvmRs.MapCodeChange != nil {
+		rs.SetMapCodeChange(mvmRs.MapCodeChange)
+	}
 
 	if span != nil { // GUARD for final attributes
 		span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())

@@ -177,6 +177,7 @@ func NewClient(
 		go clientContext.SocketServer.Listen("0.0.0.0:8080")
 
 	}
+	return &client, nil
 }
 
 func (client *Client) GetClientContext() *client_context.ClientContext {
@@ -1029,7 +1030,6 @@ func (client *Client) AddAccountForClient(privateKey string, chainId string) (ty
 
 	deviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
 
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
@@ -1069,7 +1069,6 @@ func (client *Client) BuildTransactionTx0(
 
 	deviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
 
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
