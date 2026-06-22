@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -97,10 +96,16 @@ func ProcessTransactionsOptimistic(
 
 		if isFirstRound {
 			// Round 1: Flat parallel execution of all static groups
-			var nextIdx uint32
 			for _, realIdx := range groupsToExecute {
 				executionGroups = append(executionGroups, []int{realIdx})
 			}
+			
+			jobs := make(chan int, len(groupsToExecute))
+			for _, realIdx := range groupsToExecute {
+				jobs <- realIdx
+			}
+			close(jobs)
+
 			for w := 0; w < numWorkers; w++ {
 				wg.Add(1)
 				go func() {
@@ -122,12 +127,13 @@ func ProcessTransactionsOptimistic(
 						localAccountDB,
 					)
 
-					for {
-						idx := int(atomic.AddUint32(&nextIdx, 1) - 1)
-						if idx >= len(groupsToExecute) {
-							break
+					for realIdx := range jobs {
+						select {
+						case <-ctx.Done():
+							return // Global abort
+						default:
 						}
-						realIdx := groupsToExecute[idx]
+
 						group := groupedGroups[realIdx]
 
 						// In Round 1, execute from the base state without previous writes
@@ -215,8 +221,13 @@ func ProcessTransactionsOptimistic(
 			executionGroups = cd.BuildExecutionGroups(groupsToExecute, uf)
 
 			// Execute groups in parallel, sequentially within each group
-			var nextGroupIdx uint32
 			speculativeGroupResults := make(map[int]map[int]groupResultExt) // groupIdx -> realIdx -> result
+
+			groupJobs := make(chan int, len(executionGroups))
+			for gIdx := range executionGroups {
+				groupJobs <- gIdx
+			}
+			close(groupJobs)
 
 			for w := 0; w < numWorkers; w++ {
 				wg.Add(1)
@@ -239,11 +250,13 @@ func ProcessTransactionsOptimistic(
 						localAccountDB,
 					)
 
-					for {
-						gIdx := int(atomic.AddUint32(&nextGroupIdx, 1) - 1)
-						if gIdx >= len(executionGroups) {
-							break
+					for gIdx := range groupJobs {
+						select {
+						case <-ctx.Done():
+							return // Global abort
+						default:
 						}
+
 						groupRealIndices := executionGroups[gIdx]
 
 						// Inject only the targeted accounts and storage slots that were read by these groups in the previous round
@@ -319,6 +332,12 @@ func ProcessTransactionsOptimistic(
 					conflictsInBlock++
 					nextRoundGroups = append(nextRoundGroups, realIdx)
 				}
+				// -------------------------------------------------------------------------
+				// PIPELINED EARLY ABORT SIGNAL
+				// -------------------------------------------------------------------------
+				// If a conflict is detected and the block size is large, we could signal 
+				// dependent groups to abort early. For now, since validation is fast, 
+				// we just enqueue them for the next round.
 			} else {
 				for _, realIdx := range groupRealIndices {
 					res := speculativeResults[realIdx]

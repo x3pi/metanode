@@ -395,7 +395,30 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 		return minHashI.Cmp(minHashJ) < 0
 	})
 
-	// Assign sequential GroupIDs after final sort
+	// ═══════════════════════════════════════════════════════════════
+	// STEP 6: CHUNKING HOT-CONTRACTS (MaxGroupSize = 100)
+	// ═══════════════════════════════════════════════════════════════
+	const MaxGroupSize = 100
+	var chunkedGroups []RelativeGroup
+	for _, g := range groups {
+		if len(g.Items) <= MaxGroupSize {
+			chunkedGroups = append(chunkedGroups, g)
+		} else {
+			for i := 0; i < len(g.Items); i += MaxGroupSize {
+				end := i + MaxGroupSize
+				if end > len(g.Items) {
+					end = len(g.Items)
+				}
+				chunk := RelativeGroup{
+					Items: g.Items[i:end],
+				}
+				chunkedGroups = append(chunkedGroups, chunk)
+			}
+		}
+	}
+	groups = chunkedGroups
+
+	// Assign sequential GroupIDs after chunking
 	for i := range groups {
 		groups[i].GroupID = i
 	}

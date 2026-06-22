@@ -2,7 +2,9 @@ package tx_processor
 
 import (
 "github.com/ethereum/go-ethereum/common"
-"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 type ConflictDetector struct {
@@ -21,7 +23,7 @@ return &ConflictDetector{
 writeToIndices: make(map[string][]int),
 readToIndices:  make(map[string][]int),
 groupIdxMap:    groupIdxMap,
-conflictFreeAddr: common.HexToAddress("0x00000000000000000000000000000000D844bb55"),
+conflictFreeAddr: utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT),
 }
 }
 
