@@ -43,6 +43,18 @@ func New(appCtx *app.Context) (*RpcReverseProxy, error) {
 		readonlyProxy.Transport = createCustomTransport()
 	}
 
+	modifyResponse := func(resp *http.Response) error {
+		resp.Header.Del("Access-Control-Allow-Origin")
+		resp.Header.Del("Access-Control-Allow-Methods")
+		resp.Header.Del("Access-Control-Allow-Headers")
+		resp.Header.Del("Access-Control-Allow-Credentials")
+		return nil
+	}
+	defaultProxy.ModifyResponse = modifyResponse
+	if readonlyProxy != nil {
+		readonlyProxy.ModifyResponse = modifyResponse
+	}
+
 	proxy := &RpcReverseProxy{
 		ReverseProxy:         defaultProxy,
 		ReadonlyReverseProxy: readonlyProxy,
