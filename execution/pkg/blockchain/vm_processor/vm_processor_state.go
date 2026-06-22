@@ -322,6 +322,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 	if mvmRs != nil && mvmRs.MapCodeChange != nil {
 		rs.SetMapCodeChange(mvmRs.MapCodeChange)
 	}
+	if mvmRs != nil && mvmRs.MapStorageChange != nil {
+		rs.SetMapStorageChange(mvmRs.MapStorageChange)
+	}
 
 	if span != nil { // GUARD for final attributes
 		span.SetAttribute("finalResultStatus", rs.ReceiptStatus().String())
@@ -374,6 +377,9 @@ func (vmP *VmProcessor) MvmResultToExecuteResultOffChain(
 	)
 	if mvmRs != nil && mvmRs.MapFullDbLogs != nil {
 		rs.SetMapFullDbLogs(mvmRs.MapFullDbLogs)
+	}
+	if mvmRs != nil && mvmRs.MapStorageChange != nil {
+		rs.SetMapStorageChange(mvmRs.MapStorageChange)
 	}
 	return rs, nil
 }
