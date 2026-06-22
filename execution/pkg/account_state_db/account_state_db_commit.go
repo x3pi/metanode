@@ -944,7 +944,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 	// ═══════════════════════════════════════════════════════════════
 	// TPS OPT Phase 2: In-place clear instead of reassignment.
 	clearStart := time.Now()
-	
+
 	// CRITICAL FIX: The account was modified and committed to the trie.
 	// If its old (pre-modification) state was cached in loadedAccounts, we MUST evict it!
 	// We cannot do `Delete` inside `Range` on ShardedAddressMap as it causes deadlocks.
@@ -993,7 +993,11 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		// trie state — no change needed.
 		// ═══════════════════════════════════════════════════════════════
 		if _, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {
+			// TPS OPT Phase 6: UNLOCK BEFORE EXPENSIVE FFI CALL!
+			db.muTrie.Unlock()
 			committedHash, _, _, commitErr := db.trie.Commit(true)
+			db.muTrie.Lock()
+
 			if commitErr != nil {
 				logger.Error("❌ [NOMT-INLINE-COMMIT] Commit during IntermediateRoot failed: %v", commitErr)
 				newHash = db.trie.Hash() // fallback to stale hash

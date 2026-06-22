@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
@@ -512,6 +513,38 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		storage.SetCommitLock(true)
 	}
 
+	var totalWaitGoUs int64
+	var totalWaitRustUs int64
+	var waitCount int64
+
+	now := time.Now()
+	if vp.env != nil {
+		for _, tx := range txs {
+			if entry, ok := vp.env.GetTxHashConnEntry(tx.Hash()); ok {
+				waitCount++
+				waitGoUs := entry.SentToRustAt.Sub(entry.CreatedAt).Microseconds()
+				if waitGoUs < 0 {
+					waitGoUs = 0
+				}
+				totalWaitGoUs += waitGoUs
+
+				waitRustUs := now.Sub(entry.SentToRustAt).Microseconds()
+				if waitRustUs < 0 {
+					waitRustUs = 0
+				}
+				totalWaitRustUs += waitRustUs
+			}
+		}
+	}
+
+	avgWaitGoUs := int64(0)
+	avgWaitRustUs := int64(0)
+	if waitCount > 0 {
+		avgWaitGoUs = totalWaitGoUs / waitCount
+		avgWaitRustUs = totalWaitRustUs / waitCount
+	}
+	pipeline.GlobalBlockTraceStore.SetWaitTime(blockNum, avgWaitGoUs, avgWaitRustUs)
+
 	var processedTxs []types.Transaction
 	processedTxs = append(processedTxs, txs...)
 	ev := mt_filters.NewTxsEvent{
@@ -631,19 +664,24 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		rootSpan = nil
 	}
 
-	startExecution := time.Now()
+	waitLockStart := time.Now()
 	vp.blockProcessingLock.Lock()
+	lockWaitDuration := time.Since(waitLockStart)
+
+	startExecution := time.Now()
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
 	if len(txs) > 0 {
-		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | RealExec=%v",
-			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
+		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | LockWait=%v | RealExec=%v",
+			blockNum, len(txs), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), lockWaitDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
+			
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(txs), consensusDuration.Microseconds(), execDuration.Microseconds())
 	}
 
-	if execDuration.Milliseconds() > 100 {
-		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v", len(txs), execDuration)
+	if execDuration.Microseconds() > 100 {
+		logger.Info("⏱️  [PERF] tx_processor.ProcessTransactions (EVM/State) of %d TXs took %v (WaitLock: %v)", len(txs), execDuration, lockWaitDuration)
 	}
 
 	return res, execErr
