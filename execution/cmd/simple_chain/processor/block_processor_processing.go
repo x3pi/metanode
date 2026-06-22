@@ -23,6 +23,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -293,6 +294,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Record phase times
 	phase1Elapsed := time.Since(overallStart)
+	pipeline.GlobalBlockTraceStore.AddPhase1Time(currentBlockNumber, 0, receiptsRootDuration.Microseconds(), txsRootDuration.Microseconds(), phase1Elapsed.Microseconds())
 
 	// Phase 2: Create Block Data
 	phase2Start := time.Now()
@@ -482,6 +484,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		codeBatchPut = retCodeBatchPut
 	}
 	phase32Elapsed := time.Since(phase32Start)
+	pipeline.GlobalBlockTraceStore.UpdateCommitMemoryTime(currentBlockNumber, phase32Elapsed.Microseconds())
 
 	phase4Start := time.Now()
 	// TPS OPTIMIZATION: SetCommitLock(false) removed — CommitLock is now a no-op
@@ -602,6 +605,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	phase4Elapsed := time.Since(phase4Start)
 	overallElapsed := time.Since(overallStart)
+
+	pipeline.GlobalBlockTraceStore.AddPhase2to4Time(currentBlockNumber, phase2Elapsed.Microseconds(), phase31Elapsed.Microseconds(), phase32Elapsed.Microseconds(), phase4Elapsed.Microseconds(), tDispatch.Microseconds())
+	pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(currentBlockNumber, overallElapsed.Microseconds())
 
 	// ── TPS Degradation Monitor (Phase 6) ──────────────────────────────
 	// Log key metrics every 50 blocks to track performance degradation

@@ -77,6 +77,9 @@ var GlobalPipelineStats = &PipelineStats{
 // TxsProcessor2 successfully queued a batch to Rust via SendBatch.
 var LastSendBatchTimeNano atomic.Int64
 
+// LastClientBatchProcessingMs stores the duration (in ms) of the last ProcessTransactionsFromClient call
+var LastClientBatchProcessingMs atomic.Int64
+
 // LastSendBatchTxCount stores the total TX count of the last batch sent to Rust.
 var LastSendBatchTxCount atomic.Int64
 

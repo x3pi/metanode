@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -756,4 +757,19 @@ func (api *MetaAPI) FeeHistory(ctx context.Context, blockCount math.HexOrDecimal
 	}
 
 	return result, nil
+}
+
+// GetBlockTraces returns performance traces for blocks within a specified range
+func (api *MetaAPI) GetBlockTraces(ctx context.Context, startBlock uint64, endBlock uint64) ([]pipeline.BlockTrace, error) {
+	if startBlock > endBlock {
+		return nil, fmt.Errorf("startBlock must be <= endBlock")
+	}
+	
+	// Limit query range to prevent massive responses
+	if endBlock-startBlock > 1000 {
+		return nil, fmt.Errorf("range too large, max 1000 blocks")
+	}
+	
+	traces := pipeline.GlobalBlockTraceStore.GetTraces(startBlock, endBlock)
+	return traces, nil
 }

@@ -59,6 +59,10 @@ message ExecutableBlock {
     // LAYER-6 FORK-PROOF: Commit digest from Rust DAG for inline hash verification.
     // Go stores this digest and exposes it via RPC for peer cross-checking.
     bytes commit_digest = 13;
+    // [NEW] Timestamp khi Rust consensus hoàn thành commit (dispatch)
+    uint64 rust_dispatch_timestamp_ms = 14;
+    // [NEW] Timestamp ngay trước khi Rust gọi FFI execute_block về Go
+    uint64 rust_ffi_delivery_timestamp_ms = 15;
 }
 
 // Response from Go after processing an ExecutableBlock.
@@ -76,3 +80,4 @@ message ExecuteBlockResponse {
     // Error message if !success
     string error = 5;
 }
+

@@ -219,6 +219,14 @@ impl ExecutorClient {
                     // Layer 1: Protobuf strict boundary fields
                     authority_key: vec![],
                     commit_digest: vec![],
+                    rust_dispatch_timestamp_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                    rust_ffi_delivery_timestamp_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
                 };
 
                 for tx_exe in &epoch_data.transactions {
@@ -302,6 +310,14 @@ impl ExecutorClient {
             // Layer 1: Protobuf strict boundary fields
             authority_key: vec![],
             commit_digest: vec![],
+            rust_dispatch_timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            rust_ffi_delivery_timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
         };
 
         for tx_exe in &epoch_data.transactions {
@@ -925,6 +941,14 @@ impl ExecutorClient {
             // Layer 1: Protobuf strict boundary fields
             authority_key: vec![],
             commit_digest: vec![],
+            rust_dispatch_timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            rust_ffi_delivery_timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
         };
 
         let mut epoch_data_bytes = Vec::new();

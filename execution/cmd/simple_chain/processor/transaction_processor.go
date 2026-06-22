@@ -488,6 +488,15 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 
 	for _, tx := range transactions {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BATCH_UNMARSHALED", "Transaction received in batch from client")
+		
+		// Always save txHash → connection mapping for txHash-based receipt delivery and timing traces
+		if tp.env != nil {
+			tp.env.StoreTxHashConnEntry(tx.Hash(), TxHashConnEntry{
+				Conn:      request.Connection(),
+				MsgID:     request.Message().ID(),
+				CreatedAt: time.Now(),
+			})
+		}
 	}
 
 	t1 := time.Now()
