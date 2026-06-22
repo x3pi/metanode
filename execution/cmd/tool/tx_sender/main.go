@@ -263,7 +263,6 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 	var submittedHashes []common.Hash
 	var submittedTxActions []string
 	expectedDeployAddresses := make(map[common.Hash]common.Address)
-	ethStdDeployAddresses := make(map[common.Hash]common.Address)
 
 	for i, data := range datas {
 		fmt.Printf("\n──────────────────────────────────────\n")
@@ -297,7 +296,7 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				failCount++
 				continue
 			}
-			deployedAddr = crypto.CreateAddress(fromAddress, currentNonce+1)
+			deployedAddr = crypto.CreateAddress(fromAddress, currentNonce)
 			lastDeployedAddress = deployedAddr
 			fmt.Printf("  📋 From:              %s\n", fromAddress.Hex())
 			fmt.Printf("  📋 Predicted address:  %s\n", deployedAddr.Hex())
@@ -476,7 +475,6 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 
 		if data.Action == "deploy" {
 			expectedDeployAddresses[tx.Hash()] = deployedAddr
-			ethStdDeployAddresses[tx.Hash()] = crypto.CreateAddress(fromAddress, currentNonce)
 		}
 
 		// Update local nonce for sequence on success
@@ -534,12 +532,10 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 			successCount++
 			if data.Action == "deploy" {
 				expectedAddr := expectedDeployAddresses[tx.Hash()]
-				ethStdAddr := ethStdDeployAddresses[tx.Hash()]
 				if len(receipt.Return()) == 20 {
 					actualAddr := common.BytesToAddress(receipt.Return())
 					fmt.Printf("  📋 Actually Deployed to (from receipt): %s\n", actualAddr.Hex())
-					fmt.Printf("  📋 Predicted (Metanode Standard):       %s\n", expectedAddr.Hex())
-					fmt.Printf("  📋 Ethereum Standard Calculated:        %s\n", ethStdAddr.Hex())
+					fmt.Printf("  📋 Predicted (Metanode & ETH Standard): %s\n", expectedAddr.Hex())
 					if actualAddr != expectedAddr {
 						fmt.Printf("  ❌ ERROR: Address mismatch! Receipt address does not match predicted address!\n")
 					} else {
@@ -613,12 +609,10 @@ func processBatch(c *client.Client, config *c_config.ClientConfig, datas []SCDat
 				successCount++
 				if action == "deploy" {
 					expectedAddr := expectedDeployAddresses[hash]
-					ethStdAddr := ethStdDeployAddresses[hash]
 					if len(receipt.Return()) == 20 {
 						actualAddr := common.BytesToAddress(receipt.Return())
 						fmt.Printf("  📋 Actually Deployed to (from receipt): %s\n", actualAddr.Hex())
-						fmt.Printf("  📋 Predicted (Metanode Standard):       %s\n", expectedAddr.Hex())
-						fmt.Printf("  📋 Ethereum Standard Calculated:        %s\n", ethStdAddr.Hex())
+						fmt.Printf("  📋 Predicted (Metanode & ETH Standard): %s\n", expectedAddr.Hex())
 						if actualAddr != expectedAddr {
 							fmt.Printf("  ❌ ERROR: Address mismatch! Receipt address does not match predicted address!\n")
 						} else {
