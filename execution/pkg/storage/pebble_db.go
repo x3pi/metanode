@@ -365,6 +365,15 @@ func NewLazyPebbleDB(path string) *LazyPebbleDB {
 	}
 }
 
+func (lp *LazyPebbleDB) MemTableSize() uint64 {
+	lp.mu.RLock()
+	defer lp.mu.RUnlock()
+	if lp.db != nil && lp.db.db != nil {
+		return lp.db.db.Metrics().MemTable.Size
+	}
+	return 0
+}
+
 // Open initializes the underlying PebbleDB and starts the background flusher.
 func (lp *LazyPebbleDB) Open(parallelism int) error {
 	if err := lp.db.Open(parallelism); err != nil {

@@ -520,26 +520,40 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	vp.eventSystem.TxsFeed.Send(ev)
 
 	// --- AUTO-FLUSH LOGIC (OOM Prevention) ---
-	// Increment the global TX counter and flush if threshold reached.
+	// Increment the global TX counter and check PebbleDB MemTable metrics.
 	// PERF OPT: Flush runs ASYNC in background goroutine to avoid stalling
 	// the block processing hot path (~200-500ms per flush).
 	// CAS guard prevents concurrent flushes from racing.
 	currentCount := atomic.AddUint64(&tx_processor.GlobalTxProcessCounter, uint64(len(txs)))
-	if currentCount > tx_processor.FlushThresholdTxs {
+	
+	shouldFlush := false
+	var memSize uint64
+	sm := vp.chainState.GetStorageManager()
+	if sm != nil {
+		memSize = sm.GetMemTableSize()
+		if memSize > 64*1024*1024 { // 64MB threshold
+			shouldFlush = true
+		}
+	}
+
+	if shouldFlush || currentCount > tx_processor.FlushThresholdTxs {
 		// CAS: only one goroutine triggers the flush (prevent concurrent flushes)
 		if atomic.CompareAndSwapUint64(&tx_processor.GlobalTxProcessCounter, currentCount, 0) {
-			sm := vp.chainState.GetStorageManager()
 			if sm != nil {
-				go func(count uint64) {
+				go func(count uint64, size uint64) {
 					startFlush := time.Now()
-					logger.Warn("🧹 [AUTO-FLUSH] Reached %d TXs (threshold %d). Flushing LazyPebbleDB to disk async...", count, tx_processor.FlushThresholdTxs)
+					if size > 0 {
+						logger.Warn("🧹 [AUTO-FLUSH] PebbleDB MemTableSize %d MB reached / %d TXs. Flushing LazyPebbleDB to disk async...", size/1024/1024, count)
+					} else {
+						logger.Warn("🧹 [AUTO-FLUSH] Reached %d TXs (threshold %d). Flushing LazyPebbleDB to disk async...", count, tx_processor.FlushThresholdTxs)
+					}
 					err := sm.FlushAll()
 					if err != nil {
 						logger.Error("❌ [AUTO-FLUSH] Failed to flush storage: %v", err)
 					} else {
-						logger.Warn("✅ [AUTO-FLUSH] Successfully flushed %d TXs to disk in %v (async)", count, time.Since(startFlush))
+						logger.Warn("✅ [AUTO-FLUSH] Successfully flushed to disk in %v (async)", time.Since(startFlush))
 					}
-				}(currentCount)
+				}(currentCount, memSize)
 			}
 		}
 	}
