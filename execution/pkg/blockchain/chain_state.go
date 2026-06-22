@@ -882,6 +882,31 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 			logger.Warn("⚠️ [EPOCH STATE] Failed to save: %v", err)
 		}
 	}
+
+	// --- NOMT CHANGELOG PRUNING ---
+	// If newEpoch >= 2, we prune changelog data from (newEpoch - 2).
+	// This prevents the disk from filling up on validators.
+	if newEpoch >= 2 {
+		epochToPrune := newEpoch - 2
+		boundaryBlockToPrune, ok := cs.epochBoundaryBlocks[epochToPrune]
+		if ok && boundaryBlockToPrune > 0 {
+			go func(epoch, block uint64) {
+				logger.Info("🧹 [CHANGELOG PRUNER] Starting background prune for epoch %d (before block %d)", epoch, block)
+				
+				if cs.changelogDB != nil {
+					if err := cs.changelogDB.PruneBeforeBlock(block); err != nil {
+						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune account changelog: %v", err)
+					}
+				}
+				if cs.stakeChangelogDB != nil {
+					if err := cs.stakeChangelogDB.PruneBeforeBlock(block); err != nil {
+						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune stake changelog: %v", err)
+					}
+				}
+				logger.Info("✅ [CHANGELOG PRUNER] Finished pruning for epoch %d", epoch)
+			}(epochToPrune, boundaryBlockToPrune)
+		}
+	}
 }
 
 // CheckAndUpdateEpochFromBlock checks if the incoming block has a higher epoch and auto-updates
