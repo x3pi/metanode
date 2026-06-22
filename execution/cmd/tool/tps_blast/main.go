@@ -32,6 +32,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 )
@@ -252,8 +253,8 @@ noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not 
 		parsedABI, _ := abi.JSON(strings.NewReader(abiJSON))
 		dataTx, _ := parsedABI.Pack("setBlsPublicKey", blsPubKeyBytes)
 		
-		// Gửi đến ACCOUNT_SETTING_ADDRESS_SELECT (0x0000000000000000000000000000000000000002)
-		toAddr := common.HexToAddress("0x0000000000000000000000000000000000000002")
+		// Gửi đến ACCOUNT_SETTING_ADDRESS_SELECT
+		toAddr := utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 		
 		tx := e_types.NewTransaction(0, toAddr, big.NewInt(0), 1000000000, big.NewInt(100000), dataTx)
 		signer := e_types.LatestSignerForChainID(bigChainId)
