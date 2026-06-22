@@ -145,6 +145,41 @@ var (
 		Help:    "Trie Intermediate Root calculation latency in seconds",
 		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0},
 	})
+
+	// TxMempoolDuration observes the latency of a transaction from reception to being forwarded to consensus.
+	TxMempoolDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_tx_mempool_seconds",
+		Help:    "Transaction latency in mempool before consensus in seconds",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0},
+	})
+
+	// TxConsensusDuration observes the latency of a transaction inside the consensus layer.
+	TxConsensusDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_tx_consensus_seconds",
+		Help:    "Transaction consensus latency in seconds",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0},
+	})
+
+	// TxExecutionDuration observes the execution latency of a transaction.
+	TxExecutionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_tx_execution_seconds",
+		Help:    "Transaction execution latency in seconds",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0},
+	})
+
+	// TxEndToEndDuration observes the full end-to-end latency of a transaction.
+	TxEndToEndDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_tx_end_to_end_seconds",
+		Help:    "Full end-to-end latency from reception to execution in seconds",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0},
+	})
+
+	// BlockTimeDuration observes the time between block generations.
+	BlockTimeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_block_time_seconds",
+		Help:    "Time between consecutive blocks in seconds",
+		Buckets: []float64{0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0},
+	})
 )
 
 // ─── System Metrics Collector ────────────────────────────────────────────────

@@ -626,6 +626,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	metrics.CurrentBlock.Set(float64(bl.Header().BlockNumber()))
 	metrics.TxsProcessedTotal.Add(float64(len(processResults.Transactions)))
 
+	lastConfirmedBlock := bp.GetLastBlock()
+	if lastConfirmedBlock != nil {
+		blockTimeElapsed := float64(bl.Header().TimeStamp()-lastConfirmedBlock.Header().TimeStamp()) / 1000.0
+		if blockTimeElapsed > 0 {
+			metrics.BlockTimeDuration.Observe(blockTimeElapsed)
+		}
+	}
+
 	if len(processResults.Transactions) > 0 {
 		logger.Info("📦 [batch_id=%s] === Block Creation Time %d (In Memory) [%d txs] === 📦\n   - Phase 1 (Root Calc):      %v\n   - Phase 2 (Block Data):     %v\n   - Phase 3.1 (Mapping):      %v\n   - Phase 3.2 (Trie Commit):  %v\n   - Phase 4 (Job Prep & Snap):%v\n   - 🚀 TOTAL (IN-MEMORY):     %v",
 			batchID, bl.Header().BlockNumber(), len(processResults.Transactions),
