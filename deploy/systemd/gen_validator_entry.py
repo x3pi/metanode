@@ -274,9 +274,9 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "snapshot_source_dir": f"{install_dir}/data/execution",
         "snapshot_server_port": snapshot_port,
         "state_backend": "nomt",
-        "nomt_commit_concurrency": 32,
-        "nomt_page_cache_mb": 1024,
-        "nomt_leaf_cache_mb": 1024,
+        "nomt_commit_concurrency": 64,
+        "nomt_page_cache_mb": 4096,
+        "nomt_leaf_cache_mb": 4096,
         "rust_config_path": f"{install_dir}/config/consensus.toml",
         "is_explorer": is_rpc_node,
         "is_rpc_node": is_rpc_node,
@@ -288,7 +288,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "console_output": True,
             "file_output": False
         },
-        "tx_trace_enabled": True
+        "tx_trace_enabled": False
     }
 
     import os
@@ -319,9 +319,9 @@ commit_sync_parallel_fetches = 32
 commit_sync_batches_ahead = {commit_batches_ahead}
 adaptive_catchup_enabled = true
 adaptive_delay_enabled = false
-adaptive_delay_ms = 50
-min_round_delay_ms = 10
-leader_timeout_ms = 40
+adaptive_delay_ms = 20
+min_round_delay_ms = 100
+leader_timeout_ms = 200
 epoch_transition_optimization = "fast"
 enable_gradual_shutdown = true
 gradual_shutdown_user_cert_drain_secs = 2
