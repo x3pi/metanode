@@ -124,10 +124,6 @@ func ProcessTransactionsOptimistic(
 						localAccountDB,
 					)
 
-					// 🚀 [PERF-FIX] Share the preloaded accounts cache from the global DB!
-					// This eliminates thousands of CGO calls to Rust NOMT during parallel execution.
-					localAccountDB.ShareLoadedAccountsFrom(chainState.GetAccountStateDB())
-
 					for realIdx := range jobs {
 						select {
 						case <-ctx.Done():
@@ -245,7 +241,6 @@ func ProcessTransactionsOptimistic(
 						localTrie = baseTrie.Copy()
 					}
 					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-					localAccountDB.ShareLoadedAccountsFrom(chainState.GetAccountStateDB())
 					localSmartContractDB := smart_contract_db.NewSmartContractDB(
 						chainState.GetStorageManager().GetStorageCode(),
 						chainState.GetStorageManager().GetStorageSmartContract(),
