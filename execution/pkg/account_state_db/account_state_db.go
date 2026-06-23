@@ -445,9 +445,7 @@ func (db *AccountStateDB) InvalidateAllCaches() {
 	// The channel is pre-closed at initialization, so this is a no-op for the first block.
 	<-db.persistReady
 
-	if !db.isSharedCache {
-		db.loadedAccounts.Clear()
-	}
+	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe, persistReady waited)")
@@ -462,9 +460,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	}
 	// Clear dirty accounts first
 	db.dirtyAccounts.Clear()
-	if !db.isSharedCache {
-		db.loadedAccounts.Clear()
-	}
+	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 
@@ -1144,8 +1140,6 @@ func (db *AccountStateDB) ClearCaches() {
 		return
 	}
 	db.dirtyAccounts.Clear()
-	if !db.isSharedCache {
-		db.loadedAccounts.Clear()
-	}
+	db.loadedAccounts.Clear()
 }
 
