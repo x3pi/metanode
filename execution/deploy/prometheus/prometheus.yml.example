@@ -14,6 +14,7 @@ scrape_configs:
         - "192.168.1.232:8757" # Node 1
         - "192.168.1.231:8757" # Node 2
         - "192.168.1.230:8757" # Node 3
+        - "192.168.1.234:8757" # Node 4
 
   # MetaNode Rust Consensus Metrics
   - job_name: "metanode-rust-consensus"
@@ -23,6 +24,7 @@ scrape_configs:
         - "192.168.1.232:9100" # Node 1
         - "192.168.1.231:9100" # Node 2
         - "192.168.1.230:9100" # Node 3
+        - "192.168.1.234:9100" # Node 4
 
   # Hardware Node Exporter Metrics
   - job_name: "node_exporter"
@@ -32,3 +34,4 @@ scrape_configs:
         - "192.168.1.232:9105" # Node 1
         - "192.168.1.231:9105" # Node 2
         - "192.168.1.230:9105" # Node 3
+        - "192.168.1.234:9105" # Node 4
