@@ -681,6 +681,49 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	// Wait for preload to finish before proceeding to execution
 	<-preloadDone
 
+	// --- Parallel Signature Pre-verification ---
+	if len(txs) > 0 {
+		tSigStart := time.Now()
+		// Spawn workers to verify signatures in parallel
+		numSigWorkers := runtime.NumCPU()
+		if numSigWorkers > 128 {
+			numSigWorkers = 128
+		}
+		if len(txs) < numSigWorkers {
+			numSigWorkers = len(txs)
+		}
+
+		var sigWg sync.WaitGroup
+		sigWg.Add(numSigWorkers)
+		chunkSize := (len(txs) + numSigWorkers - 1) / numSigWorkers
+
+		for w := 0; w < numSigWorkers; w++ {
+			start := w * chunkSize
+			end := start + chunkSize
+			if end > len(txs) {
+				end = len(txs)
+			}
+			go func(s, e int) {
+				defer sigWg.Done()
+				for i := s; i < e; i++ {
+					tx := txs[i]
+					if tx == nil {
+						continue
+					}
+					// Fetch preloaded sender state
+					senderState, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
+					if err != nil || senderState == nil {
+						senderState = nil
+					}
+					// Verify and cache signature (VerifyTransaction writes to verifiedSignaturesCache internally)
+					_ = tx_processor.VerifyTransaction(tx, vp.chainState, senderState)
+				}
+			}(start, end)
+		}
+		sigWg.Wait()
+		logger.Info("⏱️  [PERF-SIG-PREVERIFY] Pre-verified %d signatures in %v", len(txs), time.Since(tSigStart))
+	}
+
 	ctx := context.Background()
 
 	var baseCtx context.Context
