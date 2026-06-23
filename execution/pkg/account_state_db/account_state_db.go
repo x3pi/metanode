@@ -53,7 +53,6 @@ type AccountStateDB struct {
 	// This separation prevents loaded-but-unmodified accounts from triggering
 	// trie.Update() in IntermediateRoot (each costs ~25µs).
 	loadedAccounts *utils.ShardedAddressMap[types.AccountState]
-	isSharedCache  bool // True if loadedAccounts is shared from parent, prevents clearing in ClearCaches
 
 	// muTrie protects concurrent access to the underlying trie.
 	// RLock is used for reads (getOrCreateAccountState, GetAll) — unlimited concurrent readers.
@@ -687,17 +686,7 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	return finalAs, nil
 }
 
-// ShareLoadedAccountsFrom allows a child DB to share the read-only loaded accounts cache from a parent DB.
-// This is critical for Block-STM workers to hit the Preloaded accounts without CGO overhead.
-func (db *AccountStateDB) ShareLoadedAccountsFrom(parent types.AccountStateDB) {
-	if pDB, ok := parent.(*AccountStateDB); ok {
-		// Share the exact same underlying sync map instance.
-		// Since loadedAccounts is thread-safe and read-only for already loaded accounts,
-		// and new cache misses will just LoadOrStore into the shared cache, this is perfectly safe.
-		db.loadedAccounts = pDB.loadedAccounts
-		db.isSharedCache = true
-	}
-}
+
 
 // PreloadAccounts batch-loads multiple account states into the dirty cache.
 // PERFORMANCE OPTIMIZATION: Instead of calling AccountState() N times (each acquiring/releasing
@@ -769,6 +758,12 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 			keysToWarm[i] = addr.Bytes()
 		}
 		baseCopy.PreWarm(keysToWarm)
+		
+		// 🚀 [PERF-FIX]: Since we removed `ShareLoadedAccountsFrom` to fix Block-STM ReadSet corruption,
+		// workers no longer read from the global `loadedAccounts` cache.
+		// Therefore, we do NOT need to spend massive CPU cycles unmarshalling accounts here.
+		// NomtStateTrie is lock-free and CGO overhead is minimal since the Merkle nodes are now in memory!
+		return
 	}
 	prewarmDuration := time.Since(startPrewarm)
 

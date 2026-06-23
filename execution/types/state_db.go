@@ -29,7 +29,7 @@ type AccountStateDB interface {
 
 	SetState(AccountState)
 	InjectLoadedAccount(AccountState)
-	ShareLoadedAccountsFrom(AccountStateDB)
+
 	PublicSetDirtyAccountState(AccountState)
 	DirtyAccountCount() int
 
