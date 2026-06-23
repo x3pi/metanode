@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use parking_lot::RwLock;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
@@ -428,7 +428,7 @@ impl CommitObserver {
         let utc_now = self.context.clock.timestamp_utc_ms();
 
         for commit in committed {
-            info!(
+            debug!(
                 "🎯 [STATION 2: CORE] Consensus commit {} with leader {} has {} blocks",
                 commit.commit_ref,
                 commit.leader,

@@ -788,7 +788,7 @@ impl CommitProcessor {
                                     .unwrap_or_else(|| "UNRESOLVED".to_string())
                             };
                             let poll_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
-                            info!(
+                            debug!(
                                 "📊 [FORK-FORENSIC] commit_index={}, path=DIGEST-GATE-POLL, epoch={}, \
                                  leader={:?} (auth_idx={}, eth={}), digest={}, txs={}, timestamp_ms={}",
                                 local_idx, current_epoch, confirmed.leader, poll_leader_idx, poll_leader_eth,
@@ -830,7 +830,7 @@ impl CommitProcessor {
                                 callback(local_idx);
                             }
                             // Post-dispatch digest audit: log the dispatch for forensic tracing
-                            info!(
+                            debug!(
                                 "📊 [DIGEST-AUDIT] commit_index={}, path=DIGEST-GATE-POLL, gei={}, \
                                  leader={:?}, digest={}, local=true",
                                 local_idx, exec_gei, confirmed.leader, hex::encode(&local_digest[..4])
@@ -886,7 +886,7 @@ impl CommitProcessor {
                         match verifier(next_expected_index) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
-                                    info!(
+                                    debug!(
                                         "✅ [DISPATCH:DIGEST-GATE-OOO] Pending local commit {} VERIFIED: digest matches quorum.",
                                         next_expected_index
                                     );
@@ -927,7 +927,7 @@ impl CommitProcessor {
                                         let local_digest = pending.commit_ref.digest.into_inner();
                                         match attestor(next_expected_index, local_digest) {
                                             PeerAttestResult::Ok => {
-                                                info!(
+                                                debug!(
                                                     "✅ [DIGEST-GATE-OOO PEER-ATTEST] Commit {} dispatching: \
                                                      peer attestation confirmed. Data-driven (zero timeout).",
                                                     next_expected_index
@@ -949,7 +949,7 @@ impl CommitProcessor {
                                                 } else {
                                                     false
                                                 };
-                                                info!(
+                                                debug!(
                                                     "🛡️ [DIGEST-GATE-OOO] Commit {} staying in buffer: verifier returned None, \
                                                      attestor returned Insufficient (digest_has_data={}). Waiting for CertifiedCommit.",
                                                     next_expected_index, digest_has_data_ooo
@@ -1173,7 +1173,7 @@ impl CommitProcessor {
                                 match verifier(commit_index) {
                                     Some(quorum_digest) => {
                                         if quorum_digest == local_digest {
-                                            info!(
+                                            debug!(
                                                 "✅ [DISPATCH:DIGEST-GATE-IMMEDIATE] Local commit {} VERIFIED: \
                                                  digest matches network quorum (digest={}). Safe to dispatch.",
                                                 commit_index, hex::encode(&local_digest[..4])
@@ -1212,7 +1212,7 @@ impl CommitProcessor {
                                                     let result = attestor(commit_index, local_digest);
                                                     match result {
                                                         PeerAttestResult::Ok => {
-                                                            info!(
+                                                            debug!(
                                                                 "✅ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} dispatching: \
                                                                  peer attestation confirmed. Data-driven (zero timeout).",
                                                                 commit_index
@@ -1227,7 +1227,7 @@ impl CommitProcessor {
                                                                 false
                                                             };
                                                             // Conflict or Insufficient — buffer for POLL path
-                                                            info!(
+                                                            debug!(
                                                                 "🛡️ [DIGEST-GATE-IMMEDIATE PEER-ATTEST] Commit {} buffered: \
                                                                  peer attestation returned {:?} (digest_has_data={}). Will retry in POLL path.",
                                                                 commit_index, other, digest_has_data
@@ -1305,7 +1305,7 @@ impl CommitProcessor {
                                         );
                                     }
                                     Some(_) => {
-                                        info!(
+                                        debug!(
                                             "✅ [DISPATCH:CERTIFIED+DIGEST] CertifiedCommit {} digest matches quorum.",
                                             commit_index
                                         );
@@ -1352,7 +1352,7 @@ impl CommitProcessor {
                                         local_txs, cert_txs
                                     );
                                 } else {
-                                    info!(
+                                    debug!(
                                         "✅ [DISPATCH:CERTIFIED-COMMIT] CertifiedCommit {} matches local (leader={:?}).",
                                         commit_index, subdag.leader
                                     );
@@ -1558,7 +1558,7 @@ impl CommitProcessor {
                             }
                         }
 
-                        warn!(
+                        debug!(
                             "Received out-of-order commit: index={}, expected={}, pending_count={}, storing for later",
                             commit_index, next_expected_index, pending_commits.len()
                         );
@@ -1637,7 +1637,7 @@ impl CommitProcessor {
                                 }
                                 shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                                 let certified_digest = certified.commit_ref.digest.into_inner();
-                                info!(
+                                debug!(
                                     "📊 [DIGEST-AUDIT] commit_index={}, path=CERTIFIED-REPLACE, gei={}, \
                                      leader={:?}, digest={}, local=false",
                                     commit_index, exec_gei, certified.leader,
