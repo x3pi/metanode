@@ -328,10 +328,42 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	t1 := time.Now()
 	// Warm the local states map to pass directly to VerifyTransaction, avoiding concurrent sync.Map lookups.
 	senderStates := make(map[common.Address]types.AccountState, len(preloadAddrs))
-	for _, addr := range preloadAddrs {
-		if as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr); err == nil && as != nil {
-			senderStates[addr] = as
+	if len(preloadAddrs) > 0 {
+		var senderStatesMutex sync.Mutex
+		numPreloadWorkers := runtime.NumCPU()
+		if numPreloadWorkers > 32 {
+			numPreloadWorkers = 32
 		}
+		if len(preloadAddrs) < numPreloadWorkers {
+			numPreloadWorkers = len(preloadAddrs)
+		}
+		var wgPreload sync.WaitGroup
+		wgPreload.Add(numPreloadWorkers)
+		chunkSizePreload := (len(preloadAddrs) + numPreloadWorkers - 1) / numPreloadWorkers
+
+		for w := 0; w < numPreloadWorkers; w++ {
+			start := w * chunkSizePreload
+			end := start + chunkSizePreload
+			if end > len(preloadAddrs) {
+				end = len(preloadAddrs)
+			}
+			go func(s, e int) {
+				defer wgPreload.Done()
+				localStates := make(map[common.Address]types.AccountState, e-s)
+				for i := s; i < e; i++ {
+					addr := preloadAddrs[i]
+					if as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr); err == nil && as != nil {
+						localStates[addr] = as
+					}
+				}
+				senderStatesMutex.Lock()
+				for k, v := range localStates {
+					senderStates[k] = v
+				}
+				senderStatesMutex.Unlock()
+			}(start, end)
+		}
+		wgPreload.Wait()
 	}
 	statePreloadDuration := time.Since(t1)
 
@@ -827,14 +859,45 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				preloadAddrs = append(preloadAddrs, addr)
 			}
 			vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
-			for _, addr := range preloadAddrs {
-				as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr)
-				if err == nil && as != nil {
-					nonceMap[addr] = as.Nonce()
-				} else {
-					nonceMap[addr] = 0
-				}
+			
+			var nonceMapMutex sync.Mutex
+			numWorkers := runtime.NumCPU()
+			if numWorkers > 32 {
+				numWorkers = 32
 			}
+			if len(preloadAddrs) < numWorkers {
+				numWorkers = len(preloadAddrs)
+			}
+			var wg sync.WaitGroup
+			wg.Add(numWorkers)
+			chunkSize := (len(preloadAddrs) + numWorkers - 1) / numWorkers
+
+			for w := 0; w < numWorkers; w++ {
+				start := w * chunkSize
+				end := start + chunkSize
+				if end > len(preloadAddrs) {
+					end = len(preloadAddrs)
+				}
+				go func(s, e int) {
+					defer wg.Done()
+					localNonces := make(map[common.Address]uint64, e-s)
+					for i := s; i < e; i++ {
+						addr := preloadAddrs[i]
+						as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr)
+						if err == nil && as != nil {
+							localNonces[addr] = as.Nonce()
+						} else {
+							localNonces[addr] = 0
+						}
+					}
+					nonceMapMutex.Lock()
+					for k, v := range localNonces {
+						nonceMap[k] = v
+					}
+					nonceMapMutex.Unlock()
+				}(start, end)
+			}
+			wg.Wait()
 		}
 
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
