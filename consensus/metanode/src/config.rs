@@ -178,6 +178,9 @@ pub struct NodeConfig {
     /// Severe lag threshold for Go execution engine (default: 200)
     #[serde(default = "default_severe_lag_threshold")]
     pub severe_lag_threshold: u64,
+    /// Enable transaction tracing (default: false)
+    #[serde(default = "default_false")]
+    pub tx_trace_enabled: bool,
 }
 
 fn default_max_clock_drift_seconds() -> u64 {
@@ -354,6 +357,7 @@ impl NodeConfig {
                 log: Some(LogConfig::default()),
                 moderate_lag_threshold: default_moderate_lag_threshold(),
                 severe_lag_threshold: default_severe_lag_threshold(),
+                tx_trace_enabled: false,
             };
 
             // Save keys - use private_key_bytes and public key bytes
@@ -533,4 +537,8 @@ fn default_log_format() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }

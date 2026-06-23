@@ -11,6 +11,9 @@ use tracing::{debug, error, info, warn};
 // The global callbacks registry configured from Go
 pub static GO_CALLBACKS: OnceLock<GoCallbacks> = OnceLock::new();
 
+use std::sync::atomic::{AtomicBool, Ordering};
+pub static TX_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
 // The global channel sender for zero-copy FFI transaction submission
 pub static FFI_TX_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
 // Condvar to block Go's FFI caller until the channel is initialized
@@ -57,6 +60,9 @@ pub struct GoCallbacks {
 
 /// Call into Go to update transaction trace
 pub fn update_go_tx_trace(hash: &[u8], step: &str, details: &str) {
+    if !TX_TRACE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if let Some(callbacks) = GO_CALLBACKS.get() {
         if let Some(func) = callbacks.update_tx_trace {
             let step_c = std::ffi::CString::new(step).unwrap_or_default();
@@ -314,11 +320,13 @@ pub unsafe extern "C" fn metanode_start_consensus(
                     let mut node_config = match NodeConfig::load(&config_path) {
                         Ok(c) => c,
                         Err(e) => {
-                            error!("Failed to load configuration from {:?}: {}", config_path, e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                            continue;
+                             error!("Failed to load configuration from {:?}: {}", config_path, e);
+                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                             continue;
                         }
                     };
+
+                    TX_TRACE_ENABLED.store(node_config.tx_trace_enabled, Ordering::SeqCst);
 
                     // Override storage path to live inside Go's data directory if provided
                     if !data_dir_str.is_empty() {
