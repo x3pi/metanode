@@ -4469,7 +4469,7 @@ impl ProtocolConfig {
 
         // MetaNode performance overrides for >30K TPS target
         cfg.consensus_max_transactions_in_block_bytes = Some(64 * 1024 * 1024); // 64 MB max payload size
-        cfg.consensus_max_num_transactions_in_block = Some(50000); // Target block size cap at 50,000 Go txs
+        cfg.consensus_max_num_transactions_in_block = Some(20000); // Target block size cap at 20,000 Go txs
 
         // Simtest specific overrides.
         if cfg!(msim) {
