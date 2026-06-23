@@ -103,7 +103,7 @@ pub struct Parameters {
 
 impl Parameters {
     pub(crate) fn default_leader_timeout() -> Duration {
-        Duration::from_millis(200)
+        Duration::from_millis(100)
     }
 
     pub(crate) fn default_min_round_delay() -> Duration {
@@ -116,7 +116,7 @@ impl Parameters {
             // Avoid excessive CPU, data and logs in tests.
             Duration::from_millis(250)
         } else {
-            Duration::from_millis(50)
+            Duration::from_millis(25)
         }
     }
 
