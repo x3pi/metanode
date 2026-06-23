@@ -1122,10 +1122,10 @@ PROCESS_BLOCK:
 		currentDispatchMs := epochData.GetRustDispatchTimestampMs()
 		prevDispatchMs := pipeline.LastRustDispatchTimestampMs.Swap(currentDispatchMs)
 		var rustDagConsensusUs uint64
-		if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs {
+		if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs && (currentDispatchMs - prevDispatchMs) < 5000 {
 			rustDagConsensusUs = (currentDispatchMs - prevDispatchMs) * 1000
 		} else {
-			// Fallback: estimate consensus as time from first batch sent to dispatch
+			// Fallback: estimate consensus as time from first batch sent to dispatch (prevents inter-round idle time pollution)
 			if dispatchUs > goSendBatchTimeUs {
 				rustDagConsensusUs = dispatchUs - goSendBatchTimeUs
 			}
