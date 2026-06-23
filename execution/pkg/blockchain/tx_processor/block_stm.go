@@ -108,28 +108,28 @@ func ProcessTransactionsOptimistic(
 				go func() {
 					defer wg.Done()
 					
+					var localTrie p_trie.StateTrie
+					baseTrie := validationCache.Trie()
+					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+						localTrie = baseTrie
+					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+						localTrie = baseTrie
+					} else {
+						localTrie = baseTrie.Copy()
+					}
+					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+					localSmartContractDB := smart_contract_db.NewSmartContractDB(
+						chainState.GetStorageManager().GetStorageCode(),
+						chainState.GetStorageManager().GetStorageSmartContract(),
+						localAccountDB,
+					)
+
 					for realIdx := range jobs {
 						select {
 						case <-ctx.Done():
 							return // Global abort
 						default:
 						}
-
-						var localTrie p_trie.StateTrie
-						baseTrie := validationCache.Trie()
-						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
-							localTrie = baseTrie
-						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
-							localTrie = baseTrie
-						} else {
-							localTrie = baseTrie.Copy()
-						}
-						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-						localSmartContractDB := smart_contract_db.NewSmartContractDB(
-							chainState.GetStorageManager().GetStorageCode(),
-							chainState.GetStorageManager().GetStorageSmartContract(),
-							localAccountDB,
-						)
 
 						group := groupedGroups[realIdx]
 
@@ -151,6 +151,7 @@ func ProcessTransactionsOptimistic(
 						speculativeResults[realIdx] = res
 						resultsMutex.Unlock()
 
+						localAccountDB.ClearCaches()
 						localSmartContractDB.Discard()
 					}
 				}()
@@ -230,28 +231,28 @@ func ProcessTransactionsOptimistic(
 				go func() {
 					defer wg.Done()
 
+					var localTrie p_trie.StateTrie
+					baseTrie := validationCache.Trie()
+					if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
+						localTrie = baseTrie
+					} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
+						localTrie = baseTrie
+					} else {
+						localTrie = baseTrie.Copy()
+					}
+					localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
+					localSmartContractDB := smart_contract_db.NewSmartContractDB(
+						chainState.GetStorageManager().GetStorageCode(),
+						chainState.GetStorageManager().GetStorageSmartContract(),
+						localAccountDB,
+					)
+
 					for gIdx := range groupJobs {
 						select {
 						case <-ctx.Done():
 							return // Global abort
 						default:
 						}
-
-						var localTrie p_trie.StateTrie
-						baseTrie := validationCache.Trie()
-						if _, ok := baseTrie.(*p_trie.FlatStateTrie); ok {
-							localTrie = baseTrie
-						} else if _, ok := baseTrie.(*p_trie.NomtStateTrie); ok {
-							localTrie = baseTrie
-						} else {
-							localTrie = baseTrie.Copy()
-						}
-						localAccountDB := account_state_db.NewAccountStateDB(localTrie, chainState.GetStorageManager().GetStorageAccount())
-						localSmartContractDB := smart_contract_db.NewSmartContractDB(
-							chainState.GetStorageManager().GetStorageCode(),
-							chainState.GetStorageManager().GetStorageSmartContract(),
-							localAccountDB,
-						)
 
 						groupRealIndices := executionGroups[gIdx]
 
@@ -292,6 +293,7 @@ func ProcessTransactionsOptimistic(
 						speculativeGroupResults[gIdx] = groupResults
 						resultsMutex.Unlock()
 
+						localAccountDB.ClearCaches()
 						localSmartContractDB.Discard()
 					}
 				}()

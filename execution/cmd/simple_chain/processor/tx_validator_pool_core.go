@@ -303,7 +303,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 
 	// Phase 1.5 (TPS Optimization): Batch Cache Warming
 	// Collect unique addresses to fetch in parallel without blocking muTrie.Lock
-	preloadSet := make(map[common.Address]struct{}, len(txs))
+	preloadSet := make(map[common.Address]struct{}, len(txs)*2)
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -311,6 +311,9 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		tx.AddRelatedAddress(tx.FromAddress())
 		tx.AddRelatedAddress(tx.ToAddress())
 		preloadSet[tx.FromAddress()] = struct{}{}
+		if !tx.IsDeployContract() {
+			preloadSet[tx.ToAddress()] = struct{}{}
+		}
 	}
 	var preloadAddrs []common.Address
 	if len(preloadSet) > 0 {
