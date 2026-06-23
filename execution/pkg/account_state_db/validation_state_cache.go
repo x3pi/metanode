@@ -164,6 +164,11 @@ func (v *ValidationStateCache) InjectTargetedAcceptedWrites(targetAccountDB type
 	}
 }
 
+// ShareLoadedAccountsFrom is passed through to the parent AccountStateDB
+func (v *ValidationStateCache) ShareLoadedAccountsFrom(parent types.AccountStateDB) {
+	v.parentAccountDB.ShareLoadedAccountsFrom(parent)
+}
+
 
 // -----------------------------------------------------------------------------
 // Write Methods (Mutate the overlay directly during fallback re-execution)

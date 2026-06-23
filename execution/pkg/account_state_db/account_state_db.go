@@ -682,6 +682,17 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	return finalAs, nil
 }
 
+// ShareLoadedAccountsFrom allows a child DB to share the read-only loaded accounts cache from a parent DB.
+// This is critical for Block-STM workers to hit the Preloaded accounts without CGO overhead.
+func (db *AccountStateDB) ShareLoadedAccountsFrom(parent types.AccountStateDB) {
+	if pDB, ok := parent.(*AccountStateDB); ok {
+		// Share the exact same underlying sync map instance.
+		// Since loadedAccounts is thread-safe and read-only for already loaded accounts,
+		// and new cache misses will just LoadOrStore into the shared cache, this is perfectly safe.
+		db.loadedAccounts = pDB.loadedAccounts
+	}
+}
+
 // PreloadAccounts batch-loads multiple account states into the dirty cache.
 // PERFORMANCE OPTIMIZATION: Instead of calling AccountState() N times (each acquiring/releasing
 // muTrie.Lock individually), this method:
