@@ -8,11 +8,11 @@
   },
   "validators": [
     {
-      "address": "0xda34c040ada405cbbc8b772b4e80202717c2da63",
-      "eth_private_key": "0xefc339714d59969ff4d619a7b1b1c065d1a27395634c0fc6a1a41ff8ca8851ab",
-      "primary_address": "192.168.1.233:6200",
-      "worker_address": "192.168.1.233:4012",
-      "p2p_address": "/ip4/192.168.1.233/tcp/9100",
+      "address": "0xb487eda3d43f939ae2a82e31b31916c112f80798",
+      "eth_private_key": "0x1bfe1bf7916ea39eac3924781629e4f9b5bf07b9d0cbb8ffb25b120175fc5860",
+      "primary_address": "192.168.1.234:6200",
+      "worker_address": "192.168.1.234:4012",
+      "p2p_address": "/ip4/192.168.1.234/tcp/9100",
       "description": "Validator node-0",
       "website": "",
       "image": "",
@@ -21,22 +21,22 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0xda34c040ada405cbbc8b772b4e80202717c2da63",
+          "address": "0xb487eda3d43f939ae2a82e31b31916c112f80798",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "HlA++hQeIdw7vLXmQO6tuw4nwLTqtlYwf79ETzLGWlA=",
+      "network_key": "+Kja6Qo0lbK23hWGpZeOXzR2EDFoKaCm/WCjvlI0QiU=",
       "hostname": "node-0",
-      "authority_key": "isTLC3iiMt9OlAxNA/6mT8/Hg+IJcVMOLx+tseSWPKHdDqOYL+32/wPXCp7FkXLyA63LJ9ICqr+8pL03u9dQ9cc7orAVyQA0Q/cgWJfw5+/mua9O89/gkJ+3HuieEx6P",
-      "protocol_key": "0k+deRvo9jgmSo9yN01MrRiX4WHkzeSKvaducSVetWA="
+      "authority_key": "jvW4NjK2HKlvyBU2LPzl3LNIGO4fds5RpREPZW/GWqPhIOw3lz733f+SBLgrcPcuAyU7z3MnZ2d2CvrUybJa74DihZI0VQx1whv1GEGGW1URvWvnrMqnOGdxiyptK0HQ",
+      "protocol_key": "1sG0CoYUryBW0Z7yaiFw0ONeH2yVWlMK3CLOxMqMnus="
     },
     {
-      "address": "0xf73696bb1397eed8e02d0e131d5dec99169efbf8",
-      "eth_private_key": "0x86b92874409d5e2e1ebcb66d7b77c8d6b11fcd1bfa4e52555d91362873603c40",
-      "primary_address": "192.168.1.232:6201",
-      "worker_address": "192.168.1.232:4013",
-      "p2p_address": "/ip4/192.168.1.232/tcp/9101",
+      "address": "0xdd12eeb3962aa1fed8e9f784fc4885558b05eb45",
+      "eth_private_key": "0x2b3deaa8995f21ace00803fcc693a9905068bb7a83fb5f57b5f8962aa793301f",
+      "primary_address": "192.168.1.234:6201",
+      "worker_address": "192.168.1.234:4013",
+      "p2p_address": "/ip4/192.168.1.234/tcp/9101",
       "description": "Validator node-1",
       "website": "",
       "image": "",
@@ -45,22 +45,22 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0xf73696bb1397eed8e02d0e131d5dec99169efbf8",
+          "address": "0xdd12eeb3962aa1fed8e9f784fc4885558b05eb45",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "UmlM+gLVgFtef+OuH/wVe20dsm3HczabkrZdRsEvBd0=",
+      "network_key": "W1GMoywZ1oEf/pYE0lCAdJbfa6eCTHGDyBTgsZUVYb0=",
       "hostname": "node-1",
-      "authority_key": "s0aoNr9ZB8uk4oEgSvc+IZ6wPT/qb1/HwpIzzL6Bb5Suvzmu4n57WX1eM1qcNvMuAm2qusKEgk7nbT1AU6VjiN8cJF1WlR47JcBGPAv9VSQX0/gqqzJ8d60Y1gPz7YN/",
-      "protocol_key": "MUPE5s29eN3wV0FbiyZIMtrTKmen4sEYtWzwYnHOqN0="
+      "authority_key": "jBWuC92GC641wMwhkYRCbmaChhxuRjPsNvobxUXADUl+z6uLVgG986xcm8L0ovhVFW2uBdvqptoMhjHkgaqkO4OW+P/+ZPH+2/JKjEgYWDwzOj0FtEP+hszS14Z1kxH1",
+      "protocol_key": "XMmOyfKbTTuWFpm/+k4U8awhZAHrUVT3K0UDGkNiEgE="
     },
     {
-      "address": "0xf7367770fd2b92fbefe265acfc24d63560ca9bcf",
-      "eth_private_key": "0xb511e2e820b59b871c9854289e82986be4d296e7e8f68ef9715952f95e7413c9",
-      "primary_address": "192.168.1.231:6202",
-      "worker_address": "192.168.1.231:4014",
-      "p2p_address": "/ip4/192.168.1.231/tcp/9102",
+      "address": "0x8f8b1311ec86e28cab4ddbcf1272e4a2ea67577b",
+      "eth_private_key": "0x7f75dba4baa93894ec0ac801bf61de2930730312deb198826a51d24b6d48f0a9",
+      "primary_address": "192.168.1.234:6202",
+      "worker_address": "192.168.1.234:4014",
+      "p2p_address": "/ip4/192.168.1.234/tcp/9102",
       "description": "Validator node-2",
       "website": "",
       "image": "",
@@ -69,22 +69,22 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0xf7367770fd2b92fbefe265acfc24d63560ca9bcf",
+          "address": "0x8f8b1311ec86e28cab4ddbcf1272e4a2ea67577b",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "dLJDMIRsHoWSw1qcAQq4ttGvAAyzAg8mbUWM+kulTQc=",
+      "network_key": "W7H5YwF3/TF45f5vNcpWNETvgilSpbG1T6LgGsmLzCM=",
       "hostname": "node-2",
-      "authority_key": "j9SFcBzxtZK8uFTn/EWP/TXU2OQC4BtEXZVCyJN3zyafIgRTsuuH/47sVG91e5XHAo0sG3Gs8eOnGq8uWFI17WBKlE4VcpgN89KRjVsI0TAMWLCsJOU67ze9ghmMvMe6",
-      "protocol_key": "f/B0rByJM612FPeC4Eb6hoBfGUo3bDPdGzt1F65XJNo="
+      "authority_key": "j02zcqgp2rwv3hkYImCX0dVcU5Pxuz0Rq4oyY0AcskKQU+Juk/Phw0dZA3jV+jdDCG09MSHie9tstmPQF69mcwN1iIsepT5L01QQhQ8C7mPT4EBYJ6paxf+XhE4wgsUu",
+      "protocol_key": "tHC5eKwD60AuWWZ2dT0OFnV1m2K5kWUwWClClydBSBw="
     },
     {
-      "address": "0x8c4d72f8024a00efe5e8d2102282c2eafc76e82f",
-      "eth_private_key": "0xa9693ce95f52ca9fbaf73e7e771326a643906c443558d61604b7b4e356863fdf",
-      "primary_address": "192.168.1.230:6203",
-      "worker_address": "192.168.1.230:4015",
-      "p2p_address": "/ip4/192.168.1.230/tcp/9103",
+      "address": "0x7a2007a8c76c22c8e8a3e38f35a151a5696766d5",
+      "eth_private_key": "0x4ff88dc538ff4e092e7fd944542027438343cd4c690ecb4906ba530c512189b3",
+      "primary_address": "192.168.1.234:6203",
+      "worker_address": "192.168.1.234:4015",
+      "p2p_address": "/ip4/192.168.1.234/tcp/9103",
       "description": "Validator node-3",
       "website": "",
       "image": "",
@@ -93,15 +93,15 @@
       "accumulated_rewards_per_share": "0",
       "delegator_stakes": [
         {
-          "address": "0x8c4d72f8024a00efe5e8d2102282c2eafc76e82f",
+          "address": "0x7a2007a8c76c22c8e8a3e38f35a151a5696766d5",
           "amount": "1000000000000000000000"
         }
       ],
       "total_staked_amount": "1000000000000000000000",
-      "network_key": "noQBg8ggxBcv996YKHzLHy1HjnwpXbj/TckwOFJ/WiU=",
+      "network_key": "flhUTrlscwcG/WQyh4j28BVIReIB/7lz8DNOzwdlE4Y=",
       "hostname": "node-3",
-      "authority_key": "hcWrDcrcGkU29ZNTJJyBkeH2N8uU/ynqYE1xQE4tNiElZp+0TgYSmdPhgjvrVjNZCU6uyBnK1sbe+b+tM8psTirRNclJgfMvOK4dkoYZ7Pj93dndLOj9ueXWrVCSuL/z",
-      "protocol_key": "jlusHmVA/ly8o5T0x5Z7NHZpXvoNjXHmPlHsI6jfexk="
+      "authority_key": "pYhgRLMe32H7XbKo0U/lO9bE09TpHwCztb5qIXb0oGvIA/xL/20TwnoZhIEHOLhBA35DU9PbKcNJ2AEFMuOW79lqNmSHWBnc8MWRJbMN6m6goHgb1I7BhJc74A6U1yPW",
+      "protocol_key": "q48Ki5GeSVWin2Z5Jt4HQl9Ig1C1yqQqwcht7rNCfP4="
     },
     {
       "address": "0x42e067b0ceb410a585f24fead248dc9ce18abd3c",
@@ -130,6 +130,14 @@
   ],
   "alloc": [
     {
+      "address": "0x8cF200967660DB21739CaC872e64Bb5cfFBA0049",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+    },
+    {
       "address": "0x2C71210D239D472e963a7Be8362eCBdeD5337fE6",
       "balance": "100000000000000000000",
       "pending_balance": "0",
@@ -147,7 +155,7 @@
     },
     {
       "address": "0x7174Ad7F17a5B57a7d1835ba1a942521407c0dC6",
-      "balance": "100000000000000000000",
+      "balance": "1000000000000000000000000000000000",
       "pending_balance": "0",
       "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -1040,6 +1048,186 @@
       "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "publicKeyBls": "0x87ac85af3b1a502e835152c0965f48f3c8bf77e880cb0587f87cc84227ce97ffcb7a2610f73e960575798fc1e8165c4c"
+    },
+    {
+      "address": "0x4b51d69B903C136654D168d0d500dA58AFdc5b60",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xd5D1c7e1c276288Fa0993bB7B1cF40C73f1226A4",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xB5814D58e8Bd09673fA41b41F53846334970e7Ed",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x40123c5B48C14A3945B73A91429705028c83DcFc",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x2f45Bc898316E8Aa9F1Bb530A710a7840D50Aa0b",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xFA6c3CB0785F29905528bB42172ae03aF642Ba54",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x02bF9dB2b056c5816cCE1eeCea5F89748c71fCdD",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x5Ba5c3C959e1100CB7B6B483048c22a1D33b10E8",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xE13240be6f35C257d91A9f676c8C03501f9bf01d",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x4bd11A56F174facBFe784C9c43E255622D2a02B1",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x248BF9E035E4C3da95FECC94A0bF9A1e1F648a46",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xF925262a405194Db7fbDFF02f111cDfaa3F8E54F",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xeb9fB85817bdC05fC1fAA43984500847e2006884",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x4eCB82724890c656D09761b617369479c5392d6D",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0x3b97a0aa19f157E7B2BeD22f43d2B187d89ca135",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xDeEBF59cb5fddd8926C6E8f6A131bd25E60C9fb1",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xdC6640eAb14767854C2793e599945cd7F2E9AB10",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
+    },
+    {
+      "address": "0xFAdc1883451766B5274671032B374b82fbF12019",
+      "balance": "1000000000000000000000000000000000",
+      "pending_balance": "0",
+      "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "public_key_bls": "",
+      "r_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pending_bls": ""
     }
   ],
   "total_stake": 4000,
