@@ -1125,3 +1125,13 @@ func (db *AccountStateDB) InjectLoadedAccount(as types.AccountState) {
 	}
 }
 
+// ClearCaches explicitly clears the dirty and loaded caches without reloading the trie.
+// This is used for reusing DB contexts during Block-STM processing to avoid massive memory allocations.
+func (db *AccountStateDB) ClearCaches() {
+	if db == nil {
+		return
+	}
+	db.dirtyAccounts.Clear()
+	db.loadedAccounts.Clear()
+}
+
