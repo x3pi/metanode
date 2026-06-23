@@ -525,11 +525,23 @@ impl CommittedSubDag {
     /// Returns a vector of (block_ref, system_transaction) tuples
     pub fn extract_system_transactions(&self) -> Vec<(BlockRef, SystemTransaction)> {
         let mut system_txs = Vec::new();
+        let cache = crate::transaction::get_global_tx_cache().read();
 
         for block in &self.blocks {
-            for tx in block.transactions() {
-                if let Some(system_tx) = extract_system_transaction(tx.data()) {
-                    system_txs.push((block.reference(), system_tx));
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    if let Some(tx) = cache.get(digest) {
+                        if let Some(system_tx) = extract_system_transaction(tx.data()) {
+                            system_txs.push((block.reference(), system_tx));
+                        }
+                    }
+                }
+            } else {
+                for tx in block.transactions() {
+                    if let Some(system_tx) = extract_system_transaction(tx.data()) {
+                        system_txs.push((block.reference(), system_tx));
+                    }
                 }
             }
         }
@@ -540,11 +552,25 @@ impl CommittedSubDag {
     /// Extract EndOfEpoch system transactions from this committed sub-dag
     /// Returns the first EndOfEpoch transaction found (there should be at most one per commit)
     pub fn extract_end_of_epoch_transaction(&self) -> Option<(BlockRef, SystemTransaction)> {
+        let cache = crate::transaction::get_global_tx_cache().read();
         for block in &self.blocks {
-            for tx in block.transactions() {
-                if let Some(system_tx) = extract_system_transaction(tx.data()) {
-                    if system_tx.is_end_of_epoch() {
-                        return Some((block.reference(), system_tx));
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    if let Some(tx) = cache.get(digest) {
+                        if let Some(system_tx) = extract_system_transaction(tx.data()) {
+                            if system_tx.is_end_of_epoch() {
+                                return Some((block.reference(), system_tx));
+                            }
+                        }
+                    }
+                }
+            } else {
+                for tx in block.transactions() {
+                    if let Some(system_tx) = extract_system_transaction(tx.data()) {
+                        if system_tx.is_end_of_epoch() {
+                            return Some((block.reference(), system_tx));
+                        }
                     }
                 }
             }

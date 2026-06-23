@@ -489,6 +489,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         context: &Context,
         peer_index: AuthorityIndex,
         dag_state: Arc<RwLock<DagState>>,
+        network_client: Arc<C>,
     ) -> ConsensusResult<Vec<VerifiedBlock>> {
         let mut verified_blocks = Vec::new();
         let mut voted_blocks = Vec::new();
@@ -560,6 +561,25 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                             .inc();
                         info!("Invalid block received from {}: Block has wrong epoch: expected {}, actual {}", peer_index, expected, actual);
                         return Err(ConsensusError::WrongEpoch { expected, actual });
+                    }
+                }
+                Err(ConsensusError::MissingTransactions(missing)) => {
+                    // Fetch the missing transactions synchronously using block_on
+                    let rt = tokio::runtime::Handle::current();
+                    let fetch_res = rt.block_on(network_client.fetch_transactions(peer_index, missing, FETCH_REQUEST_TIMEOUT));
+                    match fetch_res {
+                        Ok(txs_bytes) => {
+                            {
+                                let mut cache = crate::transaction::get_global_tx_cache().write();
+                                for tx_bytes in txs_bytes {
+                                    let tx = crate::block::Transaction::new(tx_bytes.to_vec());
+                                    cache.insert(tx.digest(), tx);
+                                }
+                            }
+                            // Re-verify after inserting missing transactions into cache
+                            block_verifier.verify_and_vote(signed_block, serialized_block)?
+                        }
+                        Err(err) => return Err(err),
                     }
                 }
                 Err(e) => {
@@ -1431,6 +1451,7 @@ mod tests {
         );
 
         // Create a Synchronizer
+        let network_client = Arc::new(MockNetworkClient::default());
         let result = Synchronizer::<
             MockNetworkClient,
             NoopBlockVerifier,
@@ -1447,6 +1468,7 @@ mod tests {
             commands_sender,
             dag_state.clone(),
             "test",
+            network_client,
         )
         .await;
 

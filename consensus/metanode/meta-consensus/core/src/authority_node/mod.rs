@@ -622,6 +622,7 @@ where
             None,                 // epoch_change_processor
             legacy_store_manager, // Pass initialized manager
             epoch_base_index,     // CRITICAL: Pass epoch_base for cold-start fallback
+            network_client.clone(),
         ));
 
         let subscriber = {

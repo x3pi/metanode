@@ -3,17 +3,21 @@
 
 use std::vec;
 
-use consensus_types::block::{BlockDigest, BlockRef, BlockTimestampMs};
+use consensus_types::block::{BlockDigest, BlockRef, BlockTimestampMs, Round};
 use parking_lot::RwLock;
 
 use super::*;
 use crate::{
-    block::{BlockAPI, Slot, TestBlock, VerifiedBlock},
+    block::{BlockAPI, Slot, TestBlock, VerifiedBlock, genesis_blocks, GENESIS_ROUND},
     commit::{CommitAPI, CommitDigest, CommitIndex},
-    storage::{mem_store::MemStore, WriteBatch},
+    storage::{mem_store::MemStore, WriteBatch, Store},
     test_dag_builder::DagBuilder,
     test_dag_parser::parse_dag,
+    Context, CommitRef, TrustedCommit,
 };
+use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use consensus_config::AuthorityIndex;
 
 #[tokio::test]
 async fn test_get_blocks() {
