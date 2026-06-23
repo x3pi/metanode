@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
@@ -37,12 +39,26 @@ func ProcessTransactionsOptimistic(
 	map[common.Hash]common.Address,
 ) {
 	var totalTxs int
+	hasEvmTx := false
 	for _, group := range groupedGroups {
 		totalTxs += len(group.Items)
+		for _, item := range group.Items {
+			tx := item.Tx
+			if !tx.IsRegularTransaction() {
+				hasEvmTx = true
+			}
+			to := tx.ToAddress()
+			if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+				to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
+				to == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+				hasEvmTx = true
+			}
+		}
 	}
 	if totalTxs == 0 {
 		return nil, nil, nil, nil
 	}
+	logger.Info("🔍 [BLOCK-STM-DEBUG] Block contains %d txs, hasEvmTx=%v", totalTxs, hasEvmTx)
 
 	startPreload := time.Now()
 	uniqueAddrMap := make(map[common.Address]struct{}, totalTxs*2)
@@ -143,6 +159,7 @@ func ProcessTransactionsOptimistic(
 						res := processSingleGroup(
 							ctx, chainState, localAccountDB, localSmartContractDB,
 							group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+							hasEvmTx,
 						)
 						res.readAccounts = localAccountDB.GetLoadedAccounts()
 						res.readStorage = localSmartContractDB.GetReadStorageKeys()
@@ -282,6 +299,7 @@ func ProcessTransactionsOptimistic(
 							res := processSingleGroup(
 								ctx, chainState, localAccountDB, localSmartContractDB,
 								group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
+								hasEvmTx,
 							)
 							res.readAccounts = localAccountDB.GetLoadedAccounts()
 							res.readStorage = localSmartContractDB.GetReadStorageKeys()

@@ -40,6 +40,7 @@ func processSingleGroup(
 	isCache bool,
 	blockTime uint64,
 	leaderAddr common.Address,
+	hasEvmTx bool,
 ) groupResultExt {
 	// Acquire slices from memory pools to eliminate GC pressure
 	txPtr := txSlicePool.Get().(*[]types.Transaction)
@@ -549,17 +550,19 @@ func processSingleGroup(
 			// However, since FromAddress is grouped, no other native TX is modifying it,
 			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
 			// So we can just use as.Nonce() + 1
-			mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce()+1)
+			if hasEvmTx {
+				mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce()+1)
 
-			// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
-			asSender, _ := localAccountDB.AccountState(tx.FromAddress())
-			if asSender != nil {
-				mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
-			}
+				// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
+				asSender, _ := localAccountDB.AccountState(tx.FromAddress())
+				if asSender != nil {
+					mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
+				}
 
-			asReceiver, _ := localAccountDB.AccountState(tx.ToAddress())
-			if asReceiver != nil {
-				mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())
+				asReceiver, _ := localAccountDB.AccountState(tx.ToAddress())
+				if asReceiver != nil {
+					mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())
+				}
 			}
 
 			// Generate fake MVM result

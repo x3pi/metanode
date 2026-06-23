@@ -102,8 +102,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			if currentPoolSize == lastPoolSize {
 				stagnantCycles++
-				// ADAPTIVE BATCHING: If no new TXs arrive for 2ms, flush immediately
-				if stagnantCycles >= 2 {
+				// ADAPTIVE BATCHING: If no new TXs arrive for 10ms, flush immediately
+				if stagnantCycles >= 10 {
 					break
 				}
 			} else {
@@ -228,10 +228,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				// ─────────────────────────────────────────────────────────────────
 				// PACING: Add an adaptive delay proportional to batch size to prevent overflowing Rust consensus.
 				// For small batches, sleep less (proportional to size) to avoid artificially bottlenecking TPS.
-				// Capped at 20ms to prevent excessive delays for large batches.
-				pacingDelay := time.Duration(len(batchTxs)) * 20 * time.Microsecond
-				if pacingDelay > 20*time.Millisecond {
-					pacingDelay = 20 * time.Millisecond
+				// Capped at 5ms to prevent excessive delays for large batches.
+				pacingDelay := time.Duration(len(batchTxs)) * 2 * time.Microsecond
+				if pacingDelay > 5*time.Millisecond {
+					pacingDelay = 5 * time.Millisecond
 				}
 				if pacingDelay > 0 {
 					time.Sleep(pacingDelay)
