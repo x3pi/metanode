@@ -53,6 +53,7 @@ type AccountStateDB struct {
 	// This separation prevents loaded-but-unmodified accounts from triggering
 	// trie.Update() in IntermediateRoot (each costs ~25µs).
 	loadedAccounts *utils.ShardedAddressMap[types.AccountState]
+	isSharedCache  bool // True if loadedAccounts is shared from parent, prevents clearing in ClearCaches
 
 	// muTrie protects concurrent access to the underlying trie.
 	// RLock is used for reads (getOrCreateAccountState, GetAll) — unlimited concurrent readers.
@@ -445,7 +446,9 @@ func (db *AccountStateDB) InvalidateAllCaches() {
 	// The channel is pre-closed at initialization, so this is a no-op for the first block.
 	<-db.persistReady
 
-	db.loadedAccounts.Clear()
+	if !db.isSharedCache {
+		db.loadedAccounts.Clear()
+	}
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 	logger.Debug("InvalidateAllCaches: Cleared loadedAccounts + lruCache (Sub-node sync safe, persistReady waited)")
@@ -460,7 +463,9 @@ func (db *AccountStateDB) Discard() (err error) {
 	}
 	// Clear dirty accounts first
 	db.dirtyAccounts.Clear()
-	db.loadedAccounts.Clear()
+	if !db.isSharedCache {
+		db.loadedAccounts.Clear()
+	}
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 
@@ -690,6 +695,7 @@ func (db *AccountStateDB) ShareLoadedAccountsFrom(parent types.AccountStateDB) {
 		// Since loadedAccounts is thread-safe and read-only for already loaded accounts,
 		// and new cache misses will just LoadOrStore into the shared cache, this is perfectly safe.
 		db.loadedAccounts = pDB.loadedAccounts
+		db.isSharedCache = true
 	}
 }
 
@@ -1143,6 +1149,8 @@ func (db *AccountStateDB) ClearCaches() {
 		return
 	}
 	db.dirtyAccounts.Clear()
-	db.loadedAccounts.Clear()
+	if !db.isSharedCache {
+		db.loadedAccounts.Clear()
+	}
 }
 
