@@ -263,7 +263,9 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "BLSPrivateKey": bls_private_hex,
             "SnapshotPath": f"{install_dir}/data/execution/snapshots",
             "MaxPartSizeMB": 100,
-            "ArchiveBaseName": "snapshot_archive"
+            "ArchiveBaseName": "snapshot_archive",
+            "pebble_cache_size_mb": 4096,
+            "pebble_mem_table_size_mb": 256
         },
         "nodes": {
             "network_sync_enabled": False,

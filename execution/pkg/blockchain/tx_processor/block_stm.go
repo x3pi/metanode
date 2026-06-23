@@ -81,6 +81,30 @@ func ProcessTransactionsOptimistic(
 	chainState.GetAccountStateDB().PreloadAccounts(addrSlice)
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
+	// =========================================================================
+	// FAST-PATH: All-Native-Transfer Blocks (Bypass Block-STM)
+	// =========================================================================
+	// When ALL TXs are simple value transfers (no EVM, no contract calls),
+	// we bypass the full Block-STM machinery (Union-Find, ValidationStateCache,
+	// conflict detection, speculative re-execution) and process directly on the
+	// global AccountStateDB. This eliminates:
+	//   - 25K+ localAccountDB/localSmartContractDB allocations
+	//   - 25K+ goroutine job scheduling overhead
+	//   - Conflict detection rounds (always 0 conflicts for native TXs)
+	//   - ValidationStateCache merge overhead
+	//
+	// FORK-SAFETY: Native transfers use AccountStateDB's sharded locks
+	// (accountLocks[address[0]]) for thread-safe concurrent mutations.
+	// Each sender is unique per group (guaranteed by UnionFind grouping),
+	// so no data race on sender state. Receiver AddBalance is also lock-protected.
+	// =========================================================================
+	if !hasEvmTx {
+		return processNativeTransfersFastPath(
+			ctx, chainState, groupedGroups, totalTxs,
+			enableTrace, leaderAddr,
+		)
+	}
+
 	// -------------------------------------------------------------------------
 	// 2. Iterative Parallel Group Block-STM (Union-Find Conflict Resolution)
 	// -------------------------------------------------------------------------

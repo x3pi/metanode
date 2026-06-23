@@ -54,6 +54,7 @@ type DatabasesConfig struct {
 	NumShardsCode          int    `json:"num_shards_code,omitempty"`
 	Parallelism            int    `json:"parallelism,omitempty"`
 	PebbleCacheSizeMB      int    `json:"pebble_cache_size_mb,omitempty"`
+	PebbleMemTableSizeMB   int    `json:"pebble_mem_table_size_mb,omitempty"`
 }
 
 // NodesConfig khớp với cấu trúc của đối tượng "nodes" trong JSON.
@@ -262,7 +263,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			ConfigApp.Databases.Parallelism = 2 // TUNED: Restore to 2 to match previous behavior
 		}
 		if ConfigApp.Databases.PebbleCacheSizeMB == 0 {
-			ConfigApp.Databases.PebbleCacheSizeMB = 512
+			ConfigApp.Databases.PebbleCacheSizeMB = 4096
+		}
+		if ConfigApp.Databases.PebbleMemTableSizeMB == 0 {
+			ConfigApp.Databases.PebbleMemTableSizeMB = 256
 		}
 
 		// Default log configuration if not specified
