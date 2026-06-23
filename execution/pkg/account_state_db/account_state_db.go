@@ -682,6 +682,8 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	return finalAs, nil
 }
 
+
+
 // PreloadAccounts batch-loads multiple account states into the dirty cache.
 // PERFORMANCE OPTIMIZATION: Instead of calling AccountState() N times (each acquiring/releasing
 // muTrie.Lock individually), this method:
@@ -752,6 +754,12 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 			keysToWarm[i] = addr.Bytes()
 		}
 		baseCopy.PreWarm(keysToWarm)
+		
+		// 🚀 [PERF-FIX]: Since we removed `ShareLoadedAccountsFrom` to fix Block-STM ReadSet corruption,
+		// workers no longer read from the global `loadedAccounts` cache.
+		// Therefore, we do NOT need to spend massive CPU cycles unmarshalling accounts here.
+		// NomtStateTrie is lock-free and CGO overhead is minimal since the Merkle nodes are now in memory!
+		return
 	}
 	prewarmDuration := time.Since(startPrewarm)
 
@@ -1123,5 +1131,15 @@ func (db *AccountStateDB) InjectLoadedAccount(as types.AccountState) {
 	if as != nil {
 		db.loadedAccounts.Store(as.Address(), as)
 	}
+}
+
+// ClearCaches explicitly clears the dirty and loaded caches without reloading the trie.
+// This is used for reusing DB contexts during Block-STM processing to avoid massive memory allocations.
+func (db *AccountStateDB) ClearCaches() {
+	if db == nil {
+		return
+	}
+	db.dirtyAccounts.Clear()
+	db.loadedAccounts.Clear()
 }
 

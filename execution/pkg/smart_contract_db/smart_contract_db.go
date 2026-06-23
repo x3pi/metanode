@@ -709,6 +709,10 @@ func (db *SmartContractDB) Discard() {
 		db.smartContractStorageTries.Delete(key)
 		return true
 	})
+	db.readStorageKeys.Range(func(key, _ interface{}) bool {
+		db.readStorageKeys.Delete(key)
+		return true
+	})
 }
 
 // InvalidateAllCaches clears all in-memory caches. This is CRITICAL for fork-safety

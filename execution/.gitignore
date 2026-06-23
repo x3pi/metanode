@@ -251,3 +251,5 @@ sed*
 test_sort.rs
 patch_http_handler.sh
 
+# ===== Prometheus configuration =====
+deploy/prometheus/prometheus.yml
