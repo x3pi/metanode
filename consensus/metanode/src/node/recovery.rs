@@ -88,14 +88,32 @@ pub async fn perform_block_recovery_check(
 
         // Count total TXs to determine how many GEIs this commit will consume
         let mut total_txs = 0;
+        let cache = consensus_core::get_global_tx_cache().read();
         for block in subdag.blocks.iter() {
-            for tx in block.transactions().iter() {
-                let tx_data = tx.data();
-                // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                    continue;
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    if let Some(tx) = cache.get(digest) {
+                        let tx_data = tx.data();
+                        // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                        if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                            continue;
+                        }
+                        total_txs += 1;
+                    } else {
+                        warn!("⚠️ [RECOVERY] Missing transaction payload for digest {:?} in block {}", digest, block.reference());
+                        total_txs += 1; // Fallback to avoid undercounting
+                    }
                 }
-                total_txs += 1;
+            } else {
+                for tx in block.transactions().iter() {
+                    let tx_data = tx.data();
+                    // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                    if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                        continue;
+                    }
+                    total_txs += 1;
+                }
             }
         }
         let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();

@@ -1,4 +1,5 @@
 use super::*;
+use super::proposal::receive;
 
 #[tokio::test]
 async fn test_commit_and_notify_for_block_status() {
@@ -62,6 +63,7 @@ async fn test_commit_and_notify_for_block_status() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
@@ -81,6 +83,7 @@ async fn test_commit_and_notify_for_block_status() {
         context.clone(),
         commit_consumer,
         dag_state.clone(),
+        dag_state_writer.clone(),
         transaction_certifier.clone(),
         leader_schedule.clone(),
         0,
@@ -235,6 +238,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
 
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
@@ -254,6 +258,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
         context.clone(),
         commit_consumer,
         dag_state.clone(),
+        dag_state_writer.clone(),
         transaction_certifier.clone(),
         leader_schedule.clone(),
         0,
@@ -667,6 +672,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
 
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
@@ -693,6 +699,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         context.clone(),
         commit_consumer,
         dag_state.clone(),
+        dag_state_writer.clone(),
         transaction_certifier.clone(),
         leader_schedule.clone(),
         0,

@@ -128,3 +128,40 @@ impl AsRef<[u8]> for BlockDigest {
         &self.0
     }
 }
+
+/// Digest of a transaction.
+#[derive(Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TxDigest(pub [u8; consensus_config::DIGEST_LENGTH]);
+
+impl TxDigest {
+    pub const MIN: Self = Self([u8::MIN; consensus_config::DIGEST_LENGTH]);
+    pub const MAX: Self = Self([u8::MAX; consensus_config::DIGEST_LENGTH]);
+}
+
+impl fmt::Display for TxDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.0)
+                .get(0..4)
+                .ok_or(fmt::Error)?
+        )
+    }
+}
+
+impl fmt::Debug for TxDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.0)
+        )
+    }
+}
+
+impl AsRef<[u8]> for TxDigest {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}

@@ -37,6 +37,11 @@ impl ConsensusNode {
     ) -> Result<ConsensusSetup> {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
+
+        // Initialize persistent transaction directory
+        let tx_dir = config.storage_path.join("tx_payloads");
+        std::fs::create_dir_all(&tx_dir).ok();
+        let _ = consensus_core::TX_PAYLOAD_DIR.set(tx_dir);
         
         let dag_has_history = Self::check_dag_history(config, storage);
 

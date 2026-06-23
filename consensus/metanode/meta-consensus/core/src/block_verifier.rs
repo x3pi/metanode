@@ -6,7 +6,7 @@ use consensus_types::block::{BlockRef, TransactionIndex};
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    block::{genesis_blocks, BlockAPI, SignedBlock, GENESIS_ROUND},
+    block::{genesis_blocks, Block, BlockAPI, SignedBlock, GENESIS_ROUND},
     context::Context,
     error::{ConsensusError, ConsensusResult},
     transaction::TransactionVerifier,
@@ -187,25 +187,71 @@ impl SignedBlockVerifier {
             });
         }
 
-        let batch: Vec<_> = block.transactions().iter().map(|t| t.data()).collect();
+        // Pre-check BlockV3 transactions in cache, and insert BlockV1/V2 transactions to cache.
+        match &**block {
+            Block::V1(v1) => {
+                let mut cache = crate::transaction::get_global_tx_cache().write();
+                for tx in v1.transactions() {
+                    cache.insert(tx.digest(), tx.clone());
+                }
+            }
+            Block::V2(v2) => {
+                let mut cache = crate::transaction::get_global_tx_cache().write();
+                for tx in v2.transactions() {
+                    cache.insert(tx.digest(), tx.clone());
+                }
+            }
+            Block::V3(v3) => {
+                let cache = crate::transaction::get_global_tx_cache().read();
+                let mut missing = Vec::new();
+                for digest in v3.tx_digests() {
+                    if cache.get(&digest).is_none() {
+                        missing.push(digest);
+                    }
+                }
+                if !missing.is_empty() {
+                    return Err(ConsensusError::MissingTransactions(missing));
+                }
+            }
+        }
+
+        let mut txs = Vec::new();
+        match &**block {
+            Block::V1(v1) => {
+                txs = v1.transactions().to_vec();
+            }
+            Block::V2(v2) => {
+                txs = v2.transactions().to_vec();
+            }
+            Block::V3(v3) => {
+                let cache = crate::transaction::get_global_tx_cache().read();
+                for digest in v3.tx_digests() {
+                    if let Some(tx) = cache.get(&digest) {
+                        txs.push(tx);
+                    }
+                }
+            }
+        }
+        let batch: Vec<&[u8]> = txs.iter().map(|t| t.data()).collect();
 
         let tx_start = std::time::Instant::now();
         self.check_transactions(&batch)?;
         let tx_elapsed = tx_start.elapsed();
 
         // Enforce group size limit per block/commit
-        if !crate::tx_group_filter::verify_group_limit(block.transactions(), crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
+        if !crate::tx_group_filter::verify_group_limit(&txs, crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
             return Err(ConsensusError::InvalidTransaction(
                 "Block contains transactions exceeding group size limit".to_string(),
             ));
         }
 
-        if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || block.transactions().len() > 0 {
+        let num_txs = txs.len();
+        if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || num_txs > 0 {
             tracing::warn!(
                 "⏱️ [PERF-RUST] verify_block_inner detail for author {} round {} (txs: {}): sig_verify={:?}, tx_check={:?}",
                 block.author(),
                 block.round(),
-                block.transactions().len(),
+                num_txs,
                 sig_elapsed,
                 tx_elapsed
             );
@@ -251,6 +297,23 @@ impl SignedBlockVerifier {
     }
 }
 
+fn get_block_transactions_data(block: &Block) -> Vec<Vec<u8>> {
+    match block {
+        Block::V1(v1) => v1.transactions().iter().map(|t| t.data().to_vec()).collect(),
+        Block::V2(v2) => v2.transactions().iter().map(|t| t.data().to_vec()).collect(),
+        Block::V3(v3) => {
+            let cache = crate::transaction::get_global_tx_cache().read();
+            let mut data = Vec::new();
+            for digest in v3.tx_digests() {
+                if let Some(tx) = cache.get(&digest) {
+                    data.push(tx.data().to_vec());
+                }
+            }
+            data
+        }
+    }
+}
+
 // All block verification logic are implemented below.
 impl BlockVerifier for SignedBlockVerifier {
     fn verify_and_vote(
@@ -269,19 +332,22 @@ impl BlockVerifier for SignedBlockVerifier {
         let rejected_transactions = if self.context.protocol_config.mysticeti_fastpath() {
             self.vote(&verified_block)?
         } else {
+            let txs_data = get_block_transactions_data(&verified_block);
+            let batch: Vec<&[u8]> = txs_data.iter().map(|d| d.as_slice()).collect();
             self.transaction_verifier
-                .verify_batch(&verified_block.transactions_data())
+                .verify_batch(&batch)
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
         let vote_elapsed = vote_start.elapsed();
         let total_elapsed = start.elapsed();
 
-        if total_elapsed.as_micros() > 500 || verified_block.transactions().len() > 0 {
+        let num_txs = verified_block.tx_digests().len();
+        if total_elapsed.as_micros() > 500 || num_txs > 0 {
             tracing::warn!(
                 "⏱️ [PERF-RUST] verify_and_vote block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
                 verified_block.reference(),
-                verified_block.transactions().len(),
+                num_txs,
                 total_elapsed,
                 verify_elapsed,
                 vote_elapsed
@@ -305,19 +371,22 @@ impl BlockVerifier for SignedBlockVerifier {
         let rejected_transactions = if self.context.protocol_config.mysticeti_fastpath() {
             self.vote(&verified_block)?
         } else {
+            let txs_data = get_block_transactions_data(&verified_block);
+            let batch: Vec<&[u8]> = txs_data.iter().map(|d| d.as_slice()).collect();
             self.transaction_verifier
-                .verify_batch(&verified_block.transactions_data())
+                .verify_batch(&batch)
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
         let vote_elapsed = vote_start.elapsed();
         let total_elapsed = start.elapsed();
 
-        if total_elapsed.as_micros() > 500 || verified_block.transactions().len() > 0 {
+        let num_txs = verified_block.tx_digests().len();
+        if total_elapsed.as_micros() > 500 || num_txs > 0 {
             tracing::warn!(
                 "⏱️ [PERF-RUST] verify_for_commit_sync block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
                 verified_block.reference(),
-                verified_block.transactions().len(),
+                num_txs,
                 total_elapsed,
                 verify_elapsed,
                 vote_elapsed
@@ -327,8 +396,10 @@ impl BlockVerifier for SignedBlockVerifier {
     }
 
     fn vote(&self, block: &VerifiedBlock) -> ConsensusResult<Vec<TransactionIndex>> {
+        let txs_data = get_block_transactions_data(block);
+        let batch: Vec<&[u8]> = txs_data.iter().map(|d| d.as_slice()).collect();
         self.transaction_verifier
-            .verify_and_vote_batch(&block.reference(), &block.transactions_data())
+            .verify_and_vote_batch(&block.reference(), &batch)
             .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))
     }
 }

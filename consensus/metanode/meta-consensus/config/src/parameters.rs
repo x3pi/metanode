@@ -99,6 +99,10 @@ pub struct Parameters {
     /// Enable adaptive delay mechanism (default: true).
     #[serde(default = "Parameters::default_adaptive_delay_enabled")]
     pub adaptive_delay_enabled: bool,
+
+    /// Enable compact blocks consensus by Tx hash (default: false).
+    #[serde(default = "Parameters::default_compact_blocks_enabled")]
+    pub compact_blocks_enabled: bool,
 }
 
 impl Parameters {
@@ -208,6 +212,10 @@ impl Parameters {
     pub(crate) fn default_adaptive_delay_enabled() -> bool {
         true
     }
+
+    pub(crate) fn default_compact_blocks_enabled() -> bool {
+        false
+    }
 }
 
 impl Default for Parameters {
@@ -231,6 +239,7 @@ impl Default for Parameters {
             commit_sync_batches_ahead: Parameters::default_commit_sync_batches_ahead(),
             tonic: TonicParameters::default(),
             adaptive_delay_enabled: Parameters::default_adaptive_delay_enabled(),
+            compact_blocks_enabled: Parameters::default_compact_blocks_enabled(),
         }
     }
 }

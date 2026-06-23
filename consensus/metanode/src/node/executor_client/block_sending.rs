@@ -72,7 +72,18 @@ impl ExecutorClient {
         }
 
         // Count total transactions BEFORE conversion (to detect if transactions are lost)
-        let total_tx_before: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
+        let total_tx_before: usize = subdag
+            .blocks
+            .iter()
+            .map(|b| {
+                let tx_len = b.transactions().len();
+                if tx_len > 0 {
+                    tx_len
+                } else {
+                    b.tx_digests().len()
+                }
+            })
+            .sum();
 
         // T2-6: Unified batch_id for cross-process tracing (matches Go format)
 
@@ -1062,32 +1073,51 @@ impl ExecutorClient {
             calculate_transaction_hash_single, verify_transaction_protobuf,
         };
 
+        // Reconstruct transactions from digests if it's BlockV3
+        let mut all_txs_to_process = Vec::new();
+        let cache = consensus_core::get_global_tx_cache().read();
+
+        for block in &subdag.blocks {
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    if let Some(tx) = cache.get(digest) {
+                        all_txs_to_process.push(tx);
+                    } else {
+                        warn!("⚠️ [build_sorted_transactions] Missing transaction for digest {:?} in block {}", digest, block.reference());
+                    }
+                }
+            } else {
+                for tx in block.transactions() {
+                    all_txs_to_process.push(tx.clone());
+                }
+            }
+        }
+
         let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new();
         let mut system_transactions: Vec<Vec<u8>> = Vec::new();
         let mut skipped_count = 0;
 
-        for (block_idx, block) in subdag.blocks.iter().enumerate() {
-            for (tx_idx, tx) in block.transactions().iter().enumerate() {
-                let tx_data = tx.data();
-                let tx_hash = calculate_transaction_hash_single(tx_data);
+        for (tx_idx, tx) in all_txs_to_process.iter().enumerate() {
+            let tx_data = tx.data();
+            let tx_hash = calculate_transaction_hash_single(tx_data);
 
-                // Filter: Separate SystemTransaction (BCS format)
-                if SystemTransaction::from_bytes(tx_data).is_ok() {
-                    system_transactions.push(tx_data.to_vec());
-                    skipped_count += 1;
-                    continue;
-                }
-
-                // Filter: Skip non-protobuf transactions
-                if !verify_transaction_protobuf(tx_data) {
-                    let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
-                    trace!("⚠️ [FRAGMENT-FILTER] Skipping non-protobuf tx in block {} tx {}: hash={}...", block_idx, tx_idx, tx_hash_hex);
-                    skipped_count += 1;
-                    continue;
-                }
-
-                all_transactions_with_hash.push((tx_data, tx_hash));
+            // Filter: Separate SystemTransaction (BCS format)
+            if SystemTransaction::from_bytes(tx_data).is_ok() {
+                system_transactions.push(tx_data.to_vec());
+                skipped_count += 1;
+                continue;
             }
+
+            // Filter: Skip non-protobuf transactions
+            if !verify_transaction_protobuf(tx_data) {
+                let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
+                trace!("⚠️ [FRAGMENT-FILTER] Skipping non-protobuf tx at index {}: hash={}...", tx_idx, tx_hash_hex);
+                skipped_count += 1;
+                continue;
+            }
+
+            all_transactions_with_hash.push((tx_data, tx_hash));
         }
 
         // Dedup by txHash
