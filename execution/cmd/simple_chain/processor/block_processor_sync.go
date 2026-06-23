@@ -1118,10 +1118,19 @@ PROCESS_BLOCK:
 		if commitUs > goSendBatchTimeUs {
 			rustMempoolProposeUs = commitUs - goSendBatchTimeUs
 		}
+		
+		currentDispatchMs := epochData.GetRustDispatchTimestampMs()
+		prevDispatchMs := pipeline.LastRustDispatchTimestampMs.Swap(currentDispatchMs)
 		var rustDagConsensusUs uint64
-		if dispatchUs > commitUs {
-			rustDagConsensusUs = dispatchUs - commitUs
+		if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs {
+			rustDagConsensusUs = (currentDispatchMs - prevDispatchMs) * 1000
+		} else {
+			// Fallback: estimate consensus as time from first batch sent to dispatch
+			if dispatchUs > goSendBatchTimeUs {
+				rustDagConsensusUs = dispatchUs - goSendBatchTimeUs
+			}
 		}
+		
 		goReceiveUs := uint64(time.Now().UnixMicro())
 		var rustDeliveryFFIUs uint64
 		if goReceiveUs > dispatchUs {

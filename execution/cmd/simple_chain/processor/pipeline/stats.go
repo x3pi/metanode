@@ -83,6 +83,9 @@ var LastClientBatchProcessingMs atomic.Int64
 // LastSendBatchTxCount stores the total TX count of the last batch sent to Rust.
 var LastSendBatchTxCount atomic.Int64
 
+// LastRustDispatchTimestampMs stores the timestamp (in ms) when the last block was dispatched from Rust FFI.
+var LastRustDispatchTimestampMs atomic.Uint64
+
 // SetNodeRole sets the node role (should be called once during initialization).
 func (ps *PipelineStats) SetNodeRole(role string) {
 	ps.NodeRole = role
