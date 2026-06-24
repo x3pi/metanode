@@ -754,28 +754,22 @@ func (db *AccountStateDB) PreloadAccounts(addresses []common.Address) {
 			keysToWarm[i] = addr.Bytes()
 		}
 		baseCopy.PreWarm(keysToWarm)
-		
-		// 🚀 [PERF-FIX]: Since we removed `ShareLoadedAccountsFrom` to fix Block-STM ReadSet corruption,
-		// workers no longer read from the global `loadedAccounts` cache.
-		// Therefore, we do NOT need to spend massive CPU cycles unmarshalling accounts here.
-		// NomtStateTrie is lock-free and CGO overhead is minimal since the Merkle nodes are now in memory!
-		return
 	}
 	prewarmDuration := time.Since(startPrewarm)
 
 	// Dynamic worker allocation to prevent CGO thread contention and GC overhead.
 	// - For small batches (<= 16), run sequentially (1 worker) to avoid scheduling latency.
 	// - For larger batches, target 32 addresses per worker.
-	// - Cap the maximum number of concurrent workers dynamically based on CPU count (NumCPU / 2, capped between 8 and 48).
+	// - Cap the maximum number of concurrent workers dynamically based on CPU count (NumCPU, capped between 8 and 128).
 	numWorkers := 1
 	if len(toLoad) > 16 {
 		numWorkers = (len(toLoad) + 31) / 32
-		maxWorkers := runtime.NumCPU() / 2
+		maxWorkers := runtime.NumCPU()
 		if maxWorkers < 8 {
 			maxWorkers = 8
 		}
-		if maxWorkers > 48 {
-			maxWorkers = 48
+		if maxWorkers > 128 {
+			maxWorkers = 128
 		}
 		if numWorkers > maxWorkers {
 			numWorkers = maxWorkers

@@ -218,6 +218,8 @@ type BlockProcessor struct {
 	// NOMT-RECOVERY-GUARD: Track the highest block processed before crash
 	// ═══════════════════════════════════════════════════════════════
 	startupLastHandledBlockNum uint64
+
+	speculativeExecutor *SpeculativeExecutor
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
@@ -471,6 +473,8 @@ func NewBlockProcessor(
 
 	// Initialize snapshot gate (must be done before any goroutine starts)
 	bp.initSnapshotGate()
+
+	bp.speculativeExecutor = NewSpeculativeExecutor(bp)
 
 	// Phase 7: Initialize decoupled components
 	bp.txBatchForwarder = NewTxBatchForwarder(

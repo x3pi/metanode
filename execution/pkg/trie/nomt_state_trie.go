@@ -95,9 +95,8 @@ type NomtStateTrie struct {
 	wOldValues map[string][]byte          // pre-commit values for replication
 	wOldLoaded map[string]bool            // tracks which old values were loaded
 
-	// knownKeys tracks ALL original keys ever written to this trie instance.
-	knownKeys   map[string][]byte
-	knownKeysMu sync.RWMutex
+	// registry is a thread-safe registry of all known keys shared across trie clones.
+	registry    *sharedRegistry
 
 	// ─── SESSION STATE (protected by sessionMu) ────────────────────────
 	// Separate from writerMu to allow session drain without blocking writes.
@@ -200,6 +199,11 @@ func registryKeyPath(namespace []byte) [32]byte {
 // root computation, completely eliminating these sources of non-determinism.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+type sharedRegistry struct {
+	mu   sync.RWMutex
+	keys map[string][]byte
+}
+
 // registryFilePath returns the filesystem path for storing a namespace's key registry.
 func registryFilePath(handlePath string, namespace string) string {
 	dir := filepath.Dir(handlePath)
@@ -271,15 +275,15 @@ func loadRegistryFromFile(handlePath string, namespace string) map[string][]byte
 
 // updateRegistryCache updates the in-memory registry cache without writing to disk.
 func (n *NomtStateTrie) updateRegistryCache() {
-	n.knownKeysMu.RLock()
-	defer n.knownKeysMu.RUnlock()
+	n.registry.mu.RLock()
+	defer n.registry.mu.RUnlock()
 
 	dbPath := n.handle.GetPath()
 	namespace := string(n.namespace)
 	cacheKey := dbPath + ":" + namespace
 
-	cloned := make(map[string][]byte, len(n.knownKeys))
-	for k, v := range n.knownKeys {
+	cloned := make(map[string][]byte, len(n.registry.keys))
+	for k, v := range n.registry.keys {
 		cloned[k] = v
 	}
 
@@ -291,28 +295,28 @@ func (n *NomtStateTrie) updateRegistryCache() {
 // persistRegistryToFile writes the knownKeys registry to a file and updates the memory cache.
 // This is called after each Commit to ensure the registry is durable.
 func (n *NomtStateTrie) persistRegistryToFile() {
-	n.knownKeysMu.RLock()
-	if len(n.knownKeys) == 0 {
-		n.knownKeysMu.RUnlock()
+	n.registry.mu.RLock()
+	if len(n.registry.keys) == 0 {
+		n.registry.mu.RUnlock()
 		return
 	}
 
-	sortedKeys := make([]string, 0, len(n.knownKeys))
-	for hexKey := range n.knownKeys {
+	sortedKeys := make([]string, 0, len(n.registry.keys))
+	for hexKey := range n.registry.keys {
 		sortedKeys = append(sortedKeys, hexKey)
 	}
 	sort.Strings(sortedKeys)
 
 	var data []byte
 	for _, hexKey := range sortedKeys {
-		origKey := n.knownKeys[hexKey]
+		origKey := n.registry.keys[hexKey]
 		if len(origKey) > 255 {
 			continue
 		}
 		data = append(data, byte(len(origKey)))
 		data = append(data, origKey...)
 	}
-	n.knownKeysMu.RUnlock()
+	n.registry.mu.RUnlock()
 
 	filePath := registryFilePath(n.handle.GetPath(), string(n.namespace))
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
@@ -325,11 +329,11 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 	cacheKey := dbPath + ":" + namespace
 
 	cloned := make(map[string][]byte, len(sortedKeys))
-	n.knownKeysMu.RLock()
-	for k, v := range n.knownKeys {
+	n.registry.mu.RLock()
+	for k, v := range n.registry.keys {
 		cloned[k] = v
 	}
-	n.knownKeysMu.RUnlock()
+	n.registry.mu.RUnlock()
 
 	registryCacheMu.Lock()
 	registryCache[cacheKey] = cloned
@@ -339,13 +343,13 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 // RegisterKnownKey safely adds a key to the registry map.
 // This is used for recovering missing validators from the authoritative epoch cache.
 func (n *NomtStateTrie) RegisterKnownKey(key []byte) {
-	n.knownKeysMu.Lock()
-	defer n.knownKeysMu.Unlock()
-	if n.knownKeys == nil {
-		n.knownKeys = make(map[string][]byte)
+	n.registry.mu.Lock()
+	defer n.registry.mu.Unlock()
+	if n.registry.keys == nil {
+		n.registry.keys = make(map[string][]byte)
 	}
 	hexKey := hex.EncodeToString(key)
-	n.knownKeys[hexKey] = key
+	n.registry.keys[hexKey] = key
 	logger.Debug("[NomtStateTrie] Registered recovered known key: %s", hexKey)
 }
 
@@ -406,7 +410,7 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		wDirty:            make(map[string]*nomtDirtyEntry),
 		wOldValues:        make(map[string][]byte),
 		wOldLoaded:        make(map[string]bool),
-		knownKeys:         knownKeys,
+		registry:          &sharedRegistry{keys: knownKeys},
 		isHash:            isHash,
 		isReplicationSync: false,
 		registryChanged:   false,
@@ -623,12 +627,12 @@ func (n *NomtStateTrie) GetAll() (map[string][]byte, error) {
 	}
 
 	// Merge dirty + knownKeys
-	n.knownKeysMu.RLock()
-	allHexKeys := make(map[string][]byte, len(n.knownKeys))
-	for hexKey, origKey := range n.knownKeys {
+	n.registry.mu.RLock()
+	allHexKeys := make(map[string][]byte, len(n.registry.keys))
+	for hexKey, origKey := range n.registry.keys {
 		allHexKeys[hexKey] = origKey
 	}
-	n.knownKeysMu.RUnlock()
+	n.registry.mu.RUnlock()
 
 	// Also add keys from wDirty and view.dirty that bypass knownKeys tracking
 	for hexKey, origKey := range wDirtySnapshot {
@@ -737,12 +741,12 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 	// Track key in knownKeys registry if not skipped
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 	if !skipRegistry {
-		n.knownKeysMu.Lock()
-		if _, exists := n.knownKeys[hexKey]; !exists {
-			n.knownKeys[hexKey] = keyCopy
+		n.registry.mu.Lock()
+		if _, exists := n.registry.keys[hexKey]; !exists {
+			n.registry.keys[hexKey] = keyCopy
 			n.registryChanged = true
 		}
-		n.knownKeysMu.Unlock()
+		n.registry.mu.Unlock()
 	}
 
 	n.writerMu.Unlock()
@@ -834,7 +838,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
 	if !skipRegistry {
-		n.knownKeysMu.Lock()
+		n.registry.mu.Lock()
 	}
 
 	for i := 0; i < count; i++ {
@@ -856,15 +860,15 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 		}
 
 		if !skipRegistry {
-			if _, exists := n.knownKeys[e.hexKey]; !exists {
-				n.knownKeys[e.hexKey] = e.originalKey
+			if _, exists := n.registry.keys[e.hexKey]; !exists {
+				n.registry.keys[e.hexKey] = e.originalKey
 				n.registryChanged = true
 			}
 		}
 	}
 
 	if !skipRegistry {
-		n.knownKeysMu.Unlock()
+		n.registry.mu.Unlock()
 	}
 
 	return nil
@@ -964,7 +968,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 	skipRegistry := strings.HasPrefix(string(n.namespace), "smart_contract_storage") || string(n.namespace) == "transaction_state" || string(n.namespace) == "receipts"
 
 	if !skipRegistry {
-		n.knownKeysMu.Lock()
+		n.registry.mu.Lock()
 	}
 
 	for i := 0; i < count; i++ {
@@ -986,15 +990,15 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		}
 
 		if !skipRegistry {
-			if _, exists := n.knownKeys[e.hexKey]; !exists {
-				n.knownKeys[e.hexKey] = e.originalKey
+			if _, exists := n.registry.keys[e.hexKey]; !exists {
+				n.registry.keys[e.hexKey] = e.originalKey
 				n.registryChanged = true
 			}
 		}
 	}
 
 	if !skipRegistry {
-		n.knownKeysMu.Unlock()
+		n.registry.mu.Unlock()
 	}
 
 	return nil
@@ -1153,13 +1157,13 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	if !retrievedFromChangelog {
 		// Fallback to legacy retrieval from registry + storage/handle (if changelog is disabled or empty)
 		knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
-		n.knownKeysMu.RLock()
-		for hexKey, origKey := range n.knownKeys {
+		n.registry.mu.RLock()
+		for hexKey, origKey := range n.registry.keys {
 			keyCopy := make([]byte, len(origKey))
 			copy(keyCopy, origKey)
 			knownKeys[hexKey] = keyCopy
 		}
-		n.knownKeysMu.RUnlock()
+		n.registry.mu.RUnlock()
 
 		var readFromStorageCount, readFromHandleCount int
 		for _, origKey := range knownKeys {
@@ -1240,12 +1244,12 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	n.wDirty = make(map[string]*nomtDirtyEntry)
 	n.wOldValues = make(map[string][]byte)
 	n.wOldLoaded = make(map[string]bool)
-	n.knownKeysMu.Lock()
-	n.knownKeys = make(map[string][]byte)
+	n.registry.mu.Lock()
+	n.registry.keys = make(map[string][]byte)
 	for _, kv := range kvs {
-		n.knownKeys[hex.EncodeToString(kv[0])] = kv[0]
+		n.registry.keys[hex.EncodeToString(kv[0])] = kv[0]
 	}
-	n.knownKeysMu.Unlock()
+	n.registry.mu.Unlock()
 	n.registryChanged = true
 	n.pendingChangelog = nil
 	n.pendingChangelogBlock = 0
@@ -1381,17 +1385,44 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		}
 	}
 
-	newRoot, err := n.handle.StateDbCommit(writes, writeVals, reads, readVals)
+	session := nomt_ffi.BeginSession(n.handle)
+	if session == nil {
+		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BeginSession failed")
+	}
+
+	if len(reads) > 0 {
+		if err := session.BatchRecordRead(reads, readVals); err != nil {
+			session.Abort()
+			return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BatchRecordRead failed: %w", err)
+		}
+	}
+
+	if len(writes) > 0 {
+		if err := session.BatchWrite(writes, writeVals); err != nil {
+			session.Abort()
+			return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BatchWrite failed: %w", err)
+		}
+	}
+
+	newRoot, finishedSession, err := session.Finish(n.handle)
 	if err != nil {
-		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: StateDbCommit failed: %w", err)
+		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: session.Finish failed: %w", err)
 	}
 
 	newRootHash := e_common.BytesToHash(newRoot[:])
 
+	n.sessionMu.Lock()
+	if n.pendingFinishedSession != nil {
+		logger.Warn("⚠️ [NomtStateTrie] Overwriting non-nil pendingFinishedSession (namespace=%s)", string(n.namespace))
+		n.pendingFinishedSession.Abort()
+	}
+	n.pendingFinishedSession = finishedSession
+	n.sessionMu.Unlock()
+
 	n.writerMu.Lock()
 	n.publishReadView(
 		make(map[string]*nomtDirtyEntry),
-		nil, // committing cleared
+		committingSnapshot, // keep in readView until asynchronously committed
 		newRootHash,
 	)
 	n.lastCommitBatch = replicationBatch
@@ -1462,20 +1493,13 @@ func (n *NomtStateTrie) Copy() StateTrie {
 	}
 	n.writerMu.Unlock()
 
-	n.knownKeysMu.RLock()
-	newKnownKeys := make(map[string][]byte, len(n.knownKeys))
-	for k, v := range n.knownKeys {
-		newKnownKeys[k] = v
-	}
-	n.knownKeysMu.RUnlock()
-
 	t := &NomtStateTrie{
 		handle:            n.handle,
 		namespace:         n.namespace,
 		wDirty:            newDirty,
 		wOldValues:        newOldValues,
 		wOldLoaded:        newOldLoaded,
-		knownKeys:         newKnownKeys,
+		registry:          n.registry,
 		isReplicationSync: n.isReplicationSync,
 		registryChanged:   n.registryChanged,
 		isHash:            n.isHash,
@@ -1489,29 +1513,97 @@ func (n *NomtStateTrie) Copy() StateTrie {
 }
 
 func (n *NomtStateTrie) CommitPayload() error {
+	n.sessionMu.Lock()
+	fs := n.pendingFinishedSession
+	n.pendingFinishedSession = nil
+	n.sessionMu.Unlock()
+
+	if fs == nil {
+		return nil
+	}
+
+	n.handle.LockCommitPayload()
+	err := fs.CommitPayload(n.handle)
+	n.handle.UnlockCommitPayload()
+
+	if err != nil {
+		return err
+	}
+
+	n.writerMu.Lock()
+	view := n.loadReadView()
+	n.publishReadView(view.dirty, nil, view.rootHash)
+	n.writerMu.Unlock()
+
 	return nil
 }
 
 type NomtPayload struct {
-	trie     *NomtStateTrie
-	doneOnce sync.Once
+	trie            *NomtStateTrie
+	finishedSession *nomt_ffi.FinishedSession
+	doneOnce        sync.Once
 }
 
 func (p *NomtPayload) Discard() {
 	if p != nil {
 		p.doneOnce.Do(func() {
+			if p.finishedSession != nil {
+				p.trie.handle.LockCommitPayload()
+				p.finishedSession.Abort()
+				p.trie.handle.UnlockCommitPayload()
+				p.finishedSession = nil
+			}
 			p.trie.commitWg.Done()
 		})
 	}
 }
 
 func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
-	return nil
+	n.sessionMu.Lock()
+	fs := n.pendingFinishedSession
+	n.pendingFinishedSession = nil
+	n.sessionMu.Unlock()
+
+	if fs == nil {
+		return nil
+	}
+
+	n.commitWg.Add(1)
+	return &NomtPayload{
+		trie:            n,
+		finishedSession: fs,
+	}
 }
 
 func (p *NomtPayload) WriteChangelog() {}
 
-func (p *NomtPayload) CommitAsync() {}
+func (p *NomtPayload) CommitAsync() {
+	if p == nil || p.finishedSession == nil {
+		return
+	}
+	go func() {
+		defer p.doneOnce.Do(func() {
+			p.trie.commitWg.Done()
+		})
+
+		p.trie.handle.LockCommitPayload()
+		err := p.finishedSession.CommitPayload(p.trie.handle)
+		p.trie.handle.UnlockCommitPayload()
+
+		if err != nil {
+			p.trie.setAsyncError(err)
+			logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
+		} else {
+			logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+		}
+
+		// Clear committing from readView since data is now on disk
+		p.trie.writerMu.Lock()
+		view := p.trie.loadReadView()
+		p.trie.publishReadView(view.dirty, nil, view.rootHash)
+		p.trie.writerMu.Unlock()
+	}()
+}
 
 func (n *NomtStateTrie) CommitPayloadAsync() {}
 

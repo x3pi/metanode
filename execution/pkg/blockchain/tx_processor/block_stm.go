@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math/big"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -80,6 +81,17 @@ func ProcessTransactionsOptimistic(
 	}
 	chainState.GetAccountStateDB().PreloadAccounts(addrSlice)
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
+
+	// Pre-verify BLS signatures in parallel to avoid CPU bottlenecks in workers
+	startPreVerify := time.Now()
+	flatTxs := make([]types.Transaction, 0, totalTxs)
+	for _, group := range groupedGroups {
+		for _, item := range group.Items {
+			flatTxs = append(flatTxs, item.Tx)
+		}
+	}
+	PreVerifySignatures(flatTxs, chainState)
+	logger.Debug("⚡ [PERF] Pre-verified %d signatures in parallel in %v", len(flatTxs), time.Since(startPreVerify))
 
 	// =========================================================================
 	// FAST-PATH: All-Native-Transfer Blocks (Bypass Block-STM)
@@ -257,6 +269,34 @@ func ProcessTransactionsOptimistic(
 			}
 
 			executionGroups = cd.BuildExecutionGroups(groupsToExecute, uf)
+
+			// Deterministic Sort of executionGroups themselves by the smallest TxHash in each group
+			// similar to grouptxns.go sorting behavior.
+			sort.Slice(executionGroups, func(i, j int) bool {
+				var minHashI common.Hash
+				firstI := true
+				for _, realIdx := range executionGroups[i] {
+					for _, item := range groupedGroups[realIdx].Items {
+						hash := item.Tx.Hash()
+						if firstI || hash.Cmp(minHashI) < 0 {
+							minHashI = hash
+							firstI = false
+						}
+					}
+				}
+				var minHashJ common.Hash
+				firstJ := true
+				for _, realIdx := range executionGroups[j] {
+					for _, item := range groupedGroups[realIdx].Items {
+						hash := item.Tx.Hash()
+						if firstJ || hash.Cmp(minHashJ) < 0 {
+							minHashJ = hash
+							firstJ = false
+						}
+					}
+				}
+				return minHashI.Cmp(minHashJ) < 0
+			})
 
 			// Execute groups in parallel, sequentially within each group
 			speculativeGroupResults := make(map[int]map[int]groupResultExt) // groupIdx -> realIdx -> result

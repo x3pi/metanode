@@ -752,7 +752,7 @@ impl PeerRpcServer {
             }
 
             if !all_tx_bytes.is_empty() {
-                const MAX_BUNDLE_SIZE: usize = 15000;
+                const MAX_BUNDLE_SIZE: usize = 2500;
                 let chunks: Vec<Vec<Vec<u8>>> = if all_tx_bytes.len() <= MAX_BUNDLE_SIZE {
                     vec![all_tx_bytes.clone()]
                 } else {

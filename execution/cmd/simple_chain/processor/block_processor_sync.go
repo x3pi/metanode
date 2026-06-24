@@ -19,12 +19,10 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
-	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // processSingleEpochData processes a single epoch data with full implementation
@@ -637,54 +635,12 @@ PROCESS_BLOCK:
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// STEP 2: Process direct transactions from payload
-	// OPTIMIZATION: Pre-allocate slice to prevent GC allocations during deserialization
-	allTransactions := make([]types.Transaction, 0, len(epochData.Transactions))
-	totalTxsFromRust := 0
+	// OPTIMIZATION: Parallel unmarshalling of transactions
+	allTransactions := ParallelUnmarshalTransactions(epochData.Transactions)
 
-	for txIdx, ms := range epochData.Transactions {
-		// Skip empty transaction data
-		if len(ms.Digest) == 0 {
-			logger.Warn("⚠️  [TX FLOW] Empty transaction data in Rust block, transaction[%d], skipping", txIdx)
-			continue
-		}
-
-		// EXPLICIT FILTER: Skip 64-byte zero payloads (SystemTransaction artifact)
-		// These artifacts appear at epoch boundaries and are not valid user transactions.
-		if len(ms.Digest) == 64 {
-			isZero := true
-			for _, b := range ms.Digest {
-				if b != 0 {
-					isZero = false
-					break
-				}
-			}
-			if isZero {
-				logger.Info("📡 [TELEMETRY] SystemTransaction artifact detected and filtered. GEI=%d, Epoch=%d, TxIdx=%d", globalExecIndex, epochNum, txIdx)
-				continue
-			}
-		}
-
-		// Unmarshal as single Transaction first
-		singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
-		if err == nil {
-			allTransactions = append(allTransactions, singleTx)
-			totalTxsFromRust++
-			tx_processor.GlobalTxTraceStore.UpdateTrace(singleTx.Hash(), "CONSENSUS_COMMITTED", fmt.Sprintf("Transaction ordered and committed in Rust block. GEI=%d, Epoch=%d", globalExecIndex, epochNum))
-			continue
-		}
-		logger.Warn("⚠️ [TX FLOW] UnmarshalTransaction FAILED for tx[%d]: %v", txIdx, err)
-
-		// Fallback: try unmarshal as Transactions message (backward compatibility)
-		transactions, err := transaction.UnmarshalTransactions(ms.Digest)
-		if err != nil {
-			logger.Error("❌ [TX FLOW] Failed to unmarshal transaction[%d] in Rust block: %v (size=%d bytes). Hex: %x", txIdx, err, len(ms.Digest), ms.Digest)
-			continue
-		}
-		allTransactions = append(allTransactions, transactions...)
-		totalTxsFromRust += len(transactions)
-		for _, tx := range transactions {
-			tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "CONSENSUS_COMMITTED", fmt.Sprintf("Transaction ordered and committed in Rust block. GEI=%d, Epoch=%d", globalExecIndex, epochNum))
-		}
+	// Update trace sequentially (in-memory hash map updates)
+	for _, tx := range allTransactions {
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "CONSENSUS_COMMITTED", fmt.Sprintf("Transaction ordered and committed in Rust block. GEI=%d, Epoch=%d", globalExecIndex, epochNum))
 	}
 
 	// If no transactions after unmarshal, skip (same as empty commit)

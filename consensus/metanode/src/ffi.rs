@@ -34,7 +34,14 @@ static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[repr(C)]
 pub struct GoCallbacks {
     /// Send an executable block to Go for execution.
-    pub execute_block: Option<extern "C" fn(payload: *const u8, len: usize) -> bool>,
+    pub execute_block: Option<
+        extern "C" fn(
+            payload: *const u8,
+            len: usize,
+            out_payload: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> bool,
+    >,
     /// Process a generic RPC request. Takes Protobuf request bytes, returns allocated Protobuf response bytes.
     pub process_rpc_request: Option<
         extern "C" fn(

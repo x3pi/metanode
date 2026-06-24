@@ -130,3 +130,8 @@ func (s *TxTraceStore) GetLatestTraces(limit int) []*TxTrace {
 	}
 	return traces
 }
+
+// Enabled returns true if transaction tracing is enabled in the configuration.
+func (s *TxTraceStore) Enabled() bool {
+	return config.ConfigApp != nil && config.ConfigApp.TxTraceEnabled
+}
