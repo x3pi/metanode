@@ -106,7 +106,7 @@ func ProcessTransactionsOptimistic(
 	//   - ValidationStateCache merge overhead
 	//
 	// FORK-SAFETY: Native transfers use AccountStateDB's sharded locks
-	// (accountLocks[address[0]]) for thread-safe concurrent mutations.
+	// (accountLocks[address[0:2]]) for thread-safe concurrent mutations.
 	// Each sender is unique per group (guaranteed by UnionFind grouping),
 	// so no data race on sender state. Receiver AddBalance is also lock-protected.
 	// =========================================================================
