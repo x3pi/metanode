@@ -375,7 +375,30 @@ impl ExecutorClient {
 
             if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
                 let ffi_start = std::time::Instant::now();
-                let success = c_fn(epoch_data_bytes.as_ptr(), epoch_data_bytes.len());
+                
+                let (success, response) = {
+                    let mut out_payload: *mut u8 = std::ptr::null_mut();
+                    let mut out_len = 0usize;
+                    let success = c_fn(
+                        epoch_data_bytes.as_ptr(),
+                        epoch_data_bytes.len(),
+                        &mut out_payload,
+                        &mut out_len,
+                    );
+                    
+                    let response = if !out_payload.is_null() && out_len > 0 {
+                        let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
+                        let resp = super::proto::ExecuteBlockResponse::decode(slice).ok();
+                        if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                            free_fn(out_payload);
+                        }
+                        resp
+                    } else {
+                        None
+                    };
+                    (success, response)
+                };
+
                 let ffi_elapsed = ffi_start.elapsed();
                 tracing::warn!(
                     "⏱️ [PERF-RUST] FFI direct execute_block for commit_index {} (size={} bytes): {:?}",
@@ -383,6 +406,7 @@ impl ExecutorClient {
                     epoch_data_bytes.len(),
                     ffi_elapsed
                 );
+
                 if success {
                     self.record_send_success().await;
                     trace!(
@@ -391,6 +415,15 @@ impl ExecutorClient {
                         epoch,
                         total_tx
                     );
+                    if let Some(resp) = response {
+                        if !resp.state_root.is_empty() {
+                            tracing::info!(
+                                "💾 [BLOCK-SEND] Go computed StateRoot for commit_index={}: 0x{}",
+                                commit_index,
+                                hex::encode(&resp.state_root)
+                            );
+                        }
+                    }
                 } else {
                     warn!(
                         "⚠️  [PHASE-B DIRECT] FFI execute_block failed for commit_index={}",
@@ -659,11 +692,39 @@ impl ExecutorClient {
                     );
                     let ffi_start = std::time::Instant::now();
                     let data_clone = data.clone();
-                    let success = tokio::task::spawn_blocking(move || {
-                        c_fn(data_clone.as_ptr(), data_clone.len())
-                    })
-                    .await
-                    .unwrap_or(false);
+                    
+                    let (success, response) = {
+                        let ffi_res = tokio::task::spawn_blocking(move || {
+                            let mut out_payload: *mut u8 = std::ptr::null_mut();
+                            let mut out_len = 0usize;
+                            let success = c_fn(
+                                data_clone.as_ptr(),
+                                data_clone.len(),
+                                &mut out_payload,
+                                &mut out_len,
+                            );
+                            (success, out_payload as usize, out_len)
+                        })
+                        .await
+                        .unwrap_or((false, 0usize, 0));
+
+                        let success = ffi_res.0;
+                        let out_payload = ffi_res.1 as *mut u8;
+                        let out_len = ffi_res.2;
+
+                        let response = if !out_payload.is_null() && out_len > 0 {
+                            let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
+                            let resp = super::proto::ExecuteBlockResponse::decode(slice).ok();
+                            if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                                free_fn(out_payload);
+                            }
+                            resp
+                        } else {
+                            None
+                        };
+                        (success, response)
+                    };
+
                     let ffi_elapsed = ffi_start.elapsed();
                     tracing::warn!(
                         "⏱️ [PERF-RUST] FFI execute_block for gei {} (size={} bytes): {:?}",
@@ -671,11 +732,21 @@ impl ExecutorClient {
                         data.len(),
                         ffi_elapsed
                     );
+
                     if success {
                         debug!(
                             "✅ [TX-FLOW-TRACE] ▶ PHASE 4 FFI DONE: Go accepted block | gei={}",
                             idx
                         );
+                        if let Some(resp) = response {
+                            if !resp.state_root.is_empty() {
+                                tracing::info!(
+                                    "💾 [BLOCK-SEND] Go computed StateRoot for GEI={}: 0x{}",
+                                    idx,
+                                    hex::encode(&resp.state_root)
+                                );
+                            }
+                        }
                         sent_count += 1;
                     } else {
                         warn!("⚠️  [BLOCK-SEND] FFI execute_block failed at GEI={}", idx);
@@ -1000,11 +1071,39 @@ impl ExecutorClient {
         if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
             let ffi_start = std::time::Instant::now();
             let data_vec = epoch_data_bytes.to_vec();
-            let success = tokio::task::spawn_blocking(move || {
-                c_fn(data_vec.as_ptr(), data_vec.len())
-            })
-            .await
-            .unwrap_or(false);
+            
+            let (success, response) = {
+                let ffi_res = tokio::task::spawn_blocking(move || {
+                    let mut out_payload: *mut u8 = std::ptr::null_mut();
+                    let mut out_len = 0usize;
+                    let success = c_fn(
+                        data_vec.as_ptr(),
+                        data_vec.len(),
+                        &mut out_payload,
+                        &mut out_len,
+                    );
+                    (success, out_payload as usize, out_len)
+                })
+                .await
+                .unwrap_or((false, 0usize, 0));
+
+                let success = ffi_res.0;
+                let out_payload = ffi_res.1 as *mut u8;
+                let out_len = ffi_res.2;
+
+                let response = if !out_payload.is_null() && out_len > 0 {
+                    let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
+                    let resp = super::proto::ExecuteBlockResponse::decode(slice).ok();
+                    if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                        free_fn(out_payload);
+                    }
+                    resp
+                } else {
+                    None
+                };
+                (success, response)
+            };
+
             let ffi_elapsed = ffi_start.elapsed();
             tracing::warn!(
                 "⏱️ [PERF-RUST] FFI direct send_block_data for gei {} (size={} bytes): {:?}",
@@ -1012,9 +1111,19 @@ impl ExecutorClient {
                 epoch_data_bytes.len(),
                 ffi_elapsed
             );
+
             if success {
                 trace!("📤 [TX FLOW] Sent committed sub-DAG to Go executor via FFI: global_exec_index={}, commit_index={}, epoch={}, data_size={} bytes", 
                     global_exec_index, commit_index, epoch, epoch_data_bytes.len());
+                if let Some(resp) = response {
+                    if !resp.state_root.is_empty() {
+                        tracing::info!(
+                            "💾 [BLOCK-SEND] Go computed StateRoot for send_block_data gei={}: 0x{}",
+                            global_exec_index,
+                            hex::encode(&resp.state_root)
+                        );
+                    }
+                }
                 self.record_send_success().await; // ✅ Mark Success
                 Ok(())
             } else {
