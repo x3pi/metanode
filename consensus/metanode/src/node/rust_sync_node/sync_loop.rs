@@ -441,7 +441,29 @@ impl RustSyncNode {
                                 let mut sent = 0;
                                 if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
                                     for (gei, data) in exec_blocks {
-                                        if c_fn(data.as_ptr(), data.len()) {
+                                        let (success, _response) = {
+                                            let mut out_payload: *mut u8 = std::ptr::null_mut();
+                                            let mut out_len = 0usize;
+                                            let success = c_fn(
+                                                data.as_ptr(),
+                                                data.len(),
+                                                &mut out_payload,
+                                                &mut out_len,
+                                            );
+                                            let response = if !out_payload.is_null() && out_len > 0 {
+                                                let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
+                                                let resp = <crate::node::executor_client::proto::ExecuteBlockResponse as prost::Message>::decode(slice).ok();
+                                                if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                                                    free_fn(out_payload);
+                                                }
+                                                resp
+                                            } else {
+                                                None
+                                            };
+                                            (success, response)
+                                        };
+
+                                        if success {
                                             sent += 1;
                                         } else {
                                             tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -78,35 +79,8 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			blockNum = lastCommittedBlockNumber + 1
 		}
 
-		// 2. Unmarshal transactions
-		allTransactions := make([]types.Transaction, 0, len(epochData.Transactions))
-		for _, ms := range epochData.Transactions {
-			if len(ms.Digest) == 0 {
-				continue
-			}
-			if len(ms.Digest) == 64 {
-				// Filter zero artifacts
-				isZero := true
-				for _, b := range ms.Digest {
-					if b != 0 {
-						isZero = false
-						break
-					}
-				}
-				if isZero {
-					continue
-				}
-			}
-			singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
-			if err == nil {
-				allTransactions = append(allTransactions, singleTx)
-				continue
-			}
-			transactions, err := transaction.UnmarshalTransactions(ms.Digest)
-			if err == nil {
-				allTransactions = append(allTransactions, transactions...)
-			}
-		}
+		// 2. Prepare transactions (Deduplicate and sort lexicographically by TxHash)
+		allTransactions := PrepareTransactions(epochData)
 
 		// 3. Epoch boundary check
 		isEpochBoundary := lastBlockHeader.Epoch() > 0 && epochNum > lastBlockHeader.Epoch()
@@ -284,11 +258,16 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 				// Send response for the first empty block if it is authoritative
 				if specRes.AuthRespCh != nil {
+					var stateRoot []byte
+					if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
+						stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
+					}
 					specRes.AuthRespCh <- &pb.ExecuteBlockResponse{
 						Success:      true,
 						ActualGei:    specRes.GEI,
 						BlockNumber:  specRes.BlockNum,
 						GeisConsumed: 1,
+						StateRoot:    stateRoot,
 					}
 				}
 
@@ -308,11 +287,16 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 						
 						// Send response for drained empty block if it is authoritative
 						if nextRes.AuthRespCh != nil {
+							var stateRoot []byte
+							if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
+								stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
+							}
 							nextRes.AuthRespCh <- &pb.ExecuteBlockResponse{
 								Success:      true,
 								ActualGei:    nextRes.GEI,
 								BlockNumber:  nextRes.BlockNum,
 								GeisConsumed: 1,
+								StateRoot:    stateRoot,
 							}
 						}
 						
@@ -373,11 +357,16 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 					GeisConsumed: 0,
 				}
 			} else {
+				var stateRoot []byte
+				if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
+					stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
+				}
 				res.AuthRespCh <- &pb.ExecuteBlockResponse{
 					Success:      true,
 					ActualGei:    res.GEI,
 					BlockNumber:  currentBlockNumber,
 					GeisConsumed: 1,
+					StateRoot:    stateRoot,
 				}
 			}
 		}
@@ -528,4 +517,145 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 
 	bp.PushAsyncGEIUpdate(res.GEI, res.RawBlock.GetCommitHash(), res.CommitIndex, res.Epoch)
 	return nil
+}
+
+// PrepareTransactions processes the raw ExecutableBlock transactions:
+// 1. Unmarshal and collect all transactions from the DAG blocks
+// 2. Filter out duplicate transactions by TxHash
+// 3. Sort transactions lexicographically by TxHash (bytes comparison)
+// 4. Returns a deterministic, sorted slice of transactions
+func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
+	if epochData == nil {
+		return nil
+	}
+
+	// 1. Unmarshal all transactions in parallel
+	rawTxs := ParallelUnmarshalTransactions(epochData.Transactions)
+
+	// 2. Deduplicate transactions by TxHash
+	seenTxs := make(map[common.Hash]bool, len(rawTxs))
+	dedupedTxs := make([]types.Transaction, 0, len(rawTxs))
+	for _, tx := range rawTxs {
+		hash := tx.Hash()
+		if seenTxs[hash] {
+			continue // Skip duplicates
+		}
+		seenTxs[hash] = true
+		dedupedTxs = append(dedupedTxs, tx)
+	}
+
+	// 3. Sort lexicographically by TxHash (bytes comparison)
+	sort.Slice(dedupedTxs, func(i, j int) bool {
+		hashI := dedupedTxs[i].Hash()
+		hashJ := dedupedTxs[j].Hash()
+		return bytes.Compare(hashI.Bytes(), hashJ.Bytes()) < 0
+	})
+
+	return dedupedTxs
+}
+
+// ParallelUnmarshalTransactions decodes transaction digests in parallel using multiple CPU workers.
+func ParallelUnmarshalTransactions(txs []*pb.TransactionExe) []types.Transaction {
+	if len(txs) == 0 {
+		return nil
+	}
+
+	numTxs := len(txs)
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 16 {
+		numWorkers = 16
+	}
+	if numTxs < 200 {
+		numWorkers = 1 // Sequential is faster for small slices due to goroutine scheduling overhead
+	}
+
+	if numWorkers <= 1 {
+		res := make([]types.Transaction, 0, numTxs)
+		for _, ms := range txs {
+			if len(ms.Digest) == 0 {
+				continue
+			}
+			if len(ms.Digest) == 64 {
+				isZero := true
+				for _, b := range ms.Digest {
+					if b != 0 {
+						isZero = false
+						break
+					}
+				}
+				if isZero {
+					continue
+				}
+			}
+			singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
+			if err == nil {
+				res = append(res, singleTx)
+				continue
+			}
+			multiTxs, err := transaction.UnmarshalTransactions(ms.Digest)
+			if err == nil {
+				res = append(res, multiTxs...)
+			}
+		}
+		return res
+	}
+
+	chunks := make([][]types.Transaction, numWorkers)
+	chunkSize := (numTxs + numWorkers - 1) / numWorkers
+
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		if start >= numTxs {
+			break
+		}
+		end := start + chunkSize
+		if end > numTxs {
+			end = numTxs
+		}
+
+		wg.Add(1)
+		go func(workerID int, slice []*pb.TransactionExe) {
+			defer wg.Done()
+			localTxs := make([]types.Transaction, 0, len(slice))
+			for _, ms := range slice {
+				if len(ms.Digest) == 0 {
+					continue
+				}
+				if len(ms.Digest) == 64 {
+					isZero := true
+					for _, b := range ms.Digest {
+						if b != 0 {
+							isZero = false
+							break
+						}
+					}
+					if isZero {
+						continue
+					}
+				}
+				singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
+				if err == nil {
+					localTxs = append(localTxs, singleTx)
+					continue
+				}
+				multiTxs, err := transaction.UnmarshalTransactions(ms.Digest)
+				if err == nil {
+					localTxs = append(localTxs, multiTxs...)
+				}
+			}
+			chunks[workerID] = localTxs
+		}(w, txs[start:end])
+	}
+	wg.Wait()
+
+	totalLen := 0
+	for _, chunk := range chunks {
+		totalLen += len(chunk)
+	}
+	res := make([]types.Transaction, 0, totalLen)
+	for _, chunk := range chunks {
+		res = append(res, chunk...)
+	}
+	return res
 }
