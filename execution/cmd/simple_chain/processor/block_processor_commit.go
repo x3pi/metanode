@@ -524,6 +524,12 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 
 	if accountPipelineResult != nil {
 		accountBatch = accountPipelineResult.AccountBatch
+		if bp.pendingAccountPayload != nil {
+			logger.Warn("⚠️ [COMMIT] Overwriting non-nil bp.pendingAccountPayload!")
+			if discarder, ok := bp.pendingAccountPayload.(interface{ Discard() }); ok {
+				discarder.Discard()
+			}
+		}
 		bp.pendingAccountPayload = accountPipelineResult.NomtPayload
 		go func(res *account_state_db.PipelineCommitResult) {
 			startPersist := time.Now()
@@ -537,6 +543,12 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	}
 	if stakePipelineResult != nil {
 		stakeBatch = stakePipelineResult.StakeBatch
+		if bp.pendingStakePayload != nil {
+			logger.Warn("⚠️ [COMMIT] Overwriting non-nil bp.pendingStakePayload!")
+			if discarder, ok := bp.pendingStakePayload.(interface{ Discard() }); ok {
+				discarder.Discard()
+			}
+		}
 		bp.pendingStakePayload = stakePipelineResult.NomtPayload
 		go func(res *stake_state_db.StakePipelineCommitResult) {
 			startPersist := time.Now()

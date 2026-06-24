@@ -331,8 +331,8 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	if len(preloadAddrs) > 0 {
 		var senderStatesMutex sync.Mutex
 		numPreloadWorkers := runtime.NumCPU()
-		if numPreloadWorkers > 32 {
-			numPreloadWorkers = 32
+		if numPreloadWorkers > 128 {
+			numPreloadWorkers = 128
 		}
 		if len(preloadAddrs) < numPreloadWorkers {
 			numPreloadWorkers = len(preloadAddrs)
@@ -373,12 +373,12 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
 	// verifiedSignaturesCache. 104 goroutines cause excessive cache-line bouncing.
 	if !skipVerification {
-		numWorkers := runtime.NumCPU() / 2
+		numWorkers := runtime.NumCPU()
 		if numWorkers < 4 {
 			numWorkers = 4
 		}
-		if numWorkers > 48 {
-			numWorkers = 48
+		if numWorkers > 96 {
+			numWorkers = 96
 		}
 		if len(txs) < numWorkers {
 			numWorkers = len(txs)
@@ -421,12 +421,12 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	t3 := time.Now()
 	var logFile *os.File
 	// Phase 3 (TPS Optimization): Parallel HasNonceConflict Checks
-	numWorkersConflict := runtime.NumCPU() / 2
+	numWorkersConflict := runtime.NumCPU()
 	if numWorkersConflict < 4 {
 		numWorkersConflict = 4
 	}
-	if numWorkersConflict > 48 {
-		numWorkersConflict = 48
+	if numWorkersConflict > 96 {
+		numWorkersConflict = 96
 	}
 	if len(txs) < numWorkersConflict {
 		numWorkersConflict = len(txs)
@@ -881,8 +881,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 			
 			var nonceMapMutex sync.Mutex
 			numWorkers := runtime.NumCPU()
-			if numWorkers > 32 {
-				numWorkers = 32
+			if numWorkers > 128 {
+				numWorkers = 128
 			}
 			if len(preloadAddrs) < numWorkers {
 				numWorkers = len(preloadAddrs)

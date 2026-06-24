@@ -99,8 +99,8 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				IsEpochBoundary: false,
 				AuthRespCh:      authRespCh,
 			}
-			se.resultChan <- res
 			se.activeSessions.Store(gei, res)
+			se.resultChan <- res
 			return
 		}
 
@@ -148,7 +148,10 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		<-preloadChan
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
+		startTime := time.Now()
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum)
+		execDuration := time.Since(startTime)
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(allTransactions), 0, execDuration.Microseconds())
 
 		res := &SpeculativeResult{
 			BlockNum:        blockNum,
@@ -166,8 +169,8 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			AuthRespCh:      authRespCh,
 		}
 
-		se.resultChan <- res
 		se.activeSessions.Store(gei, res)
+		se.resultChan <- res
 	}()
 }
 
