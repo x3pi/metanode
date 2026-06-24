@@ -96,7 +96,7 @@ type groupResultExt struct {
 // ProcessTransactions processes a batch of transactions.
 // blockTime is the deterministic block timestamp (in seconds) from Rust consensus.
 // This ensures all nodes use the same EVM block.timestamp for deterministic execution.
-func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64) (
+func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64, skipSignatureVerify bool) (
 	ProcessResult,
 	error,
 ) {
@@ -134,7 +134,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// *** Call the new function for concurrent processing ***
 	startExec := time.Now()
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
 	execDuration := time.Since(startExec)
 	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
@@ -238,7 +238,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 }
 
 // ProcessTransactionsRemote processes a batch of transactions for remote execution.
-func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64) (
+func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.ChainState, groupedGroups []grouptxns.RelativeGroup, enableTrace bool, isCache bool, blockTime uint64, leaderAddr common.Address, blockNum uint64, skipSignatureVerify bool) (
 	ProcessResult,
 	error,
 ) {
@@ -275,7 +275,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// *** Call the new function for concurrent processing ***
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr)
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()

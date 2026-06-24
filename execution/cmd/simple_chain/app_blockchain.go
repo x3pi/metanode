@@ -1440,7 +1440,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		leaderAddr := blk.Header().LeaderAddress()
 		
 		// Run execution
-		_, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn)
+		_, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn, false)
 		if execErr != nil {
 			return fmt.Errorf("failed to execute transactions for block #%d during NOMT catch-up: %v", bn, execErr)
 		}
