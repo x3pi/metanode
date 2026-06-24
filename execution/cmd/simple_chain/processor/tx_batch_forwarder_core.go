@@ -83,7 +83,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		}
 
 		const batchAccumulationCheckInterval = 1 * time.Millisecond
-		const minBatchSize = 20000
+		const minBatchSize = 2500
 
 		accumulationStart := time.Now()
 		lastPoolSize := poolSizeBefore
@@ -140,9 +140,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// Block size capping: Limit total transactions processed per block tick to ~50,000 txs.
+		// Block size capping: Limit total transactions processed per block tick to ~2500 txs.
 		// Return any excess transactions back to the pool to be processed in the next blocks.
-		const targetBlockSize = 50000
+		const targetBlockSize = 2500
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
