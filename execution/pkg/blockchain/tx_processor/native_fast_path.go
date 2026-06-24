@@ -32,7 +32,7 @@ import (
 //   - Chunked parallel workers instead of N goroutine jobs
 //
 // FORK-SAFETY: Thread-safety is guaranteed by AccountStateDB's sharded locks
-// (accountLocks[address[0]]). Each sender appears in exactly one group
+// (accountLocks[address[0:2]]). Each sender appears in exactly one group
 // (guaranteed by UnionFind grouping), so no concurrent writes to the same
 // sender account. Receiver accounts may be shared (e.g., multiple senders
 // sending to the same address), but AddBalance uses the same sharded lock.

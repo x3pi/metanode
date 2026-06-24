@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiến Trúc Xử Lý Giao Dịch: Từ Đồng Thuận đến Thực Thi Block-STM (Metanode Core)</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Mermaid.js via CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        brand: {
+                            rust: '#E05A47',
+                            go: '#00ADD8',
+                            ipc: '#F59E0B',
+                            stm: '#8B5CF6',
+                            dark: '#0B0F19',
+                            card: '#161F30',
+                            border: '#1E293B',
+                        }
+                    }
+                }
+            }
+        }
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                primaryColor: '#1E293B',
+                primaryTextColor: '#F8FAFC',
+                primaryBorderColor: '#334155',
+                lineColor: '#64748B',
+                secondaryColor: '#0F172A',
+                tertiaryColor: '#1E293B'
+            }
+        });
+    </script>
+    <style>
+        body {
+            background-color: #0B0F19;
+            color: #F8FAFC;
+        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0B0F19; }
+        ::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #334155; }
+        .glass-panel {
+            background: rgba(22, 31, 48, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .tab-content { display: none; opacity: 0; transition: opacity 0.3s ease-in-out; }
+        .tab-content.active { display: block; opacity: 1; }
+        @keyframes dash { to { stroke-dashoffset: -40; } }
+        .animate-dash { stroke-dasharray: 8, 4; animation: dash 2s linear infinite; }
+    </style>
+</head>
+<body class="font-sans antialiased selection:bg-brand-stm/30 selection:text-brand-stm-100">
+
+    <header class="border-b border-slate-800 bg-brand-dark/80 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <span class="flex h-3 w-3 relative">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-go opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-3 w-3 bg-brand-go"></span>
+                </span>
+                <span class="text-lg font-bold tracking-tight bg-gradient-to-r from-brand-rust via-brand-go to-brand-stm bg-clip-text text-transparent">
+                    KIẾN TRÚC METANODE
+                </span>
+            </div>
+            <div class="flex items-center space-x-4">
+                <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">Phiên bản v1.3.1</span>
+                <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Tích Hợp FFI Hoàn Toàn</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        <div class="mb-10 text-center md:text-left md:flex md:items-center md:justify-between border-b border-slate-800 pb-8">
+            <div class="md:max-w-3xl">
+                <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent mb-3">
+                    Kiến Trúc Xử Lý Giao Dịch Song Song
+                </h1>
+                <p class="text-slate-400 text-base md:text-lg leading-relaxed">
+                    Mô tả chi tiết luồng xử lý giao dịch khép kín từ tầng Go (Tx Pool) đẩy qua Rust để đồng thuận, sau đó Rust gửi lại Go thông qua biên giới <strong>CGo FFI Boundary</strong> để thực thi song song bằng <strong>Block-STM Lặp</strong>.
+                </p>
+            </div>
+            <div class="mt-6 md:mt-0 flex flex-wrap gap-3 justify-center md:justify-end">
+                <span class="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-500/10 text-brand-go border border-blue-500/20">Go (Tx Pool & Thực thi)</span>
+                <span class="text-xs font-medium px-3 py-1.5 rounded-lg bg-red-500/10 text-brand-rust border border-red-500/20">Rust (Đồng thuận BFT/DAG)</span>
+                <span class="text-xs font-medium px-3 py-1.5 rounded-lg bg-purple-500/10 text-brand-stm border border-purple-500/20">Block-STM & Fast-Path</span>
+            </div>
+        </div>
+
+        <div class="mb-8 p-4 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20 text-sm">
+            <strong class="font-bold flex items-center mb-1">
+                <svg class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                QUYẾT ĐỊNH THIẾT KẾ: BÃI BỎ UDS SOCKET - THỐNG NHẤT 100% CGo FFI
+            </strong>
+            Để tối ưu hóa hiệu năng, triệt tiêu độ trễ I/O socket, toàn bộ dữ liệu (gửi batch giao dịch, nhận block execute, đồng bộ block) hiện được gọi trực tiếp thông qua biên giới bộ nhớ CGo FFI (zero-copy memory sharing).
+        </div>
+
+        <section class="mb-12 glass-panel rounded-2xl p-6 shadow-2xl relative overflow-hidden">
+            <div class="absolute inset-0 bg-gradient-to-r from-brand-rust/5 via-brand-go/5 to-brand-stm/5 opacity-50 pointer-events-none"></div>
+            <h2 class="text-xl font-bold mb-6 flex items-center space-x-2 text-slate-100">
+                <svg class="h-5 w-5 text-brand-go" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+                </svg>
+                <span>Bản Đồ Kiến Trúc Luồng Giao Dịch Tổng Quan</span>
+            </h2>
+            
+            <div class="w-full overflow-x-auto flex justify-center py-4">
+                <svg width="1020" height="350" viewBox="0 0 1020 350" class="min-w-[980px] select-none">
+                    <defs>
+                        <linearGradient id="grad-rust" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#EF4444" />
+                            <stop offset="100%" stop-color="#B91C1C" />
+                        </linearGradient>
+                        <linearGradient id="grad-go" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#06B6D4" />
+                            <stop offset="100%" stop-color="#0891B2" />
+                        </linearGradient>
+                        <linearGradient id="grad-ipc" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#F59E0B" />
+                            <stop offset="100%" stop-color="#D97706" />
+                        </linearGradient>
+                        <linearGradient id="grad-stm" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#8B5CF6" />
+                            <stop offset="100%" stop-color="#6D28D9" />
+                        </linearGradient>
+                        <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+                            <feDropShadow dx="2" dy="4" stdDeviation="4" flood-color="#000" flood-opacity="0.5" />
+                        </filter>
+                        <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748B" />
+                        </marker>
+                    </defs>
+
+                    <g stroke="#334155" stroke-width="0.5" opacity="0.15">
+                        <path d="M 0,50 L 1020,50 M 0,100 L 1020,100 M 0,150 L 1020,150 M 0,200 L 1020,200 M 0,250 L 1020,250 M 0,300 L 1020,300" />
+                        <path d="M 100,0 L 100,350 M 200,0 L 200,350 M 300,0 L 300,350 M 400,0 L 400,350 M 500,0 L 500,350 M 600,0 L 600,350 M 700,0 L 700,350 M 800,0 L 800,350 M 900,0 L 900,350" />
+                    </g>
+
+                    <line x1="280" y1="20" x2="280" y2="330" stroke="#334155" stroke-dasharray="4,4" />
+                    <line x1="480" y1="20" x2="480" y2="330" stroke="#334155" stroke-dasharray="4,4" />
+                    <line x1="840" y1="20" x2="840" y2="330" stroke="#334155" stroke-dasharray="4,4" />
+
+                    <text x="140" y="30" text-anchor="middle" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1">TẦNG GO (NHẬN TX)</text>
+                    <text x="380" y="30" text-anchor="middle" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1">BIÊN GIỚI CGO FFI</text>
+                    <text x="660" y="30" text-anchor="middle" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1">TẦNG RUST (ĐỒNG THUẬN)</text>
+                    <text x="930" y="30" text-anchor="middle" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1">THỰC THI (BLOCK-STM)</text>
+
+                    <!-- Flows -->
+                    <path d="M 230,110 L 310,110" fill="none" stroke="#64748B" stroke-width="2.5" marker-end="url(#arrow)" />
+                    <path d="M 450,110 L 510,110" fill="none" stroke="#64748B" stroke-width="2.5" marker-end="url(#arrow)" />
+                    <path d="M 710,230 L 450,230" fill="none" stroke="#64748B" stroke-width="2.5" marker-end="url(#arrow)" />
+                    <path d="M 310,230 L 230,230" fill="none" stroke="#64748B" stroke-width="2.5" marker-end="url(#arrow)" />
+
+                    <!-- Dynamic lines -->
+                    <path d="M 230,110 L 310,110" fill="none" stroke="#06B6D4" stroke-width="2" class="animate-dash" />
+                    <path d="M 710,230 L 450,230" fill="none" stroke="#EF4444" stroke-width="2" class="animate-dash" />
+
+                    <!-- Go Tx Pool -->
+                    <g transform="translate(30, 70)" filter="url(#shadow)">
+                        <rect width="200" height="80" rx="10" fill="url(#grad-go)" stroke="#06B6D4" stroke-width="1.5" />
+                        <text x="100" y="32" text-anchor="middle" fill="#FFFFFF" font-size="14" font-weight="700">Go TxBatch Forwarder</text>
+                        <text x="100" y="52" text-anchor="middle" fill="#ECFEFF" font-size="11" font-family="monospace">tx_batch_forwarder_core.go</text>
+                        <text x="100" y="66" text-anchor="middle" fill="#CFFAFE" font-size="10">Adaptive Batching</text>
+                    </g>
+                    <!-- Go Executor -->
+                    <g transform="translate(30, 190)" filter="url(#shadow)">
+                        <rect width="200" height="80" rx="10" fill="url(#grad-stm)" stroke="#8B5CF6" stroke-width="1.5" />
+                        <text x="100" y="32" text-anchor="middle" fill="#FFFFFF" font-size="14" font-weight="700">Speculative Executor</text>
+                        <text x="100" y="52" text-anchor="middle" fill="#F5F3FF" font-size="11" font-family="monospace">speculative_executor.go</text>
+                        <text x="100" y="66" text-anchor="middle" fill="#EDE9FE" font-size="10">Background Execution</text>
+                    </g>
+
+                    <!-- IPC -->
+                    <g transform="translate(310, 70)" filter="url(#shadow)">
+                        <rect width="140" height="80" rx="10" fill="url(#grad-ipc)" stroke="#F59E0B" stroke-width="1.5" />
+                        <text x="70" y="32" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="700">Submit Tx Batch</text>
+                        <text x="70" y="52" text-anchor="middle" fill="#FEF3C7" font-size="10" font-family="monospace">CGo Direct Call</text>
+                    </g>
+                    <g transform="translate(310, 190)" filter="url(#shadow)">
+                        <rect width="140" height="80" rx="10" fill="url(#grad-ipc)" stroke="#F59E0B" stroke-width="1.5" />
+                        <text x="70" y="30" text-anchor="middle" fill="#FFFFFF" font-size="12" font-weight="700">Execute Block</text>
+                        <text x="70" y="48" text-anchor="middle" fill="#FEF3C7" font-size="10" font-family="monospace">cgo_execute_block</text>
+                    </g>
+
+                    <!-- Rust -->
+                    <g transform="translate(510, 70)" filter="url(#shadow)">
+                        <rect width="200" height="80" rx="10" fill="url(#grad-rust)" stroke="#EF4444" stroke-width="1.5" />
+                        <text x="100" y="32" text-anchor="middle" fill="#FFFFFF" font-size="14" font-weight="700">Rust Consensus</text>
+                        <text x="100" y="52" text-anchor="middle" fill="#FEE2E2" font-size="11" font-family="monospace">consensus_node.rs</text>
+                        <text x="100" y="66" text-anchor="middle" fill="#FCA5A5" font-size="10">Xác thực DAG & Vote</text>
+                    </g>
+                    <!-- Block-STM & DB -->
+                    <g transform="translate(850, 190)" filter="url(#shadow)">
+                        <rect width="140" height="80" rx="10" fill="url(#grad-go)" stroke="#06B6D4" stroke-width="1.5" />
+                        <text x="70" y="32" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="700">Committer Loop</text>
+                        <text x="70" y="52" text-anchor="middle" fill="#ECFEFF" font-size="11" font-family="monospace">Atomic DB Commit</text>
+                    </g>
+                    <path d="M 230,230 L 840,230" fill="none" stroke="#8B5CF6" stroke-width="2.5" marker-end="url(#arrow)" stroke-dasharray="4,2" />
+                    
+                    <text x="535" y="210" font-size="11" fill="#DDD6FE" font-weight="bold">Block-STM / Fast-Path Resolving →</text>
+                </svg>
+            </div>
+        </section>
+
+        <!-- Navigation Tabs -->
+        <div class="mb-8 border-b border-slate-800">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <button type="button" onclick="switchTab('tab-end-to-end'); return false;" id="btn-tab-end-to-end" class="tab-btn border-b-2 border-brand-go text-brand-go px-1 py-4 text-sm font-semibold tracking-wide flex items-center space-x-2">
+                    <span>1. Quy Trình Tổng Thể (Đầu-Đến-Cuối)</span>
+                </button>
+                <button type="button" onclick="switchTab('tab-block-stm'); return false;" id="btn-tab-block-stm" class="tab-btn border-b-2 border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-700 px-1 py-4 text-sm font-semibold tracking-wide flex items-center space-x-2">
+                    <span>2. Thuật Toán Block-STM Lặp</span>
+                </button>
+                <button type="button" onclick="switchTab('tab-modules'); return false;" id="btn-tab-modules" class="tab-btn border-b-2 border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-700 px-1 py-4 text-sm font-semibold tracking-wide flex items-center space-x-2">
+                    <span>3. Bản Đồ Module & File</span>
+                </button>
+            </nav>
+        </div>
+
+        <!-- TAB CONTENT 1: END-TO-END -->
+        <div id="tab-end-to-end" class="tab-content active space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                <div class="lg:col-span-2 space-y-6">
+                    <div class="glass-panel rounded-2xl p-6 shadow-lg">
+                        <h3 class="text-lg font-bold text-slate-100 mb-4 border-b border-slate-800 pb-2">Luồng Dữ Liệu Từng Bước</h3>
+                        <ol class="space-y-4 text-slate-300 text-sm md:text-base leading-relaxed">
+                            <li class="flex items-start">
+                                <span class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-brand-go/20 text-brand-go border border-blue-500/30 text-xs font-bold mr-3 mt-0.5">1</span>
+                                <div>
+                                    <strong class="text-slate-200">Gom Nhóm & Chuyển Tiếp (Go -> Rust):</strong>
+                                    Go thu thập giao dịch. <code>TxBatchForwarder</code> dùng chiến lược <em>Throughput-Based Adaptive Batching</em> để nhóm giao dịch, đẩy chúng qua FFI (<code>SubmitTransactionBatch</code>) vào Rust cực nhanh với Zero-Copy.
+                                </div>
+                            </li>
+                            <li class="flex items-start">
+                                <span class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-brand-rust/20 text-brand-rust border border-red-500/30 text-xs font-bold mr-3 mt-0.5">2</span>
+                                <div>
+                                    <strong class="text-slate-200">Đồng Thuận BFT/DAG (Rust):</strong>
+                                    Rust Core nhóm giao dịch thành các khối, chạy thuật toán đồng thuận DAG BFT, lấy phiếu bầu từ Validator. Khi đạt 2f+1 votes, block được chốt.
+                                </div>
+                            </li>
+                            <li class="flex items-start">
+                                <span class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-brand-ipc/20 text-brand-ipc border border-yellow-500/30 text-xs font-bold mr-3 mt-0.5">3</span>
+                                <div>
+                                    <strong class="text-slate-200">Gửi Block Qua FFI (Rust -> Go):</strong>
+                                    Rust gọi hàm callback <code>cgo_execute_block</code>, đẩy <code>ExecutableBlock</code> (chứa các Tx đã sắp xếp) qua một Channel (blockQueue) vào tầng Go để thực thi.
+                                </div>
+                            </li>
+                            <li class="flex items-start">
+                                <span class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-brand-stm/20 text-brand-stm border border-purple-500/30 text-xs font-bold mr-3 mt-0.5">4</span>
+                                <div>
+                                    <strong class="text-slate-200">Thực Thi Kế Thừa (Speculative Block-STM):</strong>
+                                    <code>SpeculativeExecutor</code> nhận block, tự động clone lại <code>ParentState</code> hiện tại ở nhánh nền (Background). Kích hoạt Block-STM Lặp (với EVM) hoặc Fast-Path (với Native Transfer) để xử lý dữ liệu và tính State Root.
+                                </div>
+                            </li>
+                            <li class="flex items-start">
+                                <span class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-brand-go/20 text-brand-go border border-blue-500/30 text-xs font-bold mr-3 mt-0.5">5</span>
+                                <div>
+                                    <strong class="text-slate-200">Xác Thực & Lưu Trữ (Committer Loop):</strong>
+                                    <code>StartCommitterLoop</code> đối chiếu kết quả. Nếu ParentHash của bản copy khớp với DB thực tế (không có xung đột phân nhánh), hệ thống lưu trạng thái xuống PebbleDB nguyên tử. Gửi <code>ExecuteBlockResponse</code> về lại Rust.
+                                </div>
+                            </li>
+                        </ol>
+                    </div>
+
+                    <div class="glass-panel rounded-2xl p-6 shadow-lg">
+                        <h3 class="text-lg font-bold text-slate-100 mb-4 border-b border-slate-800 pb-2">Biểu Đồ Trình Tự Thực Thi Khép Kín</h3>
+                        <div class="mermaid py-4">
+                            sequenceDiagram
+                                autonumber
+                                participant GoPool as Go TxPool & Forwarder
+                                participant FFI as Biên Giới CGo FFI
+                                participant Rust as Rust Consensus
+                                participant SpecExec as Go SpeculativeExecutor
+                                participant Committer as Go Committer & DB
+
+                                Note over GoPool: 1. Adaptive Batching
+                                GoPool->>FFI: SubmitTransactionBatch(txs)
+                                FFI->>Rust: Chuyển dữ liệu vào Mempool (Zero-Copy)
+                                
+                                Note over Rust: 2. DAG BFT Consensus -> Finality (2f+1)
+                                Rust->>FFI: cgo_execute_block(ExecutableBlock)
+                                FFI->>SpecExec: Đẩy block vào blockQueue
+                                
+                                rect rgb(30, 27, 75)
+                                    Note over SpecExec: 3. Block-STM Background Execution
+                                    SpecExec->>SpecExec: Clone ParentState
+                                    SpecExec->>SpecExec: Phân luồng: Block-STM hoặc Fast-Path
+                                    SpecExec->>SpecExec: Tính toán StateRoot & Read/Write Sets
+                                end
+
+                                SpecExec->>Committer: Trả kết quả SpeculativeResult
+                                
+                                Note over Committer: 4. Zero-Fork Verification
+                                Committer->>Committer: Kiểm tra parentHash khớp với trạng thái Tip.
+                                Committer->>Committer: Lưu toàn bộ thay đổi xuống PebbleDB (Atomic Batch)
+                                Committer->>FFI: Gửi ExecuteBlockResponse (StateRoot, Success)
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-6">
+                    <div class="glass-panel rounded-2xl p-6 border-l-4 border-emerald-500 shadow-md">
+                        <h4 class="text-md font-bold text-emerald-400 mb-2">FAST-PATH (Tối Ưu Giao Dịch Thuần Tùy)</h4>
+                        <p class="text-sm text-slate-300 leading-relaxed mb-3">
+                            Nếu trong block KHÔNG có bất kỳ giao dịch EVM/Smart Contract nào (toàn bộ là Native Transfer), quá trình bỏ qua hoàn toàn Block-STM và Validation Cache.
+                        </p>
+                        <ul class="text-xs text-slate-300 space-y-1 mt-2 list-disc pl-4">
+                            <li>Xóa bỏ 25K+ goroutine allocations.</li>
+                            <li>Dùng cơ chế <strong>Sharded Lock</strong> trực tiếp trên AccountStateDB.</li>
+                            <li>Tăng tốc TPS lên gấp nhiều lần mà vẫn đảm bảo 100% thread-safe.</li>
+                        </ul>
+                    </div>
+
+                    <div class="glass-panel rounded-2xl p-6 border-l-4 border-brand-ipc shadow-md">
+                        <h4 class="text-md font-bold text-brand-ipc mb-2">ZERO-FORK GUARD</h4>
+                        <p class="text-sm text-slate-300 leading-relaxed mb-3">
+                            Tầng Committer bắt buộc so sánh <code class="text-xs bg-slate-900 px-1 py-0.5 rounded text-pink-400">specParentHash</code> với thực tế. Nếu có sai lệch (do khối trước tạo xung đột bất ngờ), block hiện tại tự động hủy Speculative và chạy lại kiểu Tuần Tự (Sequential Execution). Không bao giờ có fork trạng thái nội bộ.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB CONTENT 2: BLOCK-STM DETAILS -->
+        <div id="tab-block-stm" class="tab-content space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                <div class="lg:col-span-2 space-y-6">
+                    <div class="glass-panel rounded-2xl p-6 shadow-lg">
+                        <h3 class="text-lg font-bold text-slate-100 mb-4 border-b border-slate-800 pb-2">Vòng Lặp Block-STM: Speculative & Conflict Resolution</h3>
+                        <p class="text-slate-300 text-sm md:text-base mb-4 leading-relaxed">
+                            Cơ chế này diễn ra 100% trong Background Thread, chia thành các vòng chạy song song.
+                        </p>
+                        
+                        <div class="mermaid py-4">
+                            graph TD
+                                Start["ProcessTransactionsOptimistic"] --> Preload["1. Pre-fetch Accounts & Pre-Verify BLS in Parallel"]
+                                Preload --> Round1["2. Round 1: Chạy song song mù (Speculative Parallel)"]
+                                Round1 --> UnionFind["3. Lấy Read/Write Sets -> Gom nhóm Connected Components (Union-Find)"]
+                                
+                                subgraph IterationGroup["Vòng Lặp Sửa Xung Đột (Round 2+)"]
+                                    UnionFind --> Sort{"4. Sắp xếp Deterministic Sort theo TxHash nhỏ nhất"}
+                                    Sort --> ReExecute["5. Re-Execute song song THEO NHÓM"]
+                                    ReExecute --> CheckConflicts{"6. Còn xung đột nhóm (Cross-Group)?"}
+                                    
+                                    CheckConflicts -- "Có" --> UnionFind
+                                end
+                                
+                                CheckConflicts -- "Hết Xung Đột" --> ApplyCache["7. Apply thay đổi vào ValidationCache"]
+                                ApplyCache --> End["8. Hợp nhất vào Kết Quả & Gửi Committer"]
+                                
+                                style Start fill:#1E293B,stroke:#334155,stroke-width:2px
+                                style End fill:#065F46,stroke:#059669,stroke-width:2px
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-6">
+                    <div class="glass-panel rounded-2xl p-6 shadow-md bg-gradient-to-br from-brand-stm/10 via-brand-dark to-brand-dark border border-brand-stm/30">
+                        <h4 class="text-md font-bold text-brand-stm mb-2">Memory Sandbox</h4>
+                        <ul class="text-xs text-slate-300 space-y-2 leading-relaxed">
+                            <li>Quá trình Re-execute dùng các bản clone nhẹ của Trie (<code>localTrie = baseTrie.Copy()</code>).</li>
+                            <li>Chỉ khi một nhóm Transaction vượt qua vòng kiểm tra Conflict, bộ nhớ của nó mới được <code>FlushToGlobal()</code> để gộp vào State thật.</li>
+                            <li>Hạn chế rác bộ nhớ khổng lồ khi chạy EVM lỗi.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB CONTENT 3: MODULE MAP -->
+        <div id="tab-modules" class="tab-content space-y-8">
+            <div class="glass-panel rounded-2xl p-6 shadow-lg overflow-hidden">
+                <h3 class="text-lg font-bold text-slate-100 mb-6 border-b border-slate-800 pb-2">Bản Đồ Các File Source Code và Chức Năng (Bản Thống Nhất FFI)</h3>
+                
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-800 text-sm md:text-base">
+                        <thead>
+                            <tr class="text-left text-slate-400 font-semibold bg-slate-900/50">
+                                <th class="px-6 py-3 text-xs uppercase tracking-wider">Thành phần</th>
+                                <th class="px-6 py-3 text-xs uppercase tracking-wider">Đường dẫn file (Source Code)</th>
+                                <th class="px-6 py-3 text-xs uppercase tracking-wider">Vai trò & Nhiệm vụ chính</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-800 text-slate-300">
+                            <tr>
+                                <td class="px-6 py-4 font-bold text-brand-go">Go TxBatchForwarder</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go</td>
+                                <td class="px-6 py-4">Nhóm Tx từ pool (Adaptive Batching) gửi qua FFI vào Rust.</td>
+                            </tr>
+                            <tr>
+                                <td class="px-6 py-4 font-bold text-brand-ipc">CGo FFI Bridge</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">execution/executor/ffi_bridge.go<br>consensus/metanode/src/ffi.rs</td>
+                                <td class="px-6 py-4">Giao tiếp bộ nhớ chéo C-ABI 2 chiều (Submit Tx & Execute Block). Không dùng UDS Socket.</td>
+                            </tr>
+                            <tr>
+                                <td class="px-6 py-4 font-bold text-brand-stm">Speculative Executor</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">execution/cmd/simple_chain/processor/speculative_executor.go</td>
+                                <td class="px-6 py-4">Tiếp nhận block, tạo state clone, khởi chạy Block-STM chạy ngầm. Gửi kết quả về Committer Loop.</td>
+                            </tr>
+                            <tr>
+                                <td class="px-6 py-4 font-bold text-brand-stm">Block-STM & Fast-Path</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">execution/pkg/blockchain/tx_processor/block_stm.go</td>
+                                <td class="px-6 py-4">Logic giải quyết xung đột bằng Union-Find, Deterministic Sort, hoặc chạy Native Transfer siêu tốc.</td>
+                            </tr>
+                            <tr>
+                                <td class="px-6 py-4 font-bold text-brand-go">Committer Loop</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">execution/cmd/simple_chain/processor/speculative_executor.go (StartCommitterLoop)</td>
+                                <td class="px-6 py-4">Kiểm tra Zero-Fork (parentHash guard), lưu kết quả xuống PebbleDB và phản hồi lại cho Rust.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => {
+                el.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-btn').forEach(el => {
+                el.classList.remove('border-brand-go', 'text-brand-go');
+                el.classList.add('border-transparent', 'text-slate-400');
+            });
+            
+            document.getElementById(tabId).classList.add('active');
+            const activeBtn = document.getElementById('btn-' + tabId);
+            activeBtn.classList.remove('border-transparent', 'text-slate-400');
+            activeBtn.classList.add('border-brand-go', 'text-brand-go');
+        }
+    </script>
+</body>
+</html>
