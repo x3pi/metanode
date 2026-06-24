@@ -47,11 +47,22 @@ impl TxPayloadCache {
         self.queue.push_back(digest);
 
         // Persist to disk if directory is configured
-        if let Some(dir) = TX_PAYLOAD_DIR.get() {
+        if let Some(dir) = TX_PAYLOAD_DIR.get().cloned() {
             let file_name = digest.0.iter().map(|b| format!("{:02x}", b)).collect::<String>();
             let file_path = dir.join(file_name);
-            if !file_path.exists() {
-                let _ = std::fs::write(file_path, tx.data());
+            let tx_data = tx.clone().into_data();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    if !file_path.exists() {
+                        let _ = std::fs::write(file_path, tx_data);
+                    }
+                });
+            } else {
+                std::thread::spawn(move || {
+                    if !file_path.exists() {
+                        let _ = std::fs::write(file_path, tx_data);
+                    }
+                });
             }
         }
 

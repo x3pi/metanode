@@ -148,7 +148,18 @@ func processSingleGroup(
 
 		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...)
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
-		if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
+		var errVerify *transaction.TransactionError
+		if LoadVerifiedSignature(tx.Hash()) {
+			// PERF OPT (D): Fast path for already verified transactions (e.g., from local mempool injection).
+			// Skips redundant AccountState fetches and amount/fee validations.
+			// Nonce check is handled explicitly below.
+			errVerify = nil
+		} else {
+			// Fallback: Full verification for transactions from P2P sync
+			errVerify = VerifyTransaction(tx, chainState, as)
+		}
+
+		if errVerify != nil {
 			GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
 			logger.Warn("❌ [VERIFY-REJECT] %v for tx %s (From: %s) -> GIAO DỊCH BỊ VỨT BỎ KHỎI BLOCK", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
 

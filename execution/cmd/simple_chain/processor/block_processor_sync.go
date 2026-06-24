@@ -492,6 +492,9 @@ PROCESS_BLOCK:
 	// Compare that against the DB — if the DB already has it, this is a re-execution.
 	nextBlockToCreate := *currentBlockNumber + 1
 	if nextBlockToCreate <= storage.GetLastBlockNumber() && storage.GetLastBlockNumber() > 0 {
+		if dispatchMs := epochData.GetRustDispatchTimestampMs(); dispatchMs > 0 {
+			pipeline.LastRustDispatchTimestampMs.Store(dispatchMs)
+		}
 		logger.Warn("🛡️ [NOMT-GUARD] Skipping EVM execution and block creation for historic block #%d (already in DB: #%d, GEI=%d, txs=%d). "+
 			"Re-executing historic blocks corrupts NOMT state.", nextBlockToCreate, storage.GetLastBlockNumber(), globalExecIndex, len(epochData.Transactions))
 
@@ -578,6 +581,10 @@ PROCESS_BLOCK:
 		bNum := epochData.GetBlockNumber()
 		if bNum == 0 {
 			logger.Debug("⏭️  [SKIP-EMPTY] Skipping empty commit: global_exec_index=%d (no state change)", globalExecIndex)
+
+			if dispatchMs := epochData.GetRustDispatchTimestampMs(); dispatchMs > 0 {
+				pipeline.LastRustDispatchTimestampMs.Store(dispatchMs)
+			}
 
 			// Update GlobalExecIndex tracking (persistent)
 			bp.PushAsyncGEIUpdate(globalExecIndex, epochData.GetCommitHash(), commitIndex, epochNum)
@@ -682,6 +689,9 @@ PROCESS_BLOCK:
 
 	// If no transactions after unmarshal, skip (same as empty commit)
 	if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
+		if dispatchMs := epochData.GetRustDispatchTimestampMs(); dispatchMs > 0 {
+			pipeline.LastRustDispatchTimestampMs.Store(dispatchMs)
+		}
 		bNum := epochData.GetBlockNumber()
 
 		if bNum == 0 {
