@@ -33,6 +33,7 @@ func ProcessTransactionsOptimistic(
 	isCache bool,
 	blockTime uint64,
 	leaderAddr common.Address,
+	skipSignatureVerify bool,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -83,15 +84,19 @@ func ProcessTransactionsOptimistic(
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
 	// Pre-verify BLS signatures in parallel to avoid CPU bottlenecks in workers
-	startPreVerify := time.Now()
-	flatTxs := make([]types.Transaction, 0, totalTxs)
-	for _, group := range groupedGroups {
-		for _, item := range group.Items {
-			flatTxs = append(flatTxs, item.Tx)
+	if !skipSignatureVerify {
+		startPreVerify := time.Now()
+		flatTxs := make([]types.Transaction, 0, totalTxs)
+		for _, group := range groupedGroups {
+			for _, item := range group.Items {
+				flatTxs = append(flatTxs, item.Tx)
+			}
 		}
+		PreVerifySignatures(flatTxs, chainState)
+		logger.Debug("⚡ [PERF] Pre-verified %d signatures in parallel in %v", len(flatTxs), time.Since(startPreVerify))
+	} else {
+		logger.Debug("⚡ [PERF] Skipped BLS pre-verify (transactions from consensus block)")
 	}
-	PreVerifySignatures(flatTxs, chainState)
-	logger.Debug("⚡ [PERF] Pre-verified %d signatures in parallel in %v", len(flatTxs), time.Since(startPreVerify))
 
 	// =========================================================================
 	// FAST-PATH: All-Native-Transfer Blocks (Bypass Block-STM)
