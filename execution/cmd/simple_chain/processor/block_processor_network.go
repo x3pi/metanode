@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
@@ -313,6 +314,7 @@ PROCESS_LOOP:
 			// Check epoch from commit
 			lastEpochNum := epochData.GetEpoch()
 			lastCommitTimestampMs := epochData.GetCommitTimestampMs()
+			latestDispatchMs := epochData.GetRustDispatchTimestampMs()
 
 			// Drain additional consecutive empty commits from channel buffer
 			// OPTIMIZATION: Use timed drain window (5ms) instead of instant default exit.
@@ -356,6 +358,9 @@ PROCESS_LOOP:
 							draining = false
 							// Persist the batch up to this point (BEFORE the epoch boundary)
 							bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
+							if latestDispatchMs > 0 {
+								pipeline.LastRustDispatchTimestampMs.Store(latestDispatchMs)
+							}
 							nextExpectedGlobalExecIndex = highestGEI + 1
 							if batchCount > 1 {
 								logger.Info("⚡ [BATCH-DRAIN] Processed %d consecutive empty commits in 1 batch (GEI %d→%d) before epoch boundary",
@@ -379,6 +384,9 @@ PROCESS_LOOP:
 						highestGEI = nextGEI
 						highestCommitIndex = next.GetCommitIndex()
 						batchCount++
+						if dispatch := next.GetRustDispatchTimestampMs(); dispatch > latestDispatchMs {
+							latestDispatchMs = dispatch
+						}
 						// Reset drain timer — more data might follow
 						if !drainTimeout.Stop() {
 							select {
@@ -396,6 +404,9 @@ PROCESS_LOOP:
 						// use the same atomic counter. Previously used Rust's hint GEI
 						// directly, which could diverge from GEIAuthority's counter.
 						bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
+						if latestDispatchMs > 0 {
+							pipeline.LastRustDispatchTimestampMs.Store(latestDispatchMs)
+						}
 						nextExpectedGlobalExecIndex = highestGEI + 1
 						bp.updateAndPersistLastExecutedCommitHash(next.GetCommitHash())
 						if lastEpochNum > 0 {
@@ -434,6 +445,9 @@ PROCESS_LOOP:
 			// GO-AUTHORITATIVE FIX: Route through GEIAuthority so all paths
 			// use the same atomic counter, preventing +1 offset divergence.
 			bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
+			if latestDispatchMs > 0 {
+				pipeline.LastRustDispatchTimestampMs.Store(latestDispatchMs)
+			}
 			nextExpectedGlobalExecIndex = highestGEI + 1
 			if lastEpochNum > 0 {
 				bp.chainState.CheckAndUpdateEpochFromBlock(lastEpochNum, lastCommitTimestampMs)

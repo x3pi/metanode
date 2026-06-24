@@ -78,7 +78,7 @@ func init() {
 	})
 }
 
-func loadVerifiedSignature(key interface{}) bool {
+func LoadVerifiedSignature(key interface{}) bool {
 	rc := currentRotatingCache.Load()
 	if rc == nil {
 		return false
@@ -94,7 +94,7 @@ func loadVerifiedSignature(key interface{}) bool {
 	return false
 }
 
-func storeVerifiedSignature(key interface{}) {
+func StoreVerifiedSignature(key interface{}) {
 	rc := currentRotatingCache.Load()
 	if rc != nil {
 		rc.active.Store(key, true)
@@ -241,7 +241,7 @@ func VerifyTransaction(
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
 			if !isCrossChainBatchSubmit {
-				if !loadVerifiedSignature(txHash) {
+				if !LoadVerifiedSignature(txHash) {
 					request := transaction.NewVerifyTransactionRequest(
 						tx.Hash(),
 						common.PubkeyFromBytes(as.PublicKeyBls()),
@@ -261,7 +261,7 @@ func VerifyTransaction(
 						}
 					}
 					// Only cache on successful validation
-					storeVerifiedSignature(txHash)
+					StoreVerifiedSignature(txHash)
 					count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 					if count == maxVerifiedSignaturesCacheSize {
 						rotateVerifiedSignatures()
@@ -292,11 +292,11 @@ func VerifyTransaction(
 		switch {
 		case as.Nonce() == 0 && isSetBls:
 			txHash := tx.Hash()
-			if !loadVerifiedSignature(txHash) {
+			if !LoadVerifiedSignature(txHash) {
 				if !tx.ValidEthSign() {
 					return transaction.InvalidSignSecp
 				}
-				storeVerifiedSignature(txHash)
+				StoreVerifiedSignature(txHash)
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()
