@@ -140,9 +140,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// Block size capping: Limit total transactions processed per block tick to ~2500 txs.
+		// Block size capping: Limit total transactions processed per block tick to ~10000 txs.
 		// Return any excess transactions back to the pool to be processed in the next blocks.
-		const targetBlockSize = 2500
+		const targetBlockSize = 10000
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
