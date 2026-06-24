@@ -553,6 +553,62 @@ func (cs *ChainState) SetAccountStateDB(asDB *account_state_db.AccountStateDB) {
 	cs.accountStateDB.Store(asDB)
 }
 
+func (cs *ChainState) SetSmartContractDB(scDB *smart_contract_db.SmartContractDB) {
+	cs.smartContractDB.Store(scDB)
+}
+
+func (cs *ChainState) SetStakeStateDB(stakeDB *stake_state_db.StakeStateDB) {
+	cs.stakeStateDB.Store(stakeDB)
+}
+
+// CloneSpeculative creates a speculative, thread-safe copy of ChainState
+// sharing the same databases configuration but with cloned/copied trie structures.
+func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, error) {
+	// 1. Copy AccountStateDB
+	accDB := cs.GetAccountStateDB()
+	clonedAccTrie := accDB.Trie().Copy()
+	clonedAccDB := account_state_db.NewAccountStateDB(clonedAccTrie, cs.storageManager.GetStorageAccount())
+
+	// 2. Copy StakeStateDB
+	stakeDB := cs.GetStakeStateDB()
+	clonedStakeTrie := stakeDB.Trie().Copy()
+	clonedStakeDB := stake_state_db.NewStakeStateDB(clonedStakeTrie, cs.storageManager.GetStorageStake())
+
+	// 3. Copy SmartContractDB
+	clonedScDB := smart_contract_db.NewSmartContractDB(
+		cs.storageManager.GetStorageCode(),
+		cs.storageManager.GetStorageSmartContract(),
+		clonedAccDB,
+	)
+
+	// 4. Construct cloned ChainState
+	clonedCS := &ChainState{
+		config:                cs.config,
+		storageManager:        cs.storageManager,
+		blockDatabase:         cs.blockDatabase,
+		freeFeeAddress:        cs.freeFeeAddress,
+		changelogDB:           cs.changelogDB,
+		stakeChangelogDB:      cs.stakeChangelogDB,
+		currentEpoch:          cs.currentEpoch,
+		epochStartTimestampMs: cs.epochStartTimestampMs,
+		backupPath:            cs.backupPath,
+		attestationInterval:   cs.attestationInterval,
+	}
+	clonedCS.currentBlockHeader.Store(&header)
+	clonedCS.accountStateDB.Store(clonedAccDB)
+	clonedCS.smartContractDB.Store(clonedScDB)
+	clonedCS.stakeStateDB.Store(clonedStakeDB)
+
+	cs.epochMutex.RLock()
+	clonedCS.epochStartTimestamps = cs.epochStartTimestamps
+	clonedCS.epochBoundaryBlocks = cs.epochBoundaryBlocks
+	clonedCS.epochBoundaryGeis = cs.epochBoundaryGeis
+	cs.epochMutex.RUnlock()
+
+	return clonedCS, nil
+}
+
+
 // InvalidateAllState clears all in-memory caches across all state databases.
 // This ensures that subsequent reads will fetch fresh data from the underlying PebbleDB/NOMT storage.
 func (cs *ChainState) InvalidateAllState() {
