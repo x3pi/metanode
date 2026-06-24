@@ -60,7 +60,7 @@ impl Core {
             let last_proposed_round = dag_state.get_last_proposed_block().round();
             
             if clock_round <= last_proposed_round {
-                info!(
+                debug!(
                     "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
                     clock_round,
                     last_proposed_round
@@ -74,7 +74,7 @@ impl Core {
             // is invalid and will be rejected by the BlockManager, causing a crash.
             let gc_round = dag_state.gc_round();
             if clock_round <= gc_round {
-                info!(
+                debug!(
                     "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
                     clock_round,
                     gc_round
@@ -501,7 +501,7 @@ impl Core {
             .update_from_verified_block(&extended_block);
 
         let prop_total = prop_start.elapsed() + ancestors_elapsed;
-        tracing::warn!(
+        tracing::debug!(
             "⏱️ [PERF-RUST] try_new_block proposal for round {} (txs: {}): total={:?}, ancestors={:?}, tx_pack={:?}, sign={:?}, accept={:?}",
             clock_round,
             verified_block.transactions().len(),

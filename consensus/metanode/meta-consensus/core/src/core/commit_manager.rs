@@ -403,7 +403,7 @@ impl Core {
             if sequenced_leaders.is_empty() {
                 break;
             }
-            tracing::info!(
+            tracing::debug!(
                 "Committing {} leaders: {}; {} commits before next leader schedule change",
                 sequenced_leaders.len(),
                 sequenced_leaders
