@@ -190,6 +190,9 @@ pub enum ConsensusError {
 
     #[error("Consensus has shut down!")]
     Shutdown,
+
+    #[error("Block has missing transactions: {0:?}")]
+    MissingTransactions(Vec<consensus_types::block::TxDigest>),
 }
 
 impl ConsensusError {

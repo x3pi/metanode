@@ -1,4 +1,5 @@
 use super::*;
+use super::proposal::receive;
 
 #[tokio::test]
 async fn test_smart_ancestor_selection() {
@@ -14,6 +15,7 @@ async fn test_smart_ancestor_selection() {
 
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
@@ -40,6 +42,7 @@ async fn test_smart_ancestor_selection() {
         context.clone(),
         commit_consumer,
         dag_state.clone(),
+        dag_state_writer.clone(),
         transaction_certifier.clone(),
         leader_schedule.clone(),
         0,
@@ -312,6 +315,7 @@ async fn test_excluded_ancestor_limit() {
 
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
@@ -338,6 +342,7 @@ async fn test_excluded_ancestor_limit() {
         context.clone(),
         commit_consumer,
         dag_state.clone(),
+        dag_state_writer.clone(),
         transaction_certifier.clone(),
         leader_schedule.clone(),
         0,

@@ -186,7 +186,7 @@ func TestStartSignatureCacheCleanup_StopsOnSignal(t *testing.T) {
 
 	// Store something in cache
 	hash := common.BytesToHash([]byte("test_hash_1"))
-	storeVerifiedSignature(hash)
+	StoreVerifiedSignature(hash)
 	atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 
 	// Signal stop
@@ -206,13 +206,13 @@ func TestSignatureCache_AutoResetOnOverflow(t *testing.T) {
 	// Simulate cache reaching max size
 	for i := int64(0); i < 10; i++ {
 		hashI := common.BytesToHash([]byte{byte(i)})
-		storeVerifiedSignature(hashI)
+		StoreVerifiedSignature(hashI)
 	}
 	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxVerifiedSignaturesCacheSize)
 
 	// Next addition should trigger reset/rotation in VerifyTransaction
 	overflowHash := common.BytesToHash([]byte("overflow_trigger"))
-	storeVerifiedSignature(overflowHash)
+	StoreVerifiedSignature(overflowHash)
 	newCount := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 
 	if newCount > maxVerifiedSignaturesCacheSize+1 {

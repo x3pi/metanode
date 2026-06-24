@@ -72,11 +72,18 @@
   loop: "{{ active_nodes }}"
   notify: reload systemd
 
-- name: Generate systemd service for Consensus
-  ansible.builtin.template:
-    src: metanode-consensus.service.j2
-    dest: /etc/systemd/system/metanode-consensus-{{ item }}.service
-    mode: '0644'
+- name: Disable and stop Consensus services
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Remove Consensus systemd service file
+  ansible.builtin.file:
+    path: "/etc/systemd/system/metanode-consensus-{{ item }}.service"
+    state: absent
   loop: "{{ active_nodes }}"
   notify: reload systemd
 
@@ -86,17 +93,6 @@
     state: started
     enabled: yes
     daemon_reload: yes
-  loop: "{{ active_nodes }}"
-
-- name: Wait 5 seconds before starting Consensus
-  ansible.builtin.pause:
-    seconds: 5
-
-- name: Enable and start Consensus services
-  ansible.builtin.systemd:
-    name: "metanode-consensus-{{ item }}"
-    state: started
-    enabled: yes
   loop: "{{ active_nodes }}"
 
 - name: Open firewall ports for node

@@ -72,7 +72,18 @@ impl ExecutorClient {
         }
 
         // Count total transactions BEFORE conversion (to detect if transactions are lost)
-        let total_tx_before: usize = subdag.blocks.iter().map(|b| b.transactions().len()).sum();
+        let total_tx_before: usize = subdag
+            .blocks
+            .iter()
+            .map(|b| {
+                let tx_len = b.transactions().len();
+                if tx_len > 0 {
+                    tx_len
+                } else {
+                    b.tx_digests().len()
+                }
+            })
+            .sum();
 
         // T2-6: Unified batch_id for cross-process tracing (matches Go format)
 
@@ -828,26 +839,26 @@ impl ExecutorClient {
 
         // Phase 5: Go verification (periodic RPC check)
         if last_idx.is_multiple_of(GO_VERIFICATION_INTERVAL) {
-            if let Ok((go_last_block, _, _, _, _)) = self.get_last_block_number().await {
+            if let Ok((go_last_block, go_last_gei, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
                     error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
                         *last_verified, go_last_block);
                 }
                 *last_verified = go_last_block;
-                let lag = last_idx.saturating_sub(go_last_block);
+                let lag = last_idx.saturating_sub(go_last_gei);
                 if let Some(ref handle) = self.go_lag_handle {
                     handle.store(lag, std::sync::atomic::Ordering::Relaxed);
                 }
                 if lag > 100 {
                     warn!(
-                        "⚠️ [GO LAG] Go is {} blocks behind Rust. sent={}, go={}",
-                        lag, last_idx, go_last_block
+                        "⚠️ [GO LAG] Go is {} GEIs behind Rust. sent_gei={}, go_gei={}",
+                        lag, last_idx, go_last_gei
                     );
                 } else {
                     trace!(
-                        "✓ [GO VERIFY] Go verified at block {}. Rust sent={}, lag={}",
-                        go_last_block,
+                        "✓ [GO VERIFY] Go verified at GEI {}. Rust sent_gei={}, lag={}",
+                        go_last_gei,
                         last_idx,
                         lag
                     );
@@ -1062,32 +1073,51 @@ impl ExecutorClient {
             calculate_transaction_hash_single, verify_transaction_protobuf,
         };
 
+        // Reconstruct transactions from digests if it's BlockV3
+        let mut all_txs_to_process = Vec::new();
+        let cache = consensus_core::get_global_tx_cache().read();
+
+        for block in &subdag.blocks {
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    if let Some(tx) = cache.get(digest) {
+                        all_txs_to_process.push(tx);
+                    } else {
+                        warn!("⚠️ [build_sorted_transactions] Missing transaction for digest {:?} in block {}", digest, block.reference());
+                    }
+                }
+            } else {
+                for tx in block.transactions() {
+                    all_txs_to_process.push(tx.clone());
+                }
+            }
+        }
+
         let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new();
         let mut system_transactions: Vec<Vec<u8>> = Vec::new();
         let mut skipped_count = 0;
 
-        for (block_idx, block) in subdag.blocks.iter().enumerate() {
-            for (tx_idx, tx) in block.transactions().iter().enumerate() {
-                let tx_data = tx.data();
-                let tx_hash = calculate_transaction_hash_single(tx_data);
+        for (tx_idx, tx) in all_txs_to_process.iter().enumerate() {
+            let tx_data = tx.data();
+            let tx_hash = calculate_transaction_hash_single(tx_data);
 
-                // Filter: Separate SystemTransaction (BCS format)
-                if SystemTransaction::from_bytes(tx_data).is_ok() {
-                    system_transactions.push(tx_data.to_vec());
-                    skipped_count += 1;
-                    continue;
-                }
-
-                // Filter: Skip non-protobuf transactions
-                if !verify_transaction_protobuf(tx_data) {
-                    let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
-                    trace!("⚠️ [FRAGMENT-FILTER] Skipping non-protobuf tx in block {} tx {}: hash={}...", block_idx, tx_idx, tx_hash_hex);
-                    skipped_count += 1;
-                    continue;
-                }
-
-                all_transactions_with_hash.push((tx_data, tx_hash));
+            // Filter: Separate SystemTransaction (BCS format)
+            if SystemTransaction::from_bytes(tx_data).is_ok() {
+                system_transactions.push(tx_data.to_vec());
+                skipped_count += 1;
+                continue;
             }
+
+            // Filter: Skip non-protobuf transactions
+            if !verify_transaction_protobuf(tx_data) {
+                let tx_hash_hex = hex::encode(&tx_hash[..8.min(tx_hash.len())]);
+                trace!("⚠️ [FRAGMENT-FILTER] Skipping non-protobuf tx at index {}: hash={}...", tx_idx, tx_hash_hex);
+                skipped_count += 1;
+                continue;
+            }
+
+            all_transactions_with_hash.push((tx_data, tx_hash));
         }
 
         // Dedup by txHash

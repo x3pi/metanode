@@ -288,6 +288,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                         commands_sender.clone(),
                         dag_state.clone(),
                         "periodic",
+                        network_client.clone(),
                     )
                     .await
                     {

@@ -85,6 +85,7 @@ pub use system_transaction_provider::{
 };
 pub use transaction::{
     BlockStatus, ClientError, TransactionClient, TransactionVerifier, ValidationError,
+    TxPayloadCache, get_global_tx_cache, TX_PAYLOAD_DIR,
 };
 
 // Exported API for benchmarking

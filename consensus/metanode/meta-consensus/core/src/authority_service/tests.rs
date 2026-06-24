@@ -203,7 +203,7 @@ async fn test_handle_send_block() {
         blocks_sender,
     );
     let synchronizer = Synchronizer::start(
-        network_client,
+        network_client.clone(),
         context.clone(),
         core_dispatcher.clone(),
         commit_vote_monitor.clone(),
@@ -227,6 +227,7 @@ async fn test_handle_send_block() {
         None,
         None, // legacy_store_manager
         0,    // epoch_base_index (tests start at epoch 0)
+        network_client.clone(),
     ));
 
     // Test delaying blocks with time drift.
@@ -325,7 +326,7 @@ async fn test_handle_fetch_blocks() {
         blocks_sender,
     );
     let synchronizer = Synchronizer::start(
-        network_client,
+        network_client.clone(),
         context.clone(),
         core_dispatcher.clone(),
         commit_vote_monitor.clone(),
@@ -349,6 +350,7 @@ async fn test_handle_fetch_blocks() {
         None,
         None, // legacy_store_manager
         0,    // epoch_base_index (tests start at epoch 0)
+        network_client.clone(),
     ));
 
     // GIVEN: 40 rounds of blocks in the dag state.
@@ -496,7 +498,7 @@ async fn test_handle_fetch_latest_blocks() {
         blocks_sender,
     );
     let synchronizer = Synchronizer::start(
-        network_client,
+        network_client.clone(),
         context.clone(),
         core_dispatcher.clone(),
         commit_vote_monitor.clone(),
@@ -520,6 +522,7 @@ async fn test_handle_fetch_latest_blocks() {
         None,
         None, // legacy_store_manager
         0,    // epoch_base_index (tests start at epoch 0)
+        network_client.clone(),
     ));
 
     // Create some blocks for a few authorities. Create some equivocations as well and store in dag state.

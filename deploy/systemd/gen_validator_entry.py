@@ -263,7 +263,9 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "BLSPrivateKey": bls_private_hex,
             "SnapshotPath": f"{install_dir}/data/execution/snapshots",
             "MaxPartSizeMB": 100,
-            "ArchiveBaseName": "snapshot_archive"
+            "ArchiveBaseName": "snapshot_archive",
+            "pebble_cache_size_mb": 4096,
+            "pebble_mem_table_size_mb": 256
         },
         "nodes": {
             "network_sync_enabled": False,
@@ -320,7 +322,8 @@ commit_sync_batches_ahead = {commit_batches_ahead}
 adaptive_catchup_enabled = true
 adaptive_delay_enabled = false
 adaptive_delay_ms = 20
-min_round_delay_ms = 100
+min_round_delay_ms = 25
+compact_blocks_enabled = true
 leader_timeout_ms = 200
 epoch_transition_optimization = "fast"
 enable_gradual_shutdown = true

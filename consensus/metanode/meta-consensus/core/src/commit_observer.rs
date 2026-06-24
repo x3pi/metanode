@@ -796,9 +796,11 @@ mod tests {
 
                 // Allow comparison with committed subdag before recovery.
                 subdag.recovered_rejected_transactions = false;
-                assert_eq!(subdag, commits[processed_subdag_index as usize]);
+                let mut expected_subdag = commits[processed_subdag_index as usize].clone();
+                expected_subdag.decided_with_local_blocks = false;
+                assert_eq!(subdag, expected_subdag);
 
-                assert!(subdag.decided_with_local_blocks);
+                assert!(!subdag.decided_with_local_blocks);
                 assert_eq!(subdag.reputation_scores_desc, vec![]);
                 processed_subdag_index = subdag.commit_ref.index;
                 if processed_subdag_index == consumer_last_processed_commit_index {
@@ -881,7 +883,7 @@ mod tests {
             {
                 tracing::info!("Received {subdag} on recovery");
                 assert_eq!(subdag.commit_ref.index, processed_subdag_index + 1);
-                assert!(subdag.decided_with_local_blocks);
+                assert!(!subdag.decided_with_local_blocks);
                 assert_eq!(subdag.reputation_scores_desc, vec![]);
                 processed_subdag_index = subdag.commit_ref.index;
                 if processed_subdag_index == expected_last_sent_index as CommitIndex {
@@ -938,9 +940,11 @@ mod tests {
 
                 // Allow comparison with committed subdag before recovery.
                 subdag.recovered_rejected_transactions = false;
-                assert_eq!(subdag, commits[processed_subdag_index as usize]);
+                let mut expected_subdag = commits[processed_subdag_index as usize].clone();
+                expected_subdag.decided_with_local_blocks = false;
+                assert_eq!(subdag, expected_subdag);
 
-                assert!(subdag.decided_with_local_blocks);
+                assert!(!subdag.decided_with_local_blocks);
                 assert_eq!(subdag.reputation_scores_desc, vec![]);
                 processed_subdag_index = subdag.commit_ref.index;
                 if processed_subdag_index == expected_last_sent_index as CommitIndex {

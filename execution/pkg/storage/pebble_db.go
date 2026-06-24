@@ -43,6 +43,7 @@ var (
 	sharedPebbleCacheOnce sync.Once
 	sharedPebbleCache     *pebble.Cache
 	sharedCacheSizeMB     int = 512
+	sharedMemTableSizeMB  int = 256
 
 	sharedPebbleTableCacheOnce sync.Once
 	sharedPebbleTableCache     *pebble.TableCache
@@ -51,6 +52,12 @@ var (
 func SetSharedPebbleCacheSize(sizeMB int) {
 	if sizeMB > 0 {
 		sharedCacheSizeMB = sizeMB
+	}
+}
+
+func SetSharedPebbleMemTableSize(sizeMB int) {
+	if sizeMB > 0 {
+		sharedMemTableSizeMB = sizeMB
 	}
 }
 
@@ -93,10 +100,9 @@ func (p *PebbleDB) Open(parallelism int) error {
 	dbPath := p.path
 	opts := &pebble.Options{
 		// ── Memory & Cache ──────────────────────────────────────────
-		// 64MB memtable — reduced from 256MB to prevent OOM under sustained load.
-		// With ~48 shards/node × 256MB × 2 active memtables = 24GB/node was excessive.
-		// 48 shards × 64MB × 2 = 6GB/node — much more sustainable.
-		MemTableSize: 64 << 20,
+		// memtable size is now configurable to prevent OOM on low-resource machines
+		// while allowing higher performance on high-RAM validator nodes.
+		MemTableSize: uint64(sharedMemTableSizeMB) << 20,
 		// Block cache: use a process-wide shared 512MB cache for better cross-DB
 		// cache utilization.
 		Cache: GetSharedPebbleCache(),

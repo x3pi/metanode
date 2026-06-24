@@ -404,6 +404,24 @@ impl NetworkClient for TonicClient {
             .map_err(|e| ConsensusError::NetworkRequest(format!("send_block failed: {e:?}")))?;
         Ok(())
     }
+
+    async fn fetch_transactions(
+        &self,
+        peer: AuthorityIndex,
+        digests: Vec<consensus_types::block::TxDigest>,
+        timeout: Duration,
+    ) -> ConsensusResult<Vec<Bytes>> {
+        let mut client = self.get_client(peer, timeout).await?;
+        let digests_raw = digests.iter().map(|d| d.0.to_vec()).collect();
+        let mut request = Request::new(FetchTransactionsRequest {
+            digests: digests_raw,
+        });
+        request.set_timeout(timeout);
+        let response = client.fetch_transactions(request).await.map_err(|e| {
+            ConsensusError::NetworkRequest(format!("fetch_transactions failed: {e:?}"))
+        })?;
+        Ok(response.into_inner().transactions)
+    }
 }
 
 // Tonic channel wrapped with layers - using plain TCP
@@ -845,6 +863,38 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
             .await
             .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
         Ok(Response::new(SendEpochChangeVoteResponse {}))
+    }
+
+    async fn fetch_transactions(
+        &self,
+        request: Request<FetchTransactionsRequest>,
+    ) -> Result<Response<FetchTransactionsResponse>, tonic::Status> {
+        let peer_index = request
+            .extensions()
+            .get::<PeerInfo>()
+            .map(|p| p.authority_index)
+            .unwrap_or_else(|| {
+                trace!("⚠️ [PEERINFO] PeerInfo missing, using dummy index 0");
+                AuthorityIndex::new_for_test(0)
+            });
+        let request_inner = request.into_inner();
+        let mut digests = Vec::new();
+        for d_raw in request_inner.digests {
+            if d_raw.len() == consensus_config::DIGEST_LENGTH {
+                let mut arr = [0u8; consensus_config::DIGEST_LENGTH];
+                arr.copy_from_slice(&d_raw);
+                digests.push(consensus_types::block::TxDigest(arr));
+            } else {
+                return Err(tonic::Status::invalid_argument("invalid digest length"));
+            }
+        }
+        let transactions = self.service
+            .handle_fetch_transactions(peer_index, digests)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+        Ok(Response::new(FetchTransactionsResponse {
+            transactions,
+        }))
     }
 }
 
@@ -1423,6 +1473,18 @@ pub(crate) struct SendEpochChangeVoteRequest {
 
 #[derive(Clone, prost::Message)]
 pub(crate) struct SendEpochChangeVoteResponse {}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct FetchTransactionsRequest {
+    #[prost(bytes = "vec", repeated, tag = "1")]
+    pub digests: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct FetchTransactionsResponse {
+    #[prost(bytes = "bytes", repeated, tag = "1")]
+    pub transactions: Vec<Bytes>,
+}
 
 fn chunk_blocks(blocks: Vec<Bytes>, chunk_limit: usize) -> Vec<Vec<Bytes>> {
     let mut chunks = vec![];
