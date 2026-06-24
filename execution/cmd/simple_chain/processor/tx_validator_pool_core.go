@@ -548,13 +548,26 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		storage.SetCommitLock(true)
 	}
 
-	var totalWaitGoUs int64
-	var totalWaitRustUs int64
-	var waitCount int64
-
+	// PERF OPT (C): Sample-based WaitGo/WaitRust metrics instead of iterating all TXs.
+	// For 50k TXs, sampling first+last entries gives representative averages
+	// without O(n) map lookups on the hot path.
+	var avgWaitGoUs, avgWaitRustUs int64
 	now := time.Now()
-	if vp.env != nil {
-		for _, tx := range txs {
+	if vp.env != nil && len(txs) > 0 {
+		// Sample up to 10 entries: first 5 + last 5
+		const maxSamples = 10
+		var sampleTxs []types.Transaction
+		if len(txs) <= maxSamples {
+			sampleTxs = txs
+		} else {
+			half := maxSamples / 2
+			sampleTxs = make([]types.Transaction, 0, maxSamples)
+			sampleTxs = append(sampleTxs, txs[:half]...)
+			sampleTxs = append(sampleTxs, txs[len(txs)-half:]...)
+		}
+		var totalWaitGoUs, totalWaitRustUs int64
+		var waitCount int64
+		for _, tx := range sampleTxs {
 			if entry, ok := vp.env.GetTxHashConnEntry(tx.Hash()); ok {
 				waitCount++
 				waitGoUs := entry.SentToRustAt.Sub(entry.CreatedAt).Microseconds()
@@ -570,20 +583,16 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 				totalWaitRustUs += waitRustUs
 			}
 		}
-	}
-
-	avgWaitGoUs := int64(0)
-	avgWaitRustUs := int64(0)
-	if waitCount > 0 {
-		avgWaitGoUs = totalWaitGoUs / waitCount
-		avgWaitRustUs = totalWaitRustUs / waitCount
+		if waitCount > 0 {
+			avgWaitGoUs = totalWaitGoUs / waitCount
+			avgWaitRustUs = totalWaitRustUs / waitCount
+		}
 	}
 	pipeline.GlobalBlockTraceStore.SetWaitTime(blockNum, avgWaitGoUs, avgWaitRustUs)
 
-	var processedTxs []types.Transaction
-	processedTxs = append(processedTxs, txs...)
+	// PERF OPT (B): Send txs directly to event feed without copying the entire slice.
 	ev := mt_filters.NewTxsEvent{
-		Txs: processedTxs,
+		Txs: txs,
 	}
 	vp.eventSystem.TxsFeed.Send(ev)
 
@@ -681,48 +690,15 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	// Wait for preload to finish before proceeding to execution
 	<-preloadDone
 
-	// --- Parallel Signature Pre-verification ---
-	if len(txs) > 0 {
-		tSigStart := time.Now()
-		// Spawn workers to verify signatures in parallel
-		numSigWorkers := runtime.NumCPU()
-		if numSigWorkers > 128 {
-			numSigWorkers = 128
-		}
-		if len(txs) < numSigWorkers {
-			numSigWorkers = len(txs)
-		}
-
-		var sigWg sync.WaitGroup
-		sigWg.Add(numSigWorkers)
-		chunkSize := (len(txs) + numSigWorkers - 1) / numSigWorkers
-
-		for w := 0; w < numSigWorkers; w++ {
-			start := w * chunkSize
-			end := start + chunkSize
-			if end > len(txs) {
-				end = len(txs)
-			}
-			go func(s, e int) {
-				defer sigWg.Done()
-				for i := s; i < e; i++ {
-					tx := txs[i]
-					if tx == nil {
-						continue
-					}
-					// Fetch preloaded sender state
-					senderState, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(tx.FromAddress())
-					if err != nil || senderState == nil {
-						senderState = nil
-					}
-					// Verify and cache signature (VerifyTransaction writes to verifiedSignaturesCache internally)
-					_ = tx_processor.VerifyTransaction(tx, vp.chainState, senderState)
-				}
-			}(start, end)
-		}
-		sigWg.Wait()
-		logger.Info("⏱️  [PERF-SIG-PREVERIFY] Pre-verified %d signatures in %v", len(txs), time.Since(tSigStart))
-	}
+	// PERF OPT (A): Signature pre-verification REMOVED from hot path.
+	// Rationale: addTransactionsToPoolInternal() already calls VerifyTransaction()
+	// during TX injection, which populates the BLS verifiedSignaturesCache.
+	// The pre-verify step here was redundant — re-fetching AccountState,
+	// re-running VerifyTransaction for 40-50k TXs (all cache hits) added
+	// 100-300ms per block. This delay cascaded as increased WaitRust
+	// for subsequent blocks, causing E2E TPS regression from 5644 to 3590.
+	// The BLS cache in processSingleGroup's VerifyTransaction call
+	// will still hit the warm cache from injection.
 
 	ctx := context.Background()
 

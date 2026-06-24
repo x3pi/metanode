@@ -503,6 +503,7 @@ mod test {
         let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
         let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
         let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
@@ -537,7 +538,6 @@ mod test {
             dag_state.clone(),
         ));
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
         let core = Core::new(
             context.clone(),
             leader_schedule,

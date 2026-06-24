@@ -121,9 +121,11 @@ pub trait NetworkClient: Send + Sync + Sized + 'static {
     /// Gets the epoch status from a peer, including current epoch and first commit index.
     async fn get_epoch_status(
         &self,
-        peer: AuthorityIndex,
-        timeout: Duration,
-    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse>;
+        _peer: AuthorityIndex,
+        _timeout: Duration,
+    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse> {
+        unimplemented!("get_epoch_status not implemented for this client")
+    }
 
     /// Sends an epoch change proposal to a peer.
     #[allow(dead_code)]
@@ -151,6 +153,38 @@ pub trait NetworkClient: Send + Sync + Sized + 'static {
         block: &VerifiedBlock,
         timeout: Duration,
     ) -> ConsensusResult<()>;
+
+    /// Fetches transactions by their digests from a peer.
+    async fn fetch_transactions(
+        &self,
+        _peer: AuthorityIndex,
+        _digests: Vec<consensus_types::block::TxDigest>,
+        _timeout: Duration,
+    ) -> ConsensusResult<Vec<Bytes>> {
+        unimplemented!("fetch_transactions not implemented for this client")
+    }
+}
+
+#[async_trait]
+pub trait TransactionFetcher: Send + Sync + 'static {
+    async fn fetch_transactions(
+        &self,
+        peer: AuthorityIndex,
+        digests: Vec<consensus_types::block::TxDigest>,
+        timeout: Duration,
+    ) -> ConsensusResult<Vec<Bytes>>;
+}
+
+#[async_trait]
+impl<T: NetworkClient> TransactionFetcher for T {
+    async fn fetch_transactions(
+        &self,
+        peer: AuthorityIndex,
+        digests: Vec<consensus_types::block::TxDigest>,
+        timeout: Duration,
+    ) -> ConsensusResult<Vec<Bytes>> {
+        self.fetch_transactions(peer, digests, timeout).await
+    }
 }
 
 /// Network service for handling requests from peers.
@@ -218,8 +252,10 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
     /// Handles the request to get the epoch status from the peer.
     async fn handle_get_epoch_status(
         &self,
-        peer: AuthorityIndex,
-    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse>;
+        _peer: AuthorityIndex,
+    ) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse> {
+        unimplemented!("handle_get_epoch_status not implemented for this service")
+    }
 
     /// Handles the epoch change proposal sent from the peer.
     async fn handle_send_epoch_change_proposal(
@@ -234,6 +270,15 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
         peer: AuthorityIndex,
         vote: crate::epoch_change::EpochChangeVote,
     ) -> ConsensusResult<()>;
+
+    /// Handles the request to fetch transactions by their digests.
+    async fn handle_fetch_transactions(
+        &self,
+        _peer: AuthorityIndex,
+        _digests: Vec<consensus_types::block::TxDigest>,
+    ) -> ConsensusResult<Vec<Bytes>> {
+        unimplemented!("handle_fetch_transactions not implemented for this service")
+    }
 }
 
 /// An `AuthorityNode` holds a `NetworkManager` until shutdown.

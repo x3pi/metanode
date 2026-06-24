@@ -134,7 +134,7 @@ use super::*;
 
         // Mark the blocks as committed in DagState. This will allow to correctly detect the committed blocks when the new linearizer logic is enabled.
         for block in blocks.iter() {
-            dag_state_writer.set_committed(&block.reference());
+            dag_state_writer.set_committed(block.reference());
         }
 
         // Now take all the blocks from round `leader_round_wave_1` up to round `leader_round_wave_2-1`
@@ -170,7 +170,7 @@ use super::*;
             last_commit_index as u64, // global_exec_index for test
         );
 
-        let commit = linearizer.handle_commit(vec![leader.clone()]);
+        let commit = linearizer.handle_commit(vec![leader.clone()], None);
         assert_eq!(commit.len(), 1);
 
         let subdag = &commit[0];
@@ -452,8 +452,7 @@ use super::*;
 
         let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
-        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
-        let dag_state = dag_state.read();
+        let dag_state_lock = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
 
         let ancestors = vec![
             VerifiedBlock::new_for_test(TestBlock::new(4, 0).set_timestamp_ms(1_000).build()),
@@ -474,16 +473,20 @@ use super::*;
                 .build(),
         );
 
-        for block in &ancestors {
-            dag_state.accept_block(block.clone());
+        {
+            let mut dag_state = dag_state_lock.write();
+            for block in &ancestors {
+                dag_state.accept_block(block.clone());
+            }
         }
 
+        let dag_state = dag_state_lock.read();
         let last_commit_timestamp_ms = 0;
 
         // WHEN
         let timestamp = Linearizer::calculate_commit_timestamp(
             &context,
-            &mut dag_state,
+            &dag_state,
             &leader_block,
             last_commit_timestamp_ms,
         );
@@ -505,7 +508,7 @@ use super::*;
 
         let timestamp = Linearizer::calculate_commit_timestamp(
             &context,
-            &mut dag_state,
+            &dag_state,
             &leader_block,
             last_commit_timestamp_ms,
         );
@@ -515,7 +518,7 @@ use super::*;
         let last_commit_timestamp_ms = 6_000;
         let timestamp = Linearizer::calculate_commit_timestamp(
             &context,
-            &mut dag_state,
+            &dag_state,
             &leader_block,
             last_commit_timestamp_ms,
         );
@@ -538,7 +541,7 @@ use super::*;
         let last_commit_timestamp_ms = 0;
         let timestamp = Linearizer::calculate_commit_timestamp(
             &context,
-            &mut dag_state,
+            &dag_state,
             &leader_block,
             last_commit_timestamp_ms,
         );

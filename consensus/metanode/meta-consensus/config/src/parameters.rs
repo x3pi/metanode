@@ -99,11 +99,15 @@ pub struct Parameters {
     /// Enable adaptive delay mechanism (default: true).
     #[serde(default = "Parameters::default_adaptive_delay_enabled")]
     pub adaptive_delay_enabled: bool,
+
+    /// Enable compact blocks consensus by Tx hash (default: false).
+    #[serde(default = "Parameters::default_compact_blocks_enabled")]
+    pub compact_blocks_enabled: bool,
 }
 
 impl Parameters {
     pub(crate) fn default_leader_timeout() -> Duration {
-        Duration::from_millis(200)
+        Duration::from_millis(100)
     }
 
     pub(crate) fn default_min_round_delay() -> Duration {
@@ -116,7 +120,7 @@ impl Parameters {
             // Avoid excessive CPU, data and logs in tests.
             Duration::from_millis(250)
         } else {
-            Duration::from_millis(50)
+            Duration::from_millis(25)
         }
     }
 
@@ -208,6 +212,10 @@ impl Parameters {
     pub(crate) fn default_adaptive_delay_enabled() -> bool {
         true
     }
+
+    pub(crate) fn default_compact_blocks_enabled() -> bool {
+        false
+    }
 }
 
 impl Default for Parameters {
@@ -231,6 +239,7 @@ impl Default for Parameters {
             commit_sync_batches_ahead: Parameters::default_commit_sync_batches_ahead(),
             tonic: TonicParameters::default(),
             adaptive_delay_enabled: Parameters::default_adaptive_delay_enabled(),
+            compact_blocks_enabled: Parameters::default_compact_blocks_enabled(),
         }
     }
 }

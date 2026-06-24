@@ -68,6 +68,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             Arc<Context>,
             Sender<Command>,
             Arc<RwLock<DagState>>,
+            Arc<C>,
         )>(100);
 
         // Spawn consumer task that processes blocks independently of the fetch loop
@@ -83,6 +84,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 context,
                 commands_sender,
                 dag_state,
+                network_client,
             )) = rx_process.recv().await
             {
                 let peer_hostname = &context.committee.authority(peer_index).hostname;
@@ -98,6 +100,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     commands_sender,
                     dag_state,
                     "live",
+                    network_client,
                 )
                 .await
                 {
@@ -134,6 +137,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                                 context.clone(),
                                 commands_sender.clone(),
                                 dag_state.clone(),
+                                network_client.clone(),
                             );
                             if tx_process.send(payload).await.is_err() {
                                 warn!("Process channel closed, exiting fetch loop for peer {peer_index}");
@@ -176,6 +180,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         commands_sender: Sender<Command>,
         dag_state: Arc<RwLock<DagState>>,
         sync_method: &str,
+        network_client: Arc<C>,
     ) -> ConsensusResult<()> {
         if serialized_blocks.is_empty() {
             return Ok(());
@@ -193,6 +198,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             let context = context.clone();
             let dag_state = dag_state.clone();
             let transaction_certifier = transaction_certifier.clone();
+            let network_client = network_client.clone();
             
             verification_tasks.push(tokio::task::spawn_blocking(move || {
                 Self::verify_blocks(
@@ -202,6 +208,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     &context,
                     peer_index,
                     dag_state,
+                    network_client,
                 )
             }));
         }

@@ -3,8 +3,6 @@ Description=Metanode Execution Layer (Go) — Node {{ item }}
 Documentation=https://github.com/x3pi/metanode
 After=network-online.target
 Wants=network-online.target
-# Consensus depends on execution — execution must start first
-Before=metanode-consensus-{{ item }}.service
 
 [Service]
 Type=simple

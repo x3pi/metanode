@@ -1,6 +1,6 @@
 use super::*;
 
-    #![allow(non_snake_case)]
+    #[allow(non_snake_case)]
 
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -48,7 +48,6 @@ use super::*;
 
         let authority = ConsensusAuthority::start(
             network_type,
-            0,
             0,
             0,
             own_index,
@@ -438,7 +437,6 @@ use super::*;
             network_type,
             0,
             0,
-            0,
             index,
             committee,
             parameters,
@@ -452,6 +450,7 @@ use super::*;
             boot_counter,
             None,
             None, // legacy_store_manager
+            crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
         )
         .await;
 

@@ -7,13 +7,89 @@ use consensus_types::block::{
     BlockRef, Round, TransactionIndex, NUM_RESERVED_TRANSACTION_INDICES, PING_TRANSACTION_INDEX,
 };
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tap::TapFallible;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{error, warn};
 
 use crate::{block::Transaction, context::Context};
+use std::collections::VecDeque;
+use std::sync::OnceLock;
+use consensus_types::block::TxDigest;
+
+pub static TX_PAYLOAD_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+pub struct TxPayloadCache {
+    map: BTreeMap<TxDigest, Transaction>,
+    queue: VecDeque<TxDigest>,
+    capacity: usize,
+}
+
+impl TxPayloadCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: BTreeMap::new(),
+            queue: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    pub fn insert(&mut self, digest: TxDigest, tx: Transaction) {
+        if self.map.contains_key(&digest) {
+            return;
+        }
+        if self.queue.len() >= self.capacity {
+            if let Some(oldest) = self.queue.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.queue.push_back(digest);
+
+        // Persist to disk if directory is configured
+        if let Some(dir) = TX_PAYLOAD_DIR.get().cloned() {
+            let file_name = digest.0.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            let file_path = dir.join(file_name);
+            let tx_data = tx.clone().into_data();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    if !file_path.exists() {
+                        let _ = std::fs::write(file_path, tx_data);
+                    }
+                });
+            } else {
+                std::thread::spawn(move || {
+                    if !file_path.exists() {
+                        let _ = std::fs::write(file_path, tx_data);
+                    }
+                });
+            }
+        }
+
+        self.map.insert(digest, tx);
+    }
+
+    pub fn get(&self, digest: &TxDigest) -> Option<Transaction> {
+        if let Some(tx) = self.map.get(digest) {
+            return Some(tx.clone());
+        }
+        // Try reading from disk
+        if let Some(dir) = TX_PAYLOAD_DIR.get() {
+            let file_name = digest.0.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            let file_path = dir.join(file_name);
+            if let Ok(data) = std::fs::read(file_path) {
+                return Some(Transaction::new(data));
+            }
+        }
+        None
+    }
+}
+
+pub(crate) static GLOBAL_TX_CACHE: OnceLock<RwLock<TxPayloadCache>> = OnceLock::new();
+
+pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
+    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(500_000)))
+}
 
 /// The maximum number of transactions pending to the queue to be pulled for block proposal
 const MAX_PENDING_TRANSACTIONS: usize = 200_000;
@@ -451,8 +527,15 @@ impl TransactionClient {
             }
         }
 
+        let txs: Vec<Transaction> = transactions.into_iter().map(Transaction::new).collect();
+        {
+            let mut cache = crate::transaction::get_global_tx_cache().write();
+            for tx in &txs {
+                cache.insert(tx.digest(), tx.clone());
+            }
+        }
         let t = TransactionsGuard {
-            transactions: transactions.into_iter().map(Transaction::new).collect(),
+            transactions: txs,
             included_in_block_ack: included_in_block_ack_send,
         };
         self.sender

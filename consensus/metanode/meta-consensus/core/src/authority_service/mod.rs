@@ -62,6 +62,7 @@ pub(crate) struct AuthorityService<C: CoreThreadDispatcher> {
     /// Bounded to prevent unbounded memory growth.
     #[allow(dead_code)]
     recently_verified_blocks: Arc<RwLock<BTreeSet<BlockRef>>>,
+    tx_fetcher: Arc<dyn crate::network::TransactionFetcher>,
 }
 
 impl<C: CoreThreadDispatcher> AuthorityService<C> {
@@ -80,6 +81,7 @@ impl<C: CoreThreadDispatcher> AuthorityService<C> {
         epoch_change_processor: Option<Box<dyn EpochChangeProcessor>>,
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         epoch_base_index: u64,
+        tx_fetcher: Arc<dyn crate::network::TransactionFetcher>,
     ) -> Self {
         let subscription_counter = Arc::new(SubscriptionCounter::new(context.clone()));
         Self {
@@ -98,6 +100,7 @@ impl<C: CoreThreadDispatcher> AuthorityService<C> {
             legacy_store_manager,
             epoch_base_index,
             recently_verified_blocks: Arc::new(RwLock::new(BTreeSet::new())),
+            tx_fetcher,
         }
     }
 

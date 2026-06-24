@@ -42,6 +42,12 @@ impl Transaction {
     pub fn into_data(self) -> Bytes {
         self.data
     }
+
+    pub fn digest(&self) -> consensus_types::block::TxDigest {
+        let mut hasher = DefaultHashFunction::new();
+        hasher.update(&self.data);
+        consensus_types::block::TxDigest(hasher.finalize().into())
+    }
 }
 /// Votes on transactions in a specific block.
 /// Reject votes are explicit. The rest of transactions in the block receive implicit accept votes.
@@ -62,6 +68,7 @@ pub(crate) struct BlockTransactionVotes {
 pub enum Block {
     V1(BlockV1),
     V2(BlockV2),
+    V3(BlockV3),
 }
 
 #[allow(private_interfaces)]
@@ -78,6 +85,7 @@ pub trait BlockAPI {
     fn commit_votes(&self) -> &[CommitVote];
     fn transaction_votes(&self) -> &[BlockTransactionVotes];
     fn misbehavior_reports(&self) -> &[MisbehaviorReport];
+    fn tx_digests(&self) -> Vec<consensus_types::block::TxDigest>;
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -203,6 +211,10 @@ impl BlockAPI for BlockV1 {
 
     fn misbehavior_reports(&self) -> &[MisbehaviorReport] {
         &self.misbehavior_reports
+    }
+
+    fn tx_digests(&self) -> Vec<consensus_types::block::TxDigest> {
+        self.transactions.iter().map(|t| t.digest()).collect()
     }
 }
 
@@ -335,6 +347,143 @@ impl BlockAPI for BlockV2 {
     fn misbehavior_reports(&self) -> &[MisbehaviorReport] {
         &self.misbehavior_reports
     }
+
+    fn tx_digests(&self) -> Vec<consensus_types::block::TxDigest> {
+        self.transactions.iter().map(|t| t.digest()).collect()
+    }
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(crate) struct BlockV3 {
+    epoch: Epoch,
+    round: Round,
+    author: AuthorityIndex,
+    timestamp_ms: BlockTimestampMs,
+    ancestors: Vec<BlockRef>,
+    tx_digests: Vec<consensus_types::block::TxDigest>,
+    transaction_votes: Vec<BlockTransactionVotes>,
+    commit_votes: Vec<CommitVote>,
+    misbehavior_reports: Vec<MisbehaviorReport>,
+    /// Epoch change proposal (serialized as bytes to avoid cross-crate dependencies)
+    epoch_change_proposal: Option<Vec<u8>>,
+    /// Epoch change votes (serialized as bytes)
+    epoch_change_votes: Vec<Vec<u8>>,
+}
+
+#[allow(unused)]
+impl BlockV3 {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        epoch: Epoch,
+        round: Round,
+        author: AuthorityIndex,
+        timestamp_ms: BlockTimestampMs,
+        ancestors: Vec<BlockRef>,
+        tx_digests: Vec<consensus_types::block::TxDigest>,
+        commit_votes: Vec<CommitVote>,
+        transaction_votes: Vec<BlockTransactionVotes>,
+        misbehavior_reports: Vec<MisbehaviorReport>,
+    ) -> BlockV3 {
+        Self {
+            epoch,
+            round,
+            author,
+            timestamp_ms,
+            ancestors,
+            tx_digests,
+            commit_votes,
+            transaction_votes,
+            misbehavior_reports,
+            epoch_change_proposal: None,
+            epoch_change_votes: Vec::new(),
+        }
+    }
+
+    /// Set epoch change proposal
+    pub(crate) fn set_epoch_change_proposal(&mut self, proposal: Option<Vec<u8>>) {
+        self.epoch_change_proposal = proposal;
+    }
+
+    /// Get epoch change proposal
+    pub(crate) fn epoch_change_proposal(&self) -> Option<&Vec<u8>> {
+        self.epoch_change_proposal.as_ref()
+    }
+
+    /// Set epoch change votes
+    pub(crate) fn set_epoch_change_votes(&mut self, votes: Vec<Vec<u8>>) {
+        self.epoch_change_votes = votes;
+    }
+
+    /// Get epoch change votes
+    pub(crate) fn epoch_change_votes(&self) -> &[Vec<u8>] {
+        &self.epoch_change_votes
+    }
+
+    fn genesis_block(context: &Context, author: AuthorityIndex) -> Self {
+        Self {
+            epoch: context.committee.epoch(),
+            round: GENESIS_ROUND,
+            author,
+            timestamp_ms: context.epoch_start_timestamp_ms,
+            ancestors: vec![],
+            tx_digests: vec![],
+            commit_votes: vec![],
+            transaction_votes: vec![],
+            misbehavior_reports: vec![],
+            epoch_change_proposal: None,
+            epoch_change_votes: vec![],
+        }
+    }
+}
+
+impl BlockAPI for BlockV3 {
+    fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    fn round(&self) -> Round {
+        self.round
+    }
+
+    fn author(&self) -> AuthorityIndex {
+        self.author
+    }
+
+    fn slot(&self) -> Slot {
+        Slot::new(self.round, self.author)
+    }
+
+    fn timestamp_ms(&self) -> BlockTimestampMs {
+        self.timestamp_ms
+    }
+
+    fn ancestors(&self) -> &[BlockRef] {
+        &self.ancestors
+    }
+
+    fn transactions(&self) -> &[Transaction] {
+        &[]
+    }
+
+    fn transactions_data(&self) -> Vec<&[u8]> {
+        vec![]
+    }
+
+    fn transaction_votes(&self) -> &[BlockTransactionVotes] {
+        &self.transaction_votes
+    }
+
+    fn commit_votes(&self) -> &[CommitVote] {
+        &self.commit_votes
+    }
+
+    fn misbehavior_reports(&self) -> &[MisbehaviorReport] {
+        &self.misbehavior_reports
+    }
+
+    fn tx_digests(&self) -> Vec<consensus_types::block::TxDigest> {
+        self.tx_digests.clone()
+    }
 }
 
 /// Slot is the position of blocks in the DAG. It can contain 0, 1 or multiple blocks
@@ -371,6 +520,7 @@ impl Block {
         match self {
             Block::V1(block) => block.epoch_change_proposal(),
             Block::V2(block) => block.epoch_change_proposal(),
+            Block::V3(block) => block.epoch_change_proposal(),
         }
     }
 
@@ -379,6 +529,7 @@ impl Block {
         match self {
             Block::V1(block) => block.epoch_change_votes(),
             Block::V2(block) => block.epoch_change_votes(),
+            Block::V3(block) => block.epoch_change_votes(),
         }
     }
 
@@ -387,6 +538,7 @@ impl Block {
         match self {
             Block::V1(block) => block.set_epoch_change_proposal(proposal),
             Block::V2(block) => block.set_epoch_change_proposal(proposal),
+            Block::V3(block) => block.set_epoch_change_proposal(proposal),
         }
     }
 
@@ -395,6 +547,7 @@ impl Block {
         match self {
             Block::V1(block) => block.set_epoch_change_votes(votes),
             Block::V2(block) => block.set_epoch_change_votes(votes),
+            Block::V3(block) => block.set_epoch_change_votes(votes),
         }
     }
 

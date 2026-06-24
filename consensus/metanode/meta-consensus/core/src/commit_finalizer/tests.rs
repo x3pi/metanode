@@ -9,7 +9,12 @@ use crate::{
     block::{BlockAPI, BlockTransactionVotes}, block_verifier::NoopBlockVerifier, dag_state::DagState,
     linearizer::Linearizer, storage::mem_store::MemStore, test_dag_builder::DagBuilder,
     TestBlock, VerifiedBlock,
+    commit::CommittedSubDag,
+    Context, TransactionCertifier, CommitFinalizer,
 };
+use consensus_types::block::{BlockRef, Round};
+use std::sync::Arc;
+use tokio::sync::mpsc::unbounded_channel;
 
 use super::*;
 
@@ -42,6 +47,7 @@ fn create_commit_finalizer_fixture() -> Fixture {
         context.clone(),
         Arc::new(MemStore::new()),
     )));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let (blocks_sender, _blocks_receiver) =
         tokio::sync::mpsc::unbounded_channel();

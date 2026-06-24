@@ -50,10 +50,91 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         let peer_hostname = &self.context.committee.authority(signed_block.author()).hostname;
 
         // Reject blocks failing validations.
-        let (verified_block, reject_txn_votes) = self
+        let (verified_block, reject_txn_votes) = match self
             .block_verifier
-            .verify_and_vote(signed_block, serialized_block.block)
-            .tap_err(|e| {
+            .verify_and_vote(signed_block.clone(), serialized_block.block.clone())
+        {
+            Ok(res) => res,
+            Err(ConsensusError::MissingTransactions(missing)) => {
+                let context = self.context.clone();
+                let block_verifier = self.block_verifier.clone();
+                let commit_vote_monitor = self.commit_vote_monitor.clone();
+                let synchronizer = self.synchronizer.clone();
+                let core_dispatcher = self.core_dispatcher.clone();
+                let transaction_certifier = self.transaction_certifier.clone();
+                let dag_state = self.dag_state.clone();
+                let round_tracker = self.round_tracker.clone();
+                let tx_fetcher = self.tx_fetcher.clone();
+                let peer_hostname = peer_hostname.to_string();
+                let peer_clone = peer;
+                let serialized_block_clone = serialized_block.clone();
+                let signed_block_clone = signed_block.clone();
+
+                tokio::spawn(async move {
+                    let block_digest = VerifiedBlock::compute_digest(&serialized_block_clone.block);
+                    let block_ref = BlockRef::new(signed_block_clone.round(), signed_block_clone.author(), block_digest);
+                    match tx_fetcher.fetch_transactions(peer_clone, missing, Duration::from_secs(5)).await {
+                        Ok(txs_bytes) => {
+                            {
+                                let mut cache = crate::transaction::get_global_tx_cache().write();
+                                for tx_bytes in txs_bytes {
+                                    let tx = crate::block::Transaction::new(tx_bytes.to_vec());
+                                    cache.insert(tx.digest(), tx);
+                                }
+                            }
+                            // Now that transactions are cached, verify and process the block!
+                            let verify_res = block_verifier.verify_and_vote(signed_block_clone, serialized_block_clone.block.clone());
+                            match verify_res {
+                                Ok((verified_block, reject_txn_votes)) => {
+                                    let block_ref = verified_block.reference();
+                                    debug!("Successfully verified suspended block {} after fetching transactions.", block_ref);
+
+                                    let now = context.clock.timestamp_utc_ms();
+                                    let forward_time_drift = Duration::from_millis(verified_block.timestamp_ms().saturating_sub(now));
+                                    context.metrics.node_metrics.block_timestamp_drift_ms
+                                        .with_label_values(&[&peer_hostname, "handle_send_block"])
+                                        .inc_by(forward_time_drift.as_millis() as u64);
+
+                                    commit_vote_monitor.observe_block(&verified_block);
+
+                                    context.metrics.node_metrics.verified_blocks
+                                        .with_label_values(&[&peer_hostname])
+                                        .inc();
+
+                                    if context.protocol_config.mysticeti_fastpath() {
+                                        transaction_certifier.add_voted_blocks(vec![(verified_block.clone(), reject_txn_votes)]);
+                                    }
+
+                                    let proposal_bytes = verified_block.epoch_change_proposal().map(|v| v.as_slice());
+                                    let votes_bytes: Vec<Vec<u8>> = verified_block.epoch_change_votes().to_vec();
+                                    if proposal_bytes.is_some() || !votes_bytes.is_empty() {
+                                        crate::epoch_change_provider::process_block_epoch_change(proposal_bytes, &votes_bytes);
+                                    }
+
+                                    if let Ok(missing_ancestors) = core_dispatcher.add_blocks(vec![verified_block.clone()]).await {
+                                        if !missing_ancestors.is_empty() {
+                                            context.metrics.node_metrics.handler_received_block_missing_ancestors
+                                                .with_label_values(&[&peer_hostname])
+                                                .inc_by(missing_ancestors.len() as u64);
+                                            if let Err(err) = synchronizer.fetch_blocks(missing_ancestors, peer_clone).await {
+                                                debug!("Failed to fetch missing ancestors for suspended block via synchronizer: {err}");
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!("Failed to verify suspended block {} after fetching transactions: {:?}", block_ref, err);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Failed to fetch missing transactions for block {} from peer {}: {:?}", block_ref, peer_clone, err);
+                        }
+                    }
+                });
+                return Ok(());
+            }
+            Err(e) => {
                 self.context
                     .metrics
                     .node_metrics
@@ -62,11 +143,13 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                     .inc();
                 info!("Invalid block from {}: {}", peer, e);
                 if let ConsensusError::WrongEpoch { expected, actual } = e {
-                    if *actual > *expected {
-                        self.commit_vote_monitor.observe_highest_seen_epoch(*actual);
+                    if actual > expected {
+                        self.commit_vote_monitor.observe_highest_seen_epoch(actual);
                     }
                 }
-            })?;
+                return Err(e);
+            }
+        };
         let block_ref = verified_block.reference();
         debug!("Received block {} via send block.", block_ref);
 
@@ -884,6 +967,21 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         }
 
         Ok(())
+    }
+
+    async fn handle_fetch_transactions(
+        &self,
+        _peer: AuthorityIndex,
+        digests: Vec<consensus_types::block::TxDigest>,
+    ) -> ConsensusResult<Vec<Bytes>> {
+        let cache = crate::transaction::get_global_tx_cache().read();
+        let mut transactions = Vec::new();
+        for digest in digests {
+            if let Some(tx) = cache.get(&digest) {
+                transactions.push(tx.into_data());
+            }
+        }
+        Ok(transactions)
     }
 }
 

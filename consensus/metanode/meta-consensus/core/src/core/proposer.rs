@@ -12,7 +12,7 @@ use meta_macros::fail_point;
 use crate::{
     ancestor::AncestorState,
     block::{
-        Block, BlockAPI, BlockV1, BlockV2, ExtendedBlock, SignedBlock, Slot, VerifiedBlock,
+        Block, BlockAPI, BlockV1, BlockV2, BlockV3, ExtendedBlock, SignedBlock, Slot, VerifiedBlock,
         GENESIS_ROUND,
     },
     commit::{CertifiedCommit, CommitAPI, DecidedLeader, Decision},
@@ -317,6 +317,12 @@ impl Core {
                         .collect();
 
                     if !system_transactions.is_empty() {
+                        {
+                            let mut cache = crate::transaction::get_global_tx_cache().write();
+                            for tx in &system_transactions {
+                                cache.insert(tx.digest(), tx.clone());
+                            }
+                        }
                         tracing::info!(
                             "📝 Injecting {} system transaction(s) into block (epoch={}, commit_index={})",
                             system_transactions.len(),
@@ -371,7 +377,20 @@ impl Core {
             crate::epoch_change_provider::get_epoch_change_data();
 
         // Create the block and insert to storage.
-        let mut block = if self.context.protocol_config.mysticeti_fastpath() {
+        let mut block = if self.context.parameters.compact_blocks_enabled {
+            let tx_digests = transactions.iter().map(|t| t.digest()).collect();
+            Block::V3(BlockV3::new(
+                self.context.committee.epoch(),
+                clock_round,
+                self.context.own_index,
+                now,
+                ancestors.iter().map(|b| b.reference()).collect(),
+                tx_digests,
+                commit_votes,
+                transaction_votes,
+                vec![],
+            ))
+        } else if self.context.protocol_config.mysticeti_fastpath() {
             Block::V2(BlockV2::new(
                 self.context.committee.epoch(),
                 clock_round,

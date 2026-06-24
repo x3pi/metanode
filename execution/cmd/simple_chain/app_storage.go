@@ -10,8 +10,9 @@ import (
 
 // initStorage initializes all storage-related components
 func (app *App) initStorage() error {
-	// Set pebble global cache size
+	// Set pebble global cache and memtable sizes
 	storage.SetSharedPebbleCacheSize(app.config.Databases.PebbleCacheSizeMB)
+	storage.SetSharedPebbleMemTableSize(app.config.Databases.PebbleMemTableSizeMB)
 
 	// Initialize storage databases
 	if err := app.initStorageDatabases(); err != nil {
