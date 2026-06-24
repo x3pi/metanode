@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-19
+> **Last updated:** 2026-06-24
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -206,6 +206,7 @@ metanode/
 | `state_processor.go` | 630 | State transition processor |
 | `vote_recovery.go` | 257 | Vote/quorum recovery |
 | `gei_authority.go` | 234 | Go-authoritative GEI singleton |
+| `speculative_executor.go` | 470 | Speculative execution pipeline (optimistic parallel EVM) |
 
 ### `execution/executor/` — FFI/IPC Boundary ⚠️ CRITICAL
 | File | Lines | Role |
